@@ -704,11 +704,13 @@ public actor CorpusContentEngine {
     ///
     /// **Why not the full index path?** The idempotence gate keys on the CONTENT
     /// digest (unchanged by distillation). Calling `index(force: true)` would
-    /// bypass the gate but would also re-run BM25 indexing — unnecessary and
-    /// potentially disruptive to IDF state. This method bypasses BOTH the gate
-    /// AND the BM25 path by targeting only the float lane directly. §9 BM25
-    /// isolation (SPEC_DISTILLATION_STORAGE) is preserved: the content and digest
-    /// are unchanged, so BM25 scores remain byte-identical before and after.
+    /// bypass the gate but would also re-run BM25 indexing, changing IDF state for
+    /// content whose text has not changed — wrong for the distillation path. This
+    /// method bypasses BOTH the gate AND the BM25 path by targeting only the float
+    /// lane directly. §9 BM25 isolation (SPEC_DISTILLATION_STORAGE) is preserved:
+    /// the content and digest are unchanged, so BM25 scores remain byte-identical.
+    /// For a corpus-wide dense-only update (basis-only retrains), use
+    /// `reindex(now:laneScope:.dense)` instead of looping this method.
     ///
     /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
     /// so `countsAdmission` serialization is maintained against concurrent
@@ -800,7 +802,7 @@ public actor CorpusContentEngine {
     /// on the serial `prepareIndex` path because it also mutates range rows.
     private func indexWholeContentBatch(
         ids: [CorpusContentID], now: Date, parallelism: Int?,
-        slotScope: SlotScope, force: Bool
+        slotScope: SlotScope, laneScope: LaneScope = .all, force: Bool
     ) async throws -> Int {
         guard !ids.isEmpty else { return 0 }
         guard case .wholeContent = configuration.indexUnit else {
@@ -829,13 +831,33 @@ public actor CorpusContentEngine {
         }
         guard !records.isEmpty else { return 0 }
 
+        // Coverage gate (non-forced path only): pre-fetch per-slot covered IDs so
+        // embedQueueRecords can skip (record, slot) pairs already current under the
+        // active basis digest. Forced reindex bypasses this — a retrain changes the
+        // basis digest, making prior coverage rows stale by definition.
+        var coveredBySlot: [String: Set<CorpusContentID>] = [:]
+        if !force {
+            for slot in slots {
+                guard slot.basisDigest != Self.untrainedDigest else { continue }
+                let covered = try await coverageStore.coveredContentIDs(
+                    modelID: slot.provider.modelID, basisDigest: slot.basisDigest)
+                coveredBySlot[slot.provider.modelID] = covered
+            }
+        }
+
         // Delegate the bounded parallel embed phase to the shared kernel,
         // which also services the queue drain path.
         let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
-        let prepared = try await embedQueueRecords(records, slotScope: slotScope, cap: cap, now: now)
+        let prepared = try await embedQueueRecords(
+            records, slotScope: slotScope, laneScope: laneScope,
+            coveredBySlot: coveredBySlot, cap: cap, now: now)
 
-        for item in prepared {
-            try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+        // Dense-only lane: BM25 IDF weights are unchanged by a basis retrain;
+        // skip the write to preserve existing postings intact.
+        if laneScope == .all {
+            for item in prepared {
+                try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+            }
         }
         let vectorRows = prepared.flatMap(\.vectorRows)
         if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
@@ -920,9 +942,23 @@ public actor CorpusContentEngine {
     /// `slotScope` follows the same semantics as `indexWholeContentBatch`:
     ///   - `.all`: embed across every active provider slot.
     ///   - `.statelessOnly`: skip trainable slots (migration / backfill path).
+    ///   - `.slot(String)`: embed exactly one provider by model ID.
+    ///
+    /// `laneScope` selects which derived lanes are written:
+    ///   - `.all`: BM25 tokens + binary (vectorIndex 0) + dense (vectorIndex 1).
+    ///   - `.dense`: dense float lane only; BM25 tokens are returned empty
+    ///     (the caller skips the BM25 write), binary rows are not produced,
+    ///     and non-trainable slots are excluded.
+    ///
+    /// `coveredBySlot`: optional pre-fetched coverage keyed by modelID.
+    ///   When provided, (record, slot) pairs already covered under the active
+    ///   basis digest are skipped — their vectors are current and re-embedding
+    ///   is waste.
     func embedQueueRecords(
         _ records: [CorpusContentRecord],
         slotScope: SlotScope,
+        laneScope: LaneScope = .all,
+        coveredBySlot: [String: Set<CorpusContentID>] = [:],
         cap: Int,
         now: Date
     ) async throws -> [PreparedStructuralRecord] {
@@ -931,21 +967,31 @@ public actor CorpusContentEngine {
         // so the parallel tasks never re-enter the actor for slot reads.
         let providers = slots.enumerated().compactMap { index, slot -> StructuralProvider? in
             if slotScope == .statelessOnly, slot.freshBasisBlob != nil { return nil }
+            if case .slot(let targetModelID) = slotScope,
+               slot.provider.modelID != targetModelID { return nil }
+            // Dense-only lane excludes non-trainable providers (FDC, deterministic, NL):
+            // their vectors are item-local and unchanged by a basis retrain.
+            if laneScope == .dense, slot.freshBasisBlob == nil { return nil }
             // A trainable slot with no trained basis cannot embed yet.
             if slot.freshBasisBlob != nil, slot.basisDigest == Self.untrainedDigest { return nil }
+            // Binary (Hamming) lane: default slot in attached mode, all slots in standalone.
+            // Dense-only lane omits binary entirely — only vectorIndex 1 rows are written.
+            let writeBinary = (index == 0 || configuration.mode == .standalone)
+                && laneScope == .all
             return StructuralProvider(
                 provider: slot.provider,
                 modelID: slot.provider.modelID,
                 modelVersion: slot.provider.modelVersion,
                 basisDigest: slot.basisDigest,
-                writeBinary: index == 0 || configuration.mode == .standalone)
+                writeBinary: writeBinary)
         }
-        // No active providers: return skeleton records (BM25 will still run).
+        // No active providers: return skeleton records (BM25 will still run for .all).
         guard !providers.isEmpty else {
             return records.map { record in
                 PreparedStructuralRecord(
                     record: record,
-                    tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                    tokens: laneScope == .dense
+                        ? [] : CorpusDefaultTokenizer().keywordTokens(record.text),
                     vectorRows: [],
                     covered: [])
             }
@@ -959,6 +1005,10 @@ public actor CorpusContentEngine {
             // text otherwise). BM25 tokens always use the lexical text.
             let denseText = record.effectiveDenseText
             for target in providers {
+                // Coverage gate: skip (record, slot) pairs already current under
+                // the active basis digest. Their vectors are durable — re-embedding
+                // produces the same result at wasted compute cost.
+                if coveredBySlot[target.modelID]?.contains(record.id) == true { continue }
                 let (engram, floats) = try await target.provider.embedPair(denseText)
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
@@ -978,8 +1028,12 @@ public actor CorpusContentEngine {
             }
             return PreparedStructuralRecord(
                 record: record,
-                // BM25 keyword tokens: always lexical text, never dense text.
-                tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                // Dense-only lane: BM25 IDF weights are unchanged by a basis retrain;
+                // return empty tokens so the caller skips the BM25 write. This keeps
+                // existing IDF state intact — the same invariant recomposeDenseFloat
+                // enforces for the single-ID distillation path.
+                tokens: laneScope == .dense
+                    ? [] : CorpusDefaultTokenizer().keywordTokens(record.text),
                 vectorRows: rows,
                 covered: covered)
         }
@@ -1717,11 +1771,21 @@ public actor CorpusContentEngine {
         }
     }
 
-    /// Which slots an indexing pass embeds. `.all` is the ordinary path;
-    /// `.statelessOnly` is the migration's structural rebuild — BM25 +
-    /// checkpoints + stateless-slot vectors, with trainable slots deferred
-    /// to the train + backfill phases.
-    enum SlotScope: Sendable { case all, statelessOnly }
+    /// Which slots an indexing pass embeds.
+    ///   - `.all`: all configured slots (ordinary ingest and reindex).
+    ///   - `.statelessOnly`: BM25 + checkpoints + stateless-slot vectors only;
+    ///     trainable slots are deferred to the train + backfill phases (migration path).
+    ///   - `.slot(String)`: exactly one provider by model ID — used when one
+    ///     drifted provider does not warrant a full multi-slot retrain.
+    enum SlotScope: Sendable, Equatable { case all, statelessOnly, slot(String) }
+
+    /// Which vector lanes an indexing pass writes.
+    ///   - `.all`: BM25, binary (Hamming), and dense (float) lanes (ordinary path).
+    ///   - `.dense`: float-vector lane only — used for basis-only retrains where
+    ///     distributional weights changed but BM25 IDF and binary fingerprints are
+    ///     unchanged. Skips BM25 write, binary rows, and non-trainable slots (whose
+    ///     vectors are item-local and basis-invariant).
+    public enum LaneScope: Sendable, Equatable { case all, dense }
 
     private func index(
         record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
@@ -1789,6 +1853,8 @@ public actor CorpusContentEngine {
             case .all: break
             case .statelessOnly:
                 if slot.freshBasisBlob != nil { continue }
+            case .slot(let targetModelID):
+                if slot.provider.modelID != targetModelID { continue }
             }
             // A trainable slot with no trained basis cannot embed; the
             // train + backfill phases cover it (never write vectors or
@@ -2515,7 +2581,15 @@ public actor CorpusContentEngine {
     /// and re-index every active content row. Deterministic ascending-ID
     /// streaming order. Training is streamed (bounded) and each provider's
     /// basis+counts commit is atomic.
-    public func reindex(now: Date) async throws {
+    ///
+    /// - Parameters:
+    ///   - now: Deterministic operation timestamp (passed in — never `Date()` inside
+    ///     the engine per the CLAUDE.md determinism rule).
+    ///   - laneScope: Which derived lanes to write. Defaults to `.all`. Pass `.dense`
+    ///     for basis-only retrains where BM25 IDF weights and binary fingerprints are
+    ///     unchanged — this skips the BM25 write and binary rows, embedding only the
+    ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
+    public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
         _ = try await trainTrainableSlots(now: now, force: true)
         // Bulk-write bracket (same idiom as reconcileConfiguredProviders and
         // the drain worker): defer the resident dense index for the whole
@@ -2530,11 +2604,11 @@ public actor CorpusContentEngine {
             for batch in ids.chunked(into: 500) {
                 _ = try await indexWholeContentBatch(
                     ids: batch, now: now, parallelism: nil,
-                    slotScope: .all, force: true)
+                    slotScope: .all, laneScope: laneScope, force: true)
             }
         } else {
-            // Standalone passage policies also replace durable range rows;
-            // keep that mutation path serialized and policy-bound.
+            // Standalone passage mode: always full-lane (LaneScope.all).
+            // Dense-only partial reindex is available on the wholeContent path only.
             for id in ids {
                 guard let record = try await source.record(for: id) else {
                     try await clearDerivedState(id: id, now: now)

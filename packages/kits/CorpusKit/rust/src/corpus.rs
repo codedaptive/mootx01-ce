@@ -2232,13 +2232,25 @@ impl Corpus {
         })?;
         eprintln!("[corpus] reindex: training complete — bases persisted");
 
-        // Phase 2 — re-embed every chunk under each slot's (now possibly
-        // retrained) provider, replacing stale vectors. Done whether or not a
-        // retrain occurred: for a non-trainable slot (no factory blob) reindex is
-        // a pure vector refresh under the current basis. Serial per slot: each
-        // re-embed already fans its embed compute across all cores and funnels
-        // one bulk single-writer transaction (replace_model_vectors).
+        // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
+        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped:
+        // their vectors are item-local and invariant to basis retraining — the same
+        // embedding function applied to the same text always produces the same vector
+        // regardless of which distributional basis the trainable slots carry. Serial
+        // per slot: each re-embed already fans its embed compute across all cores and
+        // funnels one bulk single-writer transaction (replace_model_vectors).
         for slot_index in 0..self.slots.len() {
+            // Skip non-trainable providers: fresh_basis_blob.is_none() means no
+            // factory blob → item-local deterministic output → basis-invariant vectors.
+            // Re-embedding them on every reindex is wasted work (~20% of per-chunk
+            // embed cost in the 5-provider default ensemble).
+            if self.slots[slot_index].fresh_basis_blob.is_none() {
+                eprintln!(
+                    "[corpus] reindex: skipping non-trainable slot {} — vectors are basis-invariant",
+                    self.slots[slot_index].model_id,
+                );
+                continue;
+            }
             eprintln!(
                 "[corpus] reindex: re-embedding {} chunks (slot {}/{})",
                 chunks.len(),

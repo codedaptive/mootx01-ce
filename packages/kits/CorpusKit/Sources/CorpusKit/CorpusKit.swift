@@ -1952,13 +1952,22 @@ public actor Corpus {
             corpusLog.info("reindex: training complete — bases persisted")
         }
 
-        // Phase 2 — re-embed every chunk under each slot's (now possibly
-        // retrained) provider, replacing stale vectors. Done whether or not a
-        // retrain occurred: for a non-trainable slot (no factory blob) reindex is
-        // a pure vector refresh under the current basis, with no basis row
-        // written. Serial per slot: each re-embed already fans its embed compute
-        // across all cores and funnels one bulk single-writer transaction.
+        // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
+        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped:
+        // their vectors are item-local and invariant to basis retraining — the same
+        // embedding function applied to the same text always produces the same vector
+        // regardless of which distributional basis the trainable slots carry. Serial
+        // per slot: each re-embed already fans its embed compute across all cores and
+        // funnels one bulk single-writer transaction.
         for index in slots.indices {
+            // Skip non-trainable providers: their output is item-local and basis-invariant;
+            // re-embedding them on every reindex is wasted work (~20% of per-chunk embed
+            // cost in the 5-provider default ensemble).
+            guard slots[index].freshBasisBlob != nil else {
+                corpusLog.info(
+                    "reindex: skipping non-trainable slot \(self.slots[index].provider.modelID, privacy: .public) — vectors are basis-invariant")
+                continue
+            }
             corpusLog.info(
                 "reindex: re-embedding \(chunks.count, privacy: .public) chunks under \(self.slots[index].provider.modelID, privacy: .public) (slot \(index + 1, privacy: .public)/\(self.slots.count, privacy: .public))")
             try await reembedChunks(slotIndex: index, chunks, now: now)
