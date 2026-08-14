@@ -2237,10 +2237,6 @@ public actor DrawerStore {
     ///
     /// Mirrors Rust `DrawerStore::all_active_tunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
-        // Load all non-tombstoned tunnels and filter in-memory: PersistenceKit's
-        // predicate DSL does not expose bit-mask comparisons, so the client-side
-        // filter is the correct approach (consistent with recall_trace bitmap
-        // filtering elsewhere in this file).
         let all = try await allTunnels()
         return all.filter { !$0.isRetired && $0.lifecycle == .active }
     }
