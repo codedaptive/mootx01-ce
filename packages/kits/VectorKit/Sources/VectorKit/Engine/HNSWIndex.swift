@@ -1,0 +1,538 @@
+// HNSWIndex.swift
+//
+// Hierarchical Navigable Small World approximate nearest-neighbour index
+// for the float lane (Lane D).
+//
+// Architecture (HNSW_DESIGN.md §2 + §4):
+//   The graph is a layered navigable small-world structure. Every vector is a
+//   node; each node keeps a short neighbour list per layer. The top layer is
+//   sparse with long hops, the bottom layer (0) holds every node. A search
+//   enters at the top, greedily hops toward the query, drops one layer, and
+//   repeats until it reaches layer 0, where it collects efSearch candidates.
+//   Cost grows logarithmically in corpus size; brute-force grows linearly.
+//
+// Design rulings:
+//   - Float lane ONLY. Binary lane (A/B) is untouched; it is already exact.
+//   - Cross-port determinism NOT required. Any valid HNSW graph answers
+//     correctly; the Swift and Rust graphs legitimately differ (HNSW_DESIGN §7).
+//   - Within-port reproducibility IS required. SplitMix64 seeded at index
+//     creation so the same seed + insertion order yields the same graph.
+//   - Crossover threshold: 5,000 vectors per modelID partition. Below this
+//     count FloatBruteForceIndex is faster (see §Crossover below).
+//   - Nearest only. Farthest queries still use FloatBruteForceIndex regardless
+//     of corpus size — anti-similarity with HNSW requires a full-graph scan
+//     and provides no speed benefit.
+//
+// Storage contract (HNSW_DESIGN §3):
+//   The graph (neighbour lists) lives in the `hnsw_graph` SQLite table as
+//   packed Int32 BLOBs. Vectors are owned by the HNSWIndex itself (flat float
+//   byte array per node). At/above the threshold, VectorStore routes nearest-
+//   float queries through HNSWIndex; below it, FloatBruteForceIndex is used.
+//
+// Cadence duties (HNSW_DESIGN §5):
+//   ALPHA  (30 s)  — extreme vocabulary drift clears the index; rebuild is lazy.
+//   THETA  (24 h)  — basis retrain → re-embed → graph rebuild, ONE operation.
+//   BETA   (7 d)   — tombstone sweep + compact (wear, not staleness).
+//   OMEGA  (14 d)  — unchanged (retires dreamed tunnels, not graph nodes).
+//
+// Sync policy (HNSW_DESIGN §6):
+//   hnsw_graph table is NEVER included in ConvergenceKit sync exports.
+//   The graph is a rebuildable derived accelerator; device-local only.
+//
+// Crossover threshold rationale (measured, then confirmed by calculation):
+//   At M=16, efSearch=50, HNSW visits ≈ efSearch × log₂(n) nodes per search.
+//   At n=5000: HNSW comparisons ≈ 50 × 12.2 ≈ 610 vs brute-force 5000.
+//   Below 5000 the graph construction overhead + pointer-chasing overhead
+//   outweighs the scan reduction. 5000 is a conservative crossover; tests
+//   confirm ≥90% recall@10 at this threshold.
+//
+// Default parameters (HNSW_DESIGN §8, Malkov & Yashunin 2018):
+//   M              = 16   (max connections per layer; 2×M at layer 0)
+//   efConstruction = 100  (beam width during insert)
+//   efSearch       = 50   (beam width during search)
+//   seed           = 42   (SplitMix64 initial state; overridable in tests)
+
+import Foundation
+import OSLog
+
+private let hnswLog = Logger(subsystem: "com.mootx01.kit", category: "HNSWIndex")
+
+// MARK: - HNSW tuning constants (public — exposed so VectorStore can log them)
+
+/// Max connections per node per layer (layers 1+). Layer 0 uses `hnswM0 = 2 × hnswM`.
+/// M=16 is optimal for high-dimensional embedding spaces (Malkov & Yashunin 2018 §4.1).
+public let hnswM: Int = 16
+
+/// Max connections at layer 0. Always 2 × M (per-paper recommendation).
+public let hnswM0: Int = hnswM * 2
+
+/// Level multiplier for probabilistic level assignment: 1/ln(M).
+/// Controls the expected number of layers; smaller mL = fewer, denser layers.
+let hnswML: Double = 1.0 / log(Double(hnswM))
+
+/// Beam width during index construction. Higher = better graph quality, slower build.
+/// efConstruction=100 is the paper's default for M=16.
+public let hnswEfConstruction: Int = 100
+
+/// Beam width during search. Higher = better recall, slower query.
+/// efSearch=50 achieves ≥90% recall@10 for M=16 at n≥5,000.
+public let hnswEfSearch: Int = 50
+
+/// Vector count per modelID partition above which HNSWIndex activates.
+/// Below this threshold FloatBruteForceIndex is faster (see file header §Crossover).
+public let hnswDefaultThreshold: UInt32 = 5_000
+
+// MARK: - HNSWIndex
+
+/// Approximate nearest-neighbour index for the float32 dense lane (Lane D).
+///
+/// Implements HNSW (Malkov & Yashunin 2018) over resident float32 vectors. Owns
+/// both the graph structure (neighbour lists, megabytes) and the flat vector bytes
+/// (for distance computation without a separate vector store lookup). At/above the
+/// crossover threshold VectorStore routes nearest-float queries here; below the
+/// threshold FloatBruteForceIndex is the active index.
+///
+/// This is an APPROXIMATE index. FloatBruteForceIndex is the conformance oracle.
+/// Tests compare recall quality: HNSW must find ≥90% of the oracle's top-k results.
+///
+/// Thread-safety: actor. Mutation (insert, tombstone, compact, clear) is actor-
+/// isolated. Search is read-only over the current frozen state.
+public actor HNSWIndex {
+
+    // MARK: - Node storage
+
+    /// One node in the HNSW graph.
+    ///
+    /// Owns the float vector bytes so search can compute distances without
+    /// fetching from SQLite. `neighbours[l]` = list of node indices at layer l.
+    struct Node: Sendable {
+        /// item_id from the originating VectorRecordKey.
+        let itemID: String
+        /// model_id from the originating VectorRecordKey.
+        let modelID: String
+        /// IEEE-754 LE float32 bytes (same format as VectorPayload.bytes).
+        let vectorBytes: [UInt8]
+        /// `neighbours[l]` = array of node indices (Int32) at layer l.
+        /// Layer 0 (the densest) has up to M0 connections; layers ≥1 have up to M.
+        var neighbours: [[Int32]]
+        /// True once tombstoned. Excluded from search; compacted out on next compact().
+        var tombstoned: Bool = false
+    }
+
+    /// All nodes in insertion order. A node's array index is its graph node_id (Int32).
+    private var nodes: [Node] = []
+
+    /// itemID → node array index. O(1) lookup by item_id.
+    private var nodeIndex: [String: Int32] = [:]
+
+    /// Current graph entry point (top-layer seed for search). Nil when empty.
+    private var entryPoint: Int32? = nil
+
+    /// Highest layer currently in use (0 = all nodes at layer 0 only).
+    private var maxLayer: Int = 0
+
+    // MARK: - RNG (SplitMix64 — same algorithm as GauntletRNG)
+
+    /// SplitMix64 state. Seeded at init; same seed + insertion order → same graph.
+    private var rngState: UInt64
+
+    // MARK: - Stride
+
+    /// Byte count per vector (float32 stride = dim × 4). Set on first insert.
+    /// Nil before any node is inserted.
+    private var vectorStride: Int? = nil
+
+    /// Float dimensionality. Derived from vectorStride.
+    private var dim: Int { (vectorStride ?? 0) / 4 }
+
+    // MARK: - Observability
+
+    /// Total node count (including tombstoned).
+    public var totalCount: Int { nodes.count }
+
+    /// Live (non-tombstoned) node count.
+    public var liveCount: Int { nodes.filter { !$0.tombstoned }.count }
+
+    // MARK: - Init
+
+    /// Construct an empty HNSW index.
+    ///
+    /// - Parameter seed: SplitMix64 initial state. Default 42. Override in
+    ///   tests to explore different graph shapes with the same data set.
+    public init(seed: UInt64 = 42) {
+        self.rngState = seed
+    }
+
+    // MARK: - SplitMix64 RNG
+
+    /// Advance state and return the next pseudorandom UInt64.
+    ///
+    /// SplitMix64 (Vigna 2015): one-state, zero-avalanche, good statistical
+    /// properties. Identical algorithm to GauntletRNG and RandomIndexingProvider
+    /// in the fleet — chosen for consistency.
+    private func nextRandom() -> UInt64 {
+        rngState &+= 0x9e3779b97f4a7c15
+        var z: UInt64 = rngState
+        z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9
+        z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
+        return z ^ (z >> 31)
+    }
+
+    /// Draw a HNSW node level from the geometric distribution.
+    ///
+    /// Formula: `floor(-ln(u) × mL)` where u ~ Uniform(0,1), mL = 1/ln(M).
+    /// Always ≥ 0 (every node appears at layer 0). Approximately 1/M of nodes
+    /// appear at layer 1, 1/M² at layer 2, and so on.
+    private func assignLevel() -> Int {
+        // Map UInt64 to uniform (0,1) using top 53 bits (IEEE-754 double mantissa).
+        let u = Double(nextRandom() >> 11) * (1.0 / Double(1 << 53))
+        let level = Int(-log(max(u, 1e-15)) * hnswML)
+        return max(0, level)
+    }
+
+    // MARK: - Distance computation
+
+    /// Cosine distance between a [Float] probe and the bytes of node `idx`.
+    ///
+    /// cosine distance = 1 − cos(a,b). Range [0,2]; 0 = identical direction.
+    /// Returns 1.0 for zero-norm vectors (safe maximum-distance fallback).
+    private func cosineDistanceToNode(probe: [Float], nodeIdx: Int) -> Float {
+        let bytes = nodes[nodeIdx].vectorBytes
+        let d = dim
+        guard d > 0, bytes.count == d * 4, probe.count == d else { return 1.0 }
+        var dot: Float = 0, normA: Float = 0, normB: Float = 0
+        for i in 0..<d {
+            let a = probe[i]
+            let b = floatFromBytes(bytes, at: i)
+            dot   += a * b
+            normA += a * a
+            normB += b * b
+        }
+        let denom = normA.squareRoot() * normB.squareRoot()
+        guard denom > 0 else { return 1.0 }
+        let sim = (dot / denom).clamped(to: -1.0...1.0)
+        return 1.0 - sim
+    }
+
+    /// Decode one IEEE-754 LE float32 from byte array at index i.
+    private func floatFromBytes(_ bytes: [UInt8], at i: Int) -> Float {
+        let base = i * 4
+        let bits = UInt32(bytes[base])
+            | (UInt32(bytes[base + 1]) << 8)
+            | (UInt32(bytes[base + 2]) << 16)
+            | (UInt32(bytes[base + 3]) << 24)
+        return Float(bitPattern: bits)
+    }
+
+    // MARK: - searchLayer (core graph traversal)
+
+    /// Greedy best-first search within one HNSW layer.
+    ///
+    /// Implements the `SEARCH-LAYER(q, ep, ef, lc)` function from Malkov &
+    /// Yashunin Algorithm 2. Returns up to `ef` nearest candidates to `probe`
+    /// at layer `layer`, sorted by cosine distance ascending.
+    ///
+    /// For small ef (default 50–200) a sorted Array is faster than a heap
+    /// because element counts are bounded and branch prediction dominates.
+    private func searchLayer(
+        probe: [Float],
+        entryPts: [Int32],
+        ef: Int,
+        layer: Int
+    ) -> [(dist: Float, idx: Int32)] {
+
+        var visited = Set<Int32>(minimumCapacity: ef * 2)
+
+        /// `candidates`: min-heap ordered by dist (nearest-first, popped from front).
+        /// `results`: the ef-nearest found so far, dist ascending (farthest at .last).
+        var candidates: [(dist: Float, idx: Int32)] = []
+        var results:    [(dist: Float, idx: Int32)] = []
+
+        // Sorted insert helper: insert `item` into a dist-ascending array.
+        func insertSortedAsc(into arr: inout [(dist: Float, idx: Int32)],
+                             item: (dist: Float, idx: Int32)) {
+            // Binary search for insertion point.
+            var lo = 0, hi = arr.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if arr[mid].dist <= item.dist { lo = mid + 1 } else { hi = mid }
+            }
+            arr.insert(item, at: lo)
+        }
+
+        // Seed with entry points.
+        for ep in entryPts {
+            let epInt = Int(ep)
+            guard epInt < nodes.count, !nodes[epInt].tombstoned else { continue }
+            visited.insert(ep)
+            let d = cosineDistanceToNode(probe: probe, nodeIdx: epInt)
+            insertSortedAsc(into: &candidates, item: (d, ep))
+            insertSortedAsc(into: &results,    item: (d, ep))
+        }
+
+        while !candidates.isEmpty {
+            // Pop nearest candidate.
+            let c = candidates.removeFirst()
+            // farthest in results set.
+            let fDist = results.last?.dist ?? Float.infinity
+
+            // Early exit: even the closest unexplored candidate is farther than the
+            // farthest result we already have. Greedy exploration is complete.
+            if c.dist > fDist { break }
+
+            let cInt = Int(c.idx)
+            guard cInt < nodes.count else { continue }
+            let node = nodes[cInt]
+            if layer < node.neighbours.count {
+                for nIdx in node.neighbours[layer] {
+                    guard !visited.contains(nIdx) else { continue }
+                    let nInt = Int(nIdx)
+                    guard nInt < nodes.count, !nodes[nInt].tombstoned else { continue }
+                    visited.insert(nIdx)
+                    let nd = cosineDistanceToNode(probe: probe, nodeIdx: nInt)
+                    let fDist2 = results.last?.dist ?? Float.infinity
+                    if nd < fDist2 || results.count < ef {
+                        insertSortedAsc(into: &candidates, item: (nd, nIdx))
+                        insertSortedAsc(into: &results,    item: (nd, nIdx))
+                        if results.count > ef { results.removeLast() }
+                    }
+                }
+            }
+        }
+
+        return results
+    }
+
+    // MARK: - Insert
+
+    /// Insert a float32 vector into the HNSW graph (incremental, O(log n)).
+    ///
+    /// If `itemID` is already present, the existing node is tombstoned and a
+    /// new node is inserted (upsert behaviour, matching VectorStore's UNIQUE
+    /// constraint on (item_id, vector_index, model_id)).
+    ///
+    /// - Parameters:
+    ///   - itemID: item_id from the VectorRecordKey.
+    ///   - modelID: model_id from the VectorRecordKey.
+    ///   - vector: float32 values. Must have the same dimensionality as all
+    ///     previously inserted vectors. Mismatched dim logs a warning and no-ops.
+    public func insert(itemID: String, modelID: String, vector: [Float]) {
+        // Upsert: tombstone any existing node for this itemID.
+        if let existingIdx = nodeIndex[itemID] {
+            nodes[Int(existingIdx)].tombstoned = true
+        }
+
+        let byteCount = vector.count * 4
+        if let vs = vectorStride, byteCount != vs {
+            hnswLog.warning("HNSWIndex.insert: dimension mismatch; expected \(vs / 4) floats, got \(vector.count). Skipped.")
+            return
+        }
+        if vectorStride == nil { vectorStride = byteCount }
+
+        // Pack float32 to LE bytes (VectorPayload byte order).
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        for (i, f) in vector.enumerated() {
+            let bits = f.bitPattern
+            bytes[i * 4]     = UInt8(bits        & 0xFF)
+            bytes[i * 4 + 1] = UInt8((bits >> 8)  & 0xFF)
+            bytes[i * 4 + 2] = UInt8((bits >> 16) & 0xFF)
+            bytes[i * 4 + 3] = UInt8((bits >> 24) & 0xFF)
+        }
+
+        let level = assignLevel()
+        let newIdx = Int32(nodes.count)
+
+        // Allocate the node with `level + 1` empty neighbour layers.
+        let emptyLayers = [[Int32]](repeating: [], count: level + 1)
+        nodes.append(Node(
+            itemID: itemID, modelID: modelID,
+            vectorBytes: bytes, neighbours: emptyLayers
+        ))
+        nodeIndex[itemID] = newIdx
+
+        guard let ep = entryPoint else {
+            // First node: becomes entry point at the assigned level.
+            entryPoint = newIdx
+            maxLayer = level
+            return
+        }
+
+        var curEP = ep
+        let curMaxLayer = maxLayer
+
+        // Search from the top down to `level+1` to find the best layer-`level` entry.
+        if curMaxLayer > level {
+            for lc in (level + 1 ... curMaxLayer).reversed() {
+                let cands = searchLayer(probe: vector, entryPts: [curEP], ef: 1, layer: lc)
+                if let nearest = cands.first { curEP = nearest.idx }
+            }
+        }
+
+        // Wire connections at each layer from min(level, curMaxLayer) down to 0.
+        let topWireLayer = min(level, curMaxLayer)
+        if topWireLayer >= 0 {
+            for lc in (0 ... topWireLayer).reversed() {
+                var cands = searchLayer(
+                    probe: vector, entryPts: [curEP], ef: hnswEfConstruction, layer: lc
+                )
+                cands.sort { $0.dist < $1.dist }
+                let mMax = lc == 0 ? hnswM0 : hnswM
+                let selected = cands.prefix(mMax)
+
+                // Set new node's neighbours at this layer.
+                nodes[Int(newIdx)].neighbours[lc] = selected.map { $0.idx }
+
+                // Add back-connections from each selected neighbour to the new node.
+                for nbr in selected {
+                    let nInt = Int(nbr.idx)
+                    guard nInt < nodes.count, !nodes[nInt].tombstoned else { continue }
+                    guard lc < nodes[nInt].neighbours.count else { continue }
+                    var nNeighbours = nodes[nInt].neighbours[lc]
+                    if nNeighbours.count < mMax {
+                        nNeighbours.append(newIdx)
+                    } else {
+                        // Back-edge shrink: evict the weakest neighbour to stay ≤ mMax.
+                        // Compute neighbour-to-all-candidates distances from nInt's position.
+                        let nProbe = nodeFloats(nInt)
+                        var conns: [(dist: Float, idx: Int32)] = nNeighbours.compactMap { cidx in
+                            let ci = Int(cidx)
+                            guard ci < nodes.count, !nodes[ci].tombstoned else { return nil }
+                            return (cosineDistanceToNode(probe: nProbe, nodeIdx: ci), cidx)
+                        }
+                        conns.append((cosineDistanceToNode(probe: nProbe, nodeIdx: Int(newIdx)), newIdx))
+                        conns.sort { $0.dist < $1.dist }
+                        nNeighbours = Array(conns.prefix(mMax).map { $0.idx })
+                    }
+                    nodes[nInt].neighbours[lc] = nNeighbours
+                }
+
+                // The nearest at this layer is the entry point for the next lower layer.
+                if let nearest = selected.first { curEP = nearest.idx }
+            }
+        }
+
+        // Promote entry point if the new node's level is higher.
+        if level > curMaxLayer {
+            entryPoint = newIdx
+            maxLayer = level
+        }
+    }
+
+    // MARK: - Search
+
+    /// Find the k approximate nearest neighbours (cosine metric).
+    ///
+    /// Traverses the layered graph from the top layer to layer 0, collecting
+    /// `efSearch` candidates at layer 0 via greedy best-first. Filters to
+    /// `modelID` and returns the top k.
+    ///
+    /// Distance convention: `Int((cosineDistance × 10_000).rounded())` —
+    /// matches VectorMatch.distance in the float lane (same as FloatBruteForceIndex
+    /// path in VectorStore._findNearestFloatCached).
+    ///
+    /// - Parameters:
+    ///   - probe: float32 query vector. Must match the index's dimensionality.
+    ///   - modelID: model partition to search (only nodes with this modelID returned).
+    ///   - k: number of nearest neighbours to return.
+    /// - Returns: up to k VectorMatch values, sorted by distance ascending.
+    /// - Throws: VectorKitError.invalidPayload if probe dimension mismatches.
+    public func search(probe: [Float], modelID: String, k: Int) throws -> [VectorMatch] {
+        guard liveCount > 0, k > 0 else { return [] }
+        guard let ep = entryPoint else { return [] }
+
+        if let vs = vectorStride, probe.count * 4 != vs {
+            throw VectorKitError.invalidPayload(
+                "HNSWIndex.search: probe has \(probe.count) floats; expected \(vs / 4)"
+            )
+        }
+
+        var curEP = ep
+        // Upper layers: single-candidate greedy descent to the layer-0 entry point.
+        if maxLayer > 0 {
+            for lc in (1 ... maxLayer).reversed() {
+                let cands = searchLayer(probe: probe, entryPts: [curEP], ef: 1, layer: lc)
+                if let nearest = cands.first { curEP = nearest.idx }
+            }
+        }
+
+        // Layer 0: collect efSearch candidates.
+        let cands = searchLayer(probe: probe, entryPts: [curEP], ef: hnswEfSearch, layer: 0)
+
+        // Filter to modelID, take top k, convert distances.
+        return cands
+            .filter { nodes[Int($0.idx)].modelID == modelID }
+            .prefix(k)
+            .map { c in
+                let node = nodes[Int(c.idx)]
+                let dist = Int((c.dist * 10_000).rounded())
+                return VectorMatch(itemID: node.itemID, distance: dist, modelID: node.modelID)
+            }
+    }
+
+    // MARK: - Maintenance duties
+
+    /// Tombstone a node by item_id (pre-step for BETA compaction).
+    ///
+    /// Tombstoned nodes are excluded from search results and skipped during
+    /// graph traversal. Dead edges pointing to a tombstone are not immediately
+    /// removed; they are cleaned up during the next compact() call. This is
+    /// the "wear" model from HNSW_DESIGN §5: tombstones accumulate until BETA.
+    public func tombstone(itemID: String) {
+        guard let idx = nodeIndex[itemID] else { return }
+        nodes[Int(idx)].tombstoned = true
+    }
+
+    /// Rebuild the graph from live nodes, dropping all tombstones (BETA duty).
+    ///
+    /// O(n log n) where n is the live count. Dead nodes and their inbound edges
+    /// are permanently removed. The graph is deterministically rebuilt using the
+    /// same seed and in the order of the original live insertions.
+    public func compact() {
+        let live = nodes.filter { !$0.tombstoned }
+        guard !live.isEmpty else { clear(); return }
+        let snapshot = live.map { (itemID: $0.itemID, modelID: $0.modelID, bytes: $0.vectorBytes) }
+        clear()
+        for node in snapshot {
+            let floats = bytesToFloats(node.bytes)
+            insert(itemID: node.itemID, modelID: node.modelID, vector: floats)
+        }
+        hnswLog.info("HNSWIndex.compact: rebuilt with \(self.nodes.count) live nodes")
+    }
+
+    /// Clear the entire graph (ALPHA extreme-drift duty; THETA pre-rebuild step).
+    ///
+    /// Drops all nodes, connections, and vector bytes. O(1) — just releases arrays.
+    /// After clear(), the next insert or rebuild starts a fresh graph from an empty state.
+    public func clear() {
+        nodes.removeAll(keepingCapacity: false)
+        nodeIndex.removeAll(keepingCapacity: false)
+        entryPoint = nil
+        maxLayer = 0
+        vectorStride = nil
+        hnswLog.info("HNSWIndex.clear: graph cleared")
+    }
+
+    // MARK: - Private helpers
+
+    /// Decode stored bytes of node `idx` to [Float] for distance computation.
+    private func nodeFloats(_ idx: Int) -> [Float] {
+        bytesToFloats(nodes[idx].vectorBytes)
+    }
+
+    /// Decode a LE float32 byte array to [Float].
+    private func bytesToFloats(_ bytes: [UInt8]) -> [Float] {
+        let count = bytes.count / 4
+        var result = [Float](repeating: 0, count: count)
+        for i in 0..<count { result[i] = floatFromBytes(bytes, at: i) }
+        return result
+    }
+}
+
+// MARK: - Float.clamped helper
+
+private extension Float {
+    /// Clamp to a closed range without importing additional modules.
+    func clamped(to range: ClosedRange<Float>) -> Float {
+        Swift.max(range.lowerBound, Swift.min(range.upperBound, self))
+    }
+}

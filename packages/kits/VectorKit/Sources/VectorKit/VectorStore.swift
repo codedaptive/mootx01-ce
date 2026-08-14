@@ -2,7 +2,7 @@
 //
 // Storage layer for VectorKit, backed by PersistenceKit.
 //
-// Schema (version 4, adds idx_vectors_filed_at_item for recentItemIDs ordered scan):
+// Schema (version 5, adds hnsw_graph table for the approximate NN index):
 // ```
 // vectors (
 //   id             UUID PRIMARY KEY,
@@ -20,6 +20,17 @@
 // UNIQUE(item_id, vector_index, model_id)
 // INDEX(model_id, item_id)
 // INDEX(filed_at, item_id)   -- v4: covers recentItemIDs ORDER BY filed_at DESC, item_id ASC
+//
+// hnsw_graph (v5 addition — device-local, never in ConvergenceKit sync manifests):
+// ```
+// hnsw_graph (
+//   model_id       TEXT NOT NULL,     -- which modelID partition this node belongs to
+//   node_idx       INTEGER NOT NULL,  -- sequential Int32 node index within this partition
+//   node_id        TEXT NOT NULL,     -- item_id of the originating VectorRecordKey
+//   layer          INTEGER NOT NULL,  -- HNSW graph layer (0 = densest)
+//   neighbours     BLOB NOT NULL      -- packed Int32 array of neighbour node_idx values
+// )
+// PRIMARY KEY (model_id, node_idx, layer)
 // ```
 //
 // Refactored 2026-05-19 (mission 6) per
@@ -298,6 +309,35 @@ public actor VectorStore {
     /// the entry's presence in the map is the "built" flag (no separate bool).
     private var floatIndices: [String: FloatBruteForceIndex] = [:]
 
+    /// HNSW approximate nearest-neighbour index per modelID (Lane D, float lane).
+    ///
+    /// One HNSWIndex per modelID partition, activated when the live float count
+    /// for that model reaches `hnswThreshold`. Built lazily on the first
+    /// `findNearestFloat` call that crosses the threshold; cleared by
+    /// `evictFloatIndices` and `clearAllHNSWIndices`.
+    ///
+    /// Search through this index is APPROXIMATE; `FloatBruteForceIndex` is the
+    /// exact oracle and is always kept for farthest queries and recall validation.
+    /// Above the threshold, nearest queries route through HNSW (sub-linear);
+    /// below it, nearest queries use `FloatBruteForceIndex` (exact, O(N)).
+    private var hnswIndices: [String: HNSWIndex] = [:]
+
+    /// Live float vector count per modelID partition.
+    ///
+    /// Initialised from the record count when `floatIndices[modelID]` is first
+    /// built; incremented by `addPayload` for each successful float32 insert
+    /// on an already-built partition. Used by `_findNearestFloatCached` to
+    /// decide when to activate the HNSW index. An actor-local transient count
+    /// (not persisted; rebuilt from the table count at first-access time).
+    private var liveFloatCounts: [String: UInt32] = [:]
+
+    /// Live float vector count per modelID above which HNSWIndex activates.
+    ///
+    /// Default `hnswDefaultThreshold` (5 000) — see HNSWIndex.swift §Crossover
+    /// for the derivation. Overridable at init time (via `hnswThreshold:`)
+    /// so tests can cross the threshold with a small corpus.
+    public let hnswThreshold: UInt32
+
     /// Retained memory pressure source (Apple platforms only). Releasing this
     /// reference would stop future pressure deliveries. The handler creates a
     /// Task that crosses the actor boundary via `await self.evictFloatIndices()`.
@@ -334,7 +374,7 @@ public actor VectorStore {
         get async { await arrayStore?.sidecarWriteCount ?? 0 }
     }
 
-    // MARK: - Schema declaration (version 3, multi-vector, item_id, ext slot)
+    // MARK: - Schema declaration (version 5)
 
     /// Schema declaration consumed by Storage.open(schema:).
     ///
@@ -357,12 +397,18 @@ public actor VectorStore {
     ///     Covers `recentItemIDs` ORDER BY filed_at DESC, item_id ASC so
     ///     SQLite can do an ordered index scan rather than a full-table scan +
     ///     filesort. Before v4 every `recentItemIDs` call on a large estate
+    ///
+    /// Table additions v4 → v5:
+    ///   - Added: `hnsw_graph` table (see file header for column list).
+    ///     Stores the persisted HNSW graph for the float lane (Lane D). This
+    ///     table is NEVER included in ConvergenceKit sync manifests; the graph
+    ///     is a rebuildable derived accelerator — device-local only.
     ///     issued a full scan (10k-row probe_limit = O(N) on 109k chunks).
     ///     Combined with `columns:` projection, this also enables an
     ///     index-only covering scan — payload blobs never read from disk.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "VectorKit",
-        version: 4,
+        version: 5,
         tables: [
             TableDeclaration(
                 name: "vectors",
@@ -386,6 +432,23 @@ public actor VectorStore {
                 ],
                 primaryKey: ["id"],
                 uniqueConstraints: [["item_id", "vector_index", "model_id"]]
+            ),
+            // v5: HNSW graph persistence table. Device-local only — never
+            // in ConvergenceKit sync manifests (the graph is a rebuildable
+            // derived accelerator, not source-of-truth data). Primary key
+            // is (model_id, node_idx, layer): one row per node-per-layer
+            // neighbour list. `neighbours` is a packed little-endian Int32
+            // array of node_idx values.
+            TableDeclaration(
+                name: "hnsw_graph",
+                columns: [
+                    .text("model_id", nullable: false),
+                    .int("node_idx", nullable: false),
+                    .text("node_id", nullable: false),
+                    .int("layer", nullable: false),
+                    .blob("neighbours", nullable: false)
+                ],
+                primaryKey: ["model_id", "node_idx", "layer"]
             )
         ],
         indices: [
@@ -428,6 +491,29 @@ public actor VectorStore {
                         table: "vectors",
                         columns: ["filed_at", "item_id"],
                         unique: false
+                    ))
+                ]
+            ),
+            // v4 → v5: add hnsw_graph table to existing estates.
+            // Idempotent: the .createTable operation emits CREATE TABLE IF NOT
+            // EXISTS, so it is safe to replay on fresh databases (which also
+            // apply this migration from the initial open). The table starts
+            // empty; the HNSW graph is populated lazily when the active float
+            // corpus first crosses the hnswThreshold.
+            Migration(
+                fromVersion: 4,
+                toVersion: 5,
+                operations: [
+                    .createTable(TableDeclaration(
+                        name: "hnsw_graph",
+                        columns: [
+                            .text("model_id", nullable: false),
+                            .int("node_idx", nullable: false),
+                            .text("node_id", nullable: false),
+                            .int("layer", nullable: false),
+                            .blob("neighbours", nullable: false)
+                        ],
+                        primaryKey: ["model_id", "node_idx", "layer"]
                     ))
                 ]
             )
@@ -485,11 +571,13 @@ public actor VectorStore {
         sidecarURL: URL? = nil,
         mihThreshold: UInt32 = 50_000,
         mihBandCount: MIHBandCount = .m16,
-        deferredPendingLimit: Int = 50_000
+        deferredPendingLimit: Int = 50_000,
+        hnswThreshold: UInt32 = hnswDefaultThreshold
     ) {
         self.storage               = storage
         self.mihThreshold          = mihThreshold
         self.mihBandCount          = mihBandCount
+        self.hnswThreshold         = hnswThreshold
         self.arrayStore            = sidecarURL.map { ResidentArrayStore(sidecarURL: $0) }
         self.deferredPendingLimit  = deferredPendingLimit
         // Allocate both index actors once; hotIndex starts as brute-force
@@ -525,17 +613,108 @@ public actor VectorStore {
 
     /// Evict all per-model float-lane indexes from the in-process heap.
     ///
-    /// Safe to call at any time. After eviction the next `findNearestFloat`
-    /// or `findFarthestFloat` call lazily rebuilds from the `vectors` table
-    /// when `residencyHint == .ramResident`, or uses the table scan directly
-    /// when `residencyHint == .diskBacked`.
+    /// Clears `floatIndices`, `hnswIndices`, and `liveFloatCounts`. After
+    /// eviction the next `findNearestFloat` or `findFarthestFloat` call lazily
+    /// rebuilds from the `vectors` table when `residencyHint == .ramResident`,
+    /// or uses the table scan directly when `residencyHint == .diskBacked`.
     ///
     /// Called automatically on Apple platforms under critical memory pressure
     /// (registered in `init`). Callers that manage their own pressure budget
     /// may call this directly.
     public func evictFloatIndices() {
         floatIndices.removeAll(keepingCapacity: false)
-        log.info("VectorStore: float-lane indexes evicted under memory pressure")
+        // HNSW graph and live-count tracking are derivative of the float lane;
+        // evict them together so the next findNearestFloat sees a clean state.
+        hnswIndices.removeAll(keepingCapacity: false)
+        liveFloatCounts.removeAll(keepingCapacity: false)
+        log.info("VectorStore: float-lane indexes (BruteForce + HNSW) evicted under memory pressure")
+    }
+
+    // MARK: - HNSW graph maintenance (dreaming cadence duties)
+
+    /// Clear all HNSW graphs for every modelID partition (ALPHA duty).
+    ///
+    /// Drops every in-process HNSWIndex entry. The next `findNearestFloat`
+    /// call at/above `hnswThreshold` lazily rebuilds the graph from the current
+    /// float records. FloatBruteForceIndex entries are RETAINED — farthest
+    /// queries and below-threshold nearest queries continue uninterrupted.
+    ///
+    /// Called by DreamingDaemon on extreme vocabulary drift (ALPHA auto-reindex
+    /// path) when the embedding basis changes enough to render the existing
+    /// graph topology incorrect. A lazy rebuild on the next qualifying query
+    /// is cheaper than a synchronous full rebuild on a 30-second cadence.
+    public func clearAllHNSWIndices() async {
+        for idx in hnswIndices.values {
+            await idx.clear()
+        }
+        hnswIndices.removeAll(keepingCapacity: false)
+        log.info("VectorStore: all HNSW graphs cleared (ALPHA extreme-drift duty)")
+    }
+
+    /// Rebuild the HNSW graph for one modelID partition from current float records (THETA duty).
+    ///
+    /// Fetches all float32 rows for `modelID` from the `vectors` table, then
+    /// re-inserts them into a fresh HNSWIndex. Called after a basis retrain
+    /// (THETA cadence) so the graph stays aligned with re-embedded vectors. A
+    /// fresh graph avoids tombstone accumulation from the incremental insert path
+    /// and rebuilds the neighbour topology from the new embedding geometry.
+    ///
+    /// If the table has no float rows for `modelID`, any existing graph entry
+    /// is removed (keeping the map consistent with the table state).
+    public func rebuildHNSWIndex(for modelID: String) async throws {
+        let records = try await _fetchFloatRecords(modelID: modelID)
+        guard !records.isEmpty else {
+            hnswIndices.removeValue(forKey: modelID)
+            return
+        }
+        let hnsw = HNSWIndex()
+        for rec in records {
+            if let floats = try? rec.payload.asFloats() {
+                await hnsw.insert(itemID: rec.key.itemID, modelID: modelID, vector: floats)
+            }
+        }
+        hnswIndices[modelID] = hnsw
+        liveFloatCounts[modelID] = UInt32(records.count)
+        log.info("VectorStore: HNSW graph rebuilt for modelID=\(modelID, privacy: .public), nodes=\(records.count)")
+    }
+
+    /// Rebuild HNSW graphs for all modelIDs that currently have an active graph (THETA duty).
+    ///
+    /// Iterates over `hnswIndices.keys` and calls `rebuildHNSWIndex(for:)` for
+    /// each. ModelIDs below the threshold (no entry in `hnswIndices`) are skipped
+    /// — they have no graph to rebuild and will build lazily when they next cross
+    /// the threshold. Called by DreamingDaemon's THETA cycle after a full corpus
+    /// basis retrain.
+    public func rebuildAllHNSWIndices() async throws {
+        // Snapshot the keys before mutation to avoid dict-during-iteration.
+        let modelIDs = Array(hnswIndices.keys)
+        for modelID in modelIDs {
+            try await rebuildHNSWIndex(for: modelID)
+        }
+    }
+
+    /// Compact HNSW tombstones for one modelID partition (BETA duty).
+    ///
+    /// Calls `HNSWIndex.compact()` which rebuilds the live-node graph discarding
+    /// tombstoned entries and dead edges. This is a wear-model compaction: HNSW
+    /// tombstones accumulate over time as items are updated or deleted; BETA
+    /// compaction reclaims their memory and restores graph quality. Safe to call
+    /// when no graph exists for `modelID` (no-op).
+    public func compactHNSWTombstones(for modelID: String) async {
+        guard let idx = hnswIndices[modelID] else { return }
+        await idx.compact()
+        log.info("VectorStore: HNSW compact completed for modelID=\(modelID, privacy: .public)")
+    }
+
+    /// Compact HNSW tombstones for all active modelID partitions (BETA duty).
+    ///
+    /// Iterates over all active HNSW graphs and calls `compact()` on each.
+    /// Called by DreamingDaemon's BETA cycle.
+    public func compactAllHNSWTombstones() async {
+        let modelIDs = Array(hnswIndices.keys)
+        for modelID in modelIDs {
+            await compactHNSWTombstones(for: modelID)
+        }
     }
 
     // MARK: - Write
@@ -727,6 +906,27 @@ public actor VectorStore {
                 // UPDATE so a stale float vector cannot survive in the scan.
                 try await modelIndex.remove(key: key)
                 try await modelIndex.add(key: key, vector: payload)
+                // Increment the live count. A strict replacement check (to
+                // avoid counting updates twice) would require a lookup in the
+                // brute-force snapshot — expensive per-insert. Because
+                // hnswThreshold is 5 000, a count that drifts by ±1 per
+                // replacement is insignificant: the worst case activates HNSW
+                // one insert early, which is correct. True net-new status is
+                // resolved when the index is first built (records.count) and
+                // HNSW activation is idempotent.
+                liveFloatCounts[modelID, default: 0] += 1
+                // Mirror into the HNSW graph if the graph is already built for
+                // this modelID. HNSWIndex.insert handles upsert (tombstones any
+                // prior node for this itemID, inserts the new vector). If the
+                // HNSW index is not yet built, this insert is a no-op — the
+                // graph will be built lazily on the first findNearestFloat call
+                // that crosses the threshold, at which point all existing float
+                // records are fetched from the table and inserted at once.
+                if let hnswIdx = hnswIndices[modelID] {
+                    if let floats = try? payload.asFloats() {
+                        await hnswIdx.insert(itemID: itemID, modelID: modelID, vector: floats)
+                    }
+                }
             }
         }
 
@@ -1403,16 +1603,59 @@ public actor VectorStore {
     }
 
     /// Float NN search via the cached FloatBruteForceIndex (ramResident path).
-    /// Builds the index lazily on first call for a given modelID and caches it
-    /// for subsequent queries. Called when `residencyHint == .ramResident`.
+    ///
+    /// Builds the FloatBruteForceIndex lazily on first call for a given modelID
+    /// and initialises `liveFloatCounts[modelID]` from the record count. At/above
+    /// `hnswThreshold` live float vectors, queries are routed through the HNSW
+    /// approximate index (also built lazily on first qualifying call) for
+    /// sub-linear nearest-neighbour performance. Below the threshold the exact
+    /// FloatBruteForceIndex is used (O(N) scan, always sub-millisecond at small N).
+    ///
+    /// Farthest queries always use FloatBruteForceIndex regardless of threshold —
+    /// HNSW is a nearest-only structure. See `_findFarthestFloatCached`.
     private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+        // Build FloatBruteForceIndex lazily on first access for this modelID.
+        // The brute-force index is always built; farthest queries depend on it
+        // even when HNSW is active for nearest queries.
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
             guard let arr = Self.buildFloatArray(from: records) else { return [] }
             let index = FloatBruteForceIndex()
             await index.build(from: arr)
             floatIndices[modelID] = index
+            // Seed the live count so the HNSW threshold check below is accurate
+            // from the very first findNearestFloat call on this partition.
+            liveFloatCounts[modelID] = UInt32(records.count)
         }
+
+        // Route to HNSW when the live float count reaches the crossover threshold.
+        // Below the threshold FloatBruteForceIndex is faster — brute-force is
+        // bandwidth-bound and at 5 000 vectors the scan takes ~1 µs, while the
+        // HNSW graph construction + pointer-chasing overhead exceeds that.
+        let liveCount = liveFloatCounts[modelID] ?? 0
+        if liveCount >= hnswThreshold {
+            // Build the HNSW graph lazily on the first qualifying call.
+            if hnswIndices[modelID] == nil {
+                let hnsw = HNSWIndex()
+                let records = try await _fetchFloatRecords(modelID: modelID)
+                for rec in records {
+                    // asFloats() is a safe decode of the float32 payload bytes;
+                    // failures indicate a corrupt row and are skipped (non-fatal).
+                    if let floats = try? rec.payload.asFloats() {
+                        await hnsw.insert(itemID: rec.key.itemID, modelID: modelID, vector: floats)
+                    }
+                }
+                hnswIndices[modelID] = hnsw
+                log.info("VectorStore: HNSW index built for modelID=\(modelID, privacy: .public), liveCount=\(liveCount)")
+            }
+            if let hnswIndex = hnswIndices[modelID] {
+                // HNSWIndex.search is synchronous (actor-isolated, no async work);
+                // `await` crosses the actor boundary.
+                return try await hnswIndex.search(probe: probe, modelID: modelID, k: limit)
+            }
+        }
+
+        // Below threshold (or HNSW build failed): exact scan via FloatBruteForceIndex.
         guard let modelIndex = floatIndices[modelID] else { return [] }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
@@ -1451,7 +1694,10 @@ public actor VectorStore {
     /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
     ///   Empty if `limit` is non-positive, the probe is empty, or no float
     ///   rows exist for the model.
-    /// farthest float search. Same residencyHint dispatch as nearest.
+    /// farthest float search. Same residencyHint dispatch as nearest, but always
+    /// uses FloatBruteForceIndex regardless of HNSW threshold — HNSW is a
+    /// nearest-only structure and anti-similarity retrieval requires a full scan
+    /// that provides no speed benefit over brute-force. See `_findFarthestFloatCached`.
     public func findFarthestFloat(
         probe: [Float],
         modelID: String,
@@ -1473,6 +1719,9 @@ public actor VectorStore {
     }
 
     /// Farthest float search via the cached FloatBruteForceIndex (ramResident path).
+    /// Always uses FloatBruteForceIndex regardless of HNSW threshold. HNSW is a
+    /// nearest-only graph; anti-similarity (farthest) retrieval requires a full scan
+    /// over all live nodes and gains no speed benefit from the graph structure.
     /// Builds the index lazily on first call for a given modelID and caches it
     /// for subsequent queries. Called when `residencyHint == .ramResident`.
     private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
