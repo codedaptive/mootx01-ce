@@ -309,7 +309,10 @@ pub trait MaintenanceProposalSink {
 ///
 /// Failures are caught and logged by the daemon — they do not abort the cycle.
 /// `None` (`with_duty` never called) safely disables the duty.
-pub trait PerformanceHealthDuty {
+/// `Send` is required: the daemon travels into the governor's worker thread
+/// (see aria-mcp autonomic_governor_tests), so any duty implementation must
+/// be movable across threads with it.
+pub trait PerformanceHealthDuty: Send {
     /// Run the daily timing-derivation health duty.
     ///
     /// - `watermark_ms`: HLC physical-time watermark (epoch ms). 0 = start of log.
