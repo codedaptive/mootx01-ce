@@ -98,6 +98,7 @@ try {
     <button class="navitem" data-view="configuration">Configuration</button>
     <button class="navitem" data-view="review">Review</button>
     <button class="navitem" data-view="packets">Packets</button>
+    <button class="navitem" data-view="perf-health">Perf Health</button>
     <!-- activity-temp: hidden from nav, preserved as a parts drawer for reuse.
          Contains the original Overview elements (metric cards, feeds, health,
          capabilities, busiest estates) while the new Overview is being built
@@ -421,6 +422,13 @@ try {
       </div>
     </section>
 
+    <!-- PERF HEALTH — daily performance-health indicator with trend (A8 / D6) -->
+    <section class="view" data-view="perf-health">
+      <h1 class="title">Perf Health</h1>
+      <p class="sub">Daily audit-derived performance indicator — ingest and cycle timing samples with trend over time.</p>
+      <div id="perfHealthContent"></div>
+    </section>
+
     <!-- ACTIVITY-TEMP: hidden parts drawer — old Overview elements preserved for
          component reuse while the new Overview is being built out. Not linked
          from nav; not user-visible. -->
@@ -437,7 +445,7 @@ try {
 
   </main>
 </div>
-<script type="module" src="/app.js?v=27"></script>
+<script type="module" src="/app.js?v=28"></script>
 </body>
 </html>
 
@@ -6262,6 +6270,128 @@ import {
   }
 
   // =========================================================================
+  // PERF HEALTH — daily performance-health indicator with trend (A8 / D6)
+  // =========================================================================
+  //
+  // Sources audit-derived timing samples from /api/perf-health.
+  // Values are written by EstatePerformanceHealthDuty on a 24 h cadence (A7).
+  // D6 boundary: display only — no alerting, no general query surface.
+  async function renderPerfHealth() {
+    const container = $("#perfHealthContent");
+    if (!container) return;
+    clear(container);
+
+    // Fetch perf-health data from the stats-store endpoint.
+    let data = null;
+    try { data = await getJSON("/api/perf-health"); } catch (e) {
+      container.appendChild(el("div", "empty", "perf-health data unreachable — " + e.message));
+      return;
+    }
+
+    if (data.pending) {
+      container.appendChild(el("div", "empty", "perf-health data pending — manager not started"));
+      return;
+    }
+
+    const s = data.latestSample;
+
+    // Row 1: summary metric cards (key indicators from the latest sample).
+    const cardRow = el("div", "cards");
+    const fmtMs = (v) => v != null ? v.toFixed(1) : "—";
+    cardRow.appendChild(metricCard("Ingest p50", fmtMs(s && s.ingestP50Ms), "ms", null));
+    cardRow.appendChild(metricCard("Ingest p95", fmtMs(s && s.ingestP95Ms), "ms", null));
+    cardRow.appendChild(metricCard("Trend points", String(data.trend.length), null,
+                                    data.trend.length > 0 ? "blue" : null));
+    cardRow.appendChild(metricCard("Sample count", fmtMs(s && s.ingestSampleCount), null, null));
+    if (s) {
+      cardRow.appendChild(metricCard("Last run", fmtRelative(s.ts), null, null));
+    }
+    container.appendChild(cardRow);
+
+    // Row 2: detail panel — all 11 audit-derived metric fields for the latest sample.
+    const detailPanel = el("div", "panel");
+    panelHead(detailPanel, "Latest Sample",
+              s ? "audit-derived · " + s.ts : "no samples yet");
+    if (!s) {
+      const note = el("div", "empty");
+      note.style.marginTop = "12px";
+      note.textContent = "No audit-derived samples — EstatePerformanceHealthDuty has not run yet (24 h cadence).";
+      detailPanel.appendChild(note);
+    } else {
+      // Two-column key/value grid mirroring the Configuration panel layout.
+      const grid = el("div", "cfg-kvgrid");
+      grid.style.marginTop = "10px";
+      [
+        ["Ingest p50",           s.ingestP50Ms,         "ms"],
+        ["Ingest p95",           s.ingestP95Ms,         "ms"],
+        ["Cycle vector p50",     s.cycleVectorP50Ms,    "ms"],
+        ["Cycle vector p95",     s.cycleVectorP95Ms,    "ms"],
+        ["Cycle novel p50",      s.cycleNovelP50Ms,     "ms"],
+        ["Cycle novel p95",      s.cycleNovelP95Ms,     "ms"],
+        ["Cycle novel unbounded",s.cycleNovelUnbounded, ""],
+        ["Cycle dreamt p50",     s.cycleDreamtP50Ms,    "ms"],
+        ["Cycle dreamt p95",     s.cycleDreamtP95Ms,    "ms"],
+        ["Cycle dreamt unbounded",s.cycleDreamtUnbounded,""],
+        ["Ingest sample count",  s.ingestSampleCount,   ""],
+      ].forEach(function (row) {
+        const key = row[0], val = row[1], unit = row[2];
+        grid.appendChild(el("span", "cfg-key", key));
+        const cell = el("span", "cfg-val");
+        const display = val != null
+          ? val.toFixed(1) + (unit ? " " + unit : "")
+          : "n/a";
+        cell.appendChild(el("span", val != null ? "cfg-val-chip" : "cfg-val-na", display));
+        grid.appendChild(cell);
+      });
+      detailPanel.appendChild(grid);
+    }
+    container.appendChild(detailPanel);
+
+    // Row 3: ingest-p50 trend table — one row per daily duty run, oldest first.
+    const trendPanel = el("div", "panel");
+    panelHead(trendPanel, "Ingest p50 Trend",
+              data.trend.length + " samples · audit-derived · oldest first");
+    if (data.trend.length === 0) {
+      const note = el("div", "empty");
+      note.style.marginTop = "12px";
+      note.textContent = "No trend data yet — samples accumulate at the daily duty cadence (one per estate per day).";
+      trendPanel.appendChild(note);
+    } else {
+      const tbl = el("table", "dtable");
+      tbl.style.marginTop = "12px";
+      const thead = el("thead");
+      const hrow = el("tr");
+      ["Timestamp", "Ingest p50 (ms)"].forEach(function (h) {
+        const th = el("th"); th.textContent = h; hrow.appendChild(th);
+      });
+      thead.appendChild(hrow);
+      tbl.appendChild(thead);
+
+      const tbody = el("tbody");
+      data.trend.forEach(function (pt) {
+        const tr = el("tr");
+        // Timestamp column: monospace, ISO-8601
+        const tdTs = el("td");
+        tdTs.style.fontFamily = "var(--font-m)";
+        tdTs.style.fontSize = "12px";
+        tdTs.textContent = pt.ts;
+        tr.appendChild(tdTs);
+        // Value column: right-aligned, tabular numerics
+        const tdVal = el("td");
+        tdVal.style.textAlign = "right";
+        tdVal.style.fontFamily = "var(--font-m)";
+        tdVal.style.fontVariantNumeric = "tabular-nums";
+        tdVal.textContent = pt.ingestP50Ms.toFixed(1);
+        tr.appendChild(tdVal);
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      trendPanel.appendChild(tbl);
+    }
+    container.appendChild(trendPanel);
+  }
+
+  // =========================================================================
   // VIEW ROUTER
   // =========================================================================
 
@@ -6276,6 +6406,7 @@ import {
     lexicon:       renderLexicon,
     lattice:       renderLattice,
     configuration: renderConfiguration,
+    "perf-health": renderPerfHealth,
   };
 
   function show(view) {

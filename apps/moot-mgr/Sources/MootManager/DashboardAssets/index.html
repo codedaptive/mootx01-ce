@@ -74,6 +74,7 @@ try {
     <button class="navitem" data-view="configuration">Configuration</button>
     <button class="navitem" data-view="review">Review</button>
     <button class="navitem" data-view="packets">Packets</button>
+    <button class="navitem" data-view="perf-health">Perf Health</button>
     <!-- activity-temp: hidden from nav, preserved as a parts drawer for reuse.
          Contains the original Overview elements (metric cards, feeds, health,
          capabilities, busiest estates) while the new Overview is being built
@@ -397,6 +398,13 @@ try {
       </div>
     </section>
 
+    <!-- PERF HEALTH — daily performance-health indicator with trend (A8 / D6) -->
+    <section class="view" data-view="perf-health">
+      <h1 class="title">Perf Health</h1>
+      <p class="sub">Daily audit-derived performance indicator — ingest and cycle timing samples with trend over time.</p>
+      <div id="perfHealthContent"></div>
+    </section>
+
     <!-- ACTIVITY-TEMP: hidden parts drawer — old Overview elements preserved for
          component reuse while the new Overview is being built out. Not linked
          from nav; not user-visible. -->
@@ -413,6 +421,6 @@ try {
 
   </main>
 </div>
-<script type="module" src="/app.js?v=27"></script>
+<script type="module" src="/app.js?v=28"></script>
 </body>
 </html>
