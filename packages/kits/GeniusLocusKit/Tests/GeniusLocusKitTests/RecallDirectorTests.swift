@@ -188,7 +188,7 @@ struct RecallDirectorTests {
     // MARK: - 3. Legacy shim returns same result as explicit locusOnly request
 
     /// Calling `recall(_ handle:, _ frame:)` (legacy shim) and
-    /// `recall(_ handle:, GLKRecallRequest(mode:.locusOnly, ...))` must
+    /// `recall(_ handle:, GLKRecallRequest(mode:.locusOnly, scoring:.raw, limit:50, fallback:.failClosed, origin:.internal))` must
     /// return identical drawer arrays for the same frame.
     ///
     /// This pins the shim's contract: it is a thin adapter, not an
@@ -207,7 +207,8 @@ struct RecallDirectorTests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let directorResult = try await kit.recall(handle, request)
 
@@ -229,7 +230,8 @@ struct RecallDirectorTests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -263,7 +265,8 @@ struct RecallDirectorTests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         do {
             _ = try await kit.recall(handle, request)
@@ -288,7 +291,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "corpusOnly should return at least one hit for seeded content")
@@ -316,7 +320,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "hybrid should return at least one hit for seeded estate")
@@ -344,7 +349,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 1000,
             fallback: .failClosed,
-            queryText: "fruit mango"
+            queryText: "fruit mango",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.plan.frontierK <= 256,
@@ -356,7 +362,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 1,
             fallback: .failClosed,
-            queryText: "fruit"
+            queryText: "fruit",
+            origin: .internal
         )
         let resultSmall = try await kit.recall(handle, requestSmall)
         #expect(resultSmall.plan.frontierK >= 64,
@@ -378,7 +385,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         let expectedFrontierK = min(max(limit * 4, 64), 256)
@@ -404,7 +412,8 @@ struct RecallDirectorTests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // Must not throw; must return at least one hit from the locus lane.
@@ -432,7 +441,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "unionBest should return at least one hit for seeded estate")
@@ -457,7 +467,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         let ids = result.hits.map(\.id)
@@ -480,7 +491,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.hits.count <= limit,
@@ -679,7 +691,8 @@ struct RecallDirectorDenseSignalTests {
             scoring: .rrf,
             limit: 10,
             fallback: .failClosed,
-            queryText: "mango fruit recall"
+            queryText: "mango fruit recall",
+            origin: .internal
         )
     }
 
@@ -934,7 +947,8 @@ struct RecallDirector004Tests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 3,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -967,7 +981,8 @@ struct RecallDirector004Tests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // Degraded to locusOnly — must return the captured drawer.
@@ -1058,7 +1073,8 @@ struct RecallDirector004Tests {
                 mode: .unionBest,
                 scoring: .matrixAware,
                 limit: limit,
-                fallback: .allowDegraded
+                fallback: .allowDegraded,
+                origin: .internal
             )
             let result = try await kit.recall(handle, request)
             #expect(result.hits.count <= limit,
@@ -1121,7 +1137,8 @@ struct RecallDirector004Tests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1303,7 +1320,8 @@ struct RecallDirectorSafetyTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "apple mango tombstone"
+            queryText: "apple mango tombstone",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1363,7 +1381,8 @@ struct RecallDirectorSafetyTests {
             mode: .unionBest,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1420,7 +1439,8 @@ struct RecallDirectorSafetyTests {
             mode: .unionBest,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1471,7 +1491,8 @@ struct RecallDirectorSafetyTests {
                     filterChain: [.unconfirmed], hydrationLevel: level,
                     limit: 5, ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .raw, limit: 5,
-                fallback: .allowDegraded)
+                fallback: .allowDegraded,
+                origin: .internal)
             return try await kit.recall(handle, request).hits
         }
 
@@ -1539,7 +1560,8 @@ struct RecallAPI001Tests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "locusOnly recall should return at least one hit")
@@ -1590,7 +1612,8 @@ struct RecallAPI001Tests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         // Must not throw; .rrf on a single lane degrades to raw ordering.
         let result = try await kit.recall(handle, request)
@@ -1662,7 +1685,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // With a registered GraphCache returning 0.8, every hit's graph score
@@ -1699,7 +1723,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty)
@@ -1749,7 +1774,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,  // ask for only 2: shingle should suppress one near-dup
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.hits.count == 2, "limit=2 must yield exactly 2 hits")
@@ -1795,7 +1821,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         // Must not throw or crash. With bitmapOnly, content is "" so
         // sourceMask Jaccard fallback is used. All hits must have empty content.
@@ -1965,7 +1992,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let rrfResult = try await kit.recall(handle, rrfRequest)
         #expect(!rrfResult.hits.isEmpty, ".rrf scoring on unionBest must return hits")
@@ -1977,7 +2005,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let matrixResult = try await kit.recall(handle, matrixRequest)
         #expect(!matrixResult.hits.isEmpty, ".matrixAware scoring on unionBest must return hits")
@@ -2044,7 +2073,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "matrixAware scoring on unionBest must return hits")
@@ -2146,7 +2176,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .failClosed)
+            fallback: .failClosed,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(!result.hits.isEmpty,
@@ -2285,7 +2316,8 @@ struct RecallByIDHydrationEquivalenceTests {
             scoring: .rrf,
             limit: 50,
             fallback: .failClosed,
-            queryText: "mango recall fruit"
+            queryText: "mango recall fruit",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "hybrid recall must return seeded frontier hits")
@@ -2335,7 +2367,8 @@ struct RecallByIDHydrationEquivalenceTests {
             scoring: .rrf,
             limit: 50,
             fallback: .failClosed,
-            queryText: "mango recall fruit"
+            queryText: "mango recall fruit",
+            origin: .internal
         )
         let first = try await kit.recall(handle, request)
         let second = try await kit.recall(handle, request)
@@ -2474,7 +2507,8 @@ struct RecallDirectorMatrixConformanceTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed)
+            fallback: .failClosed,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(!result.hits.isEmpty,

@@ -92,6 +92,7 @@ struct RecallShapeSignedWeightTests {
             limit: 10,
             fallback: .failClosed,
             queryText: query,
+            origin: .internal,
             recallShape: shape
         )
     }

@@ -149,7 +149,8 @@ public enum PreciseRecall {
             limit: poolSize,
             fallback: .allowDegraded,
             queryText: query,
-            traceLimit: limit)
+            traceLimit: limit,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         // b. REDUCTION COMPOSITION — project each body-free pooled hit (with its

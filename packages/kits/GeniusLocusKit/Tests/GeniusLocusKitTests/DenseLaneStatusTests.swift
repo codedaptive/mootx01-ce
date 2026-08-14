@@ -147,6 +147,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test",
             origin: .internal
         )
@@ -165,6 +166,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "",   // empty query
             origin: .internal
         )
@@ -184,6 +186,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,  // no query text
             origin: .internal
         )
@@ -203,6 +206,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test",
             origin: .internal
         )
@@ -239,6 +243,7 @@ struct DenseLaneCounterTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "dense float lane test",
                 origin: .internal
             )
@@ -272,6 +277,7 @@ struct DenseLaneCounterTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "test",
                 origin: .internal
             )
@@ -299,6 +305,7 @@ struct DenseLaneHappyPathTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test content",
             origin: .internal
         )
@@ -324,6 +331,7 @@ struct DenseLaneOtherModesTests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             origin: .internal
         )
         let result = try await kit.recall(handle, request)
@@ -442,6 +450,7 @@ struct DenseLaneStoreErrorTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "photosynthesis recall store error chain",
                 origin: .internal
             )

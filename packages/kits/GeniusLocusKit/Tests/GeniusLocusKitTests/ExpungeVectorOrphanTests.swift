@@ -97,7 +97,8 @@ struct ExpungeVectorOrphanTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 

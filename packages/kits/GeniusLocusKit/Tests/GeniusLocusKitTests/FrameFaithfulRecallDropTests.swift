@@ -84,7 +84,8 @@ struct FrameFaithfulRecallDropTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 

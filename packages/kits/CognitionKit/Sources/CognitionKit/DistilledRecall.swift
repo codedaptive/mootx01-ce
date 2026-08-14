@@ -159,10 +159,10 @@ public struct DistilledRecall: Recipe {
             scoring: .matrixAware,
             limit: input.limit,
             fallback: .allowDegraded,
-            queryText: input.query
-            // origin stays internal (B-10a): only the ARIA boundary marks
-            // requests external; the recipe layer never does (the
-            // PreciseRecall/ShapedRecall precedent).
+            queryText: input.query,
+            // origin: .internal — B-10a: recipe layer is never external;
+            // only the ARIA_MCP boundary passes .external.
+            origin: .internal
         )
         let result = try await kit.recall(estate, request)
 

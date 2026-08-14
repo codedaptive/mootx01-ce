@@ -143,7 +143,8 @@ public func hybridRecall(
             limit: scoredLane.frame.limit ?? tuning.pageSize,
             fallback: .allowDegraded,
             queryText: scoredLane.queryText,
-            traceLimit: scoredLane.traceLimit)
+            traceLimit: scoredLane.traceLimit,
+            origin: .internal)
         let scored = try await glk.recall(handle, request)
         var seen = Set<String>()
         var union: [Drawer] = []

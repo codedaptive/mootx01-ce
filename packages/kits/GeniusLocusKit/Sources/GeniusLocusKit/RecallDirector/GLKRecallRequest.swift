@@ -9,24 +9,25 @@ import LocusKit
 /// `.internal` so the reward pipeline learns from experience with users,
 /// not from the system's own reflective reads.
 ///
-/// The default on `GLKRecallRequest` is `.internal` so that every existing
-/// call site is safe unless explicitly overridden to `.external`. The
-/// ARIA_MCP boundary is the ONLY place where `.external` is set.
+/// All callers must supply this explicitly. The ARIA_MCP boundary is the
+/// ONLY place that passes `.external`.
 public enum RecallOrigin: Sendable {
     /// Request originates from an external consumer (human or outside AI)
     /// arriving through the ARIA access surface. May write recall-trace rows.
     case external
     /// Request originates from an internal system process. Must NOT write
-    /// recall-trace rows. Default for all non-ARIA callers.
+    /// recall-trace rows. All non-ARIA callers pass this explicitly.
     case `internal`
 }
 
 /// A fully-specified recall request at the GLK surface.
 ///
 /// `GLKRecallRequest` is the primary entry point for the Recall Director
-/// introduced in RECALL-DIRECTOR-001. Callers that do not need explicit
-/// mode/scoring control use the legacy shim `recall(_ handle:, _ frame:)`,
-/// which routes through this type with `mode: .locusOnly, scoring: .raw`.
+/// introduced in RECALL-DIRECTOR-001. All five behavioural parameters
+/// (`mode`, `scoring`, `limit`, `fallback`, `origin`) are required — every
+/// caller names its lane explicitly. The legacy shim `recall(_ handle:, _ frame:)`
+/// routes through this type with `mode: .locusOnly, scoring: .raw,
+/// fallback: .failClosed, origin: .internal` stated explicitly at the call site.
 public struct GLKRecallRequest: Sendable {
     /// The LocusKit filter chain, hydration level, ordering, and limit.
     public let frame: LocusKit.RecallFrame
@@ -44,7 +45,6 @@ public struct GLKRecallRequest: Sendable {
     /// registered corpus; the vector lane embeds it to find Hamming-nearest
     /// engrams. When nil, both lanes return empty candidate sets and the result
     /// falls back to the locus lane (for hybrid) or empty (for corpusOnly).
-    /// Defaults to nil for backward compatibility with locusOnly callers.
     public let queryText: String?
     /// How many rows to record as recall-trace rows in the reward cycle.
     ///
@@ -56,9 +56,9 @@ public struct GLKRecallRequest: Sendable {
     /// is what the caller actually receives — writing ~500 trace rows for a
     /// limit-20 precise query inflates the trace table ~25× for no benefit.
     ///
-    /// When nil (the default), the trace limit falls back to `request.limit`
-    /// — but ONLY when `origin == .external`. Internal requests never set
-    /// `traceLimit` on the frame regardless of this field (B-10a).
+    /// When nil, the trace limit falls back to `request.limit` — but ONLY when
+    /// `origin == .external`. Internal requests never set `traceLimit` on the
+    /// frame regardless of this field (B-10a).
     public let traceLimit: Int?
     /// Whether this recall originates from an external consumer or an internal
     /// system process.
@@ -66,9 +66,8 @@ public struct GLKRecallRequest: Sendable {
     /// B-10a enforcement: the RecallDirector sets `traceLimit` on the
     /// LocusKit `RecallFrame` ONLY when `origin == .external`. Internal reads
     /// (dreaming, standing signals, recipes, migration, etc.) must not write
-    /// recall-trace rows. Defaults to `.internal` so every existing call site
-    /// is safe unless explicitly overridden. The ARIA_MCP boundary is the
-    /// ONLY place that sets `.external`.
+    /// recall-trace rows. The ARIA_MCP boundary is the ONLY place that passes
+    /// `.external`; all other callers pass `.internal` explicitly.
     public let origin: RecallOrigin
     /// Optional SIGNED per-lane steering for the RRF fusion (6b-modifiers).
     ///
@@ -86,32 +85,38 @@ public struct GLKRecallRequest: Sendable {
 
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
+    /// All five behavioural parameters are required — there are no defaults.
+    /// Omitting any of the first five arguments is a compile error, which is
+    /// the enforcement mechanism: every caller must name its lane, scoring,
+    /// limit, fallback, and origin.
+    ///
     /// - Parameters:
     ///   - frame: LocusKit filter chain, hydration level, ordering, and limit.
-    ///   - mode: Which recall lane to route through. Defaults to `.hybrid`.
-    ///   - scoring: Scoring strategy applied after lane recall. Defaults to `.matrixAware`.
-    ///   - limit: Maximum hits to return. Defaults to `12`.
-    ///   - fallback: Behavior when the requested lane is unavailable. Defaults to `.failClosed`.
-    ///   - queryText: Optional free-text query for BM25 and vector lanes. Defaults to `nil`.
-    ///   - traceLimit: Override for the reward-cycle trace write budget. Nil defaults to
-    ///     `limit`. Set by the PreciseRecall recipe to thread the caller's final limit
-    ///     through when the pool (scan width) is larger than what the caller receives.
-    ///     Ignored unless `origin == .external` (B-10a).
+    ///   - mode: Which recall lane to route through.
+    ///   - scoring: Scoring strategy applied after lane recall.
+    ///   - limit: Maximum hits to return.
+    ///   - fallback: Behavior when the requested lane is unavailable.
+    ///   - queryText: Optional free-text query for BM25 and vector lanes. Nil means
+    ///     BM25 and vector lanes return empty candidate sets.
+    ///   - traceLimit: Override for the reward-cycle trace write budget. When nil the
+    ///     trace limit falls back to `limit`, but only when `origin == .external`
+    ///     (B-10a). Set by the PreciseRecall recipe to decouple the coarse pool from
+    ///     the reward-cycle write budget.
     ///   - origin: Whether the request originates externally (ARIA boundary) or
-    ///     internally (system process). Defaults to `.internal`. Only the ARIA_MCP
-    ///     boundary passes `.external` (B-10a enforcement).
-    ///   - recallShape: Optional signed per-lane fusion steering. Defaults to `nil`
-    ///     (uniform positive weights — byte-identical to today's fusion). See
+    ///     internally (system process). Only the ARIA_MCP boundary passes `.external`
+    ///     (B-10a enforcement); all other callers pass `.internal`.
+    ///   - recallShape: Optional signed per-lane fusion steering. Nil means uniform
+    ///     positive weights — byte-identical to pre-6b-modifiers behaviour. See
     ///     `RecallShape` for the signed-weight semantics and lane-key scheme.
     public init(
         frame: LocusKit.RecallFrame,
-        mode: GLKRecallMode = .hybrid,
-        scoring: GLKRecallScoring = .matrixAware,
-        limit: Int = 12,
-        fallback: RecallFallbackPolicy = .failClosed,
+        mode: GLKRecallMode,
+        scoring: GLKRecallScoring,
+        limit: Int,
+        fallback: RecallFallbackPolicy,
         queryText: String? = nil,
         traceLimit: Int? = nil,
-        origin: RecallOrigin = .internal,
+        origin: RecallOrigin,
         recallShape: RecallShape? = nil
     ) {
         self.frame = frame

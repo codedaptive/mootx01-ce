@@ -115,7 +115,10 @@ struct QuiescedVerbGateTests {
 
         // AriaMcpKit calls `kit.recall(handle, request)` directly, bypassing the
         // RecallFrame shim. The RecallDirector check covers this path.
-        let request = GLKRecallRequest(frame: RecallFrame(filterChain: []))
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: []),
+            mode: .hybrid, scoring: .matrixAware, limit: 1, fallback: .failClosed,
+            origin: .internal)
         await expectQuiescedError(from: handle) {
             _ = try await kit.recall(handle, request)
         }

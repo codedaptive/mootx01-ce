@@ -80,6 +80,7 @@ struct RecallShapeAntiSimilarTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: limit,
+            fallback: .failClosed,
             queryText: query,
             origin: .internal,
             recallShape: shape
@@ -305,6 +306,7 @@ struct RecallShapeAntiSimilarTests {
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .rrf, limit: Self.drawerCount,
+                fallback: .failClosed,
                 queryText: query, origin: .internal, recallShape: shape)
         }
         let emptyShape = RecallShape(antiSimilarLanes: [])

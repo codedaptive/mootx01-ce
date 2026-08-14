@@ -147,6 +147,7 @@ private func unionBestRequest(
         mode: .unionBest,
         scoring: scoring,
         limit: 5,
+        fallback: .failClosed,
         queryText: queryText,
         origin: .internal
     )
@@ -165,6 +166,7 @@ private func hybridRequest(
         mode: .hybrid,
         scoring: .rrf,
         limit: 5,
+        fallback: .failClosed,
         queryText: queryText,
         origin: .internal
     )
@@ -393,6 +395,7 @@ struct PoolGetDrawersDegradationTests {
                 mode: .unionBest,
                 scoring: .matrixAware,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -444,6 +447,7 @@ struct PoolGetDrawersDegradationTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: "cosmos galaxy recall probe",
             origin: .internal
         )
@@ -482,6 +486,7 @@ struct MMRHydrationDegradationTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -532,6 +537,7 @@ struct ReturnHydrationDegradationTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -669,6 +675,7 @@ struct DegradedStagesHappyPathTests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,
             origin: .internal
         )
@@ -735,6 +742,7 @@ struct ScoringFallbackDispositionTests {
             mode: .locusOnly,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,
             origin: .internal
         )
@@ -772,6 +780,7 @@ struct ScoringFallbackDispositionTests {
             mode: .hybrid,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: "cosmos galaxy recall probe",
             origin: .internal
         )

@@ -154,6 +154,7 @@ public struct ShapedRecall: Recipe {
             limit: input.limit,
             fallback: .allowDegraded,
             queryText: input.query,
+            origin: .internal,
             recallShape: shape)
         let result = try await kit.recall(estate, request)
 

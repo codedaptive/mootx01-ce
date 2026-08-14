@@ -111,7 +111,8 @@ struct EncodeDrainNearRealtimeTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 
@@ -128,7 +129,8 @@ struct EncodeDrainNearRealtimeTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 

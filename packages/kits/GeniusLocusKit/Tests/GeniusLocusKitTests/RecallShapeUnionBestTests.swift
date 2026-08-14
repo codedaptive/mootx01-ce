@@ -52,6 +52,7 @@ struct RecallShapeUnionBestTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: limit,
+            fallback: .failClosed,
             queryText: query,
             origin: .internal,
             recallShape: shape
@@ -271,6 +272,7 @@ struct RecallShapeUnionBestTests {
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .matrixAware, limit: 10,
+                fallback: .failClosed,
                 queryText: query, origin: .internal, recallShape: shape)
         }
         let neutral = try await kit.recall(handle, matrixReq(shape: nil))
@@ -307,6 +309,7 @@ struct RecallShapeUnionBestTests {
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .matrixAware, limit: 10,
+                fallback: .failClosed,
                 queryText: query, origin: .internal, recallShape: shape)
         }
 

@@ -106,7 +106,8 @@ public enum ConnectedRecall {
             limit: max(safeLimit, 20),
             fallback: .allowDegraded,
             queryText: query,
-            traceLimit: safeLimit)
+            traceLimit: safeLimit,
+            origin: .internal)
         let anchor = try await kit.recall(handle, request)
         // ReductionCandidate.from(hit:) is the established hit→(id, room,
         // content) projection (PreciseRecall uses the same one); reusing it

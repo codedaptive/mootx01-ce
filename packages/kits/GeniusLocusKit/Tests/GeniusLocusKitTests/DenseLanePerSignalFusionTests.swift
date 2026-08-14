@@ -42,6 +42,7 @@ private func unionBestRRF(queryText: String, limit: Int = 10) -> GLKRecallReques
         mode: .unionBest,
         scoring: .rrf,
         limit: limit,
+        fallback: .failClosed,
         queryText: queryText,
         origin: .internal
     )

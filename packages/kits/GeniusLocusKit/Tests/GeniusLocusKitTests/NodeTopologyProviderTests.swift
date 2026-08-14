@@ -250,7 +250,9 @@ struct GLKNodeTopologyProviderTests {
             frame: frame,
             mode: .nodeTreeNative,
             scoring: .raw,
-            limit: 10
+            limit: 10,
+            fallback: .failClosed,
+            origin: .internal
         )
 
         let result = try await kit.recall(handle, request)

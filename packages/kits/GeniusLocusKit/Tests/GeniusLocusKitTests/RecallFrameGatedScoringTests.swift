@@ -98,7 +98,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 
@@ -258,7 +259,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 20,
             fallback: .failClosed,
-            queryText: "oracle probe canary")
+            queryText: "oracle probe canary",
+            origin: .internal)
 
         let overrideResult = try await kit.recall(handle, overrideRequest)
         #expect(overrideResult.hits.contains { $0.id == restricted.id },
@@ -316,7 +318,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 3,
             fallback: .failClosed,
-            queryText: "mmr oracle canary")
+            queryText: "mmr oracle canary",
+            origin: .internal)
 
         let resultA = try await kitA.recall(handleA, mmrRequestA)
         let contentsA = resultA.hits.compactMap { $0.drawer?.content }
@@ -343,7 +346,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 3,
             fallback: .failClosed,
-            queryText: "mmr oracle canary")
+            queryText: "mmr oracle canary",
+            origin: .internal)
 
         let resultB = try await kitB.recall(handleB, mmrRequestB)
         let contentsB = resultB.hits.compactMap { $0.drawer?.content }
