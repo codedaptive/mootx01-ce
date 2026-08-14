@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-13
-version: 1.34.0
+date: 2026-08-14
+version: 1.35.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -1210,7 +1210,7 @@ the crate root. The Swift originals are in
 | `RecallWeights` | `RecallWeights` | `recall::RecallWeights` | 7 fields; `uniform` → `UNIFORM` constant |
 | `RecallPlan` | `RecallPlan` | `recall::RecallPlan` | `effectiveMode` → `effective_mode`; `frontierK` → `frontier_k` |
 | `RecallHit` | `RecallHit` | `recall::RecallHit` | `drawer: Drawer?` → `drawer: Option<Drawer>`; `sources: Set<RecallEvidencePath>` → `sources: Vec<RecallEvidencePath>` |
-| `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | Builder API; defaults match Swift. Optional `recallShape`/`recall_shape` field (defaults `nil`/`None`) carries the signed per-lane fusion steering (6b-modifiers) |
+| `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | All five behaviour-selecting parameters (`mode`, `scoring`, `limit`, `fallback`, `origin`) are required constructor arguments in both ports — no defaults, no overriding builders. The three nil-defaulted optionals (`queryText`/`query_text`, `traceLimit`/`trace_limit`, `recallShape`/`recall_shape`) stay optional and are set via chained builder methods. Optional `recallShape`/`recall_shape` carries the signed per-lane fusion steering (6b-modifiers) |
 | `RecallShape` | `RecallShape` | `recall::RecallShape` | Signed per-lane fusion weights (`laneWeights`/`lane_weights`, keys `locus`/`bm25`/`hamming`/`dense:<modelID>` and the aggregate `dense`, PLUS the matrix/graph/preference columns `fieldFit`/`coOccurrence`/`temporal`/`graph`/`preference`; missing key ⇒ 1.0) + `antiSimilarLanes`/`anti_similar_lanes` (dense lane keys that invert objective to FARTHEST) + optional clamped `frontierK`/`frontier_k`. `w>0` forward, `w==0` exclude, `w<0` suppress (demote). Steers the Hybrid + CorpusOnly RRF lanes AND the UnionBest lane (per-signal `dense:<modelID>` weights steer the dense consensus fold; `locus`/`bm25`/`hamming`/`dense` AND the five matrix/graph/preference keys steer the UnionBest `.matrixAware` weighted columns — the matrix keys are a no-op under `.raw`/`.rrf`, where those columns are dark). A `dense:<modelID>` key in `antiSimilarLanes` queries CorpusKit `floatFarthestPerSignal` for that lane — the dissimilar candidates become its voters (DISTINCT from a negative weight; the two compose). nil/absent ⇒ uniform nearest fusion (byte-identical to pre-6b-modifiers) |
 | `GLKRecallResult` | `GLKRecallResult` | `recall::GLKRecallResult` | `.drawers()` convenience accessor; `degradedStages`/`degraded_stages` carries named stage failures, incl. the four `locus.*` recall internal-read stages merged from `RecallStream` (SPEC § degradedStages) |
 | `RecallUnionProfile` | `RecallUnionProfile` | `recall::RecallUnionProfile` | 6 fields; `ZERO` constant |
@@ -2121,6 +2121,18 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.35.0 -- 2026-08-14
+`GLKRecallRequest.init` (Swift) and `GLKRecallRequest::new` (Rust): all five
+behaviour-selecting parameters — `mode`, `scoring`, `limit`, `fallback`, and
+`origin` — are now required constructor arguments in both ports. No default
+values remain; builders for the five required parameters are removed from the
+Rust port (`with_mode`, `with_scoring`, `with_limit`, `with_fallback`, the
+`external()` origin setter). The three nil-defaulted optionals (`queryText` /
+`query_text`, `traceLimit` / `trace_limit`, `recallShape` / `recall_shape`)
+keep their nil defaults and remain settable via chained builder methods. Callers
+that previously relied on defaults now state their lane and policy at the call
+site; compile-time enforcement prevents omissions.
 
 ### 1.34.0 -- 2026-08-13
 `AutonomicGovernor` wires `EstateThetaBasisRetrainHook(handle:kit:)` as the
