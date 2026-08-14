@@ -241,6 +241,20 @@ public actor DreamingDaemon {
     /// are logged at the error level but do not abort the THETA cycle.
     private let thetaRetrainHook: (any ThetaBasisRetrainHook)?
 
+    /// Optional HNSW graph maintenance seam for the three cadence duties.
+    ///
+    /// When non-nil the daemon calls the three `HNSWGraphMaintenance` methods
+    /// at the appropriate cadences:
+    ///   • ALPHA auto-reindex fires → `clearFloatIndex(now:)` (stale graph dropped;
+    ///     lazy rebuild on next qualifying `findNearestFloat` call).
+    ///   • THETA basis retrain fires → `rebuildFloatIndex(now:)` (graph rebuilt
+    ///     from re-embedded vectors so topology matches new geometry).
+    ///   • BETA compaction fires → `compactFloatIndexTombstones(now:)` (tombstones
+    ///     from item updates/deletes swept from every active partition).
+    /// Nil safely disables all HNSW duties (correct for estates with no float
+    /// lane and for tests that do not require approximate NN).
+    private let hnswMaintenance: (any HNSWGraphMaintenance)?
+
     /// Fractional vocabulary growth above which the daemon triggers a corpus
     /// basis retrain. Defaults to `autoReindexVocabGrowthFraction` (0.10). See
     /// that constant for the vocabulary-drift rationale.
@@ -348,6 +362,11 @@ public actor DreamingDaemon {
     ///     per THETA cycle so the embedding basis stays current on a daily cadence.
     ///     Defaults to nil (duty disabled). Production callers pass an
     ///     `EstateThetaBasisRetrainHook` to activate the daily retrain lane.
+    ///   - hnswMaintenance: optional HNSW graph maintenance seam. When non-nil,
+    ///     the daemon calls `clearFloatIndex` on ALPHA auto-reindex, `rebuildFloatIndex`
+    ///     on THETA after basis retrain, and `compactFloatIndexTombstones` on BETA.
+    ///     Defaults to nil (all HNSW duties disabled). Production callers pass an
+    ///     `EstateHNSWGraphMaintenance` to activate the approximate NN maintenance lane.
     public init(
         reader: DreamingSubstrateReader,
         sink: DreamingProposalSink,
@@ -359,7 +378,8 @@ public actor DreamingDaemon {
         growthProbe: (any CorpusGrowthProbe)? = nil,
         reindexVocabGrowthFraction: Double = autoReindexVocabGrowthFraction,
         reindexVocabGrowthFloor: Int = autoReindexVocabGrowthFloor,
-        thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil
+        thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil,
+        hnswMaintenance: (any HNSWGraphMaintenance)? = nil
     ) {
         self.reader = reader
         self.sink = sink
@@ -372,6 +392,7 @@ public actor DreamingDaemon {
         self.reindexVocabGrowthFraction = reindexVocabGrowthFraction
         self.reindexVocabGrowthFloor = reindexVocabGrowthFloor
         self.thetaRetrainHook = thetaRetrainHook
+        self.hnswMaintenance = hnswMaintenance
     }
 
     // MARK: - Policy registration (§ 3.1 registration API)
@@ -874,6 +895,31 @@ public actor DreamingDaemon {
                         // Advance baseline to the vocabulary at retrain time so the
                         // next window measures growth from this retrain.
                         lastReindexVocab = liveVocab
+                        // ALPHA HNSW duty: clear all HNSW graphs so the next
+                        // findNearestFloat call lazily rebuilds from the fresh
+                        // re-embedded vectors. A full synchronous rebuild inside
+                        // the 30-second ALPHA cycle is too expensive; lazy rebuild
+                        // on next qualifying query is the correct trade-off here.
+                        // Failure is non-fatal — the float lane falls back to exact
+                        // scan (FloatBruteForceIndex) until the graph is rebuilt.
+                        if let m = hnswMaintenance {
+                            do {
+                                try await m.clearFloatIndex(now: now)
+                                Intellectus.report(.metric(
+                                    name: "neuronkit.dream.hnsw_clear",
+                                    value: 1.0,
+                                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                                    ts: now.timeIntervalSince1970
+                                ))
+                            } catch {
+                                Intellectus.report(.metric(
+                                    name: "neuronkit.dream.hnsw_clear_error",
+                                    value: 1.0,
+                                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                                    ts: now.timeIntervalSince1970
+                                ))
+                            }
+                        }
                     }
                 }
             } catch {
@@ -1075,6 +1121,49 @@ public actor DreamingDaemon {
         }
     }
 
+    // MARK: - THETA-gate HNSW rebuild helper
+
+    /// Fire the THETA HNSW graph rebuild, catching and logging any error.
+    ///
+    /// Called at both exit paths of `runThetaCycle` (the early-return no-data
+    /// path and the main consolidation path) so the graph rebuild fires
+    /// exactly once per THETA gate invocation — same pattern as `fireTheta`.
+    /// Called AFTER `fireTheta` so the rebuild reads freshly re-embedded vectors
+    /// from the `vectors` table.
+    ///
+    /// Failures are non-fatal: a stale HNSW graph degrades nearest-query
+    /// performance (falls back to exact FloatBruteForceIndex scan) but does
+    /// not break correctness.
+    ///
+    /// - Parameters:
+    ///   - maintenance: the wired maintenance seam, or nil if duty is disabled.
+    ///   - now: deterministic timestamp forwarded to `rebuildFloatIndex(now:)`.
+    private func fireThetaHNSWRebuild(
+        maintenance: (any HNSWGraphMaintenance)?,
+        now: Date
+    ) async {
+        guard let m = maintenance else { return }
+        do {
+            try await m.rebuildFloatIndex(now: now)
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.hnsw_rebuild",
+                value: 1.0,
+                tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                ts: now.timeIntervalSince1970
+            ))
+        } catch {
+            // Log at error level so operators can investigate, but the cycle
+            // continues — a stale graph degrades nearest performance; it does
+            // not break correctness (exact scan remains the fallback).
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.hnsw_rebuild_error",
+                value: 1.0,
+                tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                ts: now.timeIntervalSince1970
+            ))
+        }
+    }
+
     // MARK: - REM-THETA cycle
 
     /// Daily bounded consolidation sweep (NEURONKIT_SPEC § 12.6 THETA row).
@@ -1152,6 +1241,10 @@ public actor DreamingDaemon {
             // the no-data early-return path. A stale basis degrades dense recall
             // regardless of whether THETA had anything to consolidate today.
             await fireTheta(retrainHook: thetaRetrainHook, now: now)
+            // HNSW rebuild fires after the retrain so the graph is built from
+            // the freshly re-embedded vectors. Same non-fatal pattern as the
+            // retrain itself.
+            await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
             return nil
         }
 
@@ -1254,6 +1347,9 @@ public actor DreamingDaemon {
         // so a retrain failure cannot interfere with the consolidation result
         // or the cycle's persistence step. Failure is logged but non-fatal.
         await fireTheta(retrainHook: thetaRetrainHook, now: now)
+        // HNSW rebuild fires after the retrain so the graph is built from the
+        // freshly re-embedded vectors. Non-fatal; see fireThetaHNSWRebuild.
+        await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
 
         return DreamingCycleReport(
             tickedAt: now,
@@ -1360,6 +1456,30 @@ public actor DreamingDaemon {
         // a proposal. For now, no telemetry: the cycle is internal bookkeeping.
         _ = prunedConsolidated  // used by tests; suppress unused-result warning
         _ = prunedCoRecall
+
+        // BETA HNSW duty: compact tombstones accumulated since the last BETA
+        // or THETA cycle. Items updated or deleted between runs leave tombstone
+        // slots in the HNSW graph that waste memory and slightly degrade graph
+        // quality (dead edges still occupy neighbour lists). Failure is non-fatal.
+        if let m = hnswMaintenance {
+            do {
+                try await m.compactFloatIndexTombstones(now: now)
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_compact",
+                    value: 1.0,
+                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            } catch {
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_compact_error",
+                    value: 1.0,
+                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            }
+        }
+
         return nil
     }
 
