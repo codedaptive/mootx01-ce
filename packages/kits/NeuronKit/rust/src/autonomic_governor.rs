@@ -1249,6 +1249,25 @@ impl AutonomicGovernor {
                                 if !sink.write_errors.is_empty() {
                                     eprintln!("AutonomicGovernor: REM-THETA sink errors: {:?}", sink.write_errors);
                                 }
+                                // THETA-RETRAIN: daily corpus basis retrain, best-effort (non-fatal).
+                                //
+                                // Distributional embedding bases freeze their vocabulary at training
+                                // time. The ALPHA corpus-growth probe fires on vocabulary GROWTH,
+                                // but quiescent estates (content changes in kind, not in word count)
+                                // can go stale without this unconditional daily retrain. Attaching it
+                                // to the existing 24 h THETA gate matches the Swift seam.
+                                //
+                                // The coordinator guard is already held here — `corpus_for()` is a
+                                // read-only HashMap lookup that does NOT re-acquire any lock. A LocusOnly
+                                // estate has no corpus registered; the if-let skips cleanly (no error).
+                                // Errors are logged but do NOT abort the THETA cycle (a stale basis
+                                // degrades dense recall; it does not break proposal/diary functions).
+                                if let Some(corpus) = coord.corpus_for(&self.handle) {
+                                    let now_millis = (now_epoch_secs * 1000.0) as i64;
+                                    if let Err(e) = corpus.reindex(now_millis) {
+                                        eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
+                                    }
+                                }
                             }
                             Err(e) => {
                                 eprintln!("AutonomicGovernor: REM-THETA cycle panic: {:?}", e);

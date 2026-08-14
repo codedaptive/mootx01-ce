@@ -571,6 +571,64 @@ pub const AUTO_REINDEX_VOCAB_GROWTH_FRACTION: f64 = 0.10;
 /// Dominates at small vocabularies (avoids thrashing) and is the cold-start gate.
 pub const AUTO_REINDEX_VOCAB_GROWTH_FLOOR: i64 = 25;
 
+// ─── THETA-gate basis-retrain hook ───────────────────────────────────────────
+
+/// Seam for the THETA-gate daily corpus basis retrain. Mirrors the Swift
+/// `ThetaBasisRetrainHook` protocol (NEURONKIT_SPEC § 3.1 theta-retrain
+/// extension).
+///
+/// Injected into `run_theta_cycle_with_hook`. Returns `true` on success,
+/// `false` on a captured failure — the caller logs the failure and continues,
+/// matching Swift's non-fatal behaviour.
+///
+/// `now_epoch_secs` is the caller-injected cycle timestamp (deterministic;
+/// the implementor must NOT read the system clock).
+pub trait ThetaBasisRetrainHook {
+    /// Trigger a full corpus basis retrain. Returns `true` on success;
+    /// on failure, records the error out-of-band and returns `false`.
+    /// The boolean lets the gate match Swift's failure policy: the THETA
+    /// cycle continues regardless, but the failure is observable via logging.
+    ///
+    /// `now_epoch_secs` is the injected cycle timestamp (deterministic; the
+    /// hook must not read the system clock internally).
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool;
+}
+
+/// In-memory `ThetaBasisRetrainHook` for tests. Records retrain calls without
+/// touching a live Corpus. Mirrors the Swift test `FakeThetaRetrainHook`.
+#[derive(Default)]
+pub struct InMemoryThetaBasisRetrainHook {
+    /// Timestamps (epoch-seconds) of successful `retrain()` calls, in call order.
+    pub retrain_calls: Vec<f64>,
+    /// When true, `retrain()` returns `false` (simulates a captured failure) and
+    /// records nothing — the gate then does not advance and retries on the next cycle.
+    pub error_on_retrain: bool,
+}
+
+impl InMemoryThetaBasisRetrainHook {
+    /// Construct a hook with the given initial error flag.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a hook that always fails.
+    pub fn failing() -> Self {
+        Self { error_on_retrain: true, ..Default::default() }
+    }
+}
+
+impl ThetaBasisRetrainHook for InMemoryThetaBasisRetrainHook {
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool {
+        if self.error_on_retrain {
+            // Simulate a captured failure: record nothing and report failure so
+            // the caller logs and continues (non-fatal, per-spec).
+            return false;
+        }
+        self.retrain_calls.push(now_epoch_secs);
+        true
+    }
+}
+
 // ─── DreamingDaemon ──────────────────────────────────────────────────────────
 
 /// The dreaming daemon's across-cycle state and cycle driver — the Rust
@@ -1053,6 +1111,51 @@ impl DreamingDaemon {
             reward_by_target,
             diary_entry: entry,
         })
+    }
+
+    // ─── THETA-gate basis-retrain helper ─────────────────────────────────────
+
+    /// Run a THETA cycle and fire the daily basis-retrain hook (if provided).
+    ///
+    /// Wraps `run_theta_cycle` and calls `hook.retrain(now_epoch_secs)` once
+    /// per invocation — including on the early-return no-data path — so the
+    /// embedding basis stays current on a daily cadence regardless of whether
+    /// THETA had anything to consolidate. Mirrors Swift `DreamingDaemon`'s
+    /// `fireTheta(retrainHook:now:)` helper.
+    ///
+    /// Failures are non-fatal: a `false` return from `hook.retrain` is
+    /// logged out-of-band by the caller and the cycle result is returned
+    /// unchanged.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is passed to the hook — the hook must
+    /// not read the system clock internally.
+    ///
+    /// Pass `hook: None` to skip the daily retrain (equivalent to calling
+    /// `run_theta_cycle` directly).
+    pub fn run_theta_cycle_with_hook<R, S, H>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        hook: Option<&mut H>,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        S: DreamingProposalSink,
+        H: ThetaBasisRetrainHook,
+    {
+        let result = self.run_theta_cycle(now_epoch_secs, reader, sink);
+
+        // Fire daily basis-retrain hook once per THETA gate invocation,
+        // including on the early-return no-data path (result == None). A stale
+        // basis degrades dense recall regardless of whether THETA consolidated.
+        if let Some(h) = hook {
+            // `false` = failure — the hook has already logged / recorded it.
+            // We continue and return the cycle result unchanged (non-fatal).
+            let _ = h.retrain(now_epoch_secs);
+        }
+
+        result
     }
 
     // ─── REM-BETA cycle ──────────────────────────────────
@@ -2590,5 +2693,102 @@ mod tests {
         assert_eq!(state.cycle_count, 4);
         assert_eq!(state.consolidated["alpha|beta"], 0.8);
         assert_eq!(state.proposed_keys, vec!["alpha|beta".to_string()]);
+    }
+
+    // ── THETA-gate basis-retrain hook tests ────────────────────────────────────
+    //
+    // Mirrors Swift ThetaRetrainHookTests. Covers (per mission A1 spec):
+    //   TR-1: gate fires → hook invoked exactly once (consolidation path).
+    //   TR-2: gate fires → hook invoked exactly once (early-return / no-data path).
+    //   TR-3: nil hook (None) → no invocations, no crash.
+    //   TR-4: hook failure (false return) is non-fatal — cycle result is returned.
+    //   TR-5: hook receives the same now_epoch_secs passed to run_theta_cycle_with_hook.
+    //
+    // Timing is deterministic: `now_epoch_secs` is injected. The
+    // InMemoryThetaBasisRetrainHook records calls without touching a live corpus.
+
+    /// Helper: two RecallTraceItems both used, so the used-set has 2 entries
+    /// and THETA proceeds to the consolidation path (not the early-return path).
+    fn two_used_theta_traces() -> Vec<RecallTraceItem> {
+        vec![
+            trace("drawer-A", true),
+            trace("drawer-B", true),
+        ]
+    }
+
+    /// TR-1: consolidation path (2 used drawers) fires hook exactly once.
+    #[test]
+    fn tr1_hook_invoked_once_on_consolidation_path() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 1_000_000.0_f64;
+
+        daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        assert_eq!(hook.retrain_calls.len(), 1, "hook must fire exactly once per THETA cycle");
+    }
+
+    /// TR-2: early-return / no-data path (0 used drawers) also fires hook once.
+    #[test]
+    fn tr2_hook_invoked_once_on_early_return_path() {
+        // Empty trace list → no used drawers → usedSet.count < 2 → early return (None).
+        let reader = FakeReaderMut::with_traces(vec![]);
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 2_000_000.0_f64;
+
+        let result = daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+        assert!(result.is_none(), "early-return path must return None");
+        assert_eq!(hook.retrain_calls.len(), 1, "hook must still fire on early-return path");
+    }
+
+    /// TR-3: passing None for the hook is a safe no-op — no invocations, no crash.
+    #[test]
+    fn tr3_none_hook_is_no_op() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let now = 3_000_000.0_f64;
+
+        // Type annotation required because None has no concrete type here.
+        daemon.run_theta_cycle_with_hook::<_, _, InMemoryThetaBasisRetrainHook>(
+            now, &reader, &mut sink, None,
+        );
+        // Must complete without error — no assertion on a None hook beyond "no crash".
+    }
+
+    /// TR-4: hook failure (false return) is non-fatal — cycle result is returned normally.
+    #[test]
+    fn tr4_hook_failure_is_non_fatal() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::failing();
+        let now = 4_000_000.0_f64;
+
+        // Must not panic even though the hook returns false (simulates failure).
+        // The cycle result (Some or None) is still returned.
+        let _ = daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        // The failing hook records nothing.
+        assert_eq!(hook.retrain_calls.len(), 0, "failing hook must record no successful calls");
+    }
+
+    /// TR-5: hook receives the exact now_epoch_secs timestamp from the caller.
+    #[test]
+    fn tr5_hook_receives_now_timestamp() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 5_000_000.0_f64;
+
+        daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        assert_eq!(hook.retrain_calls.first(), Some(&now),
+            "hook must receive the injected now_epoch_secs");
     }
 }
