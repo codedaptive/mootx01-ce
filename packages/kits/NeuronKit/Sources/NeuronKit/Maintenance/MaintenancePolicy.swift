@@ -135,22 +135,58 @@ public extension MaintenancePolicyStore {
 /// - `proposedKeys`: maintenance proposal keys already emitted (never repeated).
 ///   Stored as a SORTED array so the serialized manifest value is byte-stable.
 /// - `cycleCount`: number of cycles run.
+/// - `lastPerformanceHealthAt`: when the daily timing-derivation health duty last
+///   ran. Nil = never run. Used by the 24 h gate inside `runCycle` (A7).
+///   `decodeIfPresent` keeps older persisted states loading cleanly when this
+///   field is absent from the manifest.
+/// - `performanceHealthWatermarkMs`: HLC physical-time watermark (epoch ms) for
+///   the audit-log page cursor. 0 = start from the beginning of the log (first
+///   run, or a reset). Advances to the last event's physical time after each
+///   successful health duty run. `decodeIfPresent ?? 0` for backward
+///   compatibility with states serialized before A7 landed.
 public struct MaintenanceDaemonState: Sendable, Equatable, Codable {
     public var lastTickAt: Date?
     public var lastAuditCheckAt: Date?
     public var proposedKeys: [String]
     public var cycleCount: Int
+    /// When the daily timing-derivation health duty last ran. Nil = never run.
+    public var lastPerformanceHealthAt: Date?
+    /// HLC physical-time watermark for the audit-log page cursor, epoch ms.
+    /// 0 = start from the beginning (first run or reset).
+    public var performanceHealthWatermarkMs: Int64
 
     public init(
         lastTickAt: Date?,
         lastAuditCheckAt: Date?,
         proposedKeys: [String],
-        cycleCount: Int
+        cycleCount: Int,
+        lastPerformanceHealthAt: Date? = nil,
+        performanceHealthWatermarkMs: Int64 = 0
     ) {
         self.lastTickAt = lastTickAt
         self.lastAuditCheckAt = lastAuditCheckAt
         self.proposedKeys = proposedKeys
         self.cycleCount = cycleCount
+        self.lastPerformanceHealthAt = lastPerformanceHealthAt
+        self.performanceHealthWatermarkMs = performanceHealthWatermarkMs
+    }
+
+    // MARK: - Codable (custom decoder for backward compatibility)
+
+    private enum CodingKeys: String, CodingKey {
+        case lastTickAt, lastAuditCheckAt, proposedKeys, cycleCount
+        case lastPerformanceHealthAt, performanceHealthWatermarkMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastTickAt = try c.decodeIfPresent(Date.self, forKey: .lastTickAt)
+        lastAuditCheckAt = try c.decodeIfPresent(Date.self, forKey: .lastAuditCheckAt)
+        proposedKeys = try c.decode([String].self, forKey: .proposedKeys)
+        cycleCount = try c.decode(Int.self, forKey: .cycleCount)
+        // A7 fields: absent in states serialized before A7 landed — default to nil / 0.
+        lastPerformanceHealthAt = try c.decodeIfPresent(Date.self, forKey: .lastPerformanceHealthAt)
+        performanceHealthWatermarkMs = try c.decodeIfPresent(Int64.self, forKey: .performanceHealthWatermarkMs) ?? 0
     }
 }
 

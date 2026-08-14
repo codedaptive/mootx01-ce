@@ -53,6 +53,12 @@ public actor MaintenanceDaemon {
     private let reader: MaintenanceSubstrateReader
     private let sink: MaintenanceProposalSink
     private let policyStore: MaintenancePolicyStore
+    /// Optional hook for the daily timing-derivation performance-health duty (A7).
+    /// When non-nil, the daemon calls `PerformanceHealthDuty.runHealthDuty(watermarkMs:now:)`
+    /// once per 24 h so INGEST/CYCLE latency trends are captured in the stats store.
+    /// Nil safely disables the duty (test daemons, LocusOnly estates without timing markers).
+    /// Failures are caught and logged — they do not abort the maintenance cycle.
+    private let performanceHealthDuty: (any PerformanceHealthDuty)?
 
     // MARK: - Mutable state (actor-isolated)
 
@@ -74,6 +80,24 @@ public actor MaintenanceDaemon {
     /// Number of cycles run. Recorded in the cycle diary entry.
     private var cycleCount: Int = 0
 
+    /// When the daily timing-derivation health duty last ran. Nil = never run.
+    /// Gating field for the 24 h cadence in `runCycle` (A7). Persisted in
+    /// `MaintenanceDaemonState.lastPerformanceHealthAt` via the manifest-backed
+    /// state path so the cadence survives daemon restarts.
+    private var lastPerformanceHealthAt: Date? = nil
+
+    /// HLC physical-time watermark (epoch ms) for the audit-log page cursor.
+    /// 0 = start from the beginning (first run or reset). Advances to the last
+    /// event's physical time after each successful health duty run. Persisted in
+    /// `MaintenanceDaemonState.performanceHealthWatermarkMs`.
+    private var performanceHealthWatermarkMs: Int64 = 0
+
+    // MARK: - Constants
+
+    /// 24 h cadence for the daily timing-derivation health duty, matching the
+    /// DreamingDaemon's THETA cadence constant (D5a, `thetaCadenceSecs = 86400`).
+    private static let healthDutyCadenceSecs: Double = 86_400
+
     // MARK: - Init
 
     /// Construct a daemon over the injected seams.
@@ -84,16 +108,23 @@ public actor MaintenanceDaemon {
     ///   - policyStore: manifest-resident policy persistence seam.
     ///   - policy: initial in-memory policy. Defaults to the spec
     ///     defaults; `loadPersistedPolicy()` overrides it from the store.
+    ///   - performanceHealthDuty: optional hook for the daily timing-derivation
+    ///     health duty. When non-nil, fires once per 24 h to derive INGEST/CYCLE
+    ///     samples and write them to the stats store. Pass
+    ///     `EstatePerformanceHealthDuty(handle:kit:)` in production;
+    ///     nil (default) disables the duty.
     public init(
         reader: MaintenanceSubstrateReader,
         sink: MaintenanceProposalSink,
         policyStore: MaintenancePolicyStore,
-        policy: MaintenancePolicy = .default
+        policy: MaintenancePolicy = .default,
+        performanceHealthDuty: (any PerformanceHealthDuty)? = nil
     ) {
         self.reader = reader
         self.sink = sink
         self.policyStore = policyStore
         self.policy = policy
+        self.performanceHealthDuty = performanceHealthDuty
     }
 
     // MARK: - Policy registration (§ 3.2 registration API)
@@ -127,14 +158,18 @@ public actor MaintenanceDaemon {
         if let stored = try await policyStore.loadPolicy() {
             policy = stored
         }
-        //  / manifest-backed daemon state: restore the daemon's idempotency/cycle memory so a restart
-        // does not repeat suppressed proposals or reset its counters. Absent state
-        // leaves the in-memory defaults in place.
+        // Manifest-backed daemon state: restore the daemon's idempotency/cycle
+        // memory so a restart does not repeat suppressed proposals, reset its
+        // counters, or re-measure audit events the health duty already consumed
+        // (the watermark survives restarts so each event is measured exactly once).
+        // Absent state leaves the in-memory defaults in place.
         if let state = try await policyStore.loadDaemonState() {
             lastTickAt = state.lastTickAt
             lastAuditCheckAt = state.lastAuditCheckAt
             proposedKeys = Set(state.proposedKeys)
             cycleCount = state.cycleCount
+            lastPerformanceHealthAt = state.lastPerformanceHealthAt
+            performanceHealthWatermarkMs = state.performanceHealthWatermarkMs
         }
     }
 
@@ -145,7 +180,9 @@ public actor MaintenanceDaemon {
             lastTickAt: lastTickAt,
             lastAuditCheckAt: lastAuditCheckAt,
             proposedKeys: proposedKeys.sorted(),
-            cycleCount: cycleCount
+            cycleCount: cycleCount,
+            lastPerformanceHealthAt: lastPerformanceHealthAt,
+            performanceHealthWatermarkMs: performanceHealthWatermarkMs
         )
     }
 
@@ -483,9 +520,50 @@ public actor MaintenanceDaemon {
         try await sink.recordCycleDiary(entry)
 
         lastTickAt = now
-        //  / manifest-backed daemon state: persist the daemon's idempotency/cycle memory after every
-        // cycle so a restart resumes from here. All cycle mutations — cycleCount,
-        // proposedKeys, lastAuditCheckAt, lastTickAt — are complete by this point.
+
+        // ── Step 6.5: daily timing-derivation health duty (A7) ───────────
+        // Fires once per 24 h on the same cadence family as the DreamingDaemon's
+        // THETA gate (`healthDutyCadenceSecs = 86_400`). The duty pages audit
+        // events from the persisted watermark, derives INGEST and CYCLE timing
+        // samples via `NeuronKit.deriveTimings`, and emits them via Intellectus
+        // into the existing PersistenceStatsSink write path. Best-effort: a
+        // failure is logged and swallowed — the proposal + diary functions have
+        // already succeeded by this point.
+        //
+        // The gate mirrors THETA's pattern (D5a): `now >= lastPerformanceHealthAt + 24h`,
+        // OR never run (nil). Nil hook safely disables the duty in test daemons.
+        if let duty = performanceHealthDuty {
+            let healthDue: Bool = {
+                guard let last = lastPerformanceHealthAt else { return true }
+                return now.timeIntervalSince(last) >= Self.healthDutyCadenceSecs
+            }()
+            if healthDue {
+                do {
+                    let newWatermark = try await duty.runHealthDuty(
+                        watermarkMs: performanceHealthWatermarkMs,
+                        now: now
+                    )
+                    performanceHealthWatermarkMs = newWatermark
+                    lastPerformanceHealthAt = now
+                } catch {
+                    // Best-effort: a derivation failure never breaks the daemon cycle.
+                    // The watermark and last-run timestamp are NOT advanced on failure
+                    // so the next due cycle retries the same window.
+                    // Log at error level so the operator can diagnose store/GLK issues.
+                    Intellectus.report(.metric(
+                        name: "neuronkit.perf_health.duty_error",
+                        value: 1.0,
+                        tags: ["cycle": "\(cycleCount)"],
+                        ts: cycleTs
+                    ))
+                }
+            }
+        }
+
+        // Manifest-backed daemon state: persist after every cycle so a restart
+        // resumes from here. All cycle mutations — cycleCount, proposedKeys,
+        // lastAuditCheckAt, lastTickAt, lastPerformanceHealthAt, and
+        // performanceHealthWatermarkMs — are complete by this point.
         // Default store impl is a no-op, so in-memory/test daemons are unaffected.
         try await policyStore.saveDaemonState(currentDaemonState())
         return MaintenanceCycleReport(

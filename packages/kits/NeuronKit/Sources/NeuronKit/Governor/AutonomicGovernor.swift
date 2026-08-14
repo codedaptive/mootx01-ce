@@ -283,7 +283,11 @@ public actor AutonomicGovernor {
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),
             sink: EstateMaintenanceSink(handle: handle, kit: kit),
-            policyStore: EstateManifestMaintenancePolicyStore(handle: handle, kit: kit)
+            policyStore: EstateManifestMaintenancePolicyStore(handle: handle, kit: kit),
+            // Wire the daily timing-derivation health duty (A7). Pages the estate
+            // audit log, derives INGEST/CYCLE timing samples, and persists them via
+            // the Intellectus → PersistenceStatsSink write path on a 24 h cadence.
+            performanceHealthDuty: EstatePerformanceHealthDuty(handle: handle, kit: kit)
         )
     }
 

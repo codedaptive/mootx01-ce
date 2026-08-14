@@ -21,6 +21,43 @@
 import Foundation
 import GeniusLocusKit
 
+// MARK: - Daily performance-health duty seam (A7)
+
+/// Seam for the maintenance daemon's daily timing-derivation performance-health
+/// duty (NEURONKIT_SPEC § 12.6.1 performance-health extension, A7).
+///
+/// Injected into `MaintenanceDaemon`. The daemon calls `runHealthDuty(watermarkMs:now:)`
+/// once per 24 h (gated on `lastPerformanceHealthAt`) and persists the returned
+/// watermark in `MaintenanceDaemonState.performanceHealthWatermarkMs`. Each call
+/// pages the estate audit log from the watermark, derives INGEST and CYCLE timing
+/// samples via `NeuronKit.deriveTimings`, and emits the results through the existing
+/// `Intellectus.report(.metric(...))` path — the same `PersistenceStatsSink` write
+/// path the resident observer uses for live samples.
+///
+/// Mirrors the `ThetaBasisRetrainHook` seam pattern: the protocol is pure (the
+/// daemon carries no GLK import), and the production adapter
+/// (`EstatePerformanceHealthDuty`) imports GeniusLocusKit and pages
+/// `GeniusLocusKit.auditEvents(_:after:limit:)`. Nil safely disables the duty
+/// in test daemons that do not wire an audit source. Failures are caught and
+/// logged by the daemon — they do not abort the maintenance cycle.
+///
+/// - Returns: the HLC physical-time watermark (epoch ms) of the last event
+///   consumed. The daemon persists this and passes it on the next call so each
+///   audit event is measured exactly once across restarts (A6 watermark contract).
+public protocol PerformanceHealthDuty: Sendable {
+
+    /// Run the daily timing-derivation health duty.
+    ///
+    /// - Parameters:
+    ///   - watermarkMs: HLC physical-time watermark (epoch ms) of the last event
+    ///     consumed. 0 = start from the beginning of the log.
+    ///   - now: Deterministic timestamp from the caller (never `Date()` inside
+    ///     the engine; CLAUDE.md determinism rule).
+    /// - Returns: the new watermark (HLC physical-time of the last event consumed).
+    ///   Equal to `watermarkMs` when the audit log has no new events.
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
+
 // MARK: - Scan-input observation value types
 
 /// One learned-reference observation, the input to the byReference
