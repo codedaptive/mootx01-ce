@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.37.0
+version: 1.37.1
 status: accepted-1.1-target
-date: 2026-08-11
+date: 2026-08-13
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -379,9 +379,9 @@ twenty-three reasoning-lens tools (`moot_lens_*`), and five vault control tools
 `moot_vault_reconcile`, `moot_vault_job`) carry `.recipe` and `.vault`
 provenance respectively. Three tabular-dataset tools (`moot_file_dataset`,
 `moot_dataset_query`, `moot_dataset_stats`, MX-TAB-7) carry `.interface`
-provenance — always visible, never vault-gated. Total: 71 tools vault-on,
-65 vault-off (30 interface: 22 five-tier + 4 maintenance + 1 monitoring + 3
-dataset; 1 federation; 35 recipe/lens; 5 vault). Lens findings that name
+provenance — always visible, never vault-gated. Total: 78 tools vault-on,
+71 vault-off (36 interface: 22 five-tier + 6 maintenance + 1 monitoring + 3
+dataset + 4 packet; 1 federation; 36 recipe/lens; 5 vault). Lens findings that name
 memories MUST cite them as dense rows through the shared renderer (evidence
 addresses, PR-05): the seven memory-listing arms (keystones,
 free_association, cohesion, contradiction, trust_synthesis, partial_cue,
@@ -470,8 +470,8 @@ The `TeachmeGuides` entry for `moot_estate_status` is a ten-tier surface
 summary covering tiers 1–10 plus the teachme and coaching mechanisms. The
 total count line and all per-tier counts are computed at call time from
 `ToolProjection.tools()` — the guide can never drift from the shipped surface.
-The live vault-on count is 71 tools; vault-off is 65 (moot_palace_import and
-the 5 moot_vault_* tools omitted). The cold-start sequence is named explicitly.
+The live vault-on count is 78 tools; vault-off is 71 (moot_palace_import,
+moot_json_import, and the 5 moot_vault_* tools omitted). The cold-start sequence is named explicitly.
 Tier structure: Tier 1 Core Memory (9), Tier 2 Connections (4), Tier 3 KG (4),
 Tier 4 Journal (2), Tier 5 Estate (7 always + 1 vault-gated), Tier 6 Cognition
 (27 = 4 recipe + 23 lens), Tier 7 Extended Cognition (8 = remaining recipe
@@ -1056,6 +1056,14 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.37.1 -- 2026-08-13
+
+- Tool-count corrections: the total-surface figures had drifted across
+  several tool additions (packet tools, `moot_json_import`,
+  `moot_recall_connected`, `moot_timing_report`). Current truth: 78 tools
+  vault-on / 71 vault-off on the Swift surface; the teachme live counts
+  match.
 
 ### 1.37.0 -- 2026-08-13
 

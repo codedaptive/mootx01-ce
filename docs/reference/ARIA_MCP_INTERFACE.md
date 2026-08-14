@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.42.0
+version: 1.42.1
 status: accepted-1.1-target
-date: 2026-08-12
+date: 2026-08-13
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -68,10 +68,11 @@ purpose: |
 The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
 the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
 `AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
-The Rust binary links the same 71-tool surface (65 vault-off) backed by the Rust kit stack
+The Rust binary links a 74-tool surface (67 vault-off) — the Swift surface
+minus the four Swift-side packet tools (FAB5-I2) — backed by the Rust kit stack
 (genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
 Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
-`MOOTX01_MEMORY_TOOL=1`, raising the count to 72/66 — same gate as the Swift port
+`MOOTX01_MEMORY_TOOL=1`, raising the count to 75/68 — same gate as the Swift port
 (`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 71/65 baseline. All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
@@ -191,7 +192,7 @@ public struct ProjectedTool: Sendable, Equatable {
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
-    public static func tools() -> [ProjectedTool]   // vault-on: 71 tools; vault-off: 65 tools (interface+federation+recipe+lens+vault+maintenance+dataset)
+    public static func tools() -> [ProjectedTool]   // vault-on: 78 tools; vault-off: 71 tools (interface+federation+recipe+lens+vault+maintenance+dataset+packet)
     public static func memoryToolEnabled(environment: [String: String]) -> Bool  // opt-in memory_20250818 adapter (MOOTX01_MEMORY_TOOL=1); default OFF
     public static var memoryToolEnabled: Bool
     public static func federationTool() -> ProjectedTool
@@ -1255,6 +1256,14 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.42.1 -- 2026-08-13
+
+- Tool-count corrections: Swift `ToolProjection.tools()` is 78 vault-on /
+  71 vault-off; the Rust wire surface is 74/67 (75/68 with the opt-in
+  memory adapter) — the Swift surface minus the four Swift-side packet
+  tools (FAB5-I2). The previous 71/65 and 72/66 figures had drifted
+  across several tool additions.
 
 ### 1.42.0 -- 2026-08-13
 

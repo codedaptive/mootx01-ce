@@ -23,17 +23,18 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 73 tools (out-of-band sensitivity grants added moot_monitoring_status;
+//! Vault-on (default): 74 tools (out-of-band sensitivity grants added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
 //! moot_hunt_contradictions + moot_review_tunnel; MX-TAB-7 added 3 dataset
-//! tools moot_file_dataset/query/stats).
+//! tools moot_file_dataset/query/stats; the C3+A6 benchmark reset added
+//! moot_timing_report).
 //! Vault-off (MOOTX01_VAULT=0): the five moot_vault_* tools,
 //! moot_palace_import, and moot_json_import are hidden together because all
 //! open local files (filesystem import/export vector).
 //! Dataset tools are always present (not vault-gated).
 //! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
-//! base count — 72 vault-on or 66 vault-off when enabled. Default (absent / ≠ "1")
-//! is OFF, preserving the 71/65 counts unchanged.
+//! base count — 75 vault-on or 68 vault-off when enabled. Default (absent / ≠ "1")
+//! is OFF, preserving the 74/67 counts unchanged.
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -61,8 +62,8 @@ pub fn vault_enabled() -> bool {
 /// True when the Anthropic memory_20250818 adapter tool is enabled.
 ///
 /// Opt-in: requires `MOOTX01_MEMORY_TOOL=1` (set by `mootx01 enable memory-tool`).
-/// Default (absent or any value ≠ "1") is OFF — the base tool surface (71/65) is
-/// unchanged. When ON, a single `memory` tool is prepended to the list (72/66).
+/// Default (absent or any value ≠ "1") is OFF — the base tool surface (74/67) is
+/// unchanged. When ON, a single `memory` tool is prepended to the list (75/68).
 /// Mirrors Swift `ToolProjection.memoryToolEnabled(environment:)`.
 pub fn memory_enabled() -> bool {
     std::env::var("MOOTX01_MEMORY_TOOL")
@@ -72,7 +73,7 @@ pub fn memory_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 71 tools when vault is enabled (the default) or 65 tools when
+/// Produces 74 tools when vault is enabled (the default) or 67 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
 /// `moot_palace_import` and `moot_json_import` tools are hidden with the vault
@@ -81,7 +82,7 @@ pub fn memory_enabled() -> bool {
 /// Out-of-band sensitivity grants added `moot_monitoring_status`; the FDC
 /// reset tool added `moot_reclassify_fdc`; the contradiction hunter added
 /// `moot_hunt_contradictions` + `moot_review_tunnel`; MX-TAB-7 added 3
-/// dataset tools.
+/// dataset tools; the C3+A6 benchmark reset added `moot_timing_report`.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_flags(vault_enabled(), memory_enabled())
 }
@@ -102,12 +103,12 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
 /// The single implementation all entry points delegate to. Tests that need
 /// fully deterministic behaviour (no env-var reads) call this directly —
 /// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
-/// baseline 71/65 count without racing against memory-tool env mutations.
+/// baseline 74/67 count without racing against memory-tool env mutations.
 pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
-    // Vault-on: 73 tools. Vault-off: 66 tools (palace_import + json_import
+    // Vault-on: 74 tools. Vault-off: 67 tools (palace_import + json_import
     // + 5 vault_* hidden). Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1.
     // Dataset tools (3) are always present regardless of vault flag.
-    let capacity = if vault_on { 73 } else { 66 } + if memory_on { 1 } else { 0 };
+    let capacity = if vault_on { 74 } else { 67 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when

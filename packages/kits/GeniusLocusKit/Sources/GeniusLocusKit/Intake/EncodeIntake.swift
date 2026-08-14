@@ -601,7 +601,7 @@ public extension GeniusLocusKit {
                 try await estate.appendReindexCompleteMarker(
                     rowCount: total,
                     unitSessionID: UUID().uuidString.lowercased(),
-                    at: Date()
+                    at: now
                 )
             } catch {
                 Self.intakeLog.warning("reindexComplete marker failed: \(error, privacy: .public)")

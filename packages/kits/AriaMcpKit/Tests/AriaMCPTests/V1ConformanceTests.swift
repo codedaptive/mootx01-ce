@@ -67,7 +67,8 @@ struct V1ConformanceTests {
     /// response payload exceeds macOS's 16 KiB default pipe buffer.
     ///
     /// The deadlock pattern that caused the hang (MX-TAB-7 regression, 2026-07-12):
-    ///   1. `server.run()` writes the `tools/list` response (71 tools ≈ 30+ KiB)
+    ///   1. `server.run()` writes the `tools/list` response (71 tools ≈ 30+ KiB
+    ///      at the time; the surface is larger now)
     ///      to `outPipe.fileHandleForWriting` via a blocking `write(2)` syscall.
     ///   2. `write(2)` fills the 16 KiB pipe buffer and stalls — the kernel blocks
     ///      the write until the read side drains some bytes.
@@ -158,7 +159,7 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 77 tools.
+    /// VC-2: `tools/list` returns exactly 78 tools.
     ///
     /// The count is a snapshot of the v1.1 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
@@ -170,7 +171,9 @@ struct V1ConformanceTests {
     /// moot_packet_list, moot_packet_lineage).
     /// 76 → 77: +1 seed-file JSON import tool (MXE-JI-1: moot_json_import,
     /// vault-gated).
-    @Test func v1ToolsListReturns77Tools() async throws {
+    /// 77 → 78: +1 timing report tool (C3+A6 benchmark reset:
+    /// moot_timing_report, audit-derived INGEST/CYCLE metrics).
+    @Test func v1ToolsListReturns78Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -198,7 +201,8 @@ struct V1ConformanceTests {
         //   11th recipe = moot_hunt_contradictions (Wave 1: moot_recollect removed).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
         // +1 (MXE-JI-1): moot_json_import — seed-file JSON lane, vault-gated.
-        #expect(tools.count == 77, "tools/list must return exactly 77 tools; got \(tools.count)")
+        // +1 (C3+A6): moot_timing_report — audit-derived timing metrics.
+        #expect(tools.count == 78, "tools/list must return exactly 78 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

@@ -44,7 +44,7 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 71.
+    /// Hard contract gate: the total tool count must be exactly 78.
     /// Snapshot includes the interface, federation, recipe, lens, vault, and
     /// maintenance surfaces exposed by ToolProjection, plus the three dataset
     /// tools added in MX-TAB-7 (moot_file_dataset, moot_dataset_query,
@@ -56,10 +56,11 @@ struct ToolProjectionTests {
     /// node motion modeling) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_hunt_contradictions (Wave 1: moot_recollect
     /// was removed; moot_consolidate no longer dispatches — its alias era ended
-    /// with SPEC_DISTILLATION_STORAGE §3 Phase 2). The three
+    /// with SPEC_DISTILLATION_STORAGE §3 Phase 2). The
     /// maintenance tools are moot_reindex (corpus/vector backfill),
     /// moot_drain_status (background drain progress), moot_reclassify_fdc
-    /// (FDC anchor repair/reset), and moot_palace_import (PAR-PB-1,
+    /// (FDC anchor repair/reset), moot_timing_report (C3+A6, audit-derived
+    /// timing metrics), and moot_palace_import (PAR-PB-1,
     /// direct palace import).
     /// The contradiction hunter adds two: moot_hunt_contradictions (recipe —
     /// on-demand content sweep for conflicts) and moot_review_tunnel
@@ -70,9 +71,10 @@ struct ToolProjectionTests {
         // moot_review_tunnel) + 3 dataset tools (MX-TAB-7: moot_file_dataset,
         // moot_dataset_query, moot_dataset_stats) + 4 packet tools (FAB5-I2:
         // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) + moot_recall_connected
-        // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated) = 77.
-        #expect(ToolProjection.tools(environment: [:]).count == 77,
-                "tools() must return exactly 77 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated)
+        // + moot_timing_report (C3+A6 audit-derived timing metrics) = 78.
+        #expect(ToolProjection.tools(environment: [:]).count == 78,
+                "tools() must return exactly 78 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
