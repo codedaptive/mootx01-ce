@@ -739,7 +739,7 @@ fn run_memory_search(
     sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use genius_locus_kit::recall::{
-        GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
     };
 
     let estate = registry.resolve_direct(args)?;
@@ -918,16 +918,19 @@ fn run_memory_search(
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
-    // B-10a: mark as external so the coordinator writes recall-trace rows for
-    // the reward pipeline. The ARIA_MCP boundary is the ONLY place that sets
-    // `.external()` — internal callers (dreaming, lenses, recipes) must NOT.
-    let request = GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(scoring)
-        .with_limit(limit)
-        .with_fallback(RecallFallbackPolicy::AllowDegraded)
-        .with_query_text(query.to_string())
-        .external(); // B-10a: ARIA boundary is external origin
+    // B-10a: RecallOrigin::External causes the coordinator to write recall-trace
+    // rows for the reward pipeline. The ARIA_MCP boundary is the ONLY call site
+    // that passes External — internal callers (dreaming, lenses, recipes) pass
+    // Internal at the constructor, enforced at compile time.
+    let request = GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::UnionBest,
+        scoring,
+        limit,
+        RecallFallbackPolicy::AllowDegraded,
+        RecallOrigin::External, // B-10a: ARIA boundary is external origin
+    )
+    .with_query_text(query.to_string());
 
     // `mut`: out-of-band sensitivity grants read-under-grant audit recording below needs a
     // mutable coordinator borrow (audit append is a coordinator-owned

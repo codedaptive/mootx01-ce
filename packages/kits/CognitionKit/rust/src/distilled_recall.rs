@@ -28,7 +28,7 @@ use genius_locus_kit::hydration_representation::{
     resolve_hydration_representation, HydrationRepresentation,
 };
 use genius_locus_kit::recall::{
-    GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+    GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
 };
 use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 
@@ -149,12 +149,15 @@ pub fn run_distilled_recall(
     let mut frame = RecallFrame::new(vec![input.filter.clone()]);
     frame.hydration_level = HydrationLevel::Full;
     frame.limit = Some(input.limit);
-    let request = GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(input.limit)
-        .with_fallback(RecallFallbackPolicy::AllowDegraded)
-        .with_query_text(input.query.clone());
+    let request = GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        input.limit,
+        RecallFallbackPolicy::AllowDegraded,
+        RecallOrigin::Internal,
+    )
+    .with_query_text(input.query.clone());
     let result = coord.recall_scored(handle, request, now)?;
 
     // Hydrate each hit through the §10.1 selector pinned to Distilled.
@@ -284,12 +287,15 @@ mod tests {
             let mut frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
             frame.hydration_level = HydrationLevel::Full;
             frame.limit = Some(20);
-            let request = GLKRecallRequest::new(frame)
-                .with_mode(GLKRecallMode::UnionBest)
-                .with_scoring(GLKRecallScoring::MatrixAware)
-                .with_limit(20)
-                .with_fallback(RecallFallbackPolicy::AllowDegraded)
-                .with_query_text(query.to_string());
+            let request = GLKRecallRequest::new(
+                frame,
+                GLKRecallMode::UnionBest,
+                GLKRecallScoring::MatrixAware,
+                20,
+                RecallFallbackPolicy::AllowDegraded,
+                RecallOrigin::Internal,
+            )
+            .with_query_text(query.to_string());
             let exact: Vec<String> = coord
                 .recall_scored(&h, request, NOW + 1)
                 .expect("exact search")

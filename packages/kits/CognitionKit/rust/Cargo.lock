@@ -608,6 +608,7 @@ dependencies = [
  "serde",
  "serde_json",
  "substrate-kernel",
+ "substrate-lib",
  "substrate-ml",
  "substrate-types",
  "uuid",

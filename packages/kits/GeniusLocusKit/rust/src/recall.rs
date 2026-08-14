@@ -951,46 +951,31 @@ pub struct GLKRecallRequest {
 }
 
 impl GLKRecallRequest {
-    /// Create a request with explicit lane, scoring, and policy.
+    /// Create a request with all five control parameters required explicitly.
     ///
-    /// Defaults match Swift: mode=hybrid, scoring=matrixAware, limit=12,
-    /// fallback=failClosed, query_text=None, origin=Internal.
-    pub fn new(frame: RecallFrame) -> Self {
+    /// Every caller names mode, scoring, limit, fallback, and origin at the
+    /// call site — the signature enforces completeness at compile time.
+    /// Optional fields (query_text, trace_limit, recall_shape) are set via
+    /// the retained builders below.
+    pub fn new(
+        frame: RecallFrame,
+        mode: GLKRecallMode,
+        scoring: GLKRecallScoring,
+        limit: usize,
+        fallback: RecallFallbackPolicy,
+        origin: RecallOrigin,
+    ) -> Self {
         Self {
             frame,
-            mode: GLKRecallMode::Hybrid,
-            scoring: GLKRecallScoring::MatrixAware,
-            limit: 12,
-            fallback: RecallFallbackPolicy::FailClosed,
+            mode,
+            scoring,
+            limit,
+            fallback,
             query_text: None,
             trace_limit: None,
-            origin: RecallOrigin::Internal,
+            origin,
             recall_shape: None,
         }
-    }
-
-    /// Builder: set the recall mode.
-    pub fn with_mode(mut self, mode: GLKRecallMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// Builder: set the scoring strategy.
-    pub fn with_scoring(mut self, scoring: GLKRecallScoring) -> Self {
-        self.scoring = scoring;
-        self
-    }
-
-    /// Builder: set the maximum hits to return.
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
-        self
-    }
-
-    /// Builder: set the fallback policy.
-    pub fn with_fallback(mut self, fallback: RecallFallbackPolicy) -> Self {
-        self.fallback = fallback;
-        self
     }
 
     /// Builder: set an optional free-text query for BM25 and vector lanes.
@@ -1006,14 +991,6 @@ impl GLKRecallRequest {
     /// `origin == External` (B-10a).
     pub fn with_trace_limit(mut self, limit: usize) -> Self {
         self.trace_limit = Some(limit);
-        self
-    }
-
-    /// Builder: mark this request as originating from an external consumer.
-    ///
-    /// Only the ARIA_MCP boundary should call this method (B-10a enforcement).
-    pub fn external(mut self) -> Self {
-        self.origin = RecallOrigin::External;
         self
     }
 
