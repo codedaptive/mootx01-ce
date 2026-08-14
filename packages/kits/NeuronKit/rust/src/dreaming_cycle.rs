@@ -1755,6 +1755,43 @@ impl DreamingDaemon {
             self.last_reindex_vocab = live_vocab;
         }
     }
+
+    /// Returns true when the THETA daily basis-retrain gate warrants a retrain:
+    ///   - First cycle (`last_reindex_vocab == -1` sentinel): always fire —
+    ///     THETA acts as a backstop for a dormant ALPHA path on a fresh estate.
+    ///   - Subsequent cycles: fire only when vocabulary has grown by at least
+    ///     `max(reindex_vocab_growth_floor, ceil(fraction × baseline))` terms
+    ///     since the last retrain (same gate as `check_corpus_growth`).
+    ///
+    /// When returning `true`, the caller MUST retrain and then call
+    /// `advance_reindex_vocab(live_vocab)` on success, so a failed retrain
+    /// re-fires on the next THETA cycle. Keeping the check and advancement
+    /// separate lets the caller skip advancement on error.
+    ///
+    /// Mirrors Swift `DreamingDaemon.fireTheta`'s drift gate.
+    pub fn theta_retrain_warranted(&self, live_vocab: i64) -> bool {
+        if self.last_reindex_vocab == -1 {
+            // First-ever retrain: always fire (establish baseline + retrain
+            // in one shot, since ALPHA may not have run yet).
+            return true;
+        }
+        let fractional =
+            (self.last_reindex_vocab as f64 * self.reindex_vocab_growth_fraction).ceil() as i64;
+        let trigger = self.reindex_vocab_growth_floor.max(fractional);
+        live_vocab - self.last_reindex_vocab >= trigger
+    }
+
+    /// Advance the vocabulary baseline to `live_vocab` after a successful retrain.
+    ///
+    /// Call after both ALPHA and THETA successful retrains so both gates share
+    /// the same baseline. A shared baseline prevents double-retrain: an ALPHA
+    /// retrain advances the counter, so the next THETA cycle sees no drift.
+    ///
+    /// Mirrors Swift's `lastReindexVocab = liveVocab` assignment in
+    /// `DreamingDaemon.fireTheta`.
+    pub fn advance_reindex_vocab(&mut self, live_vocab: i64) {
+        self.last_reindex_vocab = live_vocab;
+    }
 }
 
 #[cfg(test)]
@@ -2797,5 +2834,92 @@ mod tests {
 
         assert_eq!(hook.retrain_calls.first(), Some(&now),
             "hook must receive the injected now_epoch_secs");
+    }
+
+    // ─── theta_retrain_warranted / advance_reindex_vocab unit tests ────────────
+    //
+    // Pure method tests — no reader, sink, or hook infrastructure needed.
+    // These pin the drift gate logic added for CORPUS-SCOPE-01 § 4.
+
+    /// TR-R1: sentinel path — first-ever call (last_reindex_vocab == -1) always
+    /// returns true regardless of live_vocab magnitude.
+    #[test]
+    fn tr_r1_sentinel_always_warranted() {
+        let daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Sentinel value (-1) must fire immediately, even with a large corpus.
+        assert!(
+            daemon.theta_retrain_warranted(1_000),
+            "sentinel (last_reindex_vocab == -1) must always return true"
+        );
+        assert!(
+            daemon.theta_retrain_warranted(0),
+            "sentinel must return true even when live_vocab == 0"
+        );
+    }
+
+    /// TR-R2: after advancing the baseline, sub-floor growth returns false.
+    #[test]
+    fn tr_r2_below_floor_returns_false() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Set baseline to 100.
+        daemon.advance_reindex_vocab(100);
+
+        // Growth of 20 is below max(25, ceil(100 × 0.10)=10) = 25 → defer.
+        assert!(
+            !daemon.theta_retrain_warranted(120),
+            "growth of 20 (< floor 25) must not warrant a retrain"
+        );
+    }
+
+    /// TR-R3: growth exactly at the trigger threshold returns true.
+    #[test]
+    fn tr_r3_at_threshold_returns_true() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Baseline = 100; trigger = max(25, ceil(100 × 0.10)=10) = 25.
+        daemon.advance_reindex_vocab(100);
+
+        // live_vocab = 100 + 25 = 125: delta == trigger → warranted.
+        assert!(
+            daemon.theta_retrain_warranted(125),
+            "growth equal to the trigger threshold must return true"
+        );
+    }
+
+    /// TR-R4: advance_reindex_vocab shifts the baseline so the next check
+    /// measures delta from the new level, not the original.
+    #[test]
+    fn tr_r4_advance_shifts_baseline() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Cycle 1: advance from sentinel to 100.
+        daemon.advance_reindex_vocab(100);
+
+        // Grow by 25 → trigger fires; advance baseline to 125.
+        assert!(daemon.theta_retrain_warranted(125), "pre-condition: growth warranted at 125");
+        daemon.advance_reindex_vocab(125);
+
+        // From baseline 125, delta = 10 (vocab=135) < trigger 25 → defer.
+        // If baseline did NOT advance (stuck at 100), delta = 35 → fires (wrong).
+        assert!(
+            !daemon.theta_retrain_warranted(135),
+            "after advancing baseline to 125, growth of 10 (135-125) must defer"
+        );
+    }
+
+    /// TR-R5: proportional fraction dominates the floor at a large baseline.
+    /// At baseline 1000, fraction 0.10 × 1000 = 100, which exceeds floor 25.
+    /// Growth of 99 must defer; growth of 100 must trigger.
+    #[test]
+    fn tr_r5_fraction_dominates_at_large_baseline() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        daemon.advance_reindex_vocab(1_000);
+        // trigger = max(25, ceil(1000 × 0.10)=100) = 100.
+        assert!(
+            !daemon.theta_retrain_warranted(1_099),
+            "growth of 99 (< fraction-trigger 100) must not warrant retrain"
+        );
+        assert!(
+            daemon.theta_retrain_warranted(1_100),
+            "growth of 100 (== fraction-trigger 100) must warrant retrain"
+        );
     }
 }

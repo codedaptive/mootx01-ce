@@ -10,10 +10,11 @@
 // vocabulary at training time. The corpus-growth probe (`CorpusGrowthProbe`)
 // fires a retrain on vocabulary GROWTH within ALPHA cycles, but that gate
 // can be silent on quiescent estates where content changes in kind rather
-// than in raw word count. Attaching a daily unconditional retrain to the
-// existing THETA gate (24 h cadence) ensures every live estate refreshes its
-// basis at least once per day, matching the documentation's "no stale basis
-// without a manual moot_reindex" promise.
+// than in raw word count. Attaching a drift-gated daily retrain to the
+// existing THETA gate (24 h cadence) provides a backstop: if ALPHA has been
+// keeping the basis current the drift delta is under the threshold and THETA
+// skips the retrain; if ALPHA has been failing or the estate was quiescent,
+// THETA fires and refreshes the basis.
 //
 // ── Seam idiom ───────────────────────────────────────────────────────────
 // Mirrors the `CorpusGrowthProbe` injection pattern: the protocol is pure
@@ -34,17 +35,20 @@ import OSLog
 
 // MARK: - Protocol
 
-/// Seam for the THETA-gate daily corpus basis retrain
+/// Seam for the THETA-gate corpus basis retrain
 /// (NEURONKIT_SPEC § 3.1 theta-retrain extension).
 ///
-/// Injected into `DreamingDaemon`. The daemon calls `retrain(now:)` once
-/// per THETA cycle regardless of whether consolidation produced proposals,
-/// so the embedding basis stays current with ingested content on a daily
-/// cadence. `EstateThetaBasisRetrainHook` is the production adapter; tests
-/// use in-memory fakes.
+/// Injected into `DreamingDaemon`. The daemon calls `retrain(now:)` when
+/// the vocabulary-drift gate warrants it on a THETA cadence (24 h). If a
+/// `CorpusGrowthProbe` is also wired, the daemon applies the same drift
+/// threshold the ALPHA step uses and skips the retrain when ALPHA has already
+/// kept the basis current. Without a probe the retrain fires unconditionally
+/// (correct for LocusOnly estates and injectionless tests).
+/// `EstateThetaBasisRetrainHook` is the production adapter; tests use
+/// in-memory fakes.
 ///
 /// - Note: A nil `thetaRetrainHook` in `DreamingDaemon.init` silently
-///   disables the daily retrain (correct for LocusOnly estates and tests).
+///   disables the duty (correct for LocusOnly estates and tests).
 public protocol ThetaBasisRetrainHook: Sendable {
 
     /// Trigger a full corpus basis retrain for this hook's estate.

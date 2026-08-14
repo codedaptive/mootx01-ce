@@ -975,16 +975,27 @@ public actor DreamingDaemon {
 
     // MARK: - THETA-gate basis-retrain helper
 
-    /// Fire the THETA daily basis-retrain hook, catching and logging any error.
+    /// Fire the THETA basis-retrain hook when the drift gate warrants it,
+    /// catching and logging any error.
     ///
-    /// Called at both exit paths of `runThetaCycle` (the early-return
-    /// no-data path and the main consolidation path) so the duty fires
-    /// exactly once per THETA gate invocation. Failures are non-fatal:
-    /// a stale basis degrades dense recall but does not break the daemon's
-    /// proposal and diary functions.
+    /// Called at both exit paths of `runThetaCycle` so the duty fires at most
+    /// once per THETA gate invocation. Failures are non-fatal: a stale basis
+    /// degrades dense recall but does not break the daemon's proposal and diary
+    /// functions.
     ///
-    /// Emits OSLog error and an Intellectus metric on failure so operators
-    /// can investigate. On success, emits a metric for observability.
+    /// **Drift gate behaviour (when `growthProbe` is wired):**
+    ///   - `lastReindexVocab == -1` (first ever cycle): fire immediately.
+    ///     THETA acts as a backstop for a dormant ALPHA path on a fresh estate.
+    ///   - Subsequent cycles: fire only when vocabulary has grown by at least
+    ///     `max(reindexVocabGrowthFloor, ceil(fraction × baseline))` terms
+    ///     since the last retrain — the same gate ALPHA's growth probe uses.
+    ///   - After a successful retrain: `lastReindexVocab` advances so ALPHA's
+    ///     next delta window starts from the post-retrain baseline.
+    ///   - Probe error: fire unconditionally (safe fallback, same as nil-probe path).
+    ///
+    /// **Without `growthProbe` (nil):** fire unconditionally on every THETA
+    /// invocation — correct for LocusOnly estates and tests that do not wire
+    /// a Corpus. This matches the pre-CORPUS-SCOPE-01 behaviour.
     ///
     /// - Parameters:
     ///   - retrainHook: the wired hook, or nil if duty is disabled.
@@ -994,8 +1005,57 @@ public actor DreamingDaemon {
         now: Date
     ) async {
         guard let hook = retrainHook else { return }
+
+        // Drift gate: when a corpus growth probe is wired, apply the same
+        // vocabulary-growth threshold the ALPHA auto-reindex step uses.
+        // THETA is a backstop for a failing dreaming daemon, not a second
+        // unconditional trigger — if ALPHA has been running correctly the
+        // drift delta will be under the threshold and THETA skips the retrain.
+        var vocabAtCheckTime: Int? = nil
+        if let probe = growthProbe {
+            do {
+                let liveVocab = try await probe.vocabAnchor()
+                if lastReindexVocab != -1 {
+                    // Not the first-ever retrain: apply drift gate.
+                    let fractional = Int(
+                        (Double(lastReindexVocab) * reindexVocabGrowthFraction).rounded(.up))
+                    let trigger = max(reindexVocabGrowthFloor, fractional)
+                    let delta = liveVocab - lastReindexVocab
+                    if delta < trigger {
+                        // Drift below threshold — ALPHA is keeping the basis
+                        // current; THETA defers this cycle.
+                        Intellectus.report(.metric(
+                            name: "neuronkit.dream.theta_retrain_skipped",
+                            value: Double(delta),
+                            tags: [
+                                "cycle": "\(cycleCount)",
+                                "live_vocab": "\(liveVocab)",
+                                "delta": "\(delta)",
+                                "trigger": "\(trigger)",
+                            ],
+                            ts: now.timeIntervalSince1970
+                        ))
+                        return
+                    }
+                }
+                // Retrain is warranted (first cycle OR drift ≥ trigger).
+                // Record the current vocab to advance lastReindexVocab on success.
+                vocabAtCheckTime = liveVocab
+            } catch {
+                // Probe error: fire unconditionally (safe fallback — a probe
+                // error cannot silently skip a needed retrain).
+            }
+        }
+
         do {
             try await hook.retrain(now: now)
+            // Advance the shared vocabulary baseline after a successful THETA
+            // retrain so ALPHA's next delta window starts from this retrain point.
+            // Without a probe (vocabAtCheckTime == nil), lastReindexVocab is
+            // managed exclusively by ALPHA and must not be touched here.
+            if let lv = vocabAtCheckTime {
+                lastReindexVocab = lv
+            }
             Intellectus.report(.metric(
                 name: "neuronkit.dream.theta_retrain",
                 value: 1.0,

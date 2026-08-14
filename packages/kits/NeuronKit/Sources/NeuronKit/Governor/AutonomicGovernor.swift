@@ -268,10 +268,12 @@ public actor AutonomicGovernor {
         // directly with growthProbe: nil.
         //
         // THETA-RETRAIN: wire an EstateThetaBasisRetrainHook so the embedding basis
-        // is refreshed unconditionally once per THETA cycle (daily cadence). This
-        // covers estates where content changes in kind but not in raw word count, so
-        // the vocab-growth gate never fires. The hook is optional — a nil hook
-        // disables the duty (correct for tests and LocusOnly estates).
+        // is refreshed on a THETA cadence (daily) when vocabulary drift warrants it.
+        // The daemon applies the same drift gate as the ALPHA growth probe: if ALPHA
+        // has kept the basis current the THETA fire is skipped; if ALPHA has been
+        // failing or the estate is quiescent, THETA acts as the backstop. The hook
+        // is optional — a nil hook disables the duty (correct for tests and LocusOnly
+        // estates).
         self.dreaming = DreamingDaemon(
             reader: EstateDreamingReader(handle: handle, kit: kit),
             sink: EstateDreamingSink(handle: handle, kit: kit),
