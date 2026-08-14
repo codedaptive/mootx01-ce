@@ -38,6 +38,17 @@
 //! bit-for-bit on identical inputs is the conformance BLOCKER (arch spec
 //! §3.3). Results are identical regardless of which index is active.
 //!
+//! FLOAT LANE (Lane D) HNSW ROUTING: `find_nearest_float` uses a separate
+//! size-threshold policy:
+//!
+//!   - Below `hnsw_threshold` live float32 vectors (default 5,000): routes
+//!     through `FloatBruteForceIndex` (Lane C, O(N) exact scan).
+//!   - At or above threshold: builds and routes through `HNSWIndex` (Lane D,
+//!     approximate NN, Malkov & Yashunin 2018). ≥90% recall@10 at threshold.
+//!
+//! `find_farthest_float` ALWAYS uses `FloatBruteForceIndex`: anti-similarity
+//! with HNSW requires a full-graph scan and provides no speed benefit.
+//!
 //! By default, both indexes are updated on every write so they stay current
 //! immediately. During a deferred-index burst (`begin_deferred_index` /
 //! `publish_resident_index`), staged rows are not searchable until publish
@@ -56,6 +67,7 @@
 
 use crate::engine::brute_force::BruteForceIndex;
 use crate::engine::float_brute_force::FloatBruteForceIndex;
+use crate::engine::hnsw_index::{HNSWIndex, HNSW_DEFAULT_THRESHOLD};
 use crate::engine::key::VectorRecordKey;
 use crate::engine::metric::DenseMetric;
 use crate::engine::mih::{MIHBandCount, MIHIndex};
@@ -306,6 +318,20 @@ struct HotState {
     /// the map is the per-model "built" flag.
     float_indices: std::collections::HashMap<String, FloatBruteForceIndex>,
 
+    /// Per-modelID approximate nearest-neighbour graphs (Lane D HNSW).
+    ///
+    /// Activates at/above `VectorStore.hnsw_threshold` live vectors per modelID.
+    /// Built lazily on the first qualifying `find_nearest_float` call. Mirrors
+    /// Swift `VectorStore.hnswIndices`.
+    hnsw_indices: std::collections::HashMap<String, HNSWIndex>,
+
+    /// Live float32 vector count per modelID. Used to decide when to activate
+    /// HNSW above the crossover threshold. Mirrors Swift `VectorStore.liveFloatCounts`.
+    ///
+    /// Set when `ensure_float_index_built_locked` builds the per-model float index,
+    /// and incremented by `add_payload` when mirroring a float32 write.
+    live_float_counts: std::collections::HashMap<String, u32>,
+
     /// Number of times the sidecar was detected as stale and rebuilt from
     /// the `vectors` table in the lifetime of this `VectorStore` instance.
     ///
@@ -331,6 +357,10 @@ struct HotState {
 pub struct VectorStore {
     storage: Arc<dyn Storage>,
     state: Mutex<HotState>,
+    /// Live float32 count per modelID above which `HNSWIndex` activates for
+    /// `find_nearest_float`. Below this count `FloatBruteForceIndex` is used.
+    /// Mirrors Swift `VectorStore.hnswThreshold`.
+    hnsw_threshold: u32,
 }
 
 impl VectorStore {
@@ -477,7 +507,7 @@ impl VectorStore {
     ) -> Self {
         let array_store = sidecar_path.map(|p| ResidentArrayStore::new_binary(p));
         Self::new_internal(storage, array_store, mih_threshold, mih_band_count,
-                           DEFERRED_PENDING_LIMIT)
+                           DEFERRED_PENDING_LIMIT, HNSW_DEFAULT_THRESHOLD)
     }
 
     /// Internal constructor. All public constructors delegate here.
@@ -487,9 +517,11 @@ impl VectorStore {
         mih_threshold: u32,
         mih_band_count: MIHBandCount,
         deferred_pending_limit: usize,
+        hnsw_threshold: u32,
     ) -> Self {
         VectorStore {
             storage,
+            hnsw_threshold,
             state: Mutex::new(HotState {
                 array_store,
                 brute_force_index: BruteForceIndex::new(),
@@ -508,6 +540,10 @@ impl VectorStore {
                 // Float indices are built lazily per modelID on first
                 // find_nearest_float; the map starts empty.
                 float_indices: std::collections::HashMap::new(),
+                // HNSW indices and live counts start empty; built lazily when
+                // live_float_counts[model_id] first reaches hnsw_threshold.
+                hnsw_indices: std::collections::HashMap::new(),
+                live_float_counts: std::collections::HashMap::new(),
                 sidecar_rebuild_count: 0,
             }),
         }
@@ -528,7 +564,7 @@ impl VectorStore {
     ) -> Self {
         let array_store = sidecar_path.map(|p| ResidentArrayStore::new_binary(p));
         Self::new_internal(storage, array_store, mih_threshold, mih_band_count,
-                           deferred_pending_limit)
+                           deferred_pending_limit, HNSW_DEFAULT_THRESHOLD)
     }
 
     /// Convenience: construct with no sidecar (memory-only resident array).
@@ -741,6 +777,16 @@ impl VectorStore {
                 // float vector cannot survive in the scan.
                 model_index.remove(&key)?;
                 model_index.add(key, payload.clone())?;
+                // Increment live count (counts replacements as +1; slight
+                // overcount is acceptable — threshold is 5,000 and HNSW
+                // activation is idempotent). Mirrors Swift liveFloatCounts update.
+                *state.live_float_counts.entry(model_id.to_string()).or_insert(0) += 1;
+                // Mirror into the HNSW index if it is already active for this model.
+                if let Some(hnsw_idx) = state.hnsw_indices.get_mut(model_id) {
+                    if let Ok(floats) = payload.as_f32_vec() {
+                        hnsw_idx.insert(item_id.to_string(), model_id.to_string(), floats);
+                    }
+                }
             }
         }
 
@@ -992,9 +1038,13 @@ impl VectorStore {
             //    has a float row in the batch so the next find_nearest_float
             //    rebuilds that model's index once from the table (cheaper than N
             //    float adds). Dropping the map entry is the invalidation; other
-            //    models' indices are untouched.
+            //    models' indices are untouched. HNSW and live counts are
+            //    invalidated alongside FloatBruteForce — the batch may have
+            //    changed the vector geometry enough to warrant a fresh graph.
             for model_id in &float_model_ids {
                 state.float_indices.remove(model_id);
+                state.hnsw_indices.remove(model_id);
+                state.live_float_counts.remove(model_id);
             }
         }
 
@@ -1533,6 +1583,32 @@ impl VectorStore {
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             let built = self.ensure_float_index_built_locked(&mut state, model_id)?;
             if built {
+                let live_count = state.live_float_counts.get(model_id).copied().unwrap_or(0);
+                if live_count >= self.hnsw_threshold {
+                    // HNSW path: activate the approximate NN index for this model if
+                    // not yet built, then route through it. Farthest queries always
+                    // use FloatBruteForceIndex (anti-similarity with HNSW requires a
+                    // full-graph scan and provides no speed benefit).
+                    if !state.hnsw_indices.contains_key(model_id) {
+                        // Lazy HNSW build: fetch float records and insert into a fresh graph.
+                        let records = self.fetch_float_records(model_id)?;
+                        let mut hnsw = HNSWIndex::new_default();
+                        for (key, payload) in &records {
+                            if let Ok(floats) = payload.as_f32_vec() {
+                                hnsw.insert(
+                                    key.item_id.clone(),
+                                    model_id.to_string(),
+                                    floats,
+                                );
+                            }
+                        }
+                        state.hnsw_indices.insert(model_id.to_string(), hnsw);
+                    }
+                    if let Some(hnsw_index) = state.hnsw_indices.get(model_id) {
+                        return hnsw_index.search(probe, model_id, k);
+                    }
+                }
+                // Below threshold: use FloatBruteForceIndex (exact scan).
                 let probe_payload = VectorPayload::from_f32(probe);
                 // Unwrap is safe: ensure_float_index_built_locked guarantees
                 // the entry is present when it returns true.
@@ -1739,8 +1815,11 @@ impl VectorStore {
         // Reset the Lane D float indices — every float row was just deleted, so
         // every per-modelID resident float array must be cleared. Dropping all
         // map entries clears every model's index; each rebuilds lazily (and
-        // empty) on the next find_nearest_float for that model.
+        // empty) on the next find_nearest_float for that model. HNSW graphs and
+        // live counts are cleared alongside: no vectors remain, so no graphs remain.
         state.float_indices.clear();
+        state.hnsw_indices.clear();
+        state.live_float_counts.clear();
         Ok(())
     }
 
@@ -1866,8 +1945,11 @@ impl VectorStore {
         // Invalidate THIS model's Lane D index so the next find_nearest_float
         // rebuilds from the table (the authoritative source). The delete carries
         // no kind, so a lazy rebuild is the correct coherence path for the float
-        // lane. Other models' indices are untouched.
+        // lane. Other models' indices are untouched. HNSW and live count are
+        // invalidated alongside so the next query builds a fresh graph.
         state.float_indices.remove(model_id);
+        state.hnsw_indices.remove(model_id);
+        state.live_float_counts.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }
@@ -1974,11 +2056,14 @@ impl VectorStore {
         }
 
         // 2. Rebuild the resident binary index ONCE from the durable table (O(n)),
-        //    and drop this model's Lane D float index so it lazily rebuilds too.
+        //    and drop this model's Lane D float index (and HNSW graph) so they
+        //    lazily rebuild on the next find_nearest_float call.
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
         state.float_indices.remove(model_id);
+        state.hnsw_indices.remove(model_id);
+        state.live_float_counts.remove(model_id);
         self.rebuild_binary_index_from_table_locked(&mut state)?;
         Ok(())
     }
@@ -2082,13 +2167,15 @@ impl VectorStore {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
         // Lane D coherence: drop ONLY the touched models' cached float
-        // indices; other models' float indices are untouched.
+        // indices (and HNSW graphs); other models' indices are untouched.
         for model_id in key_set
             .iter()
             .map(|k| k.model_id.as_str())
             .collect::<std::collections::BTreeSet<_>>()
         {
             state.float_indices.remove(model_id);
+            state.hnsw_indices.remove(model_id);
+            state.live_float_counts.remove(model_id);
         }
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
@@ -2277,12 +2364,14 @@ impl VectorStore {
             }
         }
 
-        // Coherence: this model's float index lazily rebuilds from the table;
-        // the resident binary index is rebuilt once from the table.
+        // Coherence: this model's float index (and HNSW graph) lazily rebuild from
+        // the table; the resident binary index is rebuilt once from the table.
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
         state.float_indices.remove(model_id);
+        state.hnsw_indices.remove(model_id);
+        state.live_float_counts.remove(model_id);
         self.rebuild_binary_index_from_table_locked(&mut state)?;
         Ok((stale_keys.len(), expected.len()))
     }
@@ -2456,6 +2545,110 @@ impl VectorStore {
     pub fn evict_float_indices(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.float_indices.clear();
+            // Also evict HNSW graphs and live counts: the float lane is fully
+            // evicted as a unit. The next find_nearest_float rebuilds from the table.
+            state.hnsw_indices.clear();
+            state.live_float_counts.clear();
+        }
+    }
+
+    // MARK: - HNSW graph maintenance (dreaming cadence duties)
+
+    /// Clear all HNSW graphs for every modelID partition (ALPHA duty).
+    ///
+    /// Drops every in-process `HNSWIndex` entry and live count. The next
+    /// `find_nearest_float` call at/above `hnsw_threshold` lazily rebuilds
+    /// the graph from the current float records. `FloatBruteForceIndex` entries
+    /// are RETAINED — farthest queries and below-threshold nearest queries
+    /// continue uninterrupted.
+    ///
+    /// Called by the ALPHA cadence adapter when extreme vocabulary drift renders
+    /// the existing graph topology incorrect. A lazy rebuild on the next qualifying
+    /// query is cheaper than a synchronous full rebuild on a 30-second cadence.
+    pub fn clear_all_hnsw_indices(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.hnsw_indices.clear();
+            state.live_float_counts.clear();
+        }
+    }
+
+    /// Rebuild the HNSW graph for one modelID partition from current float records.
+    ///
+    /// Fetches all float32 rows for `model_id` from the `vectors` table and
+    /// re-inserts them into a fresh `HNSWIndex`. Called by the THETA cadence
+    /// adapter after a daily basis retrain, so the graph topology stays aligned
+    /// with re-embedded vectors.
+    ///
+    /// If the table has no float rows for `model_id`, any existing graph entry
+    /// is removed (keeping the map consistent with the table state).
+    pub fn rebuild_hnsw_index(&self, model_id: &str) -> Result<(), VectorKitError> {
+        let records = self.fetch_float_records(model_id)?;
+        let mut state = self.state.lock()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        if records.is_empty() {
+            state.hnsw_indices.remove(model_id);
+            state.live_float_counts.remove(model_id);
+            return Ok(());
+        }
+        let record_count = records.len() as u32;
+        let mut hnsw = HNSWIndex::new_default();
+        for (key, payload) in &records {
+            if let Ok(floats) = payload.as_f32_vec() {
+                hnsw.insert(key.item_id.clone(), model_id.to_string(), floats);
+            }
+        }
+        state.hnsw_indices.insert(model_id.to_string(), hnsw);
+        state.live_float_counts.insert(model_id.to_string(), record_count);
+        Ok(())
+    }
+
+    /// Rebuild HNSW graphs for all modelIDs that currently have an active graph (THETA duty).
+    ///
+    /// Iterates over all active HNSW graph keys and calls `rebuild_hnsw_index` for
+    /// each. ModelIDs below the threshold (no entry in `hnsw_indices`) are skipped
+    /// — they have no graph to rebuild and will build lazily when they next cross
+    /// the threshold. Called by the THETA cadence adapter after a full corpus
+    /// basis retrain.
+    pub fn rebuild_all_hnsw_indices(&self) -> Result<(), VectorKitError> {
+        // Snapshot the keys before mutation to avoid HashMap-during-iteration.
+        let model_ids: Vec<String> = {
+            let state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            state.hnsw_indices.keys().cloned().collect()
+        };
+        for model_id in &model_ids {
+            self.rebuild_hnsw_index(model_id)?;
+        }
+        Ok(())
+    }
+
+    /// Compact HNSW tombstones for one modelID partition (BETA duty).
+    ///
+    /// Calls `HNSWIndex::compact()` which rebuilds the live-node graph discarding
+    /// tombstoned entries and dead edges. Safe to call when no graph exists for
+    /// `model_id` (no-op).
+    pub fn compact_hnsw_tombstones(&self, model_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(hnsw_idx) = state.hnsw_indices.get_mut(model_id) {
+                hnsw_idx.compact();
+            }
+        }
+    }
+
+    /// Compact HNSW tombstones for all active modelID partitions (BETA duty).
+    ///
+    /// Iterates over all active HNSW graphs and calls `compact()` on each.
+    /// Called by the BETA cadence adapter.
+    pub fn compact_all_hnsw_tombstones(&self) {
+        // Snapshot model IDs before iterating to avoid borrow conflicts.
+        let model_ids: Vec<String> = {
+            match self.state.lock() {
+                Ok(state) => state.hnsw_indices.keys().cloned().collect(),
+                Err(_) => return,
+            }
+        };
+        for model_id in &model_ids {
+            self.compact_hnsw_tombstones(model_id);
         }
     }
 
@@ -2474,11 +2667,16 @@ impl VectorStore {
             // a real index on the next search.
             return Ok(false);
         }
+        let record_count = records.len() as u32;
         let payloads: Vec<VectorPayload> = records.iter().map(|(_, p)| p.clone()).collect();
         let keys: Vec<VectorRecordKey> = records.into_iter().map(|(k, _)| k).collect();
         let mut index = FloatBruteForceIndex::new();
         index.build(&payloads, &keys)?;
         state.float_indices.insert(model_id.to_string(), index);
+        // Record the live count so find_nearest_float can decide whether to activate
+        // HNSW on the next query. Only set when building the index from the table;
+        // add_payload increments this value for subsequent incremental inserts.
+        state.live_float_counts.insert(model_id.to_string(), record_count);
         Ok(true)
     }
 
@@ -2684,9 +2882,11 @@ impl VectorStore {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
         // The deleted row may have been a float32 vector for this modelID.
-        // Invalidate THIS model's Lane D index so the next find_nearest_float
-        // rebuilds from the table. Other models' indices are untouched.
+        // Invalidate THIS model's Lane D index (and HNSW graph) so the next
+        // find_nearest_float rebuilds from the table. Other models' indices are untouched.
         state.float_indices.remove(model_id);
+        state.hnsw_indices.remove(model_id);
+        state.live_float_counts.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }

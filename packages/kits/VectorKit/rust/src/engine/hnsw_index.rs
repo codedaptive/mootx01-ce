@@ -1,0 +1,845 @@
+//! HNSWIndex — Lane D approximate nearest-neighbour index (Rust twin).
+//!
+//! Hierarchical Navigable Small World approximate nearest-neighbour index
+//! for the float32 lane (Lane D).
+//!
+//! # Architecture (HNSW_DESIGN.md §2 + §4)
+//!
+//! The graph is a layered navigable small-world structure. Every vector is a
+//! node; each node keeps a short neighbour list per layer. The top layer is
+//! sparse with long hops, the bottom layer (0) holds every node. A search
+//! enters at the top, greedily hops toward the query, drops one layer, and
+//! repeats until it reaches layer 0, where it collects `efSearch` candidates.
+//! Cost grows logarithmically in corpus size; brute-force grows linearly.
+//!
+//! # Design rulings
+//!
+//! - Float lane ONLY. Binary lane (A/B) is untouched; it is already exact.
+//! - Cross-port determinism NOT required. Any valid HNSW graph answers
+//!   correctly; the Swift and Rust graphs legitimately differ (HNSW_DESIGN §7).
+//! - Within-port reproducibility IS required. SplitMix64 seeded at index
+//!   creation so the same seed + insertion order yields the same graph.
+//! - Crossover threshold: 5,000 vectors per modelID partition. Below this
+//!   count `FloatBruteForceIndex` is faster (see §Crossover below).
+//! - Nearest only. Farthest queries still use `FloatBruteForceIndex` regardless
+//!   of corpus size — anti-similarity with HNSW requires a full-graph scan
+//!   and provides no speed benefit.
+//!
+//! # Crossover threshold rationale (measured, then confirmed by calculation)
+//!
+//! At M=16, efSearch=50, HNSW visits ≈ efSearch × log₂(n) nodes per search.
+//! At n=5000: HNSW comparisons ≈ 50 × 12.2 ≈ 610 vs brute-force 5000.
+//! Below 5000 the graph construction overhead + pointer-chasing overhead
+//! outweighs the scan reduction. 5000 is a conservative crossover; tests
+//! confirm ≥90% recall@10 at this threshold.
+//!
+//! # Default parameters (HNSW_DESIGN §8, Malkov & Yashunin 2018)
+//!
+//! - M              = 16   (max connections per layer; 2×M at layer 0)
+//! - efConstruction = 100  (beam width during insert)
+//! - efSearch       = 50   (beam width during search)
+//! - seed           = 42   (SplitMix64 initial state; overridable in tests)
+//!
+//! # Float determinism
+//!
+//! THIS LANE IS NOT FOUR-WAY BIT-IDENTICAL.
+//! The Swift and Rust graphs legitimately differ (different pointer order,
+//! different float rounding) — recall quality is the correctness criterion,
+//! not bit-identity. A reviewer must not "fix" this to chase four-way identity.
+//!
+//! # Rule FT-1
+//!
+//! This file does NOT modify any Lane F shared type. If a new field is needed
+//! on a shared type, stop and file an FT-1 update to Lane F.
+
+use crate::error::VectorKitError;
+use crate::vector_store::VectorMatch;
+
+// MARK: - HNSW tuning constants
+
+/// Max connections per node per layer (layers 1+). Layer 0 uses `HNSW_M0 = 2 × M`.
+/// M=16 is optimal for high-dimensional embedding spaces (Malkov & Yashunin 2018 §4.1).
+pub const HNSW_M: usize = 16;
+
+/// Max connections at layer 0. Always 2 × M (per-paper recommendation).
+pub const HNSW_M0: usize = HNSW_M * 2;
+
+/// Level multiplier for probabilistic level assignment: 1/ln(M).
+/// Controls the expected number of layers; smaller mL = fewer, denser layers.
+/// Precomputed: 1/ln(16) = 1/(4×ln(2)) ≈ 0.36067376022224085.
+/// Cannot be computed via `f64::ln()` in a const context (not a const fn in stable Rust).
+const HNSW_ML: f64 = 0.36067376022224085_f64;
+
+/// Beam width during index construction. Higher = better graph quality, slower build.
+/// efConstruction=100 is the paper's default for M=16.
+pub const HNSW_EF_CONSTRUCTION: usize = 100;
+
+/// Beam width during search. Higher = better recall, slower query.
+/// efSearch=50 achieves ≥90% recall@10 for M=16 at n≥5,000.
+pub const HNSW_EF_SEARCH: usize = 50;
+
+/// Vector count per modelID partition above which HNSWIndex activates.
+/// Below this threshold FloatBruteForceIndex is faster (see module docstring §Crossover).
+pub const HNSW_DEFAULT_THRESHOLD: u32 = 5_000;
+
+// MARK: - Node
+
+/// One node in the HNSW graph.
+///
+/// Owns the float vector bytes so search can compute distances without
+/// fetching from the table. `neighbours[l]` = list of node indices at layer l.
+#[derive(Clone)]
+struct Node {
+    /// item_id from the originating VectorRecordKey.
+    item_id: String,
+    /// model_id from the originating VectorRecordKey.
+    model_id: String,
+    /// IEEE-754 LE float32 bytes (same format as VectorPayload.bytes).
+    vector_bytes: Vec<u8>,
+    /// `neighbours[l]` = array of node indices (i32) at layer l.
+    /// Layer 0 (the densest) has up to M0 connections; layers ≥1 have up to M.
+    neighbours: Vec<Vec<i32>>,
+    /// True once tombstoned. Excluded from search; compacted out on next compact().
+    tombstoned: bool,
+}
+
+// MARK: - HNSWIndex
+
+/// Approximate nearest-neighbour index for the float32 dense lane (Lane D).
+///
+/// Implements HNSW (Malkov & Yashunin 2018) over resident float32 vectors.
+/// Owns both the graph structure (neighbour lists) and the flat vector bytes
+/// (for distance computation without a separate store lookup). At/above the
+/// crossover threshold `VectorStore` routes nearest-float queries here; below
+/// the threshold `FloatBruteForceIndex` is the active index.
+///
+/// This is an APPROXIMATE index. `FloatBruteForceIndex` is the conformance oracle.
+/// Tests compare recall quality: HNSW must find ≥90% of the oracle's top-k results.
+///
+/// Thread-safety: this struct is NOT thread-safe by itself. VectorStore wraps it
+/// inside the `Mutex<HotState>` lock — all access is serialised by the caller.
+///
+/// # No Default impl
+///
+/// Use `HNSWIndex::new(seed)` or `HNSWIndex::new_default()`. No `impl Default`
+/// is provided; see BRR VEC-HNSW-01 schema constraints: "HNSWIndex in Rust
+/// exposes only `new()` factory, not `impl Default`."
+pub struct HNSWIndex {
+    /// All nodes in insertion order. A node's array index is its graph node_id.
+    nodes: Vec<Node>,
+
+    /// item_id → node array index. O(1) lookup by item_id.
+    node_index: std::collections::HashMap<String, i32>,
+
+    /// Current graph entry point (top-layer seed for search). None when empty.
+    entry_point: Option<i32>,
+
+    /// Highest layer currently in use (0 = all nodes at layer 0 only).
+    max_layer: usize,
+
+    /// SplitMix64 state. Seeded at init; same seed + insertion order → same graph.
+    rng_state: u64,
+
+    /// Byte count per vector (float32 stride = dim × 4). None before first insert.
+    vector_stride: Option<usize>,
+}
+
+impl HNSWIndex {
+    /// Construct an empty HNSW index with a given SplitMix64 seed.
+    ///
+    /// Use `new_default()` for the production seed (42). The seed parameter
+    /// exists for tests that need to explore different graph shapes with the same
+    /// data set.
+    ///
+    /// - Parameter seed: SplitMix64 initial state. Default production value is 42.
+    pub fn new(seed: u64) -> Self {
+        HNSWIndex {
+            nodes: Vec::new(),
+            node_index: std::collections::HashMap::new(),
+            entry_point: None,
+            max_layer: 0,
+            rng_state: seed,
+            vector_stride: None,
+        }
+    }
+
+    /// Construct an empty HNSW index with the production seed (42).
+    ///
+    /// The canonical entry point for all non-test callers.
+    pub fn new_default() -> Self {
+        Self::new(42)
+    }
+
+    // MARK: - SplitMix64 RNG
+
+    /// Advance state and return the next pseudorandom u64.
+    ///
+    /// SplitMix64 (Vigna 2015): one-state, zero-avalanche, good statistical
+    /// properties. Identical algorithm to Swift GauntletRNG and the fleet's
+    /// RandomIndexingProvider — chosen for consistency.
+    fn next_random(&mut self) -> u64 {
+        self.rng_state = self.rng_state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.rng_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    /// Draw a HNSW node level from the geometric distribution.
+    ///
+    /// Formula: `floor(-ln(u) × mL)` where u ~ Uniform(0,1), mL = 1/ln(M).
+    /// Always ≥ 0 (every node appears at layer 0). Approximately 1/M of nodes
+    /// appear at layer 1, 1/M² at layer 2, and so on.
+    fn assign_level(&mut self) -> usize {
+        // Map u64 to uniform (0,1) using top 53 bits (IEEE-754 double mantissa).
+        let r = self.next_random();
+        let u = (r >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
+        let level = (-f64::ln(f64::max(u, 1e-15)) * HNSW_ML) as usize;
+        level
+    }
+
+    // MARK: - Distance computation
+
+    /// Float dimensionality derived from the stride.
+    fn dim(&self) -> usize {
+        self.vector_stride.unwrap_or(0) / 4
+    }
+
+    /// Cosine distance between a [f32] probe and the bytes of node `idx`.
+    ///
+    /// cosine distance = 1 − cos(a, b). Range [0, 2]; 0 = identical direction.
+    /// Returns 1.0 for zero-norm vectors (safe maximum-distance fallback).
+    fn cosine_distance_to_node(&self, probe: &[f32], node_idx: usize) -> f32 {
+        let bytes = &self.nodes[node_idx].vector_bytes;
+        let d = self.dim();
+        if d == 0 || bytes.len() != d * 4 || probe.len() != d {
+            return 1.0;
+        }
+        let mut dot = 0.0_f32;
+        let mut norm_a = 0.0_f32;
+        let mut norm_b = 0.0_f32;
+        for i in 0..d {
+            let a = probe[i];
+            let b = decode_f32_le_at(bytes, i);
+            dot += a * b;
+            norm_a += a * a;
+            norm_b += b * b;
+        }
+        let denom = norm_a.sqrt() * norm_b.sqrt();
+        if denom == 0.0 {
+            return 1.0;
+        }
+        let sim = (dot / denom).clamp(-1.0, 1.0);
+        1.0 - sim
+    }
+
+    // MARK: - searchLayer (core graph traversal)
+
+    /// Greedy best-first search within one HNSW layer.
+    ///
+    /// Implements the `SEARCH-LAYER(q, ep, ef, lc)` function from Malkov &
+    /// Yashunin Algorithm 2. Returns up to `ef` nearest candidates to `probe`
+    /// at layer `layer`, sorted by cosine distance ascending.
+    ///
+    /// For small ef (default 50–200) a sorted Vec is faster than a heap
+    /// because element counts are bounded and branch prediction dominates.
+    fn search_layer(
+        &self,
+        probe: &[f32],
+        entry_pts: &[i32],
+        ef: usize,
+        layer: usize,
+    ) -> Vec<(f32, i32)> {
+        let mut visited: std::collections::HashSet<i32> =
+            std::collections::HashSet::with_capacity(ef * 2);
+
+        // `candidates`: sorted by dist ascending (nearest-first, pop from front).
+        // `results`: the ef-nearest found so far, dist ascending (farthest at end).
+        let mut candidates: Vec<(f32, i32)> = Vec::new();
+        let mut results: Vec<(f32, i32)> = Vec::new();
+
+        // Sorted insert into a dist-ascending Vec (binary search insertion point).
+        fn insert_sorted_asc(arr: &mut Vec<(f32, i32)>, item: (f32, i32)) {
+            let pos = arr.partition_point(|&(d, _)| d <= item.0);
+            arr.insert(pos, item);
+        }
+
+        // Seed with entry points.
+        for &ep in entry_pts {
+            let ep_i = ep as usize;
+            if ep_i >= self.nodes.len() || self.nodes[ep_i].tombstoned {
+                continue;
+            }
+            visited.insert(ep);
+            let d = self.cosine_distance_to_node(probe, ep_i);
+            insert_sorted_asc(&mut candidates, (d, ep));
+            insert_sorted_asc(&mut results, (d, ep));
+        }
+
+        while !candidates.is_empty() {
+            // Pop nearest candidate.
+            let c = candidates.remove(0);
+            // Farthest in results set.
+            let f_dist = results.last().map(|&(d, _)| d).unwrap_or(f32::INFINITY);
+
+            // Early exit: even the closest unexplored candidate is farther than
+            // the farthest result we already have. Greedy exploration is complete.
+            if c.0 > f_dist {
+                break;
+            }
+
+            let c_i = c.1 as usize;
+            if c_i >= self.nodes.len() {
+                continue;
+            }
+            let node = &self.nodes[c_i];
+            if layer < node.neighbours.len() {
+                for &n_idx in &node.neighbours[layer] {
+                    if visited.contains(&n_idx) {
+                        continue;
+                    }
+                    let n_i = n_idx as usize;
+                    if n_i >= self.nodes.len() || self.nodes[n_i].tombstoned {
+                        continue;
+                    }
+                    visited.insert(n_idx);
+                    let nd = self.cosine_distance_to_node(probe, n_i);
+                    let f_dist2 = results.last().map(|&(d, _)| d).unwrap_or(f32::INFINITY);
+                    if nd < f_dist2 || results.len() < ef {
+                        insert_sorted_asc(&mut candidates, (nd, n_idx));
+                        insert_sorted_asc(&mut results, (nd, n_idx));
+                        if results.len() > ef {
+                            results.pop();
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    // MARK: - Insert
+
+    /// Insert a float32 vector into the HNSW graph (incremental, O(log n)).
+    ///
+    /// If `item_id` is already present, the existing node is tombstoned and a
+    /// new node is inserted (upsert behaviour, matching VectorStore's UNIQUE
+    /// constraint on (item_id, vector_index, model_id)).
+    ///
+    /// A mismatched dimension (different from previously inserted vectors) logs
+    /// nothing and no-ops silently — the caller is responsible for supplying
+    /// dimensionally consistent vectors within one HNSWIndex.
+    ///
+    /// - Parameters:
+    ///   - item_id: item_id from the VectorRecordKey.
+    ///   - model_id: model_id from the VectorRecordKey.
+    ///   - vector: float32 values. Must have the same dimensionality as all
+    ///     previously inserted vectors.
+    pub fn insert(&mut self, item_id: String, model_id: String, vector: Vec<f32>) {
+        // Upsert: tombstone any existing node for this item_id.
+        if let Some(&existing_idx) = self.node_index.get(&item_id) {
+            self.nodes[existing_idx as usize].tombstoned = true;
+        }
+
+        let byte_count = vector.len() * 4;
+
+        // Dimension guard: mismatched dim is a no-op (same as Swift's warning+return).
+        if let Some(vs) = self.vector_stride {
+            if byte_count != vs {
+                return;
+            }
+        }
+        if self.vector_stride.is_none() {
+            self.vector_stride = Some(byte_count);
+        }
+
+        // Pack float32 to LE bytes (VectorPayload byte order).
+        let mut bytes = vec![0u8; byte_count];
+        for (i, &f) in vector.iter().enumerate() {
+            let bits = f.to_bits();
+            bytes[i * 4]     = (bits        & 0xFF) as u8;
+            bytes[i * 4 + 1] = ((bits >> 8)  & 0xFF) as u8;
+            bytes[i * 4 + 2] = ((bits >> 16) & 0xFF) as u8;
+            bytes[i * 4 + 3] = ((bits >> 24) & 0xFF) as u8;
+        }
+
+        let level = self.assign_level();
+        let new_idx = self.nodes.len() as i32;
+
+        // Allocate the node with `level + 1` empty neighbour layers.
+        let empty_layers: Vec<Vec<i32>> = vec![Vec::new(); level + 1];
+        self.nodes.push(Node {
+            item_id: item_id.clone(),
+            model_id,
+            vector_bytes: bytes,
+            neighbours: empty_layers,
+            tombstoned: false,
+        });
+        self.node_index.insert(item_id, new_idx);
+
+        let ep = match self.entry_point {
+            None => {
+                // First node: becomes entry point at the assigned level.
+                self.entry_point = Some(new_idx);
+                self.max_layer = level;
+                return;
+            }
+            Some(ep) => ep,
+        };
+
+        let mut cur_ep = ep;
+        let cur_max_layer = self.max_layer;
+
+        // Search from the top down to `level+1` to find the best layer-`level` entry.
+        if cur_max_layer > level {
+            for lc in ((level + 1)..=cur_max_layer).rev() {
+                let cands = self.search_layer(&vector, &[cur_ep], 1, lc);
+                if let Some(&(_, nearest)) = cands.first() {
+                    cur_ep = nearest;
+                }
+            }
+        }
+
+        // Wire connections at each layer from min(level, cur_max_layer) down to 0.
+        let top_wire_layer = level.min(cur_max_layer);
+        for lc in (0..=top_wire_layer).rev() {
+            let mut cands = self.search_layer(&vector, &[cur_ep], HNSW_EF_CONSTRUCTION, lc);
+            cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let m_max = if lc == 0 { HNSW_M0 } else { HNSW_M };
+            let selected: Vec<(f32, i32)> = cands.into_iter().take(m_max).collect();
+
+            // Set new node's neighbours at this layer.
+            self.nodes[new_idx as usize].neighbours[lc] =
+                selected.iter().map(|&(_, idx)| idx).collect();
+
+            // Add back-connections from each selected neighbour to the new node.
+            for &(_, nbr_idx) in &selected {
+                let n_i = nbr_idx as usize;
+                if n_i >= self.nodes.len() || self.nodes[n_i].tombstoned {
+                    continue;
+                }
+                if lc >= self.nodes[n_i].neighbours.len() {
+                    continue;
+                }
+                let current_count = self.nodes[n_i].neighbours[lc].len();
+                if current_count < m_max {
+                    self.nodes[n_i].neighbours[lc].push(new_idx);
+                } else {
+                    // Back-edge shrink: evict the weakest neighbour to stay ≤ m_max.
+                    // Compute distances from nbr_idx's position to all its current
+                    // neighbours + the new node, keep the m_max nearest.
+                    let n_probe = self.node_to_floats(n_i);
+                    let mut conns: Vec<(f32, i32)> = self.nodes[n_i].neighbours[lc]
+                        .iter()
+                        .filter_map(|&cidx| {
+                            let ci = cidx as usize;
+                            if ci >= self.nodes.len() || self.nodes[ci].tombstoned {
+                                return None;
+                            }
+                            Some((self.cosine_distance_to_node(&n_probe, ci), cidx))
+                        })
+                        .collect();
+                    conns.push((
+                        self.cosine_distance_to_node(&n_probe, new_idx as usize),
+                        new_idx,
+                    ));
+                    conns.sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    self.nodes[n_i].neighbours[lc] =
+                        conns.into_iter().take(m_max).map(|(_, idx)| idx).collect();
+                }
+            }
+
+            // The nearest at this layer is the entry point for the next lower layer.
+            if let Some(&(_, nearest)) = selected.first() {
+                cur_ep = nearest;
+            }
+        }
+
+        // Promote entry point if the new node's level is higher.
+        if level > cur_max_layer {
+            self.entry_point = Some(new_idx);
+            self.max_layer = level;
+        }
+    }
+
+    // MARK: - Search
+
+    /// Find the k approximate nearest neighbours (cosine metric).
+    ///
+    /// Traverses the layered graph from the top layer to layer 0, collecting
+    /// `efSearch` candidates at layer 0 via greedy best-first. Filters to
+    /// `model_id` and returns the top k.
+    ///
+    /// Distance convention: `((cosine_distance × 10_000).round()) as i32` —
+    /// matches VectorMatch.distance in the float lane (same as the
+    /// FloatBruteForceIndex path in VectorStore.find_nearest_float).
+    ///
+    /// Returns `VectorKitError::InvalidPayload` if the probe dimension mismatches
+    /// the index's established stride.
+    pub fn search(
+        &self,
+        probe: &[f32],
+        model_id: &str,
+        k: usize,
+    ) -> Result<Vec<VectorMatch>, VectorKitError> {
+        let live_count = self.nodes.iter().filter(|n| !n.tombstoned).count();
+        if live_count == 0 || k == 0 {
+            return Ok(Vec::new());
+        }
+        let ep = match self.entry_point {
+            None => return Ok(Vec::new()),
+            Some(ep) => ep,
+        };
+
+        if let Some(vs) = self.vector_stride {
+            if probe.len() * 4 != vs {
+                return Err(VectorKitError::InvalidPayload(format!(
+                    "HNSWIndex.search: probe has {} floats; expected {}",
+                    probe.len(),
+                    vs / 4
+                )));
+            }
+        }
+
+        let mut cur_ep = ep;
+
+        // Upper layers: single-candidate greedy descent to the layer-0 entry point.
+        if self.max_layer > 0 {
+            for lc in (1..=self.max_layer).rev() {
+                let cands = self.search_layer(probe, &[cur_ep], 1, lc);
+                if let Some(&(_, nearest)) = cands.first() {
+                    cur_ep = nearest;
+                }
+            }
+        }
+
+        // Layer 0: collect efSearch candidates.
+        let cands = self.search_layer(probe, &[cur_ep], HNSW_EF_SEARCH, 0);
+
+        // Filter to model_id, take top k, convert distances.
+        let results: Vec<VectorMatch> = cands
+            .into_iter()
+            .filter(|&(_, idx)| {
+                let i = idx as usize;
+                i < self.nodes.len() && self.nodes[i].model_id == model_id
+            })
+            .take(k)
+            .map(|(dist, idx)| {
+                let node = &self.nodes[idx as usize];
+                VectorMatch {
+                    item_id: node.item_id.clone(),
+                    distance: (dist * 10_000.0).round() as i32,
+                    model_id: node.model_id.clone(),
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    // MARK: - Maintenance duties
+
+    /// Tombstone a node by item_id (pre-step for BETA compaction).
+    ///
+    /// Tombstoned nodes are excluded from search results and skipped during
+    /// graph traversal. Dead edges pointing to a tombstone are not immediately
+    /// removed; they are cleaned up during the next `compact()` call. This is
+    /// the "wear" model from HNSW_DESIGN §5: tombstones accumulate until BETA.
+    pub fn tombstone(&mut self, item_id: &str) {
+        if let Some(&idx) = self.node_index.get(item_id) {
+            self.nodes[idx as usize].tombstoned = true;
+        }
+    }
+
+    /// Rebuild the graph from live nodes, dropping all tombstones (BETA duty).
+    ///
+    /// O(n log n) where n is the live count. Dead nodes and their inbound edges
+    /// are permanently removed. The graph is deterministically rebuilt using the
+    /// same seed and in the order of the original live insertions.
+    pub fn compact(&mut self) {
+        // Snapshot live nodes before clearing.
+        let live: Vec<(String, String, Vec<f32>)> = self
+            .nodes
+            .iter()
+            .filter(|n| !n.tombstoned)
+            .map(|n| {
+                (
+                    n.item_id.clone(),
+                    n.model_id.clone(),
+                    bytes_to_floats(&n.vector_bytes),
+                )
+            })
+            .collect();
+
+        if live.is_empty() {
+            self.clear();
+            return;
+        }
+
+        self.clear();
+        for (item_id, model_id, floats) in live {
+            self.insert(item_id, model_id, floats);
+        }
+    }
+
+    /// Clear the entire graph (ALPHA extreme-drift duty; THETA pre-rebuild step).
+    ///
+    /// Drops all nodes, connections, and vector bytes. O(1) — just releases the
+    /// allocated Vecs. After `clear()`, the next `insert` or rebuild starts a
+    /// fresh graph from an empty state.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.node_index.clear();
+        self.entry_point = None;
+        self.max_layer = 0;
+        self.vector_stride = None;
+    }
+
+    // MARK: - Observability
+
+    /// Total node count (including tombstoned).
+    pub fn total_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Live (non-tombstoned) node count.
+    pub fn live_count(&self) -> usize {
+        self.nodes.iter().filter(|n| !n.tombstoned).count()
+    }
+
+    // MARK: - Private helpers
+
+    /// Decode stored bytes of node `idx` to Vec<f32> for distance computation.
+    fn node_to_floats(&self, idx: usize) -> Vec<f32> {
+        bytes_to_floats(&self.nodes[idx].vector_bytes)
+    }
+}
+
+// MARK: - Float helpers (private, file-local)
+
+/// Decode one IEEE-754 LE float32 from a byte slice at float index `i`.
+fn decode_f32_le_at(bytes: &[u8], i: usize) -> f32 {
+    let base = i * 4;
+    let bits = (bytes[base] as u32)
+        | ((bytes[base + 1] as u32) << 8)
+        | ((bytes[base + 2] as u32) << 16)
+        | ((bytes[base + 3] as u32) << 24);
+    f32::from_bits(bits)
+}
+
+/// Decode a LE float32 byte slice to Vec<f32>.
+fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
+    let count = bytes.len() / 4;
+    (0..count).map(|i| decode_f32_le_at(bytes, i)).collect()
+}
+
+// MARK: - Tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_index() -> HNSWIndex {
+        HNSWIndex::new_default()
+    }
+
+    fn v3(x: f32, y: f32, z: f32) -> Vec<f32> {
+        vec![x, y, z]
+    }
+
+    // MARK: - Basic insert + search
+
+    #[test]
+    fn empty_index_returns_empty() {
+        let idx = make_index();
+        let result = idx.search(&[1.0, 0.0, 0.0], "m", 5).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn single_insert_then_search() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0));
+        let results = idx.search(&[1.0, 0.0, 0.0], "m", 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, "a");
+    }
+
+    #[test]
+    fn identical_vector_distance_near_zero() {
+        let mut idx = make_index();
+        let v = v3(0.6, 0.8, 0.0);
+        idx.insert("a".into(), "m".into(), v.clone());
+        let results = idx.search(&v, "m", 1).unwrap();
+        assert_eq!(results.len(), 1);
+        let dist_f = results[0].distance as f32 / 10_000.0;
+        assert!(dist_f.abs() < 1e-2, "expected ~0 cosine distance, got {}", dist_f);
+    }
+
+    #[test]
+    fn model_id_filter() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "model-a".into(), v3(1.0, 0.0, 0.0));
+        idx.insert("b".into(), "model-b".into(), v3(1.0, 0.0, 0.0));
+        let results = idx.search(&[1.0, 0.0, 0.0], "model-a", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, "a");
+    }
+
+    #[test]
+    fn upsert_replaces_old_node() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0));
+        idx.insert("a".into(), "m".into(), v3(0.0, 1.0, 0.0));
+        // After upsert, there is one live node (the new one).
+        assert_eq!(idx.live_count(), 1);
+    }
+
+    // MARK: - Tombstone + compact
+
+    #[test]
+    fn tombstone_excludes_from_search() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0));
+        idx.insert("b".into(), "m".into(), v3(0.0, 1.0, 0.0));
+        idx.tombstone("a");
+        let results = idx.search(&[1.0, 0.0, 0.0], "m", 5).unwrap();
+        assert!(results.iter().all(|r| r.item_id != "a"),
+            "tombstoned node 'a' must not appear in search results");
+    }
+
+    #[test]
+    fn compact_removes_tombstones() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0));
+        idx.insert("b".into(), "m".into(), v3(0.0, 1.0, 0.0));
+        idx.tombstone("a");
+        idx.compact();
+        assert_eq!(idx.live_count(), 1);
+        // 'b' is still searchable after compact.
+        let results = idx.search(&[0.0, 1.0, 0.0], "m", 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, "b");
+    }
+
+    // MARK: - Clear
+
+    #[test]
+    fn clear_empties_index() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0));
+        idx.clear();
+        assert_eq!(idx.total_count(), 0);
+        let results = idx.search(&[1.0, 0.0, 0.0], "m", 5).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // MARK: - Dim mismatch
+
+    #[test]
+    fn insert_dim_mismatch_is_noop() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0)); // stride=12
+        idx.insert("b".into(), "m".into(), vec![1.0, 0.0]);     // stride=8 → mismatch
+        // 'b' must not appear; only 'a' is in the index.
+        assert_eq!(idx.live_count(), 1);
+    }
+
+    #[test]
+    fn search_dim_mismatch_returns_error() {
+        let mut idx = make_index();
+        idx.insert("a".into(), "m".into(), v3(1.0, 0.0, 0.0)); // dim=3
+        let err = idx.search(&[1.0, 0.0], "m", 1);             // dim=2 → mismatch
+        assert!(err.is_err());
+    }
+
+    // MARK: - Recall quality
+
+    #[test]
+    fn recall_quality_at_threshold() {
+        // Build a 200-vector corpus (enough to exercise multi-layer topology)
+        // and verify HNSW finds ≥90% of the BF oracle's top-10.
+        use crate::engine::float_brute_force::FloatBruteForceIndex;
+        use crate::engine::metric::DenseMetric;
+        use crate::engine::payload::VectorPayload;
+        use crate::engine::key::VectorRecordKey;
+        use crate::engine::seam::DenseIndex;
+
+        let dim: usize = 64;
+        let n: usize = 200;
+        let k: usize = 10;
+
+        // Deterministic corpus: use SplitMix64 directly for reproducibility.
+        let mut rng: u64 = 0xDEADBEEF;
+        let mut next = |rng: &mut u64| -> u64 {
+            *rng = rng.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = *rng;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        };
+
+        // Generate vectors as unit-normalized float32.
+        let mut raw_vecs: Vec<Vec<f32>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let v: Vec<f32> = (0..dim)
+                .map(|_| {
+                    // Uniform [-1, 1] from top 24 bits.
+                    let r = next(&mut rng);
+                    (r >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+                })
+                .collect();
+            // Normalize.
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let v_norm: Vec<f32> = if norm > 0.0 {
+                v.iter().map(|x| x / norm).collect()
+            } else {
+                v
+            };
+            raw_vecs.push(v_norm);
+        }
+
+        // Build HNSW.
+        let mut hnsw = HNSWIndex::new(12345);
+        let mut payloads_for_bf: Vec<VectorPayload> = Vec::with_capacity(n);
+        let mut keys_for_bf: Vec<VectorRecordKey> = Vec::with_capacity(n);
+        for (i, v) in raw_vecs.iter().enumerate() {
+            let item_id = format!("item-{}", i);
+            hnsw.insert(item_id.clone(), "m".into(), v.clone());
+            payloads_for_bf.push(VectorPayload::from_f32(v));
+            keys_for_bf.push(VectorRecordKey::new(&item_id, 0, "m", "1"));
+        }
+
+        // Build BF oracle.
+        let mut bf = FloatBruteForceIndex::new();
+        bf.build(&payloads_for_bf, &keys_for_bf).unwrap();
+
+        // Query with a deterministic probe.
+        let probe_vec: Vec<f32> = raw_vecs[0].clone();
+        let probe_payload = VectorPayload::from_f32(&probe_vec);
+
+        let hnsw_results = hnsw.search(&probe_vec, "m", k).unwrap();
+        let bf_results = bf.search(&probe_payload, DenseMetric::COSINE, k, None).unwrap();
+
+        let hnsw_ids: std::collections::HashSet<&str> =
+            hnsw_results.iter().map(|r| r.item_id.as_str()).collect();
+        let bf_ids: std::collections::HashSet<&str> =
+            bf_results.iter().map(|h| h.key.item_id.as_str()).collect();
+
+        let overlap: usize = hnsw_ids.intersection(&bf_ids).count();
+        let recall = overlap as f64 / k as f64;
+        assert!(
+            recall >= 0.90,
+            "HNSW recall@{} = {:.2} (< 0.90); overlap={}/{}; hnsw={:?}; bf={:?}",
+            k,
+            recall,
+            overlap,
+            k,
+            hnsw_results.iter().map(|r| &r.item_id).collect::<Vec<_>>(),
+            bf_results.iter().map(|h| &h.key.item_id).collect::<Vec<_>>(),
+        );
+    }
+}

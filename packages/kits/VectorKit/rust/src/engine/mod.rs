@@ -14,6 +14,11 @@
 //! Lane C: float lane — `FloatBruteForceIndex` (exact brute-force for Float32),
 //! the float lane's production path and oracle. Dense-embedding k-NN is a
 //! VectorKit concern; persistence-kit owns no vector engine.
+//!
+//! Lane D: `HNSWIndex` — approximate float-lane NN via Hierarchical Navigable
+//! Small World graphs (Malkov & Yashunin 2018). Activates at/above 5,000 vectors
+//! per modelID partition; `FloatBruteForceIndex` remains the oracle and the active
+//! index below the threshold. Farthest queries always use `FloatBruteForceIndex`.
 
 // Lane F — foundation types
 pub mod hit;
@@ -33,6 +38,9 @@ pub mod mih;
 // Lane C — float lane implementations
 pub mod float_brute_force;
 
+// Lane D — float lane HNSW approximate nearest-neighbour index
+pub mod hnsw_index;
+
 // Lane E1 — binary ColBERT MaxSim late interaction (Exact-A exhaustive scorer)
 pub mod max_sim;
 
@@ -50,5 +58,7 @@ pub use resident_store::ResidentArrayStore;
 pub use mih::{MIHBandCount, MIHIndex};
 // Lane C re-exports
 pub use float_brute_force::FloatBruteForceIndex;
+// Lane D re-exports
+pub use hnsw_index::{HNSWIndex, HNSW_DEFAULT_THRESHOLD};
 // Lane E1 re-exports
 pub use max_sim::{MaxSimHit, MaxSimScorer};
