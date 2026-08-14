@@ -374,44 +374,81 @@ impl VectorStore {
     /// Covers `recent_item_ids` ORDER BY filed_at DESC, item_id ASC so
     /// SQLite can do an ordered index scan rather than a full-table scan +
     /// filesort. Migrated onto existing estates by the v3→v4 migration.
+    ///
+    /// v5 adds the `hnsw_graph` table — the schema home for the
+    /// approximate float-lane NN index (Lane D). The table is
+    /// device-local derived state (never in ConvergenceKit sync manifests)
+    /// and is rebuildable from the `vectors` table at any time.
+    /// Columns: model_id TEXT, node_idx INTEGER, node_id TEXT,
+    /// layer INTEGER, neighbours BLOB; PK=(model_id, node_idx, layer).
     pub fn schema_declaration() -> SchemaDeclaration {
+        // v5 hnsw_graph table declaration — reused in both the table list and
+        // the v4→v5 migration so the two declarations are byte-identical.
+        let hnsw_graph_table = TableDeclaration::new(
+            "hnsw_graph",
+            vec![
+                // Partition key: which embedding model owns this graph node.
+                ColumnDeclaration::text("model_id"),
+                // Ordinal index of the node within this model's graph
+                // (assigned at insertion time, stable for the life of the graph).
+                ColumnDeclaration::int("node_idx"),
+                // The item ID stored at this node (matches vectors.item_id).
+                ColumnDeclaration::text("node_id"),
+                // Layer within the HNSW hierarchical structure (0 = base layer).
+                ColumnDeclaration::int("layer"),
+                // Serialized neighbour list: little-endian u32 node indices.
+                // Rebuilt from the vectors table when the graph is cleared.
+                ColumnDeclaration::blob("neighbours"),
+            ],
+            vec![
+                "model_id".to_string(),
+                "node_idx".to_string(),
+                "layer".to_string(),
+            ],
+        );
         SchemaDeclaration::new(
             "VectorKit",
-            4,
-            vec![TableDeclaration::new(
-                "vectors",
-                vec![
-                    ColumnDeclaration::uuid("id"),
-                    // Lane F rename: item_id replaces drawer_id.
-                    ColumnDeclaration::text("item_id"),
-                    // vector_index: 0 for single-vector models; token
-                    // position for ColBERT late-interaction.
-                    ColumnDeclaration::int("vector_index"),
-                    ColumnDeclaration::text("model_id"),
-                    ColumnDeclaration::text("model_version"),
-                    // kind: VectorKind raw integer (0=Binary,1=Float32,2=Int8).
-                    ColumnDeclaration::int("kind"),
-                    // dim: number of logical elements (bits for Binary,
-                    // floats for Float32, int8s for Int8).
-                    ColumnDeclaration::int("dim"),
-                    // payload: raw bytes. For Binary: 32-byte Engram wire form.
-                    ColumnDeclaration::blob("payload"),
-                    // scale: dequantisation multiplier for Int8; NULL for Binary/Float32.
-                    ColumnDeclaration::float("scale").nullable(),
-                    ColumnDeclaration::timestamp("filed_at"),
-                    // ext: nullable entity ext slots forward-compat slot (v3). Nullable JSON;
-                    // future per-vector typed metadata (quantisation provenance,
-                    // embedding-run tags) serializes here migration-free. 1.0
-                    // writes NULL and never reads it.
-                    ColumnDeclaration::json("ext").nullable(),
-                ],
-                vec!["id".to_string()],
-            )
-            .with_unique_constraints(vec![vec![
-                "item_id".to_string(),
-                "vector_index".to_string(),
-                "model_id".to_string(),
-            ]])],
+            5,
+            vec![
+                TableDeclaration::new(
+                    "vectors",
+                    vec![
+                        ColumnDeclaration::uuid("id"),
+                        // Lane F rename: item_id replaces drawer_id.
+                        ColumnDeclaration::text("item_id"),
+                        // vector_index: 0 for single-vector models; token
+                        // position for ColBERT late-interaction.
+                        ColumnDeclaration::int("vector_index"),
+                        ColumnDeclaration::text("model_id"),
+                        ColumnDeclaration::text("model_version"),
+                        // kind: VectorKind raw integer (0=Binary,1=Float32,2=Int8).
+                        ColumnDeclaration::int("kind"),
+                        // dim: number of logical elements (bits for Binary,
+                        // floats for Float32, int8s for Int8).
+                        ColumnDeclaration::int("dim"),
+                        // payload: raw bytes. For Binary: 32-byte Engram wire form.
+                        ColumnDeclaration::blob("payload"),
+                        // scale: dequantisation multiplier for Int8; NULL for Binary/Float32.
+                        ColumnDeclaration::float("scale").nullable(),
+                        ColumnDeclaration::timestamp("filed_at"),
+                        // ext: nullable entity ext slots forward-compat slot (v3). Nullable JSON;
+                        // future per-vector typed metadata (quantisation provenance,
+                        // embedding-run tags) serializes here migration-free. 1.0
+                        // writes NULL and never reads it.
+                        ColumnDeclaration::json("ext").nullable(),
+                    ],
+                    vec!["id".to_string()],
+                )
+                .with_unique_constraints(vec![vec![
+                    "item_id".to_string(),
+                    "vector_index".to_string(),
+                    "model_id".to_string(),
+                ]]),
+                // v5: HNSW graph storage table. Device-local derived state;
+                // never synced via ConvergenceKit. Rebuildable from `vectors`
+                // at any time by clearing hnsw_indices and allowing lazy rebuild.
+                hnsw_graph_table.clone(),
+            ],
         )
         .with_indices(vec![
             IndexDeclaration::new(
@@ -450,7 +487,38 @@ impl VectorStore {
                     vec!["filed_at".to_string(), "item_id".to_string()],
                 ))],
             },
+            // v4 → v5: add the hnsw_graph table to existing estates.
+            // New estates receive it directly from the schema declaration above.
+            // Idempotent: CREATE TABLE IF NOT EXISTS (enforced by the backend).
+            Migration {
+                from_version: 4,
+                to_version: 5,
+                operations: vec![SchemaOperation::CreateTable(hnsw_graph_table)],
+            },
         ])
+    }
+
+    /// Test-only: open a VectorStore with a custom HNSW activation threshold.
+    ///
+    /// Allows tests to trigger HNSW routing with small corpora (e.g.
+    /// threshold 10 with 20 vectors) without waiting for the default 5,000.
+    /// Not part of the stable public API. All production callers use `open`.
+    pub fn open_with_hnsw_threshold(
+        storage: Arc<dyn Storage>,
+        hnsw_threshold: u32,
+    ) -> Result<Self, VectorKitError> {
+        let schema = Self::schema_declaration();
+        storage
+            .open(&schema)
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        Ok(Self::new_internal(
+            storage,
+            None,
+            50_000,
+            MIHBandCount::M16,
+            DEFERRED_PENDING_LIMIT,
+            hnsw_threshold,
+        ))
     }
 
     /// Construct against an already-opened `Storage`, with optional sidecar

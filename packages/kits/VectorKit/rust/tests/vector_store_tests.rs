@@ -584,18 +584,19 @@ fn default_sidecar_path_derives_vec_beside_sqlite_and_none_for_inmemory() {
 // VK-PERF-FIX-2026-07-13: schema v4 index + projection guard tests.
 // Mirrors the Swift VectorStoreTests "VK-PERF-FIX" section.
 
-/// Schema version is v4 (VK-PERF-FIX-2026-07-13).
+/// Schema version is v5 (VEC-HNSW-01: hnsw_graph table added).
 ///
-/// Guards the version bump: if schema_version drifts below 4, the
-/// idx_vectors_filed_at_item migration will not run and the GeniusLocusKit
-/// composite version gate will reject fresh estate opens.
+/// Guards the version bump: if schema_version drifts below 5, the hnsw_graph
+/// table will not be created for new estates and the GeniusLocusKit composite
+/// version gate will reject fresh estate opens. v4 added
+/// idx_vectors_filed_at_item; v5 adds the HNSW graph storage table.
 #[test]
-fn schema_declaration_is_version_four() {
+fn schema_declaration_is_version_five() {
     let schema = VectorStore::schema_declaration();
-    assert_eq!(schema.version, 4, "VectorKit schema must be v4 after idx_vectors_filed_at_item was added");
+    assert_eq!(schema.version, 5, "VectorKit schema must be v5 after hnsw_graph table was added");
 }
 
-/// The schema declaration includes idx_vectors_filed_at_item (v4).
+/// The schema declaration includes idx_vectors_filed_at_item (added at v4).
 ///
 /// Guards that the index is present in the declared schema so fresh installs
 /// get it immediately and existing estates receive it via the v3→v4 migration.
@@ -605,7 +606,7 @@ fn schema_declaration_is_version_four() {
 fn schema_declaration_contains_filed_at_item_index() {
     let schema = VectorStore::schema_declaration();
     let idx = schema.indices.iter().find(|i| i.name == "idx_vectors_filed_at_item");
-    assert!(idx.is_some(), "idx_vectors_filed_at_item must be declared in schema v4");
+    assert!(idx.is_some(), "idx_vectors_filed_at_item must be declared in schema");
     let idx = idx.unwrap();
     assert_eq!(idx.table, "vectors");
     assert_eq!(idx.columns, vec!["filed_at", "item_id"]);
@@ -633,6 +634,120 @@ fn schema_declaration_has_v3_to_v4_index_migration() {
         }
         other => panic!("v3→v4 migration operation must be AddIndex, got {other:?}"),
     }
+}
+
+/// The schema declaration includes the `hnsw_graph` table (added at v5).
+///
+/// Guards that the table is present with the correct columns and primary key so
+/// fresh installs get it directly and existing v4 estates receive it via the
+/// v4→v5 migration. Column order and PK must match the Swift declaration
+/// byte-for-byte so the GLK composite schema fixture stays in sync.
+#[test]
+fn schema_declaration_contains_hnsw_graph_table() {
+    let schema = VectorStore::schema_declaration();
+    let tbl = schema.tables.iter().find(|t| t.name == "hnsw_graph");
+    assert!(tbl.is_some(), "hnsw_graph table must be declared in v5 schema");
+    let tbl = tbl.unwrap();
+
+    // Column names in declaration order (must match Swift for fixture parity).
+    let col_names: Vec<&str> = tbl.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours"],
+        "hnsw_graph columns must match Swift declaration order");
+
+    // Primary key.
+    assert_eq!(tbl.primary_key, vec!["model_id", "node_idx", "layer"],
+        "hnsw_graph PK must be (model_id, node_idx, layer)");
+
+    // Not append-only; not hashable (device-local derived state, not audited).
+    assert!(!tbl.append_only, "hnsw_graph must not be append_only");
+    assert!(!tbl.hashable, "hnsw_graph must not be hashable");
+}
+
+/// v4→v5 migration is declared and creates the hnsw_graph table.
+///
+/// Guards the migration path for existing v4 estates: they must receive a
+/// CreateTable(hnsw_graph) migration so the HNSW graph storage is available
+/// after upgrade. Without this migration, v4 estates opened post-upgrade would
+/// fail any write to hnsw_graph on their first HNSW rebuild.
+#[test]
+fn schema_declaration_has_v4_to_v5_hnsw_graph_migration() {
+    use persistence_kit::SchemaOperation;
+    let schema = VectorStore::schema_declaration();
+    let m = schema.migrations.iter().find(|m| m.from_version == 4 && m.to_version == 5);
+    assert!(m.is_some(), "v4→v5 migration must be present");
+    let m = m.unwrap();
+    assert_eq!(m.operations.len(), 1, "v4→v5 migration must contain exactly one operation");
+    match &m.operations[0] {
+        SchemaOperation::CreateTable(decl) => {
+            assert_eq!(decl.name, "hnsw_graph",
+                "v4→v5 migration must create the hnsw_graph table");
+            let col_names: Vec<&str> = decl.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours"],
+                "hnsw_graph migration columns must match schema declaration");
+            assert_eq!(decl.primary_key, vec!["model_id", "node_idx", "layer"],
+                "hnsw_graph migration PK must match schema declaration");
+        }
+        other => panic!("v4→v5 migration operation must be CreateTable, got {other:?}"),
+    }
+}
+
+/// `find_nearest_float` routes through HNSW above the activation threshold.
+///
+/// Mirrors Swift HI-6: uses a low HNSW threshold (10) so 20 inserts suffice to
+/// activate the approximate index. At n=20 the efSearch=50 beam exceeds the
+/// corpus size, making HNSW behave as an exact scan — results are rank-correct.
+/// The probe is item-0's vector, so item-0 must rank first.
+#[test]
+fn find_nearest_float_routes_through_hnsw_above_threshold() {
+    use vectorkit::VectorPayload;
+    use std::sync::Arc;
+    use persistence_kit::inmemory::InMemoryStorage;
+    use uuid::Uuid;
+
+    let storage: Arc<dyn persistence_kit::Storage> =
+        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // Threshold of 10: 20 inserts will cross it and activate HNSW.
+    let store = VectorStore::open_with_hnsw_threshold(storage, 10)
+        .expect("open_with_hnsw_threshold");
+
+    // Seed a deterministic PRNG to generate reproducible float vectors.
+    // SplitMix64 with the same seed as the Swift test for cross-port parity.
+    let mut state: u64 = 0x12345678_ABCDEF00;
+    let next_f32 = |s: &mut u64| -> f32 {
+        *s = s.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = *s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z = z ^ (z >> 31);
+        // Map to [0, 1) then to [-1, 1).
+        let u = (z >> 11) as f32 / (1u64 << 53) as f32;
+        u * 2.0 - 1.0
+    };
+
+    let dim = 8_usize;
+    let filed_at: i64 = 1_700_000_000;
+    let model_id = "cross-model";
+    let mut first_vector: Option<Vec<f32>> = None;
+
+    for i in 0..20usize {
+        let v: Vec<f32> = (0..dim).map(|_| next_f32(&mut state)).collect();
+        if i == 0 {
+            first_vector = Some(v.clone());
+        }
+        let payload = VectorPayload::from_f32(&v);
+        store.add_payload(
+            &format!("item-{i}"), 0, &payload, model_id, "1", filed_at,
+        ).expect("add_payload");
+    }
+
+    // Probe is item-0's vector: it must rank first under cosine distance.
+    let probe = first_vector.unwrap();
+    let results = store.find_nearest_float(&probe, model_id, 5)
+        .expect("find_nearest_float");
+
+    assert!(!results.is_empty(), "find_nearest_float must return results after HNSW crossover");
+    assert_eq!(results[0].item_id, "item-0",
+        "probe direction must rank nearest after HNSW routing activates at threshold 10");
 }
 
 /// `find_by_keyword` returns correct results with column projection.

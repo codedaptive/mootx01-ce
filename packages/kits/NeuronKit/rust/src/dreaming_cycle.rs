@@ -1792,6 +1792,141 @@ impl DreamingDaemon {
     pub fn advance_reindex_vocab(&mut self, live_vocab: i64) {
         self.last_reindex_vocab = live_vocab;
     }
+
+    // ─── HNSW maintenance seam ───────────────────────────────────────────────
+    //
+    // Three `_with_hnsw` variants extend the ALPHA, THETA, and BETA cycle
+    // drivers to call the appropriate HNSWGraphMaintenance operation after
+    // the primary dreaming work completes. The base methods are unchanged so
+    // existing callers (and all existing tests) continue to compile and pass.
+    //
+    // Pass `hnsw: None::<&mut InMemoryHNSWGraphMaintenance>` to disable HNSW
+    // maintenance in tests that do not require a float index.
+
+    /// ALPHA vocabulary-growth check with HNSW graph clear (VEC-HNSW-01 seam).
+    ///
+    /// Extends `check_corpus_growth` with an optional HNSW clear step: when the
+    /// vocabulary growth gate fires and `probe.reindex()` succeeds, calls
+    /// `hnsw.clear_float_index(now_epoch_secs)` so the next qualifying
+    /// `find_nearest_float` lazily rebuilds the graph from the fresh vectors.
+    ///
+    /// Failure of the HNSW clear is non-fatal: the clear result (`bool`) is not
+    /// propagated — a stale graph degrades approximate NN performance but does
+    /// not break correctness. Mirrors Swift `DreamingDaemon.checkCorpusGrowth`
+    /// after the VEC-HNSW-01 wiring.
+    ///
+    /// `now_epoch_secs` is the injected cycle timestamp; neither the probe nor the
+    /// maintenance seam may read the system clock internally.
+    pub fn check_corpus_growth_with_hnsw<P, M>(
+        &mut self,
+        now_epoch_secs: f64,
+        probe: &mut P,
+        hnsw: Option<&mut M>,
+    ) where
+        P: CorpusGrowthProbe,
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        let live_vocab = probe.vocab_anchor();
+        if self.last_reindex_vocab == -1 {
+            // First cycle: establish baseline, do not retrain.
+            self.last_reindex_vocab = live_vocab;
+            return;
+        }
+        let fractional =
+            (self.last_reindex_vocab as f64 * self.reindex_vocab_growth_fraction).ceil() as i64;
+        let trigger = self.reindex_vocab_growth_floor.max(fractional);
+        if live_vocab - self.last_reindex_vocab >= trigger
+            && probe.reindex(now_epoch_secs)
+        {
+            // Advance only on success so a failed retrain re-fires next cycle.
+            self.last_reindex_vocab = live_vocab;
+            // Clear stale HNSW graphs: the new embedding geometry makes old
+            // graph topology incorrect. Non-fatal on failure — a stale graph
+            // falls back to exact scan on the next query.
+            if let Some(m) = hnsw {
+                let _ = m.clear_float_index(now_epoch_secs);
+            }
+        }
+    }
+
+    /// THETA cycle with basis-retrain hook AND HNSW graph rebuild (VEC-HNSW-01 seam).
+    ///
+    /// Extends `run_theta_cycle_with_hook` with an optional HNSW rebuild step:
+    /// after the retrain hook fires (regardless of its success — matching Swift's
+    /// non-fatal policy), calls `hnsw.rebuild_float_index(now_epoch_secs)` so
+    /// the graph topology reflects the new embedding geometry.
+    ///
+    /// Failure of the HNSW rebuild is non-fatal. Mirrors Swift
+    /// `DreamingDaemon.fireThetaHNSWRebuild` called at both THETA exit paths.
+    ///
+    /// Pass `hook: None` to skip the daily retrain (equivalent to calling
+    /// `run_theta_cycle` directly). Pass `hnsw: None` to skip the graph rebuild.
+    pub fn run_theta_cycle_with_hook_and_hnsw<R, S, H, M>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        hook: Option<&mut H>,
+        hnsw: Option<&mut M>,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        S: DreamingProposalSink,
+        H: ThetaBasisRetrainHook,
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        let result = self.run_theta_cycle(now_epoch_secs, reader, sink);
+
+        // Fire daily basis-retrain hook — same non-fatal policy as
+        // `run_theta_cycle_with_hook`. `false` = captured failure; the cycle
+        // result is returned unchanged in either case.
+        if let Some(h) = hook {
+            let _ = h.retrain(now_epoch_secs);
+        }
+
+        // Rebuild HNSW graphs after the retrain: the new embedding space makes
+        // the old graph topology stale. Rebuild from the current float records
+        // so `find_nearest_float` queries immediately use the new geometry.
+        // Non-fatal on failure — falls back to exact scan.
+        if let Some(m) = hnsw {
+            let _ = m.rebuild_float_index(now_epoch_secs);
+        }
+
+        result
+    }
+
+    /// BETA weekly prune/GC with HNSW tombstone compaction (VEC-HNSW-01 seam).
+    ///
+    /// Extends `run_beta_cycle` with an optional HNSW compaction step: after the
+    /// `consolidated` and `co_recall_counts` prune completes, calls
+    /// `hnsw.compact_float_index_tombstones(now_epoch_secs)`. Compaction discards
+    /// tombstoned entries and dead edges accumulated since the last compaction,
+    /// improving cache locality and reclaiming memory for stale node slots.
+    ///
+    /// Failure of the HNSW compaction is non-fatal. Mirrors Swift
+    /// `DreamingDaemon.runBetaCycle` after the VEC-HNSW-01 wiring.
+    pub fn run_beta_cycle_with_hnsw<M>(
+        &mut self,
+        now_epoch_secs: f64,
+        hnsw: Option<&mut M>,
+    ) -> Option<DreamingCycleReport>
+    where
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        // Run the base BETA cycle (consolidated + co_recall_counts prune,
+        // timestamp advance, None return). Reuse the existing implementation to
+        // keep the two code paths in sync.
+        let result = self.run_beta_cycle(now_epoch_secs);
+
+        // Compact HNSW tombstones: weekly GC mirrors the consolidated prune
+        // cadence. Non-fatal on failure — a non-compacted graph is correct but
+        // carries wasted memory from deleted-node slots.
+        if let Some(m) = hnsw {
+            let _ = m.compact_float_index_tombstones(now_epoch_secs);
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]

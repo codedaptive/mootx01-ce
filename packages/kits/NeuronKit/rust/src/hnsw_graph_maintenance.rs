@@ -1,0 +1,145 @@
+// hnsw_graph_maintenance.rs
+//
+// Seam for DreamingDaemon's HNSW graph maintenance duties: the three
+// cadence-bound operations that keep the approximate float-lane NN index
+// aligned with the current vector corpus across ALPHA, THETA, and BETA cycles.
+//
+// ── Design rationale ─────────────────────────────────────────────────────
+// HNSWIndex (VectorKit) is an approximate nearest-neighbour index for the
+// float lane (Lane D). It activates at/above a configurable threshold
+// (default 5 000 vectors per modelID partition). Three dreaming cadences
+// have maintenance duties over this graph:
+//
+//   ALPHA (30 s) — extreme vocabulary drift triggers a corpus reindex.
+//     The new embedding geometry makes the old graph topology incorrect;
+//     all HNSW graphs are cleared so the next qualifying query rebuilds
+//     from the fresh vectors. A lazy rebuild is cheaper than a synchronous
+//     full rebuild inside a 30-second cycle.
+//
+//   THETA (24 h) — after the daily basis retrain the embedding space has
+//     shifted. All active HNSW graphs are rebuilt from the current float
+//     records so the graph topology matches the new vector geometry. A
+//     fresh rebuild also removes tombstone accumulation from the
+//     incremental insert path.
+//
+//   BETA (7 d) — tombstones accumulate when items are updated or deleted.
+//     BETA compaction rebuilds the live-node graph, discarding tombstoned
+//     entries and dead edges. A compacted graph has better cache locality
+//     and no wasted memory from stale node slots.
+//
+//   OMEGA (14 d) — retires dreamed tunnels. No HNSW duty.
+//
+// ── Seam idiom ───────────────────────────────────────────────────────────
+// Mirrors the `ThetaBasisRetrainHook` injection pattern: the trait is pure
+// (no VectorKit import in the daemon itself), the production adapter holds
+// a VectorStore reference and delegates to its public HNSW maintenance
+// surface. `DreamingDaemon`'s `_with_hnsw` method variants accept an
+// `Option<&mut M>` so passing `None` safely disables all HNSW duties for
+// tests that do not wire a VectorStore.
+//
+// ── Failure handling ─────────────────────────────────────────────────────
+// Maintenance failures are non-fatal: a stale or missing HNSW graph
+// degrades nearest-query performance (falls back to exact scan) but does
+// not break correctness. Methods return `bool` — `false` signals a
+// captured failure so the caller can log and continue, matching the Swift
+// non-fatal behaviour.
+
+// ── Trait ─────────────────────────────────────────────────────────────────
+
+/// Seam for `DreamingDaemon`'s HNSW graph maintenance duties.
+///
+/// Injected into `DreamingDaemon`'s `_with_hnsw` method variants. The daemon
+/// calls the three methods at the appropriate REM cadences (ALPHA, THETA, BETA)
+/// to keep the approximate float-lane nearest-neighbour graph aligned with the
+/// current vector corpus. Tests supply `InMemoryHNSWGraphMaintenance`.
+///
+/// All methods are synchronous: the Rust daemon has no async runtime.
+///
+/// Returns `true` on success, `false` on a captured failure. The daemon
+/// continues on failure (non-fatal, performance-degrading only) and emits
+/// an Intellectus counter for operator visibility.
+///
+/// Mirrors Swift `HNSWGraphMaintenance` protocol (NeuronKit).
+pub trait HNSWGraphMaintenance {
+    /// Clear all HNSW graphs for the estate (ALPHA extreme-drift duty).
+    ///
+    /// Called when vocabulary drift crosses the auto-reindex threshold and a
+    /// full corpus reindex fires. The next `find_nearest_float` call at/above
+    /// the threshold lazily rebuilds the graph from the fresh vectors.
+    ///
+    /// `now_epoch_secs` is the caller-injected cycle timestamp (deterministic;
+    /// the implementor must NOT read the system clock).
+    fn clear_float_index(&mut self, now_epoch_secs: f64) -> bool;
+
+    /// Rebuild all active HNSW graphs from current float records (THETA duty).
+    ///
+    /// Called after the daily basis retrain fires. Fetches current float32 rows
+    /// from the `vectors` table and re-inserts them into fresh HNSWIndex
+    /// instances, so graph topology matches the new embedding geometry.
+    ///
+    /// `now_epoch_secs` is the caller-injected cycle timestamp.
+    fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool;
+
+    /// Compact HNSW tombstones across all active graph partitions (BETA duty).
+    ///
+    /// Called weekly. Each active HNSWIndex rebuilds from its live nodes,
+    /// discarding tombstoned entries and dead edges accumulated since the last
+    /// compaction.
+    ///
+    /// `now_epoch_secs` is the caller-injected cycle timestamp.
+    fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool;
+}
+
+// ── In-memory test double ──────────────────────────────────────────────────
+
+/// In-memory `HNSWGraphMaintenance` for tests. Records calls without touching a
+/// live VectorStore. Mirrors Swift's test double pattern for `ThetaBasisRetrainHook`.
+#[derive(Debug, Default)]
+pub struct InMemoryHNSWGraphMaintenance {
+    /// Timestamps of successful `clear_float_index` calls, in call order.
+    pub clear_calls: Vec<f64>,
+    /// Timestamps of successful `rebuild_float_index` calls, in call order.
+    pub rebuild_calls: Vec<f64>,
+    /// Timestamps of successful `compact_float_index_tombstones` calls, in call order.
+    pub compact_calls: Vec<f64>,
+    /// When true, all three methods return `false` (simulates captured failures).
+    pub fail_all: bool,
+}
+
+impl InMemoryHNSWGraphMaintenance {
+    /// Construct a maintenance fake with no failures.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a maintenance fake whose every call fails.
+    pub fn failing() -> Self {
+        Self { fail_all: true, ..Default::default() }
+    }
+}
+
+impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
+    fn clear_float_index(&mut self, now_epoch_secs: f64) -> bool {
+        if self.fail_all {
+            return false;
+        }
+        self.clear_calls.push(now_epoch_secs);
+        true
+    }
+
+    fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool {
+        if self.fail_all {
+            return false;
+        }
+        self.rebuild_calls.push(now_epoch_secs);
+        true
+    }
+
+    fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool {
+        if self.fail_all {
+            return false;
+        }
+        self.compact_calls.push(now_epoch_secs);
+        true
+    }
+}

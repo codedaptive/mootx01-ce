@@ -43,6 +43,7 @@ pub mod constellation;
 pub mod context_synthesizer;
 pub mod dreaming_cycle;
 pub mod dreaming_decision;
+pub mod hnsw_graph_maintenance;
 pub mod rem_cycle_table;
 pub mod estate_dreaming_reader;
 pub mod estate_dreaming_sink;
@@ -98,6 +99,7 @@ pub use dreaming_cycle::{
     InMemoryDreamingPolicyStore, ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource,
     RewardSource, RewardSourceKind, TunnelLink,
 };
+pub use hnsw_graph_maintenance::{HNSWGraphMaintenance, InMemoryHNSWGraphMaintenance};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
