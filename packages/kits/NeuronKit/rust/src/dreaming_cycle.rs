@@ -1132,6 +1132,13 @@ impl DreamingDaemon {
     ///
     /// Pass `hook: None` to skip the daily retrain (equivalent to calling
     /// `run_theta_cycle` directly).
+    ///
+    /// Test-only seam in production terms: the shipped runtime path is the
+    /// AutonomicGovernor firing the retrain INLINE after `run_theta_cycle`
+    /// returns (on its already-held coordinator lock). This wrapper exists
+    /// so the gate/hook contract is testable without a governor. The Swift
+    /// port injects the hook into the daemon instead — an intentional
+    /// architectural asymmetry documented in NEURONKIT_SPEC §12.6.1.
     pub fn run_theta_cycle_with_hook<R, S, H>(
         &mut self,
         now_epoch_secs: f64,
