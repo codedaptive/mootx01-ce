@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.42.1
+version: 1.42.2
 status: accepted-1.1-target
 date: 2026-08-13
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -73,7 +73,7 @@ minus the four Swift-side packet tools (FAB5-I2) — backed by the Rust kit stac
 (genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
 Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
 `MOOTX01_MEMORY_TOOL=1`, raising the count to 75/68 — same gate as the Swift port
-(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 71/65 baseline. All five
+(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 74/67 baseline. All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
 manifest owned by the ARIA layer. The fifth vault
@@ -1235,8 +1235,9 @@ cargo test --manifest-path packages/kits/AriaMcpKit/rust/Cargo.toml
 (Rust test targets: `dispatch_tests`, `jsonrpc_tests`, `persistence_tests`,
 `stdio_framing_tests`, `http_transport_tests`, `autonomic_governor_tests`,
 `dataset_tools` coverage in `dispatch_tests`, and additional integration
-test modules. Tool census: 71/71 vault-on, 65/65 vault-off (Rust matches
-Swift exactly). Run `cargo test` for the current pass count.)
+test modules. Tool census: 74 vault-on, 67 vault-off on the Rust wire
+surface; the Swift surface carries 4 additional packet tools (FAB5-I2) —
+78/71. Run `cargo test` for the current pass count.)
 
 ## § 6 — Examples
 
@@ -1256,6 +1257,14 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.42.2 -- 2026-08-13
+
+- Two more stale tool-count lines corrected (§1 memory-adapter baseline
+  "71/65" → "74/67"; §5 Rust test census "71/71 / 65/65, Rust matches
+  Swift exactly" → per-port truth 74/67 wire vs Swift 78/71 with the
+  FAB5-I2 packet tools). Non-changelog current-state count claims now
+  swept file-wide.
 
 ### 1.42.1 -- 2026-08-13
 
