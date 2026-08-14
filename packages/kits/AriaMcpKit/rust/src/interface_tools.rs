@@ -2544,9 +2544,9 @@ fn run_write_journal(
 
 /// Read journal entries. Optional `agent` (default "mcp-agent") and `last_n` (default 10).
 ///
-/// Reads all diary entries via `coordinator.recall_diary_entries`, filters by
-/// agent_name if specified, returns the most-recent `last_n`. Mirrors Swift
-/// `runReadJournal`.
+/// Uses `coordinator.diary_entries` to push agent_name equality into SQL via
+/// idx_diary_agent — no post-fetch filter. Returns the most-recent `last_n`.
+/// Mirrors Swift `runReadJournal`.
 ///
 /// # Timestamp unit
 ///
@@ -2578,14 +2578,12 @@ fn run_read_journal(
     )?;
 
     let coord = estate.coord.lock().unwrap();
-    let mut entries = coord
-        .recall_diary_entries(&estate.handle)
+    // diary_entries pushes agent_name equality and tombstonedAt IS NULL into SQL via
+    // idx_diary_agent, returns newest-first, and applies the last_n LIMIT at the
+    // storage layer — no post-fetch retain/sort/truncate needed.
+    let entries = coord
+        .diary_entries(&estate.handle, agent, last_n)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
-
-    entries.retain(|e| e.agent_name == agent);
-    // Sort by filed_at descending so most-recent entries come first.
-    entries.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
-    entries.truncate(last_n);
 
     let mut lines = vec![format!("journal for {agent}: {} entry(s)", entries.len())];
     for e in &entries {
