@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.37.1
+version: 1.37.2
 status: accepted-1.1-target
-date: 2026-08-13
+date: 2026-08-14
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -473,7 +473,7 @@ total count line and all per-tier counts are computed at call time from
 The live vault-on count is 78 tools; vault-off is 71 (moot_palace_import,
 moot_json_import, and the 5 moot_vault_* tools omitted). The cold-start sequence is named explicitly.
 Tier structure: Tier 1 Core Memory (9), Tier 2 Connections (4), Tier 3 KG (4),
-Tier 4 Journal (2), Tier 5 Estate (7 always + 1 vault-gated), Tier 6 Cognition
+Tier 4 Journal (2), Tier 5 Estate (8 always + 2 vault-gated), Tier 6 Cognition
 (27 = 4 recipe + 23 lens), Tier 7 Extended Cognition (8 = remaining recipe
 tools), Tier 8 Dataset (3), Tier 9 Vault (5 vault-on only), Tier 10 Federation
 (1). The authoritative live count is always in ARIA_MCP_INTERFACE.md §2.
@@ -1056,6 +1056,13 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.37.2 -- 2026-08-14
+
+- §12 Tier 5 breakdown corrected: "(7 always + 1 vault-gated)" →
+  "(8 always + 2 vault-gated)" — `moot_timing_report` (+1 always) and
+  `moot_json_import` (+1 vault-gated) had landed since the text was
+  set. Found by the pinned-model Adams re-run of rounds 3–4.
 
 ### 1.37.1 -- 2026-08-13
 
