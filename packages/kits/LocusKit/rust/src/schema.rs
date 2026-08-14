@@ -1607,6 +1607,7 @@ mod tests {
                 "idx_drawers_tombstoned",
                 "idx_drawers_lineageID",
                 "idx_drawers_udcCode",
+                "idx_drawers_filedAt",
                 "idx_drawers_provenance_source",
                 "idx_drawers_provenance_confirmation",
                 "idx_drawers_operational_channel",
