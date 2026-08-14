@@ -18,7 +18,9 @@ use std::sync::Arc;
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy};
+    RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -66,12 +68,14 @@ fn capture_drawer(
 /// This is the production ARIA path: recall_scored with origin=External.
 /// B-10a: dreaming enqueue fires ONLY on external-origin scored recalls.
 fn external_recall_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external() // B-10a: only ARIA boundary sets External
+    GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    )
 }
 
 /// Fire one external-origin scored recall, triggering dreaming enqueue

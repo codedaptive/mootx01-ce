@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
-use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath};
+use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallFallbackPolicy, RecallOrigin};
 use locus_kit::adjectives::State;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
@@ -63,11 +63,15 @@ fn corpus_only_request(query: &str, extra: Option<Filter>) -> GLKRecallRequest {
     if let Some(f) = extra {
         chain.push(f);
     }
-    GLKRecallRequest::new(RecallFrame::new(chain))
-        .with_mode(GLKRecallMode::CorpusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
+    GLKRecallRequest::new(
+        RecallFrame::new(chain),
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(50)
 }
 
 // A: withdrawn drawer is dropped under the default frame (GLK level).

@@ -31,6 +31,8 @@ use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -139,11 +141,15 @@ fn union_best_rrf(
     }
     let anti: HashSet<String> = anti_similar.iter().map(|s| s.to_string()).collect();
     let shape = RecallShape::new(m, Some(PINNED_FRONTIER_K)).with_anti_similar_lanes(anti);
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        DRAWER_COUNT,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(DRAWER_COUNT)
         .with_recall_shape(shape)
 }
 
@@ -269,11 +275,15 @@ fn empty_anti_similar_equals_nil() {
 
     // Both use the engine default frontier_k (no override) → whole corpus in the
     // dense pool → pure back-compat comparison, no truncation.
-    let nil_req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text(&query)
-        .with_limit(DRAWER_COUNT);
+    let nil_req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        DRAWER_COUNT,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(&query);
     let empty_req = nil_req
         .clone()
         .with_recall_shape(RecallShape::new(HashMap::new(), None).with_anti_similar_lanes(HashSet::new()));

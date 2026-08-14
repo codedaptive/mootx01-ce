@@ -29,6 +29,7 @@ use aria_mcp::dream_runner::run_one_dreaming_cycle;
 use aria_mcp::estate_registry::EstateRegistry;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
@@ -90,12 +91,14 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_i64: i64) {
 
     // External-origin recall triggers the dreaming queue mount and enqueues
     // one DreamingItem (two captured drawer ids ≥ 2 → guard passes).
-    let ext_request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external();
+    let ext_request = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    );
     registry
         .coord
         .lock()

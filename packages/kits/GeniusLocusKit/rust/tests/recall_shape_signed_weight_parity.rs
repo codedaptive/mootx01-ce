@@ -25,6 +25,8 @@ use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -99,11 +101,15 @@ fn estate_with_drawers(
 }
 
 fn hybrid_req(query: &str, shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::Hybrid)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text(query)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::Hybrid,
+        GLKRecallScoring::Rrf,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(query);
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }

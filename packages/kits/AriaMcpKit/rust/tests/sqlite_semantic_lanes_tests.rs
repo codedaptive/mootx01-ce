@@ -356,18 +356,22 @@ fn sqlite_semantic_lanes_lit_after_register_sqlite() {
     let hits = {
         use genius_locus_kit::recall::{
             GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
-        };
+    RecallOrigin,
+};
         use locus_kit::filter::{HydrationLevel, RecallFrame};
 
         let mut frame = RecallFrame::new(vec![]);
         // Full hydration: content blob required for the content-contains assertion below.
         frame.hydration_level = HydrationLevel::Full;
 
-        let request = GLKRecallRequest::new(frame)
-            .with_mode(GLKRecallMode::UnionBest)
-            .with_scoring(GLKRecallScoring::Rrf)
-            .with_limit(20)
-            .with_fallback(RecallFallbackPolicy::AllowDegraded)
+        let request = GLKRecallRequest::new(
+            frame,
+            GLKRecallMode::UnionBest,
+            GLKRecallScoring::Rrf,
+            20,
+            RecallFallbackPolicy::AllowDegraded,
+            RecallOrigin::Internal,
+        )
             .with_query_text("egret marshland".to_string());
 
         let now = aria_mcp::dispatch::wall_now();

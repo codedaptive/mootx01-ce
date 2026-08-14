@@ -31,6 +31,8 @@ use genius_locus_kit::audit::UnifiedAuditValue;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GraphCache,
     PreferenceStore, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -138,10 +140,14 @@ fn seed_matrix_tier(
 }
 
 fn matrix_req(shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    );
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }

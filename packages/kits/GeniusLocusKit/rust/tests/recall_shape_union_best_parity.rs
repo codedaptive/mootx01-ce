@@ -27,6 +27,8 @@ use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -142,11 +144,15 @@ fn two_provider_estate() -> (
 }
 
 fn union_best_rrf(query: &str, shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text(query)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(query);
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }
@@ -154,11 +160,15 @@ fn union_best_rrf(query: &str, shape: Option<RecallShape>) -> GLKRecallRequest {
 }
 
 fn union_best_matrix(query: &str, shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_query_text(query)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(query);
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }

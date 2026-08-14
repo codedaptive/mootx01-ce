@@ -36,7 +36,9 @@ use intellectus_lib::{EventKind, Intellectus, NoOpSink, StatSample, StatsSink};
 // Dreaming-queue seeding imports (v2 pending-count gate).
 // Used by seed_dreaming_queue and tests that assert dreaming fires.
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy};
+    RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::drawer_operational::CaptureChannel;
@@ -192,12 +194,14 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_epoch_i64: i64) {
     // External-origin recall: coordinator mounts the dreaming queue and
     // enqueues one DreamingItem with the 2 captured drawer ids, making
     // pending_count = 1 so the pending-count gate passes on the next tick.
-    let external_request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external();
+    let external_request = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    );
     registry.coord
         .lock()
         .unwrap()
@@ -498,7 +502,9 @@ fn ag9_maintenance_fire_writes_diary_entry_to_live_estate() {
 #[test]
 fn dreaming_pump_emits_think_events() {
     use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-        RecallFallbackPolicy};
+        RecallFallbackPolicy,
+    RecallOrigin,
+};
     use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
     use locus_kit::filter::{Filter, RecallFrame};
     use locus_kit::frames::CaptureFrame;
@@ -559,12 +565,14 @@ fn dreaming_pump_emits_think_events() {
     // dreaming queue. After 3 calls, co_recall_count(a,b), co_recall_count(a,c),
     // co_recall_count(b,c) each reach 3 — meeting DreamingPolicy::default min_attempts=3.
     let external_request = || {
-        GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-            .with_mode(GLKRecallMode::LocusOnly)
-            .with_scoring(GLKRecallScoring::Raw)
-            .with_limit(50)
-            .with_fallback(RecallFallbackPolicy::FailClosed)
-            .external()
+        GLKRecallRequest::new(
+            RecallFrame::new(vec![Filter::Unconfirmed]),
+            GLKRecallMode::LocusOnly,
+            GLKRecallScoring::Raw,
+            50,
+            RecallFallbackPolicy::FailClosed,
+            RecallOrigin::External,
+        )
     };
     for _ in 0..3 {
         registry.coord

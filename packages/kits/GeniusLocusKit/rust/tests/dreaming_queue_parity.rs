@@ -24,7 +24,9 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::DreamingItem;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy};
+    RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -84,21 +86,26 @@ fn capture_drawers(
 /// Build an external-origin GLKRecallRequest for the LocusOnly lane.
 /// This is the production MCP path: recall_scored with origin=External.
 fn external_recall_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(recall_all())
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external() // B-10a: only ARIA boundary sets External
+    GLKRecallRequest::new(
+        recall_all(),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    )
 }
 
 /// Build an internal-origin GLKRecallRequest. Must NEVER enqueue dreaming items.
 fn internal_recall_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(recall_all())
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
+    GLKRecallRequest::new(
+        recall_all(),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
     // origin defaults to Internal — B-10a
 }
 

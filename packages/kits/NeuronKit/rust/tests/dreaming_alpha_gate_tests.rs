@@ -26,6 +26,7 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
@@ -76,12 +77,14 @@ fn fire_external_recall(
     handle: &EstateHandle,
     now: i64,
 ) {
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external(); // B-10a boundary
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    );
     let c = coord.lock().unwrap();
     c.recall_scored(handle, req, now).expect("recall_scored");
 }

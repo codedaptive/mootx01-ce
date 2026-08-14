@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
-use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring};
+use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin};
 use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -91,21 +91,29 @@ fn make_corpus() -> Arc<CorpusContentEngine> {
 fn default_request(query: &str, limit: usize) -> GLKRecallRequest {
     let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     frame.hydration_level = HydrationLevel::Full;
-    GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::CorpusOnly)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Rrf,
+        limit,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(limit)
 }
 
 /// Override-frame request that explicitly includes .Restricted sensitivity.
 fn restricted_override_request(query: &str) -> GLKRecallRequest {
     let frame = RecallFrame::new(vec![Filter::Unconfirmed, Filter::SensitivityAtMost(AdjectiveSensitivity::Restricted)]);
-    GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::CorpusOnly)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Rrf,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(50)
 }
 
 // ---------------------------------------------------------------------------

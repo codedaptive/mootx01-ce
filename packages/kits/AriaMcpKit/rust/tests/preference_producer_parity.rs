@@ -28,6 +28,8 @@ use neuron_kit::preference_producer::{
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, PreferenceStore,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
@@ -73,11 +75,14 @@ fn capture(registry: &EstateRegistry, content: &str) -> String {
 fn recall_writing_traces(registry: &EstateRegistry, trace_limit: usize) {
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(50)
-        .external()
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    )
         .with_trace_limit(trace_limit);
     coord.recall_scored(h, req, NOW).expect("recall writing traces");
 }
@@ -281,10 +286,14 @@ fn recall_reads_live_preference_column() {
     // The producer registered the store on the shared coordinator — recall it.
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(50);
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    );
     let result = coord.recall_scored(h, req, NOW + 10).expect("recall");
 
     let endorsed_hit = result
