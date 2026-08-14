@@ -19,6 +19,15 @@
 // platform. No aggregation, no alerting, no query surface — the window is a
 // bounded recent buffer and nothing more.
 //
+// Boundary update (D6, 2026-08-14, Phase-4 brief §6): the daily
+// performance-health duty (A7) derives INGEST/CYCLE timing samples from the
+// audit log and persists them through the existing PersistenceStatsSink write
+// path — this is aggregation, approved by Bob as necessary for CYCLE-creep
+// trend detection (P6/P7 early warning). The DEBT-3 no-alerting and no-general-
+// query-surface constraints remain in force. See
+// docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md for the full
+// boundary definition.
+//
 // The bounded window is the contractual piece: it holds at most `windowCapacity`
 // samples (default 256). On overflow the oldest is evicted (RecentWindowSink
 // FIFO ring). Memory is O(capacity) regardless of emission volume.
