@@ -400,9 +400,12 @@ public actor VectorStore {
     ///
     /// Table additions v4 → v5:
     ///   - Added: `hnsw_graph` table (see file header for column list).
-    ///     Stores the persisted HNSW graph for the float lane (Lane D). This
-    ///     table is NEVER included in ConvergenceKit sync manifests; the graph
-    ///     is a rebuildable derived accelerator — device-local only.
+    ///     Schema declaration for the float-lane (Lane D) HNSW graph. The
+    ///     graph is currently MEMORY-ONLY — no rows are written in either
+    ///     port; the table exists so the v4→v5 migration path is in place
+    ///     for existing estates before persistence lands. NEVER included in
+    ///     ConvergenceKit sync manifests; the graph is a rebuildable derived
+    ///     accelerator — device-local only.
     ///     issued a full scan (10k-row probe_limit = O(N) on 109k chunks).
     ///     Combined with `columns:` projection, this also enables an
     ///     index-only covering scan — payload blobs never read from disk.
@@ -433,7 +436,9 @@ public actor VectorStore {
                 primaryKey: ["id"],
                 uniqueConstraints: [["item_id", "vector_index", "model_id"]]
             ),
-            // v5: HNSW graph persistence table. Device-local only — never
+            // v5: schema declaration for the HNSW graph (memory-only today —
+            // no rows are written; the declaration reserves the migration
+            // path for when persistence lands). Device-local only — never
             // in ConvergenceKit sync manifests (the graph is a rebuildable
             // derived accelerator, not source-of-truth data). Primary key
             // is (model_id, node_idx, layer): one row per node-per-layer

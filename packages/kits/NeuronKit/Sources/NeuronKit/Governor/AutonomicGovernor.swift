@@ -281,6 +281,11 @@ public actor AutonomicGovernor {
             policyStore: EstateManifestDreamingPolicyStore(handle: handle, kit: kit),
             growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit),
             thetaRetrainHook: EstateThetaBasisRetrainHook(handle: handle, kit: kit)
+            // HNSW-MAINT: hnswMaintenance is deliberately nil here. Production
+            // estates get HNSW search without graph maintenance (ALPHA clear /
+            // THETA rebuild / BETA compact) until the serve layer exposes the
+            // estate's VectorStore at this construction site — wire an
+            // EstateHNSWGraphMaintenance(vectorStore:) then (VEC-HNSW-02).
         )
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),
