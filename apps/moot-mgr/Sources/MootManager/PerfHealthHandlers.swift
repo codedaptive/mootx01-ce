@@ -172,6 +172,12 @@ extension MootManager {
     /// - Returns: A valid `PerfHealthPayload`. Returns `pending: true` when
     ///   the manager has not been started. Returns `latestSample: nil, trend: []`
     ///   when no samples have been written yet.
+    // Deliberately one function rather than split helpers: the body is seven
+    // sequential phases over ONE query result (guard → query → estate filter →
+    // build-latest-map → derive trend anchor → build latest sample → build
+    // trend series), and each later phase reads the same intermediate maps.
+    // Splitting would thread three dictionaries through five signatures for
+    // no clarity gain.
     public func perfHealthPayload(estate: String? = nil) async throws -> PerfHealthPayload {
         // Return pending when the manager has not been started (no store yet).
         // Mirrors the ReviewPayload.pending pattern — callers get a valid payload,
