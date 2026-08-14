@@ -9,7 +9,7 @@ import Testing
 /// `.recipe`; vault tools carry `.vault`. There are no `.lexicon` tools.
 ///
 /// Every test projects with `tools(environment: [:])` — an explicit empty
-/// environment — so the contract (68 tools: vault on by default, opt-in
+/// environment — so the contract (78 tools: vault on by default, opt-in
 /// memory tool off) holds regardless of what the test runner's process
 /// environment or a concurrently running suite has set.
 @Suite("Tool projection")
@@ -294,5 +294,46 @@ struct ToolProjectionTests {
                 "\(name) is in the dispatch switch but missing from the membership gate"
             )
         }
+    }
+}
+
+// MARK: - Tier decomposition reconciliation
+
+/// The count-documentation layer (SPEC §12, TeachmeGuides, header comments)
+/// drifted three times in the 2026-08 benchmark-reset phase because the tier
+/// breakdown lives as prose in several places while the surface grows. This
+/// suite pins the DECOMPOSITION, not just the total: if any tier count or the
+/// non-tier remainder shifts, this fails and names the layer that must move
+/// with it (SPEC §12 tier structure, TeachmeGuides comment block + guide
+/// string, ToolProjection header doc).
+@Suite("Tier decomposition reconciliation")
+struct TierDecompositionTests {
+
+    @Test func tiersPlusNonTierSumToLiveTotal() {
+        let tier1 = ToolProjection.coreMemoryTools().count           // 9
+        let tier2 = ToolProjection.connectionTools().count           // 4
+        let tier3 = ToolProjection.knowledgeGraphTools().count       // 4
+        let tier4 = ToolProjection.journalTools().count              // 2
+        let tier5 = ToolProjection.estateTools().count               // 10 (8 always + 2 vault-gated)
+        let tier6 = 4 + LensTools.tools().count                      // 27 (4 recipe + 23 lens)
+        let tier7 = RecipeTools.tools().count - 4                    // 9 (remaining recipe)
+        let tier8 = DatasetTools.tools().count                       // 3
+        let tier9 = VaultTools.vaultToolNames.count                  // 5 (vault-on only)
+        let tier10 = 1                                               // federation
+        let packet = PacketTools.tools().count                       // 4 (non-tier)
+
+        let decomposed = tier1 + tier2 + tier3 + tier4 + tier5
+            + tier6 + tier7 + tier8 + tier9 + tier10 + packet
+        let liveVaultOn = ToolProjection.tools(environment: [:]).count
+
+        #expect(decomposed == liveVaultOn,
+                "tier decomposition (\(decomposed)) no longer sums to the live vault-on surface (\(liveVaultOn)) — update SPEC §12, TeachmeGuides, and the ToolProjection header together")
+        // The specific figures the prose layer states today. When a tool is
+        // added, these move — and so must every prose copy.
+        #expect(tier5 == 10)
+        #expect(tier7 == 9)
+        #expect(RecipeTools.tools().count == 13)
+        #expect(packet == 4)
+        #expect(liveVaultOn == 78)
     }
 }
