@@ -182,6 +182,14 @@ table=grants
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
+table=hnsw_graph
+  col=model_id type=text null=0 default=- role=-
+  col=node_idx type=int null=0 default=- role=-
+  col=node_id type=text null=0 default=- role=-
+  col=layer type=int null=0 default=- role=-
+  col=neighbours type=blob null=0 default=- role=-
+  pk=model_id,node_idx,layer
+  appendOnly=0 hashable=0
 table=iix_doclens
   col=item_id type=text null=0 default=- role=-
   col=length type=int null=0 default=- role=-
