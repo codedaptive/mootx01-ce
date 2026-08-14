@@ -1,7 +1,7 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.10.0
+version: 1.11.0
 spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-08-13
@@ -731,6 +731,64 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     public func reindex(now: Date) async throws
 }
 ```
+
+### `ThetaBasisRetrainHook` / `EstateThetaBasisRetrainHook` (v1.11.0)
+
+Seam for the THETA-gate daily corpus basis retrain (NEURONKIT_SPEC § 12.6.1).
+Injected into `DreamingDaemon` as a nil-defaulted optional parameter. The
+daemon calls `retrain(now:)` once per THETA gate invocation — on BOTH the
+consolidation path AND the early-return / no-data path. Failures are caught
+and logged by the daemon (non-fatal). A nil hook silently disables the duty
+(correct for LocusOnly estates and tests that don't wire a Corpus).
+
+Mirrors the `CorpusGrowthProbe` seam idiom: the protocol is pure (no GLK
+import in the daemon); `EstateThetaBasisRetrainHook` imports GeniusLocusKit and
+delegates through `GeniusLocusKit.reindexCorpus(handle:now:)`.
+
+**Swift (both protocol and adapter in NeuronKit):**
+
+```swift
+public protocol ThetaBasisRetrainHook: Sendable {
+    /// Trigger a full corpus basis retrain. Called once per THETA cycle.
+    /// Failures are caught by the daemon (non-fatal).
+    /// `now` is the injected cycle timestamp — the hook MUST NOT read Date() internally.
+    func retrain(now: Date) async throws
+}
+
+public struct EstateThetaBasisRetrainHook: ThetaBasisRetrainHook {
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+    public func retrain(now: Date) async throws
+}
+```
+
+**Rust (trait + in-memory fake in `dreaming_cycle.rs`):**
+
+```rust
+pub trait ThetaBasisRetrainHook {
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool;  // true = ok, false = failure
+}
+pub struct InMemoryThetaBasisRetrainHook { /* records calls; test-only */ }
+```
+
+The Rust governor wires the retrain inline (using the already-held
+`MutexGuard<EstateCoordinator>`) rather than through the trait, so there is no
+`EstateThetaBasisRetrainHook` in Rust. The `run_theta_cycle_with_hook` method
+accepts any `ThetaBasisRetrainHook` impl; `InMemoryThetaBasisRetrainHook` is
+the test fake.
+
+**`DreamingDaemon` init (Swift) — new parameter:**
+
+```swift
+public init(reader: DreamingSubstrateReader, sink: DreamingProposalSink,
+            rewardSource: RewardSource = RecallTraceRewardSource(),
+            policyStore: DreamingPolicyStore,
+            growthProbe: (any CorpusGrowthProbe)? = nil,
+            thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil)
+```
+
+`thetaRetrainHook` defaults to nil so all existing call sites are unaffected.
+`AutonomicGovernor` passes `EstateThetaBasisRetrainHook(handle:kit:)` at
+production construction time.
 
 ### Node-motion / diffusion types (SPEC § 11 diffusion)
 
@@ -1717,6 +1775,7 @@ shape deltas.
 | Node-anomaly classify (pure, both ports) | `NodeMotionLens.classify` `Lenses/NodeMotion.swift` | `classify` `diffusion/node_anomaly.rs` | `public` / `pub fn` | Pure: classify a `NodeMotion` as churning/reanchored/stable given `churnThreshold`. Identical both ports. | `NodeMotionTests.swift` / `diffusion/node_anomaly.rs` | Confirmed |
 | Node-motion estate reader (Swift-only) | `NodeMotionLens.run` / `NodeMotionLens.anomaly` `Lenses/NodeMotion.swift` | — | `public` / — | GLK-bound estate-reading entry points. `run(kit:handle:rowID:now:lambdaPerDay:)` calls `kit.nodeAuditEntries` then `fold`; `anomaly(…)` adds `classify`. Rust has no GLK estate dependency for this module — the pure `fold`/`classify` fns are the Rust surface. | `NodeMotionTests.swift` | Confirmed (Swift-only GLK entry points) |
 | Corpus growth probe | `CorpusGrowthProbe` / `EstateCorpusGrowthProbe` `Dreaming/CorpusGrowthProbe.swift` | — | `public` / — | Swift-only: protocol seam + production GLK adapter for dreaming auto-reindex. Rust dreaming daemon has no corpus-reindex seam. `autoReindexVocabGrowthFraction = 0.10`; `autoReindexVocabGrowthFloor = 25`. | `DreamingDaemonTests.swift` | Confirmed (Swift-only) |
+| THETA basis-retrain hook | `ThetaBasisRetrainHook` / `EstateThetaBasisRetrainHook` `Dreaming/ThetaBasisRetrainHook.swift` | `ThetaBasisRetrainHook` / `InMemoryThetaBasisRetrainHook` `dreaming_cycle.rs` | `public` / `pub` | Both ports have the protocol/trait and in-memory fake. Swift has `EstateThetaBasisRetrainHook` (GLK-bound); Rust governor wires retrain inline via coordinator guard. Called once per THETA gate (both paths). Non-fatal. nil/None default on `DreamingDaemon`. | `ThetaRetrainHookTests.swift` / `dreaming_cycle.rs::tests::tr1..tr5` | Confirmed |
 | Autonomic governor | `AutonomicGovernor` (actor) `Governor/AutonomicGovernor.swift` | `AutonomicGovernor` (struct) `autonomic_governor.rs` | `public` / `pub` | Swift actor / Rust struct (sync, no async runtime — sanctioned). Both sequence background duties: dreaming, maintenance, graph-centrality, preference, topology snapshots, GC sweeps, pool-reduce. | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
 | Governor report | `AutonomicGovernor.GovernorReport` `Governor/AutonomicGovernor.swift` | `GovernorReport` `autonomic_governor.rs` | `public` / `pub struct` | Boolean tick-result summary. Swift nests it under `AutonomicGovernor`; Rust declares it flat. Same fields both ports (snake/camel idiom). | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
 | Topology inputs token (Swift-only) | `TopologyInputsToken` `Governor/AutonomicGovernor.swift` | — | `public` / — | Stable change-detection token: digest over drawer/tunnel/fact counts and max timestamps. Avoids redundant topology recomputes. Swift-only governor surface; Rust governor does not use a token. | `AutonomicGovernorTests.swift` | Confirmed (Swift-only) |
@@ -1986,6 +2045,15 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.11.0 -- 2026-08-13
+
+- `ThetaBasisRetrainHook` protocol (Swift) + trait (Rust) — THETA-gate daily
+  corpus basis-retrain seam. `EstateThetaBasisRetrainHook` production adapter
+  (Swift, GLK-bound). `DreamingDaemon.init` gains `thetaRetrainHook: (any
+  ThetaBasisRetrainHook)? = nil` (nil-default; all existing callers unaffected).
+  Rust: `InMemoryThetaBasisRetrainHook` test fake + `run_theta_cycle_with_hook`
+  method. See NEURONKIT_SPEC § 12.6.1.
 
 ### 1.10.0 -- 2026-08-13
 

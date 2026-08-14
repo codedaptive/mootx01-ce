@@ -1,6 +1,6 @@
 ---
 title: NeuronKit Specification
-version: 1.11.0
+version: 1.12.0
 status: active
 date: 2026-08-13
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
@@ -969,6 +969,33 @@ retire)` at four cadences:
 
 All four are bounded by recall activity (recalled-set²), never by estate shape.
 
+#### § 12.6.1 — THETA basis-retrain duty (v1.12.0)
+
+Each REM-THETA fire triggers a full corpus basis retrain on the estate's
+attached Corpus (if any). Distributional embedding bases freeze their
+vocabulary at training time; the ALPHA corpus-growth probe fires on
+vocabulary GROWTH, but quiescent estates (content changes in kind rather
+than in raw word count) can go stale without an unconditional daily
+retrain. Attaching the retrain to the existing 24 h THETA gate ensures
+every live estate refreshes its embedding basis at least once per day,
+matching the "no stale basis without a manual `moot_reindex`" promise.
+
+**Seam:** `ThetaBasisRetrainHook` (Swift protocol / Rust trait) — injected
+into `DreamingDaemon` at construction time (nil/None-defaulted). The daemon
+calls the hook once per THETA gate invocation (on BOTH the consolidation
+path AND the early-return / no-data path). Hook failures are caught, logged
+via OSLog / stderr, and do NOT abort the THETA cycle. A LocusOnly estate
+with no Corpus registered passes nil/None and the duty is silently skipped.
+
+**Production adapter:** `EstateThetaBasisRetrainHook` (wired in
+`AutonomicGovernor` at construction) delegates to
+`GeniusLocusKit.reindexCorpus(handle:now:)` (Swift) or calls
+`coord.corpus_for(&handle)?.reindex(now_millis)` inline on the already-held
+coordinator guard (Rust).
+
+**Invariant:** `now` is always caller-injected (the cycle's deterministic
+timestamp); the hook MUST NOT read the system clock internally.
+
 ### § 12.7 — Trigger modes and the forked dreamer
 
 The trigger mode selects **who drives** dreaming, decoupled from § 12.6:
@@ -1046,6 +1073,15 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 *End of NeuronKit Specification.*
 
 ## Changelog
+
+### 1.12.0 -- 2026-08-13
+Add § 12.6.1 documenting the THETA basis-retrain duty (A1 from Phase 4).
+`ThetaBasisRetrainHook` protocol (Swift) / trait (Rust) injected into
+`DreamingDaemon`, fired once per REM-THETA gate on both the consolidation
+and early-return paths. Hook failures are non-fatal. Production adapter
+`EstateThetaBasisRetrainHook` wired in `AutonomicGovernor`. No invariant
+change to any existing cycle; the seam is purely additive via a nil-defaulted
+parameter.
 
 ### 1.11.0 -- 2026-08-13
 

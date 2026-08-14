@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.27.0
+version: 1.28.0
 status: accepted-1.1-target
 date: 2026-08-13
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
@@ -2021,6 +2021,14 @@ State lives on the tunnel (LocusKit): operational bits 14/15 and the
 `ext` review ledger — see LOCUSKIT_SPEC.md § tunnel review state.
 
 ## Changelog
+
+### 1.28.0 -- 2026-08-13
+GLK supplies `EstateThetaBasisRetrainHook` to NeuronKit's `AutonomicGovernor` at
+composition time. The hook's `retrain(now:)` implementation calls
+`GeniusLocusKit.reindexCorpus(handle:now:)` — the existing public reindex surface.
+No new GLK public API; the composition wiring is in `AutonomicGovernor.swift`.
+No invariant change: `reindexCorpus` already existed and its contract is unchanged.
+See NEURONKIT_SPEC § 12.6.1 for the hook design.
 
 ### 1.27.0 -- 2026-08-13
 

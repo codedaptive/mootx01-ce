@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-13
-version: 1.33.0
+version: 1.34.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -2121,6 +2121,13 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.34.0 -- 2026-08-13
+`AutonomicGovernor` wires `EstateThetaBasisRetrainHook(handle:kit:)` as the
+`thetaRetrainHook` parameter of `DreamingDaemon.init` at production construction
+time. The adapter calls `GeniusLocusKit.reindexCorpus(handle:now:)` — no new
+public GLK surface added. This is the composition-layer wiring for the THETA
+basis-retrain duty (NEURONKIT_SPEC § 12.6.1 / NEURONKIT_INTERFACE 1.11.0).
 
 ### 1.33.0 -- 2026-08-13
 
