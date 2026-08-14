@@ -473,6 +473,13 @@ public actor HTTPReadAPI {
             // feed. Reads from the stats store — metadata only, no rung content.
             // Degrades to pending:false with zero counts on an empty store.
             return await jsonResponse { try await self.manager.reviewPayload() }
+        case ("GET", "/api/perf-health"):
+            // Daily performance-health indicator with trend (A8, D6 boundary).
+            // Sources audit-derived timing samples from EstatePerformanceHealthDuty.
+            // Optional ?estate= filter mirrors the /api/graph pattern.
+            // Display only — no alerting, no general query surface (D6 boundary).
+            let estate = Self.queryValue("estate", in: request.query)
+            return await jsonResponse { try await self.manager.perfHealthPayload(estate: estate) }
         case ("GET", "/api/packets"):
             // Exportable work packets list. Applies Filter.exportable at recall
             // layer — non-exportable (.private_) packets are silently absent.
