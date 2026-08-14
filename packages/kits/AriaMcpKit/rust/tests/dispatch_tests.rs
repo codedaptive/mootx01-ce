@@ -345,8 +345,9 @@ fn tools_list_name_set_matches_expected_74_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
-        //               + confirm_migration + recall_precise + recall_shaped + dream
+        // Recipe (13) — list_lenses + list_recipes + synthesize + run_migration
+        //               + confirm_migration + recall_precise + recall_connected
+        //               + recall_shaped + recall_vague + dream
         //               + distill + recall_distilled + hunt_contradictions
         //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
         //                moot_recollect is a notice-only stub, not listed)

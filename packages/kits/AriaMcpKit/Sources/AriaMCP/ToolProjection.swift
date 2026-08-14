@@ -18,11 +18,13 @@ import Foundation
 ///   fact timeline. Structured triple assertions on the estate.
 /// - **Tier 4 — Journal (2):** write entry, read entries. Agent diary for
 ///   session continuity.
-/// - **Tier 5 — Estate (3):** status, map, reconnect. Estate-level inspection
-///   and maintenance.
+/// - **Tier 5 — Estate (10):** status, map, ping, plus monitoring and the
+///   maintenance family (reindex, drain_status, reclassify_fdc,
+///   timing_report; palace_import + json_import vault-gated). Estate-level
+///   inspection and maintenance.
 ///
-/// Non-tier tools (federation, recipe, lens, vault) are appended after the
-/// five tiers and are unchanged in shape from the prior surface.
+/// Non-tier tools (federation, recipe, lens, vault, dataset, packet) are
+/// appended after the five tiers.
 ///
 /// ## Internal-infrastructure fields are never surfaced
 ///
@@ -492,7 +494,7 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (9 total; palace_import + json_import vault-gated)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (10 total; palace_import + json_import vault-gated)
 
     // Internal so TeachmeGuides can derive per-tier counts at runtime.
     // Returns 9 tools including moot_palace_import and moot_json_import.

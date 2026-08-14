@@ -13,9 +13,9 @@
 //!                       moot_timing_report, and vault-gated
 //!                       moot_palace_import + moot_json_import
 //!   Federation (1) — moot_federated_search
-//!   Recipe (12) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
-//!                 recall_precise, recall_shaped, dream, hunt_contradictions,
-//!                 consolidate, recall_distilled, recollect
+//!   Recipe (13) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
+//!                 recall_precise, recall_connected, recall_shaped, recall_vague,
+//!                 dream, distill, recall_distilled, hunt_contradictions
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!   Dataset (3) — moot_file_dataset, moot_dataset_query, moot_dataset_stats (MX-TAB-7b)
@@ -170,7 +170,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // Federation (1)
     tools.push(federated_search_tool());
 
-    // Recipe (12)
+    // Recipe (13)
     tools.push(list_lenses_tool());
     tools.push(list_recipes_catalog_tool());
     tools.push(synthesize_tool());

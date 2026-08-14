@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.37.2
+version: 1.37.3
 status: accepted-1.1-target
 date: 2026-08-14
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -368,9 +368,9 @@ provenance.
 
 ### Recipe, lens, vault, and dataset tools
 
-Twelve CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
-`moot_synthesize`, `moot_recall_precise`, `moot_recall_shaped`,
-`moot_recall_vague`,
+Thirteen CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
+`moot_synthesize`, `moot_recall_precise`, `moot_recall_connected`,
+`moot_recall_shaped`, `moot_recall_vague`,
 `moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_distill`,
 `moot_recall_distilled`,
 `moot_hunt_contradictions`),
@@ -474,9 +474,12 @@ The live vault-on count is 78 tools; vault-off is 71 (moot_palace_import,
 moot_json_import, and the 5 moot_vault_* tools omitted). The cold-start sequence is named explicitly.
 Tier structure: Tier 1 Core Memory (9), Tier 2 Connections (4), Tier 3 KG (4),
 Tier 4 Journal (2), Tier 5 Estate (8 always + 2 vault-gated), Tier 6 Cognition
-(27 = 4 recipe + 23 lens), Tier 7 Extended Cognition (8 = remaining recipe
-tools), Tier 8 Dataset (3), Tier 9 Vault (5 vault-on only), Tier 10 Federation
-(1). The authoritative live count is always in ARIA_MCP_INTERFACE.md §2.
+(27 = 4 recipe + 23 lens), Tier 7 Extended Cognition (9 = remaining recipe
+tools, incl. `moot_recall_connected` and `moot_recall_vague`), Tier 8 Dataset
+(3), Tier 9 Vault (5 vault-on only), Tier 10 Federation (1), plus the four
+non-tier packet tools (FAB5-I2, always visible). Reconciliation: tiers sum
+74 vault-on including the two gated imports; + 4 packet = 78. The
+authoritative live count is always in ARIA_MCP_INTERFACE.md §2.
 
 ### `moot_list_lenses` cognition menu
 
@@ -1056,6 +1059,15 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.37.3 -- 2026-08-14
+
+- §12 tier decomposition now reconciles to the stated totals: Tier 7 is
+  9 (recipe is thirteen tools, not twelve — `moot_recall_connected` was
+  missing from the §2 enumeration and from the remaining-recipe count),
+  and the four non-tier FAB5-I2 packet tools are named with an explicit
+  reconciliation line (74 + 4 packet = 78). Found by Bob's audit: the
+  corrected Tier-5 line still summed to 73 against a stated 78.
 
 ### 1.37.2 -- 2026-08-14
 

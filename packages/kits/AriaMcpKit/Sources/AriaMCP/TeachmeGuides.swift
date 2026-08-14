@@ -728,14 +728,16 @@ enum TeachmeGuides {
     //   Tier 2:  ToolProjection.connectionTools().count            (4)
     //   Tier 3:  ToolProjection.knowledgeGraphTools().count        (4)
     //   Tier 4:  ToolProjection.journalTools().count               (2)
-    //   Tier 5:  ToolProjection.estateTools() minus palace_import  (7 always; +1 vault-gated)
+    //   Tier 5:  ToolProjection.estateTools() minus the 2 gated imports (8 always; +2 vault-gated)
     //   Tier 6:  LensTools.tools().count + 4 Tier-6 recipe tools  (27)
-    //   Tier 7:  RecipeTools.tools().count minus 4 Tier-6 tools    (8)
+    //   Tier 7:  RecipeTools.tools().count minus 4 Tier-6 tools    (9)
     //   Tier 8:  DatasetTools.tools().count                        (3)
     //   Tier 9:  VaultTools.vaultToolNames.count (vault-on only)   (5)
     //   Tier 10: 1 (moot_federated_search, always present)         (1)
-    //   Total vault-on:  ToolProjection.tools(environment:[:]).count (71)
-    //   Total vault-off: ToolProjection.tools(environment:["MOOTX01_VAULT":"0"]).count (65)
+    //   Non-tier: PacketTools.tools().count (always visible)       (4)
+    //   Tiers sum 74 vault-on incl. the 2 gated imports; + 4 packet = 78.
+    //   Total vault-on:  ToolProjection.tools(environment:[:]).count (78)
+    //   Total vault-off: ToolProjection.tools(environment:["MOOTX01_VAULT":"0"]).count (71)
     private static var estateStatusGuide: String {
         // Tier counts derived from the live registry.
         let tier1 = ToolProjection.coreMemoryTools().count
@@ -752,7 +754,8 @@ enum TeachmeGuides {
         let tier6RecipeCount = 4  // list_lenses, synthesize, recall_precise, recall_shaped
         let tier6 = tier6RecipeCount + LensTools.tools().count
         // Tier 7: remaining recipe tools (dream, distill, recall_distilled,
-        //         hunt, list_recipes, run_migration, confirm_migration).
+        //         hunt, list_recipes, run_migration, confirm_migration,
+        //         recall_connected, recall_vague).
         let tier7 = RecipeTools.tools().count - tier6RecipeCount
         let tier8 = DatasetTools.tools().count
         let tier9 = VaultTools.vaultToolNames.count  // vault-on only
@@ -785,7 +788,7 @@ enum TeachmeGuides {
             Tier 4 — Journal (\(tier4) tools):
               moot_write_journal, moot_read_journal
 
-            Tier 5 — Estate (\(tier5Always) tools + 1 vault-gated):
+            Tier 5 — Estate (\(tier5Always) tools + 2 vault-gated):
               moot_estate_status, moot_estate_map, moot_estate_ping,
               moot_monitoring_status, moot_reindex, moot_drain_status,
               moot_reclassify_fdc, moot_timing_report
@@ -799,7 +802,8 @@ enum TeachmeGuides {
             Tier 7 — Extended Cognition (\(tier7) tools):
               moot_dream, moot_distill, moot_recall_distilled,
               moot_hunt_contradictions, moot_list_recipes,
-              moot_run_migration, moot_confirm_migration
+              moot_run_migration, moot_confirm_migration,
+              moot_recall_connected, moot_recall_vague
 
             Tier 8 — Dataset (\(tier8) tools):
               moot_file_dataset, moot_dataset_query, moot_dataset_stats
@@ -810,6 +814,10 @@ enum TeachmeGuides {
 
             Tier 10 — Federation (\(tier10) tool):
               moot_federated_search
+
+            Non-tier — Packets (\(PacketTools.tools().count) tools, always visible):
+              moot_file_packet, moot_packet_get, moot_packet_list,
+              moot_packet_lineage
 
             Teaching mechanism:
               Add teachme:true to any tool call to receive a usage guide instead
