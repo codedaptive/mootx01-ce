@@ -116,7 +116,9 @@ public enum LocusKitSchema {
     /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
     /// (NT-L1). v2 added keys.ext. Populated estates exist; every
     /// schema change from v13 on ships a ladder entry.
-    public static let version = 13
+    /// v14 added idx_drawers_filedAt (ORDER BY filedAt DESC LIMIT 256 on
+    /// the Director recall path ran a full-table sort without this index).
+    public static let version = 14
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -227,6 +229,16 @@ public enum LocusKitSchema {
                         name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text(""))),
                     .addColumn(table: "kg_facts", column: ColumnDeclaration(
                         name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text(""))),
+                ]),
+                // v14: idx_drawers_filedAt — the Director recall path sorts by
+                // `filedAt DESC LIMIT 256` without an index, forcing SQLite to
+                // sort all ~53,000 rows before truncating. One index turns the
+                // sort into a 256-entry index walk.
+                Migration(fromVersion: 13, toVersion: 14, operations: [
+                    .addIndex(IndexDeclaration(
+                        name: "idx_drawers_filedAt",
+                        table: "drawers",
+                        columns: ["filedAt"])),
                 ]),
             ]
         )
@@ -868,6 +880,10 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_drawers_tombstoned", table: "drawers", columns: ["tombstonedAt"]),
         IndexDeclaration(name: "idx_drawers_lineageID", table: "drawers", columns: ["lineageID"]),
         IndexDeclaration(name: "idx_drawers_udcCode", table: "drawers", columns: ["udcCode"]),
+        // filedAt — ORDER BY filedAt DESC LIMIT 256 on the Director recall path
+        // scanned all ~53,000 rows without this index. With it, SQLite walks the
+        // index in reverse order and stops after 256 entries.
+        IndexDeclaration(name: "idx_drawers_filedAt", table: "drawers", columns: ["filedAt"]),
         // bit-range functional indices, now on generated columns
         IndexDeclaration(name: "idx_drawers_provenance_source", table: "drawers", columns: ["g_provenance_source"]),
         IndexDeclaration(name: "idx_drawers_provenance_confirmation", table: "drawers", columns: ["g_provenance_confirmation"]),

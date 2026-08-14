@@ -52,7 +52,12 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v13 adds the kg_facts identity trio
+/// Current schema version. v14 adds `idx_drawers_filedAt` — the Director
+/// recall path sorts by `filed_at DESC LIMIT 256` without an index, forcing
+/// SQLite to sort all ~53,000 rows before truncating. One index turns the
+/// sort into a 256-entry index walk. Matches Swift `LocusKitSchema.version`.
+///
+/// v13 adds the kg_facts identity trio
 /// (`addedBy`, `foreignSourceKey`, `foreignRecordID`, all TEXT NOT NULL
 /// DEFAULT '') — the columns MXE-KH declared on the table but shipped
 /// without a ladder entry, so populated v12 estates never gained them on
@@ -87,7 +92,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -120,6 +125,18 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v13 → v14: add idx_drawers_filedAt. The Director recall path
+            // orders by `filed_at DESC LIMIT 256`; without this index SQLite
+            // sorts all ~53,000 rows before truncating. Matches Swift v13 → v14.
+            Migration {
+                from_version: 13,
+                to_version: 14,
+                operations: vec![SchemaOperation::AddIndex(IndexDeclaration::new(
+                    "idx_drawers_filedAt",
+                    "drawers",
+                    vec!["filedAt".to_string()],
+                ))],
+            },
             // v12 → v13: add the kg_facts identity trio (MXE-KH declared
             // these on `kg_facts_table()` but shipped no ladder entry, so a
             // populated v12 estate never gained them and every write to
@@ -1074,6 +1091,14 @@ fn indices() -> Vec<IndexDeclaration> {
             "drawers",
             vec!["udcCode".to_string()],
         ),
+        // filedAt — ORDER BY filedAt DESC LIMIT 256 on the Director recall path
+        // scanned all ~53,000 rows without this index. With it, SQLite walks
+        // 256 index entries in reverse order and stops.
+        IndexDeclaration::new(
+            "idx_drawers_filedAt",
+            "drawers",
+            vec!["filedAt".to_string()],
+        ),
         // bit-range functional indices, now on generated columns
         IndexDeclaration::new(
             "idx_drawers_provenance_source",
@@ -1245,6 +1270,8 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
+    /// v14 adds idx_drawers_filedAt so ORDER BY filedAt DESC LIMIT 256 on
+    /// the Director recall path can seek rather than sort all ~53,000 rows.
     /// v13 adds the kg_facts identity trio (addedBy, foreignSourceKey,
     /// foreignRecordID) as a ladder entry so populated v12 estates gain
     /// the columns MXE-KH declared on the table.
@@ -1259,30 +1286,35 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_thirteen() {
-        assert_eq!(SCHEMA_VERSION, 13);
-        // Four migrations: v9 → v10 (FINDING-3 dedup + unique index),
+    fn schema_version_is_fourteen() {
+        assert_eq!(SCHEMA_VERSION, 14);
+        // Five migrations: v9 → v10 (FINDING-3 dedup + unique index),
         //                  v10 → v11 (operationalAND on container_fingerprints),
         //                  v11 → v12 (subject trio on drawers),
-        //                  v12 → v13 (kg_facts identity trio).
+        //                  v12 → v13 (kg_facts identity trio),
+        //                  v13 → v14 (idx_drawers_filedAt).
         let m = schema();
-        assert_eq!(m.migrations.len(), 4);
-        // v12 → v13 is listed first (newest-first order).
-        assert_eq!(m.migrations[0].from_version, 12);
-        assert_eq!(m.migrations[0].to_version, 13);
-        assert_eq!(m.migrations[0].operations.len(), 3);
-        // v11 → v12 is listed second.
-        assert_eq!(m.migrations[1].from_version, 11);
-        assert_eq!(m.migrations[1].to_version, 12);
+        assert_eq!(m.migrations.len(), 5);
+        // v13 → v14 is listed first (newest-first order).
+        assert_eq!(m.migrations[0].from_version, 13);
+        assert_eq!(m.migrations[0].to_version, 14);
+        assert_eq!(m.migrations[0].operations.len(), 1);
+        // v12 → v13 is listed second.
+        assert_eq!(m.migrations[1].from_version, 12);
+        assert_eq!(m.migrations[1].to_version, 13);
         assert_eq!(m.migrations[1].operations.len(), 3);
-        // v10 → v11 is listed third.
-        assert_eq!(m.migrations[2].from_version, 10);
-        assert_eq!(m.migrations[2].to_version, 11);
-        assert_eq!(m.migrations[2].operations.len(), 1);
-        // v9 → v10 is listed fourth.
-        assert_eq!(m.migrations[3].from_version, 9);
-        assert_eq!(m.migrations[3].to_version, 10);
-        assert_eq!(m.migrations[3].operations.len(), 2);
+        // v11 → v12 is listed third.
+        assert_eq!(m.migrations[2].from_version, 11);
+        assert_eq!(m.migrations[2].to_version, 12);
+        assert_eq!(m.migrations[2].operations.len(), 3);
+        // v10 → v11 is listed fourth.
+        assert_eq!(m.migrations[3].from_version, 10);
+        assert_eq!(m.migrations[3].to_version, 11);
+        assert_eq!(m.migrations[3].operations.len(), 1);
+        // v9 → v10 is listed fifth.
+        assert_eq!(m.migrations[4].from_version, 9);
+        assert_eq!(m.migrations[4].to_version, 10);
+        assert_eq!(m.migrations[4].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
