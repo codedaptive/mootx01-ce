@@ -2487,22 +2487,21 @@ extension ToolDispatcher {
 
     /// `moot_connection_search` — find connections going out from a memory.
     ///
-    /// Reads all tunnels from the estate and filters by `sourceDrawerId`.
+    /// Pushes `sourceDrawerId == from_id`, tombstone guard, and lifecycle/retirement
+    /// bitmap predicates into SQL via `activeTunnelsFrom(drawerId:)` so that
+    /// SQLite evaluates them before any row is decoded. The sensitivity gate
+    /// (`isBulkExportable`) is applied in-memory on the small returned slice.
     func runConnectionSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let fromID = try requireString(args, "from_id")
         let estate = try await kit.estate(for: handle)
-        let allTunnels = try await estate.allTunnels()
-        // Keep only confirmed-active, non-tombstoned, exportable tunnels
-        // originating from this drawer. Lifecycle gate (FIND4): proposed,
-        // withdrawn, and superseded tunnels are excluded at the MCP boundary
-        // so AI clients see only confirmed edges. Sensitivity ceiling (#58):
-        // restricted/secret tunnels are excluded, matching the default recall
-        // ceiling.
-        let outgoing = allTunnels.filter {
-            $0.sourceDrawerId == fromID && $0.tombstonedAt == nil
-                && $0.lifecycle == .active
-                && $0.adjectiveSensitivity.isBulkExportable
+        // activeTunnelsFrom pushes sourceDrawerId equality, tombstone IS NULL,
+        // and (operationalBitmap & mask) = 0 into SQL — lifecycle + retirement
+        // filters move to the storage layer. Sensitivity ceiling (#58):
+        // restricted/secret tunnels are excluded in the in-memory pass below.
+        let candidates = try await estate.activeTunnelsFrom(drawerId: fromID)
+        let outgoing = candidates.filter {
+            $0.adjectiveSensitivity.isBulkExportable
         }
         // Dense-row citations (PR-03): each drawer endpoint is cited as a
         // dense row so the AI can judge the neighbor without another call.
@@ -2520,20 +2519,20 @@ extension ToolDispatcher {
 
     /// `moot_connection_map` — find connections pointing to a memory.
     ///
-    /// Reads all tunnels from the estate and filters by `targetDrawerId`.
+    /// Pushes `targetDrawerId == to_id`, tombstone guard, and lifecycle/retirement
+    /// bitmap predicates into SQL via `activeTunnelsTo(drawerId:)`. The sensitivity
+    /// gate is applied in-memory on the small returned slice. Mirror of
+    /// `runConnectionSearch` for the incoming-edge direction.
     func runConnectionMap(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let toID = try requireString(args, "to_id")
         let estate = try await kit.estate(for: handle)
-        let allTunnels = try await estate.allTunnels()
-        // Keep only confirmed-active, non-tombstoned, exportable tunnels
-        // pointing to this drawer. Lifecycle gate (FIND4): proposed, withdrawn,
-        // and superseded tunnels are excluded at the MCP boundary. Sensitivity
-        // ceiling (#58): same gate as connection_search.
-        let incoming = allTunnels.filter {
-            $0.targetDrawerId == toID && $0.tombstonedAt == nil
-                && $0.lifecycle == .active
-                && $0.adjectiveSensitivity.isBulkExportable
+        // activeTunnelsTo pushes targetDrawerId equality, tombstone IS NULL, and
+        // (operationalBitmap & mask) = 0 into SQL. Sensitivity ceiling (#58):
+        // same in-memory gate as connection_search.
+        let candidates = try await estate.activeTunnelsTo(drawerId: toID)
+        let incoming = candidates.filter {
+            $0.adjectiveSensitivity.isBulkExportable
         }
         // Dense-row citations (PR-03) — mirror of connection_search.
         let endpointIDs = incoming.prefix(50).compactMap { $0.sourceDrawerId }
@@ -2594,12 +2593,6 @@ extension ToolDispatcher {
     /// the ARIA surface consistent.
     func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let allFactsRaw = try await kit.recallKGFacts(handle)
-        // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
-        // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
-        // that normal recall applies via insertDefaults. Filter at the ARIA tool boundary
-        // only — recallKGFacts has internal callers that need the full set.
-        let allFacts = allFactsRaw.filter { $0.adjectiveSensitivity.isBulkExportable }
         // Optional query: substring match across subject, predicate, and object.
         // Omitting query returns all active facts (the unfiltered case).
         let queryRaw = try optionalString(args["query"], argument: "query")
@@ -2613,6 +2606,22 @@ extension ToolDispatcher {
             argument: "limit",
             default: 100
         )
+        // Push subject and sourceDrawerID equality predicates into SQL when
+        // present. The active-cluster guard (g_state_cluster < 16) is always
+        // in the SQL WHERE; only rows that satisfy it are decoded in Swift.
+        // idx_kg_facts_subject and idx_kg_facts_sourceDrawer let the engine
+        // seek rather than scan when these columns are constrained.
+        // predicateExact, objectExact, and the substring query remain in-memory.
+        let estate = try await kit.estate(for: handle)
+        let allFactsRaw = try await estate.kgFacts(
+            subjectEq: subjectExact,
+            sourceDrawerIDEq: sourceExact
+        )
+        // MCP disclosure ceiling: drop Restricted/Secret facts before any output.
+        // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
+        // that normal recall applies via insertDefaults. Filter at the ARIA tool boundary
+        // only — recallKGFacts has internal callers that need the full set.
+        let allFacts = allFactsRaw.filter { $0.adjectiveSensitivity.isBulkExportable }
         let facts = allFacts.filter { fact in
             let queryMatches = query.map { q in
                 fact.subject.lowercased().contains(q) ||
@@ -2620,10 +2629,8 @@ extension ToolDispatcher {
                 fact.object.lowercased().contains(q)
             } ?? true
             return queryMatches
-                && (subjectExact.map { fact.subject == $0 } ?? true)
                 && (predicateExact.map { fact.predicate == $0 } ?? true)
                 && (objectExact.map { fact.object == $0 } ?? true)
-                && (sourceExact.map { fact.sourceDrawerID == $0 } ?? true)
         }
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit, check whether it references an actual drawer row in the estate.
@@ -2635,7 +2642,6 @@ extension ToolDispatcher {
         // Parity with Rust run_fact_search.
         let emittedFacts = Array(facts.prefix(limit))
         let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
-        let estate = try await kit.estate(for: handle)
         let hiddenSourceIDs: Set<String>
         if distinctSourceIDs.isEmpty {
             hiddenSourceIDs = []
@@ -3360,13 +3366,23 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let sinceMs = Int64(try optionalInt(args["since_ms"], argument: "since_ms") ?? 0)
 
-        // Page the whole window through the GLK audit seam. 4096 events per
-        // page bounds peak memory without measurable extra latency (the
-        // cursor resume is an indexed scan on SQL backends). The FULL window
-        // must be collected before deriving — tier 3/4 pair captures with
-        // markers that can arrive many pages later.
+        // Page the audit log from `sinceMs` forward. The HLC cursor is seeded
+        // exactly as EstatePerformanceHealthDuty does: physicalTime = sinceMs,
+        // logicalCount = 0, nodeID = 0. This sits at the very start of the
+        // given millisecond; events from that same millisecond but with
+        // logicalCount > 0 are re-fetched, but deriveTimings' sinceExclusiveMs
+        // guard excludes their contribution (A6 exactly-once contract).
+        // When sinceMs == 0 the cursor is nil, meaning start from the beginning
+        // of the log. A nil seed and then using last.hlc to advance is the
+        // standard paging protocol; the audit-log index makes the resume cheap.
+        //
+        // 4096 events per page bounds peak memory without measurable extra latency.
+        // The FULL window must be collected before deriving — tier 3/4 pair captures
+        // have markers that can arrive many pages later.
         var events: [NeuronKit.TimingAuditEvent] = []
-        var cursor: HLC? = nil
+        var cursor: HLC? = sinceMs > 0
+            ? HLC(physicalTime: sinceMs, logicalCount: 0, nodeID: 0)
+            : nil
         let pageSize = 4096
         while true {
             let page = try await kit.auditEvents(handle, after: cursor, limit: pageSize)

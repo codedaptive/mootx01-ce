@@ -861,6 +861,23 @@ public actor Estate {
         try await store.allActiveTunnels()
     }
 
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` equals `drawerId`.
+    ///
+    /// Pushes source-drawer equality, tombstone guard, and lifecycle/retirement
+    /// bitmap predicates into SQL so that SQLite evaluates them before any row
+    /// is allocated in Swift. Delegates to `DrawerStore.activeTunnelsFrom`.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsFrom(drawerId: drawerId)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` equals `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming direction.
+    /// Delegates to `DrawerStore.activeTunnelsTo`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsTo(drawerId: drawerId)
+    }
+
     /// Insert a tunnel directly into the estate store.
     ///
     /// Delegates to `DrawerStore.addTunnel`. Conflicting IDs surface as
@@ -1005,6 +1022,13 @@ public actor Estate {
     /// Peer of the Rust `Estate::all_kg_facts`.
     public func allKGFacts() async throws -> [KGFact] {
         try await store.allKGFacts()
+    }
+
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality predicates
+    /// pushed into SQL. When both parameters are nil this is equivalent to
+    /// `allKGFacts()`. Delegates to `DrawerStore.kgFacts(subjectEq:sourceDrawerIDEq:)`.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        try await store.kgFacts(subjectEq: subjectEq, sourceDrawerIDEq: sourceDrawerIDEq)
     }
 
     /// All kg-facts estate-wide regardless of lifecycle state — active AND

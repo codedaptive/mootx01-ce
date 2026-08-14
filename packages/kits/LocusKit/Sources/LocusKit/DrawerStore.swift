@@ -2237,8 +2237,96 @@ public actor DrawerStore {
     ///
     /// Mirrors Rust `DrawerStore::all_active_tunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
-        let all = try await allTunnels()
-        return all.filter { !$0.isRetired && $0.lifecycle == .active }
+        // Push both the lifecycle (bits 3–5 = 0) and the retirement (bit 13 = 0)
+        // filters into SQL. `bitwiseEq` compiles to ("operationalBitmap" & mask) = 0,
+        // which is evaluated inside SQLite — no rows are hydrated that fail either
+        // condition. `tombstonedAt IS NULL` is the hard-delete guard, matching
+        // what `allTunnels` already applies. Together these three predicates
+        // replace the previous full-scan + in-memory retain.
+        //
+        // Bit constants per TunnelOperational.swift layout:
+        //   bits 3–5 = TunnelLifecycle; `.active` rawValue 0 → all three bits clear
+        //   bit   13 = is_retired flag (Tunnel.isRetiredBit)
+        let lifecycleMask: Int64 = 0x38         // bits 3–5
+        let retiredBit: Int64 = Tunnel.isRetiredBit // bit 13
+        let activeMask: Int64 = lifecycleMask | retiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` matches `drawerId`.
+    ///
+    /// Pushes three predicates into SQL so that SQLite evaluates them before
+    /// any row is decoded into a Swift `Tunnel`:
+    ///   • `sourceDrawerId = drawerId`  (equality; the primary filter)
+    ///   • `tombstonedAt IS NULL`       (hard-delete guard)
+    ///   • `(operationalBitmap & activeMask) = 0`  (lifecycle active + not retired)
+    ///
+    /// The `idx_tunnels_kind_source_drawer` compound index has `sourceDrawerId`
+    /// as the trailing column; SQLite may use it for the equality filter when
+    /// the result-set fraction is small (MCP connection queries typically match
+    /// far fewer than 1 % of the tunnels table).
+    ///
+    /// Callers that need the full sensitivity gate (`adjectiveSensitivity.isBulkExportable`)
+    /// apply it in memory on the (now small) returned slice.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        // Bitmap mask covering lifecycle (bits 3–5) and the retired flag (bit 13).
+        // Both fields must be 0 for an active, non-retired tunnel.
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "sourceDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` matches `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming-edge direction.
+    /// Same three SQL predicates; `idx_tunnels_kind_target_drawer` is the
+    /// candidate index for `targetDrawerId`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "targetDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
     }
 
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
@@ -2957,6 +3045,48 @@ public actor DrawerStore {
             resultCount: result.count,
             estateTag: estateUuid.uuidString,
             queryLabel: "all"
+        )
+        return result
+    }
+
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality filters
+    /// pushed into SQL.
+    ///
+    /// When `subjectEq` or `sourceDrawerIDEq` are non-nil their equality predicates
+    /// are compiled into the SQL WHERE clause alongside the active-cluster guard
+    /// (`g_state_cluster < 16`). This lets the engine use `idx_kg_facts_subject`
+    /// and `idx_kg_facts_sourceDrawer` rather than loading the whole table and
+    /// filtering in Swift. When both are nil the query is equivalent to `allKGFacts`.
+    ///
+    /// Callers that need only the `g_state_cluster` guard should use `allKGFacts`
+    /// directly; this method is for fact-search paths that carry exact-match filters.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        // Build the predicate list. The active-cluster guard is always present;
+        // equality terms are added only when the caller supplies a value.
+        var predicates: [StoragePredicate] = [
+            .lt(Column(table: "kg_facts", name: "g_state_cluster"),
+                .int(Int64(RowState.activeClusterUpperBoundRaw))),
+        ]
+        if let subject = subjectEq {
+            // idx_kg_facts_subject covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "subject"), .text(subject)))
+        }
+        if let sourceID = sourceDrawerIDEq {
+            // idx_kg_facts_sourceDrawer covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "kg_facts",
+            where: .and(predicates),
+            orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        let result = try rows.map(Self.kgFactFromRow)
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "filtered"
         )
         return result
     }
