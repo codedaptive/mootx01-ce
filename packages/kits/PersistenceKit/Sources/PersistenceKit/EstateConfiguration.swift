@@ -29,13 +29,13 @@ public struct EstateConfiguration: Sendable {
     /// constraints, especially the federation-incompatibility note.
     public let novelTokenTagger: NovelTokenTaggerChoice
 
-    /// controls whether kits hold computed indexes in RAM
-    /// between queries (`.ramResident`) or load from the durable store
-    /// on demand (`.diskBacked`, the default). `.diskBacked` uses mmap
-    /// and OS page cache — small estates stay fully resident; large
-    /// estates page on demand. `.ramResident` is the pre-disk-default storage residency
-    /// behavior: all indexes cached in heap for minimum query latency
-    /// at the cost of multi-GB memory on large estates.
+    /// Controls whether kits hold computed indexes in RAM between queries
+    /// (`.ramResident`, the default) or load from the durable store on demand
+    /// (`.diskBacked`). `.ramResident` builds the index once per model on first
+    /// query and serves subsequent queries from heap, falling back to the table
+    /// scan when the index is evicted (e.g. under memory pressure).
+    /// `.diskBacked` skips the heap copy entirely and scans SQLite on every
+    /// query, relying on the OS page cache for warm reads.
     public let residencyHint: ResidencyHint
 
     public init(
@@ -44,7 +44,7 @@ public struct EstateConfiguration: Sendable {
         encryptionConfig: EstateEncryptionConfig = .plaintext,
         cacheConfig: EstateCacheConfig = .disabled,
         novelTokenTagger: NovelTokenTaggerChoice = .hmm,
-        residencyHint: ResidencyHint = .diskBacked
+        residencyHint: ResidencyHint = .ramResident
     ) {
         self.estateID = estateID
         self.backend = backend
@@ -66,18 +66,17 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 
-/// controls whether kits hold computed indexes in heap
-/// between queries or load from the durable store on demand.
+/// Controls whether kits hold computed indexes in heap between queries
+/// or load from the durable store on demand.
 public enum ResidencyHint: Sendable, Equatable {
-    /// Indexes loaded from disk on demand; OS page cache manages RAM
-    /// residency. Default for all production estates. Multi-GB heap
-    /// savings on large estates; small estates stay fully cached by
-    /// the OS page cache with no measurable latency difference.
+    /// Indexes loaded from the durable store on demand; the OS page cache
+    /// manages RAM residency. Float NN search scans the SQLite table directly
+    /// on every query. Use when heap pressure outweighs query latency.
     case diskBacked
-    /// All indexes cached in the Swift/Rust heap for minimum query
-    /// latency. Pre-disk-default storage residency behavior. Use for test fixtures, small
-    /// embedded deployments, or any path that needs guaranteed
-    /// sub-millisecond float NN search without a SQLite round-trip.
+    /// All indexes cached in the Swift/Rust heap for minimum query latency.
+    /// The float-lane index is built lazily on first query per model and evicted
+    /// automatically under critical memory pressure, falling back to the table
+    /// scan. Default for all production estates.
     case ramResident
 }
 

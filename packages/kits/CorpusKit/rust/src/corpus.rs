@@ -2253,11 +2253,10 @@ impl Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         self.persist_maintained_counts(filed_at_secs)?;
 
-        // disk-default storage residency NOTE: release_basis was here but is REMOVED because the
-        // serving providers have no on-demand reconstruction path. Calling it
-        // clears the live vocab, making subsequent embeds return zero vectors.
-        // The ~2GB vocab RAM stays resident until a lazy-load-from-BasisStore
-        // mechanism is implemented.
+        // NOTE: release_basis was here but is REMOVED because the serving providers
+        // have no on-demand reconstruction path. Calling it clears the live vocab,
+        // making subsequent embeds return zero vectors. The ~2GB vocab RAM stays
+        // resident until a lazy-load-from-BasisStore mechanism is implemented.
 
         eprintln!(
             "[corpus] reindex: complete — {} chunks re-embedded across {} slots",

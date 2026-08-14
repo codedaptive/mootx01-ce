@@ -71,7 +71,7 @@ use std::sync::Mutex;
 use std::sync::Arc;
 use persistence_kit::{
     BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause,
-    OrderDirection, SchemaDeclaration, SchemaOperation, Storage, StoragePredicate,
+    OrderDirection, ResidencyHint, SchemaDeclaration, SchemaOperation, Storage, StoragePredicate,
     TableDeclaration, TypedValue,
 };
 use uuid::Uuid;
@@ -1508,11 +1508,17 @@ impl VectorStore {
     ///
     /// Returns up to `k` matches, nearest first. Empty if `k` is 0, the
     /// probe is empty, or no float rows exist.
-    /// float NN search scans the SQLite `vectors` table directly.
-    /// No FloatBruteForceIndex, no cached ResidentVectorArray, no multi-GB
-    /// heap copy. With PRAGMA mmap_size, row reads come from the OS page
-    /// cache. Cosine distance is computed per row; the result set is sorted
-    /// and truncated to k.
+    /// k-NEAREST neighbours over the float32 (Lane D) vectors by cosine.
+    ///
+    /// Dispatch by `residencyHint`:
+    /// - `RamResident` (default): builds a `FloatBruteForceIndex` per modelID on
+    ///   first call, then serves from heap. If the index is absent (evicted or
+    ///   no float rows), falls back to `float_scan_from_table`.
+    /// - `DiskBacked`: always scans the `vectors` table directly via
+    ///   `float_scan_from_table`. The OS page cache manages RAM residency.
+    ///
+    /// Both paths compute the same cosine distance formula; results are
+    /// reproducible-within-config but not four-way bit-identical (arch spec §6).
     pub fn find_nearest_float(
         &self,
         probe: &[f32],
@@ -1522,7 +1528,26 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        // float_scan_from_table returns the k nearest, ordered best-first.
+        if self.storage.configuration().residency_hint == ResidencyHint::RamResident {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            let built = self.ensure_float_index_built_locked(&mut state, model_id)?;
+            if built {
+                let probe_payload = VectorPayload::from_f32(probe);
+                // Unwrap is safe: ensure_float_index_built_locked guarantees
+                // the entry is present when it returns true.
+                let index = state.float_indices.get(model_id)
+                    .expect("ensure_float_index_built_locked returned true but entry is absent");
+                let hits = index.search(&probe_payload, DenseMetric::COSINE, k, None)?;
+                return Ok(hits.into_iter().map(|h| VectorMatch {
+                    item_id: h.key.item_id,
+                    distance: h.raw_distance,
+                    model_id: model_id.to_string(),
+                }).collect());
+            }
+            // No float rows for this model — fall through to the table scan.
+        }
+        // diskBacked path, or ramResident with no rows yet: scan the table.
         let scored = self.float_scan_from_table(probe, model_id, k, true)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
@@ -1557,7 +1582,24 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        // float_scan_from_table returns the k farthest, ordered best-first.
+        if self.storage.configuration().residency_hint == ResidencyHint::RamResident {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            let built = self.ensure_float_index_built_locked(&mut state, model_id)?;
+            if built {
+                let probe_payload = VectorPayload::from_f32(probe);
+                let index = state.float_indices.get(model_id)
+                    .expect("ensure_float_index_built_locked returned true but entry is absent");
+                let hits = index.search_farthest(&probe_payload, DenseMetric::COSINE, k, None)?;
+                return Ok(hits.into_iter().map(|h| VectorMatch {
+                    item_id: h.key.item_id,
+                    distance: h.raw_distance,
+                    model_id: model_id.to_string(),
+                }).collect());
+            }
+            // No float rows for this model — fall through to the table scan.
+        }
+        // diskBacked path, or ramResident with no rows yet: scan the table.
         let scored = self.float_scan_from_table(probe, model_id, k, false)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
@@ -2404,6 +2446,19 @@ impl VectorStore {
         Ok(top)
     }
 
+    /// Evict all per-model float-lane indexes from the in-process heap.
+    ///
+    /// Safe to call at any time. After eviction the next `find_nearest_float`
+    /// or `find_farthest_float` call lazily rebuilds from the `vectors` table
+    /// when `residency_hint == RamResident`, or uses `float_scan_from_table`
+    /// directly when `residency_hint == DiskBacked`. Callers that implement
+    /// their own memory-pressure management may call this directly.
+    pub fn evict_float_indices(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.float_indices.clear();
+        }
+    }
+
     fn ensure_float_index_built_locked(
         &self,
         state: &mut HotState,
@@ -2458,9 +2513,9 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
-        // disk-default storage residency string interning: model_id and model_version repeat for
-        // every row in a partition. Interning collapses N identical String
-        // heap allocations to one shared instance per unique value.
+        // model_id and model_version repeat for every row in a partition.
+        // Interning collapses N identical String heap allocations to one
+        // shared instance per unique value.
         let mut intern_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let intern = |cache: &mut std::collections::HashMap<String, String>, s: String| -> String {
             if let Some(existing) = cache.get(&s) {

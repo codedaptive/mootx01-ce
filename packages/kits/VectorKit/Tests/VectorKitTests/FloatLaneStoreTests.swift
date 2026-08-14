@@ -262,4 +262,124 @@ struct FloatLaneStoreTests {
         #expect(matches.map(\.itemID) == FloatRankFixture.expectedFarthestOrder)
       }
     }
+
+    // MARK: - Residency parity (index path == scan path)
+
+    /// Prove that the ramResident (index) path and the diskBacked (scan) path
+    /// return identical results for every query in the rank fixture.
+    ///
+    /// This is the accuracy invariant: residency is a speed knob, not a
+    /// correctness knob. Any divergence between the two paths is a defect.
+    /// Both nearest and farthest directions are checked.
+    @Test("residency parity: ramResident and diskBacked produce identical results")
+    func residencyParityIndexMatchesScan() async throws {
+      try await GlobalTestLock.shared.withLock {
+
+        // Build two scratch stores on separate SQLite files: one ramResident
+        // (uses FloatBruteForceIndex), one diskBacked (always table-scans).
+        let ramURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vectorkit-parity-ram-\(UUID().uuidString).sqlite3")
+        let diskURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vectorkit-parity-disk-\(UUID().uuidString).sqlite3")
+
+        let ramStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: ramURL, busyTimeout: 5.0),
+            residencyHint: .ramResident))
+        let diskStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: diskURL, busyTimeout: 5.0),
+            residencyHint: .diskBacked))
+
+        try await ramStorage.open(schema: VectorStore.schemaDeclaration)
+        try await diskStorage.open(schema: VectorStore.schemaDeclaration)
+
+        let ramStore  = VectorStore(storage: ramStorage)
+        let diskStore = VectorStore(storage: diskStorage)
+
+        // Insert the same fixture into both stores.
+        for (id, v) in FloatRankFixture.vectors {
+            let payload = VectorPayload(floats: v)
+            try await ramStore.addPayload(
+                itemID: id, vectorIndex: 0, payload: payload,
+                modelID: FloatRankFixture.modelID,
+                modelVersion: FloatRankFixture.modelVersion,
+                filedAt: Self.now)
+            try await diskStore.addPayload(
+                itemID: id, vectorIndex: 0, payload: payload,
+                modelID: FloatRankFixture.modelID,
+                modelVersion: FloatRankFixture.modelVersion,
+                filedAt: Self.now)
+        }
+
+        // Nearest: index path must equal scan path in both item order and distance.
+        let ramNearest  = try await ramStore.findNearestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+        let diskNearest = try await diskStore.findNearestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+        #expect(ramNearest.map(\.itemID)   == diskNearest.map(\.itemID),
+            "Nearest: item order diverges between ramResident and diskBacked")
+        #expect(ramNearest.map(\.distance) == diskNearest.map(\.distance),
+            "Nearest: distances diverge between ramResident and diskBacked")
+
+        // Farthest: same invariant.
+        let ramFarthest  = try await ramStore.findFarthestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+        let diskFarthest = try await diskStore.findFarthestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+        #expect(ramFarthest.map(\.itemID)   == diskFarthest.map(\.itemID),
+            "Farthest: item order diverges between ramResident and diskBacked")
+        #expect(ramFarthest.map(\.distance) == diskFarthest.map(\.distance),
+            "Farthest: distances diverge between ramResident and diskBacked")
+
+        // Cleanup scratch files.
+        try? FileManager.default.removeItem(at: ramURL)
+        try? FileManager.default.removeItem(at: diskURL)
+      }
+    }
+
+    /// Prove that evictFloatIndices leaves accuracy intact: after eviction the
+    /// next query rebuilds the index and returns the same results as before.
+    @Test("evictFloatIndices: post-eviction results match pre-eviction results")
+    func evictAndRebuildPreservesResults() async throws {
+      try await GlobalTestLock.shared.withLock {
+        let store = try await makeStore()  // ramResident by default
+        for (id, v) in FloatRankFixture.vectors {
+            try await store.addPayload(
+                itemID: id, vectorIndex: 0,
+                payload: VectorPayload(floats: v),
+                modelID: FloatRankFixture.modelID,
+                modelVersion: FloatRankFixture.modelVersion,
+                filedAt: Self.now)
+        }
+
+        // First query — builds index.
+        let before = try await store.findNearestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+
+        // Evict the cache.
+        await store.evictFloatIndices()
+
+        // Second query — rebuilds index from the table.
+        let after = try await store.findNearestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+
+        #expect(before.map(\.itemID)   == after.map(\.itemID),
+            "Post-eviction rebuild changed the item order")
+        #expect(before.map(\.distance) == after.map(\.distance),
+            "Post-eviction rebuild changed the distances")
+      }
+    }
 }

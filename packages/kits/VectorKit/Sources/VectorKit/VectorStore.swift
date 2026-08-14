@@ -298,6 +298,17 @@ public actor VectorStore {
     /// the entry's presence in the map is the "built" flag (no separate bool).
     private var floatIndices: [String: FloatBruteForceIndex] = [:]
 
+    /// Retained memory pressure source (Apple platforms only). Releasing this
+    /// reference would stop future pressure deliveries. The handler creates a
+    /// Task that crosses the actor boundary via `await self.evictFloatIndices()`.
+    /// `nonisolated(unsafe)` is required because Swift 6 actor init assigns
+    /// this after capturing `[weak self]`, placing the write outside the actor's
+    /// isolation boundary. The write happens once in `init`; no concurrent
+    /// mutation exists, so the `unsafe` annotation is correct here.
+    #if canImport(Darwin)
+    nonisolated(unsafe) private var memoryPressureSource: (any DispatchSourceProtocol)?
+    #endif
+
     /// True when MIHIndex is the active hot index; false when BruteForceIndex
     /// is active. Tracks the routing decision so _selectIndex can detect
     /// no-op transitions without comparing `any DenseIndex` existentials
@@ -490,6 +501,41 @@ public actor VectorStore {
         self.hotIndex        = bf   // starts in Lane A; promoted by _selectIndex
         // Float indices are built lazily per modelID on first findNearestFloat;
         // the map starts empty (no pre-built index).
+
+        // Register for critical memory pressure on Apple platforms. The handler
+        // evicts all cached float-lane indexes and falls back to the table scan.
+        // The DispatchSource is retained for the actor's lifetime so deliveries
+        // continue across the actor's existence. A Task is used to cross the
+        // actor-isolation boundary safely.
+        #if canImport(Darwin)
+        let src = DispatchSource.makeMemoryPressureSource(
+            eventMask: .critical,
+            queue: .global(qos: .utility)
+        )
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            Task { await self.evictFloatIndices() }
+        }
+        src.resume()
+        self.memoryPressureSource = src
+        #endif
+    }
+
+    // MARK: - Residency management
+
+    /// Evict all per-model float-lane indexes from the in-process heap.
+    ///
+    /// Safe to call at any time. After eviction the next `findNearestFloat`
+    /// or `findFarthestFloat` call lazily rebuilds from the `vectors` table
+    /// when `residencyHint == .ramResident`, or uses the table scan directly
+    /// when `residencyHint == .diskBacked`.
+    ///
+    /// Called automatically on Apple platforms under critical memory pressure
+    /// (registered in `init`). Callers that manage their own pressure budget
+    /// may call this directly.
+    public func evictFloatIndices() {
+        floatIndices.removeAll(keepingCapacity: false)
+        log.info("VectorStore: float-lane indexes evicted under memory pressure")
     }
 
     // MARK: - Write
@@ -1356,7 +1402,9 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-disk-default storage residency cached float search path. Used when residencyHint ==.ramResident.
+    /// Float NN search via the cached FloatBruteForceIndex (ramResident path).
+    /// Builds the index lazily on first call for a given modelID and caches it
+    /// for subsequent queries. Called when `residencyHint == .ramResident`.
     private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -1424,7 +1472,9 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-disk-default storage residency cached farthest float path. Used when residencyHint ==.ramResident.
+    /// Farthest float search via the cached FloatBruteForceIndex (ramResident path).
+    /// Builds the index lazily on first call for a given modelID and caches it
+    /// for subsequent queries. Called when `residencyHint == .ramResident`.
     private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -2149,9 +2199,8 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // disk-default storage residency string interning: modelID is the same for every row
-        // (we're fetching a single modelID partition). Intern to avoid
-        // N identical String heap allocations.
+        // modelID is the same for every row (single-modelID partition fetch).
+        // Intern to avoid N identical String heap allocations.
         var internCache: [String: String] = [:]
         func intern(_ s: String) -> String {
             if let existing = internCache[s] { return existing }
@@ -2272,9 +2321,9 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // disk-default storage residency string interning: modelID and modelVersion repeat for
-        // every row in a partition. Interning collapses 200K+ identical
-        // String heap allocations to one shared instance per unique value.
+        // modelID and modelVersion repeat for every row in a partition.
+        // Interning collapses 200K+ identical String heap allocations to
+        // one shared instance per unique value.
         var internCache: [String: String] = [:]
         func intern(_ s: String) -> String {
             if let existing = internCache[s] { return existing }

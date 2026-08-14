@@ -232,11 +232,20 @@ struct ServeCommand: AsyncParsableCommand {
         let inMemoryBackend =
             (ProcessInfo.processInfo.environment["MOOTX01_BACKEND"] ?? "")
                 .lowercased() == "inmemory"
+
+        // MOOTX01_RESIDENCY=disk opts the estate into the disk-backed scan
+        // path (no float index held in heap). Default is ramResident — the
+        // float-lane index is built once per model and evicted under pressure.
+        let residencyHint: ResidencyHint =
+            (ProcessInfo.processInfo.environment["MOOTX01_RESIDENCY"] ?? "")
+                .lowercased() == "disk" ? .diskBacked : .ramResident
+
         let storage: any Storage
         if inMemoryBackend {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
-                backend: .inMemory
+                backend: .inMemory,
+                residencyHint: residencyHint
             )
             storage = InMemoryStorage(configuration: configuration)
             Logging.stderr.log(
@@ -246,7 +255,8 @@ struct ServeCommand: AsyncParsableCommand {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
                 backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
+                encryptionConfig: encryption,
+                residencyHint: residencyHint
             )
             do {
                 storage = try SQLiteStorage(configuration: configuration)

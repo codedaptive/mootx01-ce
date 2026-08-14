@@ -90,24 +90,27 @@ pub struct EstateConfiguration {
     /// On Rust, constructing a configuration with `NlTagger` via
     /// `new_with_tagger` returns an error (fail-closed).
     pub novel_token_tagger: NovelTokenTaggerChoice,
-    /// controls whether kits hold computed indexes in heap
-    /// between queries (RamResident) or load from the durable store
-    /// on demand (DiskBacked, the default).
+    /// Controls whether kits hold computed indexes in heap between queries
+    /// (RamResident, the default) or load from the durable store on demand
+    /// (DiskBacked). Parallel to Swift `EstateConfiguration.residencyHint`.
     pub residency_hint: ResidencyHint,
 }
 
-/// controls whether kits hold computed indexes in heap
-/// between queries or load from the durable store on demand.
+/// Controls whether kits hold computed indexes in heap between queries
+/// or load from the durable store on demand. Parallel to Swift `ResidencyHint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidencyHint {
-    /// Indexes loaded from disk on demand; OS page cache manages RAM.
+    /// Indexes loaded from the durable store on demand; OS page cache manages
+    /// RAM residency. Float NN search scans the vectors table on every query.
     DiskBacked,
-    /// All indexes cached in heap for minimum query latency.
+    /// All indexes cached in heap for minimum query latency. The float-lane
+    /// index is built lazily on first query per model and evicted on demand,
+    /// falling back to the table scan. Default for all production estates.
     RamResident,
 }
 
 impl Default for ResidencyHint {
-    fn default() -> Self { Self::DiskBacked }
+    fn default() -> Self { Self::RamResident }
 }
 
 impl EstateConfiguration {

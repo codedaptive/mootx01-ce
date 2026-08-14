@@ -1969,16 +1969,15 @@ public actor Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
 
-        // disk-default storage residency NOTE: releaseBasis was here but is REMOVED because the
-        // serving providers have no on-demand reconstruction path. Calling
-        // releaseBasis() clears the live vocab, making subsequent embeds
-        // return Engram.zero until the next full reindex or process restart.
-        // The ~2GB vocab RAM stays resident until a proper lazy-load-from-
-        // BasisStore mechanism is implemented. The diskBacked BM25 pattern
-        // (load from SQLite on demand) is the model — the embedding providers
-        // need the same treatment, but it's a larger refactor (each provider's
-        // embed path must check for empty vocab and reconstruct from the
-        // persisted basis blob before embedding).
+        // NOTE: releaseBasis was here but is REMOVED because the serving providers
+        // have no on-demand reconstruction path. Calling releaseBasis() clears
+        // the live vocab, making subsequent embeds return Engram.zero until the
+        // next full reindex or process restart. The ~2GB vocab RAM stays resident
+        // until a proper lazy-load-from-BasisStore mechanism is implemented. The
+        // diskBacked BM25 pattern (load from SQLite on demand) is the model —
+        // the embedding providers need the same treatment, but it's a larger
+        // refactor (each provider's embed path must check for empty vocab and
+        // reconstruct from the persisted basis blob before embedding).
 
         corpusLog.info(
             "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")

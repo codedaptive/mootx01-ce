@@ -87,13 +87,13 @@ public actor InvertedIndexStore {
 
     private let storage: any Storage
 
-    /// when `.ramResident`, term frequencies and document lengths
-    /// are held in RAM between queries (pre-disk-default storage residency behavior). When
-    /// `.diskBacked` (default), they are loaded from SQLite on demand.
+    /// When `.ramResident` (default), term frequencies and document lengths
+    /// are held in RAM between queries. When `.diskBacked`, they are loaded
+    /// from SQLite on demand inside `buildIndex` and discarded after use.
     private var ramTermFreqs: BM25Weighting.TermFreqTable?
     private var ramDocLengths: [String: Int]?
 
-    // MARK: - Cached index (disk-default storage residency: no persistent in-memory dictionaries)
+    // MARK: - Cached index
 
     /// Last-built (index, termMapping), served by `buildIndex(parameters:)`
     /// while `isDirty` is false. Term frequencies and document lengths are
@@ -141,13 +141,13 @@ public actor InvertedIndexStore {
 
     // MARK: - Open (load persisted state)
 
-    /// Validate the schema is accessible. disk-default storage residency: term frequencies and
-    /// document lengths are no longer loaded into RAM at open time. They
-    /// are loaded from SQLite on demand inside `buildIndex` and discarded
-    /// after the index is built.
+    /// Validate the schema is accessible. When `residencyHint == .ramResident`
+    /// (the default), term frequencies and document lengths load into RAM at
+    /// open. When `residencyHint == .diskBacked`, only table accessibility is
+    /// confirmed; data stays on disk and loads on demand inside `buildIndex`.
     public func open() async throws {
         if storage.configuration.residencyHint == .ramResident {
-            // Pre-disk-default storage residency behavior: load everything into RAM at open.
+            // ramResident path: load term frequencies and document lengths into heap at open.
             ramTermFreqs = try await loadTermFreqsTransient()
             ramDocLengths = try await loadDocLengthsTransient()
             let docCount = self.ramDocLengths?.count ?? 0
@@ -165,7 +165,7 @@ public actor InvertedIndexStore {
 
     /// Load term frequencies from SQLite into a transient dictionary.
     /// Called only inside `buildIndex`; the result is discarded after
-    /// the InvertedIndex is built. disk-default storage residency: no persistent in-memory mirror.
+    /// the InvertedIndex is built.
     private func loadTermFreqsTransient() async throws -> BM25Weighting.TermFreqTable {
         var tf: BM25Weighting.TermFreqTable = [:]
         let rows = try await storage.rowStore.query(
@@ -185,7 +185,7 @@ public actor InvertedIndexStore {
 
     /// Load document lengths from SQLite into a transient dictionary.
     /// Called only inside `buildIndex`; the result is discarded after
-    /// the InvertedIndex is built. disk-default storage residency: no persistent in-memory mirror.
+    /// the InvertedIndex is built.
     private func loadDocLengthsTransient() async throws -> [String: Int] {
         var dl: [String: Int] = [:]
         let rows = try await storage.rowStore.query(
@@ -277,10 +277,10 @@ public actor InvertedIndexStore {
     /// the next query rebuilds once, not once per folded item. Rust twin:
     /// `InvertedIndexStore::fold_postings`.
     /// Mark the index dirty after an external shard merge writes to the
-    /// durable iix_* tables. disk-default storage residency: no in-memory mirror — the durable
-    /// tables are the source of truth, and `buildIndex` reloads from them
-    /// on the next query. The `items` parameter is accepted for API
-    /// compatibility but the data is NOT copied into RAM dictionaries.
+    /// durable iix_* tables. The durable tables are the source of truth
+    /// and `buildIndex` reloads from them on the next query. The `items`
+    /// parameter is accepted for API compatibility but the data is NOT
+    /// copied into RAM dictionaries.
     public func foldPostings(_ items: [(itemID: String, tf: [String: Int], docLen: Int)]) {
         markDirty()
         // ramResident cache coherence (SECURITY): an external shard merge has
@@ -415,8 +415,7 @@ public actor InvertedIndexStore {
 
     // MARK: - Accessors
 
-    /// Number of indexed documents. Queries the durable table
-    /// (disk-default storage residency: no in-memory mirror).
+    /// Number of indexed documents. Queries the durable table directly.
     public func documentCount() async throws -> Int {
         let rows = try await storage.rowStore.query(
             table: "iix_doclens", where: nil)

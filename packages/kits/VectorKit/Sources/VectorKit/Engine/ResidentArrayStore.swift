@@ -730,12 +730,11 @@ public actor ResidentArrayStore {
         offset += vectorsBytes
 
         // --- Keys block ---
-        // disk-default storage residency string interning: on a 200K-vector estate with 1 model,
-        // decoding modelID + modelVersion per key allocates 400K identical
-        // String heap objects (~500MB). Interning collapses these to one
-        // shared instance per unique string. Swift String is CoW, so
-        // assigning the interned reference does not copy — all 200K keys
-        // hold ONE pointer to the same backing storage.
+        // String interning: on a 200K-vector estate with 1 model, decoding
+        // modelID + modelVersion per key allocates 400K identical String heap
+        // objects (~500MB). Interning collapses these to one shared instance per
+        // unique string. Swift String is CoW, so assigning the interned reference
+        // does not copy — all 200K keys hold ONE pointer to the same storage.
         var stringIntern: [String: String] = [:]
         func intern(_ s: String) -> String {
             if let existing = stringIntern[s] { return existing }
