@@ -9,8 +9,8 @@
 //
 // ProximityScanCore encapsulates the two-lane kNN scan (drawer-keyed lane
 // under the caller's modelID, corpus lane under the corpus's own modelID),
-// within-pass symmetric pair dedup, and weight computation. It is the shared
-// inner loop that replaces the duplicated scan in VectorSimilaritySignal.
+// and within-pass symmetric pair dedup. It is the shared inner loop that
+// replaces the duplicated scan in VectorSimilaritySignal.
 //
 // associateSweep drives ProximityScanCore and then:
 //   - loads all existing active associations upfront → settled set
@@ -93,8 +93,7 @@ internal enum ProximityScanCore {
     ///   - proximityThreshold: Maximum Hamming distance (0-256) for a pair to qualify.
     ///   - corpus: Optional corpus engine for Lane 2. `nil` scans Lane 1 only.
     ///   - neighboursPerProbe: kNN k value. Defaults to `ProximityScanCore.neighboursPerProbe`.
-    /// - Returns: Unique candidate pairs `(a: String, b: String, weight: Double)`, sorted
-    ///   with a < b. Weight = 1 − (distance / 256).
+    /// - Returns: Unique candidate pairs `(a: String, b: String)`, sorted with a < b.
     static func candidates(
         in vectorStore: VectorStore,
         itemIDs: [String],
@@ -102,8 +101,8 @@ internal enum ProximityScanCore {
         proximityThreshold: Int,
         corpus: CorpusContentEngine?,
         neighboursPerProbe: Int = ProximityScanCore.neighboursPerProbe
-    ) async -> [(a: String, b: String, weight: Double)] {
-        var result: [(a: String, b: String, weight: Double)] = []
+    ) async -> [(a: String, b: String)] {
+        var result: [(a: String, b: String)] = []
         // Track seen pairs as canonical-key strings to deduplicate (A,B) vs
         // (B,A) from symmetric findNearest results. Both lanes key on DRAWER ids.
         var seenPairs: Set<String> = []
@@ -130,18 +129,9 @@ internal enum ProximityScanCore {
                 let key = pairKey(itemID, match.itemID)
                 guard seenPairs.insert(key).inserted else { continue }
 
-                // Weight: 1 − distance/256. Identical vectors → 1.0.
-                // ADMIN — weight is derived free from the already-computed
-                // proximity-gate Hamming distance (no extra origin-side work
-                // to obtain it). It is carried on the AssociationFrame but
-                // VESTIGIAL past the `associate` verb, which has no weight
-                // column to persist it into. Retained on purpose — a pre-2.0
-                // gauntlet experiment will test whether weight improves recall.
-                let weight = 1.0 - Double(match.distance) / 256.0
                 result.append(
                     (a: min(itemID, match.itemID),
-                     b: max(itemID, match.itemID),
-                     weight: weight))
+                     b: max(itemID, match.itemID)))
             }
         }
 
@@ -165,8 +155,7 @@ internal enum ProximityScanCore {
                     guard seenPairs.insert(key).inserted else { continue }
                     result.append(
                         (a: min(itemID, match.itemID),
-                         b: max(itemID, match.itemID),
-                         weight: 1.0 - Double(match.distance) / 256.0))
+                         b: max(itemID, match.itemID)))
                 }
             }
         }
@@ -269,7 +258,9 @@ public extension GeniusLocusKit {
             } else {
                 // Write directly through the estate verb surface (B-1 compliant).
                 // LocusKit.AssociateFrame disambiguated from GeniusLocusKit.AssociateFrame.
-                let frame = LocusKit.AssociateFrame(a: pair.a, b: pair.b, weight: pair.weight)
+                // Weight: 0.0 — no weight column exists in the associations table;
+                // the verb accepts and discards the field.
+                let frame = LocusKit.AssociateFrame(a: pair.a, b: pair.b, weight: 0.0)
                 do {
                     _ = try await estate.associate(frame, now: now)
                     written += 1

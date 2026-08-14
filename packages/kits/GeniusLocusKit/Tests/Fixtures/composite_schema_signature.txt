@@ -379,6 +379,7 @@ index=idx_associations_udcCode table=associations cols=udcCode unique=0
 index=idx_diary_agent table=diary cols=agentName unique=0
 index=idx_diary_filedAt table=diary cols=filedAt unique=0
 index=idx_diary_wing table=diary cols=wing unique=0
+index=idx_drawers_filedAt table=drawers cols=filedAt unique=0
 index=idx_drawers_lineageID table=drawers cols=lineageID unique=0
 index=idx_drawers_operational_channel table=drawers cols=g_operational_channel unique=0
 index=idx_drawers_parent_node_id table=drawers cols=parent_node_id unique=0
