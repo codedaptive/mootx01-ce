@@ -158,7 +158,7 @@ impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitCounts",
-            3,
+            4,
             vec![
                 TableDeclaration::new(
                     "corpus_provider_counts",
@@ -195,6 +195,8 @@ impl CorpusProviderCountsStore {
                     ],
                 ),
                 Self::vocab_table(),
+                Self::term_dictionary_table(),
+                Self::term_payload_table(),
             ],
         )
         .with_migrations(vec![
@@ -208,7 +210,72 @@ impl CorpusProviderCountsStore {
                 to_version: 3,
                 operations: vec![SchemaOperation::CreateTable(Self::vocab_table())],
             },
+            // v3 -> v4 (CORPUS-COUNTS-01): create the integer-keyed pair.
+            // CREATEs only — legacy-row drops belong to `mootx01 upgrade`,
+            // never the open path (ee#49). Mirrors the Swift v3→v4 migration.
+            Migration {
+                from_version: 3,
+                to_version: 4,
+                operations: vec![
+                    SchemaOperation::CreateTable(Self::term_dictionary_table()),
+                    SchemaOperation::CreateTable(Self::term_payload_table()),
+                ],
+            },
         ])
+    }
+
+    /// One row per unique term across all models (v4). Shared by the
+    /// declaration and the v3→v4 migration. Mirrors Swift
+    /// `CorpusProviderCountsStore.termDictionaryTable`.
+    fn term_dictionary_table() -> TableDeclaration {
+        TableDeclaration::new(
+            "corpus_provider_term_dictionary",
+            vec![
+                // INTEGER PRIMARY KEY (rowid alias): ids allocated by
+                // insertion, dense, stable for the life of the estate.
+                ColumnDeclaration::int("term_id"),
+                ColumnDeclaration::text("term"),
+                // Bitmask of models that know this term (bit = the model's
+                // registry integer). Multi-valued state — bitmask territory.
+                ColumnDeclaration::int("models"),
+            ],
+            vec!["term_id".to_string()],
+        )
+    }
+
+    /// Per-(model, term) payload bytes (v4). No model_version column: a
+    /// version bump drops the model's rows and sets the reindex latch.
+    /// Payload-side model bitmask REJECTED (design §2.3): single-valued key;
+    /// a bitwise AND cannot use an index. Mirrors Swift `termPayloadTable`.
+    fn term_payload_table() -> TableDeclaration {
+        TableDeclaration::new(
+            "corpus_provider_term_payload",
+            vec![
+                ColumnDeclaration::int("model_id"),
+                ColumnDeclaration::int("term_id"),
+                ColumnDeclaration::blob("vector"),
+            ],
+            vec!["model_id".to_string(), "term_id".to_string()],
+        )
+    }
+
+    /// The model → integer registry for the v4 pair. In-code and
+    /// deterministic — the identical table ships in both ports; the integer
+    /// doubles as the dictionary bitmask's bit index. Unknown models error
+    /// rather than auto-assigning (extending the registry is a deliberate,
+    /// reviewed act; derived rows are rebuildable via the reindex latch).
+    /// Mirrors Swift `CorpusProviderCountsStore.modelRegistry`.
+    fn model_int(model_id: &str) -> CorpusKitResult<i64> {
+        match model_id {
+            "random-indexing-v1" => Ok(0),
+            "ppmi-v1" => Ok(1),
+            "lsa-v1" => Ok(2),
+            "nmf-v1" => Ok(3),
+            other => Err(CorpusKitError::ModelUnavailable(format!(
+                "modelID '{other}' is not in the counts model registry — add it (both ports) \
+                 before persisting term payloads for it"
+            ))),
+        }
     }
 
     /// The term-keyed vocabulary table, shared by the declaration and its
@@ -311,7 +378,10 @@ impl CorpusProviderCountsStore {
                     updated_at_secs,
                 };
                 self.upsert_into(&row, row_store)?;
-                self.replace_vocab_into(model_id, model_version, &terms, row_store)
+                // v4: the integer-keyed pair is the write target; clear v3
+                // rows so the pair is unambiguously the truth for this key.
+                self.replace_term_payloads_into(model_id, &terms, row_store)?;
+                self.delete_vocab_into(model_id, model_version, row_store)
             }
             None => {
                 let row = PersistedCounts {
@@ -324,9 +394,10 @@ impl CorpusProviderCountsStore {
                 };
                 self.upsert_into(&row, row_store)?;
                 // A key can be reused by a provider that does not decompose;
-                // clear any term rows so the blob is unambiguously the whole
-                // truth for this key.
-                self.delete_vocab_into(model_id, model_version, row_store)
+                // clear term rows in BOTH layouts so the blob is unambiguously
+                // the whole truth for this key.
+                self.delete_vocab_into(model_id, model_version, row_store)?;
+                self.delete_term_payloads_into(model_id, row_store)
             }
         }
     }
@@ -347,6 +418,14 @@ impl CorpusProviderCountsStore {
         let Some(persisted) = self.load(model_id, model_version)? else {
             return Ok(false);
         };
+        // Preference order: v4 integer-keyed pair → v3 term rows → legacy
+        // blob. Empty at each layer means "not written in that layout",
+        // never "empty vocabulary". Mirrors the Swift chain.
+        let v4_terms = self.load_term_payloads(model_id)?;
+        if !v4_terms.is_empty() {
+            provider.restore_counts_from_parts(&persisted.counts, &v4_terms)?;
+            return Ok(true);
+        }
         let terms = self.load_vocab(model_id, model_version)?;
         if terms.is_empty() {
             provider.restore_counts(&persisted.counts)?;
@@ -354,6 +433,195 @@ impl CorpusProviderCountsStore {
             provider.restore_counts_from_parts(&persisted.counts, &terms)?;
         }
         Ok(true)
+    }
+
+    /// Replace the stored per-term payloads for a model (v4), maintaining the
+    /// term dictionary. Term ids are allocated explicitly as max(term_id)+n —
+    /// deterministic and port-parallel. Mirrors Swift `replaceTermPayloads`.
+    pub fn replace_term_payloads_into(
+        &self,
+        model_id: &str,
+        terms: &[(String, Vec<u8>)],
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let model = Self::model_int(model_id)?;
+        let bit: i64 = 1 << model;
+
+        // Load the dictionary once: term → (term_id, models bitmask).
+        let mut dict: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+        let mut max_id: i64 = 0;
+        let dict_rows = row_store
+            .query("corpus_provider_term_dictionary", None, &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        for row in &dict_rows {
+            let (Some(TypedValue::Int(id)), Some(TypedValue::Text(term)), Some(TypedValue::Int(models))) =
+                (row.get("term_id"), row.get("term"), row.get("models"))
+            else {
+                continue;
+            };
+            dict.insert(term.clone(), (*id, *models));
+            max_id = max_id.max(*id);
+        }
+
+        // Replace this model's payload generation (delete-then-insert, same
+        // idiom as replace_vocab_into).
+        let model_predicate = StoragePredicate::Eq(
+            Column::new("corpus_provider_term_payload", "model_id"),
+            TypedValue::Int(model),
+        );
+        row_store
+            .delete("corpus_provider_term_payload", &model_predicate)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+
+        for (term, vector) in terms {
+            let term_id: i64 = match dict.get(term).copied() {
+                Some((id, models)) => {
+                    if models & bit == 0 {
+                        let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+                        values.insert("term_id".into(), TypedValue::Int(id));
+                        values.insert("term".into(), TypedValue::Text(term.clone()));
+                        values.insert("models".into(), TypedValue::Int(models | bit));
+                        row_store
+                            .upsert(
+                                "corpus_provider_term_dictionary",
+                                values,
+                                &["term_id".to_string()],
+                            )
+                            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+                        dict.insert(term.clone(), (id, models | bit));
+                    }
+                    id
+                }
+                None => {
+                    max_id += 1;
+                    let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+                    values.insert("term_id".into(), TypedValue::Int(max_id));
+                    values.insert("term".into(), TypedValue::Text(term.clone()));
+                    values.insert("models".into(), TypedValue::Int(bit));
+                    row_store
+                        .upsert(
+                            "corpus_provider_term_dictionary",
+                            values,
+                            &["term_id".to_string()],
+                        )
+                        .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+                    dict.insert(term.clone(), (max_id, bit));
+                    max_id
+                }
+            };
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            values.insert("model_id".into(), TypedValue::Int(model));
+            values.insert("term_id".into(), TypedValue::Int(term_id));
+            values.insert("vector".into(), TypedValue::Blob(vector.clone()));
+            row_store
+                .upsert(
+                    "corpus_provider_term_payload",
+                    values,
+                    &["model_id".to_string(), "term_id".to_string()],
+                )
+                .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Every stored term/vector pair for a model from the v4 pair. EMPTY when
+    /// the model has no v4 rows or the estate predates v4 — callers fall back,
+    /// never read empty as "empty vocabulary". Mirrors Swift `loadTermPayloads`.
+    pub fn load_term_payloads(
+        &self,
+        model_id: &str,
+    ) -> CorpusKitResult<Vec<(String, Vec<u8>)>> {
+        let Ok(model) = Self::model_int(model_id) else {
+            return Ok(Vec::new());
+        };
+        let row_store = self.storage.row_store();
+        let payload_predicate = StoragePredicate::Eq(
+            Column::new("corpus_provider_term_payload", "model_id"),
+            TypedValue::Int(model),
+        );
+        let payload_rows = row_store
+            .query("corpus_provider_term_payload", Some(&payload_predicate), &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        if payload_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Join-free: dictionary filtered by this model's bit, id → term.
+        let bit: i64 = 1 << model;
+        let mut term_by_id: BTreeMap<i64, String> = BTreeMap::new();
+        let dict_rows = row_store
+            .query("corpus_provider_term_dictionary", None, &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        for row in &dict_rows {
+            let (Some(TypedValue::Int(id)), Some(TypedValue::Text(term)), Some(TypedValue::Int(models))) =
+                (row.get("term_id"), row.get("term"), row.get("models"))
+            else {
+                continue;
+            };
+            if models & bit != 0 {
+                term_by_id.insert(*id, term.clone());
+            }
+        }
+
+        Ok(payload_rows
+            .iter()
+            .filter_map(|row| {
+                let id = match row.get("term_id") {
+                    Some(TypedValue::Int(i)) => *i,
+                    _ => return None,
+                };
+                let vector = match row.get("vector") {
+                    Some(TypedValue::Blob(b)) => b.clone(),
+                    _ => return None,
+                };
+                term_by_id.get(&id).map(|term| (term.clone(), vector))
+            })
+            .collect())
+    }
+
+    /// Drop a model's v4 payload rows and clear its dictionary bits. Rows
+    /// whose bitmask reaches zero stay — a dead term row is harmless and its
+    /// id is reused by the next writer. Mirrors Swift `deleteTermPayloads`.
+    pub fn delete_term_payloads_into(
+        &self,
+        model_id: &str,
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let Ok(model) = Self::model_int(model_id) else {
+            return Ok(());
+        };
+        let bit: i64 = 1 << model;
+        let model_predicate = StoragePredicate::Eq(
+            Column::new("corpus_provider_term_payload", "model_id"),
+            TypedValue::Int(model),
+        );
+        row_store
+            .delete("corpus_provider_term_payload", &model_predicate)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        let dict_rows = row_store
+            .query("corpus_provider_term_dictionary", None, &[], None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        for row in &dict_rows {
+            let (Some(TypedValue::Int(id)), Some(TypedValue::Text(term)), Some(TypedValue::Int(models))) =
+                (row.get("term_id"), row.get("term"), row.get("models"))
+            else {
+                continue;
+            };
+            if models & bit != 0 {
+                let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+                values.insert("term_id".into(), TypedValue::Int(*id));
+                values.insert("term".into(), TypedValue::Text(term.clone()));
+                values.insert("models".into(), TypedValue::Int(models & !bit));
+                row_store
+                    .upsert(
+                        "corpus_provider_term_dictionary",
+                        values,
+                        &["term_id".to_string()],
+                    )
+                    .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
     /// Replace the stored vocabulary for a provider key with `terms`.

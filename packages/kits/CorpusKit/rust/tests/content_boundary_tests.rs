@@ -425,6 +425,11 @@ fn attached_profile_contains_no_canonical_content_table() {
         // canonical content could land — which a per-term vector column does
         // not offer.
         "corpus_provider_vocab",
+        // v4 integer-keyed pair (CORPUS-COUNTS-01). Same derived-vocabulary
+        // reasoning: dictionary `term TEXT` is tokens, payload carries only
+        // integer keys and vector bytes. Twin of the Swift boundary list.
+        "corpus_provider_term_dictionary",
+        "corpus_provider_term_payload",
     ]
     .into_iter()
     .collect();
