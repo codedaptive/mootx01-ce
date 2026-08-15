@@ -98,6 +98,55 @@ pub struct CorpusProviderCountsStore {
     storage: Arc<dyn Storage>,
 }
 
+// ─── Migration-invalidation sentinel ─────────────────────────────────────────
+//
+// The upgrade migration (`corpus_counts_migration_core` in apps/mootx01) zeroes
+// the `counts` column to signal that the opaque per-provider accumulator is no
+// longer valid (the new schema uses integer-keyed term pairs; the old blob
+// format cannot be reused). The migration cannot:
+//   • synthesise a new per-provider header — it operates on a provider-agnostic
+//     column and carries no per-provider codec;
+//   • delete the row — `doc_count` / `vocab_size` are monotone anchors the
+//     migration is contractually required to preserve (pinned by upgrade.rs and
+//     the corpus_counts_migration_convergence_tests.rs round-trip guard).
+//
+// An empty blob is therefore the defined "counts invalidated, rebuild from zero"
+// signal. Callers that see `Ok(false)` from `restore_counts_into` already treat
+// it as "start from zero"; the reindex latch the migration sets then rebuilds the
+// counts on the next open-and-train cycle.
+//
+// `INVALIDATED_COUNTS_SENTINEL` and `is_invalidated_counts` are the single shared
+// contract. Both the migration writer and the store reader go through this one
+// predicate so they cannot drift independently. If the sentinel format ever
+// changes (e.g. to carry a 4-byte magic header), this is the only edit site.
+
+/// The byte value written by the counts migration to mark a row whose opaque
+/// provider blob has been invalidated.
+///
+/// The migration writes an empty blob because:
+///   1. It cannot synthesise a per-provider header (the column is opaque).
+///   2. It cannot delete the row (the `doc_count`/`vocab_size` monotone anchors
+///      must survive).
+///
+/// Readers call `is_invalidated_counts` on the raw `counts` bytes and return
+/// `Ok(false)` — "nothing stored, start from zero" — before touching any provider.
+pub const INVALIDATED_COUNTS_SENTINEL: &[u8] = &[];
+
+/// Returns `true` when `bytes` carries the migration-invalidation sentinel —
+/// an empty slice meaning "counts cleared by upgrade; rebuild from zero".
+///
+/// This is the single predicate both the migration writer and the store reader
+/// use. Keeping them on one predicate means a future sentinel format change is
+/// a single-site edit, and neither end can interpret a different shape
+/// independently.
+///
+/// Deliberate narrow scope: only the empty slice is the sentinel. A non-empty
+/// but undecodable blob still propagates `DecodingFailure` loudly, which is the
+/// correct response to genuine corruption (see BRR §2 residual risk note).
+pub fn is_invalidated_counts(bytes: &[u8]) -> bool {
+    bytes.is_empty()
+}
+
 const SUBSUMED_REFERENCE_EXT: &[u8] = br#"{"kind":"subsumed"}"#;
 
 fn growth_reference_ext(terms: &[String]) -> Option<Vec<u8>> {
@@ -405,10 +454,30 @@ impl CorpusProviderCountsStore {
     /// Restore a provider's maintained counts, preferring term rows and falling
     /// back to the legacy single blob.
     ///
-    /// The fallback is what lets an upgraded estate keep working untouched: no
-    /// bulk migration runs, the blob is read exactly as before, and the
-    /// provider converts to term rows on its next persist. Returns false when
-    /// nothing is stored, which callers already treat as "start from zero".
+    /// Preference order (highest to lowest):
+    ///   1. **Migration-invalidation sentinel** — an empty `counts` blob written
+    ///      by the upgrade migration to signal that the opaque per-provider
+    ///      accumulator is no longer valid. Returns `Ok(false)` without touching
+    ///      the provider; callers adopt the `doc_count`/`vocab_size` anchors from
+    ///      the row and start training from zero. The reindex latch the migration
+    ///      sets then rebuilds the counts on the next open-and-train cycle.
+    ///   2. **v4 integer-keyed pair** (`corpus_provider_term_dictionary` /
+    ///      `corpus_provider_term_payload`) — the current layout.
+    ///   3. **v3 text-keyed vocab rows** (`corpus_provider_vocab`) — legacy layout,
+    ///      converted to term rows on the next persist.
+    ///   4. **Legacy single blob** — the original format; used when neither term
+    ///      table has entries for this model.
+    ///
+    /// "Empty at layers 2-4" means "not written in that layout", never "empty
+    /// vocabulary". Mirrors the Swift chain.
+    ///
+    /// Returns `false` when nothing is stored (no row, or the invalidation
+    /// sentinel); callers already treat this as "start from zero".
+    ///
+    /// **Non-empty but undecodable blobs still propagate `DecodingFailure`.**
+    /// The sentinel intercepts only the empty-slice case. A non-empty corrupt
+    /// blob is the correct signal for genuine on-disk corruption and must not
+    /// be silenced (see BRR §2 residual risk note).
     pub fn restore_counts_into(
         &self,
         provider: &mut dyn crate::TrainableEmbeddingBasis,
@@ -418,6 +487,17 @@ impl CorpusProviderCountsStore {
         let Some(persisted) = self.load(model_id, model_version)? else {
             return Ok(false);
         };
+        // Sentinel check: the migration writes an empty blob to invalidate stale
+        // provider counts while preserving the monotone anchors (doc_count /
+        // vocab_size). Returning Ok(false) here means "nothing stored, start from
+        // zero" — the same contract every caller already handles. This intercept
+        // must fire before any of the v4/v3/blob branches so that even surviving
+        // v4 term rows (which the migration does not delete — BRR finding F2)
+        // cannot cause restore_counts_from_parts to forward the empty header to
+        // the provider's BasisReader::expect_magic, which rejects empty slices.
+        if is_invalidated_counts(&persisted.counts) {
+            return Ok(false);
+        }
         // Preference order: v4 integer-keyed pair → v3 term rows → legacy
         // blob. Empty at each layer means "not written in that layout",
         // never "empty vocabulary". Mirrors the Swift chain.

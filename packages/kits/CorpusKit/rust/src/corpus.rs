@@ -979,10 +979,20 @@ impl Corpus {
             if let Some(persisted) =
                 counts_store.load(trainable.model_id(), trainable.model_version())?
             {
-                // restore_counts_into prefers term rows and falls back to the
-                // blob, so an estate predating the term table rehydrates
-                // exactly as before and converts on its next persist. Nothing
-                // transforms data inside the open path.
+                // restore_counts_into preference order: migration-invalidation
+                // sentinel → v4 integer-keyed term pair → v3 text-keyed vocab
+                // rows → legacy single blob.
+                //
+                // Sentinel case (empty blob written by the upgrade migration):
+                // restore_counts_into returns Ok(false), leaving the accumulator
+                // fresh. The persisted.doc_count / vocab_size anchors are still
+                // adopted from the row below (they survive the migration intact).
+                // The reindex latch set by the migration then rebuilds the counts
+                // on the next open-and-train cycle.
+                //
+                // Legacy estate case (no term table): the blob is read exactly as
+                // before and the provider converts to term rows on its next persist.
+                // Nothing transforms data inside the open path.
                 counts_store.restore_counts_into(
                     accumulator.as_mut(),
                     trainable.model_id(),
@@ -2415,7 +2425,18 @@ impl Corpus {
                 &model_version,
             )?;
             if !restored {
-                // Counts row disappeared between flush and restore — corpus path.
+                // Two causes for restored == false:
+                //   1. The counts row was deleted between flush and restore
+                //      (a race or a concurrent upgrade).
+                //   2. The row exists but carries the migration-invalidation
+                //      sentinel (an empty blob written by `mootx01 upgrade` to
+                //      signal that the stale per-provider blob has been cleared).
+                //      The upgrade also sets the reindex latch, so the next
+                //      open-and-train cycle will rebuild the counts.
+                // In both cases, CorpusPathReason::NoCountsRow is the correct
+                // report: the provider has no usable counts. No new variant is
+                // added because this enum mirrors the Swift CorpusPathReason and
+                // the Swift port is out of scope (BRR §2, no dual-port divergence).
                 corpus_path_indices.push((slot_index, CorpusPathReason::NoCountsRow));
                 continue;
             }
