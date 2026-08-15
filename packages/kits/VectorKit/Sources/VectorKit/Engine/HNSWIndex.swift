@@ -847,7 +847,12 @@ public actor HNSWIndex {
         // cleared in the F2b reset block above. hasGraph → false; caller falls
         // back to exact scan until the next THETA rebuild.
 
-        vectorStride = nodes.first?.vectorBytes.count
+        // Skip tombstone placeholders when deriving stride: a deleted node at
+        // compact index 0 has vectorBytes == [] and would set stride to 0,
+        // causing search() to throw invalidPayload. The Rust twin derives stride
+        // from node_bytes (the nodeIdx→bytes map, which excludes deleted entries)
+        // so it is immune; this makes Swift match that contract.
+        vectorStride = nodes.first(where: { !$0.tombstoned })?.vectorBytes.count
         // RNG state reset: the loaded graph is already built, so no level-
         // assignment calls are needed until the next incremental insert.
         // The default seed (42) is used for any subsequent insertions.
