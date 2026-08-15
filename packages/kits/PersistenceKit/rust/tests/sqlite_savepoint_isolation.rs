@@ -37,10 +37,19 @@
 // SV-01 fix this does not hold (B proceeds immediately, unserialized);
 // after the fix, `TxCoordinator` blocks B in `begin_transaction()` until
 // A's bracket depth returns to zero.
+//
+// Part 3 (below Part 1) broadens coverage per mission: two levels of
+// nesting, inner failure with outer success, outer failure discarding a
+// successful inner scope, and sequential sibling inner scopes — each
+// crossed with the same concurrent-unrelated-thread check, since that is
+// the axis the fix actually touches (same-thread nesting semantics were
+// already correct pre-fix; verified by reverting sqlite.rs's fix commit
+// locally and re-running this file — all five tests failed on the
+// temporal assertion, none on the same-thread row-presence assertions).
 
 use persistence_kit::{
     BackendConfiguration, ColumnDeclaration, EstateConfiguration, IsolationLevel,
-    SchemaDeclaration, SqliteStorage, Storage, TableDeclaration, TypedValue,
+    SchemaDeclaration, SqliteStorage, Storage, StorageError, TableDeclaration, TypedValue,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
@@ -185,5 +194,218 @@ fn sqlite_inner_failure_preserves_outer_and_unrelated_thread_isolation() {
          A closed at {a_close_at:?} (B opened before A closed: B's bracket \
          was silently absorbed into A's still-open transaction instead of \
          being serialized behind it)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Part 3 — nesting matrix.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Two levels of nesting, both succeeding, with a concurrent unrelated
+/// bracket from a second thread.
+#[test]
+fn sqlite_two_levels_of_nesting_isolates_unrelated_thread() {
+    let storage = make_storage();
+    let a_open_barrier = Arc::new(Barrier::new(2));
+    let a_open_barrier_a = a_open_barrier.clone();
+
+    let storage_b = storage.clone();
+    let b_handle = run_independent_bracket(storage_b, a_open_barrier, "independent-two-level");
+
+    let a_close_at = {
+        let storage = storage.clone();
+        thread::spawn(move || {
+            storage
+                .transaction(IsolationLevel::Serializable, &mut |tx| {
+                    let rows = tx.row_store();
+                    rows.insert("items", row("level1"))?;
+                    rows.begin_transaction()?; // level 2
+                    rows.insert("items", row("level2"))?;
+                    rows.commit_transaction()?; // release level 2 into level 1
+                    a_open_barrier_a.wait();
+                    thread::sleep(HOLD_OPEN);
+                    Ok(())
+                })
+                .expect("two-level commit");
+            Instant::now()
+        })
+        .join()
+        .expect("thread A panicked")
+    };
+    let (b_opened_at, _) = b_handle.join().expect("thread B panicked");
+
+    let names = names_in(&storage);
+    assert!(names.contains(&"level1".to_string()));
+    assert!(names.contains(&"level2".to_string()));
+    assert!(
+        names.contains(&"independent-two-level".to_string()),
+        "thread B's row must survive; got {names:?}"
+    );
+    assert!(
+        b_opened_at >= a_close_at,
+        "B must not open until A's two-level bracket fully closes \
+         (B opened {b_opened_at:?}, A closed {a_close_at:?})"
+    );
+}
+
+/// Inner failure with outer success: the inner scope's rollback must not
+/// touch the outer scope's already-written rows, and the outer commit must
+/// still land — alongside a concurrent unrelated bracket.
+#[test]
+fn sqlite_inner_failure_outer_success_isolates_unrelated_thread() {
+    let storage = make_storage();
+    let a_open_barrier = Arc::new(Barrier::new(2));
+    let a_open_barrier_a = a_open_barrier.clone();
+
+    let storage_b = storage.clone();
+    let b_handle = run_independent_bracket(storage_b, a_open_barrier, "independent-inner-fail");
+
+    let a_close_at = {
+        let storage = storage.clone();
+        thread::spawn(move || {
+            storage
+                .transaction(IsolationLevel::Serializable, &mut |tx| {
+                    let rows = tx.row_store();
+                    rows.insert("items", row("outer-success-pre"))?;
+                    rows.begin_transaction()?;
+                    rows.insert("items", row("inner-doomed"))?;
+                    rows.rollback_transaction()?;
+                    rows.insert("items", row("outer-success-post"))?;
+                    a_open_barrier_a.wait();
+                    thread::sleep(HOLD_OPEN);
+                    Ok(())
+                })
+                .expect("outer must still succeed");
+            Instant::now()
+        })
+        .join()
+        .expect("thread A panicked")
+    };
+    let (b_opened_at, _) = b_handle.join().expect("thread B panicked");
+
+    let names = names_in(&storage);
+    assert!(names.contains(&"outer-success-pre".to_string()));
+    assert!(names.contains(&"outer-success-post".to_string()));
+    assert!(!names.contains(&"inner-doomed".to_string()));
+    assert!(
+        names.contains(&"independent-inner-fail".to_string()),
+        "thread B's row must survive; got {names:?}"
+    );
+    assert!(
+        b_opened_at >= a_close_at,
+        "B must not open until A's bracket fully closes \
+         (B opened {b_opened_at:?}, A closed {a_close_at:?})"
+    );
+}
+
+/// Outer failure discarding a successful inner scope: the inner scope's
+/// release merges into the outer bracket (not durable on its own), so the
+/// outer rollback must discard it too — alongside a concurrent unrelated
+/// bracket, which must survive independently of A's rollback.
+#[test]
+fn sqlite_outer_failure_discards_inner_and_isolates_unrelated_thread() {
+    let storage = make_storage();
+    let a_open_barrier = Arc::new(Barrier::new(2));
+    let a_open_barrier_a = a_open_barrier.clone();
+
+    let storage_b = storage.clone();
+    let b_handle = run_independent_bracket(storage_b, a_open_barrier, "independent-outer-fail");
+
+    let a_close_at = {
+        let storage = storage.clone();
+        thread::spawn(move || {
+            let result = storage.transaction(IsolationLevel::Serializable, &mut |tx| {
+                let rows = tx.row_store();
+                rows.insert("items", row("doomed-outer"))?;
+                rows.begin_transaction()?;
+                rows.insert("items", row("doomed-inner-released"))?;
+                rows.commit_transaction()?; // released into the (still open) outer
+                a_open_barrier_a.wait();
+                thread::sleep(HOLD_OPEN);
+                Err(StorageError::BackendError {
+                    underlying: "intentional outer rollback".into(),
+                })
+            });
+            assert!(result.is_err(), "outer block must surface its Err");
+            Instant::now()
+        })
+        .join()
+        .expect("thread A panicked")
+    };
+    let (b_opened_at, _) = b_handle.join().expect("thread B panicked");
+
+    let names = names_in(&storage);
+    assert!(
+        !names.contains(&"doomed-outer".to_string()),
+        "outer rollback must discard the outer scope's own write; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"doomed-inner-released".to_string()),
+        "outer rollback must discard the released-but-not-yet-committed \
+         inner scope too; got {names:?}"
+    );
+    assert!(
+        names.contains(&"independent-outer-fail".to_string()),
+        "thread B's independently committed row must survive A's outer \
+         rollback; got {names:?}"
+    );
+    assert!(
+        b_opened_at >= a_close_at,
+        "B must not open until A's bracket fully closes \
+         (B opened {b_opened_at:?}, A closed {a_close_at:?})"
+    );
+}
+
+/// Sequential sibling inner scopes: two nested brackets opened one after
+/// the other (not overlapping) inside the same outer bracket. The first
+/// sibling's release must survive; the second sibling's rollback must not
+/// touch the first sibling's or the outer's writes — alongside a
+/// concurrent unrelated bracket.
+#[test]
+fn sqlite_sequential_sibling_inner_scopes_isolate_unrelated_thread() {
+    let storage = make_storage();
+    let a_open_barrier = Arc::new(Barrier::new(2));
+    let a_open_barrier_a = a_open_barrier.clone();
+
+    let storage_b = storage.clone();
+    let b_handle = run_independent_bracket(storage_b, a_open_barrier, "independent-siblings");
+
+    let a_close_at = {
+        let storage = storage.clone();
+        thread::spawn(move || {
+            storage
+                .transaction(IsolationLevel::Serializable, &mut |tx| {
+                    let rows = tx.row_store();
+                    rows.begin_transaction()?;
+                    rows.insert("items", row("sibling-a-committed"))?;
+                    rows.commit_transaction()?; // sibling A releases first
+
+                    rows.begin_transaction()?;
+                    rows.insert("items", row("sibling-b-rolled-back"))?;
+                    rows.rollback_transaction()?; // sibling B, opened after A closed
+
+                    a_open_barrier_a.wait();
+                    thread::sleep(HOLD_OPEN);
+                    Ok(())
+                })
+                .expect("outer commit");
+            Instant::now()
+        })
+        .join()
+        .expect("thread A panicked")
+    };
+    let (b_opened_at, _) = b_handle.join().expect("thread B panicked");
+
+    let names = names_in(&storage);
+    assert!(names.contains(&"sibling-a-committed".to_string()));
+    assert!(!names.contains(&"sibling-b-rolled-back".to_string()));
+    assert!(
+        names.contains(&"independent-siblings".to_string()),
+        "thread B's row must survive; got {names:?}"
+    );
+    assert!(
+        b_opened_at >= a_close_at,
+        "B must not open until A's bracket fully closes \
+         (B opened {b_opened_at:?}, A closed {a_close_at:?})"
     );
 }
