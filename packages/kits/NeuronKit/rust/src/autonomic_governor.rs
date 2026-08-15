@@ -1112,6 +1112,9 @@ impl AutonomicGovernor {
         // was to release the lock before pumping, but the readers are demand-read
         // adapters (they borrow the coordinator, not an owned snapshot), so the
         // lock must be held until the readers are no longer in scope.
+        // theta_retrain_pending carries the corpus Arc and vocab snapshot decided
+        // inside the lock; the actual reindex runs after the lock block closes.
+        let mut theta_retrain_pending = None;
         let (dreaming_fired, maintenance_fired) = {
             let coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
 
@@ -1249,30 +1252,23 @@ impl AutonomicGovernor {
                                 if !sink.write_errors.is_empty() {
                                     eprintln!("AutonomicGovernor: REM-THETA sink errors: {:?}", sink.write_errors);
                                 }
-                                // THETA-RETRAIN: drift-gated corpus basis retrain, best-effort
-                                // (non-fatal). Consults the same vocabulary-growth gate the ALPHA
-                                // corpus-growth probe uses. If ALPHA has been running correctly the
-                                // drift delta is below the threshold and THETA skips the retrain.
-                                // If ALPHA has been failing or the estate is quiescent, THETA acts
-                                // as the backstop and fires.
+                                // THETA-RETRAIN capture: decide while the coordinator guard is held.
                                 //
-                                // The coordinator guard is already held here — `corpus_for()` is a
-                                // read-only HashMap lookup that does NOT re-acquire any lock. A
-                                // LocusOnly estate has no corpus registered; the if-let skips cleanly.
-                                // Errors are logged but do NOT abort the THETA cycle (a stale basis
-                                // degrades dense recall; it does not break proposal/diary functions).
+                                // THETA-RETRAIN: drift-gated corpus basis retrain, best-effort (non-fatal).
+                                // Consults the same vocabulary-growth gate the ALPHA corpus-growth probe uses.
+                                // If ALPHA has been running correctly the drift delta is below the threshold
+                                // and THETA skips the retrain. If ALPHA has been failing or the estate is
+                                // quiescent, THETA acts as the backstop and fires.
+                                //
+                                // `corpus_for()` is a read-only HashMap lookup; cloning the Arc does
+                                // not re-acquire any lock. A LocusOnly estate has no corpus registered;
+                                // the if-let skips cleanly. The actual reindex runs after the lock block
+                                // closes — see the THETA-RETRAIN execution block below.
                                 if let Some(corpus) = coord.corpus_for(&self.handle) {
-                                    let now_millis = (now_epoch_secs * 1000.0) as i64;
                                     // `maintained_vocab_anchor` returns `usize` directly (no Result).
                                     let live_vocab = corpus.maintained_vocab_anchor() as i64;
                                     if self.dreaming.theta_retrain_warranted(live_vocab) {
-                                        if let Err(e) = corpus.reindex(now_millis) {
-                                            eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
-                                        } else {
-                                            // Advance the shared baseline so ALPHA's next delta
-                                            // window starts from this retrain point.
-                                            self.dreaming.advance_reindex_vocab(live_vocab);
-                                        }
+                                        theta_retrain_pending = Some((Arc::clone(&corpus), live_vocab));
                                     }
                                     // Drift below threshold: ALPHA is keeping the basis current;
                                     // THETA defers this cycle (no log — not an error).
@@ -1388,6 +1384,29 @@ impl AutonomicGovernor {
             // Coordinator lock released here (end of block).
             (dreaming_fired, maintenance_fired)
         };
+
+        // THETA-RETRAIN execution: run the basis retrain outside the coordinator
+        // lock. A full retrain can take minutes at estate scale and must not block
+        // every GLK verb behind the coordinator mutex while it runs — the same rule
+        // the ALPHA growth-probe below already obeys.
+        //
+        // THETA runs BEFORE check_corpus_growth below so that ALPHA sees a
+        // post-THETA live_vocab delta of zero and does not double-reindex.
+        //
+        // advance_reindex_vocab runs here — post-retrain, pre-save_daemon_state —
+        // so the advanced baseline is captured by the save_daemon_state call below.
+        // Errors are logged but non-fatal (a stale basis degrades dense recall;
+        // it does not break proposal/diary functions).
+        if let Some((corpus, live_vocab)) = theta_retrain_pending {
+            let now_millis = (now_epoch_secs * 1000.0) as i64;
+            if let Err(e) = corpus.reindex(now_millis) {
+                eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
+            } else {
+                // Advance the shared baseline so ALPHA's delta window starts
+                // from this retrain point. Persisted by save_daemon_state below.
+                self.dreaming.advance_reindex_vocab(live_vocab);
+            }
+        }
 
         // AUTO-REINDEX: bind the generic NeuronKit growth gate to the live
         // attached Corpus engine after releasing the coordinator lock. A full
