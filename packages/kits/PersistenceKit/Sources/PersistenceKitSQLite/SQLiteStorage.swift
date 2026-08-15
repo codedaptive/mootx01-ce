@@ -1811,6 +1811,11 @@ extension SQLiteBackend {
         } catch {
             // Original is intact; reopen the connection before surfacing the
             // error so subsequent storage calls do not receive "connection closed".
+            // `try?` is deliberate: the swap failure is the error worth
+            // surfacing here. reopen() also applies the CAND-052 symlink
+            // refusal (SQ-01); if reopen throws — refusal included — the
+            // connection stays closed and the condition surfaces on the next
+            // storage call rather than masking the swap error.
             try? connection.reopen()
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM file swap failed: \(error)")

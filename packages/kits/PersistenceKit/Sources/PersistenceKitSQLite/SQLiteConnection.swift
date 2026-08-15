@@ -38,28 +38,9 @@ final class SQLiteConnection: @unchecked Sendable {
         let parent = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
-        // CAND-052: Symlink refusal — reject a pre-planted symlink at the DB path.
-        //
-        // A symlink at the database location can redirect SQLite writes to an
-        // arbitrary file (e.g. /etc/passwd or another estate's SQLite). Refuse
-        // before opening. `resourceValues(forKeys:)` uses `lstat` semantics
-        // when asked for `isSymbolicLink` — it does NOT follow the symlink,
-        // so it correctly identifies the symlink itself rather than its target.
-        // Non-existent paths return `.resourceNotFound` or a missing key; both
-        // are safe to ignore (new-file creation path).
-        //
-        // Apple Data Protection (applied below after open) covers the DB file
-        // and its WAL sidecars at rest under the Secure Enclave key. This guard
-        // addresses the symlink-redirection attack surface (CAND-052), which is
-        // orthogonal to at-rest encryption.
-        if let attrs = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
-           attrs.isSymbolicLink == true {
-            throw StorageError.backendError(
-                underlying: "sqlite open: refusing to open \(url.lastPathComponent) " +
-                            "— path is a symbolic link. Pre-planted symlinks are a " +
-                            "security risk (CAND-052)."
-            )
-        }
+        // CAND-052: refuse a pre-planted symlink at the DB path before the
+        // first open. Shared guard — see `refuseSymlink(at:operation:)`.
+        try Self.refuseSymlink(at: url, operation: "open")
 
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(url.path, &handle, flags, nil)
@@ -161,12 +142,18 @@ final class SQLiteConnection: @unchecked Sendable {
 
     /// Reopen the connection after VACUUM INTO + atomic file swap.
     ///
-    /// Mirrors `init` exactly (symlink guard and `createDirectory` skipped —
-    /// the swapped-in file exists at `url` and its parent directory is already
-    /// established). Re-applies `PRAGMA key` for full-database encrypted
-    /// estates, Data Protection, the 0600 permissions lock, and all setup PRAGMAs.
+    /// Mirrors `init` exactly (`createDirectory` skipped — the parent
+    /// directory is already established). Re-applies the CAND-052 symlink
+    /// refusal (SQ-01: a symlink swapped in between close and reopen must be
+    /// refused, not followed — the VI-01 swap/reopen machinery made this path
+    /// more reachable), `PRAGMA key` for full-database encrypted estates,
+    /// Data Protection, the 0600 permissions lock, and all setup PRAGMAs.
     func reopen() throws {
         close() // idempotent: no-op when handle is already nil
+
+        // CAND-052 on the reopen path (SQ-01): same shared guard as `init`,
+        // so every open path — including any added later — inherits it.
+        try Self.refuseSymlink(at: url, operation: "reopen")
 
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         var newHandle: OpaquePointer?
@@ -209,6 +196,37 @@ final class SQLiteConnection: @unchecked Sendable {
         try exec("PRAGMA foreign_keys = ON;")
         try exec("PRAGMA mmap_size = 2147483648;")
         _ = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 0x7ffffffd)
+    }
+
+    /// CAND-052: Symlink refusal — reject a symlink at the DB path (SQ-01
+    /// shared guard, called by `init` and `reopen()`).
+    ///
+    /// A symlink at the database location can redirect SQLite writes to an
+    /// arbitrary file (e.g. /etc/passwd or another estate's SQLite). Refuse
+    /// before opening. `resourceValues(forKeys:)` uses `lstat` semantics
+    /// when asked for `isSymbolicLink` — it does NOT follow the symlink,
+    /// so it correctly identifies the symlink itself rather than its target.
+    /// Non-existent paths return `.resourceNotFound` or a missing key; both
+    /// are safe to ignore (new-file creation path).
+    ///
+    /// A fresh URL is constructed from the path because NSURL may cache
+    /// resource values per instance; the guard must observe the CURRENT
+    /// filesystem state at each open, not the state at `init` time.
+    ///
+    /// Apple Data Protection (applied after each open) covers the DB file
+    /// and its WAL sidecars at rest under the Secure Enclave key. This guard
+    /// addresses the symlink-redirection attack surface (CAND-052), which is
+    /// orthogonal to at-rest encryption.
+    private static func refuseSymlink(at url: URL, operation: String) throws {
+        let current = URL(fileURLWithPath: url.path)
+        if let attrs = try? current.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           attrs.isSymbolicLink == true {
+            throw StorageError.backendError(
+                underlying: "sqlite \(operation): refusing to open \(url.lastPathComponent) " +
+                            "— path is a symbolic link. Pre-planted symlinks are a " +
+                            "security risk (CAND-052)."
+            )
+        }
     }
 
     /// Best-effort application of Apple Data Protection to the database file.
