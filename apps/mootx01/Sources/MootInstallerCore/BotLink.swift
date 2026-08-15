@@ -170,41 +170,59 @@ public enum BotLink {
 
     // MARK: - Ping payload shaping
 
-    /// Parse the `moot_estate_ping` pong line into its attribution fields.
+    /// Parse the `moot_estate_ping` pong payload into its attribution
+    /// fields.
     ///
     /// The payload is text-only (verified against the live daemon: no
-    /// structuredContent), shaped
-    /// `pong: estate <name> [<uuid>] is live — build <build>`.
+    /// structuredContent) and is NOT always one line: `runEstatePing`
+    /// appends up to two opt-in-and-live advisory lines
+    /// (`version_skew: …`, `update_available: …`) to the same text —
+    /// routine pings carry them. Field extraction therefore operates on
+    /// the HEAD LINE ONLY:
+    /// `pong: estate <name> [<uuid>] is live — build <build>`
+    /// so no field can ever absorb an advisory. The advisory lines come
+    /// back separately in `advisories`; the caller decides their fate
+    /// (`ping` forwards them to stderr — they are diagnostics, and stdout
+    /// is machine JSON only).
+    ///
     /// Every field is optional-by-parse: a field that cannot be extracted
     /// is omitted from ping output, never invented.
     ///
-    /// - Parameter text: the pong content text.
-    /// - Returns: whichever of estate name, estate id, and build parsed.
+    /// - Parameter text: the pong content text (one line or more).
+    /// - Returns: whichever of estate name, estate id, and build parsed
+    ///   from the head line, plus any non-empty trailing advisory lines.
     public static func parsePong(
         _ text: String
-    ) -> (estate: String?, estateId: String?, build: String?) {
-        guard text.hasPrefix("pong: estate") else { return (nil, nil, nil) }
+    ) -> (estate: String?, estateId: String?, build: String?, advisories: [String]) {
+        // Split ONCE, up front: every extraction below sees only line 0.
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let head = lines.first.map(String.init) ?? ""
+        let advisories = lines.dropFirst()
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        guard head.hasPrefix("pong: estate") else { return (nil, nil, nil, advisories) }
 
         var estate: String?
         var estateId: String?
         var build: String?
 
-        if let open = text.firstIndex(of: "["), let close = text.firstIndex(of: "]"),
+        if let open = head.firstIndex(of: "["), let close = head.firstIndex(of: "]"),
            open < close {
-            let id = String(text[text.index(after: open)..<close])
+            let id = String(head[head.index(after: open)..<close])
             if !id.isEmpty { estateId = id }
             // The estate name sits between "pong: estate " and " [".
-            let nameStart = text.index(text.startIndex, offsetBy: "pong: estate".count)
-            let name = String(text[nameStart..<open])
+            let nameStart = head.index(head.startIndex, offsetBy: "pong: estate".count)
+            let name = String(head[nameStart..<open])
                 .trimmingCharacters(in: .whitespaces)
             if !name.isEmpty { estate = name }
         }
-        if let range = text.range(of: "build ") {
-            let b = String(text[range.upperBound...])
+        if let range = head.range(of: "build ") {
+            let b = String(head[range.upperBound...])
                 .trimmingCharacters(in: .whitespaces)
             if !b.isEmpty { build = b }
         }
-        return (estate, estateId, build)
+        return (estate, estateId, build, advisories)
     }
 
     // MARK: - Subcommand operations
@@ -224,8 +242,15 @@ public enum BotLink {
                 return failure("no result field in ping response")
             }
             if isErrorResult(result) {
-                // Tool ran and reported failure: exit 2, raw result stays
-                // parseable on stdout (normative table).
+                // DELIBERATE CHOICE (BL-1, normative for BL-2): estate_ping
+                // has reachable isError paths (quiesced/draining estate,
+                // unmounted estate). Exit 2 is load-bearing — a failed tool
+                // must be distinguishable from a dead hop — and stdout is
+                // the RAW result object (parseable, carries the server's own
+                // error content), NOT the synthesized `{"ok":true,…}` shape
+                // (which only describes a live estate) and NOT
+                // `{"ok":false,…}` (which is reserved for transport
+                // failures, exit 1). Do not "fix" this into either shape.
                 return BotLinkOutcome(stdoutJSON: result, exitCode: 2)
             }
             var payload: [String: Any] = [
@@ -239,6 +264,14 @@ public enum BotLink {
                 if let estate = parsed.estate { payload["estate"] = estate }
                 if let estateId = parsed.estateId { payload["estateId"] = estateId }
                 if let build = parsed.build { payload["build"] = build }
+                // Advisory lines (version_skew / update_available) are
+                // diagnostics: they go to stderr, keeping stdout machine
+                // JSON only (non-negotiable 5). Not an `advisories` field —
+                // the normative ping shape has no such field and botLink
+                // never invents values.
+                for advisory in parsed.advisories {
+                    FileHandle.standardError.write(Data("mootx01 botlink: \(advisory)\n".utf8))
+                }
             }
             return BotLinkOutcome(stdoutJSON: payload, exitCode: 0)
         }

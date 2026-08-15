@@ -290,6 +290,28 @@ struct BotLinkPongTests {
         #expect(parsed.estateId == nil)
         #expect(parsed.build == nil)
     }
+
+    @Test("advisory lines never leak into build — parse is head-line-only (G-1)")
+    func multiLinePongAdvisoriesDoNotLeakIntoBuild() {
+        // runEstatePing appends up to two OPT-IN-AND-LIVE advisory lines to
+        // the same text payload (ToolDispatch: version_skew on skew,
+        // update_available on the first ping of every TTL window). A parser
+        // that scans the whole text swallows them into `build` while every
+        // exit-0/strict-JSON gate stays green — exact equality is the only
+        // assertion that catches it.
+        let parsed = BotLink.parsePong("""
+        pong: estate work [ABC-123] is live — build 20260812180424/6bae5a30
+        version_skew: server 1.1.4 vs client 1.1.2
+        update_available: 1.1.5
+        """)
+        #expect(parsed.build == "20260812180424/6bae5a30")
+        #expect(parsed.estate == "work")
+        #expect(parsed.estateId == "ABC-123")
+        #expect(parsed.advisories == [
+            "version_skew: server 1.1.4 vs client 1.1.2",
+            "update_available: 1.1.5",
+        ], "advisory lines are surfaced separately (ping forwards them to stderr), never inside a field")
+    }
 }
 
 // MARK: - Subcommand operations
@@ -330,13 +352,36 @@ struct BotLinkPingTests {
 
     @Test("ping with isError:true exits 2 with the raw parseable result")
     func pingToolError() async throws {
+        // The quiesced/unmounted estate paths return errorResult — real
+        // runtime states. Exit 2 (not 0, not 1) is the load-bearing
+        // distinction from a dead hop; stdout is the raw result, and it is
+        // NOT the synthesized ok:true shape.
         let stub = TransportStub(responses: [
-            response(id: 2, result: textResult("estate unavailable", isError: true))
+            response(id: 2, result: textResult("estate quiesced — draining", isError: true))
         ])
         let outcome = await BotLink.ping(transport: stub.transport())
         #expect(outcome.exitCode == 2)
         let obj = try #require(try strictJSON(outcome) as? [String: Any])
         #expect(obj["isError"] as? Bool == true)
+        #expect(obj["ok"] == nil, "the isError path must never emit the ok:true liveness shape")
+    }
+
+    @Test("ping with the three-line production payload keeps build exact (G-1)")
+    func pingMultiLinePayloadBuildExact() async throws {
+        let stub = TransportStub(responses: [
+            response(id: 2, result: textResult("""
+            pong: estate work [ABC-123] is live — build 20260812180424/6bae5a30
+            version_skew: server 1.1.4 vs client 1.1.2
+            update_available: 1.1.5
+            """))
+        ])
+        let outcome = await BotLink.ping(transport: stub.transport())
+        #expect(outcome.exitCode == 0)
+        let obj = try #require(try strictJSON(outcome) as? [String: Any])
+        #expect(obj["build"] as? String == "20260812180424/6bae5a30",
+                "exact equality — advisories must not be swallowed into build")
+        #expect(obj["estate"] as? String == "work")
+        #expect(obj["estateId"] as? String == "ABC-123")
     }
 
     @Test("a dead transport exits 1 with {ok:false,error} on stdout")
@@ -503,5 +548,206 @@ struct BotLinkRpcTests {
         let frame = #"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"moot_x","arguments":{}}}"#
         let outcome = await BotLink.rpc(frame: frame, transport: stub.transport())
         #expect(outcome.exitCode == 2)
+    }
+}
+
+// MARK: - Exec tests through the symlink (gate B-1(b))
+
+/// Anchor class for locating the built products directory from the test
+/// bundle (Swift Testing has no test class; Bundle(for:) needs one).
+private final class BotLinkExecBundleFinder {}
+
+/// Minimal in-process loopback HTTP stub: accepts connections on an
+/// ephemeral 127.0.0.1 port, answers every HTTP POST with the canned
+/// JSON-RPC response, and counts POSTs. Probe connections (connect +
+/// close, no bytes) are served and NOT counted — only parsed HTTP
+/// requests count, so `postCount == 0` genuinely means "the stub server
+/// saw zero requests".
+private final class LoopbackHTTPStub: @unchecked Sendable {
+    private let serverSocket: Int32
+    let port: Int
+    private let responseBody: String
+    private let lock = NSLock()
+    private var posts = 0
+
+    var postCount: Int {
+        lock.withLock { posts }
+    }
+
+    init(responseBody: String) throws {
+        self.responseBody = responseBody
+        // Locals throughout — the withUnsafePointer closures must not
+        // capture self before all stored properties are initialized.
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        precondition(sock >= 0, "socket() failed")
+        var yes: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0 // ephemeral
+        addr.sin_addr.s_addr = 0x0100007F // 127.0.0.1 (host little-endian)
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        precondition(bindResult == 0, "bind() failed")
+        listen(sock, 8)
+
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        withUnsafeMutablePointer(to: &bound) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = getsockname(sock, $0, &len)
+            }
+        }
+        serverSocket = sock
+        port = Int(UInt16(bigEndian: bound.sin_port))
+
+        let thread = Thread { [weak self] in self?.acceptLoop() }
+        thread.name = "bl1-http-stub"
+        thread.start()
+    }
+
+    func stop() {
+        close(serverSocket)
+    }
+
+    private func acceptLoop() {
+        while true {
+            let client = accept(serverSocket, nil, nil)
+            guard client >= 0 else { return } // server socket closed → done
+            // 5 s receive timeout so a wedged peer cannot hang the test run.
+            var tv = timeval(tv_sec: 5, tv_usec: 0)
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            handle(client: client)
+            close(client)
+        }
+    }
+
+    private func handle(client: Int32) {
+        var request = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        // Read until the header terminator, then drain the declared body.
+        while !request.contains5CRLFCRLF() {
+            let n = recv(client, &buf, buf.count, 0)
+            if n <= 0 { return } // probe connection or peer error: not a POST
+            request.append(contentsOf: buf[0..<n])
+        }
+        let headerText = String(decoding: request, as: UTF8.self)
+        var bodyExpected = 0
+        for line in headerText.split(separator: "\r\n") {
+            if line.lowercased().hasPrefix("content-length:") {
+                bodyExpected = Int(line.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) ?? 0
+            }
+        }
+        if let headerEnd = headerText.range(of: "\r\n\r\n") {
+            var bodyGot = headerText[headerEnd.upperBound...].utf8.count
+            while bodyGot < bodyExpected {
+                let n = recv(client, &buf, buf.count, 0)
+                if n <= 0 { break }
+                bodyGot += n
+            }
+        }
+        lock.withLock { posts += 1 }
+        let body = Data(responseBody.utf8)
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        var out = Data(head.utf8)
+        out.append(body)
+        out.withUnsafeBytes { raw in
+            _ = send(client, raw.baseAddress, raw.count, 0)
+        }
+    }
+}
+
+private extension Data {
+    /// True when the buffer contains the HTTP header terminator CRLFCRLF.
+    func contains5CRLFCRLF() -> Bool {
+        guard count >= 4 else { return false }
+        let terminator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        return firstRange(of: Data(terminator)) != nil
+    }
+}
+
+@Suite("BotLink — exec through the mootx01-botLink symlink", .serialized)
+struct BotLinkExecTests {
+
+    /// The built `mootx01` binary, sitting beside the test bundle in the
+    /// products directory (SPM builds executable targets for test runs).
+    private func builtBinaryURL() throws -> URL {
+        let url = Bundle(for: BotLinkExecBundleFinder.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("mootx01", isDirectory: false)
+        try #require(FileManager.default.isExecutableFile(atPath: url.path),
+                     "built mootx01 binary not found at \(url.path)")
+        return url
+    }
+
+    /// Symlink the built binary as `mootx01-botLink` in a temp dir and
+    /// return the symlink URL.
+    private func makeSymlink() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bl1-exec-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let link = dir.appendingPathComponent(ArgvDispatch.botLinkInvocationName, isDirectory: false)
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path, withDestinationPath: try builtBinaryURL().path)
+        return link
+    }
+
+    private func exec(_ executable: URL, _ args: [String]) throws -> (status: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = args
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        // Empty stdin so the exec'd process never inherits or waits on the
+        // test runner's stdin.
+        process.standardInput = Pipe()
+        try process.run()
+        let stdoutData = out.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = err.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus,
+                String(decoding: stdoutData, as: UTF8.self),
+                String(decoding: stderrData, as: UTF8.self))
+    }
+
+    @Test("execing <tmp>/mootx01-botLink ping against a stub daemon exits 0 with strict-JSON stdout")
+    func execPingThroughSymlink() throws {
+        // If ArgumentParser stops accepting the injected array, or
+        // BotLinkCommand falls out of either subcommand list, THIS test
+        // fails while every pure-array unit test stays green.
+        let stub = try LoopbackHTTPStub(responseBody:
+            #"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong: estate work [ABC-123] is live — build 1/2"}],"isError":false}}"#)
+        defer { stub.stop() }
+        let link = try makeSymlink()
+        defer { try? FileManager.default.removeItem(at: link.deletingLastPathComponent()) }
+
+        let result = try exec(link, ["ping", "--http", "http://127.0.0.1:\(stub.port)"])
+        #expect(result.status == 0)
+        let data = Data(result.stdout.utf8)
+        let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                               "stdout must be one strict-JSON value, got: \(result.stdout)")
+        #expect(obj["ok"] as? Bool == true)
+        #expect(obj["transport"] as? String == "http")
+        #expect(obj["estateId"] as? String == "ABC-123")
+        #expect(stub.postCount == 1, "exactly one POST for a one-shot ping")
+    }
+
+    @Test("execing the symlink with a non-loopback --http exits 64 and the stub sees ZERO requests")
+    func execNonLoopbackExits64WithZeroRequests() throws {
+        let stub = try LoopbackHTTPStub(responseBody: "{}")
+        defer { stub.stop() }
+        let link = try makeSymlink()
+        defer { try? FileManager.default.removeItem(at: link.deletingLastPathComponent()) }
+
+        let result = try exec(link, ["ping", "--http", "http://example.com"])
+        #expect(result.status == 64)
+        let obj = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        #expect(obj?["ok"] as? Bool == false)
+        #expect(stub.postCount == 0, "a rejected URL must never produce a request — fails CLOSED")
     }
 }
