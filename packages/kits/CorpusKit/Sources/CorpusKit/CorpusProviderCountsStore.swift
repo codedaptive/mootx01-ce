@@ -569,7 +569,11 @@ public actor CorpusProviderCountsStore {
     // MARK: - Integer-keyed term pair (v4, CORPUS-COUNTS-01)
 
     /// Replace the stored per-term payloads for a model with `terms`,
-    /// maintaining the term dictionary (string stored once, bitmask ORed).
+    /// maintaining the term dictionary (string stored once, bitmask updated).
+    /// Terms absent from the incoming set have this model's bit cleared in
+    /// their dictionary row; rows whose bitmask reaches zero are deleted so
+    /// content that has been removed from the corpus does not persist in the
+    /// estate through its derived term text.
     ///
     /// Term ids are allocated explicitly as max(term_id)+n — deterministic,
     /// port-parallel, and independent of any driver's last-insert-rowid
@@ -644,6 +648,55 @@ public actor CorpusProviderCountsStore {
                 ],
                 conflictColumns: ["model_id", "term_id"])
         }
+
+        // Clear this model's bit from every dictionary entry whose term is absent
+        // from the incoming set. The payload delete above removes payload rows for
+        // dropped terms; this step ensures the dictionary also forgets them.
+        //
+        // A dictionary row carries the term text of the corpus content that introduced
+        // it. Leaving the model's bit set after that content is deleted would mean the
+        // content's tokens remain reachable through derived structure. The guarantee is
+        // that deleted content is not reachable through any derived structure.
+        //
+        // The cleanup runs after the id-allocation loop. The maxID high-water mark is
+        // already final, so no id allocated within this call is reassigned during cleanup.
+        //
+        // Legacy-estate note: an estate written before this change may carry over-claimed
+        // bits (model bit set with no corresponding payload row). The first post-fix write
+        // for a given model repairs that model's bits across the dictionary. Bits belonging
+        // to a model that never writes again remain set, keeping those rows alive —
+        // conservative, because no row is deleted while any model might still reference it.
+        // Ordered by term id so the emitted write sequence is a function of the
+        // stored state alone — dictionary iteration order is not, and both ports
+        // must be able to produce the same sequence for the same estate.
+        let incomingTerms: Set<String> = Set(terms.map(\.term))
+        let staleEntries = dict
+            .filter { $0.value.models & bit != 0 && !incomingTerms.contains($0.key) }
+            .sorted { $0.value.id < $1.value.id }
+        for (term, entry) in staleEntries {
+            let clearedModels = entry.models & ~bit
+            if clearedModels == 0 {
+                // No model claims this term any longer. Delete the row: the term text
+                // belongs to content that is no longer in the corpus.
+                // Term-id reuse is safe under the corrected invariant: models == 0
+                // holds only when no payload row anywhere references this term_id.
+                _ = try await rowStore.delete(
+                    table: "corpus_provider_term_dictionary",
+                    where: .eq(Column(table: "corpus_provider_term_dictionary", name: "term_id"),
+                               .int(entry.id)))
+            } else {
+                // At least one other model still claims this term. Clear only this
+                // model's bit, leaving the row for those other models.
+                _ = try await rowStore.upsert(
+                    table: "corpus_provider_term_dictionary",
+                    values: [
+                        "term_id": .int(entry.id),
+                        "term": .text(term),
+                        "models": .int(clearedModels)
+                    ],
+                    conflictColumns: ["term_id"])
+            }
+        }
     }
 
     /// Every stored term/vector pair for a model from the v4 integer-keyed
@@ -685,9 +738,12 @@ public actor CorpusProviderCountsStore {
         }
     }
 
-    /// Drop a model's v4 payload rows and clear its dictionary bits.
-    /// Dictionary rows whose bitmask reaches zero are left in place — a dead
-    /// term row is harmless, and the next writer of that term reuses its id.
+    /// Drop a model's v4 payload rows and remove its claim from the term dictionary.
+    /// Dictionary rows whose bitmask reaches zero after the bit is cleared are deleted:
+    /// a term row carries text from corpus content, and content that is gone must not
+    /// remain reachable through any derived structure. Rows with a non-zero remaining
+    /// bitmask are updated in place — those terms are still claimed by at least one
+    /// other model.
     public func deleteTermPayloads(
         modelID: String, into rowStore: any RowStore
     ) async throws {
@@ -706,14 +762,27 @@ public actor CorpusProviderCountsStore {
                   case let .int(models) = row["models"] ?? .null,
                   models & bit != 0
             else { continue }
-            _ = try await rowStore.upsert(
-                table: "corpus_provider_term_dictionary",
-                values: [
-                    "term_id": .int(id),
-                    "term": .text(term),
-                    "models": .int(models & ~bit)
-                ],
-                conflictColumns: ["term_id"])
+            let clearedModels = models & ~bit
+            if clearedModels == 0 {
+                // No model claims this term any longer. Delete the row: the term
+                // text belongs to content that is no longer in the corpus, and
+                // deleted content must not remain reachable through any derived structure.
+                _ = try await rowStore.delete(
+                    table: "corpus_provider_term_dictionary",
+                    where: .eq(Column(table: "corpus_provider_term_dictionary", name: "term_id"),
+                               .int(id)))
+            } else {
+                // At least one other model still claims this term. Clear only this
+                // model's bit and update the row in place.
+                _ = try await rowStore.upsert(
+                    table: "corpus_provider_term_dictionary",
+                    values: [
+                        "term_id": .int(id),
+                        "term": .text(term),
+                        "models": .int(clearedModels)
+                    ],
+                    conflictColumns: ["term_id"])
+            }
         }
     }
 
