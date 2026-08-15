@@ -814,51 +814,34 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     /// Remove the redundant direct `[mcp_servers.mootx01]` entry from
     /// `~/.codex/config.toml` when the MOOT Codex plugin owns the MCP
-    /// connection. Both the plugin and the direct installer now use the same
+    /// connection. Both the plugin and the direct installer use the same
     /// `"mootx01"` server key, so a user who had both wired ends up with two
-    /// connections to the same estate. This step collapses them to one.
+    /// connections to the same estate. This step collapses them to one —
+    /// but ONLY when the entry is confirmed to be the installer's own
+    /// default-database wiring.
     ///
-    /// Guard: `PluginDetector.ownsCodexConnection` must return `true` before
-    /// any write happens — the plugin is installed and enabled, so removing
-    /// the direct entry leaves the plugin wiring as the sole connection.
-    ///
-    /// Backup: copies the file to `config.toml.mootx01-backup` before
-    /// modification so the user can restore if needed.
-    ///
-    /// Idempotent: if `[mcp_servers.mootx01]` is absent the function prints
-    /// nothing and returns without touching the file.
+    /// The guard, ownership classification, backup, and removal all live in
+    /// `Installer.cleanupRedundantCodexDirectEntry` (MootInstallerCore, where
+    /// they are unit-testable): the plugin must own the connection, AND the
+    /// entry must classify `.oursDefault` via `MCPEntryClassifier` — an
+    /// entry scoped elsewhere (env override, `--db` estate override,
+    /// non-default-port URL) or not shaped like ours is reported here and
+    /// left untouched. This wrapper only prints the outcome.
     private func removeRedundantCodexDirectEntry(home: URL) {
-        let pluginID = "mootx01@mootx01"
-        guard PluginDetector.ownsCodexConnection(pluginID: pluginID, homeDirectory: home) else {
-            return
-        }
-        let configURL = home.appendingPathComponent(".codex/config.toml")
-        guard FileManager.default.fileExists(atPath: configURL.path) else { return }
-        guard let text = try? String(contentsOf: configURL, encoding: .utf8) else { return }
-        // Quick scan: is [mcp_servers.mootx01] even present?
-        let header = "[mcp_servers.mootx01]"
-        guard text.components(separatedBy: "\n").contains(where: {
-            $0.trimmingCharacters(in: .whitespaces) == header
-        }) else { return }
-
-        // Backup before modification.
-        let backupURL = configURL.deletingLastPathComponent()
-            .appendingPathComponent("config.toml.mootx01-backup")
-        do {
-            if FileManager.default.fileExists(atPath: backupURL.path) {
-                try FileManager.default.removeItem(at: backupURL)
-            }
-            try FileManager.default.copyItem(at: configURL, to: backupURL)
-        } catch {
-            print("  \u{2717} Could not back up Codex config: \(error) — skipping cleanup")
-            return
-        }
-
-        do {
-            try Installer.removeFromTOMLConfig(at: configURL, serverName: "mootx01")
+        switch Installer.cleanupRedundantCodexDirectEntry(homeDirectory: home) {
+        case .pluginNotOwner, .notPresent:
+            // Nothing to reconcile — idempotent silence, matching the other
+            // convergence steps' no-op posture.
+            break
+        case let .retainedForeign(reason):
+            print("""
+                  \u{24D8} Codex config: [mcp_servers.mootx01] in ~/.codex/config.toml \
+                left untouched — \(reason).
+                """)
+        case let .failed(message):
+            print("  \u{2717} \(message)")
+        case .removed:
             print("  \u{2713} Removed redundant direct MCP entry from Codex config (plugin owns connection).")
-        } catch {
-            print("  \u{2717} Could not clean up Codex config: \(error)")
         }
     }
 

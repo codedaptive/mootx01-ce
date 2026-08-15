@@ -13,9 +13,11 @@
 // name and path and never auto-removed; silently deleting someone's
 // dev-rig wiring is worse than leaving a stale entry behind.
 //
-// This file is the single, shared classification used by both the CLI
-// installer's act-mode dedupe (Installer.dedupeDirectEntry, InstallCommand)
-// and its ownership-aware uninstall path (Installer.uninstall). The plugin's
+// This file is the single, shared classification used by the CLI
+// installer's act-mode dedupe (Installer.dedupeDirectEntry, InstallCommand),
+// its ownership-aware uninstall path (Installer.uninstall), and the
+// upgrade's Codex direct-entry cleanup
+// (Installer.cleanupRedundantCodexDirectEntry). The plugin's
 // SessionStart hook (tools/moot-packager/Data/canonical/hooks/moot_hooks.py,
 // EE) implements the same "our server name present" detection independently
 // in Python — it is read-only and never edits config, so it does not need
