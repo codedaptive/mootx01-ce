@@ -14,6 +14,15 @@
 // name). Naming the executed program `mootx01-proxy` (argv[0]) is how
 // such a config still reaches `ProxyCommand` without an args array.
 //
+// `mootx01-botLink` (BL-1): the explicit AI data path for cloud agents
+// whose only channel to this Mac is a permissioned one-shot shell. The
+// agent execs `mootx01-botLink <subcommand>` by name; argv0 dispatch
+// routes it to `BotLinkCommand` exactly as `mootx01-proxy` routes to
+// `ProxyCommand`. Unlike the proxy route, botLink invocations normally
+// carry explicit subcommand args (`ping`/`list`/`call`/`rpc`), so this
+// route only fires for a bare `mootx01-botLink` invocation and yields
+// BotLinkCommand's usage text via its default behavior.
+//
 // This file is the PURE decision logic only — extracted into
 // MootInstallerCore (rather than living inline in MootMain.swift, an
 // untested executable-target entry point) so it is directly unit
@@ -32,23 +41,31 @@ public enum ArgvDispatch {
     /// The argv0 basename that triggers implicit `proxy` dispatch.
     public static let proxyInvocationName = "mootx01-proxy"
 
+    /// The argv0 basename that triggers implicit `botlink` dispatch (BL-1).
+    /// Matches the `mootx01-botLink → mootx01` symlink the installer places
+    /// beside the binary — capital L is deliberate and must match
+    /// `Installer.placeBinary`'s symlink name exactly.
+    public static let botLinkInvocationName = "mootx01-botLink"
+
     /// Resolve the effective CLI arguments given the raw argv and how
     /// the binary was invoked.
     ///
-    /// Two back-compat injections, evaluated in this order, and BOTH
+    /// Three injections, evaluated in this order, and ALL of them
     /// only ever apply to a truly bare invocation (`rawArgs.isEmpty`).
-    /// Neither fires when the caller already named an explicit
+    /// None fires when the caller already named an explicit
     /// subcommand (or passed `--help`/`--version`) — argv0 dispatch and
     /// the bare-serve default are defaults for absent input, never
     /// overrides of explicit input.
     ///
     /// 1. `argv0`'s last path component is `mootx01-proxy` → inject
-    ///    `["proxy"]`. This is the NEW behavior this file adds.
-    /// 2. Otherwise, `stdinIsPipe` (non-interactive) → inject `["serve"]`.
+    ///    `["proxy"]`.
+    /// 2. `argv0`'s last path component is `mootx01-botLink` → inject
+    ///    `["botlink"]` (BL-1, same mechanism as the proxy route).
+    /// 3. Otherwise, `stdinIsPipe` (non-interactive) → inject `["serve"]`.
     ///    This is the PRE-EXISTING MCP-client back-compat default
     ///    (originally inline in MootMain.swift: a client config with
     ///    `"command": "mootx01"` and no subcommand still starts the
-    ///    server). Moved here unchanged so both defaults share one
+    ///    server). Moved here unchanged so all defaults share one
     ///    tested decision point.
     ///
     /// - Parameters:
@@ -67,8 +84,12 @@ public enum ArgvDispatch {
         stdinIsPipe: Bool
     ) -> [String] {
         guard rawArgs.isEmpty else { return rawArgs }
-        if (argv0 as NSString).lastPathComponent == proxyInvocationName {
+        let basename = (argv0 as NSString).lastPathComponent
+        if basename == proxyInvocationName {
             return ["proxy"]
+        }
+        if basename == botLinkInvocationName {
+            return ["botlink"]
         }
         if stdinIsPipe {
             return ["serve"]

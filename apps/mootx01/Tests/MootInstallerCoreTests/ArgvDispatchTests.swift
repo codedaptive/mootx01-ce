@@ -69,4 +69,36 @@ struct ArgvDispatchTests {
             argv0: "mootx01-proxy", rawArgs: ["--version"], stdinIsPipe: false
         ) == ["--version"])
     }
+
+    // MARK: — botLink argv0 dispatch (BL-1)
+
+    @Test("argv0 basename mootx01-botLink with no args injects botlink")
+    func argv0BotLinkBasenameInjectsBotlink() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "/Users/dev/.mootx01/bin/mootx01-botLink", rawArgs: [], stdinIsPipe: false
+        ) == ["botlink"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: [], stdinIsPipe: true
+        ) == ["botlink"], "argv0 dispatch takes precedence over the bare-pipe serve default")
+    }
+
+    @Test("argv0 mootx01-botLink with an explicit subcommand is left untouched")
+    func argv0BotLinkBasenameWithExplicitArgsUntouched() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "/usr/local/bin/mootx01-botLink", rawArgs: ["ping"], stdinIsPipe: false
+        ) == ["ping"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["--help"], stdinIsPipe: true
+        ) == ["--help"], "explicit flags must fall through to ArgumentParser, never be overridden")
+    }
+
+    @Test("only the exact basename mootx01-botLink triggers dispatch — a partial match does not")
+    func onlyExactBotLinkBasenameTriggersDispatch() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink-dev", rawArgs: [], stdinIsPipe: false
+        ) == [], "a differently-named executable must not accidentally trigger botlink dispatch")
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "not-mootx01-botLink", rawArgs: [], stdinIsPipe: false
+        ) == [])
+    }
 }
