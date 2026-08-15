@@ -97,6 +97,30 @@ struct UpgradeReconciliationTests {
         #expect(try codexConfigText(home: home) == before)
     }
 
+    @Test("an entry scoped via an equals-form --db=<name> override survives cleanup")
+    func dbEqualsFormScopedEntrySurvives() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        // ArgumentParser accepts both `--db work` and `--db=work`; the
+        // classifier must treat both as an estate override (Adams MO-01
+        // INFO-1 — the equals form previously slipped past the exact-match
+        // check on BOTH the JSON and TOML paths).
+        try makeCodexPluginOwner(home: home, table: """
+            [mcp_servers.mootx01]
+            command = "/Users/dev/.mootx01/bin/mootx01"
+            args = ["serve", "--db=work"]
+            """)
+        let before = try codexConfigText(home: home)
+
+        let outcome = Installer.cleanupRedundantCodexDirectEntry(homeDirectory: home)
+
+        guard case let .retainedForeign(reason) = outcome else {
+            Issue.record("expected .retainedForeign, got \(outcome)"); return
+        }
+        #expect(reason.contains("--db"))
+        #expect(try codexConfigText(home: home) == before)
+    }
+
     @Test("an entry scoped via env child table survives cleanup")
     func envChildTableScopedEntrySurvives() throws {
         let home = try makeSandboxHome()

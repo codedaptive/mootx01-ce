@@ -82,7 +82,11 @@ public enum MCPEntryClassifier {
         // estate without using either env key. Removing such an entry silently
         // collapses the user's estate isolation into the default estate. Check
         // args BEFORE env so both override mechanisms are honoured.
-        if let args = entry["args"] as? [String], args.contains("--db") {
+        // Both ArgumentParser spellings count (Adams MO-01 INFO-1): the
+        // space-separated `--db <name>` (a standalone "--db" element) and the
+        // equals form `--db=<name>` (a single element).
+        if let args = entry["args"] as? [String],
+           args.contains(where: { $0 == "--db" || $0.hasPrefix("--db=") }) {
             return .foreign(reason: "args override: --db")
         }
         guard let env = entry["env"] as? [String: Any] else { return .oursDefault }
