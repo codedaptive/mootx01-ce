@@ -233,19 +233,20 @@ struct ServeCommand: AsyncParsableCommand {
             (ProcessInfo.processInfo.environment["MOOTX01_BACKEND"] ?? "")
                 .lowercased() == "inmemory"
 
-        // MOOTX01_RESIDENCY=disk opts the estate into the disk-backed scan
-        // path (no float index held in heap). Default is ramResident — the
-        // float-lane index is built once per model and evicted under pressure.
-        let residencyHint: ResidencyHint =
-            (ProcessInfo.processInfo.environment["MOOTX01_RESIDENCY"] ?? "")
-                .lowercased() == "disk" ? .diskBacked : .ramResident
+        // MOOTX01_RESIDENCY controls both the residency hint and the resident-index
+        // admission budget. See `parseResidencyConfig` for the full grammar.
+        // Default: ram-resident with a 25% ceiling on physical RAM.
+        let (residencyHint, residentIndexBudget) = Self.parseResidencyConfig(
+            rawValue: environment["MOOTX01_RESIDENCY"] ?? ""
+        )
 
         let storage: any Storage
         if inMemoryBackend {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
                 backend: .inMemory,
-                residencyHint: residencyHint
+                residencyHint: residencyHint,
+                residentIndexBudget: residentIndexBudget
             )
             storage = InMemoryStorage(configuration: configuration)
             Logging.stderr.log(
@@ -256,7 +257,8 @@ struct ServeCommand: AsyncParsableCommand {
                 estateID: UUID(),
                 backend: .sqlite(url: estateURL, busyTimeout: 5.0),
                 encryptionConfig: encryption,
-                residencyHint: residencyHint
+                residencyHint: residencyHint,
+                residentIndexBudget: residentIndexBudget
             )
             do {
                 storage = try SQLiteStorage(configuration: configuration)
@@ -633,6 +635,123 @@ struct ServeCommand: AsyncParsableCommand {
         return (try? await session.data(for: request)) != nil
     }
     #endif
+
+    /// Parse the `MOOTX01_RESIDENCY` environment variable into a residency hint and
+    /// a resident-index admission budget.
+    ///
+    /// This is the entire operator-facing contract for the residency feature.
+    /// Grammar (case-insensitive):
+    ///
+    ///   unset, or "ram"      — ram-resident, default budget (25% of physical RAM).
+    ///   "disk"               — disk-backed; no float-lane index held in heap.
+    ///                          Behaves exactly as the original `MOOTX01_RESIDENCY=disk`.
+    ///   "ram:<N>mb"          — ram-resident, explicit ceiling of N mebibytes.
+    ///                          N must be a positive integer.
+    ///   "ram:<N>gb"          — ram-resident, explicit ceiling of N gibibytes.
+    ///                          N must be a positive integer.
+    ///   "ram:<N>%"           — ram-resident, ceiling of N percent of physical RAM.
+    ///                          N must be a positive integer from 1 to 100 inclusive.
+    ///   "ram:unbounded"      — ram-resident, no admission bound (pre-RS-01 behaviour).
+    ///
+    /// Reject conditions (malformed → warn to stderr, then fall back to the default):
+    ///   — a zero or negative N
+    ///   — a non-numeric N
+    ///   — a percentage above 100
+    ///   — any value that matches none of the patterns above
+    ///
+    /// Silent fallback is not acceptable: an operator who mistypes a ceiling must
+    /// not believe a cap is in force when it is not. The warning names the value
+    /// that was rejected so the operator can correct it.
+    static func parseResidencyConfig(
+        rawValue: String
+    ) -> (hint: ResidencyHint, budget: ResidentIndexBudget) {
+        let lowered = rawValue.lowercased()
+
+        // Disk-backed: exact match. The budget is irrelevant when no index is
+        // loaded into RAM, but carry the default to keep the type consistent.
+        if lowered == "disk" {
+            return (.diskBacked, .systemFraction(0.25))
+        }
+
+        // Plain "ram" or unset: ram-resident with the 25% default budget.
+        if lowered.isEmpty || lowered == "ram" {
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // All remaining valid values begin with the "ram:" prefix.
+        guard lowered.hasPrefix("ram:") else {
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' is not recognised; "
+                + "expected one of: disk, ram, ram:<N>mb, ram:<N>gb, ram:<N>%, ram:unbounded. "
+                + "Falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        let suffix = String(lowered.dropFirst("ram:".count))
+
+        // Explicit opt-out of the admission bound (pre-RS-01 behaviour).
+        if suffix == "unbounded" {
+            return (.ramResident, .unbounded)
+        }
+
+        // Percentage ceiling: ram:<N>%
+        if suffix.hasSuffix("%") {
+            let numStr = String(suffix.dropLast())
+            if let n = Int(numStr), n > 0, n <= 100 {
+                return (.ramResident, .systemFraction(Double(n) / 100.0))
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed percentage "
+                + "(must be a positive integer from 1 to 100); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Mebibyte ceiling: ram:<N>mb  (1 MiB = 1,048,576 bytes)
+        if suffix.hasSuffix("mb") {
+            let numStr = String(suffix.dropLast(2))
+            // `n * 1024 * 1024` TRAPS on overflow in Swift, and `n` comes straight
+            // from operator-supplied environment text, so an absurd value such as
+            // "ram:99999999999999999mb" would abort the daemon at startup. Use the
+            // reporting multiply and treat an overflow as malformed input.
+            if let n = Int(numStr), n > 0 {
+                let (bytes, overflow) = n.multipliedReportingOverflow(by: 1024 * 1024)
+                if !overflow {
+                    return (.ramResident, .bytes(bytes))
+                }
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed mebibyte value "
+                + "(must be a positive integer); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Gibibyte ceiling: ram:<N>gb  (1 GiB = 1,073,741,824 bytes)
+        if suffix.hasSuffix("gb") {
+            let numStr = String(suffix.dropLast(2))
+            // Same overflow guard as the mebibyte branch above: the multiply traps
+            // on overflow and the operand is operator-supplied text.
+            if let n = Int(numStr), n > 0 {
+                let (bytes, overflow) = n.multipliedReportingOverflow(by: 1024 * 1024 * 1024)
+                if !overflow {
+                    return (.ramResident, .bytes(bytes))
+                }
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed gibibyte value "
+                + "(must be a positive integer); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Unrecognised suffix after "ram:".
+        Logging.stderr.log(
+            "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' is not recognised; "
+            + "expected one of: disk, ram, ram:<N>mb, ram:<N>gb, ram:<N>%, ram:unbounded. "
+            + "Falling back to ram-resident with the default 25% budget.")
+        return (.ramResident, .systemFraction(0.25))
+    }
 
     /// Resolve the resident HTTP port: the `--http` flag wins, else
     /// `MOOTX01_HTTP_PORT` from the environment (the launchd plist sets it). nil →

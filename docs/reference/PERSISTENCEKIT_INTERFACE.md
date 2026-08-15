@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-08-03
-version: 1.14.0
+date: 2026-08-15
+version: 1.15.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -613,10 +613,14 @@ public struct EstateConfiguration: Sendable {
     public let encryptionConfig: EstateEncryptionConfig   // defaults .plaintext (SPEC B-12)
     public let cacheConfig: EstateCacheConfig             // defaults .disabled (SPEC I-11)
     public let novelTokenTagger: NovelTokenTaggerChoice   // defaults .hmm (SPEC I-20)
+    public let residencyHint: ResidencyHint               // defaults .ramResident (SPEC I-22)
+    public let residentIndexBudget: ResidentIndexBudget   // defaults .systemFraction(0.25) (SPEC I-22)
     public init(estateID: UUID, backend: BackendConfiguration,
                 encryptionConfig: EstateEncryptionConfig = .plaintext,
                 cacheConfig: EstateCacheConfig = .disabled,
-                novelTokenTagger: NovelTokenTaggerChoice = .hmm)
+                novelTokenTagger: NovelTokenTaggerChoice = .hmm,
+                residencyHint: ResidencyHint = .ramResident,
+                residentIndexBudget: ResidentIndexBudget = .systemFraction(0.25))
 }
 public enum BackendConfiguration: Sendable {
     case sqlite(url: URL, busyTimeout: TimeInterval = 5.0)
@@ -625,13 +629,13 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 ```
-**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger, residency_hint }`.
-The Rust version carries all six fields, mirroring the Swift struct field-for-field.
+**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger, residency_hint, resident_index_budget }`.
+The Rust version carries all seven fields, mirroring the Swift struct field-for-field.
 `EstateConfiguration::new(estate_id, backend)` defaults all optional fields to plaintext /
-disabled / Hmm, so existing call sites are unchanged.
+disabled / Hmm / RamResident / SystemFraction(0.25), so existing call sites are unchanged.
 `EstateConfiguration::new_with_tagger(estate_id, backend, choice)` accepts an explicit
 `NovelTokenTaggerChoice`; returns `StorageError::InvalidConfiguration` when `NlTagger`
-is requested on Rust (no NaturalLanguage framework — fail-closed, SPEC I-20).
+is requested on Rust (no NaturalLanguage framework, fail-closed, SPEC I-20).
 `pub enum BackendConfiguration { Sqlite{…}, Postgresql{…}, InMemory }`.
 `pub enum NovelTokenTaggerChoice { Hmm, NlTagger }` — `NlTagger` exists for schema parity
 with the Swift port; active construction via `new_with_tagger` is rejected on Rust.
@@ -923,7 +927,8 @@ struct inside `IncrementalReplicationSession.swift`.
 | `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
 | `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
 | `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
-| `ResidencyHint` | `ResidencyHint` | the storage-residency rule: `.diskBacked`/`DiskBacked` (default), `.ramResident`/`RamResident`. Kits read this to choose index caching strategy. |
+| `ResidencyHint` | `ResidencyHint` | The storage-residency rule: `.ramResident`/`RamResident` (default), `.diskBacked`/`DiskBacked`. Kits read this field to choose their index caching strategy (SPEC I-22). |
+| `ResidentIndexBudget` | `ResidentIndexBudget` | Admission ceiling for per-model float-lane indexes held resident in VectorStore. Three cases: `.systemFraction(Double)`/`SystemFraction(f64)` (default 0.25), `.bytes(Int)`/`Bytes(u64)`, `.unbounded`/`Unbounded`. Queries that exceed the ceiling degrade to the table-scan path (SPEC I-22). |
 | `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Fifteen cases, case-for-case identical. |
 | `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
 | `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
@@ -1087,7 +1092,8 @@ behavioral (same rows retrieved), not on-disk byte-identical.
 | Encryption config | `encryptionConfig: EstateEncryptionConfig` | `encryption_config: EstateEncryptionConfig` |
 | Cache config | `cacheConfig: EstateCacheConfig` | `cache_config: EstateCacheConfig` |
 | Novel-token tagger | `novelTokenTagger: NovelTokenTaggerChoice` default `.hmm` | `novel_token_tagger: NovelTokenTaggerChoice` default `Hmm` |
-| Residency hint | `residencyHint: ResidencyHint` default `.diskBacked` | `residency_hint: ResidencyHint` default `DiskBacked` |
+| Residency hint | `residencyHint: ResidencyHint` default `.ramResident` | `residency_hint: ResidencyHint` default `RamResident` |
+| Resident-index budget | `residentIndexBudget: ResidentIndexBudget` default `.systemFraction(0.25)` | `resident_index_budget: ResidentIndexBudget` default `SystemFraction(0.25)` |
 
 ### `NovelTokenTaggerChoice` parity (SPEC I-20)
 
@@ -1521,6 +1527,17 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.15.0 -- 2026-08-15
+Corrected the residency default and documented the new admission-bound field
+(RS-01). The residencyHint default was stated as `.diskBacked`/`DiskBacked`
+across three locations (Rust struct description, type parity table, field parity
+table); the implementation has defaulted to `.ramResident`/`RamResident` since
+commit 20aee2a21. All three locations are corrected. The Swift EstateConfiguration
+struct block now includes `residencyHint` and `residentIndexBudget`. The Rust
+struct description now lists `resident_index_budget` as the seventh field. A
+`ResidentIndexBudget` row is added to the type parity table, and a matching row
+is added to the EstateConfiguration field parity table.
 
 ### 1.14.0 -- 2026-08-03
 Corrected the intercepted-column contract (MXE-RW). The at-rest wiring

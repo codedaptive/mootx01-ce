@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.12.0
+version: 1.13.0
 status: active
-date: 2026-08-03
+date: 2026-08-15
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -271,16 +271,11 @@ The topology boundary (PersistenceKit upstream of LatticeLib) requires separate
 declarations; consumers bridge them with a trivial switch at the GLK/NeuronKit
 boundary when calling LatticeLib tagging APIs with the estate's choice.
 
-**I-22 (residency hint, the storage-residency rule):** `EstateConfiguration` carries a
-`residencyHint: ResidencyHint` field (`.diskBacked` default) that kits
-read to choose their index caching strategy. `.diskBacked`: computed
-indexes (BM25, float vector) are loaded from the durable store on
-demand and discarded after use; the OS page cache manages RAM residency
-via `PRAGMA mmap_size`. `.ramResident`: all indexes are cached in the
-process heap between queries for minimum query latency (pre-the storage-residency rule
-behavior). The hint is advisory — kits interpret it independently for
-their own index structures. PersistenceKit defines the enum and the
-field; it does not enforce or interpret the hint itself.
+**I-22 (residency hint and admission bound, the storage-residency rule):** `EstateConfiguration` carries two related fields that govern index caching for a ram-resident estate.
+
+`residencyHint: ResidencyHint` defaults to `.ramResident`. The `.ramResident` case caches all indexes in the process heap between queries for minimum query latency. The `.diskBacked` case loads computed indexes on demand from the durable store and discards them after use, relying on the OS page cache for warm reads. The hint is advisory; kits interpret it independently for their own index structures. PersistenceKit defines the enum and the field; it does not enforce or interpret the hint.
+
+`residentIndexBudget: ResidentIndexBudget` defaults to `.systemFraction(0.25)`, capping the combined heap footprint of all per-model float-lane indexes for one estate at 25% of physical RAM. When a float index would exceed the ceiling, the query degrades to the table-scan path and returns correct results without allocating the refused index. Two alternative cases are available: `.bytes(N)` for an explicit absolute ceiling and `.unbounded` for no admission bound. When physical RAM cannot be detected, `.systemFraction` resolves to no ceiling; `.bytes(N)` is still honoured in that case. PersistenceKit defines the enum and the field; VectorStore enforces the admission gate.
 
 **I-21 (SQL-identifier validation on all write paths, CAND-047):** every
 caller-supplied column name that reaches a dynamically-constructed SQL string
@@ -853,6 +848,15 @@ Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
 ## Changelog
+
+### 1.13.0 -- 2026-08-15
+Corrected I-22 default and extended the invariant (RS-01). The residency hint
+default was stated as `.diskBacked`; the implementation has defaulted to
+`.ramResident` since commit 20aee2a21. The corrected default is now stated.
+I-22 also now covers the new `residentIndexBudget` field: a ceiling on the
+combined heap footprint of per-model float-lane indexes, defaulting to 25% of
+physical RAM, with degradation to the table-scan path when the ceiling is
+exceeded.
 
 ### 1.12.0 -- 2026-08-03
 Stated the protected-column inclusion rule (MXE-RW). B-12a described the
