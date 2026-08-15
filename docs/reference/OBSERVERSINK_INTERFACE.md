@@ -89,8 +89,10 @@ public final class StatsStore: Sendable {
     /// Returns [] immediately if `names` is empty.
     /// When `limit` is nil, ordered by ts ascending (full history).
     /// When `limit` is non-nil, ordered by ts descending (most-recent first,
-    /// capped); the effective limit is clamped to `maxMetricRowsPerNamedQuery`
-    /// so an oversized caller value cannot drive unbounded work.
+    /// capped); the effective limit is clamped two-sided — negatives floor to
+    /// 0 (SQLite treats LIMIT -1 as unbounded), oversized values clamp to
+    /// `maxMetricRowsPerNamedQuery` — so no caller value can drive unbounded
+    /// work. (Rust needs no lower clamp: `usize` cannot be negative.)
     /// Use in hot read-API paths instead of queryMetrics + Swift-side filter.
     public func queryMetricsByNames(
         _ names: Set<String>,

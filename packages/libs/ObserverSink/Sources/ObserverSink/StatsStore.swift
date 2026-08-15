@@ -958,7 +958,12 @@ public final class StatsStore: Sendable {
         // legacy ascending, unbounded behavior is preserved for callers that
         // consume full history.
         let direction: OrderDirection = limit == nil ? .ascending : .descending
-        let effectiveLimit = limit.map { min($0, Self.maxMetricRowsPerNamedQuery) }
+        // Two-sided clamp: the upper side enforces the row cap; the lower side
+        // floors negatives to 0 because SQLite treats `LIMIT -1` as NO limit —
+        // a negative caller value would otherwise bypass the cap entirely.
+        // `limit: 0` stays "zero rows" (bounded, unchanged). The Rust twin
+        // needs no lower clamp: `usize` cannot be negative.
+        let effectiveLimit = limit.map { min(max($0, 0), Self.maxMetricRowsPerNamedQuery) }
         let rows = try await storage.rowStore.query(
             table: StatsStoreSchema.metricSamplesTable,
             where: predicate,

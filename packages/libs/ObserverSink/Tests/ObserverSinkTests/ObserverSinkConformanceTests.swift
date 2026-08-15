@@ -437,6 +437,13 @@ struct ObserverSinkConformanceTests {
         let ten = try await store.queryMetricsByNames(["clamp-metric"], limit: 10)
         #expect(ten.count == 10, "A limit below the cap must be honoured exactly")
         #expect(ten.first?.ts == Date(timeIntervalSince1970: Double(total - 1)))
+
+        // A NEGATIVE limit must not bypass the cap: SQLite treats `LIMIT -1`
+        // as unbounded, so the store floors negatives to 0 rows (Perkins
+        // advisory, PH-01). Rust is immune (usize) — Swift-only guard.
+        let negative = try await store.queryMetricsByNames(["clamp-metric"], limit: -1)
+        #expect(negative.isEmpty,
+                "A negative limit must clamp to zero rows, not unbounded; got \(negative.count)")
     }
 
     @Test("queryMetricsByNames with empty set returns [] without querying")
