@@ -3369,9 +3369,9 @@ const TIMING_WINDOW_MAX_EVENTS: usize = 262_144;
 /// node_id = 0 sits at the very start of that millisecond; same-millisecond
 /// events with logical_count > 0 are re-fetched but excluded by
 /// `derive_timings`' since_exclusive_ms guard (A6 exactly-once contract).
-/// (Previously the cursor started at `None` unconditionally, so every call —
-/// including incremental scans — re-paged the entire log from epoch; the
-/// Swift port seeded the cursor. Same-symbol parity fix.)
+/// (The seed is load-bearing: an unseeded cursor pages the entire log from
+/// epoch on every call, including incremental scans. Swift seeds its cursor
+/// identically — the ports must not diverge here.)
 ///
 /// Truncation semantics: when the cap cuts the window, tier 3/4 pair
 /// captures whose markers land beyond the cut pair-lose for this call (they
