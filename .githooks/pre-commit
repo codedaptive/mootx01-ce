@@ -2,8 +2,8 @@
 # Pre-commit — blocks a commit that adds an absolute /Users/... developer
 # path under docs_internal/ (Codex findings #48/#49/#52/#39, mission DL-01).
 # Four separate waves leaked the same class of path into wave ledgers and
-# completion reports; this stops a fifth. Checks staged ADDED lines only —
-# it does not gate the pre-existing tree.
+# completion reports; this stops a fifth. Compares staged blobs against HEAD
+# base blobs — it does not gate the pre-existing tree.
 # Activate once per checkout:  git config core.hooksPath .githooks
 repo_root="$(git rev-parse --show-toplevel)" || exit 0
 "$repo_root/scripts/check-docs-internal-paths.sh" diff || exit 1
