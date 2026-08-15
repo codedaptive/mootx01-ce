@@ -170,12 +170,13 @@ struct PluginPackageShapeTests {
 
     /// Every token of `command` that names `mootx01` bare — no `/` in the
     /// token. Tokens are maximal runs between whitespace, shell separators,
-    /// and quote characters, so `exec mootx01 …`, `env mootx01 …`, and
-    /// `sh -c 'mootx01 …'` are all caught, not just a bare head token.
-    /// Mirrors bareMootx01Tokens in tools/moot-packager GeneratorTests.
+    /// quote characters, and backticks, so `exec mootx01 …`,
+    /// `env mootx01 …`, `sh -c 'mootx01 …'`, and both command-substitution
+    /// forms are all caught, not just a bare head token. Mirrors
+    /// bareMootx01Tokens in tools/moot-packager GeneratorTests.
     private static func bareMootx01Tokens(in command: String) -> [String] {
         command
-            .components(separatedBy: CharacterSet(charactersIn: " \t;&|()'\""))
+            .components(separatedBy: CharacterSet(charactersIn: " \t;&|()'\"`"))
             .filter { $0 == "mootx01" }
     }
 

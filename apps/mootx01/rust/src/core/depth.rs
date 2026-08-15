@@ -634,10 +634,11 @@ mod tests {
     /// materializes the packages map compiled in above (INSTALL_BUNDLE_JSON,
     /// include_str!) — this guards the carrier the Rust port actually ships,
     /// parsed via serde_json, never substring-matched. A bare token is any
-    /// token delimited by whitespace, shell separators (`;&|()`), or quote
-    /// characters that equals `mootx01` with no `/` — so `exec mootx01 …`,
-    /// `env mootx01 …`, and `sh -c 'mootx01 …'` are all caught, not just a
-    /// bare head token. Mirrors the Swift twin in MootInstallerCoreTests
+    /// token delimited by whitespace, shell separators (`;&|()`), quote
+    /// characters, or backticks that equals `mootx01` with no `/` — so
+    /// `exec mootx01 …`, `env mootx01 …`, `sh -c 'mootx01 …'`, and both
+    /// command-substitution forms are all caught, not just a bare head
+    /// token. Mirrors the Swift twin in MootInstallerCoreTests
     /// PluginPackageShapeTests and the packager guard in moot-packager
     /// GeneratorTests; keep the three token rules in sync.
     #[test]
@@ -680,7 +681,7 @@ mod tests {
 
         for cmd in &commands {
             let bare = cmd
-                .split(|c: char| c.is_whitespace() || ";&|()'\"".contains(c))
+                .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
                 .any(|token| token == "mootx01");
             assert!(
                 !bare,
