@@ -10440,3 +10440,382 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         "manifest must be re-stamped for the one imported note; got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// VR-01 regressions — dispatch layer (Part 4)
+// ---------------------------------------------------------------------------
+//
+// Each test guards one Finding from the VR-01 mission:
+//   Finding A: legacy manifest reset caused the tool to treat every note as
+//              "unchanged", silencing divergences between vault and estate.
+//   Finding B: apply could import notes the dry-run would not have surfaced,
+//              breaking the review gate invariant.
+//
+// Mirror targets: AriaMCPTests.VaultToolsTests "// MARK: - VR-01 regressions".
+
+/// VR-01 Finding A regression, part 1: a legacy manifest (no `version` key)
+/// that stamps the CURRENT disk hashes is the exact trap state the old code
+/// fell into — every note hashed equal, diff showed zero, nothing surfaced.
+/// After the fix: every note under a legacy manifest is classified changed /
+/// needs review (prior hashes are unavailable, fail toward surfacing).
+/// Mirrors Swift `legacyManifestSurfacesAllNotesAsNeedsReview`.
+#[test]
+fn vr01_legacy_manifest_surfaces_all_notes_as_needs_review() {
+    use aria_mcp::vault_tools::{
+        hash_all_notes, read_manifest, write_manifest, ExportManifest,
+    };
+
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    // Two hand-written notes; the estate holds neither.
+    std::fs::write(vault.join("LegacyOne.md"), "# LegacyOne")
+        .expect("write LegacyOne.md");
+    std::fs::write(vault.join("LegacyTwo.md"), "# LegacyTwo")
+        .expect("write LegacyTwo.md");
+
+    // Legacy manifest: stamp the CURRENT disk hashes, no version key —
+    // exactly what a pre-VR-01 "manifest reset" (whole-disk stamp) left behind.
+    let legacy_files = hash_all_notes(&vault).expect("hash_all_notes");
+    let legacy = ExportManifest {
+        version: None,
+        exported_at: "2026-01-01T00:00:00Z".to_string(),
+        note_count: legacy_files.len(),
+        files: legacy_files,
+    };
+    write_manifest(&legacy, &vault).expect("write legacy manifest");
+
+    // Dry-run: the diff is zero (hashes match current) — that is the trap.
+    // The legacy line and candidate listing are what surface the notes.
+    let dry_run = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dry-run must not throw transport fault");
+
+    // Read the manifest back BEFORE cleanup so the post-run assertions can run.
+    let still_legacy = read_manifest(&vault)
+        .expect("manifest read must succeed")
+        .expect("manifest must exist on disk");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&dry_run),
+        "dry-run must be isError:false; got: {dry_run:?}"
+    );
+    let text = content_text(&dry_run);
+    // The manifest diff itself shows zero drift — that is the trap state.
+    // The legacy classification line is what fires regardless.
+    assert!(
+        text.contains("0 added, 0 modified, 0 deleted"),
+        "manifest diff must show zero drift (the trap); got: {text}"
+    );
+    assert!(
+        text.contains("manifest: legacy (pre-certification) — prior hashes unavailable; all 2 note(s) classified changed / needs review"),
+        "legacy classification must surface both notes; got: {text}"
+    );
+    assert!(
+        text.contains("candidate stableSourceKey=LegacyOne vaultPath=LegacyOne.md"),
+        "LegacyOne must be listed as a candidate; got: {text}"
+    );
+    assert!(
+        text.contains("candidate stableSourceKey=LegacyTwo vaultPath=LegacyTwo.md"),
+        "LegacyTwo must be listed as a candidate; got: {text}"
+    );
+    assert!(
+        text.contains("no Proposal written"),
+        "dry-run must not write; got: {text}"
+    );
+    // Dry-run must not rewrite the manifest: still legacy (version == None).
+    assert!(
+        still_legacy.version.is_none(),
+        "dry-run must not rewrite the manifest; version must still be None"
+    );
+}
+
+/// VR-01 Finding A regression, part 2 — the full silent-divergence scenario:
+/// the estate's record and the vault note differ, but a reset (legacy) manifest
+/// stamps the note's CURRENT disk hash, so the old diff saw "unchanged" and the
+/// edit never reached the estate. Post-fix: the note is surfaced, apply imports
+/// it, and the manifest converges to schema v2 so the note does not re-surface
+/// forever.
+/// Mirrors Swift `legacyManifestModifiedNoteIsSurfacedAndApplyImportsIt`.
+#[test]
+fn vr01_legacy_manifest_modified_note_is_surfaced_and_apply_imports_it() {
+    use aria_mcp::vault_tools::{
+        hash_all_notes, read_manifest, write_manifest, ExportManifest, MANIFEST_SCHEMA_VERSION,
+    };
+
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    // Estate holds one note; export writes it (v2 manifest, correct).
+    // CAND-032: explicit "believed" scope — file_one_memory notes are born private.
+    file_one_memory(&registry, "Original benzene content.", "chem");
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap(), "scope" => "believed"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("export must succeed");
+
+    // Find the content note path (first non-OKF-navigation file in the manifest).
+    let v2_manifest = read_manifest(&vault)
+        .expect("manifest read must succeed")
+        .expect("manifest must exist after export");
+    let note_path_str = v2_manifest
+        .files
+        .keys()
+        .find(|k| {
+            let base = k.split('/').next_back().unwrap_or("");
+            base != "index.md" && base != "log.md"
+        })
+        .cloned()
+        .expect("manifest must contain at least one content note");
+
+    // Edit the note on disk — estate and vault now diverge.
+    let note_abs = vault.join(&note_path_str);
+    let original = std::fs::read_to_string(&note_abs).unwrap_or_default();
+    std::fs::write(&note_abs, original + "\nedited after reset.")
+        .expect("edit note on disk");
+
+    // The manifest is RESET: re-stamped from current disk hashes with no
+    // version key (the pre-VR-01 whole-disk stamp). Hash now matches the
+    // EDITED note, so the manifest diff sees zero drift — that is the trap.
+    let reset_files = hash_all_notes(&vault).expect("hash_all_notes after edit");
+    let reset = ExportManifest {
+        version: None,
+        exported_at: v2_manifest.exported_at.clone(),
+        note_count: reset_files.len(),
+        files: reset_files,
+    };
+    write_manifest(&reset, &vault).expect("write reset (legacy) manifest");
+
+    // Apply: the legacy classification surfaces the note and imports it.
+    let apply_result = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap(), "apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("reconcile apply must not throw transport fault");
+
+    // Convergence check: read manifest before cleanup, then do a second dry-run.
+    let converged_manifest = read_manifest(&vault)
+        .expect("manifest read must succeed after apply")
+        .expect("manifest must still exist after apply");
+
+    let second = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("second dry-run must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&apply_result),
+        "reconcile apply must be isError:false; got: {apply_result:?}"
+    );
+    let apply_text = content_text(&apply_result);
+    assert!(
+        apply_text.contains("manifest: legacy (pre-certification)"),
+        "apply must report legacy manifest classification; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("apply: true — imported exactly the surfaced import set"),
+        "apply must confirm the surfaced import; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("drawersUpdated: 1"),
+        "the edited note must supersede the estate's record; got: {apply_text}"
+    );
+    // Convergence: manifest is now schema v2, second dry-run surfaces nothing.
+    assert_eq!(
+        converged_manifest.version,
+        Some(MANIFEST_SCHEMA_VERSION),
+        "apply must converge the manifest to schema v2; got: {:?}",
+        converged_manifest.version
+    );
+    let second_text = content_text(&second);
+    assert!(
+        second_text.contains("import set: 0 note(s) — 0 candidate(s) + 0 missing"),
+        "after apply re-stamp, nothing must re-surface; got: {second_text}"
+    );
+}
+
+/// VR-01 Finding A regression, part 3: a note with NO manifest entry (hash
+/// absent under a v2 manifest) classifies as added — changed / needs review —
+/// never silently "unchanged". Mirrors Swift `v2ManifestMissingHashClassifiesAsChanged`.
+#[test]
+fn vr01_v2_manifest_missing_hash_classifies_as_changed() {
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    // One memory filed and exported (v2 manifest stamps only the exported note).
+    // CAND-032: explicit "believed" scope.
+    file_one_memory(&registry, "Stamped note content.", "chem");
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap(), "scope" => "believed"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("export must succeed");
+
+    // A note the export did not write → no stamp → must surface as added.
+    std::fs::write(vault.join("Unstamped.md"), "# Never certified")
+        .expect("write Unstamped.md");
+
+    let dry_run = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dry-run must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&dry_run),
+        "dry-run must be isError:false; got: {dry_run:?}"
+    );
+    let text = content_text(&dry_run);
+    assert!(
+        text.contains("1 added, 0 modified, 0 deleted"),
+        "unstamped note must be classified as added; got: {text}"
+    );
+    assert!(
+        text.contains("+ Unstamped.md"),
+        "added-notes section must list Unstamped.md; got: {text}"
+    );
+    assert!(
+        text.contains("candidate stableSourceKey=Unstamped vaultPath=Unstamped.md"),
+        "Unstamped.md must appear as a candidate; got: {text}"
+    );
+}
+
+/// VR-01 Finding B regression: apply operates only on the surfaced import set.
+/// Cross-estate export→reconcile is the canonical missing-set case: the manifest
+/// certifies estate A's agreement; estate B lacks every note. The dry-run lists
+/// the missing set; apply imports exactly that same recomputed set — nothing the
+/// dry-run would not list.
+///
+/// The Rust dispatch harness enforces Item 3 hardening: direct estateID routing
+/// is restricted to the default estate (non-default estateID throws INVALID_PARAMS).
+/// The cross-estate scenario is therefore exercised with TWO independent registries
+/// sharing the vault path — registry_a owns the export, registry_b targets the
+/// reconcile. Each registry's default estate is the dispatch target.
+/// Mirrors Swift `applyImportsOnlyTheSurfacedSetCrossEstate`.
+#[test]
+fn vr01_apply_imports_only_the_surfaced_set_cross_estate() {
+    let vault = temp_vault_dir();
+
+    // --- Registry A: estate A captures and exports one note ---
+    // CAND-032: explicit "believed" scope — born-private drawers need this.
+    let registry_a = EstateRegistry::new_inmemory();
+    file_one_memory(&registry_a, "Gate note content.", "chem");
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap(), "scope" => "believed"],
+        &registry_a,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate A export must succeed");
+
+    // --- Registry B: estate B is empty; the note is stamped (certified against
+    // A) so it is NOT a candidate — it is exactly a missing-set member.
+    // Dispatching against registry_b targets its empty default estate.
+    let registry_b = EstateRegistry::new_inmemory();
+
+    // Dry-run against estate B: surfaces the missing note without importing it.
+    let dry_run = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry_b,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dry-run against estate B must not throw transport fault");
+
+    assert!(
+        is_success(&dry_run),
+        "dry-run must be isError:false; got: {dry_run:?}"
+    );
+    let dry_text = content_text(&dry_run);
+    assert!(
+        dry_text.contains("0 added, 0 modified, 0 deleted"),
+        "diff against v2 manifest with no disk changes must show zero drift; got: {dry_text}"
+    );
+    assert!(
+        dry_text.contains("missing (estate lacks — apply imports these):"),
+        "missing-set header must appear; got: {dry_text}"
+    );
+    // Extract the note path from the dry-run output's missing-set section.
+    // Using the text directly (from hash_all_notes) rather than the manifest key
+    // avoids any path-format discrepancy between the two sources.
+    let note_path: String = dry_text
+        .lines()
+        .find_map(|l| l.strip_prefix("  * ").map(|p| p.to_owned()))
+        .expect("dry-run must surface at least one missing path in the missing-set section");
+    assert!(
+        dry_text.contains("import set: 1 note(s) — 0 candidate(s) + 1 missing"),
+        "import set must be 1 missing note; got: {dry_text}"
+    );
+
+    // Apply against estate B (no prior dry-run required — gate is deterministic
+    // recompute): imports exactly the same surfaced set.
+    let apply_result = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap(), "apply" => true],
+        &registry_b,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("apply against estate B must not throw transport fault");
+
+    let apply_text = content_text(&apply_result);
+    assert!(
+        apply_text.contains(&format!("  * {note_path}")),
+        "note path must appear in missing set on apply too; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("import set: 1 note(s) — 0 candidate(s) + 1 missing"),
+        "apply import set must match dry-run; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("apply: true — imported exactly the surfaced import set"),
+        "apply must confirm the review gate; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("drawersWritten: 1"),
+        "note must land in estate B; got: {apply_text}"
+    );
+    assert!(
+        apply_text.contains("manifest: re-stamped 1 imported path(s) (schema v2)"),
+        "manifest must be re-stamped after apply; got: {apply_text}"
+    );
+
+    // Convergence: a second dry-run against estate B surfaces nothing —
+    // note is now in B's estate and manifest was re-stamped.
+    let second = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry_b,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("second dry-run must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    let second_text = content_text(&second);
+    assert!(
+        second_text.contains("import set: 0 note(s) — 0 candidate(s) + 0 missing"),
+        "import set must be empty after apply; got: {second_text}"
+    );
+}

@@ -690,6 +690,203 @@ struct VaultToolsTests {
         #expect(applyResult.contains("apply: true"), "Receipt must confirm apply mode; got: \(applyResult)")
     }
 
+    // MARK: - VR-01 regressions (Finding A: manifest reset; Finding B: review gate)
+
+    /// VR-01 Finding A regression, part 1: a legacy manifest (no `version`
+    /// key) matching the disk exactly is the exact trap state the old code
+    /// fell into — every note hashed equal, nothing surfaced. Prior hashes
+    /// are unavailable after such a reset, so the safe classification is
+    /// changed / needs review for every note, never "unchanged".
+    @Test func legacyManifestSurfacesAllNotesAsNeedsReview() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "vr01-legacy-dryrun"))
+        let vault = makeTempVault()
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Two hand-written notes on disk; the estate holds neither.
+        for name in ["LegacyOne.md", "LegacyTwo.md"] {
+            try "# \(name)".write(
+                to: vault.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        // Legacy manifest: stamps the CURRENT disk hashes, no `version` key —
+        // exactly what a pre-VR-01 export ("manifest reset") left behind.
+        let legacyFiles = try VaultTools.hashAllNotes(vaultURL: vault)
+        let legacy = VaultTools.ExportManifest(
+            version: nil,
+            exportedAt: "2026-01-01T00:00:00Z",
+            noteCount: legacyFiles.count,
+            files: legacyFiles)
+        try VaultTools.writeManifest(legacy, to: vault)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let dryRun = try text(try await dispatcher.dispatch(
+            name: "moot_vault_reconcile", arguments: reconcileArgs(vaultPath: vault.path)))
+
+        // The manifest diff itself shows zero drift — that is the trap. The
+        // legacy line and the candidate listing are what surface the notes.
+        #expect(dryRun.contains("0 added, 0 modified, 0 deleted"))
+        #expect(dryRun.contains(
+            "manifest: legacy (pre-certification) — prior hashes unavailable; all 2 note(s) classified changed / needs review"))
+        #expect(dryRun.contains("candidate stableSourceKey=LegacyOne vaultPath=LegacyOne.md"))
+        #expect(dryRun.contains("candidate stableSourceKey=LegacyTwo vaultPath=LegacyTwo.md"))
+        #expect(dryRun.contains("no Proposal written"))
+
+        // Dry-run wrote nothing: estate empty, manifest still legacy on disk.
+        let drawers = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(drawers.isEmpty)
+        let stillLegacy = try #require(try VaultTools.readManifest(vaultURL: vault))
+        #expect(stillLegacy.version == nil, "dry-run must not rewrite the manifest")
+    }
+
+    /// VR-01 Finding A regression, part 2 — the full silent-divergence
+    /// scenario: the estate's record and the vault note differ, but a reset
+    /// (legacy) manifest stamps the note's current disk hash, so the old
+    /// classification saw "unchanged" and the edit never reached the estate.
+    /// Post-fix: the note is surfaced, apply imports it (the estate learns
+    /// the edit), and the manifest converges to schema v2 so the note does
+    /// not re-surface forever.
+    @Test func legacyManifestModifiedNoteIsSurfacedAndApplyImportsIt() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "vr01-legacy-apply"))
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Estate holds one note; export writes it (v2 manifest, correct).
+        try await capture(kit, handle, content: "Original benzene content.", room: "chem")
+        try await runExportAndAwait(vault: vault, via: dispatcher)
+        let v2Manifest = try #require(try VaultTools.readManifest(vaultURL: vault))
+        let notePath = try #require(v2Manifest.files.keys.first)
+
+        // The user edits the note on disk — estate and vault now diverge.
+        let noteURL = vault.appendingPathComponent(notePath)
+        let original = try String(contentsOf: noteURL, encoding: .utf8)
+        try (original + "\nedited after reset.").write(
+            to: noteURL, atomically: true, encoding: .utf8)
+
+        // The manifest is RESET: re-stamped from current disk hashes with no
+        // version key (the pre-VR-01 whole-disk stamp). Hash now matches the
+        // EDITED note, so the manifest diff sees zero drift.
+        let resetFiles = try VaultTools.hashAllNotes(vaultURL: vault)
+        let reset = VaultTools.ExportManifest(
+            version: nil,
+            exportedAt: v2Manifest.exportedAt,
+            noteCount: resetFiles.count,
+            files: resetFiles)
+        try VaultTools.writeManifest(reset, to: vault)
+
+        // Apply: the legacy classification surfaces the note and imports it.
+        let applyResult = try text(try await dispatcher.dispatch(
+            name: "moot_vault_reconcile",
+            arguments: reconcileArgs(vaultPath: vault.path, apply: true)))
+        #expect(applyResult.contains("manifest: legacy (pre-certification)"))
+        #expect(applyResult.contains("apply: true — imported exactly the surfaced import set"))
+        #expect(applyResult.contains("drawersUpdated: 1"),
+                "The edited note must supersede the estate's record; got: \(applyResult)")
+
+        // The estate learned the edit.
+        let drawers = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full))
+        #expect(drawers.count == 1)
+        #expect(drawers.first?.content.contains("edited after reset") == true,
+                "Estate content must carry the vault edit after apply")
+
+        // Convergence: the manifest is now v2 and a second reconcile is quiet.
+        let converged = try #require(try VaultTools.readManifest(vaultURL: vault))
+        #expect(converged.version == VaultTools.manifestSchemaVersion)
+        let second = try text(try await dispatcher.dispatch(
+            name: "moot_vault_reconcile", arguments: reconcileArgs(vaultPath: vault.path)))
+        #expect(second.contains("import set: 0 note(s) — 0 candidate(s) + 0 missing"),
+                "After apply re-stamp, nothing should re-surface; got: \(second)")
+    }
+
+    /// VR-01 Finding A regression, part 3: a note with NO manifest entry
+    /// (hash missing under a v2 manifest) classifies as added — changed /
+    /// needs review — never silently "unchanged".
+    @Test func v2ManifestMissingHashClassifiesAsChanged() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "vr01-missing-hash"))
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        try await capture(kit, handle, content: "Stamped note.", room: "chem")
+        try await runExportAndAwait(vault: vault, via: dispatcher)
+
+        // A note the export did not write → no stamp → must surface.
+        let unstamped = vault.appendingPathComponent("Unstamped.md")
+        try "# Never certified".write(to: unstamped, atomically: true, encoding: .utf8)
+
+        let dryRun = try text(try await dispatcher.dispatch(
+            name: "moot_vault_reconcile", arguments: reconcileArgs(vaultPath: vault.path)))
+        #expect(dryRun.contains("1 added, 0 modified, 0 deleted"))
+        #expect(dryRun.contains("+ Unstamped.md"))
+        #expect(dryRun.contains("candidate stableSourceKey=Unstamped vaultPath=Unstamped.md"))
+    }
+
+    /// VR-01 Finding B regression: apply operates only on the surfaced
+    /// import set. The dry-run lists the full set (candidates ∪ missing) an
+    /// apply over the same state imports; an apply invoked without any prior
+    /// dry-run imports exactly that same recomputed set — nothing that the
+    /// review step would not have listed. Cross-estate export→reconcile is
+    /// the canonical missing-set case: the manifest certifies estate A's
+    /// agreement, estate B lacks every note.
+    @Test func applyImportsOnlyTheSurfacedSetCrossEstate() async throws {
+        let kit = GeniusLocusKit()
+        let handleA = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "vr01-gate-src"))
+        try await capture(kit, handleA, content: "Gate note content.", room: "chem")
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        try await runExportAndAwait(vault: vault, via: ToolDispatcher(kit: kit, handle: handleA))
+        let manifest = try #require(try VaultTools.readManifest(vaultURL: vault))
+        let notePath = try #require(manifest.files.keys.first)
+
+        // Estate B: holds nothing. The note is stamped (certified against A)
+        // so it is NOT a candidate — it is exactly a missing-set member.
+        let handleB = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "vr01-gate-dst"))
+        let dispatcherB = ToolDispatcher(kit: kit, handle: handleB)
+
+        // Dry-run surfaces the missing note without importing it.
+        let dryRun = try text(try await dispatcherB.dispatch(
+            name: "moot_vault_reconcile", arguments: reconcileArgs(vaultPath: vault.path)))
+        #expect(dryRun.contains("0 added, 0 modified, 0 deleted"))
+        #expect(dryRun.contains("missing (estate lacks — apply imports these):"))
+        #expect(dryRun.contains("  * \(notePath)"))
+        #expect(dryRun.contains("import set: 1 note(s) — 0 candidate(s) + 1 missing"))
+        let beforeApply = try await kit.recall(
+            handleB, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(beforeApply.isEmpty, "dry-run must not import")
+
+        // Apply (no prior dry-run required — the gate is the deterministic
+        // recompute): imports exactly the same surfaced set.
+        let applyResult = try text(try await dispatcherB.dispatch(
+            name: "moot_vault_reconcile",
+            arguments: reconcileArgs(vaultPath: vault.path, apply: true)))
+        #expect(applyResult.contains("  * \(notePath)"))
+        #expect(applyResult.contains("import set: 1 note(s) — 0 candidate(s) + 1 missing"))
+        #expect(applyResult.contains("apply: true — imported exactly the surfaced import set"))
+        #expect(applyResult.contains("drawersWritten: 1"))
+        #expect(applyResult.contains("manifest: re-stamped 1 imported path(s) (schema v2)"))
+
+        // Retrievability: the note landed in estate B.
+        let afterApply = try await kit.recall(
+            handleB, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(afterApply.count == 1)
+
+        // Convergence: a second dry-run over B surfaces nothing.
+        let second = try text(try await dispatcherB.dispatch(
+            name: "moot_vault_reconcile", arguments: reconcileArgs(vaultPath: vault.path)))
+        #expect(second.contains("import set: 0 note(s) — 0 candidate(s) + 0 missing"),
+                "Import set must be empty after apply; got: \(second)")
+    }
+
     // MARK: - Async job helpers
 
     /// Scan the plain-text result body for a `job_id: <UUID>` line and
