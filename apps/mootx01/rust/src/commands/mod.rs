@@ -19,6 +19,7 @@ pub mod enable;
 /// MOOTx01 estate via a PreToolUse hook and settings.json merge.
 pub mod harness_memory;
 pub mod install;
+pub mod botlink;
 pub mod proxy;
 pub mod query;
 pub mod serve;
@@ -43,6 +44,7 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Db(sub) => db::run(sub),
         Command::Status => status::run(),
         Command::Query { verb, db, json, args } => query::run(verb, db, json, args),
+        Command::BotLink { sub, http, db } => botlink::run(sub, http, db),
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
         Command::Drain { db } => drain::run(db),
         Command::Dream { db } => dream::run(db),

@@ -12,19 +12,48 @@
 //! runs BEFORE `parse` sees the args (main.rs), so this invariant still
 //! holds for every caller that reaches `parse` with a non-empty args slice.
 //!
-//! argv0 dispatch (Wave 6 addendum, `resolve_argv0_dispatch`): a SEPARATE,
-//! narrower mechanism from the above — when invoked with an EMPTY args
-//! slice AND argv0's basename is `mootx01-proxy` (typically a symlink to
-//! this same binary), the effective args become `["proxy"]` before
-//! `parse` ever runs. This does not reintroduce "no implicit default
-//! subcommand": an empty-args invocation under any OTHER argv0 still
-//! reaches `parse` with an empty slice and gets the unconditional usage/64
-//! behavior above, unchanged. Mirrors Swift's `ArgvDispatch.resolvedArguments`
-//! (MootInstallerCore) — Rust has no bare-pipe → `serve` default (that half
-//! of the Swift function does not apply here, per this file's own §2 spec
-//! citation), only the argv0 → `proxy` half.
+//! argv0 dispatch (Wave 6 addendum, `resolve_argv0_dispatch`): two routes,
+//! evaluated in this order:
+//!
+//! 1. `mootx01-botLink` (BL-2): NAMESPACING route — prepend `"botlink"` to
+//!    the raw args regardless of whether args is empty or not. A leading
+//!    explicit `"botlink"` is left untouched (no double-prepend). This fires
+//!    for ARGS-CARRYING invocations too: `mootx01-botLink ping` becomes
+//!    `["botlink","ping"]`. Evaluated FIRST because it applies unconditionally.
+//!
+//! 2. `mootx01-proxy`: BARE-INVOCATION default — fires only when args is
+//!    empty AND the basename matches. ProxyCommand takes no subcommands so the
+//!    bare-only default is the whole surface; explicit args always pass through
+//!    unchanged.
+//!
+//! Mirrors Swift's `ArgvDispatch.resolvedArguments` (MootInstallerCore).
+//! Rust has no bare-pipe → `serve` default (that half of the Swift function
+//! does not apply here, per this file's own §2 spec citation).
 
 use std::fmt;
+
+/// `mootx01 botlink` subcommand selector (BL-2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum BotLinkSub {
+    /// `botlink ping` — liveness + identity: moot_estate_ping + transport attribution.
+    Ping,
+    /// `botlink list` — emit the MCP tools/list result object; cursors followed internally.
+    List,
+    /// `botlink call <verb>` — one ARIA tool call; stdout is the raw MCP result object.
+    Call {
+        verb: String,
+        /// `--args <json>` base object (optional).
+        args_json: Option<String>,
+        /// All remaining tokens (captured verbatim for KV parsing in the engine).
+        /// Mirrors Swift's `@Argument(parsing: .allUnrecognized)` on `remaining`.
+        kv: Vec<String>,
+    },
+    /// `botlink rpc [frame]` — forward one raw JSON-RPC frame and print the response.
+    Rpc {
+        /// The frame as a positional argument; None = read from stdin to EOF.
+        frame: Option<String>,
+    },
+}
 
 /// A fully parsed invocation.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +104,8 @@ pub enum Command {
     Status,
     /// §4.6 query <verb> [--db <name>] [--json] [-- <args...>]
     Query { verb: String, db: Option<String>, json: bool, args: Vec<String> },
+    /// botlink <ping|list|call|rpc> [--http <url>] [--db <name>]
+    BotLink { sub: BotLinkSub, http: Option<String>, db: Option<String> },
     /// §4.7 proxy [--daemon-url <url>]
     Proxy { daemon_url: Option<String> },
     /// drain [--db <name>] — finish draining an estate's encode queue, then exit
@@ -180,26 +211,46 @@ impl fmt::Display for UsageError {
 /// Swift `ArgvDispatch.proxyInvocationName`.
 pub const PROXY_INVOCATION_NAME: &str = "mootx01-proxy";
 
-/// Resolve argv0-based subcommand dispatch. See this module's doc comment
-/// for the precedence and scope of this mechanism relative to `parse`'s
-/// own §2 "no implicit default" invariant.
+/// The argv0 basename that triggers `botlink` namespacing dispatch (BL-2).
+/// Capital L is deliberate — matches the symlink the installer places beside
+/// the binary (`mootx01-botLink → mootx01`). Mirrors Swift
+/// `ArgvDispatch.botLinkInvocationName`.
+pub const BOTLINK_INVOCATION_NAME: &str = "mootx01-botLink";
+
+/// Resolve argv0-based subcommand dispatch. Two routes evaluated in order —
+/// see this module's doc comment for the full rationale.
 ///
-/// Only fires when `args` is empty AND argv0's last path component is
-/// exactly `mootx01-proxy` — an explicit subcommand (or any other argv0)
-/// passes `args` through unchanged.
+/// Route 1 (mootx01-botLink): NAMESPACING — checked FIRST because it applies
+/// to args-carrying invocations too. If basename == mootx01-botLink and the
+/// first arg is already "botlink", return args unchanged (no double-prepend).
+/// Otherwise prepend "botlink" unconditionally.
+///
+/// Route 2 (mootx01-proxy): BARE-INVOCATION default — fires only when args is
+/// empty AND basename is exactly `mootx01-proxy`.
 ///
 /// - Parameters:
 ///   - argv0: the invoked program path or name (`std::env::args().next()`;
 ///     may be absolute, relative, or a bare PATH-resolved name).
 ///   - args: the arguments AFTER argv0.
-/// - Returns: `vec!["proxy".to_string()]` when the dispatch fires,
-///   otherwise `args` unchanged.
+/// - Returns: the modified args slice (or args unchanged when neither route
+///   fires).
 pub fn resolve_argv0_dispatch(argv0: &str, args: &[String]) -> Vec<String> {
-    if args.is_empty() {
-        let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-        if basename == PROXY_INVOCATION_NAME {
-            return vec!["proxy".to_string()];
+    let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
+    // Route 1: botLink namespacing — evaluated BEFORE the empty-args guard
+    // because it fires for args-carrying invocations too.
+    if basename == BOTLINK_INVOCATION_NAME {
+        // No double-prepend: if the caller already wrote "mootx01-botLink botlink ping",
+        // return args as-is so the "botlink" subcommand is not duplicated.
+        if args.first().map(|s| s.as_str()) == Some("botlink") {
+            return args.to_vec();
         }
+        let mut v = vec!["botlink".to_string()];
+        v.extend_from_slice(args);
+        return v;
+    }
+    // Route 2: proxy bare-invocation default.
+    if args.is_empty() && basename == PROXY_INVOCATION_NAME {
+        return vec!["proxy".to_string()];
     }
     args.to_vec()
 }
@@ -232,6 +283,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             Ok(Command::Status)
         }
         "query" => parse_query(&mut it),
+        "botlink" => parse_botlink(&mut it),
         "proxy" => parse_proxy(&mut it),
         "drain" => parse_drain(&mut it),
         "dream" => parse_dream(&mut it),
@@ -550,6 +602,149 @@ fn parse_query(it: &mut Args) -> Result<Command, UsageError> {
     Ok(Command::Query { verb, db, json, args })
 }
 
+/// Parse `mootx01 botlink <ping|list|call|rpc> [--http <url>] [--db <name>]`.
+///
+/// Subcommand is the first token; missing or unknown → UsageError (exit 64).
+/// "botlink --help" → HelpFor("botlink").
+///
+/// - ping / list: accept only --http, --db, --help; any other token → UsageError.
+/// - call: REQUIRED first positional verb (missing → UsageError); then --args,
+///   --http, --db, --help are recognized; EVERY other token (flags and
+///   positionals alike, in order) is collected verbatim into kv. This mirrors
+///   Swift's @Argument(parsing: .allUnrecognized) — kv tokens are NOT validated
+///   at parse time.
+/// - rpc: optional single positional frame; --http/--db/--help; a second
+///   positional or unknown flag → UsageError.
+fn parse_botlink(it: &mut Args) -> Result<Command, UsageError> {
+    let sub_str = match it.next() {
+        None => return Err(UsageError(
+            "Error: 'botlink' requires a subcommand: ping, list, call, rpc.\n\n\
+             Use 'mootx01 botlink --help' for usage.".into()
+        )),
+        Some(s) if s == "--help" || s == "-h" => return Ok(Command::HelpFor("botlink")),
+        Some(s) => s.as_str(),
+    };
+
+    match sub_str {
+        "ping" => {
+            match parse_botlink_simple_options(it, "botlink ping")? {
+                BotLinkSimpleOptions::Help => Ok(Command::HelpFor("botlink")),
+                BotLinkSimpleOptions::Options { http, db } => {
+                    Ok(Command::BotLink { sub: BotLinkSub::Ping, http, db })
+                }
+            }
+        }
+        "list" => {
+            match parse_botlink_simple_options(it, "botlink list")? {
+                BotLinkSimpleOptions::Help => Ok(Command::HelpFor("botlink")),
+                BotLinkSimpleOptions::Options { http, db } => {
+                    Ok(Command::BotLink { sub: BotLinkSub::List, http, db })
+                }
+            }
+        }
+        "call" => parse_botlink_call(it),
+        "rpc" => parse_botlink_rpc(it),
+        other => Err(UsageError(format!(
+            "Error: unknown 'botlink' subcommand '{other}'. Use: ping | list | call | rpc"
+        ))),
+    }
+}
+
+/// Result of parsing `--http` / `--db` / `--help` for the `ping` and `list`
+/// subcommands. `Help` is returned when the caller passed `--help` or `-h`;
+/// `Options` carries the parsed flags otherwise.
+enum BotLinkSimpleOptions {
+    Options { http: Option<String>, db: Option<String> },
+    Help,
+}
+
+/// Parse --http / --db / --help for ping and list. Returns
+/// Ok(BotLinkSimpleOptions::Help) on --help. Any unrecognized token →
+/// UsageError (mirrors Swift ArgumentParser strictness for commands with no
+/// @Argument(parsing: .allUnrecognized)).
+fn parse_botlink_simple_options(
+    it: &mut Args,
+    cmd: &'static str,
+) -> Result<BotLinkSimpleOptions, UsageError> {
+    let (mut http, mut db) = (None, None);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--http" => http = Some(take_value(it, "--http")?),
+            "--db" => db = Some(take_value(it, "--db")?),
+            "--help" | "-h" => return Ok(BotLinkSimpleOptions::Help),
+            other => return Err(UsageError(format!(
+                "Error: unexpected argument '{other}' for '{cmd}'."
+            ))),
+        }
+    }
+    Ok(BotLinkSimpleOptions::Options { http, db })
+}
+
+fn parse_botlink_call(it: &mut Args) -> Result<Command, UsageError> {
+    // verb is the first token; must be present and must not start with "--".
+    let verb = match it.next() {
+        None => return Err(UsageError(
+            "Error: 'botlink call' requires a verb, e.g. 'mootx01 botlink call memory_search'.".into()
+        )),
+        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("botlink")),
+        Some(v) if v.starts_with("--") => return Err(UsageError(format!(
+            "Error: 'botlink call' requires a verb before flags, got '{v}'."
+        ))),
+        Some(v) => v.to_string(),
+    };
+    let (mut http, mut db, mut args_json) = (None, None, None);
+    let mut kv: Vec<String> = Vec::new();
+    // Collect remaining tokens: recognized flags consumed here; everything
+    // else goes verbatim into kv (mirrors .allUnrecognized — NOT validated).
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--http" => http = Some(take_value(it, "--http")?),
+            "--db" => db = Some(take_value(it, "--db")?),
+            "--args" => args_json = Some(take_value(it, "--args")?),
+            "--help" | "-h" => return Ok(Command::HelpFor("botlink")),
+            other => {
+                // Unrecognized flag or positional: collect verbatim into kv.
+                kv.push(other.to_string());
+                // If this was a flag (starts with "--"), also peek and collect
+                // its value if it does not itself start with "--".
+                if other.starts_with("--") {
+                    if let Some(next) = it.peek() {
+                        if !next.starts_with("--") {
+                            kv.push(it.next().unwrap().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Command::BotLink { sub: BotLinkSub::Call { verb, args_json, kv }, http, db })
+}
+
+fn parse_botlink_rpc(it: &mut Args) -> Result<Command, UsageError> {
+    let (mut http, mut db) = (None, None);
+    let mut frame: Option<String> = None;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--http" => http = Some(take_value(it, "--http")?),
+            "--db" => db = Some(take_value(it, "--db")?),
+            "--help" | "-h" => return Ok(Command::HelpFor("botlink")),
+            other if other.starts_with("--") => return Err(UsageError(format!(
+                "Error: unexpected argument '{other}' for 'botlink rpc'."
+            ))),
+            other => {
+                // First positional is the frame; a second positional is a usage error.
+                if frame.is_some() {
+                    return Err(UsageError(format!(
+                        "Error: unexpected argument '{other}' for 'botlink rpc' (frame already given)."
+                    )));
+                }
+                frame = Some(other.to_string());
+            }
+        }
+    }
+    Ok(Command::BotLink { sub: BotLinkSub::Rpc { frame }, http, db })
+}
+
 fn parse_proxy(it: &mut Args) -> Result<Command, UsageError> {
     let mut daemon_url = None;
     while let Some(a) = it.next() {
@@ -689,6 +884,7 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "db" => Ok("db"),
         "status" => Ok("status"),
         "query" => Ok("query"),
+        "botlink" => Ok("botlink"),
         "proxy" => Ok("proxy"),
         "drain" => Ok("drain"),
         "dream" => Ok("dream"),
@@ -720,6 +916,7 @@ pub fn root_usage() -> &'static str {
      \x20 db                      Manage named estate databases.\n\
      \x20 status                  Show server state, active estate, and wired clients.\n\
      \x20 query                   Issue a single ARIA tool call (v1.0: MCP subprocess passthrough).\n\
+     \x20 botlink                 One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
      \x20 proxy                   Proxy stdin JSON-RPC frames to the resident daemon over loopback HTTP (for Claude Desktop).\n\
      \x20 upgrade                 Upgrade mootx01 to the latest release or a local build.\n\
      \x20 unlock                  Authenticate and issue a sensitivity-tier grant (private → midnight; secret → 30 min).\n\
@@ -789,6 +986,27 @@ pub fn subcommand_usage(cmd: &str) -> String {
             OPTIONS:\n\
             \x20 --db <name>             Named estate to query. Default: active estate.\n\
             \x20 --json                  Output raw JSON instead of human-readable text.".into(),
+        "botlink" => "One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
+            \n\
+            USAGE: mootx01 botlink <ping|list|call|rpc> [--http <url>] [--db <name>]\n\
+            \n\
+            SUBCOMMANDS:\n\
+            \x20 ping                    Liveness + identity: moot_estate_ping plus transport attribution.\n\
+            \x20 list                    Emit the MCP tools/list result object; cursors are followed internally.\n\
+            \x20 call                    Issue one ARIA tool call; stdout is the raw MCP result object.\n\
+            \x20 rpc                     Forward one raw JSON-RPC frame (argument or stdin) and print the response frame.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --http <url>            Resident daemon base URL override (loopback required, e.g. http://127.0.0.1:4242). Dev only.\n\
+            \x20 --db <name>             Named estate; forces the serve-subprocess path.\n\
+            \n\
+            The explicit AI data path for a cloud agent whose only channel to this\n\
+            Mac is a permissioned one-shot shell. One invocation performs one MCP\n\
+            operation against the local estate and exits. stdout is exactly one JSON\n\
+            value — no banners, no log lines; diagnostics go to stderr. Exit codes:\n\
+            0 success, 2 tool error (isError true), 1 transport failure, 64 usage /\n\
+            non-loopback --http. The estate never leaves this Mac: botLink talks to\n\
+            the loopback daemon or spawns a local serve subprocess, nothing else.".into(),
         "proxy" => "Proxy stdin JSON-RPC frames to the resident daemon over loopback HTTP (for Claude Desktop).\n\
             \n\
             USAGE: mootx01 proxy [--daemon-url <url>]\n\
@@ -1319,5 +1537,191 @@ mod tests {
     #[test]
     fn hook_capture_with_trailing_args_is_usage_error() {
         assert!(p(&["hook-capture", "extra"]).is_err());
+    }
+
+    // MARK: - botlink subcommand (BL-2)
+
+    #[test]
+    fn botlink_ping_parses() {
+        assert_eq!(
+            p(&["botlink", "ping"]).unwrap(),
+            Command::BotLink { sub: BotLinkSub::Ping, http: None, db: None }
+        );
+    }
+
+    #[test]
+    fn botlink_list_parses() {
+        assert_eq!(
+            p(&["botlink", "list"]).unwrap(),
+            Command::BotLink { sub: BotLinkSub::List, http: None, db: None }
+        );
+    }
+
+    #[test]
+    fn botlink_ping_with_http_and_db() {
+        assert_eq!(
+            p(&["botlink", "ping", "--http", "http://127.0.0.1:9", "--db", "work"]).unwrap(),
+            Command::BotLink {
+                sub: BotLinkSub::Ping,
+                http: Some("http://127.0.0.1:9".into()),
+                db: Some("work".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn botlink_ping_unknown_flag_is_usage_error() {
+        assert!(p(&["botlink", "ping", "--unknown"]).is_err());
+    }
+
+    #[test]
+    fn botlink_list_unknown_flag_is_usage_error() {
+        assert!(p(&["botlink", "list", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn botlink_bare_no_subcommand_is_usage_error() {
+        assert!(p(&["botlink"]).is_err());
+    }
+
+    #[test]
+    fn botlink_help_flag_returns_help_for() {
+        assert_eq!(p(&["botlink", "--help"]).unwrap(), Command::HelpFor("botlink"));
+    }
+
+    #[test]
+    fn botlink_call_parses_verb_and_kv() {
+        let cmd = p(&["botlink", "call", "memory_search", "--limit", "5", "--query", "foo"]).unwrap();
+        match cmd {
+            Command::BotLink { sub: BotLinkSub::Call { verb, args_json, kv }, http, db } => {
+                assert_eq!(verb, "memory_search");
+                assert!(args_json.is_none());
+                assert!(http.is_none());
+                assert!(db.is_none());
+                // --limit 5 --query foo collected in kv in order.
+                assert_eq!(kv, vec!["--limit", "5", "--query", "foo"]);
+            }
+            other => panic!("expected BotLink Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn botlink_call_with_args_flag() {
+        let cmd = p(&["botlink", "call", "foo", "--args", r#"{"k":1}"#]).unwrap();
+        match cmd {
+            Command::BotLink { sub: BotLinkSub::Call { verb, args_json, kv }, .. } => {
+                assert_eq!(verb, "foo");
+                assert_eq!(args_json.as_deref(), Some(r#"{"k":1}"#));
+                assert!(kv.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn botlink_call_missing_verb_is_usage_error() {
+        assert!(p(&["botlink", "call"]).is_err());
+    }
+
+    #[test]
+    fn botlink_call_kv_tokens_captured_in_order() {
+        // Unrecognized flags + positionals go into kv verbatim.
+        let cmd = p(&["botlink", "call", "verb", "--z", "last", "--a", "first"]).unwrap();
+        match cmd {
+            Command::BotLink { sub: BotLinkSub::Call { kv, .. }, .. } => {
+                assert_eq!(kv, vec!["--z", "last", "--a", "first"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn botlink_rpc_no_frame_parses() {
+        assert_eq!(
+            p(&["botlink", "rpc"]).unwrap(),
+            Command::BotLink { sub: BotLinkSub::Rpc { frame: None }, http: None, db: None }
+        );
+    }
+
+    #[test]
+    fn botlink_rpc_with_frame() {
+        let cmd = p(&["botlink", "rpc", r#"{"jsonrpc":"2.0","id":1,"method":"x","params":{}}"#]).unwrap();
+        match cmd {
+            Command::BotLink { sub: BotLinkSub::Rpc { frame: Some(f) }, .. } => {
+                assert!(f.contains("jsonrpc"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn botlink_rpc_two_positionals_is_usage_error() {
+        assert!(p(&["botlink", "rpc", "frame1", "frame2"]).is_err());
+    }
+
+    #[test]
+    fn botlink_rpc_unknown_flag_is_usage_error() {
+        assert!(p(&["botlink", "rpc", "--bogus"]).is_err());
+    }
+
+    // MARK: - resolve_argv0_dispatch botLink routes (BL-2)
+
+    #[test]
+    fn argv0_botlink_bare_injects_botlink() {
+        // (mootx01-botLink, []) -> ["botlink"]
+        assert_eq!(
+            dispatch("mootx01-botLink", &[]),
+            vec!["botlink".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv0_botlink_with_ping_prepends() {
+        // (mootx01-botLink, ["ping"]) -> ["botlink", "ping"]
+        assert_eq!(
+            dispatch("mootx01-botLink", &["ping"]),
+            vec!["botlink".to_string(), "ping".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv0_botlink_no_double_prepend() {
+        // (mootx01-botLink, ["botlink", "ping"]) -> unchanged
+        assert_eq!(
+            dispatch("mootx01-botLink", &["botlink", "ping"]),
+            vec!["botlink".to_string(), "ping".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv0_botlink_help_flag_prepended() {
+        // (mootx01-botLink, ["--help"]) -> ["botlink", "--help"]
+        assert_eq!(
+            dispatch("mootx01-botLink", &["--help"]),
+            vec!["botlink".to_string(), "--help".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv0_botlink_absolute_path_prepends() {
+        // (/abs/path/mootx01-botLink, ["ping"]) -> ["botlink", "ping"]
+        assert_eq!(
+            dispatch("/usr/local/bin/mootx01-botLink", &["ping"]),
+            vec!["botlink".to_string(), "ping".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv0_proxy_routes_unchanged_when_botlink_invoked() {
+        // Proxy route unchanged: mootx01-proxy bare still injects proxy.
+        assert_eq!(
+            dispatch("mootx01-proxy", &[]),
+            vec!["proxy".to_string()]
+        );
+        // Proxy with args: unchanged.
+        assert_eq!(
+            dispatch("mootx01-proxy", &["install"]),
+            vec!["install".to_string()]
+        );
     }
 }
