@@ -213,6 +213,64 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         ))
     }
 
+    /// Derive the finalized serving basis from restored (and optionally augmented)
+    /// maintained counts, reading NO corpus text.
+    ///
+    /// ## Contract
+    ///
+    /// The caller MUST have already restored maintained counts via
+    /// `restore_counts` or `restore_counts_from_parts` (and MAY have folded
+    /// additional delta texts via `add_to_counts`) before calling this method.
+    /// `finalize_from_counts` converts that accumulated state into the finalized
+    /// serving basis in place, without re-reading any corpus text.
+    ///
+    /// ## Return value
+    ///
+    /// Returns `true` when the provider's maintained counts fully determine its
+    /// basis and the derivation has been applied:
+    ///
+    /// - **RandomIndexing** (`true`): the maintained counts payload IS the basis
+    ///   vocabulary (term → context vectors). Restoring the counts already
+    ///   reconstructs the basis; finalization is a no-op, so this call is a
+    ///   lossless promotion with no compute cost.
+    ///
+    /// - **PPMI** (`true`): the maintained counts hold the full raw co-occurrence
+    ///   state (`coCount`, `termCount`, `totalPairs`, `totalTerms`) — exactly what
+    ///   `finalize_training` consumes to derive `ppmiVectors`. This method runs
+    ///   that finalize pass over the restored state and returns `true` once the
+    ///   PPMI vectors are populated.
+    ///
+    /// Returns `false` when the maintained counts are insufficient to derive a
+    /// basis and the provider's state is left UNCHANGED:
+    ///
+    /// - **LSA / NMF** (`false`): maintained counts hold only the vocabulary and
+    ///   `documentCount` trigger anchors. The per-document TF rows and per-term DF
+    ///   that drive the matrix factorization are deliberately NOT persisted — by
+    ///   design those are re-tokenized from corpus text at refactor time (see
+    ///   design-doc open decision 1). No counts-only basis exists for these
+    ///   providers; the caller MUST keep the full corpus path.
+    ///
+    /// ## Acceptance contract (digest gate)
+    ///
+    /// For providers returning `true`, the byte output of `serialize_basis()`
+    /// after this call MUST be identical to a `train_on_corpus` run over the same
+    /// accumulated corpus. This digest-gate equality is the acceptance criterion
+    /// that the incremental path and the from-scratch path produce the same basis.
+    ///
+    /// ## Determinism
+    ///
+    /// Never reads wall-clock time. The result is a pure function of the
+    /// accumulated counts state at the time of the call.
+    ///
+    /// ## Default
+    ///
+    /// Returns `false`. Counts-only basis derivation is an explicit per-provider
+    /// opt-in. A conformer that has not audited its counts payload MUST NOT be
+    /// silently eligible; the conservative default ensures it isn't.
+    fn finalize_from_counts(&mut self) -> bool {
+        false
+    }
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.

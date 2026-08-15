@@ -210,6 +210,43 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// this, and the pair is exercised together by the round-trip tests.
     func restoreCounts(header: Data, terms: [(term: String, vector: Data)]) throws
 
+    /// Derive the finalized serving basis from accumulated maintained counts,
+    /// reading NO corpus text.
+    ///
+    /// **Contract.** The caller has already restored maintained counts via
+    /// `restoreCounts(from:)` or the term-decomposed `restoreCounts(header:terms:)`
+    /// and MAY have folded additional delta texts via `addToCounts(text:)`.
+    /// `finalizeFromCounts()` drives whatever method-specific finalization pass
+    /// is needed and leaves this provider in the same state as a
+    /// `trainOnCorpus` run over the same accumulated corpus:
+    ///
+    /// - **Returns `true`** when the provider's maintained counts fully determine
+    ///   its basis without corpus text:
+    ///   - *RandomIndexing* ("RICT"): the restored vocabulary of term-to-context
+    ///     vectors IS the basis — restoration alone reproduces it; finalization is
+    ///     a no-op, so `true` is returned immediately.
+    ///   - *PPMI* ("PPMC"): the counts blob holds the full raw co-occurrence
+    ///     state (coCount, termCount, totalPairs, totalTerms) — exactly what
+    ///     `finalize()` consumes to derive `ppmiVectors`. One finalize pass
+    ///     over the restored state yields a basis that is byte-identical to a
+    ///     from-scratch `trainOnCorpus` over the same accumulated corpus. That
+    ///     byte-identity through the digest gate is the acceptance contract.
+    ///
+    /// - **Returns `false`** when the maintained counts are insufficient:
+    ///   - *LSA* / *NMF*: the counts blob holds only vocab + documentCount
+    ///     trigger anchors; the per-document TF rows and per-term DF needed by
+    ///     the factorization are deliberately NOT persisted (per the design-doc
+    ///     open decision: re-tokenize at refactor time). No counts-only basis
+    ///     can be derived. On `false` the provider's state is unchanged and the
+    ///     caller MUST keep the corpus re-tokenization path.
+    ///
+    /// **Deterministic:** never reads wall-clock time.
+    ///
+    /// **Default:** returns `false` — counts-only refactoring is an explicit
+    /// per-provider opt-in. A conformer that has not audited its counts payload
+    /// MUST NOT be silently eligible.
+    func finalizeFromCounts() -> Bool
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
@@ -244,4 +281,13 @@ public extension TrainableEmbeddingBasis {
     /// treat every term as novel. Production distributional providers override
     /// this with their exact maintained-vocabulary lookup.
     func countsContainsTerm(_ term: String) -> Bool { false }
+
+    /// Default: counts-only finalization is not supported. A conformer that
+    /// has not explicitly audited its counts payload and confirmed it is
+    /// sufficient to derive a byte-identical basis (the digest-gate acceptance
+    /// contract) must not be silently eligible. Providers that CAN derive their
+    /// basis from counts alone (RandomIndexing, PPMI) override this with `true`
+    /// after the finalize pass completes; LSA and NMF keep the default because
+    /// their per-document TF input is not persisted in the counts blob.
+    func finalizeFromCounts() -> Bool { false }
 }
