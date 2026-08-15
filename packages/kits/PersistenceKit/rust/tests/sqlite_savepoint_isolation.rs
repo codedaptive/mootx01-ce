@@ -6,8 +6,7 @@
 // multi-step write in an isolated transaction can end up with a partial
 // commit, or have an inner rollback discard more (or less) than intended.
 //
-// Investigation (see docs_internal/status/SV_01_REPORT.md for the full
-// account): the SAME-THREAD nesting mechanism 6751fc618 added
+// Investigation summary: the SAME-THREAD nesting mechanism 6751fc618 added
 // (`Inner::nest_begin`/`nest_commit`/`nest_rollback`, driven by
 // `Inner::tx_depth` and per-depth `SAVEPOINT tx_{depth}` names) is
 // call-stack-correct — an inner rollback undoes only the inner scope, an

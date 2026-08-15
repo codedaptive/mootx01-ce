@@ -1,12 +1,58 @@
 # Editions
 
-*Open core, commercial edition. Same substrate. Different deployment surface.*
+*Open Community product, personal Pro product, organizational Enterprise product. Same substrate; different operational surfaces.*
 
 ---
 
-MOOTx01 ships in two editions. The open core is the substrate itself, available to anyone, runnable on any hardware, under the user's control. The commercial edition is what makes the substrate deployable in environments that need a contract behind it.
+The source ships through two repository editions. The native application ships
+at three product levels. Those are different axes and their names must not be
+used interchangeably.
 
-Both editions share the same substrate code. The open core makes the substrate exist. The commercial edition makes it operational where the open core alone cannot go.
+- **Community Edition (CE repository)** publishes the open substrate and the
+  open **MOOTx01 Community** desktop application.
+- **Enterprise Edition (EE repository)** is the private canonical workshop and
+  carries **MOOTx01 Pro** and **MOOTx01 Enterprise**, plus the Community source
+  used to prove curated CE publications.
+
+The open core is the substrate itself, available to anyone, runnable on any
+hardware, under the user's control. The commercial products make that substrate
+convenient on personal Apple devices or operational in environments that need a
+contract behind it.
+
+Both repository editions share the same substrate code. The open core makes the
+substrate exist. Pro makes it convenient across one person's Apple devices;
+Enterprise makes it operational where unsupported software alone cannot go.
+
+## Native application product levels
+
+The product boundary is capability-based and monotonic: Pro contains every
+Community capability; Enterprise contains every Pro capability. An interface
+preference may simplify navigation within a product, but it never unlocks a
+higher product level.
+
+| Capability family | Community | Pro | Enterprise |
+|---|:---:|:---:|:---:|
+| Local encrypted estate; Capture, Recall, Review; Quick Capture | ✓ | ✓ | ✓ |
+| ARIA/MCP, Product Dock, portable LAN, import/export | ✓ | ✓ | ✓ |
+| Transparent engine, tool, and edge diagnostics | ✓ | ✓ | ✓ |
+| macOS desktop application | ✓ | ✓ | ✓ |
+| Windows desktop application | Planned | — | Deployment-dependent |
+| iPhone and iPad applications | — | ✓ | ✓ |
+| On-device Intelligence and Apple system surfaces | — | ✓ | ✓ |
+| Personal iCloud sync, federation, miners, and work packets | — | ✓ | ✓ |
+| Organization identity, policy, federation, and remote administration | — | — | ✓ |
+| Managed deployment, audit/compliance assurance, certified integrations | — | — | ✓ |
+
+Trust, individual import/export, and the ability to leave the product remain in
+Community. Enterprise capabilities add organizational control above the
+single-owner model; they do not take ownership of a person's estate away from
+that person.
+
+The application stays beside the substrate in each repository. It is not a
+third repository. EE is the development and security-validation workshop. A
+curated app publication moves from an EE worktree into CE only after review;
+the CE backporter never merges the noisy EE development history and never
+copies the private app directory wholesale.
 
 ---
 
@@ -28,11 +74,17 @@ That is appropriate for most users. It is not appropriate for everyone.
 
 ---
 
-## Commercial edition
+## Commercial products
 
 Some organizations cannot deploy unsupported source-available software. Regulated industries, large enterprises, organizations with legal or compliance requirements that demand a contract behind the software they use. These are not failures of the model. They are operational realities.
 
-The commercial edition exists for those organizations. It is the same substrate, with:
+MOOTx01 Pro is the personal commercial product. It adds the official iPhone and
+iPad applications, Apple system surfaces, on-device Intelligence, personal
+iCloud sync and federation, attended miners, and work packets. It does not add
+organizational ownership or administration to a person's estate.
+
+MOOTx01 Enterprise exists for organizations that need an operational contract
+around the same substrate, with:
 
 - **Supported builds**: hardened, tested, packaged for production deployment.
 - **Certified integrations**: verified compatibility with specific AI clients, storage backends, and deployment environments.
@@ -40,7 +92,9 @@ The commercial edition exists for those organizations. It is the same substrate,
 - **Compliance documentation**: the paper trail regulated environments require.
 - **Support contract**: a commitment to respond, fix, and maintain.
 
-The commercial edition is not a different product. It is the same substrate with the operational layer that enterprise environments require. Anything you can do with the open core, you can do with the commercial edition. The commercial edition adds nothing the open core lacks at the substrate level; it adds what enterprises need to deploy the substrate in their environment.
+Enterprise is not a different substrate. It is the Community and Pro capability
+set plus the organizational identity, policy, federation, deployment, and
+assurance layer that enterprise environments require.
 
 ---
 
@@ -80,11 +134,24 @@ The substrate capability set is one thing; a given implementation may expose a s
 
 The open core creates ecosystem gravity. Every developer who learns ARIA, every application that integrates MOOTx01, every AI client that speaks the protocol, every port to a new language, each of these strengthens the substrate. The Apache-licensed foundation venues and the source-available core make that growth possible while commercial agreements cover the system deployments we reserve: multiuser enterprise integration, client-facing applications, and hosting MOOTs for clients for a fee.
 
-The commercial edition makes the substrate deployable at scale. The organizations that need a contract are the organizations that move serious workloads. The commercial edition is how MOOTx01 reaches those workloads.
+Pro makes the substrate convenient for an individual across Apple devices.
+Enterprise makes the substrate deployable at organizational scale. The
+organizations that need a contract are the organizations that move serious
+workloads.
 
-Both editions reinforce each other. The open core's adoption makes the commercial edition the natural enterprise choice. The commercial edition's revenue funds the open core's continued development. Neither edition undermines the other.
+All three products reinforce each other. Community adoption creates ecosystem
+gravity, Pro funds a polished personal product, and Enterprise funds the
+operational work required by organizations. None undermines the others.
 
-The commercial edition follows the strategy Red Hat proved: Red Hat did not win Linux by restricting it, RHEL was GPL, and anyone could rebuild the source. Red Hat won by being the most operationally credible distributor of it, and by owning the trademark that a rebuild could not use. MOOTx01's commercial edition takes the same posture: not the only way to use the substrate, but the credible way to deploy it where deployment is hardest. We differ from Red Hat in one deliberate respect, covered next: our core is source-available rather than fully open, so part of our protection lives in the license itself and not only in the operational layer.
+Enterprise follows the strategy Red Hat proved: Red Hat did not win Linux by
+restricting it, RHEL was GPL, and anyone could rebuild the source. Red Hat won
+by being the most operationally credible distributor of it, and by owning the
+trademark that a rebuild could not use. MOOTx01 Enterprise takes the same
+posture: not the only way to use the substrate, but the credible way to deploy
+it where deployment is hardest. We differ from Red Hat in one deliberate
+respect, covered next: our core is source-available rather than fully open, so
+part of our protection lives in the license itself and not only in the
+operational layer.
 
 ---
 
