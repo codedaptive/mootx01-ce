@@ -105,6 +105,14 @@ public enum BotLink {
     /// legitimate use on the JSON-RPC endpoint, and `url.path` alone does
     /// not capture them.
     ///
+    /// PORT RANGE (BL-01, Codex #41). `URL(string:)` does not range-check
+    /// the port — it parses `:99999` happily and reports `port == 99999`.
+    /// That value flows to `McpLoopback.daemonAlive`, whose `UInt16(port)`
+    /// narrowing TRAPS ("Not enough bits to represent the passed value")
+    /// and kills the process. Bounding the port here turns a crash into a
+    /// clean exit 64. A negative port needs no check: `URL(string:)`
+    /// already returns nil for `http://127.0.0.1:-1`.
+    ///
     /// - Parameter urlString: the raw `--http` argument.
     /// - Returns: the parsed URL when loopback-valid, else `nil`.
     public static func validateLoopbackHTTP(_ urlString: String) -> URL? {
@@ -120,6 +128,11 @@ public enum BotLink {
         guard url.path.isEmpty || url.path == "/",
               url.query == nil,
               url.fragment == nil else {
+            return nil
+        }
+        // An explicit port must be a real TCP port. Absent is fine — the
+        // caller resolves the daemon port downstream.
+        if let port = url.port, port < 1 || port > 65535 {
             return nil
         }
         return url

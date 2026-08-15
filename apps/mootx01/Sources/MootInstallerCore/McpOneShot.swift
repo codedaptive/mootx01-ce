@@ -45,9 +45,21 @@ public enum McpLoopback {
     /// daemon down falls through to the serve subprocess without a
     /// noticeable stall.
     ///
-    /// - Parameter port: the loopback port to probe.
+    /// - Parameter port: the loopback port to probe. Out-of-range values
+    ///   return `false` rather than trapping — see below.
     /// - Returns: `true` when a TCP connection completes within 250 ms.
     public static func daemonAlive(port: Int) -> Bool {
+        // Range check BEFORE the UInt16 narrowing below (BL-01, Codex #41).
+        // `UInt16(port)` is an unguarded narrowing: it traps with "Not
+        // enough bits to represent the passed value" for anything outside
+        // 0…65535, which killed the CLI when a `--http` override carried an
+        // out-of-range port. `validateLoopbackHTTP` now rejects those with a
+        // clean exit 64, so this is defense in depth — it also covers the
+        // resolved-default-port path, which never passes through that guard
+        // (a corrupt port file would otherwise reach the same trap).
+        // No listener can exist on port 0, so false is the honest answer.
+        guard port >= 1, port <= 65535 else { return false }
+
         let sock = socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else { return false }
         defer { close(sock) }

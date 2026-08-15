@@ -150,15 +150,26 @@ impl ValidatedLoopbackUrl {
 
 /// Validate a `--http` override as a loopback-only HTTP URL.
 ///
-/// Accepts exactly `http://127.0.0.1:*`, `http://localhost:*`, and
-/// `http://[::1]:*` (any port — INCLUDING NO PORT — and any path). Portless
-/// URLs are accepted here because the security boundary is the host, not the
-/// port. `daemon_client::port_from_url` rejects portless URLs (it requires a
-/// colon after the host) and is therefore NOT reused for this guard.
+/// Accepts exactly `http://127.0.0.1`, `http://localhost`, and
+/// `http://[::1]`, with an optional port and an optional path. Portless URLs
+/// are accepted here because the security boundary is the host, not the port.
+/// `daemon_client::port_from_url` rejects portless URLs (it requires a colon
+/// after the host) and is therefore NOT reused for this guard.
+///
+/// A port that IS given must be a real TCP port (1…65535) — see
+/// `parse_explicit_port` below for why present-but-invalid rejects the URL
+/// rather than degrading to portless.
 ///
 /// Everything else — other hosts, https, non-http schemes, 0.0.0.0,
 /// unparseable strings — returns None and the caller exits 64 WITHOUT
 /// constructing any request (fails CLOSED).
+///
+/// PATH: this function still parses and retains `path_suffix`, and its
+/// callers must reject a non-root path themselves. `resolve_transport` — the
+/// only caller — does exactly that (BL-01, Codex #42). The restriction lives
+/// there rather than here because two shipped BL-2 gates pin this function's
+/// path-accepting behaviour and the F-2 attribution semantics built on
+/// `path_suffix`.
 pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
     // Must start with http:// — rejects https and all other schemes.
     let rest = s.strip_prefix("http://")?;
@@ -167,13 +178,28 @@ pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
     // Extract host and port, handling IPv6 bracket notation [::1].
     // host_bracketed includes brackets for IPv6 so it can be used verbatim
     // when reassembling the URL in endpoint_with_port.
+    // Parse an EXPLICIT port strictly (BL-01, Codex #41). A bare
+    // `parse::<u16>().ok()` mapped both "no port given" and "port out of
+    // range" to None, which downstream is one value: `resolve_transport`
+    // falls back to the resolved daemon port. So `--http
+    // http://127.0.0.1:99999` silently retargeted the request at :4242
+    // instead of telling the caller their port was nonsense. Port 0 parsed
+    // as Some(0), which no listener can ever hold. Present-but-invalid now
+    // rejects the whole URL (exit 64), while absent stays portless.
+    fn parse_explicit_port(text: &str) -> Option<u16> {
+        match text.parse::<u16>() {
+            Ok(p) if p >= 1 => Some(p),
+            _ => None,
+        }
+    }
+
     let (host, host_bracketed, explicit_port) = if authority.starts_with('[') {
         // IPv6 bracketed form: "[::1]" or "[::1]:port"
         let close = authority.find(']')?;
         let host = &authority[1..close];
         let rest_after = &authority[close + 1..];
         let port = if let Some(p) = rest_after.strip_prefix(':') {
-            p.parse::<u16>().ok()
+            Some(parse_explicit_port(p)?)
         } else {
             None
         };
@@ -181,7 +207,7 @@ pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
     } else {
         // IPv4 / hostname: "host" or "host:port"
         match authority.rsplit_once(':') {
-            Some((h, p)) => (h, h.to_string(), p.parse::<u16>().ok()),
+            Some((h, p)) => (h, h.to_string(), Some(parse_explicit_port(p)?)),
             None => (authority, authority.to_string(), None),
         }
     };
