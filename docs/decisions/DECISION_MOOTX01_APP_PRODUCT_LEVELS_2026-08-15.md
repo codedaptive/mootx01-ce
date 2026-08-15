@@ -19,8 +19,9 @@ There are two source-repository editions and three application product levels:
   deployment and assurance product.
 
 EE remains the canonical, noisy agent-development workshop. Community changes
-are built and security-tested in an EE worktree, then published as a curated
-CE replacement by the CE backporter. CE does not ingest EE history and the app
+are built and security-tested in an EE worktree, then published through the
+declarative Community replacement contract. The ordinary SHARED backporter is
+not part of application publication. CE does not ingest EE history and the app
 directory is an `EDITION-SURFACE`, never a byte-for-byte shared path.
 
 ## Capability ownership
@@ -65,7 +66,12 @@ All implementation work lands in EE first. A CE publication must:
 2. select only the Community application surface;
 3. contain no Pro/Enterprise source, entitlements, identifiers, internal docs,
    agent artifacts, or private history;
-4. build and test against the exact CE substrate revision;
+4. preserve the reviewed dependency pins and build/test against the exact CE
+   substrate revision without automatic package resolution;
 5. record the EE source commit and the resulting CE commit.
+
+The same rule extends through `packages/apple`: Pro App Intents and Foundation
+Models code are EE-only, `MootIntentCore` is SHARED, and the package manifest is
+an edition-owned surface installed by the Community replacement contract.
 
 No change to the CE repository is part of this decision's implementation.
