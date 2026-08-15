@@ -1258,8 +1258,7 @@ public actor VectorStore {
         // One invalid row abandons the WHOLE graph load (VH-01 F3): this mirrors
         // the engine's own policy — `loadFromGraphRows` rejects on the first bad
         // row — so both layers agree: partial topology from corrupt state is worse
-        // than a clean exact-scan fallback. Previously this loop used `continue`,
-        // which silently built partial graphs the engine thought were valid.
+        // than a clean exact-scan fallback until the next THETA rebuild corrects it.
         // Matches Rust twin: query_hnsw_graph_rows returns Ok(Vec::new()) on
         // any invalid row, causing load_hnsw_graph_if_present to skip the load.
         var graphRows: [HNSWIndex.GraphRow] = []

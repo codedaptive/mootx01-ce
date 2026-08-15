@@ -3355,10 +3355,9 @@ impl VectorStore {
         // One invalid row abandons the WHOLE graph load (VH-01 F3): this
         // mirrors the engine's own policy — `load_from_graph_rows` rejects on
         // the first bad row — so both layers agree. Partial topology from
-        // corrupt state is worse than a clean exact-scan fallback. Previously
-        // this loop used `continue`, which silently passed partial sets to the
-        // engine. Matches Swift twin: `_loadHNSWGraphIfPresent` now returns
-        // on any invalid row.
+        // corrupt state is worse than a clean exact-scan fallback until the
+        // next THETA rebuild corrects it. Matches Swift twin:
+        // `_loadHNSWGraphIfPresent` returns on any invalid row.
         let mut graph_rows = Vec::with_capacity(rows.len());
         for row in rows {
             // node_idx: compact array index — must fit i32 and be ≥ 0.
