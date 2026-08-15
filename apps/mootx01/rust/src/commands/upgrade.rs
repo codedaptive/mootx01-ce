@@ -472,17 +472,80 @@ pub(crate) fn corpus_counts_migration_core(
         .delete("corpus_provider_vocab", &StoragePredicate::IsTrue)
         .map_err(|e| format!("vocab table delete failed: {e:?}"))?;
 
-    // Step 2: UPDATE all rows in `corpus_provider_counts` SET counts = b"".
-    // Zeroing the opaque blob invalidates the stale PPMI/RI/LSA/NMF
-    // serialized state so the next reindex rebuilds from scratch.
-    // doc_count and vocab_size are NOT in `values` — update() touches
-    // ONLY the specified columns, leaving the monotone anchors intact.
+    // Step 2: UPDATE all rows in `corpus_provider_counts` SET counts = INVALIDATED_COUNTS_SENTINEL.
+    // Writing the named sentinel (an empty blob) marks the opaque per-provider accumulator as
+    // invalid. The reader recognises the same sentinel through the shared `is_invalidated_counts`
+    // predicate (corpus_provider_counts_store.rs) and returns Ok(false) — "start from zero" —
+    // without calling any provider codec. Using the named constant instead of an ad-hoc vec![]
+    // means the writer and reader share ONE definition and cannot drift independently.
+    //
+    // doc_count and vocab_size are NOT in `values` — update() touches ONLY the specified
+    // columns, leaving the monotone anchors intact.
     let mut zero_counts: BTreeMap<String, TypedValue> = BTreeMap::new();
-    zero_counts.insert("counts".to_string(), TypedValue::Blob(vec![]));
+    zero_counts.insert(
+        "counts".to_string(),
+        TypedValue::Blob(
+            corpus_kit::corpus_provider_counts_store::INVALIDATED_COUNTS_SENTINEL.to_vec(),
+        ),
+    );
     let counts_updated = storage
         .row_store()
         .update("corpus_provider_counts", zero_counts, &StoragePredicate::IsTrue)
         .map_err(|e| format!("counts blob zero failed: {e:?}"))?;
+
+    // Step 2b: Read-back verification gate.
+    // Immediately after the UPDATE, query every corpus_provider_counts row and confirm
+    // the `counts` column is the invalidation sentinel. A mismatch means the storage
+    // layer returned a shape the reader cannot interpret — a loud failure here is
+    // recoverable (the user re-runs `mootx01 upgrade`); silent undecodable state on disk
+    // is not (it surfaces later in recall, far from its cause).
+    //
+    // Empirically observed: SqliteStorage returns an empty blob as TypedValue::Blob(vec![])
+    // — confirmed by the real-path test `corpus_counts_migration_core_clears_legacy_preserves_anchors_sets_latch`
+    // which asserts exactly this shape post-update. The gate encodes this observation:
+    // only Blob variants are checked against is_invalidated_counts; any other variant
+    // is rejected immediately because it cannot be the sentinel.
+    //
+    // This gate does NOT open a Corpus or touch any CorpusKit engine machinery. It
+    // operates on raw TypedValue rows through the same SqliteStorage surface used above.
+    {
+        let readback = storage
+            .row_store()
+            .query("corpus_provider_counts", None, &[], None, None)
+            .map_err(|e| format!("counts read-back query failed: {e:?}"))?;
+        for row in &readback {
+            let model_id = row
+                .get("model_id")
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_else(|| "?".into());
+            let model_version = row
+                .get("model_version")
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_else(|| "?".into());
+            match row.get("counts") {
+                Some(TypedValue::Blob(b))
+                    if corpus_kit::corpus_provider_counts_store::is_invalidated_counts(b) =>
+                {
+                    // Row is correctly zeroed to the sentinel.
+                }
+                Some(TypedValue::Blob(b)) => {
+                    return Err(format!(
+                        "counts read-back: row ({model_id}, {model_version}) counts blob \
+                         is not the invalidation sentinel (len={}); migration left \
+                         undecodable state on disk",
+                        b.len()
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "counts read-back: row ({model_id}, {model_version}) counts column \
+                         has unexpected shape {other:?}; expected Blob — migration cannot \
+                         verify the invalidation sentinel"
+                    ));
+                }
+            }
+        }
+    }
 
     // Step 3: open the queue sibling and call the reindex latch.
     // The latch enqueues a full-reindex marker job on the "reindex" stream
@@ -1178,6 +1241,258 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Regression guard: after `corpus_counts_migration_core` runs, every
+    /// `corpus_provider_counts` row must carry the invalidation sentinel, and the
+    /// migration's own read-back gate must confirm this — i.e. the function must
+    /// succeed (not Err) after writing the sentinel.
+    ///
+    /// This test proves the gate FIRES in the success path: the migration writes
+    /// the sentinel, reads it back, confirms each row satisfies `is_invalidated_counts`,
+    /// and returns Ok. It pins the observation recorded in the brief: SqliteStorage
+    /// returns an empty blob as TypedValue::Blob(vec![]) — the gate encodes exactly
+    /// this shape.
+    ///
+    /// Cannot construct a case where a row is left in an uninterpretable shape
+    /// without bypassing SqliteStorage itself (the write+read loop is deterministic
+    /// for the blob type). The success path is therefore the observable gate: the
+    /// migration does not Err, and the read-back rows satisfy is_invalidated_counts.
+    #[test]
+    fn corpus_counts_migration_gate_verifies_sentinel_on_every_row() {
+        use corpus_kit::corpus_provider_counts_store::is_invalidated_counts;
+        use persistence_kit::predicate::StoragePredicate;
+        use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
+        use persistence_kit::sqlite::SqliteStorage;
+        use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+        use persistence_kit::types::TypedValue;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = std::env::temp_dir().join(format!("counts-mig-gate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let estate = dir.join("estate.sqlite");
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: estate.display().to_string(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+
+        // Seed two counts rows with non-empty legacy blobs, so the gate has something
+        // real to verify (two rows exercise the loop, not just the 0-or-1 case).
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let schema = SchemaDeclaration::new(
+                "GateSeed",
+                1,
+                vec![
+                    TableDeclaration::new(
+                        "corpus_provider_counts",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::blob("counts"),
+                            ColumnDeclaration::int("doc_count"),
+                            ColumnDeclaration::int("vocab_size"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "corpus_provider_vocab",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::text("term"),
+                            ColumnDeclaration::blob("vector"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string(), "term".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "manifest",
+                        vec![ColumnDeclaration::text("key"), ColumnDeclaration::text("value")],
+                        vec!["key".to_string()],
+                    ),
+                ],
+            );
+            st.open(&schema).unwrap();
+            let rs = st.row_store();
+            for (mid, mv, blob, doc, vocab) in [
+                ("ppmi-v1", "1", b"ppmi-legacy-bytes" as &[u8], 100i64, 500i64),
+                ("ri-v1", "1", b"ri-legacy-bytes", 200, 800),
+            ] {
+                let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+                row.insert("model_id".into(), TypedValue::Text(mid.into()));
+                row.insert("model_version".into(), TypedValue::Text(mv.into()));
+                row.insert("counts".into(), TypedValue::Blob(blob.to_vec()));
+                row.insert("doc_count".into(), TypedValue::Int(doc));
+                row.insert("vocab_size".into(), TypedValue::Int(vocab));
+                rs.upsert(
+                    "corpus_provider_counts",
+                    row,
+                    &["model_id".to_string(), "model_version".to_string()],
+                )
+                .unwrap();
+            }
+            // Falsification anchor: pre-state must have non-empty blobs.
+            let rows = rs.query("corpus_provider_counts", None, &[], None, None).unwrap();
+            assert_eq!(rows.len(), 2, "seed must have two rows");
+            for row in &rows {
+                match row.get("counts") {
+                    Some(TypedValue::Blob(b)) => {
+                        assert!(!b.is_empty(), "seed blobs must be non-empty (pre-state)");
+                    }
+                    other => panic!("unexpected counts shape in seed: {other:?}"),
+                }
+            }
+            let _ = st.close();
+        }
+
+        // Drive the migration — the read-back gate is embedded in the core.
+        // If the gate rejects any row, the core returns Err and this test panics.
+        let (_, counts_updated) =
+            corpus_counts_migration_core(&cfg, 1_700_000_000_001).expect(
+                "migration must succeed: read-back gate must confirm sentinel on every row",
+            );
+        assert_eq!(counts_updated, 2, "both counts rows must be updated");
+
+        // Independently verify the post-state: every row now satisfies is_invalidated_counts.
+        // This is the same check the gate performs internally; doing it here makes the
+        // observation explicit in the test output.
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let rs = st.row_store();
+            let rows = rs.query("corpus_provider_counts", None, &[], None, None).unwrap();
+            assert_eq!(rows.len(), 2, "both rows must survive (anchors preserved)");
+            for row in &rows {
+                match row.get("counts") {
+                    Some(TypedValue::Blob(b)) => {
+                        // Observed read-back shape: TypedValue::Blob(vec![]) for an empty blob.
+                        // This is the empirical confirmation that is_invalidated_counts matches
+                        // what SqliteStorage actually returns.
+                        assert!(
+                            is_invalidated_counts(b),
+                            "every row must satisfy is_invalidated_counts after migration; \
+                             got blob of len {}",
+                            b.len()
+                        );
+                    }
+                    other => panic!("unexpected counts shape after migration: {other:?}"),
+                }
+            }
+            let _ = st.close();
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard: a normal migration (populated estate) leaves all anchors
+    /// intact and sets the reindex latch. No error from the read-back gate.
+    /// Complements `corpus_counts_migration_core_clears_legacy_preserves_anchors_sets_latch`
+    /// by asserting the gate's presence does not interfere with the success path.
+    #[test]
+    fn corpus_counts_migration_gate_does_not_interfere_with_normal_migration() {
+        use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
+        use persistence_kit::sqlite::SqliteStorage;
+        use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+        use persistence_kit::types::TypedValue;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = std::env::temp_dir().join(format!("counts-mig-nointerfer-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let estate = dir.join("estate.sqlite");
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: estate.display().to_string(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let schema = SchemaDeclaration::new(
+                "NormalSeed",
+                1,
+                vec![
+                    TableDeclaration::new(
+                        "corpus_provider_counts",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::blob("counts"),
+                            ColumnDeclaration::int("doc_count"),
+                            ColumnDeclaration::int("vocab_size"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "corpus_provider_vocab",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::text("term"),
+                            ColumnDeclaration::blob("vector"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string(), "term".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "manifest",
+                        vec![ColumnDeclaration::text("key"), ColumnDeclaration::text("value")],
+                        vec!["key".to_string()],
+                    ),
+                ],
+            );
+            st.open(&schema).unwrap();
+            let rs = st.row_store();
+            let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+            row.insert("model_id".into(), TypedValue::Text("nmf-v1".into()));
+            row.insert("model_version".into(), TypedValue::Text("1".into()));
+            row.insert("counts".into(), TypedValue::Blob(b"nmf-legacy-counts".to_vec()));
+            row.insert("doc_count".into(), TypedValue::Int(77));
+            row.insert("vocab_size".into(), TypedValue::Int(333));
+            rs.upsert(
+                "corpus_provider_counts",
+                row,
+                &["model_id".to_string(), "model_version".to_string()],
+            )
+            .unwrap();
+            let _ = st.close();
+        }
+
+        // Must succeed — the gate must not reject a cleanly-written sentinel.
+        let result = corpus_counts_migration_core(&cfg, 1_700_000_000_002);
+        assert!(
+            result.is_ok(),
+            "normal migration must succeed even with the read-back gate present: {result:?}"
+        );
+        let (vocab_deleted, counts_updated) = result.unwrap();
+        assert_eq!(vocab_deleted, 0, "no legacy vocab rows to delete");
+        assert_eq!(counts_updated, 1, "one counts row updated");
+
+        // Anchors preserved.
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let rows = st
+                .row_store()
+                .query("corpus_provider_counts", None, &[], None, None)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("doc_count"), Some(&TypedValue::Int(77)), "doc_count preserved");
+            assert_eq!(
+                rows[0].get("vocab_size"),
+                Some(&TypedValue::Int(333)),
+                "vocab_size preserved"
+            );
+            let _ = st.close();
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
 
