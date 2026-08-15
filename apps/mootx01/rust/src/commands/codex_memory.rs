@@ -276,10 +276,6 @@ pub fn run_import_chronicle(yes: bool) -> ExitCode {
 
     // Resolve chronicle root to a canonical path for relative-path derivation.
     let root_canonical = chronicle_root.canonicalize().unwrap_or(chronicle_root.clone());
-    let root_str = {
-        let s = root_canonical.to_string_lossy().to_string();
-        if s.ends_with('/') { s } else { s + "/" }
-    };
 
     for file in &files {
         // Read file content.
@@ -310,13 +306,20 @@ pub fn run_import_chronicle(yes: bool) -> ExitCode {
         // Swift's guard filePath.hasPrefix(prefix) else { summary.failed += 1; continue }.
         // A TOCTOU move between walk and read could produce a path outside the root;
         // filing such a path under a wrong location would corrupt the dedup index.
+        //
+        // Uses Path::strip_prefix (component-aware) rather than string prefix
+        // matching. A prior version built a string prefix by appending a
+        // hardcoded '/' to root's to_string_lossy() output; on Windows
+        // PathBuf::to_string_lossy() returns native '\'-separated paths, so
+        // that hardcoded '/' never matched and EVERY file was marked failed
+        // on that platform (Windows regression, fixed here — see
+        // relative_chronicle_path's unit tests for the portable case this
+        // exercises on any host OS).
         let file_canonical = file.canonicalize().unwrap_or(file.clone());
-        let file_str = file_canonical.to_string_lossy().to_string();
-        if !file_str.starts_with(&root_str) {
+        let Some(relative) = relative_chronicle_path(&root_canonical, &file_canonical) else {
             failed += 1;
             continue;
-        }
-        let relative = file_str[root_str.len()..].to_string();
+        };
 
         // Build provenance header matching Swift format.
         let provenance = format!(
@@ -365,6 +368,34 @@ pub fn run_import_chronicle(yes: bool) -> ExitCode {
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Derive `file`'s path relative to `root`, using `/` as the separator
+/// regardless of host OS so the stored location string (and the dedup
+/// index's keys) are stable across platforms no matter which OS filed the
+/// import.
+///
+/// Uses `Path::strip_prefix`, which compares path COMPONENTS rather than
+/// raw strings — portable across platforms without any manual separator
+/// handling. The previous implementation built a string prefix via
+/// `root.to_string_lossy()` with a hardcoded `'/'` appended; on Windows,
+/// `to_string_lossy()` yields native `'\'`-separated paths, so that
+/// hardcoded `'/'` never matched and every file was rejected on that
+/// platform. Returns `None` when `file` is not (or can no longer be
+/// determined to be, e.g. after a TOCTOU move) inside `root`.
+///
+/// Mirrors Swift's `CodexChronicleImporter.run` prefix/relative-path logic
+/// in `CodexMemory.swift`, which operates on `URL.path` — always
+/// forward-slash on every platform Swift Foundation supports here, so the
+/// Swift port never had this bug.
+fn relative_chronicle_path(root: &Path, file: &Path) -> Option<String> {
+    let relative = file.strip_prefix(root).ok()?;
+    let joined = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    if joined.is_empty() { None } else { Some(joined) }
+}
 
 /// Resolve CODEX_HOME: $CODEX_HOME env override, else ~/.codex.
 fn resolve_codex_home(home: &Path) -> PathBuf {
@@ -694,6 +725,91 @@ mod tests {
         assert!(index.hashes.values().any(|h| h == "abc123"));
         // Different hash → not a duplicate.
         assert!(!index.hashes.values().any(|h| h == "xyz789"));
+    }
+
+    // ── Chronicle relative-path derivation (CF-01 Finding #8) ───────────────
+    //
+    // These exercise `relative_chronicle_path`, the fix for the Windows
+    // regression introduced by commit e344ead: a hardcoded '/' appended to
+    // `root.to_string_lossy()` never matched Windows' native '\'-separated
+    // `to_string_lossy()` output, so `file_str.starts_with(&root_str)` was
+    // false for every file and Chronicle import failed 100% of the time on
+    // that platform.
+    //
+    // HONEST COVERAGE GAP: these tests run on macOS CI only and cannot
+    // reproduce the literal Windows failure mode. Rust's `Path` on a Unix
+    // host treats '\' as an ordinary filename character, not a path
+    // separator — there is no way to construct a `Path` here that behaves
+    // like a Windows path does under `MAIN_SEPARATOR = '\\'`. What IS
+    // covered, and what actually changed: the algorithm no longer does
+    // string-prefix matching against a manually-separator-joined string at
+    // all — it uses `Path::strip_prefix`, which is component-aware and
+    // never depends on which character the host OS uses as a separator.
+    // These tests prove that component-aware algorithm is correct on this
+    // host; the same code path runs unmodified on Windows using Windows'
+    // own `Path` component parsing, which is exactly the property that
+    // made the old string-based version wrong in the first place. A live
+    // Windows run remains the only way to observe the exact bytes
+    // `to_string_lossy()` would have produced pre-fix; it is not available
+    // here (see Smythe pre-flight: no Windows `cargo test` CI exists in
+    // this repo).
+
+    #[test]
+    fn relative_chronicle_path_direct_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let file = root.join("note.md");
+        assert_eq!(relative_chronicle_path(root, &file), Some("note.md".to_string()));
+    }
+
+    #[test]
+    fn relative_chronicle_path_nested_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let file = root.join("sub").join("deeper").join("note.md");
+        assert_eq!(
+            relative_chronicle_path(root, &file),
+            Some("sub/deeper/note.md".to_string()),
+            "relative path is joined with '/' regardless of host OS separator"
+        );
+    }
+
+    #[test]
+    fn relative_chronicle_path_outside_root_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("chronicle");
+        let unrelated = tmp.path().join("elsewhere").join("note.md");
+        assert_eq!(relative_chronicle_path(&root, &unrelated), None);
+    }
+
+    #[test]
+    fn relative_chronicle_path_file_equal_to_root_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Degenerate case: stripping root from itself yields an empty
+        // relative path, which is not a valid importable file — must be
+        // treated as "outside" (failed), not filed under an empty location.
+        assert_eq!(relative_chronicle_path(root, root), None);
+    }
+
+    #[test]
+    fn relative_chronicle_path_matches_real_walk_markdown_files_output() {
+        // End-to-end sanity: feed a real walk_markdown_files() result
+        // through relative_chronicle_path and confirm every file resolves
+        // to a relative path (not None), matching how run_import_chronicle
+        // actually uses it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("top.md"), "t").unwrap();
+        fs::write(root.join("sub").join("nested.md"), "n").unwrap();
+
+        let root_canonical = root.canonicalize().unwrap();
+        for file in walk_markdown_files(root) {
+            let file_canonical = file.canonicalize().unwrap();
+            let relative = relative_chronicle_path(&root_canonical, &file_canonical);
+            assert!(relative.is_some(), "every walked file must resolve relative to root: {file:?}");
+        }
     }
 
     // ── Drift guards ─────────────────────────────────────────────────────────
