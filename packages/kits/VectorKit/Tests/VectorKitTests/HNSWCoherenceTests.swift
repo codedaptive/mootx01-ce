@@ -21,6 +21,23 @@
 //   per-node neighbour arrays beyond available memory. The fix adds a Phase-0
 //   gate that rejects the whole graph if any row is out of bounds.
 //
+// F1 — loadFromGraphRows 'continue'd on a node whose float vector was gone,
+//   shifting every later compact index down by one and mis-wiring every neighbour
+//   edge. Fix: insert a placeholder tombstone so compact indices hold.
+//
+// F7 — vectorStride was derived from nodes.first, which after the F1 fix can be
+//   the placeholder tombstone with zero bytes → stride 0 → search throws
+//   invalidPayload → total recall suppression. Fix: derive stride from the first
+//   non-tombstoned node.
+//
+// NOTE ON GENERATION FIELD (generation: 0):
+//   All GraphRow literals and loadFromGraphRows calls in this file use generation=0
+//   and expectedGeneration=0. Generation 0 is the pre-shadow-swap serving generation
+//   for any estate that has never run a shadow swap (VEC-SHADOWSWAP-01, 0332).
+//   These engine-level fixtures are generation-agnostic — they test graph topology
+//   and loading semantics, not generation filtering, so 0 is the correct value for
+//   all fixtures here.
+//
 // These tests are designed to FAIL against the pre-fix code and PASS after the fix.
 // Each test's docstring states the pre-fix failure mode.
 
@@ -30,6 +47,18 @@ import PersistenceKit
 import PersistenceKitSQLite
 @testable import VectorKit
 
+// Test-local mirror of the production constant `hnswMaxPersistedLayer`
+// (Sources/VectorKit/Engine/HNSWIndex.swift), which the VH-01 Finding C fix
+// introduced. The pre-fix tree does not declare it, so this file could not be
+// compiled against a pre-fix base — and compiling it against a pre-fix base is
+// how every gate in this file is proved to discriminate. The mirror keeps the
+// measurement repeatable.
+//
+// Drift is caught, not silent: if production ever raises the cap above 32, a
+// layer of 33 becomes valid, the graph loads, and HC-C-1's `!hasGraph`
+// expectation fails loudly on the next run.
+private let testHnswMaxPersistedLayer: Int = 32
+
 // MARK: - Suite: HC-A (Finding A — cache coherence)
 
 /// Regression tests for Finding A: HNSW lane must be invalidated alongside the float lane.
@@ -38,9 +67,8 @@ import PersistenceKitSQLite
 /// resident. findNearestFloat routed through the stale HNSW graph, which still held
 /// item-1's raw vector bytes, returning it as a live result.
 ///
-/// Pre-fix failure mode (HC-A-2): after destroyAllVectors, hnswIndices was not cleared,
-/// leaving every model's graph resident and potentially returning results from a
-/// logically-empty store.
+/// Pre-fix failure mode (HC-A-2): after destroyAllVectors, hnswIndices was not cleared
+/// and hnsw_graph rows were not deleted, leaving every model's graph topology persisted.
 @Suite("HC-A: HNSW cache coherence (VH-01 Finding A)")
 struct HCACacheCoherenceTests {
 
@@ -129,24 +157,22 @@ struct HCACacheCoherenceTests {
         }
     }
 
-    /// HC-A-2: After destroyAllVectors, findNearestFloat must return empty results.
+    /// HC-A-2: After destroyAllVectors, the hnsw_graph table must have zero rows.
     ///
-    /// Without the fix, destroyAllVectors cleared floatIndices but not hnswIndices.
-    /// A subsequent findNearestFloat would route through the still-resident HNSW graph,
-    /// returning items from a logically-empty estate.
+    /// Without the fix, destroyAllVectors cleared floatIndices but not hnswIndices,
+    /// and did not delete hnsw_graph rows from storage. The persisted graph topology
+    /// remained on disk even though every vector was gone.
     ///
-    /// With the fix, destroyAllVectors also clears hnswIndices, liveFloatCounts,
-    /// hnswGraphDirty, AND deletes every hnsw_graph row from storage.
+    /// With the fix, destroyAllVectors also calls hnswIndices.removeAll() and deletes
+    /// every hnsw_graph row, so the storage is fully consistent with the empty vectors
+    /// table.
     ///
-    /// NOTE — partial discrimination: this test asserts the correct behavioral
-    /// outcome (empty results) but cannot distinguish between the case where
-    /// hnsw_graph rows were physically deleted from storage vs. only the in-memory
-    /// lane being evicted. After `destroyAllVectors`, the `vectors` table is also
-    /// empty, so exact scan alone returns empty — regardless of whether the
-    /// hnsw_graph rows were deleted. HC-D-4 exercises the store-layer validation
-    /// (F3) which is a distinct code path.
-    @Test("HC-A-2: destroyAllVectors leaves no HNSW graph resident — full teardown gate")
-    func hcA2_destroyAllVectorsLeavesNoGraph() async throws {
+    /// Assertion: hnswGraphRowCount == 0 after destroyAllVectors. This assertion
+    /// discriminates because pre-fix code leaves hnsw_graph rows intact; the
+    /// findNearestFloat emptiness check cannot distinguish "rows deleted" from
+    /// "exact scan returned empty because vectors table is empty".
+    @Test("HC-A-2: destroyAllVectors deletes all hnsw_graph rows — durable teardown gate")
+    func hcA2_destroyAllVectorsDeletesGraphRows() async throws {
         try await GlobalTestLock.shared.withLock {
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("hca2-\(UUID().uuidString).sqlite3")
@@ -167,23 +193,22 @@ struct HCACacheCoherenceTests {
                 )
             }
 
-            // Build the HNSW graph so it is resident in memory.
+            // Build the HNSW graph so it is resident in memory and on disk.
             try await store.rebuildHNSWIndex(for: Self.modelID)
 
-            // Verify HNSW is resident (baseline).
-            let resident = await store.hnswIndexResident(for: Self.modelID)
-            #expect(resident, "HC-A-2 setup: HNSW must be resident after rebuildHNSWIndex")
+            // Baseline: confirm rows were persisted.
+            let rowsBefore = try await store.hnswGraphRowCount(for: Self.modelID)
+            #expect(rowsBefore > 0, "HC-A-2 setup: hnsw_graph must have rows after rebuildHNSWIndex")
 
             // Destroy ALL vectors (teardown path).
             try await store.destroyAllVectors()
 
-            // The fix: findNearestFloat must return empty — HNSW evicted + rows deleted.
-            let probe = randomVector(dim: Self.dim, rng: &rng)
-            let results = try await store.findNearestFloat(
-                probe: probe, modelID: Self.modelID, limit: Self.count)
-
-            #expect(results.isEmpty,
-                "HC-A-2 (VH-01 Finding A REGRESSION): findNearestFloat must return empty after destroyAllVectors; the HNSW graph must be fully torn down")
+            // EXIT GATE: hnsw_graph rows must be physically deleted from storage.
+            // Pre-fix: destroyAllVectors does not delete hnsw_graph rows → count > 0 → FAILS.
+            // Post-fix: rows deleted → count == 0 → PASSES.
+            let rowsAfter = try await store.hnswGraphRowCount(for: Self.modelID)
+            #expect(rowsAfter == 0,
+                "HC-A-2 (VH-01 Finding A REGRESSION): destroyAllVectors must delete all hnsw_graph rows; pre-fix code leaves the persisted graph topology intact on disk even after the vectors table is empty.")
 
             await storage.close()
         }
@@ -299,7 +324,7 @@ struct HCBEntryPointRepairTests {
 ///
 /// Pre-fix failure mode: the `layer` field drove `count: maxLayer + 1` allocation
 /// and `neighboursBlob.count` drove the decoded-array size, with no bounds check.
-/// A row with layer=33 (> hnswMaxPersistedLayer=32) would silently load into the
+/// A row with layer=33 (> testHnswMaxPersistedLayer=32) would silently load into the
 /// graph with an over-sized neighbour array. A row with negative nodeIdx would
 /// produce an array index trap. A misaligned blob would decode garbage neighbours.
 ///
@@ -311,15 +336,15 @@ struct HCCRowValidationTests {
 
     private static let modelID = "hcc-model"
 
-    // ── HC-C-1: layer > hnswMaxPersistedLayer ─────────────────────────────────
+    // ── HC-C-1: layer > testHnswMaxPersistedLayer ─────────────────────────────────
 
-    /// A row with layer = 33 (> hnswMaxPersistedLayer = 32) must cause the whole
+    /// A row with layer = 33 (> testHnswMaxPersistedLayer = 32) must cause the whole
     /// graph to be rejected. hasGraph must be false after the call.
     ///
     /// Pre-fix: the row was processed; `count: maxLayer + 1 = 34` was allocated
     /// (benign here, but the gate was absent). hasGraph would be true (wrong).
     /// Post-fix: Phase-0 gate fires → early return → hasGraph false.
-    @Test("HC-C-1: row with layer > hnswMaxPersistedLayer rejects whole graph")
+    @Test("HC-C-1: row with layer > testHnswMaxPersistedLayer rejects whole graph")
     func hcC1_hugeLevelRejected() async throws {
         let idx = HNSWIndex(seed: 42)
         let nodeBytes: [Int32: (itemID: String, bytes: [UInt8])] = [
@@ -328,46 +353,72 @@ struct HCCRowValidationTests {
         let badRow = HNSWIndex.GraphRow(
             nodeIdx:        0,
             nodeID:         "x",
-            layer:          hnswMaxPersistedLayer + 1,  // 33 — one above the cap
-            neighboursBlob: Data()
+            layer:          testHnswMaxPersistedLayer + 1,  // 33 — one above the cap
+            neighboursBlob: Data(),
+            generation:     0  // pre-shadow-swap serving generation; fixture is generation-agnostic
         )
-        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID)
+        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID,
+                                    expectedGeneration: 0)
 
         let hasGraph = await idx.hasGraph
         #expect(!hasGraph,
-            "HC-C-1 (VH-01 Finding C REGRESSION): a row with layer=\(hnswMaxPersistedLayer + 1) must be rejected; the Phase-0 gate must keep hasGraph false")
+            "HC-C-1 (VH-01 Finding C REGRESSION): a row with layer=\(testHnswMaxPersistedLayer + 1) must be rejected; the Phase-0 gate must keep hasGraph false")
     }
 
-    // ── HC-C-2: negative nodeIdx ───────────────────────────────────────────────
+    // ── HC-C-2: negative nodeIdx alongside valid rows ─────────────────────────
 
-    /// A row with nodeIdx = -1 must cause the whole graph to be rejected.
+    /// A row with nodeIdx = -1, present alongside two valid rows, must cause the
+    /// whole graph to be rejected. hasGraph must be false after the call.
     ///
-    /// Pre-fix: the code used `Int32(rawNodeIdx)` without a non-negative guard;
-    /// a negative nodeIdx would be used as an array subscript, causing a trap.
-    /// Post-fix: Phase-0 gate rejects → hasGraph false.
+    /// Pre-fix: no Phase-0 gate existed. The negative-nodeIdx row had no entry
+    /// in nodeBytes so the pre-fix `continue` skipped it; the two valid rows (0
+    /// and 1) loaded successfully → hasGraph became true (wrong).
+    /// Post-fix: Phase-0 gate fires on the nodeIdx=-1 row (`row.nodeIdx >= 0`
+    /// fails) → early return → the whole graph is rejected → hasGraph false.
     ///
-    /// NOTE — partial discrimination: nodeBytes is intentionally empty `[:]` so
-    /// the test focuses on the Phase-0 guard. Pre-fix code would have checked
-    /// nodeBytes[nodeIdx=-1], found nothing, and `continue`d — also leaving
-    /// hasGraph=false. Both pre-fix and post-fix produce the same observable
-    /// result here; the guard versus the nodeBytes miss are indistinguishable.
-    /// HC-D-1 provides the proper F1/F7 discriminating test using a missing
-    /// nodeIdx=0 with live nodeIdx=1 and 2 present.
-    @Test("HC-C-2: row with negative nodeIdx rejects whole graph")
+    /// The fixture uses valid nodeBytes for nodeIdx=0 and nodeIdx=1 so that the
+    /// pre-fix path would load them and set hasGraph=true, making the gate
+    /// discriminating. An empty nodeBytes[:] fixture cannot distinguish pre-fix
+    /// from post-fix because both paths would leave hasGraph=false via different
+    /// mechanisms (the pre-fix `continue` on every row vs. the post-fix Phase-0 reject).
+    @Test("HC-C-2: negative nodeIdx row alongside valid rows rejects whole graph (Finding C discriminating)")
     func hcC2_negativeNodeIdxRejected() async throws {
         let idx = HNSWIndex(seed: 42)
-        let nodeBytes: [Int32: (itemID: String, bytes: [UInt8])] = [:]
-        let badRow = HNSWIndex.GraphRow(
-            nodeIdx:        -1,          // negative — was an array-index trap pre-fix
-            nodeID:         "x",
-            layer:          0,
-            neighboursBlob: Data()
-        )
-        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID)
+        // Valid nodeBytes for nodeIdx=0 and nodeIdx=1 ensure pre-fix code loads
+        // those nodes and sets hasGraph=true; post-fix the Phase-0 gate fires first.
+        let nodeBytes: [Int32: (itemID: String, bytes: [UInt8])] = [
+            0: ("x", [0x00, 0x00, 0x80, 0x3f]),  // 1.0f LE
+            1: ("y", [0x00, 0x00, 0x00, 0x3f]),  // 0.5f LE
+        ]
+        let rows = [
+            HNSWIndex.GraphRow(
+                nodeIdx:        -1,          // negative — Phase-0 must reject whole graph
+                nodeID:         "bad",
+                layer:          0,
+                neighboursBlob: Data(),
+                generation:     0
+            ),
+            HNSWIndex.GraphRow(
+                nodeIdx:        0,
+                nodeID:         "x",
+                layer:          0,
+                neighboursBlob: Data(),
+                generation:     0
+            ),
+            HNSWIndex.GraphRow(
+                nodeIdx:        1,
+                nodeID:         "y",
+                layer:          0,
+                neighboursBlob: Data(),
+                generation:     0
+            ),
+        ]
+        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: Self.modelID,
+                                    expectedGeneration: 0)
 
         let hasGraph = await idx.hasGraph
         #expect(!hasGraph,
-            "HC-C-2 (VH-01 Finding C REGRESSION): a row with nodeIdx=-1 must be rejected; the Phase-0 guard must keep hasGraph false")
+            "HC-C-2 (VH-01 Finding C REGRESSION): a nodeIdx=-1 row alongside valid rows must reject the whole graph; pre-fix loaded the valid rows and set hasGraph=true; post-fix Phase-0 gate fires and rejects everything.")
     }
 
     // ── HC-C-3: blob length not divisible by 4 ────────────────────────────────
@@ -389,9 +440,11 @@ struct HCCRowValidationTests {
             nodeIdx:        0,
             nodeID:         "x",
             layer:          0,
-            neighboursBlob: Data([0, 0, 0, 0, 0xFF])  // 5 bytes — not divisible by 4
+            neighboursBlob: Data([0, 0, 0, 0, 0xFF]),  // 5 bytes — not divisible by 4
+            generation:     0
         )
-        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID)
+        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID,
+                                    expectedGeneration: 0)
 
         let hasGraph = await idx.hasGraph
         #expect(!hasGraph,
@@ -420,9 +473,11 @@ struct HCCRowValidationTests {
             nodeIdx:        0,
             nodeID:         "x",
             layer:          0,
-            neighboursBlob: oversizedBlob
+            neighboursBlob: oversizedBlob,
+            generation:     0
         )
-        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID)
+        await idx.loadFromGraphRows([badRow], nodeBytes: nodeBytes, modelID: Self.modelID,
+                                    expectedGeneration: 0)
 
         let hasGraph = await idx.hasGraph
         #expect(!hasGraph,
@@ -430,14 +485,14 @@ struct HCCRowValidationTests {
     }
 }
 
-// MARK: - Suite: HC-D (Discriminating tests for F1/F7, F2, F3)
+// MARK: - Suite: HC-D (Discriminating tests for F7, F2, F3, F1)
 
 /// Discriminating regression tests that FAIL against pre-fix code in one specific
 /// code path and PASS after the corresponding fix. These complement HC-A through HC-C
-/// by covering the exact failure modes that required the F1 (tombstone placeholder),
-/// F2b (reset before empty-rows guard), F2a (bounds guard in repairEntryPoint), F7
-/// (stride skip tombstones), and F3 (store-layer row validation) fixes.
-@Suite("HC-D: Discriminating tests for F1/F7, F2, F3 (VH-01)")
+/// by covering the exact failure modes that required the F7 (stride skip tombstones),
+/// F2b (reset before empty-rows guard), F3 (store-layer row validation), and F1
+/// (tombstone placeholder endpoint-identity) fixes.
+@Suite("HC-D: Discriminating tests for F7, F2, F3, F1 (VH-01)")
 struct HCDDiscriminatingTests {
 
     private static let modelID    = "hcd-model"
@@ -466,25 +521,26 @@ struct HCDDiscriminatingTests {
         return v
     }
 
-    // ── HC-D-1: F1+F7 — tombstone at compact index 0 does not suppress search ──
+    // ── HC-D-1: F7 — tombstone at compact index 0 does not suppress search ────
 
     /// HC-D-1: When the first persisted graph node (compact index 0) was deleted
-    /// from the `vectors` table before a reload, `loadFromGraphRows` must insert a
-    /// placeholder tombstone (F1) and derive `vectorStride` from the first
-    /// non-tombstoned node (F7).
+    /// from the `vectors` table before a reload, `loadFromGraphRows` must derive
+    /// `vectorStride` from the first non-tombstoned node (F7).
     ///
-    /// Without the F1 fix: the missing-nodeBytes `continue` would have shifted
-    /// all subsequent compact indices down by one, mis-wiring every neighbour edge
-    /// in the loaded graph.
-    ///
-    /// Without the F7 fix (but with F1): the tombstone placeholder has
-    /// `vectorBytes == []`; `vectorStride = nodes.first?.vectorBytes.count`
+    /// Without the F7 fix (with F1 in place): the tombstone placeholder at compact
+    /// index 0 has `vectorBytes == []`; `vectorStride = nodes.first?.vectorBytes.count`
     /// evaluates to `Optional(0)`. `search()` guards on `expectedDim == 0` and
     /// throws `invalidPayload`, suppressing all recall while live nodes exist.
     ///
-    /// With both fixes: stride is derived from the first non-tombstoned node →
+    /// With the F7 fix: stride is derived from the first non-tombstoned node →
     /// search returns live nodes correctly.
-    @Test("HC-D-1: tombstone at compact index 0 — search returns live nodes (F1+F7 discriminating)")
+    ///
+    /// NOTE — this test gates F7 only. At BASE_A (pre-F1/F7), loadFromGraphRows
+    /// uses 'continue' on missing nodeBytes entries, so nodes.first is always a
+    /// live node with real bytes; vectorStride is computed correctly and search
+    /// returns results. The gate only fires at the intermediate state where F1 is
+    /// applied (tombstone inserted) but F7 is not (stride still reads nodes.first).
+    @Test("HC-D-1: tombstone at compact index 0 — search returns live nodes (F7 discriminating)")
     func hcD1_tombstoneAtIndexZeroDoesNotSuppressSearch() async throws {
         let idx     = HNSWIndex(seed: 42)
         let modelID = "hcd1-model"
@@ -501,7 +557,7 @@ struct HCDDiscriminatingTests {
             1: ("live-b", [0x00, 0x00, 0x80, 0x3f]),
             2: ("live-c", [0x00, 0x00, 0x00, 0x3f]),
         ]
-        // Neighbour blobs: little-endian Int32 arrays in OLD nodeIdx space.
+        // Neighbour blobs: little-endian Int32 arrays in old nodeIdx space.
         // loadFromGraphRows remaps them through oldToNew before wiring.
         let rows = [
             HNSWIndex.GraphRow(
@@ -510,23 +566,27 @@ struct HCDDiscriminatingTests {
                 layer:          0,
                 // Neighbours point to nodeIdx=1 and nodeIdx=2 (old space).
                 neighboursBlob: Data([0x01, 0x00, 0x00, 0x00,
-                                      0x02, 0x00, 0x00, 0x00])
+                                      0x02, 0x00, 0x00, 0x00]),
+                generation:     0
             ),
             HNSWIndex.GraphRow(
                 nodeIdx:        1,
                 nodeID:         "live-b",
                 layer:          0,
-                neighboursBlob: Data([0x00, 0x00, 0x00, 0x00])  // neighbour: nodeIdx=0
+                neighboursBlob: Data([0x00, 0x00, 0x00, 0x00]),  // neighbour: nodeIdx=0
+                generation:     0
             ),
             HNSWIndex.GraphRow(
                 nodeIdx:        2,
                 nodeID:         "live-c",
                 layer:          0,
-                neighboursBlob: Data([0x00, 0x00, 0x00, 0x00])  // neighbour: nodeIdx=0
+                neighboursBlob: Data([0x00, 0x00, 0x00, 0x00]),  // neighbour: nodeIdx=0
+                generation:     0
             ),
         ]
 
-        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: modelID)
+        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: modelID,
+                                    expectedGeneration: 0)
 
         let hasGraph = await idx.hasGraph
         #expect(hasGraph, "HC-D-1: graph must load successfully even with a tombstone at compact index 0")
@@ -566,11 +626,14 @@ struct HCDDiscriminatingTests {
         ]
         let rows = [
             HNSWIndex.GraphRow(nodeIdx: 0, nodeID: "x", layer: 0,
-                               neighboursBlob: Data([0x01, 0x00, 0x00, 0x00])),
+                               neighboursBlob: Data([0x01, 0x00, 0x00, 0x00]),
+                               generation: 0),
             HNSWIndex.GraphRow(nodeIdx: 1, nodeID: "y", layer: 0,
-                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00])),
+                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00]),
+                               generation: 0),
         ]
-        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: modelID)
+        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: modelID,
+                                    expectedGeneration: 0)
 
         let hasBefore = await idx.hasGraph
         #expect(hasBefore, "HC-D-2 setup: graph must be resident after loading valid rows")
@@ -579,37 +642,42 @@ struct HCDDiscriminatingTests {
         // Pre-fix F2b: `guard !rows.isEmpty else { return }` fires without resetting
         //   state → entryPoint and nodes survive → hasGraph stays true (wrong).
         // Post-fix F2b: reset block runs before guard → entryPoint = nil → hasGraph false.
-        await idx.loadFromGraphRows([], nodeBytes: [:], modelID: modelID)
+        await idx.loadFromGraphRows([], nodeBytes: [:], modelID: modelID,
+                                    expectedGeneration: 0)
 
         let hasAfter = await idx.hasGraph
         #expect(!hasAfter,
             "HC-D-2 F2b REGRESSION: loadFromGraphRows([]) must reset all state; hasGraph must be false after an empty reload on a previously-populated index.")
     }
 
-    // ── HC-D-3: F2a+F2b — two-load sequence then full tombstone, no crash ────────
+    // ── HC-D-3: Finding B — two-load sequence then full tombstone, no crash ───────
 
-    /// HC-D-3: Verifies the combined F2a (bounds guard in repairEntryPoint) and F2b
-    /// (reset before guard) behaviour: after loading a 3-node graph and then reloading
-    /// with a smaller 1-node graph, tombstoning the remaining node must cleanly set
-    /// hasGraph=false without crashing.
+    /// HC-D-3: After loading a 3-node graph and then reloading with a smaller 1-node
+    /// graph, tombstoning the remaining node must result in hasGraph=false.
     ///
-    /// Without F2b: the second loadFromGraphRows call would APPEND the 1 new node to
-    /// the existing 3 nodes (nodes never cleared), then `tombstone("x")` would set
-    /// nodes[3].tombstoned=true while the 3 old nodes [0–2] remained live →
-    /// repairEntryPoint would find a stale live entry → hasGraph stayed true (wrong).
+    /// MEASURED AGAINST BASE_A (7265a1834): this gate FAILS at BASE_A for Finding B
+    /// reasons. BASE_A's tombstone() marks nodes dead without calling repairEntryPoint().
+    /// After tombstoning "x", entryPoint still refers to it → hasGraph stays true.
+    /// In the VH-01 fixed code, tombstone() calls repairEntryPoint(), which finds no
+    /// live nodes and sets entryPoint=nil → hasGraph=false.
     ///
-    /// Without F2a (but with F2b): if a stale entryPoint ever pointed past nodes.count
-    /// after a two-load sequence, `repairEntryPoint()` would access nodes[ep] out of
-    /// bounds → crash. The F2a bounds guard (`Int(ep) < nodes.count`) prevents this.
+    /// The two-load sequence (3-node → 1-node) exercises the state-reset path (F2b),
+    /// but the discriminating assertion is identical to HC-B-1/HC-B-2: tombstone must
+    /// trigger entry-point repair. BASE_A lacks that repair in tombstone().
     ///
-    /// With both fixes: the second load fully resets state and rebuilds with 1 node;
-    /// tombstone("x") triggers a clean repair → entryPoint = nil → hasGraph = false.
-    @Test("HC-D-3: two-load sequence then tombstone all — no crash, hasGraph false (F2a+F2b discriminating)")
+    /// F2a content (the repairEntryPoint bounds guard) is NOT gated by this test:
+    /// with F2b in place, loadFromGraphRows resets state before every reload, so
+    /// there is no code path that leaves a stale out-of-range entryPoint for
+    /// repairEntryPoint to encounter. F2a is unreachable once F2b resets state.
+    ///
+    /// With the fix: second load resets state and rebuilds with 1 node; tombstone("x")
+    /// triggers repair → entryPoint=nil → hasGraph=false.
+    @Test("HC-D-3: two-load sequence then tombstone all — hasGraph false (Finding B discriminating; F2a unreachable with F2b in place)")
     func hcD3_twoLoadSequenceThenTombstoneAllIsSafe() async throws {
         let idx     = HNSWIndex(seed: 42)
         let modelID = "hcd3-model"
 
-        // Step 1: Load a 3-node graph. After load, entryPoint is set to one of [0,2].
+        // Step 1: Load a 3-node graph.
         let bytes3: [Int32: (itemID: String, bytes: [UInt8])] = [
             0: ("a", [0x00, 0x00, 0x80, 0x3f]),
             1: ("b", [0x00, 0x00, 0x00, 0x3f]),
@@ -617,41 +685,46 @@ struct HCDDiscriminatingTests {
         ]
         let rows3 = [
             HNSWIndex.GraphRow(nodeIdx: 0, nodeID: "a", layer: 0,
-                               neighboursBlob: Data([0x01, 0x00, 0x00, 0x00])),
+                               neighboursBlob: Data([0x01, 0x00, 0x00, 0x00]),
+                               generation: 0),
             HNSWIndex.GraphRow(nodeIdx: 1, nodeID: "b", layer: 0,
-                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00])),
+                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00]),
+                               generation: 0),
             HNSWIndex.GraphRow(nodeIdx: 2, nodeID: "c", layer: 0,
-                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00])),
+                               neighboursBlob: Data([0x00, 0x00, 0x00, 0x00]),
+                               generation: 0),
         ]
-        await idx.loadFromGraphRows(rows3, nodeBytes: bytes3, modelID: modelID)
+        await idx.loadFromGraphRows(rows3, nodeBytes: bytes3, modelID: modelID,
+                                    expectedGeneration: 0)
         let hasBefore = await idx.hasGraph
         #expect(hasBefore, "HC-D-3 setup: 3-node graph must be resident after first load")
 
         // Step 2: Reload with a 1-node graph.
-        // Without F2b: nodes gets a 4th entry appended (old 3 + new 1); entryPoint
-        //   points into the stale 3-node space.
-        // With F2b: nodes is cleared, rebuilt from scratch with 1 node.
+        // F2b ensures the second load resets all state (nodes cleared, entryPoint=nil)
+        // before processing the new rows. Without F2b, the 1-node graph would be
+        // appended to the existing 3-node graph rather than replacing it.
         let bytes1: [Int32: (itemID: String, bytes: [UInt8])] = [
             0: ("x", [0x00, 0x00, 0x80, 0x3f]),
         ]
         let rows1 = [
             HNSWIndex.GraphRow(nodeIdx: 0, nodeID: "x", layer: 0,
-                               neighboursBlob: Data()),
+                               neighboursBlob: Data(),
+                               generation: 0),
         ]
-        await idx.loadFromGraphRows(rows1, nodeBytes: bytes1, modelID: modelID)
+        await idx.loadFromGraphRows(rows1, nodeBytes: bytes1, modelID: modelID,
+                                    expectedGeneration: 0)
         let hasAfterReload = await idx.hasGraph
         #expect(hasAfterReload, "HC-D-3: 1-node graph must be resident after second load")
 
         // Step 3: Tombstone the only live node.
-        // repairEntryPoint must not crash (F2a bounds guard) and hasGraph must become false.
-        // Without F2b: tombstone("x") sets nodes[3].tombstoned=true; old nodes [0–2]
-        //   remain live → repairEntryPoint finds index 0 → hasGraph stays true (wrong).
-        // With F2b: nodes=[1 node]; tombstone("x") → nodes[0].tombstoned=true →
-        //   repairEntryPoint finds no live node → entryPoint=nil → hasGraph=false.
+        // Post-fix (Finding B): tombstone() calls repairEntryPoint() → no live nodes →
+        //   entryPoint=nil → hasGraph=false.
+        // Pre-fix (BASE_A): tombstone() only marks the node dead, does not call
+        //   repairEntryPoint() → entryPoint still set to the dead node → hasGraph=true.
         await idx.tombstone(itemID: "x")
         let hasFinal = await idx.hasGraph
         #expect(!hasFinal,
-            "HC-D-3 F2b REGRESSION: after tombstoning the only node in the second (smaller) load, hasGraph must be false. Without F2b, stale nodes from the first load survive and keep hasGraph true.")
+            "HC-D-3 Finding B REGRESSION: after tombstoning the only node, hasGraph must be false. Pre-fix tombstone() skips repairEntryPoint(), leaving entryPoint set to the now-dead node.")
     }
 
     // ── HC-D-4: F3 store-layer — one corrupt hnsw_graph row rejects the whole graph
@@ -697,8 +770,8 @@ struct HCDDiscriminatingTests {
 
             // Poison: insert one bad hnsw_graph row directly into storage.
             // node_idx=99999 avoids primary-key conflict with the valid rows [0..19].
-            // layer = hnswMaxPersistedLayer + 1 (= 33) triggers the F3 bounds check
-            // at the store-layer decode loop: rawLayer <= hnswMaxPersistedLayer fails →
+            // layer = testHnswMaxPersistedLayer + 1 (= 33) triggers the F3 bounds check
+            // at the store-layer decode loop: rawLayer <= testHnswMaxPersistedLayer fails →
             // whole graph load abandoned.
             _ = try await storage.rowStore.insert(
                 table: "hnsw_graph",
@@ -706,8 +779,9 @@ struct HCDDiscriminatingTests {
                     "model_id":   .text(Self.hnswModel),
                     "node_idx":   .int(Int64(99_999)),
                     "node_id":    .text("_poison_node_"),
-                    "layer":      .int(Int64(hnswMaxPersistedLayer + 1)),
+                    "layer":      .int(Int64(testHnswMaxPersistedLayer + 1)),
                     "neighbours": .blob(Data()),
+                    "generation": .int(0),
                 ]
             )
 
@@ -728,7 +802,7 @@ struct HCDDiscriminatingTests {
             //   hnswIndexResident = true (wrong).
             let resident = await store.hnswIndexResident(for: Self.hnswModel)
             #expect(!resident,
-                "HC-D-4 F3 REGRESSION: the poison hnsw_graph row (layer=\(hnswMaxPersistedLayer + 1)) must cause the WHOLE graph load to be abandoned at the store layer. Pre-fix: `continue` silently skips the bad row and loads a partial graph (resident=true). Post-fix: `return` rejects the whole load (resident=false).")
+                "HC-D-4 F3 REGRESSION: the poison hnsw_graph row (layer=\(testHnswMaxPersistedLayer + 1)) must cause the WHOLE graph load to be abandoned at the store layer. Pre-fix: `continue` silently skips the bad row and loads a partial graph (resident=true). Post-fix: `return` rejects the whole load (resident=false).")
 
             // Exact scan must still return non-empty results (count − 1 items remain).
             #expect(!results.isEmpty,
@@ -737,6 +811,122 @@ struct HCDDiscriminatingTests {
                 "HC-D-4: the deleted item-0 must not appear in exact scan results")
 
             await storage.close()
+        }
+    }
+
+    // ── HC-D-5: F1 — endpoint identity after tombstone at compact index 0 ─────
+
+    /// HC-D-5: After a node's float vector is deleted (missing from nodeBytes),
+    /// every surviving node's neighbour compact index must resolve to the correct
+    /// itemID — no self-loops and no dangling edges.
+    ///
+    /// This gates VH-01 F1 (the tombstone-placeholder fix) at the ENDPOINT-IDENTITY
+    /// level, not the liveness level. Pre-fix, loadFromGraphRows used 'continue' on
+    /// a missing nodeBytes entry, shifting every later compact index down by one.
+    /// The graph was functionally live (search still answered), but neighbour wiring
+    /// was corrupted: live-c's neighbour pointed to itself (self-loop) and live-b's
+    /// neighbour pointed past the end of the array (dangling).
+    ///
+    /// Fixture verification (run graphRows() and check neighbour-to-itemID resolution):
+    ///   nodeBytes: {1: "live-b", 2: "live-c"} — nodeIdx=0 ("deleted-a") absent.
+    ///   row topology: 0→[1,2], 1→[2], 2→[1].
+    ///
+    ///   POST-FIX: nodes=[tombstone, live-b, live-c].
+    ///     graphRows() emits: live-b at compact 1 (neighbour 2 → "live-c" ✓),
+    ///                        live-c at compact 2 (neighbour 1 → "live-b" ✓).
+    ///
+    ///   PRE-FIX (continue): nodes=[live-b, live-c].
+    ///     oldToNew={0→0,1→1,2→2}; live-b's blob remapped: old=2→new=2 (dangling,
+    ///     array size=2). live-c's blob remapped: old=1→new=1 (self-loop).
+    ///     graphRows() emits: live-b at compact 0 (neighbour 2 → dangling),
+    ///                        live-c at compact 1 (neighbour 1 → "live-c" self-loop).
+    @Test("HC-D-5: F1 endpoint identity — neighbours resolve to correct itemIDs after tombstone at compact index 0 (F1 discriminating)")
+    func hcD5_endpointIdentityAfterTombstoneAtIndexZero() async throws {
+        let idx     = HNSWIndex(seed: 42)
+        let modelID = "hcd5-model"
+
+        // nodeIdx=0 ("deleted-a") has NO nodeBytes entry — its float vector was
+        // deleted from the vectors table before reload. loadFromGraphRows must
+        // insert a tombstone placeholder at compact index 0 (F1) so that
+        // subsequent compact indices are not shifted.
+        let nodeBytes: [Int32: (itemID: String, bytes: [UInt8])] = [
+            1: ("live-b", [0x00, 0x00, 0x80, 0x3f]),  // 1.0f LE, dim=1
+            2: ("live-c", [0x00, 0x00, 0x00, 0x3f]),  // 0.5f LE, dim=1
+        ]
+
+        // Row topology: nodeIdx=1 names nodeIdx=2 as neighbour; nodeIdx=2 names
+        // nodeIdx=1. These blobs encode old-nodeIdx-space values; loadFromGraphRows
+        // remaps them through oldToNew to the new compact space.
+        //
+        // Post-fix compact numbering: tombstone=0, live-b=1, live-c=2.
+        //   live-b blob [2] → old=2 → new=2 → "live-c"  ✓
+        //   live-c blob [1] → old=1 → new=1 → "live-b"  ✓
+        //
+        // Pre-fix compact numbering (continue shifts everything):
+        //   oldToNew={0→0,1→1,2→2} — built from ALL rows including deleted-a.
+        //   live-b lands at array[0] (continue skipped deleted-a).
+        //   live-b blob [2] → old=2 → new=2 → dangling (array size=2).
+        //   live-c lands at array[1].
+        //   live-c blob [1] → old=1 → new=1 → "live-c" (self-loop).
+        let rows = [
+            HNSWIndex.GraphRow(
+                nodeIdx:        0,
+                nodeID:         "deleted-a",
+                layer:          0,
+                neighboursBlob: Data([0x01, 0x00, 0x00, 0x00,
+                                      0x02, 0x00, 0x00, 0x00]),  // neighbours [1, 2]
+                generation:     0
+            ),
+            HNSWIndex.GraphRow(
+                nodeIdx:        1,
+                nodeID:         "live-b",
+                layer:          0,
+                neighboursBlob: Data([0x02, 0x00, 0x00, 0x00]),  // neighbour [2]
+                generation:     0
+            ),
+            HNSWIndex.GraphRow(
+                nodeIdx:        2,
+                nodeID:         "live-c",
+                layer:          0,
+                neighboursBlob: Data([0x01, 0x00, 0x00, 0x00]),  // neighbour [1]
+                generation:     0
+            ),
+        ]
+
+        await idx.loadFromGraphRows(rows, nodeBytes: nodeBytes, modelID: modelID,
+                                    expectedGeneration: 0)
+
+        // Observe the compact graph topology via graphRows(). Tombstoned nodes are
+        // excluded from the output; only live nodes appear, with their post-load
+        // compact indices and neighbour blobs.
+        let emitted = await idx.graphRows()
+
+        // Two live nodes must be emitted (the tombstone at compact 0 is excluded).
+        #expect(emitted.count == 2,
+            "HC-D-5 F1: graphRows() must emit exactly 2 live nodes; the tombstone placeholder must not appear in the output.")
+
+        // Build compact-index → itemID map from emitted rows.
+        let compactToItemID: [Int32: String] = Dictionary(
+            uniqueKeysWithValues: emitted.map { ($0.nodeIdx, $0.nodeID) }
+        )
+
+        // Verify endpoint identity: every live node's neighbour must resolve to a
+        // REAL other node — no self-loops, no dangling compact indices.
+        //
+        // Pre-fix failure (F1 REGRESSION): live-c's neighbour resolves to "live-c"
+        // (self-loop) and live-b's neighbour index 2 has no entry in the map (dangling).
+        // Post-fix: both resolve correctly to the other live node.
+        for row in emitted {
+            let neighbours = row.decodeNeighbours()
+            for neighbourIdx in neighbours {
+                guard let resolvedID = compactToItemID[neighbourIdx] else {
+                    #expect(Bool(false),
+                        "HC-D-5 F1 REGRESSION: \(row.nodeID)'s neighbour compact index \(neighbourIdx) is not present in the graphRows() map — dangling edge. Pre-fix 'continue' shifts compact numbering, leaving live-b's neighbour blob pointing past the 2-element array.")
+                    continue
+                }
+                #expect(resolvedID != row.nodeID,
+                    "HC-D-5 F1 REGRESSION: \(row.nodeID)'s neighbour resolves to itself — self-loop. Pre-fix: live-c at compact 1 with neighbour blob [1] resolves to 'live-c'. Post-fix tombstone at compact 0 corrects numbering so neighbour [1] resolves to 'live-b'.")
+            }
         }
     }
 }
