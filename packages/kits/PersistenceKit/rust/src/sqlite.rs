@@ -12,7 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
@@ -679,10 +680,17 @@ struct Inner {
     /// (`SAVEPOINT tx_1`, `SAVEPOINT tx_2`, …) opened on top of the outer
     /// `BEGIN IMMEDIATE`. Each SAVEPOINT name is `tx_{depth_at_open}`.
     ///
-    /// Re-entrant callers (same thread, same call stack) are the only case
-    /// this counter handles — concurrent callers on different threads are
-    /// already serialized by `tx_lock` (in `transaction`) or by the
-    /// coordinator's own lock in the GLK layer.
+    /// This counter alone only tracks HOW DEEP a bracket is nested, not
+    /// WHICH thread opened it — every mutation of it must be paired with a
+    /// `TxCoordinator` acquire/release so a concurrent caller on a
+    /// different thread cannot have its own independent bracket silently
+    /// merged into this one via the shared connection (SV-01). See
+    /// `TxCoordinator` for the ownership half of this invariant; do not
+    /// mutate `tx_depth` from `SqliteStorage::transaction`,
+    /// `SqliteRowStore::begin_transaction`/`commit_transaction`/
+    /// `rollback_transaction`, or `SqliteDatasetStoreShim::append_rows`
+    /// without going through the matching `tx_coord.acquire()` /
+    /// `tx_coord.release_if_closed()` pair.
     tx_depth: usize,
 }
 
@@ -751,21 +759,106 @@ impl Inner {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Transaction bracket ownership (SV-01).
+//
+// `Inner::tx_depth` alone tracks HOW DEEP a bracket is nested, but not
+// WHICH call chain opened it. Four separate entry points can each start a
+// bracket on the shared connection: `Storage::transaction`,
+// `RowStore::begin_transaction`, and `DatasetStore::append_rows`. Before
+// this fix, only `Storage::transaction` serialized itself against
+// concurrent callers (via the old `tx_lock: Mutex<()>`); the other three
+// took `Inner`'s mutex only for the duration of a single nest_begin/
+// nest_commit/nest_rollback call, not for the whole bracket. That let an
+// unrelated thread's independent begin_transaction()/commit_transaction()
+// pair interleave through the shared connection and get silently absorbed
+// as a SAVEPOINT nested inside another thread's still-open bracket —
+// discarded by that thread's later rollback even though the second
+// caller believed its own work had already committed. Confirmed by
+// reproduction: an outer `transaction()` block left open while a second
+// thread ran an independent begin/insert/commit sequence, then the outer
+// block rolled back — the second thread's committed row vanished too.
+//
+// `TxCoordinator` closes this: a bracket has an OWNING thread. The SAME
+// thread may re-enter (this is the call-stack reentrancy `vault_import`
+// needs — capture_batch's begin_transaction from inside an outer
+// transaction() block). A DIFFERENT thread blocks until the owner's
+// bracket depth returns to zero, then takes ownership itself — this is
+// what actually serializes unrelated concurrent callers instead of
+// letting them silently share one bracket's fate.
+struct TxCoordinator {
+    owner: Mutex<Option<ThreadId>>,
+    closed: Condvar,
+}
+
+impl TxCoordinator {
+    fn new() -> Self {
+        TxCoordinator {
+            owner: Mutex::new(None),
+            closed: Condvar::new(),
+        }
+    }
+
+    /// Claim the bracket for the current thread before touching `Inner`.
+    /// Blocks if another thread currently owns an open bracket. Re-entrant
+    /// for the thread that already owns it (returns immediately). Must be
+    /// followed by a matching `release_if_closed` call once the caller
+    /// knows the resulting `tx_depth` — including on the failure path,
+    /// since a failed `nest_begin` at depth 0 must not leak ownership.
+    fn acquire(&self) {
+        let this_thread = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        loop {
+            match *owner {
+                None => {
+                    *owner = Some(this_thread);
+                    return;
+                }
+                Some(o) if o == this_thread => return,
+                Some(_) => {
+                    // A different thread owns the open bracket — wait for it
+                    // to fully close rather than let this call bleed into
+                    // that thread's transaction via the shared connection.
+                    owner = self.closed.wait(owner).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Release ownership once `Inner::tx_depth` has returned to zero
+    /// (either the whole bracket committed/rolled back, or a top-level
+    /// `nest_begin` failed before opening anything). No-op while the
+    /// bracket is still open at depth ≥ 1 — the owning thread keeps
+    /// ownership across its own nested calls.
+    fn release_if_closed(&self, tx_depth: usize) {
+        if tx_depth == 0 {
+            let mut owner = self.owner.lock().unwrap();
+            *owner = None;
+            self.closed.notify_all();
+        }
+    }
+}
+
 pub struct SqliteStorage {
     config: EstateConfiguration,
     inner: Arc<Mutex<Inner>>,
     observers: Arc<ObserverRegistry>,
-    /// Serializes whole `transaction` brackets against each other. There is
-    /// ONE connection per instance, and on the SAME connection a concurrent
-    /// second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies across
-    /// connections) — it is "cannot start a transaction within a
+    /// Owns the whole transaction bracket — not just one nest_begin/
+    /// nest_commit/nest_rollback call — across ALL FOUR entry points that
+    /// can open one on this connection: `transaction()`, `begin_transaction`,
+    /// `commit_transaction`/`rollback_transaction`, and `append_rows`. There
+    /// is ONE connection per instance, and on the SAME connection a
+    /// concurrent second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies
+    /// across connections) — it is "cannot start a transaction within a
     /// transaction". Two in-process threads legitimately share one instance
     /// (e.g. the corpus ingest queue's background drain loop + the
     /// foreground `await_ingest_drain` pump; the Swift twin is
-    /// actor-serialized), so the bracket must self-serialize. Distinct from
-    /// `inner`, which is released while the block runs (holding it across
-    /// the block would deadlock the block's own sub-store calls).
-    tx_lock: Arc<Mutex<()>>,
+    /// actor-serialized), so the bracket must self-serialize AND must not
+    /// let an unrelated thread's independent bracket silently nest inside
+    /// this one via the shared `tx_depth` counter (SV-01) — see
+    /// `TxCoordinator`. Cloned into `SqliteRowStore` and
+    /// `SqliteDatasetStoreShim` so every entry point shares one owner.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 impl SqliteStorage {
@@ -923,7 +1016,7 @@ impl SqliteStorage {
             config,
             inner: Arc::new(Mutex::new(Inner { conn, schema: None, tx_depth: 0 })),
             observers: Arc::new(ObserverRegistry::default()),
-            tx_lock: Arc::new(Mutex::new(())),
+            tx_coord: Arc::new(TxCoordinator::new()),
         })
     }
 }
@@ -1149,6 +1242,7 @@ impl Storage for SqliteStorage {
             observers: self.observers.clone(),
             encryption_config: self.config.encryption_config.clone(),
             aead_provider: Arc::new(AesGcmAeadProvider),
+            tx_coord: self.tx_coord.clone(),
         });
         // When cache is enabled, wrap with an LRU hot tier. Disabled (the
         // default) is a zero-change passthrough — identical to pre-mission
@@ -1223,43 +1317,55 @@ impl Storage for SqliteStorage {
         // before the block runs — the block's sub-stores re-lock per call, so
         // holding it across `block` would deadlock against them.
         //
-        // ISOLATION INVARIANT: `tx_lock` is held for the WHOLE bracket, so
-        // concurrent Rust callers on the same instance queue here instead of
-        // colliding. This is load-bearing: there is ONE connection per
-        // instance, and on the SAME connection a concurrent second
-        // BEGIN IMMEDIATE does not get SQLITE_BUSY (that is cross-connection
-        // arbitration) — it fails with "cannot start a transaction within a
-        // transaction" (observed: the corpus ingest queue's background drain
-        // loop racing the foreground await_ingest_drain pump on the shared
-        // queue.sqlite). Cross-process isolation still rests on SQLite's own
-        // file locking; non-transactional statements issued by other threads
-        // during the bracket join the open transaction as before. Production
-        // additionally serializes all estate access behind the coordinator
-        // lock, but shared side-stores (the per-estate queue.sqlite) are
-        // driven outside it — hence the self-serialization here.
+        // ISOLATION INVARIANT (SV-01): `tx_coord` owns the WHOLE bracket
+        // across every entry point on this connection — `transaction()`,
+        // `begin_transaction`, `commit_transaction`/`rollback_transaction`,
+        // and `append_rows` — not just this function. `acquire()` blocks
+        // until any OTHER thread's open bracket fully closes before this
+        // call proceeds, so an unrelated concurrent caller's independent
+        // begin/commit pair can never be silently absorbed as a SAVEPOINT
+        // inside this bracket and discarded by this bracket's rollback (the
+        // defect the old `tx_lock: Mutex<()>` allowed: it only guarded this
+        // function, not `begin_transaction`/`append_rows`, so those two
+        // could interleave with an open `transaction()` bracket from a
+        // different thread through the shared `tx_depth` counter).
         //
-        // Re-entrant callers (a block that itself calls `begin_transaction` or
-        // reaches `append_rows`) use the SAVEPOINT path via `Inner::nest_begin`:
-        // when `tx_depth` is already ≥ 1 the nested call issues a SAVEPOINT
-        // instead of a second BEGIN, which is legal on the same connection.
-        let _tx_guard = self.tx_lock.lock().unwrap();
-        self.inner
-            .lock()
-            .unwrap()
-            .nest_begin()
-            .map_err(|e| map_sql_err(e, "transaction"))?;
+        // Same-thread reentrancy (a block that itself calls
+        // `begin_transaction` or reaches `append_rows`) is unaffected:
+        // `acquire()` returns immediately for the thread that already owns
+        // the bracket, and `Inner::nest_begin` takes the SAVEPOINT path
+        // whenever `tx_depth` is already ≥ 1.
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        if let Err(e) = inner.nest_begin() {
+            // Failed before opening anything (or failed to add a further
+            // nested level) — release ownership if that leaves depth at 0,
+            // otherwise the owning thread keeps it for its still-open outer
+            // bracket.
+            let depth = inner.tx_depth;
+            drop(inner);
+            self.tx_coord.release_if_closed(depth);
+            return Err(map_sql_err(e, "transaction"));
+        }
+        drop(inner);
         match block(self) {
             Ok(()) => {
-                self.inner
-                    .lock()
-                    .unwrap()
+                let mut inner = self.inner.lock().unwrap();
+                let result = inner
                     .nest_commit()
-                    .map_err(|e| map_sql_err(e, "transaction"))?;
-                Ok(())
+                    .map_err(|e| map_sql_err(e, "transaction"));
+                let depth = inner.tx_depth;
+                drop(inner);
+                self.tx_coord.release_if_closed(depth);
+                result
             }
             Err(e) => {
                 // Best-effort rollback; surface the block's error regardless.
-                self.inner.lock().unwrap().nest_rollback();
+                let mut inner = self.inner.lock().unwrap();
+                inner.nest_rollback();
+                let depth = inner.tx_depth;
+                drop(inner);
+                self.tx_coord.release_if_closed(depth);
                 Err(e)
             }
         }
@@ -1268,10 +1374,13 @@ impl Storage for SqliteStorage {
     /// Dataset store override: returns a `SqliteDatasetStoreShim` that shares
     /// the same `Arc<Mutex<Inner>>` connection as all other SQLite stores.
     /// This ensures dataset DDL and row operations are serialized on the same
-    /// connection and participate in the WAL write-lock protocol.
+    /// connection and participate in the WAL write-lock protocol. Shares
+    /// `tx_coord` too (SV-01) so `append_rows`'s transaction bracket is
+    /// owner-tracked the same as every other entry point.
     fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
         Ok(Arc::new(SqliteDatasetStoreShim {
             inner: self.inner.clone(),
+            tx_coord: self.tx_coord.clone(),
         }))
     }
 
@@ -1922,6 +2031,12 @@ struct SqliteRowStore {
     /// `AesGcmAeadProvider`; injectable for testing (e.g. a fixed-nonce
     /// wrapper for cross-port fixture verification).
     aead_provider: Arc<dyn AeadProvider>,
+    /// Shared with `SqliteStorage` and `SqliteDatasetStoreShim` (SV-01):
+    /// owns the transaction bracket across every entry point on this
+    /// connection so an unrelated thread's independent begin/commit pair
+    /// can never be silently absorbed into another thread's still-open
+    /// bracket. See `TxCoordinator`.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 /// Collect the row keys for rows currently matching `predicate`.
@@ -2879,25 +2994,36 @@ impl RowStore for SqliteRowStore {
     /// Delegates to `Inner::nest_begin`: depth 0 → `BEGIN IMMEDIATE`;
     /// depth ≥ 1 → `SAVEPOINT tx_{depth}`. The depth counter is
     /// per-connection, stored in `Inner`, so nesting is tracked correctly
-    /// across all three transaction-opening sites on the same connection.
+    /// across all four transaction-opening sites on the same connection.
+    ///
+    /// Claims `tx_coord` first (SV-01): blocks until any other thread's
+    /// open bracket fully closes, so a caller using only the explicit
+    /// begin/commit/rollback API — never `Storage::transaction` — still
+    /// cannot have its bracket silently merged into a concurrent thread's.
     fn begin_transaction(&self) -> StorageResult<()> {
-        self.inner
-            .lock()
-            .unwrap()
-            .nest_begin()
-            .map_err(|e| map_sql_err(e, "<transaction>"))
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        let result = inner.nest_begin().map_err(|e| map_sql_err(e, "<transaction>"));
+        let depth = inner.tx_depth;
+        drop(inner);
+        if result.is_err() {
+            self.tx_coord.release_if_closed(depth);
+        }
+        result
     }
 
     /// Commit or release the innermost transaction bracket.
     ///
     /// Delegates to `Inner::nest_commit`: depth 1 → `COMMIT`; depth ≥ 2 →
-    /// `RELEASE SAVEPOINT tx_{depth-1}`.
+    /// `RELEASE SAVEPOINT tx_{depth-1}`. Releases `tx_coord` ownership once
+    /// `tx_depth` returns to 0.
     fn commit_transaction(&self) -> StorageResult<()> {
-        self.inner
-            .lock()
-            .unwrap()
-            .nest_commit()
-            .map_err(|e| map_sql_err(e, "<transaction>"))
+        let mut inner = self.inner.lock().unwrap();
+        let result = inner.nest_commit().map_err(|e| map_sql_err(e, "<transaction>"));
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
+        result
     }
 
     /// Roll back or undo the innermost transaction bracket.
@@ -2905,9 +3031,14 @@ impl RowStore for SqliteRowStore {
     /// Delegates to `Inner::nest_rollback`: depth 1 → `ROLLBACK`; depth ≥ 2
     /// → `ROLLBACK TO SAVEPOINT tx_{depth-1}` then `RELEASE SAVEPOINT
     /// tx_{depth-1}`, which discards only the innermost savepoint's changes
-    /// and collapses it back into its parent bracket.
+    /// and collapses it back into its parent bracket. Releases `tx_coord`
+    /// ownership once `tx_depth` returns to 0.
     fn rollback_transaction(&self) -> StorageResult<()> {
-        self.inner.lock().unwrap().nest_rollback();
+        let mut inner = self.inner.lock().unwrap();
+        inner.nest_rollback();
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
         Ok(())
     }
 }
@@ -3259,6 +3390,9 @@ use crate::dataset_store::{
 /// Created by `Storage::dataset_store()` on `SqliteStorage`.
 pub struct SqliteDatasetStoreShim {
     inner: Arc<Mutex<Inner>>,
+    /// Shared with `SqliteStorage` and `SqliteRowStore` (SV-01) — see
+    /// `TxCoordinator`.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 impl DatasetStore for SqliteDatasetStoreShim {
@@ -3331,63 +3465,86 @@ impl DatasetStore for SqliteDatasetStoreShim {
             return Ok(());
         }
 
-        let table_name = dataset_table_name(id);
-        let mut guard = self.inner.lock().unwrap();
+        // Claim the transaction bracket BEFORE touching `inner` (SV-01): if
+        // this locked `inner` first and then blocked waiting for `tx_coord`
+        // while a different thread's still-open bracket needed `inner` to
+        // close (via its own commit/rollback), the two would deadlock. See
+        // `TxCoordinator` for the full isolation rationale.
+        self.tx_coord.acquire();
 
-        // Validate column names from the first row.
-        if let Some(first) = rows.first() {
-            for key in first.keys() {
-                validate_dataset_column_identifier(key)?;
-            }
-        }
+        // Every path below — including early returns from column-identifier
+        // validation and the PK lookup, both of which run before
+        // `nest_begin` — must release the bracket it just claimed if it
+        // never actually opens one (depth unchanged). Running the append
+        // under one closure means there is exactly one release site instead
+        // of duplicating it at each `?`.
+        let outcome = (|| -> StorageResult<()> {
+            let table_name = dataset_table_name(id);
+            let mut guard = self.inner.lock().unwrap();
 
-        // Recover the declared PK column from PRAGMA table_info for pre-sort.
-        let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
-
-        // Pre-sort ascending by PK when declared.
-        let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
-            rows.to_vec();
-        if let Some(ref pk) = pk_column {
-            sorted_rows.sort_by(|a, b| {
-                let av = a.get(pk).unwrap_or(&TypedValue::Null);
-                let bv = b.get(pk).unwrap_or(&TypedValue::Null);
-                if compare_typed_values_for_sort(av, bv) {
-                    std::cmp::Ordering::Less
-                } else if compare_typed_values_for_sort(bv, av) {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
+            // Validate column names from the first row.
+            if let Some(first) = rows.first() {
+                for key in first.keys() {
+                    validate_dataset_column_identifier(key)?;
                 }
-            });
-        }
-
-        // GLK_BATCH1 pattern: wrap all inserts in a single transaction bracket.
-        // Uses Inner::nest_begin / nest_commit / nest_rollback so callers that
-        // already hold an outer transaction (depth ≥ 1) get a SAVEPOINT instead
-        // of a second BEGIN IMMEDIATE, which would fail on the same connection.
-        guard.nest_begin().map_err(|e| StorageError::BackendError {
-            underlying: format!("append_rows BEGIN: {e}"),
-        })?;
-
-        let result = (|| -> StorageResult<()> {
-            for row in &sorted_rows {
-                dataset_insert_row(&guard.conn, &table_name, row)?;
             }
-            Ok(())
+
+            // Recover the declared PK column from PRAGMA table_info for pre-sort.
+            let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
+
+            // Pre-sort ascending by PK when declared.
+            let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
+                rows.to_vec();
+            if let Some(ref pk) = pk_column {
+                sorted_rows.sort_by(|a, b| {
+                    let av = a.get(pk).unwrap_or(&TypedValue::Null);
+                    let bv = b.get(pk).unwrap_or(&TypedValue::Null);
+                    if compare_typed_values_for_sort(av, bv) {
+                        std::cmp::Ordering::Less
+                    } else if compare_typed_values_for_sort(bv, av) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                });
+            }
+
+            // GLK_BATCH1 pattern: wrap all inserts in a single transaction bracket.
+            // Uses Inner::nest_begin / nest_commit / nest_rollback so callers that
+            // already hold an outer transaction (depth ≥ 1) get a SAVEPOINT instead
+            // of a second BEGIN IMMEDIATE, which would fail on the same connection.
+            guard.nest_begin().map_err(|e| StorageError::BackendError {
+                underlying: format!("append_rows BEGIN: {e}"),
+            })?;
+
+            let result = (|| -> StorageResult<()> {
+                for row in &sorted_rows {
+                    dataset_insert_row(&guard.conn, &table_name, row)?;
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => guard.nest_commit().map_err(|e| StorageError::BackendError {
+                    underlying: format!("append_rows COMMIT: {e}"),
+                }),
+                Err(e) => {
+                    guard.nest_rollback();
+                    Err(e)
+                }
+            }
         })();
 
-        match result {
-            Ok(()) => {
-                guard.nest_commit().map_err(|e| StorageError::BackendError {
-                    underlying: format!("append_rows COMMIT: {e}"),
-                })?;
-                Ok(())
-            }
-            Err(e) => {
-                guard.nest_rollback();
-                Err(e)
-            }
-        }
+        // Release tx_coord ownership once the bracket is fully closed
+        // (depth 0). Validation/PK-lookup failures before `nest_begin` and a
+        // failed `nest_begin` both leave depth unchanged from whatever it
+        // was on entry — `release_if_closed` handles both the top-level
+        // (depth back to 0) and same-thread-nested (depth still ≥ 1, owner
+        // keeps it) cases correctly.
+        let depth = self.inner.lock().unwrap().tx_depth;
+        self.tx_coord.release_if_closed(depth);
+
+        outcome
     }
 
     fn query_rows(
@@ -3697,8 +3854,8 @@ mod hlc_roundtrip_tests {
         // await_ingest_drain pump — collided with "cannot start a
         // transaction within a transaction" (same-connection BEGIN nesting;
         // SQLITE_BUSY arbitration only applies across connections). The
-        // tx_lock must queue the brackets instead. 2 threads × 50
-        // transactions reproduced the collision reliably pre-fix.
+        // tx_coord bracket owner must queue the brackets instead. 2 threads
+        // × 50 transactions reproduced the collision reliably pre-fix.
         let storage = std::sync::Arc::new(make_sqlite_storage());
         let mut handles = Vec::new();
         for t in 0..2i64 {
