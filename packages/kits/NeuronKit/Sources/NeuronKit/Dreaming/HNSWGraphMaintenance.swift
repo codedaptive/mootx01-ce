@@ -31,9 +31,12 @@
 //
 // ── Seam idiom ───────────────────────────────────────────────────────────
 // Mirrors the `ThetaBasisRetrainHook` injection pattern: the protocol is
-// pure (no VectorKit import in the daemon itself), the production adapter
-// (`EstateHNSWGraphMaintenance`) holds a `VectorStore` reference and
-// delegates to its public HNSW maintenance surface. The daemon stores it
+// pure (no VectorKit type in any signature, and no VectorKit import in
+// this package at all). The production adapter,
+// `EstateHNSWGraphMaintenance`, holds a `VectorStore` reference and
+// delegates to its public HNSW maintenance surface. It lives in
+// AriaMcpKit/Sources/AriaResident because it is the half that holds
+// storage, and NeuronKit may not (B-1). The daemon stores it
 // as `private let hnswMaintenance: (any HNSWGraphMaintenance)?` so nil
 // safely disables all HNSW duties in tests that do not wire a VectorStore.
 //
@@ -44,7 +47,6 @@
 // Intellectus metric for operator visibility.
 
 import Foundation
-import VectorKit
 
 // MARK: - Protocol
 
@@ -88,45 +90,4 @@ public protocol HNSWGraphMaintenance: Sendable {
     ///
     /// - Parameter now: Deterministic timestamp from the caller.
     func compactFloatIndexTombstones(now: Date) async throws
-}
-
-// MARK: - Production adapter
-
-/// Production `HNSWGraphMaintenance` that delegates to a `VectorStore`'s
-/// public HNSW maintenance surface.
-///
-/// Holds a direct reference to the `VectorStore` that owns the float lane
-/// for the estate. DreamingDaemon never touches `VectorStore` directly
-/// (B-1 compliance: NeuronKit reaches VectorKit through a seam, not directly);
-/// `EstateHNSWGraphMaintenance` is the seam adapter.
-///
-/// Construction: the app layer creates an instance with the estate's
-/// `VectorStore` and injects it into `DreamingDaemon.init(hnswMaintenance:)`.
-public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
-
-    private let vectorStore: VectorStore
-
-    /// Construct a maintenance adapter for the given estate's vector store.
-    ///
-    /// - Parameter vectorStore: The `VectorStore` whose HNSW graphs this
-    ///   adapter maintains. Must be the same instance used by the estate's
-    ///   recall pipeline.
-    public init(vectorStore: VectorStore) {
-        self.vectorStore = vectorStore
-    }
-
-    /// Delegates to `VectorStore.clearAllHNSWIndices()`.
-    public func clearFloatIndex(now: Date) async throws {
-        try await vectorStore.clearAllHNSWIndices()
-    }
-
-    /// Delegates to `VectorStore.rebuildAllHNSWIndices()`.
-    public func rebuildFloatIndex(now: Date) async throws {
-        try await vectorStore.rebuildAllHNSWIndices()
-    }
-
-    /// Delegates to `VectorStore.compactAllHNSWTombstones()`.
-    public func compactFloatIndexTombstones(now: Date) async throws {
-        try await vectorStore.compactAllHNSWTombstones()
-    }
 }

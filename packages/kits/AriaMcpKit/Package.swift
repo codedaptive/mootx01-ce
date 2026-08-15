@@ -160,6 +160,12 @@ let package = Package(
                 // layering (downstream→upstream), no inversion. The AriaMCP target
                 // itself still lists NeuronKit for its own direct uses (recall, lens
                 // tools, etc.); this dep is the AriaResident target's own declaration.
+                // VectorKit: AriaResident owns EstateHNSWGraphMaintenance, the production
+                // adapter behind NeuronKit's pure HNSWGraphMaintenance seam. The adapter
+                // holds a live VectorStore handle and calls three write methods, so it
+                // must sit at the app layer: NeuronKit may not hold storage (B-1). The
+                // seam protocol stays in NeuronKit and carries no VectorKit type.
+                .product(name: "VectorKit", package: "VectorKit"),
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 // CognitionKit: AriaResident injects the graphAnalyticsHandler closure
                 // (Keystones + ConstellationLens) into NeuronKit.AutonomicGovernor.
