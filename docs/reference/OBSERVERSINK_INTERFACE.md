@@ -1,6 +1,6 @@
 ---
 title: ObserverSink Interface
-version: v1.2
+version: v1.3
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -586,6 +586,9 @@ Shape differences across ports:
 
 ## Changelog
 
+- **v1.3 (2026-08-15)** — PH-01 delta: two-sided clamp — negative limits
+  now floor to 0 (SQLite LIMIT -1 = unbounded guard); Rust twin
+  unaffected (usize). Upper cap unchanged.
 - **v1.2 (2026-08-15)** — PH-01: documented the named-query row cap.
   `queryMetricsByNames` / `query_metrics_by_names` now clamp a supplied
   `limit` to `maxMetricRowsPerNamedQuery` / `MAX_METRIC_ROWS_PER_NAMED_QUERY`
