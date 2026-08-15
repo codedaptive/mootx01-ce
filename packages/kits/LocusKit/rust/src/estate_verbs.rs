@@ -6025,4 +6025,72 @@ mod tests {
             events[0].hlc.physical_time
         );
     }
+
+    // --- AV-01: estate-layer audit verb validation (Codex finding, dc0f362) ---
+    //
+    // These exercise the `Estate` API boundary (estate_verbs.rs), which is
+    // the seam GLK's coordinator actually calls through. The store-layer
+    // boundary (the same validator, reached from
+    // `DrawerStoreCore::append_dream_cycle_marker`) is covered separately
+    // in `drawer_store_inmemory.rs`'s test module — together the two
+    // suites prove the in-memory backend (the only backend these
+    // integration-style Estate tests can reach) is not more permissive
+    // than the shared store-layer boundary that also backs SQLite.
+
+    #[test]
+    fn dream_cycle_marker_every_defined_verb_writes() {
+        let estate = make_estate();
+        for verb in audit_verbs::DREAM_CYCLE {
+            estate
+                .append_dream_cycle_marker(verb, "estate-cycle-ok", 1_700_000_002_000)
+                .unwrap_or_else(|e| panic!("defined verb {verb:?} was rejected: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn dream_cycle_marker_rejects_undefined_verb() {
+        let estate = make_estate();
+        let err = estate
+            .append_dream_cycle_marker("dreamSideload", "estate-cycle-bad", 1_700_000_002_000)
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn supplementary_audit_defined_verb_writes() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("capture must have produced a sealed audit event to build `from`");
+        estate
+            .append_supplementary_audit(&from, "datasetTableDrop", "dataset table dropped")
+            .expect("the one currently-defined supplementary verb must be accepted");
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().any(|e| e.verb == "datasetTableDrop"));
+    }
+
+    #[test]
+    fn supplementary_audit_rejects_undefined_verb() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let err = estate
+            .append_supplementary_audit(&from, "datasetTableForge", "attempted forgery")
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+        // The forged verb must not appear anywhere in the row's audit trail.
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().all(|e| e.verb != "datasetTableForge"));
+    }
 }

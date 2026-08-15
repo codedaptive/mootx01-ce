@@ -9886,6 +9886,54 @@ mod tests {
         assert!(brackets[0].hlc.physical_time < brackets[1].hlc.physical_time);
     }
 
+    /// AV-01 (Codex finding, commit dc0f362): the dream-marker write path
+    /// specifically cannot write an arbitrary verb — this is the store-layer
+    /// boundary shared by SQLite, in-memory, and Postgres, and it must
+    /// reject before ever touching the audit log.
+    #[test]
+    fn dream_cycle_marker_rejects_arbitrary_verb() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        let err = store
+            .append_dream_cycle_marker("dreamHijacked", "cycle-evil", NOW + 1_000)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(ref msg) if msg.contains("dreamHijacked")),
+            "expected InvalidContent naming the rejected verb, got: {err:?}"
+        );
+
+        // The rejected write must not have landed anything on the estate
+        // anchor row — a rejected verb is a rejected write, not a
+        // silently-substituted one.
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        assert!(events.iter().all(|e| e.verb != "dreamHijacked"));
+    }
+
+    /// AV-01: every currently-defined dream-cycle verb still writes after
+    /// the validator lands — the fix must not be a false-positive trap.
+    #[test]
+    fn dream_cycle_marker_accepts_every_defined_verb() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        for verb in crate::estate_verbs::audit_verbs::DREAM_CYCLE {
+            store
+                .append_dream_cycle_marker(verb, "cycle-defined", NOW + 1_000)
+                .unwrap_or_else(|e| panic!("defined verb {verb:?} was rejected: {e:?}"));
+        }
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let written: Vec<&str> = events
+            .iter()
+            .filter(|e| e.reason.as_deref() == Some("session=cycle-defined"))
+            .map(|e| e.verb.as_str())
+            .collect();
+        assert_eq!(written.len(), crate::estate_verbs::audit_verbs::DREAM_CYCLE.len());
+    }
+
     /// C3: the reindex-completion marker seals verb/actor/reason on the
     /// ESTATE anchor row with before == after bitmaps (informational).
     #[test]
