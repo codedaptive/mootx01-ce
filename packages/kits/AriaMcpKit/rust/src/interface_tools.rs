@@ -3344,6 +3344,96 @@ fn run_drain_status(
     Ok(text_result(&lines.join("\n")))
 }
 
+/// Hard cap on audit events collected per `moot_timing_report` call.
+///
+/// The MCP tool surface is reachable by any connected client, so an uncapped
+/// `since_ms: 0` scan was a caller-triggerable resource exhaustion: the
+/// 4096-per-page loop bounded peak memory per PAGE, but the whole window
+/// still accumulated in memory before deriving.
+///
+/// 262,144 = 64 full pages of 4,096. Chosen against measurement, not a round
+/// number: the largest real estate observed (live CE estate, 2026-08-15)
+/// carries 162,860 audit events (33 MB, ~216 B/row), so the cap is ~1.6×
+/// that — every real estate today keeps single-call full-history semantics,
+/// while the worst case is bounded at ~57 MB transient instead of unbounded.
+/// Beyond the cap, the existing `watermark_ms` paging contract continues the
+/// scan (clamp, not reject). Parity: mirrors Swift
+/// `ToolDispatcher.timingWindowMaxEvents`.
+const TIMING_WINDOW_MAX_EVENTS: usize = 262_144;
+
+/// Collect the audit window for the timing derivation, capped at
+/// `max_events` total events for the call.
+///
+/// The paging cursor is seeded from `since_ms` when > 0, matching Swift
+/// `collectTimingWindow`: physical_time = since_ms, logical_count = 0,
+/// node_id = 0 sits at the very start of that millisecond; same-millisecond
+/// events with logical_count > 0 are re-fetched but excluded by
+/// `derive_timings`' since_exclusive_ms guard (A6 exactly-once contract).
+/// (Previously the cursor started at `None` unconditionally, so every call —
+/// including incremental scans — re-paged the entire log from epoch; the
+/// Swift port seeded the cursor. Same-symbol parity fix.)
+///
+/// Truncation semantics: when the cap cuts the window, tier 3/4 pair
+/// captures whose markers land beyond the cut pair-lose for this call (they
+/// surface in the report's `unbounded` counts), and events sharing the
+/// boundary millisecond are excluded by the next call's since_exclusive_ms
+/// guard. Acceptable for a statistical p50/p95 maintenance metric. The
+/// returned bool is true when the window MAY have more events; the caller
+/// pages forward with the returned watermark.
+fn collect_timing_window(
+    coord: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    since_ms: i64,
+    max_events: usize,
+) -> Result<(Vec<neuron_kit::timing_derivation::TimingAuditEvent>, bool), String> {
+    let mut events: Vec<neuron_kit::timing_derivation::TimingAuditEvent> = Vec::new();
+    let mut truncated = false;
+    let mut cursor: Option<substrate_types::hlc::HLC> = if since_ms > 0 {
+        Some(substrate_types::hlc::HLC {
+            physical_time: since_ms,
+            logical_count: 0,
+            node_id: 0,
+        })
+    } else {
+        None
+    };
+    const PAGE: usize = 4096;
+    loop {
+        let remaining = max_events - events.len();
+        if remaining == 0 {
+            // Cap landed exactly on a full-page boundary — there may be more
+            // events; the watermark lets the caller find out.
+            truncated = true;
+            break;
+        }
+        let page = match coord.audit_events(handle, cursor, PAGE) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("{e:?}")),
+        };
+        let full = page.len() == PAGE;
+        let overflow = page.len() > remaining;
+        let last_hlc = page.last().map(|e| e.hlc);
+        events.extend(page.into_iter().take(remaining).map(|e| {
+            neuron_kit::timing_derivation::TimingAuditEvent {
+                verb: e.verb,
+                physical_time_ms: e.hlc.physical_time,
+                row_id: uuid::Uuid::from_u128(e.row_id.0).to_string(),
+                reason: e.reason,
+            }
+        }));
+        if overflow {
+            // Events from this page were discarded — definitely more left.
+            truncated = true;
+            break;
+        }
+        match (full, last_hlc) {
+            (true, Some(h)) => cursor = Some(h),
+            _ => break,
+        }
+    }
+    Ok((events, truncated))
+}
+
 /// `moot_timing_report` — derive INGEST and CYCLE timing metrics from the
 /// estate's audit log (C3+A6, benchmark reset 2026-08-13).
 ///
@@ -3352,8 +3442,10 @@ fn run_drain_status(
 /// benchmark and the product can never disagree about what "INGEST time"
 /// means. Read-only and stateless server-side: the CALLER keeps the returned
 /// `watermark_ms` and passes it back as `since_ms` for incremental scans (A6).
-/// Like `run_drain_status`, no orientation block — harnesses and duties call
-/// this repeatedly. Mirrors Swift `runTimingReport`.
+/// The window is capped at `TIMING_WINDOW_MAX_EVENTS` per call; a clamped
+/// report says so on its final line. Like `run_drain_status`, no orientation
+/// block — harnesses and duties call this repeatedly. Mirrors Swift
+/// `runTimingReport`.
 fn run_timing_report(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -3361,34 +3453,22 @@ fn run_timing_report(
     let estate = registry.resolve_direct(args)?;
     let since_ms = optional_integer(args, "since_ms")?.unwrap_or(0);
 
-    // Page the whole window through the GLK audit seam. 4096 events per page
-    // bounds peak memory; the FULL window must be collected before deriving —
-    // tier 3/4 pair captures with markers that can arrive many pages later.
+    // Collect the window through the GLK audit seam, capped at the call
+    // level (see TIMING_WINDOW_MAX_EVENTS for the measured justification).
+    // The window up to the cap is collected before deriving — tier 3/4 pair
+    // captures have markers that can arrive many pages later.
     let coord = estate.coord.lock().unwrap();
-    let mut events: Vec<neuron_kit::timing_derivation::TimingAuditEvent> = Vec::new();
-    let mut cursor: Option<substrate_types::hlc::HLC> = None;
-    const PAGE: usize = 4096;
-    loop {
-        let page = match coord.audit_events(&estate.handle, cursor, PAGE) {
-            Ok(p) => p,
-            Err(e) => return Ok(error_result(&format!("{e:?}"))),
-        };
-        let full = page.len() == PAGE;
-        let last_hlc = page.last().map(|e| e.hlc);
-        events.extend(page.into_iter().map(|e| {
-            neuron_kit::timing_derivation::TimingAuditEvent {
-                verb: e.verb,
-                physical_time_ms: e.hlc.physical_time,
-                row_id: uuid::Uuid::from_u128(e.row_id.0).to_string(),
-                reason: e.reason,
-            }
-        }));
-        match (full, last_hlc) {
-            (true, Some(h)) => cursor = Some(h),
-            _ => break,
-        }
-    }
+    let collected = collect_timing_window(
+        &coord,
+        &estate.handle,
+        since_ms,
+        TIMING_WINDOW_MAX_EVENTS,
+    );
     drop(coord);
+    let (events, truncated) = match collected {
+        Ok(v) => v,
+        Err(msg) => return Ok(error_result(&msg)),
+    };
 
     let d = neuron_kit::timing_derivation::derive_timings(&events, since_ms);
 
@@ -3435,6 +3515,14 @@ fn run_timing_report(
     lines.push(line("cycle_novel", &d.cycle_novel_ms, Some(d.cycle_novel_unbounded)));
     lines.push(line("cycle_dreamt", &d.cycle_dreamt_ms, Some(d.cycle_dreamt_unbounded)));
     lines.push(format!("  watermark_ms: {}", d.watermark_ms));
+    if truncated {
+        // Only emitted when the cap cut the window, so the untruncated report
+        // stays byte-identical to the pre-cap output shape. Byte-identical
+        // across ports so harness parsers read either report.
+        lines.push(format!(
+            "  window: truncated at {TIMING_WINDOW_MAX_EVENTS} events — pass watermark_ms back as since_ms to continue"
+        ));
+    }
     Ok(text_result(&lines.join("\n")))
 }
 

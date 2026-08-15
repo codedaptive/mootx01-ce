@@ -672,10 +672,10 @@ fn drain_status_tool() -> serde_json::Value {
 fn timing_report_tool() -> serde_json::Value {
     json!({
         "name": "moot_timing_report",
-        "description": "Maintenance: derive memory-timing metrics from the estate's audit log — INGEST time per single-row encode unit, bulk encode throughput, and the CYCLE tiers (vector = encode completion, novel-term = next basis retrain, dreamt = next dream cycle end). Rows with no subsequent retrain or dream are reported as unbounded counts, not dropped. Read-only. Pass since_ms (a previous call's watermark_ms) to scan only newer activity; omit for a full-history scan. Returns sample counts, p50/p95 milliseconds per metric, unbounded counts, and the new watermark_ms.",
+        "description": "Maintenance: derive memory-timing metrics from the estate's audit log — INGEST time per single-row encode unit, bulk encode throughput, and the CYCLE tiers (vector = encode completion, novel-term = next basis retrain, dreamt = next dream cycle end). Rows with no subsequent retrain or dream are reported as unbounded counts, not dropped. Read-only. Pass since_ms (a previous call's watermark_ms) to scan only newer activity; omit to scan from the beginning. Each call collects at most 262144 audit events; a larger window is clamped and the report gains a 'window: truncated' line — pass the returned watermark_ms back as since_ms to continue. Returns sample counts, p50/p95 milliseconds per metric, unbounded counts, and the new watermark_ms.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
-                "since_ms": integer_schema("Optional watermark from a previous call's watermark_ms (epoch milliseconds). Only captures strictly after it are measured, so successive calls never double-count. Omit or 0 for a full-history scan.")
+                "since_ms": integer_schema("Optional watermark from a previous call's watermark_ms (epoch milliseconds). Only captures strictly after it are measured, so successive calls never double-count. Omit or 0 to scan from the beginning (clamped at 262144 events per call; page forward via watermark_ms).")
             }),
             json!([])
         )))
