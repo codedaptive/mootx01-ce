@@ -1180,7 +1180,13 @@ mod tests {
         let outcome = rpc_engine(frame, &mut transport);
         assert_eq!(outcome.code, 1);
         let stdout_str = serialize_stdout(outcome.stdout.as_ref().unwrap());
-        // G-3 byte-compare: must NOT start with {"error":…,"ok":false shape.
+        // G-3 positive byte-compare: stdout IS the response frame, one line,
+        // sorted keys (error < id < jsonrpc; code < message inside error).
+        assert_eq!(
+            stdout_str,
+            r#"{"error":{"code":-32600,"message":"Invalid Request"},"id":5,"jsonrpc":"2.0"}"#
+        );
+        // G-3 negative: and it is NOT the {"error":…,"ok":false} botLink shape.
         assert!(!stdout_str.contains(r#""ok":false"#), "G-3: must not be ok:false shape: {stdout_str}");
         // Must contain the protocol-level error.
         assert!(stdout_str.contains(r#""error""#));
