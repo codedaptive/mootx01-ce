@@ -744,6 +744,59 @@ pub fn rpc_engine(frame_str: &str, transport: &mut Transport) -> Outcome {
     Outcome { stdout: Some(response), code }
 }
 
+/// Maximum `rpc` frame accepted from stdin, in bytes (BL-01, Codex #47).
+///
+/// 4 MiB, matching the daemon's own `max_body_bytes` default on both
+/// verticals (`aria_mcp::http_server`, and Swift's
+/// `HTTPServer.maxBodyBytes`). A frame larger than this is refused by the
+/// receiving end regardless, so buffering more than the daemon will ever
+/// read is pure waste. The largest legitimate botLink payload is a single
+/// `tools/call` frame, orders of magnitude below the cap.
+const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read one `rpc` frame from stdin under a hard byte cap.
+///
+/// `read_to_string` grows without limit, so a large or never-terminating
+/// producer on the other end of the pipe exhausts local memory. Reading
+/// through `Read::take` bounds the allocation; one extra byte is then
+/// probed to distinguish "exactly at the cap" from "over the cap", so an
+/// oversized frame is refused with a usage error (exit 64) instead of
+/// being silently truncated into a malformed frame.
+fn read_stdin_frame() -> Result<String, Outcome> {
+    use std::io::Read;
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut buf = Vec::with_capacity(8192);
+    handle
+        .by_ref()
+        .take(MAX_STDIN_FRAME_BYTES as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| Outcome::failure(&format!("cannot read rpc frame from stdin: {e}")))?;
+
+    if buf.len() == MAX_STDIN_FRAME_BYTES {
+        // Cap reached exactly: peek one more byte. Anything there means the
+        // producer had more to send, so the frame is over the limit.
+        let mut probe = [0u8; 1];
+        match handle.read(&mut probe) {
+            Ok(0) => {}
+            Ok(_) => {
+                return Err(Outcome::usage_error(&format!(
+                    "rpc frame from stdin exceeds the {MAX_STDIN_FRAME_BYTES} byte limit"
+                )));
+            }
+            Err(e) => {
+                return Err(Outcome::failure(&format!(
+                    "cannot read rpc frame from stdin: {e}"
+                )));
+            }
+        }
+    }
+
+    let text = String::from_utf8(buf)
+        .map_err(|_| Outcome::usage_error("rpc frame from stdin is not valid UTF-8"))?;
+    Ok(text.trim().to_string())
+}
+
 /// A tools/call result is an error when `isError` is `Bool(true)` exactly.
 /// Absent or `false` both mean success (normative: "isError false or absent").
 fn is_error_result(result: &Value) -> bool {
@@ -802,12 +855,10 @@ pub fn run(sub: BotLinkSub, http: Option<String>, db: Option<String>) -> ExitCod
         BotLinkSub::Rpc { frame } => {
             let raw = match frame {
                 Some(s) => s.clone(),
-                None => {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf).unwrap_or(0);
-                    buf.trim().to_string()
-                }
+                None => match read_stdin_frame() {
+                    Ok(s) => s,
+                    Err(outcome) => return emit(outcome),
+                },
             };
             rpc_engine(&raw, &mut transport)
         }

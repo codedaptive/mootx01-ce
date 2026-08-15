@@ -288,13 +288,46 @@ struct BotLinkCommand: AsyncParsableCommand {
         @Argument(help: "The JSON-RPC frame. Omitted: the frame is read from stdin to EOF.")
         var frame: String?
 
+        /// Maximum `rpc` frame accepted from stdin, in bytes (BL-01, Codex
+        /// #47).
+        ///
+        /// 4 MiB, matching the daemon's own `HTTPServer.maxBodyBytes`
+        /// default (and the Rust vertical's `max_body_bytes`). A frame
+        /// larger than this is refused by the receiving end regardless, so
+        /// buffering more than the daemon will ever read is pure waste. The
+        /// largest legitimate botLink payload is a single `tools/call`
+        /// frame, orders of magnitude below the cap.
+        static let maxStdinFrameBytes = 4 * 1024 * 1024
+
         func run() async throws {
             let rawFrame: String
             if let frame {
                 rawFrame = frame
             } else {
-                // Read stdin to EOF — the cloud agent pipes the frame in.
-                let data = FileHandle.standardInput.readDataToEndOfFile()
+                // Read stdin under a hard byte cap — the cloud agent pipes
+                // the frame in, and `readDataToEndOfFile` grows without
+                // limit, so a large or never-terminating producer exhausts
+                // local memory. One byte beyond the cap is requested so an
+                // oversized frame is refused outright rather than silently
+                // truncated into a malformed frame.
+                let handle = FileHandle.standardInput
+                var data = Data()
+                while data.count <= Self.maxStdinFrameBytes {
+                    guard let chunk = try handle.read(
+                        upToCount: Self.maxStdinFrameBytes + 1 - data.count
+                    ), !chunk.isEmpty else { break }
+                    data.append(chunk)
+                }
+                guard data.count <= Self.maxStdinFrameBytes else {
+                    try BotLinkWiring.emit(BotLinkOutcome(
+                        stdoutJSON: [
+                            "ok": false,
+                            "error": "rpc frame from stdin exceeds the \(Self.maxStdinFrameBytes) byte limit",
+                        ],
+                        exitCode: 64
+                    ))
+                    return
+                }
                 rawFrame = String(decoding: data, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
