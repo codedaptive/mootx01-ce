@@ -191,9 +191,33 @@ public actor CorpusProviderCountsStore {
     /// keeps working untouched and converts on its next write. A one-shot
     /// transformation of a multi-gigabyte estate inside the open path is
     /// exactly the shape of failure this whole incident chain was.
+    /// v4 (CORPUS-COUNTS-01) adds the integer-keyed pair that replaces the
+    /// term-keyed v3 shape for new writes:
+    ///   - `corpus_provider_term_dictionary` — one row per unique term across
+    ///     ALL models: `term_id INTEGER PK`, `term TEXT`, `models INTEGER`
+    ///     (bitmask, bit = the model's registry integer). The string is stored
+    ///     once; the bitmask answers "which models know this term" with no
+    ///     join over a small table.
+    ///   - `corpus_provider_term_payload` — PK `(model_id INTEGER,
+    ///     term_id INTEGER)`, `vector BLOB`. No version column: a model
+    ///     version bump drops its payload rows and sets the reindex latch —
+    ///     the rebuild regenerates them (REINDEX_REQUIRED_MIGRATION_DESIGN §3).
+    ///
+    /// A bitmask on the payload's model field was considered and REJECTED
+    /// (design §2.3): a payload row belongs to exactly one model, the key is
+    /// single-valued, and a bitwise AND cannot use an index — it would turn a
+    /// B-tree seek into a ~92K-row scan per model. The bitmask earns its keep
+    /// only in the dictionary, where a term genuinely spans models.
+    ///
+    /// The v3→v4 migration is two CREATEs and nothing else — no read, no
+    /// rewrite, no bulk transform in the open path (that shape is ee#49).
+    /// Legacy v3 vocab rows and legacy counts blobs are dropped by the
+    /// `mootx01 upgrade` step, which then sets the reindex latch; the read
+    /// path below prefers the v4 pair and falls back to v3 rows / the legacy
+    /// blob so an un-upgraded estate keeps working untouched.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitCounts",
-        version: 3,
+        version: 4,
         tables: [
             TableDeclaration(
                 name: "corpus_provider_counts",
@@ -238,7 +262,9 @@ public actor CorpusProviderCountsStore {
             // the document containing it, which is strictly more revealing
             // than a de-duplicated vocabulary. Terms are also already
             // plaintext inside the existing blob.
-            vocabTable
+            vocabTable,
+            termDictionaryTable,
+            termPayloadTable
         ],
         indices: [],
         migrations: [
@@ -249,9 +275,79 @@ public actor CorpusProviderCountsStore {
                 fromVersion: 2,
                 toVersion: 3,
                 operations: [.createTable(vocabTable)]
+            ),
+            // v3 → v4: create the integer-keyed pair. CREATEs only — the drop
+            // of legacy rows happens in `mootx01 upgrade`, never at open
+            // (ee#49: no bulk work in the estate-open path).
+            Migration(
+                fromVersion: 3,
+                toVersion: 4,
+                operations: [
+                    .createTable(termDictionaryTable),
+                    .createTable(termPayloadTable)
+                ]
             )
         ]
     )
+
+    /// One row per unique term across all models (v4). Shared by the
+    /// declaration and the v3→v4 migration so the two can never drift apart.
+    static let termDictionaryTable = TableDeclaration(
+        name: "corpus_provider_term_dictionary",
+        columns: [
+            // INTEGER PRIMARY KEY: SQLite rowid alias — term ids are allocated
+            // by insertion, dense, and stable for the life of the estate.
+            .int("term_id", nullable: false),
+            .text("term", nullable: false),
+            // Bitmask of models that know this term: bit = the model's
+            // registry integer (see `modelRegistry`). INTEGER state, not a
+            // Bool column — multi-valued membership is what bitmasks are for.
+            .int("models", nullable: false)
+        ],
+        primaryKey: ["term_id"]
+    )
+
+    /// Per-(model, term) payload bytes (v4). `vector` carries the provider's
+    /// own per-term bytes verbatim (for RandomIndexing: 2048 little-endian
+    /// f32, 8192 bytes) — nothing recomputes, cross-port byte equality holds.
+    /// No model_version column: a version bump drops the model's rows and
+    /// sets the reindex latch instead of versioning them in place.
+    static let termPayloadTable = TableDeclaration(
+        name: "corpus_provider_term_payload",
+        columns: [
+            .int("model_id", nullable: false),
+            .int("term_id", nullable: false),
+            .blob("vector", nullable: false)
+        ],
+        primaryKey: ["model_id", "term_id"]
+    )
+
+    /// The model → integer registry for the v4 pair.
+    ///
+    /// In-code and deterministic (both ports carry the identical table): the
+    /// provider set is code-defined, so its integer assignment is too — the
+    /// ruled storage shape is two tables, and a mapping table for four rows
+    /// would be a third. The integer doubles as the dictionary bitmask's bit
+    /// index (`models & (1 << id)`). An unknown modelID throws rather than
+    /// auto-assigning: extending the registry is a deliberate, reviewed act,
+    /// and every derived row is rebuildable via the reindex latch if an
+    /// assignment ever has to change.
+    static let modelRegistry: [String: Int] = [
+        "random-indexing-v1": 0,
+        "ppmi-v1": 1,
+        "lsa-v1": 2,
+        "nmf-v1": 3
+    ]
+
+    /// Registry lookup that fails loudly on an unregistered model.
+    static func modelInt(for modelID: String) throws -> Int {
+        guard let id = modelRegistry[modelID] else {
+            throw CorpusKitError.modelUnavailable(
+                "modelID '\(modelID)' is not in CorpusProviderCountsStore.modelRegistry — "
+                + "add it (both ports) before persisting term payloads for it")
+        }
+        return id
+    }
 
     /// The term-keyed vocabulary table, shared by the declaration and its
     /// v2→v3 migration so the two can never drift apart.
@@ -335,9 +431,13 @@ public actor CorpusProviderCountsStore {
                     vocabSize: vocabSize,
                     updatedAt: updatedAt),
                 into: rowStore)
-            try await replaceVocab(
-                modelID: modelID, modelVersion: modelVersion,
-                terms: decomposed.terms, into: rowStore)
+            // v4: the integer-keyed pair is the write target. Clear any v3
+            // term rows for this key so the pair is unambiguously the truth
+            // (the read side prefers v4 and would otherwise shadow them).
+            try await replaceTermPayloads(
+                modelID: modelID, terms: decomposed.terms, into: rowStore)
+            try await deleteVocab(
+                modelID: modelID, modelVersion: modelVersion, into: rowStore)
         } else {
             try await upsert(
                 PersistedCounts(
@@ -349,10 +449,11 @@ public actor CorpusProviderCountsStore {
                     updatedAt: updatedAt),
                 into: rowStore)
             // A provider can stop decomposing (or a key can be reused by a
-            // provider that never did). Clear any term rows so the blob is
-            // unambiguously the whole truth for this key.
+            // provider that never did). Clear term rows in BOTH layouts so
+            // the blob is unambiguously the whole truth for this key.
             try await deleteVocab(
                 modelID: modelID, modelVersion: modelVersion, into: rowStore)
+            try await deleteTermPayloads(modelID: modelID, into: rowStore)
         }
     }
 
@@ -373,6 +474,15 @@ public actor CorpusProviderCountsStore {
     ) async throws -> Bool {
         guard let persisted = try await load(modelID: modelID, modelVersion: modelVersion) else {
             return false
+        }
+        // Preference order: v4 integer-keyed pair → v3 term rows → legacy
+        // blob. Each earlier layout being empty means "not written in that
+        // layout yet", never "empty vocabulary" — the fallbacks are what let
+        // an un-upgraded estate keep working untouched.
+        let v4Terms = try await loadTermPayloads(modelID: modelID)
+        if !v4Terms.isEmpty {
+            try provider.restoreCounts(header: persisted.counts, terms: v4Terms)
+            return true
         }
         let terms = try await loadVocab(modelID: modelID, modelVersion: modelVersion)
         if terms.isEmpty {
@@ -454,6 +564,157 @@ public actor CorpusProviderCountsStore {
                 .eq(Column(table: "corpus_provider_vocab", name: "model_version"), .text(modelVersion))
             ])
         )
+    }
+
+    // MARK: - Integer-keyed term pair (v4, CORPUS-COUNTS-01)
+
+    /// Replace the stored per-term payloads for a model with `terms`,
+    /// maintaining the term dictionary (string stored once, bitmask ORed).
+    ///
+    /// Term ids are allocated explicitly as max(term_id)+n — deterministic,
+    /// port-parallel, and independent of any driver's last-insert-rowid
+    /// surface. The whole dictionary is loaded once (it is small by design)
+    /// so the per-term work is in-memory; writes are one upsert per NEW or
+    /// bit-changed dictionary row plus one payload upsert per term — no
+    /// single bind scales with vocabulary.
+    public func replaceTermPayloads(
+        modelID: String,
+        terms: [(term: String, vector: Data)],
+        into rowStore: any RowStore
+    ) async throws {
+        let model = try Self.modelInt(for: modelID)
+        let bit = Int64(1) << Int64(model)
+
+        // Load the dictionary once: term → (term_id, models bitmask).
+        var dict: [String: (id: Int64, models: Int64)] = [:]
+        var maxID: Int64 = 0
+        let dictRows = try await rowStore.query(
+            table: "corpus_provider_term_dictionary",
+            where: .isTrue, orderBy: [], limit: nil, offset: nil)
+        for row in dictRows {
+            guard case let .int(id) = row["term_id"] ?? .null,
+                  case let .text(term) = row["term"] ?? .null,
+                  case let .int(models) = row["models"] ?? .null
+            else { continue }
+            dict[term] = (id: id, models: models)
+            maxID = max(maxID, id)
+        }
+
+        // Replace this model's payload generation atomically with the caller's
+        // row store (same delete-then-insert idiom as replaceVocab).
+        _ = try await rowStore.delete(
+            table: "corpus_provider_term_payload",
+            where: .eq(Column(table: "corpus_provider_term_payload", name: "model_id"),
+                       .int(Int64(model))))
+
+        for entry in terms {
+            let termID: Int64
+            if let existing = dict[entry.term] {
+                termID = existing.id
+                if existing.models & bit == 0 {
+                    _ = try await rowStore.upsert(
+                        table: "corpus_provider_term_dictionary",
+                        values: [
+                            "term_id": .int(existing.id),
+                            "term": .text(entry.term),
+                            "models": .int(existing.models | bit)
+                        ],
+                        conflictColumns: ["term_id"])
+                    dict[entry.term] = (id: existing.id, models: existing.models | bit)
+                }
+            } else {
+                maxID += 1
+                termID = maxID
+                _ = try await rowStore.upsert(
+                    table: "corpus_provider_term_dictionary",
+                    values: [
+                        "term_id": .int(termID),
+                        "term": .text(entry.term),
+                        "models": .int(bit)
+                    ],
+                    conflictColumns: ["term_id"])
+                dict[entry.term] = (id: termID, models: bit)
+            }
+            _ = try await rowStore.upsert(
+                table: "corpus_provider_term_payload",
+                values: [
+                    "model_id": .int(Int64(model)),
+                    "term_id": .int(termID),
+                    "vector": .blob(entry.vector)
+                ],
+                conflictColumns: ["model_id", "term_id"])
+        }
+    }
+
+    /// Every stored term/vector pair for a model from the v4 integer-keyed
+    /// pair. EMPTY both when the model has no v4 rows and when the estate
+    /// predates v4 — callers treat empty as "fall back to v3 rows / blob",
+    /// never as "the vocabulary is empty".
+    public func loadTermPayloads(
+        modelID: String
+    ) async throws -> [(term: String, vector: Data)] {
+        guard let model = Self.modelRegistry[modelID] else { return [] }
+        let payloadRows = try await storage.rowStore.query(
+            table: "corpus_provider_term_payload",
+            where: .eq(Column(table: "corpus_provider_term_payload", name: "model_id"),
+                       .int(Int64(model))),
+            orderBy: [], limit: nil, offset: nil)
+        guard !payloadRows.isEmpty else { return [] }
+
+        // Join-free: dictionary filtered by this model's bit, id → term.
+        var termByID: [Int64: String] = [:]
+        let dictRows = try await storage.rowStore.query(
+            table: "corpus_provider_term_dictionary",
+            where: .isTrue, orderBy: [], limit: nil, offset: nil)
+        let bit = Int64(1) << Int64(model)
+        for row in dictRows {
+            guard case let .int(id) = row["term_id"] ?? .null,
+                  case let .text(term) = row["term"] ?? .null,
+                  case let .int(models) = row["models"] ?? .null,
+                  models & bit != 0
+            else { continue }
+            termByID[id] = term
+        }
+
+        return payloadRows.compactMap { row in
+            guard case let .int(id) = row["term_id"] ?? .null,
+                  case let .blob(vector) = row["vector"] ?? .null,
+                  let term = termByID[id]
+            else { return nil }
+            return (term: term, vector: vector)
+        }
+    }
+
+    /// Drop a model's v4 payload rows and clear its dictionary bits.
+    /// Dictionary rows whose bitmask reaches zero are left in place — a dead
+    /// term row is harmless, and the next writer of that term reuses its id.
+    public func deleteTermPayloads(
+        modelID: String, into rowStore: any RowStore
+    ) async throws {
+        guard let model = Self.modelRegistry[modelID] else { return }
+        let bit = Int64(1) << Int64(model)
+        _ = try await rowStore.delete(
+            table: "corpus_provider_term_payload",
+            where: .eq(Column(table: "corpus_provider_term_payload", name: "model_id"),
+                       .int(Int64(model))))
+        let dictRows = try await rowStore.query(
+            table: "corpus_provider_term_dictionary",
+            where: .isTrue, orderBy: [], limit: nil, offset: nil)
+        for row in dictRows {
+            guard case let .int(id) = row["term_id"] ?? .null,
+                  case let .text(term) = row["term"] ?? .null,
+                  case let .int(models) = row["models"] ?? .null,
+                  models & bit != 0
+            else { continue }
+            _ = try await rowStore.upsert(
+                table: "corpus_provider_term_dictionary",
+                values: [
+                    "term_id": .int(id),
+                    "term": .text(term),
+                    "models": .int(models & ~bit)
+                ],
+                conflictColumns: ["term_id"])
+        }
     }
 
     /// Load the full persisted counts for a provider key, or nil if none.
