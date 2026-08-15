@@ -1380,7 +1380,7 @@ pub fn is_invalidated_counts(bytes: &[u8]) -> bool;
 pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize>;
 ```
 
-**Counts-invalidation sentinel (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` and `is_invalidated_counts` are defined at module level in `corpus_provider_counts_store`. The sentinel is an empty byte slice. Callers must test it before passing bytes to any provider decoder. `restore_counts_into` performs this test internally and returns `Ok(false)` for a sentinel blob. A non-empty but undecodable blob still propagates `DecodingFailure`. The Swift port does not yet carry this contract. The gap is recorded as F1 in `docs_internal/analysis/blast_radius/MG-01_BLAST_RADIUS.md`.
+**Counts-invalidation sentinel (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` and `is_invalidated_counts` are defined at module level in `corpus_provider_counts_store`. The sentinel is an empty byte slice. Callers must test it before passing bytes to any provider decoder. `restore_counts_into` performs this test internally and returns `Ok(false)` for a sentinel blob. A non-empty but undecodable blob still propagates `DecodingFailure`. The Swift port does not yet carry this contract. A follow-up mission must port the sentinel check to the Swift surface.
 
 ### `TrainingPathDecision` / `CorpusPathReason` — retrain counts-path decision seam (both ports)
 

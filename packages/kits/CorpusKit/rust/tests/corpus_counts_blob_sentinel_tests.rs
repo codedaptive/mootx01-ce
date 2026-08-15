@@ -14,8 +14,8 @@
 //!   T1 — sentinel recovery, no v4 term rows, no v3 vocab rows
 //!   T2 — sentinel recovery with surviving v4 term rows (the migration leaves them)
 //!   T3 — no-weakening guard: a valid non-empty blob still restores (returns Ok(true))
-//!   T4 — non-empty but undecodable blob still propagates DecodingFailure (loud failure
-//!         is intentional — see BRR §2 residual risk note)
+//!   T4 — non-empty but undecodable blob still propagates DecodingFailure (the loud
+//!         failure is intentional: silence would hide genuine corruption)
 //!
 //! All tests use InMemory storage: the sentinel path requires no migration ladder,
 //! only the row shapes the upgrade produces. File-backed SQLite is exercised by
@@ -185,9 +185,10 @@ fn t1_sentinel_recovery_no_term_rows() {
 // ─── T2: sentinel recovery with surviving v4 term rows ───────────────────────
 
 /// T2 — open-path sentinel recovery with v4 term residue: the migration does NOT
-/// delete `corpus_provider_term_dictionary` / `corpus_provider_term_payload` rows
-/// (BRR finding F2). When v4 term rows survive, `restore_counts_into` takes the
-/// v4 branch and calls `restore_counts_from_parts(empty_header, terms)`. Every
+/// delete `corpus_provider_term_dictionary` / `corpus_provider_term_payload`
+/// rows, so they can outlive the invalidated blob. When v4 term rows survive,
+/// the pre-fix `restore_counts_into` took the v4 branch and called
+/// `restore_counts_from_parts(empty_header, terms)`. Every
 /// provider's header decode starts with `BasisReader::expect_magic` on the empty
 /// header, which fails identically to the direct `restore_counts(&[])` case.
 ///
@@ -282,7 +283,8 @@ fn t3_valid_blob_still_restores() {
 
 /// T4 — deliberate loud failure: a non-empty but undecodable blob still
 /// propagates `CorpusKitError::DecodingFailure`. This behaviour is intentional
-/// (BRR §2 residual risk). No known code path produces a non-empty undecodable
+/// and is the recorded residual risk of this fix. No known code path produces a
+/// non-empty undecodable
 /// blob; if one were ever observed in the field, a loud error is the correct
 /// response — swallowing it would convert genuine corruption into silent data loss.
 ///

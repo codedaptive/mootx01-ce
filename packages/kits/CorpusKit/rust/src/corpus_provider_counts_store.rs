@@ -142,7 +142,8 @@ pub const INVALIDATED_COUNTS_SENTINEL: &[u8] = &[];
 ///
 /// Deliberate narrow scope: only the empty slice is the sentinel. A non-empty
 /// but undecodable blob still propagates `DecodingFailure` loudly, which is the
-/// correct response to genuine corruption (see BRR §2 residual risk note).
+/// correct response to genuine corruption: swallowing it would convert real
+/// on-disk corruption into silent data loss.
 pub fn is_invalidated_counts(bytes: &[u8]) -> bool {
     bytes.is_empty()
 }
@@ -477,7 +478,7 @@ impl CorpusProviderCountsStore {
     /// **Non-empty but undecodable blobs still propagate `DecodingFailure`.**
     /// The sentinel intercepts only the empty-slice case. A non-empty corrupt
     /// blob is the correct signal for genuine on-disk corruption and must not
-    /// be silenced (see BRR §2 residual risk note).
+    /// be silenced: swallowing it would discard real statistics without a word.
     pub fn restore_counts_into(
         &self,
         provider: &mut dyn crate::TrainableEmbeddingBasis,
@@ -492,7 +493,8 @@ impl CorpusProviderCountsStore {
         // vocab_size). Returning Ok(false) here means "nothing stored, start from
         // zero" — the same contract every caller already handles. This intercept
         // must fire before any of the v4/v3/blob branches so that even surviving
-        // v4 term rows (which the migration does not delete — BRR finding F2)
+        // v4 term rows (the migration does not delete the term dictionary or
+        // payload tables, so those rows can outlive the invalidated blob)
         // cannot cause restore_counts_from_parts to forward the empty header to
         // the provider's BasisReader::expect_magic, which rejects empty slices.
         if is_invalidated_counts(&persisted.counts) {

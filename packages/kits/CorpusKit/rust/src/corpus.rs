@@ -2435,8 +2435,8 @@ impl Corpus {
                 //      open-and-train cycle will rebuild the counts.
                 // In both cases, CorpusPathReason::NoCountsRow is the correct
                 // report: the provider has no usable counts. No new variant is
-                // added because this enum mirrors the Swift CorpusPathReason and
-                // the Swift port is out of scope (BRR §2, no dual-port divergence).
+                // added because this enum mirrors the Swift CorpusPathReason,
+                // and a Rust-only variant would be a dual-port divergence.
                 corpus_path_indices.push((slot_index, CorpusPathReason::NoCountsRow));
                 continue;
             }
