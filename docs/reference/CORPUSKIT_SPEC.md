@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.18.2
+version: 1.19.0
 status: accepted-1.1-target
 date: 2026-08-15
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.19.0: MG-01, counts-invalidation sentinel contract added to B-14. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -792,6 +792,8 @@ are restored before serving, that same-digest replay is idempotent, that
 revision/remove/re-add paths do not double-count a canonical identity, and that
 queued and direct-feed revisions use the same admission authority.
 
+**Counts invalidation on migration (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` is a defined empty byte slice in `corpus_provider_counts_store`. It means "counts invalidated, rebuild from zero." The upgrade migration writes this sentinel into `corpus_provider_counts.counts` for every row. Writing the sentinel preserves the `doc_count` and `vocab_size` monotone anchors, which the migration is required to retain. `restore_counts_into` checks for the sentinel before any provider decode. An empty blob causes it to return `Ok(false)`, and the reindex latch the migration has already set rebuilds counts from scratch. A non-empty but undecodable blob still propagates `DecodingFailure`. That propagation is deliberate. The Swift port does not yet carry this contract and shares the identical defect. A follow-up mission must port the sentinel check to the Swift surface; until it does, the Rust fix does not protect Swift readers (see F1 in the MG-01 Blast Radius Report).
+
 ### 9.4 Conformance
 
 **C-8 (Corpus parity):** Swift and Rust `Corpus` / `EmbeddingModelConfig`
@@ -901,6 +903,10 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.19.0 -- 2026-08-15
+
+Added the counts-invalidation sentinel contract to B-14 (MG-01). `INVALIDATED_COUNTS_SENTINEL` is a defined empty byte slice the upgrade migration writes to `corpus_provider_counts.counts` to invalidate stale provider counts. The migration preserves the `doc_count` and `vocab_size` monotone anchors. `restore_counts_into` intercepts the sentinel before any provider decode and returns `Ok(false)` ("nothing stored, start from zero"), letting the reindex latch rebuild counts. A non-empty but undecodable blob still propagates `DecodingFailure`. This contract is implemented in the Rust port only. The Swift port carries the identical gap, recorded as F1 in the MG-01 Blast Radius Report.
 
 ### 1.18.2 -- 2026-08-15
 

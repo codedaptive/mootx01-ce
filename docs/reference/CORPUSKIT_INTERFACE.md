@@ -4,8 +4,8 @@ status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-15
 spec_type: kit
-version: 1.21.1
-description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
+version: 1.22.0
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.22.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -1369,9 +1369,18 @@ impl CorpusProviderCountsStore {
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 
+// Module-level: counts-invalidation sentinel and predicate.
+// The upgrade migration writes INVALIDATED_COUNTS_SENTINEL to invalidate stale
+// provider counts while preserving the doc_count / vocab_size growth anchors.
+// restore_counts_into checks is_invalidated_counts before any provider decode.
+pub const INVALIDATED_COUNTS_SENTINEL: &[u8] = &[];
+pub fn is_invalidated_counts(bytes: &[u8]) -> bool;
+
 // On Corpus:
 pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize>;
 ```
+
+**Counts-invalidation sentinel (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` and `is_invalidated_counts` are defined at module level in `corpus_provider_counts_store`. The sentinel is an empty byte slice. Callers must test it before passing bytes to any provider decoder. `restore_counts_into` performs this test internally and returns `Ok(false)` for a sentinel blob. A non-empty but undecodable blob still propagates `DecodingFailure`. The Swift port does not yet carry this contract. The gap is recorded as F1 in `docs_internal/analysis/blast_radius/MG-01_BLAST_RADIUS.md`.
 
 ### `TrainingPathDecision` / `CorpusPathReason` — retrain counts-path decision seam (both ports)
 
@@ -2245,6 +2254,10 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.22.0 -- 2026-08-15
+
+Added the counts-invalidation sentinel contract to the `CorpusProviderCountsStore` section (MG-01). New module-level items in `corpus_provider_counts_store` (Rust port only): `INVALIDATED_COUNTS_SENTINEL` (an empty byte slice the upgrade migration writes to invalidate stale provider counts while preserving the `doc_count` and `vocab_size` growth anchors) and `is_invalidated_counts(bytes: &[u8]) -> bool` (the shared predicate). Callers must check the predicate before passing bytes to any provider decoder. `restore_counts_into` performs this check internally and returns `Ok(false)` for a sentinel blob. A non-empty but undecodable blob still propagates `DecodingFailure`. The Swift port does not yet carry this contract; the gap is recorded as F1 in the MG-01 Blast Radius Report.
 
 ### 1.21.1 -- 2026-08-15
 
