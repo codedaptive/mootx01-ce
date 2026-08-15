@@ -3350,10 +3350,15 @@ impl VectorStore {
 
         // Persisted hnsw_graph rows are UNTRUSTED input (VH-01 Finding C).
         // Every INTEGER is converted with a checked cast and bounds-tested
-        // BEFORE it can size an allocation downstream; rows failing any check
-        // are skipped exactly like rows with missing/mistyped columns.
-        // `HNSWIndex::load_from_graph_rows` re-validates the same bounds and
-        // rejects the whole graph if an invalid row somehow reaches it.
+        // BEFORE it can size an allocation downstream.
+        //
+        // One invalid row abandons the WHOLE graph load (VH-01 F3): this
+        // mirrors the engine's own policy — `load_from_graph_rows` rejects on
+        // the first bad row — so both layers agree. Partial topology from
+        // corrupt state is worse than a clean exact-scan fallback. Previously
+        // this loop used `continue`, which silently passed partial sets to the
+        // engine. Matches Swift twin: `_loadHNSWGraphIfPresent` now returns
+        // on any invalid row.
         let mut graph_rows = Vec::with_capacity(rows.len());
         for row in rows {
             // node_idx: compact array index — must fit i32 and be ≥ 0.
@@ -3361,13 +3366,13 @@ impl VectorStore {
             let node_idx = match row.get("node_idx") {
                 Some(TypedValue::Int(v)) => match i32::try_from(*v) {
                     Ok(v) if v >= 0 => v,
-                    _ => continue,
+                    _ => return Ok(Vec::new()),
                 },
-                _ => continue,
+                _ => return Ok(Vec::new()),
             };
             let node_id = match row.get("node_id") {
                 Some(TypedValue::Text(s)) => s.clone(),
-                _ => continue,
+                _ => return Ok(Vec::new()),
             };
             // layer: sizes the per-node layer allocation — must be ≥ 0 and
             // within the level-generation cap. A plain `as usize` would turn
@@ -3375,9 +3380,9 @@ impl VectorStore {
             let layer = match row.get("layer") {
                 Some(TypedValue::Int(v)) => match usize::try_from(*v) {
                     Ok(l) if l <= HNSW_MAX_PERSISTED_LAYER => l,
-                    _ => continue,
+                    _ => return Ok(Vec::new()),
                 },
-                _ => continue,
+                _ => return Ok(Vec::new()),
             };
             // neighbours: packed LE i32 — must be whole i32s and within the
             // per-layer fan-out cap (layer 0 persists at most M0 neighbours).
@@ -3387,7 +3392,7 @@ impl VectorStore {
                 {
                     b.clone()
                 }
-                _ => continue,
+                _ => return Ok(Vec::new()),
             };
             // generation column added in schema v6. Pre-v6 rows (or InMemory
             // databases that replayed migrations) will have DEFAULT 0.

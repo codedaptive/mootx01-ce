@@ -1253,9 +1253,15 @@ public actor VectorStore {
         // INTEGER is converted with a checked cast and bounds-tested BEFORE it
         // can size an allocation downstream. `Int32(exactly:)` rejects negative
         // and out-of-i32-range Int64 values without trapping (a plain `Int32(v)`
-        // traps on overflow — house-style rule: no unguarded narrowing). Rows
-        // that fail any check are skipped; `loadFromGraphRows` re-validates the
-        // full set and rejects the whole graph if an invalid row reaches it.
+        // traps on overflow — house-style rule: no unguarded narrowing).
+        //
+        // One invalid row abandons the WHOLE graph load (VH-01 F3): this mirrors
+        // the engine's own policy — `loadFromGraphRows` rejects on the first bad
+        // row — so both layers agree: partial topology from corrupt state is worse
+        // than a clean exact-scan fallback. Previously this loop used `continue`,
+        // which silently built partial graphs the engine thought were valid.
+        // Matches Rust twin: query_hnsw_graph_rows returns Ok(Vec::new()) on
+        // any invalid row, causing load_hnsw_graph_if_present to skip the load.
         var graphRows: [HNSWIndex.GraphRow] = []
         var itemIDToNodeIdx: [String: Int32] = [:]
         for dbRow in dbRows {
@@ -1263,14 +1269,14 @@ public actor VectorStore {
                   case let .text(nodeID)    = dbRow["node_id"]  ?? .null,
                   case let .int(rawLayer)   = dbRow["layer"]    ?? .null,
                   case let .blob(nb)        = dbRow["neighbours"] ?? .null
-            else { continue }
+            else { return }
             // Checked narrowing: node_idx must be ≥ 0 and fit Int32.
-            guard let nodeIdx = Int32(exactly: rawNodeIdx), nodeIdx >= 0 else { continue }
+            guard let nodeIdx = Int32(exactly: rawNodeIdx), nodeIdx >= 0 else { return }
             // layer must be ≥ 0 and within the level-generation cap.
-            guard rawLayer >= 0, rawLayer <= Int64(hnswMaxPersistedLayer) else { continue }
+            guard rawLayer >= 0, rawLayer <= Int64(hnswMaxPersistedLayer) else { return }
             let layer = Int(rawLayer)
             // neighbours: packed LE i32 — must be whole i32s within the fan-out cap.
-            guard nb.count % 4 == 0, nb.count <= hnswM0 * 4 else { continue }
+            guard nb.count % 4 == 0, nb.count <= hnswM0 * 4 else { return }
             // Decode generation (v6+). Default 0 for v5 estates.
             let rowGen: Int64
             switch dbRow["generation"] ?? .null {

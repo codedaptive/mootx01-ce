@@ -535,7 +535,10 @@ public actor HNSWIndex {
     /// ties resolve to the lowest array index for determinism. O(n) scan,
     /// but only runs when the entry node was actually tombstoned.
     private func repairEntryPoint() {
-        if let ep = entryPoint, !nodes[Int(ep)].tombstoned {
+        // Bounds guard included (VH-01 F2): a stale entryPoint from a prior
+        // load can be past the end of the rebuilt nodes array. Matches Rust
+        // twin: hnsw_index.rs:638-640 (`i < self.nodes.len()` check).
+        if let ep = entryPoint, Int(ep) < nodes.count, !nodes[Int(ep)].tombstoned {
             return // entry point is live — nothing to repair
         }
         var bestIdx: Int32? = nil
@@ -692,27 +695,42 @@ public actor HNSWIndex {
     ///   - rows: All `GraphRow` values for one modelID partition, in any order.
     ///     Rows for the same nodeIdx must share the same nodeID.
     ///   - nodeBytes: Mapping from nodeIdx (Int32) to (itemID, vectorBytes).
-    ///     Nodes missing from this map are silently skipped — they have no
-    ///     float vector and cannot participate in search (the THETA rebuild
-    ///     will correct any stale topology on the next cadence).
+    ///     Nodes missing from this map receive a placeholder tombstone that
+    ///     preserves compact addressing — a bare skip would shift every later
+    ///     node's index and mis-wire neighbour edges (VH-01 F1). The tombstone
+    ///     is excluded from search; the THETA rebuild corrects topology on the
+    ///     next cadence.
     ///   - modelID: The modelID partition this graph serves. Stored on each
     ///     reconstructed node so `search(probe:modelID:k:)` can filter by
     ///     partition membership — search performs `nodes[i].modelID == modelID`
     ///     and silently returns [] if the modelID is empty (the pre-load default).
     ///   - expectedGeneration: The serving_generation value VectorStore fetched
     ///     from the registry. Only rows whose `row.generation == expectedGeneration`
-    ///     are accepted; any mismatch causes the load to be treated as absent
-    ///     (returns without mutating state) so the query path falls back to exact
-    ///     scan. On a successful load, `self.generation` is set to this value.
+    ///     are accepted; any mismatch causes the load to be treated as absent —
+    ///     this instance is left EMPTY (state is reset before the generation
+    ///     filter runs, VH-01 F2) so the query path falls back to exact scan.
+    ///     On a successful load, `self.generation` is set to this value.
     public func loadFromGraphRows(
         _ rows: [GraphRow],
         nodeBytes: [Int32: (itemID: String, bytes: [UInt8])],
         modelID: String,
         expectedGeneration: Int64
     ) {
-        // Reject rows that belong to a retired generation. Any mismatch leaves
-        // this instance empty so the query path falls back to exact scan rather
-        // than serving stale topology (§4 of the design contract).
+        // Reset all state before loading (VH-01 F2): any early return — empty
+        // rows, a retired generation, a Phase-0 reject, or an all-tombstone
+        // result — yields a clean empty index rather than leaving a stale
+        // entryPoint from a previous load. Matches the Rust twin, which calls
+        // self.clear() before the empty-rows check.
+        nodes.removeAll(keepingCapacity: false)
+        nodeIndex.removeAll(keepingCapacity: false)
+        entryPoint = nil
+        maxLayer = 0
+        vectorStride = nil
+
+        // Reject rows that belong to a retired generation. The reset above has
+        // already emptied this instance, so a mismatch leaves hasGraph false and
+        // the query path falls back to exact scan rather than serving stale
+        // topology (§4 of the design contract).
         let matchingRows = rows.filter { $0.generation == expectedGeneration }
         guard !matchingRows.isEmpty else { return }
         let rows = matchingRows
@@ -771,46 +789,63 @@ public actor HNSWIndex {
         }
 
         // Reconstruct the node array in new-index order.
-        nodes.removeAll(keepingCapacity: false)
-        nodeIndex.removeAll(keepingCapacity: false)
+        // nodes and nodeIndex were cleared in the F2b reset block above.
         nodes.reserveCapacity(totalNodes)
 
         for newIdx in 0..<totalNodes {
             let originalIdx = Int32(newToOld[newIdx])
-            guard let (itemID, bytes) = nodeBytes[originalIdx] else {
-                // No vector bytes for this node — the float vector was deleted
-                // between the persist and load calls. Skip to keep the array
-                // compact; topology may be slightly stale but remains valid
-                // (the THETA rebuild will correct it on the next cadence).
-                continue
-            }
-            let layerMap = layerNeighbours[newIdx]
-            let maxLayer = layerMap.keys.max() ?? 0
-            var nodeNeighbours = [[Int32]](repeating: [], count: maxLayer + 1)
+            let layerMap    = layerNeighbours[newIdx]
+            let topLayer    = layerMap.keys.max() ?? 0
+            var nodeNeighbours = [[Int32]](repeating: [], count: topLayer + 1)
             for (l, nbrs) in layerMap {
                 nodeNeighbours[l] = nbrs
             }
-            nodes.append(Node(
-                itemID: itemID,
-                modelID: modelID,  // partition-scoped; needed by search's per-node filter
-                vectorBytes: bytes,
-                neighbours: nodeNeighbours
-            ))
-            nodeIndex[itemID] = Int32(nodes.count - 1)
+            if let (itemID, bytes) = nodeBytes[originalIdx] {
+                // Live node: vector bytes present.
+                nodes.append(Node(
+                    itemID:      itemID,
+                    modelID:     modelID,  // partition-scoped; needed by search filter
+                    vectorBytes: bytes,
+                    neighbours:  nodeNeighbours
+                ))
+                nodeIndex[itemID] = Int32(nodes.count - 1)
+            } else {
+                // Deleted vector: placeholder tombstone preserves compact addressing
+                // (VH-01 F1). A bare `continue` would shift every later node down,
+                // mis-wiring neighbour edges: a neighbour list saying "node 3" would
+                // address whatever landed at index 3 after the skip. Matches Rust
+                // twin: hnsw_index.rs:863-871. NOT added to nodeIndex.
+                nodes.append(Node(
+                    itemID:      "",
+                    modelID:     modelID,
+                    vectorBytes: [],
+                    neighbours:  nodeNeighbours,
+                    tombstoned:  true
+                ))
+            }
         }
 
-        // Find entry point: the node with the highest layer.
-        if !nodes.isEmpty {
-            var best: (idx: Int32, layer: Int) = (0, 0)
-            for (i, node) in nodes.enumerated() {
-                let topLayer = node.neighbours.count - 1
-                if topLayer > best.layer {
-                    best = (Int32(i), topLayer)
-                }
+        // Elect entry point: the live node with the most layers (ties: lowest index).
+        // Skip tombstones — nodes may include placeholder tombstones for deleted
+        // vectors (VH-01 F1). Only set entryPoint if a live candidate exists.
+        // Matches Rust: hnsw_index.rs:893-913.
+        var bestIdx: Int32? = nil
+        var bestTopLayer    = -1
+        for (i, node) in nodes.enumerated() {
+            guard !node.tombstoned else { continue }
+            let nodeTop = node.neighbours.count - 1
+            if nodeTop > bestTopLayer {
+                bestTopLayer = nodeTop
+                bestIdx      = Int32(i)
             }
-            entryPoint = best.idx
-            maxLayer = best.layer
         }
+        if let b = bestIdx {
+            entryPoint = b
+            maxLayer   = bestTopLayer
+        }
+        // If bestIdx is nil (all tombstones, or empty), entryPoint stays nil —
+        // cleared in the F2b reset block above. hasGraph → false; caller falls
+        // back to exact scan until the next THETA rebuild.
 
         vectorStride = nodes.first?.vectorBytes.count
         // RNG state reset: the loaded graph is already built, so no level-
