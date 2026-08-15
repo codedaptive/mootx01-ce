@@ -83,8 +83,8 @@ use std::sync::Mutex;
 use std::sync::Arc;
 use persistence_kit::{
     BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause,
-    OrderDirection, ResidencyHint, SchemaDeclaration, SchemaOperation, Storage, StoragePredicate,
-    TableDeclaration, TypedValue,
+    OrderDirection, ResidencyHint, SchemaDeclaration, SchemaOperation,
+    Storage, StoragePredicate, TableDeclaration, TypedValue, physical_memory_bytes,
 };
 use uuid::Uuid;
 
@@ -405,6 +405,29 @@ struct HotState {
     /// Exposed via `last_served_graph_generation` for Gate 5 assertions.
     /// Mirrors Swift `VectorStore.lastServedGraphGen`.
     pub(crate) last_served_graph_gen: std::collections::HashMap<String, i64>,
+
+    // ── Admission accounting — self-reconciling map (BRR §5) ─────────────────
+
+    /// Projected heap footprint in bytes per modelID for each float index
+    /// currently resident. Keyed identically to `float_indices` so that the
+    /// admission gate can reconcile this map against `float_indices` in a
+    /// single pass: entries whose model is absent from `float_indices` have
+    /// been evicted and are dropped before summing.
+    ///
+    /// WHY A MAP RATHER THAN A RUNNING COUNTER: a counter must be decremented
+    /// at every site that drops a cached index. There are ~9 such sites per port
+    /// (evict_float_indices, delete_all_vectors, publish_shadow_generation, and
+    /// six others). A single missed site drifts the counter upward until every
+    /// estate is refused forever. The map self-reconciles at admission time by
+    /// comparing against `float_indices`, so none of those sites need to be
+    /// edited and none can cause drift. Do NOT replace this with a counter.
+    float_index_footprints: std::collections::HashMap<String, u64>,
+
+    /// Total count of admission refusals across all modelIDs since this
+    /// `VectorStore` was opened. Incremented by `ensure_float_index_built_locked`
+    /// on every refusal. Exposed via `admission_refusal_count()` for tests.
+    /// Mirrors Swift `VectorStore.admissionRefusalCount`.
+    admission_refusal_count: u64,
 }
 
 // ── VectorStore ───────────────────────────────────────────────────────────
@@ -850,6 +873,10 @@ impl VectorStore {
                 shadow_states: std::collections::HashMap::new(),
                 shadow_payload_bytes: std::collections::HashMap::new(),
                 last_served_graph_gen: std::collections::HashMap::new(),
+                // Admission accounting starts empty; populated by
+                // ensure_float_index_built_locked on each admitted index.
+                float_index_footprints: std::collections::HashMap::new(),
+                admission_refusal_count: 0,
             }),
         }
     }
@@ -1990,8 +2017,11 @@ impl VectorStore {
     ///
     /// Dispatch by `residencyHint`:
     /// - `RamResident` (default): builds a `FloatBruteForceIndex` per modelID on
-    ///   first call, then serves from heap. If the index is absent (evicted or
-    ///   no float rows), falls back to `float_scan_from_table`.
+    ///   first call, subject to the estate's `ResidentIndexBudget`. If admitted,
+    ///   the index is cached in heap and served from there. If the budget ceiling
+    ///   would be exceeded, the build is refused and the query falls back to
+    ///   `float_scan_from_table` — correct results, no allocation of the refused
+    ///   index. Also falls back when the index is absent (evicted or no float rows).
     /// - `DiskBacked`: always scans the `vectors` table directly via
     ///   `float_scan_from_table`. The OS page cache manages RAM residency.
     ///
@@ -2086,12 +2116,16 @@ impl VectorStore {
     /// 6b-modifiers-antisim). Parallel to Swift `VectorStore.findFarthestFloat`.
     ///
     /// Identical to `find_nearest_float` in every respect — same lazy per-model
-    /// index build, same model_id partition scope (spec I-4), same cosine
-    /// metric, same VectorMatch quantisation — EXCEPT it ranks by FARTHEST
-    /// (bottom-K by cosine similarity = largest cosine distance first) via
-    /// `FloatBruteForceIndex::search_farthest`. It is NOT a negated
-    /// nearest-list: the farthest rows are not in the nearest top-K, so the
-    /// index orders by the opposite end. No new distance math.
+    /// index build, same `ResidentIndexBudget` admission gate, same model_id
+    /// partition scope (spec I-4), same cosine metric, same VectorMatch
+    /// quantisation — EXCEPT it ranks by FARTHEST (bottom-K by cosine similarity
+    /// = largest cosine distance first) via `FloatBruteForceIndex::search_farthest`.
+    /// It is NOT a negated nearest-list: the farthest rows are not in the nearest
+    /// top-K, so the index orders by the opposite end. No new distance math.
+    ///
+    /// When the admission gate refuses the index build the query falls back to
+    /// `float_scan_from_table`, returning correct results without allocating the
+    /// refused index.
     ///
     /// Determinism: like `find_nearest_float`, the float lane is reproducible-
     /// within-config, NOT four-way bit-identical (arch spec §6).
@@ -3022,9 +3056,18 @@ impl VectorStore {
     ///
     /// Safe to call at any time. After eviction the next `find_nearest_float`
     /// or `find_farthest_float` call lazily rebuilds from the `vectors` table
-    /// when `residency_hint == RamResident`, or uses `float_scan_from_table`
-    /// directly when `residency_hint == DiskBacked`. Callers that implement
-    /// their own memory-pressure management may call this directly.
+    /// (subject to the `ResidentIndexBudget` admission gate) when
+    /// `residency_hint == RamResident`, or uses `float_scan_from_table` directly
+    /// when `residency_hint == DiskBacked`. Callers that implement their own
+    /// memory-pressure management may call this directly.
+    ///
+    /// # Admission accounting
+    ///
+    /// `float_index_footprints` is NOT cleared here. The accounting map is
+    /// self-reconciling: on the next admission check, entries whose model is no
+    /// longer in `float_indices` are dropped before the resident total is summed.
+    /// Clearing it here would be redundant and hiding the intent — any stale
+    /// entry is harmless because the reconcile pass runs first.
     pub fn evict_float_indices(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.float_indices.clear();
@@ -3032,6 +3075,10 @@ impl VectorStore {
             // evicted as a unit. The next find_nearest_float rebuilds from the table.
             state.hnsw_indices.clear();
             state.live_float_counts.clear();
+            // float_index_footprints is intentionally NOT cleared: the reconcile
+            // step in ensure_float_index_built_locked drops stale entries on the
+            // next admission check (float_indices is now empty, so all entries
+            // would be stale and will be pruned). No action required here.
         }
     }
 
@@ -3395,6 +3442,52 @@ impl VectorStore {
             .unwrap_or(false)
     }
 
+    /// True when a `FloatBruteForceIndex` is resident in memory for `model_id`.
+    ///
+    /// Used by admission tests to assert whether the float index was cached
+    /// or refused. When the admission gate refuses a build the index is not
+    /// cached and this probe returns false, confirming the refusal. Absent the
+    /// gate, the index would always be resident after the first query on a
+    /// non-empty estate. Twin of Swift `floatIndexResident(for:)`.
+    pub fn float_index_resident(&self, model_id: &str) -> bool {
+        self.state.lock()
+            .map(|s| s.float_indices.contains_key(model_id))
+            .unwrap_or(false)
+    }
+
+    /// Total count of float-index admission refusals since this `VectorStore`
+    /// was opened. Incremented once per `ensure_float_index_built_locked` call
+    /// that projects a footprint exceeding the ceiling. A refused build falls
+    /// back to the table-scan path and returns correct results; refusals are
+    /// counted so tests can assert the gate fired. Twin of Swift
+    /// `admissionRefusalCount`.
+    pub fn admission_refusal_count(&self) -> u64 {
+        self.state.lock()
+            .map(|s| s.admission_refusal_count)
+            .unwrap_or(0)
+    }
+
+    /// Build the per-model `FloatBruteForceIndex` if not yet cached, subject to
+    /// the estate's `ResidentIndexBudget`.
+    ///
+    /// Returns `Ok(true)` when the index is (or was already) resident.
+    /// Returns `Ok(false)` in two cases:
+    ///   1. No float rows exist for `model_id` — nothing to cache.
+    ///   2. Admission refused: the projected footprint plus the current resident
+    ///      total would exceed the configured ceiling. The query falls back to
+    ///      `float_scan_from_table`, which returns correct results without
+    ///      allocating the refused index.
+    ///
+    /// Both callers (`find_nearest_float` and `find_farthest_float`) already
+    /// treat `Ok(false)` as "fall through to float_scan_from_table" — no
+    /// call-site change is required.
+    ///
+    /// # Admission gate placement
+    ///
+    /// The count-and-project check runs BEFORE `fetch_float_records`. Calling
+    /// `fetch_float_records` materialises every payload in heap, which is the
+    /// spike this mission exists to prevent. A post-fetch check would allocate
+    /// the index and then decide to refuse — too late.
     fn ensure_float_index_built_locked(
         &self,
         state: &mut HotState,
@@ -3411,11 +3504,158 @@ impl VectorStore {
         // the stale index — out of scope for shadow-swap missions, and the float
         // index is invalidated on the next add_payload or delete_all_vectors).
         let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
+
+        // ── Admission gate ────────────────────────────────────────────────────
+        //
+        // Resolve the configured ceiling. SystemFraction queries physical RAM
+        // at call time so the value tracks hot-add or detection on first call.
+        // None = Unbounded or undetectable platform → no cap applied.
+        let config = self.storage.configuration();
+        let ceiling_opt = config.resident_index_budget.ceiling_bytes(physical_memory_bytes());
+
+        // footprint_to_record: Some(bytes) when we went through the admission
+        // check and were admitted. Recorded in float_index_footprints only
+        // AFTER a successful build (avoids phantom entries on build failure).
+        let mut footprint_to_record: Option<u64> = None;
+
+        if let Some(ceiling) = ceiling_opt {
+            // Build the predicate once; it is used for both count and sample.
+            // Uses a macro-style closure to avoid repeating the three-clause
+            // AND predicate.
+            let make_pred = || {
+                StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "kind"),
+                        TypedValue::Int(VectorKind::Float32.raw()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "generation"),
+                        TypedValue::Int(serving_gen),
+                    ),
+                ])
+            };
+
+            // Step 1: count rows without fetching payloads.
+            let record_count = self.storage.row_store()
+                .count("vectors", Some(&make_pred()))
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            if record_count == 0 {
+                // No float rows — do NOT cache an empty index: a later ingest of
+                // this model's first float row must be able to build a real index
+                // on the next search.
+                return Ok(false);
+            }
+
+            // Step 2: sample one row to learn the stride (dim * 4 bytes/float32).
+            let dim_opt: Option<u64> = self.storage.row_store()
+                .query("vectors", Some(&make_pred()), &[], Some(1), None)
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?
+                .into_iter()
+                .next()
+                .and_then(|r| r.get("dim").cloned())
+                .and_then(|v| match v { TypedValue::Int(n) => Some(n as u64), _ => None });
+
+            if let Some(dim) = dim_opt {
+                let stride: u64 = dim * 4;
+
+                // Step 3: project footprint.
+                //
+                // OVERHEAD = 2_000 bytes/record above the packed stride.
+                // Measured: Swift ~266 bytes/record overhead, Rust ~1,714
+                // bytes/record overhead (BRR §6.1). Both ports use the larger
+                // (Rust) figure, rounded up to 2_000, so the projection never
+                // under-estimates in either port and both ports make the SAME
+                // admission decision for identical inputs — a Part 3 test
+                // requirement.
+                //
+                // GRAPH_ALLOW = stride + OVERHEAD + 256 bytes/record ABOVE the
+                // HNSW threshold. Each HNSWIndex.Node owns a second full copy of
+                // the vector (stride bytes), a second copy of key overhead, and
+                // neighbour lists (≲256 bytes at hnswM=16). This is an analytic
+                // bound read off the struct definition (BRR §6.2), not an RSS
+                // measurement.
+                const OVERHEAD: u64 = 2_000;
+                let graph_allow: u64 = stride + OVERHEAD + 256;
+
+                let projected: u64 = if record_count < self.hnsw_threshold as usize {
+                    record_count as u64 * (stride + OVERHEAD)
+                } else {
+                    record_count as u64 * (stride + OVERHEAD + graph_allow)
+                };
+
+                // Step 4: reconcile the footprint map, then sum.
+                //
+                // Drop entries whose model is no longer in float_indices — their
+                // index was evicted by one of the ~9 clear sites (evict_float_indices,
+                // delete_all_vectors, publish_shadow_generation, etc.). This
+                // self-reconciliation is WHY those sites need no accounting edit:
+                // float_indices is the single source of truth, and the map tracks
+                // it lazily here. A running counter maintained across those sites
+                // would drift when any site is missed; the map cannot drift.
+                let stale: Vec<String> = state.float_index_footprints.keys()
+                    .filter(|k| !state.float_indices.contains_key(k.as_str()))
+                    .cloned()
+                    .collect();
+                for k in stale {
+                    state.float_index_footprints.remove(&k);
+                }
+                let current_total: u64 = state.float_index_footprints.values().sum();
+
+                // Step 5: check ceiling.
+                if current_total + projected > ceiling {
+                    // Refuse admission. The query falls back to float_scan_from_table,
+                    // which returns correct results without allocating the index.
+                    // No throw, no empty result when rows exist.
+                    state.admission_refusal_count += 1;
+                    report!({
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0);
+                        let mut tags = std::collections::HashMap::new();
+                        tags.insert("kit".to_string(), "VectorKit".to_string());
+                        tags.insert("model_id".to_string(), model_id.to_string());
+                        tags.insert("projected_bytes".to_string(), projected.to_string());
+                        tags.insert("resident_total_bytes".to_string(), current_total.to_string());
+                        tags.insert("ceiling_bytes".to_string(), ceiling.to_string());
+                        StatSample::metric(
+                            "vectorkit.float_index.admission_refused".to_string(),
+                            1.0,
+                            tags,
+                            ts,
+                        )
+                    });
+                    return Ok(false);
+                }
+
+                // Admitted. Record the footprint optimistically; it is inserted into
+                // float_index_footprints only after a successful build below.
+                footprint_to_record = Some(projected);
+            } else {
+                // Stride unknown: the sampled row carried no readable `dim`. The
+                // schema declares `dim` NOT NULL, so this is unreachable for
+                // well-formed data — but the branch must still fail SAFE. Building
+                // without a projection would let a single malformed row bypass the
+                // ceiling entirely, which is precisely the unbounded-residency
+                // defect this gate exists to close. Decline instead: the caller
+                // falls through to float_scan_from_table and the query is still
+                // answered correctly. The Swift twin declines here for the same
+                // reason, so the two ports agree on this case as well.
+                return Ok(false);
+            }
+        }
+        // ── End admission gate ────────────────────────────────────────────────
+
+        // Admitted (or Unbounded / undetectable platform): fetch all records and build.
         let records = self.fetch_float_records(model_id, serving_gen)?;
         if records.is_empty() {
-            // No float rows for this model — do NOT cache an empty index: a
-            // later ingest of this model's first float row must be able to build
-            // a real index on the next search.
+            // No float rows for this model — do NOT cache an empty index.
             return Ok(false);
         }
         let record_count = records.len() as u32;
@@ -3428,6 +3668,13 @@ impl VectorStore {
         // HNSW on the next query. Only set when building the index from the table;
         // add_payload increments this value for subsequent incremental inserts.
         state.live_float_counts.insert(model_id.to_string(), record_count);
+
+        // Record projected footprint only after successful build to prevent phantom
+        // entries in the accounting map if build() errors.
+        if let Some(footprint) = footprint_to_record {
+            state.float_index_footprints.insert(model_id.to_string(), footprint);
+        }
+
         Ok(true)
     }
 

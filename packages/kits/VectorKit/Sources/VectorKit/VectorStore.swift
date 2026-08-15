@@ -374,6 +374,30 @@ public actor VectorStore {
     /// Exposed via peakShadowStorageBytes for test and metrics use.
     private var shadowPayloadBytes: [String: Int64] = [:]
 
+    // MARK: - Float-index admission accounting
+
+    /// Projected byte footprints for each currently-resident per-model float
+    /// index, keyed by modelID — the same key space as `floatIndices`.
+    ///
+    /// This is a RECONCILING MAP, not a running counter. At admission time the
+    /// map is first reconciled against `floatIndices`: any entry whose modelID
+    /// is absent from `floatIndices` (because the index was evicted at one of
+    /// the nine clear sites across VectorStore) is dropped in the same pass.
+    /// The total is then computed from what remains. This makes ALL existing
+    /// clear sites self-correcting with zero edits to any of them — the index
+    /// map is the single source of truth and the footprint map always follows it.
+    /// A running counter maintained independently would require correct
+    /// decrement at every clear site; one missed site drifts the total upward
+    /// until every estate is refused indefinitely.
+    private var floatIndexFootprints: [String: Int] = [:]
+
+    /// Cumulative count of float-index admission refusals since this
+    /// VectorStore was opened. Incremented each time an index build is
+    /// skipped because the projected resident set would exceed the ceiling.
+    /// Exposed so tests can assert that refusals occurred without inspecting
+    /// log output. Twin of Rust `float_index_admission_refusals`.
+    private(set) var floatIndexAdmissionRefusalCount: Int = 0
+
     /// Live float vector count per modelID above which HNSWIndex activates.
     ///
     /// Default `hnswDefaultThreshold` (5 000) — see HNSWIndex.swift §Crossover
@@ -799,6 +823,152 @@ public actor VectorStore {
 
     // MARK: - Residency management
 
+    // MARK: Admission projection constants
+    //
+    // Both constants are deliberately IDENTICAL in the Swift and Rust ports so
+    // the two ports make the SAME admission decision for the same (recordCount,
+    // stride) inputs — a hard requirement of the Part 3 cross-port agreement test.
+    //
+    // OVERHEAD (2000 bytes/record): the parallel VectorRecordKey array that sits
+    // beside the packed float payload in FloatBruteForceIndex. Measured RSS overhead
+    // at N=50,000 dim-384 vectors was 266 bytes/record in Swift and 1,714 in Rust
+    // (Rust String has no small-string optimisation; freed source slabs stay in RSS).
+    // Both ports use the LARGER (Rust) figure, rounded up to 2000, so the projection
+    // never under-estimates in either port. Measurement data in BRR §6.1.
+    //
+    // GRAPH_ALLOW (stride + OVERHEAD + 256 bytes/record): above hnswThreshold VectorStore
+    // holds an HNSWIndex IN ADDITION to FloatBruteForceIndex. Each HNSWIndex.Node owns
+    // a second full copy of the vector (stride bytes, HNSWIndex.swift:108-120 vectorBytes),
+    // a second copy of the key overhead (OVERHEAD bytes), and neighbour lists of up to
+    // 2M=32 Int32 at layer 0 with hnswM=16 (HNSWIndex.swift:64), i.e. ≲ 256 bytes/record.
+    // This is an ANALYTIC bound read off the struct definition, not an RSS measurement.
+    // Ignoring the graph would under-project by ~2× exactly where estates are largest.
+    private static let floatIndexOverheadPerRecord: Int = 2000
+
+    /// Project the heap footprint in bytes for one per-model FloatBruteForceIndex
+    /// (plus HNSWIndex above the threshold) given `recordCount` and `stride`.
+    ///
+    /// The formula uses the Rust overhead figure in both ports so admission decisions
+    /// agree across languages for the same inputs. See the constant block above for
+    /// the full derivation.
+    ///
+    /// - Parameters:
+    ///   - recordCount: number of float32 rows for the model in the serving generation.
+    ///   - stride: bytes per vector payload (dim × 4 for float32).
+    /// - Returns: projected byte cost of holding this model's float-lane index in heap.
+    private func _projectFloatIndexBytes(recordCount: Int, stride: Int) -> Int {
+        let overhead = Self.floatIndexOverheadPerRecord
+        // Above the HNSW threshold the graph lives alongside the brute-force index.
+        // GRAPH_ALLOW = stride + overhead + 256 (neighbour lists). See constant block.
+        if recordCount >= Int(hnswThreshold) {
+            let graphAllow = stride + overhead + 256
+            return recordCount * (stride + overhead + graphAllow)
+        }
+        return recordCount * (stride + overhead)
+    }
+
+    /// Attempt to build the FloatBruteForceIndex for `modelID`, subject to the
+    /// estate's `residentIndexBudget` admission ceiling.
+    ///
+    /// The check MUST happen before `_fetchFloatRecords` materialises every payload
+    /// into memory — checking after the fetch would allocate the very spike this
+    /// admission gate exists to prevent. The gate therefore:
+    ///   1. Counts rows via RowStore.count (no payload transferred).
+    ///   2. Derives stride from one sampled row (single-row fetch, minimal transfer).
+    ///   3. Projects the total heap cost.
+    ///   4. Reconciles `floatIndexFootprints` against the live `floatIndices` map
+    ///      (any evicted entry is dropped — see `floatIndexFootprints` for why this
+    ///      self-reconciling design replaces a running counter).
+    ///   5. If sum + projection exceeds the ceiling: refuses, logs, increments
+    ///      `floatIndexAdmissionRefusalCount`, and returns `nil`.
+    ///   6. Only if admitted: fetches the full record set, builds the index,
+    ///      records the footprint, seeds `liveFloatCounts`, and returns the index.
+    ///
+    /// Callers that receive `nil` MUST fall through to the table-scan path so the
+    /// query returns correct results — a refusal is a cache miss, not an error.
+    ///
+    /// - Returns: the built `FloatBruteForceIndex`, or `nil` when:
+    ///   (a) no float rows exist for the model (caller's scan returns empty), or
+    ///   (b) the projected resident set would exceed the admission ceiling.
+    private func _buildFloatIndexIfAdmitted(modelID: String) async throws -> FloatBruteForceIndex? {
+        let servingGen = try await _servingGeneration(for: modelID)
+
+        // Step 1: count rows without materialising payloads.
+        let rowCount = try await storage.rowStore.count(
+            table: "vectors",
+            where: .and([
+                .eq(Column(table: "vectors", name: "kind"),
+                    .int(Int64(VectorKind.float32.rawValue))),
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "vectors", name: "generation"), .int(servingGen))
+            ])
+        )
+        guard rowCount > 0 else {
+            // No float rows for this model: the scan path will return empty results.
+            return nil
+        }
+
+        // Step 2: derive stride from one sampled row.
+        let sampleRows = try await storage.rowStore.query(
+            table: "vectors",
+            where: .and([
+                .eq(Column(table: "vectors", name: "kind"),
+                    .int(Int64(VectorKind.float32.rawValue))),
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "vectors", name: "generation"), .int(servingGen))
+            ]),
+            orderBy: [],
+            limit: 1,
+            offset: nil
+        )
+        guard let sampleRow = sampleRows.first,
+              let samplePayload = Self.decodePayload(from: sampleRow),
+              samplePayload.kind == .float32 else {
+            // Cannot determine stride; fall back to the scan path conservatively.
+            return nil
+        }
+        let stride = samplePayload.bytes.count
+
+        // Step 3: project byte cost.
+        let projection = _projectFloatIndexBytes(recordCount: rowCount, stride: stride)
+
+        // Step 4: reconcile the footprint map against the live index map.
+        // Drop entries for models whose index has been evicted. The index map is
+        // the single source of truth; this pass makes all nine clear sites across
+        // VectorStore self-correcting without any edit to those sites.
+        let liveKeys = Set(floatIndices.keys)
+        floatIndexFootprints = floatIndexFootprints.filter { liveKeys.contains($0.key) }
+        let currentResidentTotal = floatIndexFootprints.values.reduce(0, +)
+
+        // Step 5: apply the ceiling.
+        let ceiling = storage.configuration.residentIndexBudget.resolveCeiling(
+            physicalMemoryBytes: UInt64(ProcessInfo.processInfo.physicalMemory)
+        )
+        if let cap = ceiling, currentResidentTotal + projection > cap {
+            floatIndexAdmissionRefusalCount += 1
+            log.warning(
+                "VectorStore: float-index admission refused modelID=\(modelID, privacy: .public) projection=\(projection) residentTotal=\(currentResidentTotal) ceiling=\(cap) — falling back to table-scan"
+            )
+            return nil
+        }
+
+        // Step 6: admitted — fetch full records, build, record footprint.
+        let records = try await _fetchFloatRecords(modelID: modelID)
+        guard let arr = Self.buildFloatArray(from: records) else {
+            // Records vanished between count and fetch (race with deletion).
+            // Return nil so caller uses the scan; scan will return empty.
+            return nil
+        }
+        let index = FloatBruteForceIndex()
+        await index.build(from: arr)
+        // Seed the live count so the HNSW threshold check is accurate from the
+        // very first query on this partition.
+        liveFloatCounts[modelID] = UInt32(records.count)
+        // Record the footprint for future admission decisions.
+        floatIndexFootprints[modelID] = projection
+        return index
+    }
+
     /// Evict all per-model float-lane indexes from the in-process heap.
     ///
     /// Clears `floatIndices`, `hnswIndices`, and `liveFloatCounts`. After
@@ -923,6 +1093,15 @@ public actor VectorStore {
     /// quietly covered it". Twin of Rust `hnsw_index_resident`.
     func hnswIndexResident(for modelID: String) -> Bool {
         hnswIndices[modelID] != nil
+    }
+
+    /// True when a float-lane FloatBruteForceIndex is resident in memory for `modelID`.
+    ///
+    /// Internal (not private) as the positive residency probe for admission tests:
+    /// a refusal leaves this false; an admitted build sets it true. Twin of Rust
+    /// `float_index_resident`.
+    func floatIndexResident(for modelID: String) -> Bool {
+        floatIndices[modelID] != nil
     }
 
     public func compactHNSWTombstones(for modelID: String) async throws {
@@ -2037,10 +2216,12 @@ public actor VectorStore {
     /// distance, using the in-house FloatBruteForceIndex — the production
     /// exact path (Bob's storage amendment 2026-06-12: no external engine).
     ///
-    /// On the first call (or after a process restart) the float index is
-    /// built once from the float32 rows in the `vectors` table; subsequent
-    /// calls scan the resident float array. The scan restricts to
-    /// `modelID`'s partition (spec I-4: cross-model comparisons forbidden).
+    /// On the `.ramResident` path the float index is built lazily on the first
+    /// qualifying call and cached in heap; subsequent calls scan the resident
+    /// array. If the projected index size would exceed the estate's
+    /// `residentIndexBudget` ceiling, the index is not cached and the query
+    /// falls back to the table-scan path. The scan restricts to `modelID`'s
+    /// partition (spec I-4: cross-model comparisons forbidden).
     ///
     /// Cosine is the float lane's ranking metric: it is scale-invariant, so
     /// the answer-vs-question-echo case the SimHash-Hamming lane could not
@@ -2062,17 +2243,25 @@ public actor VectorStore {
     ///   - limit: maximum number of matches to return.
     /// - Returns: up to `limit` matches, nearest first. Empty if `limit`
     ///   is non-positive, the probe is empty, or no float rows exist.
-    /// float NN search. `.diskBacked` scans SQLite directly
-    /// (no heap copy). `.ramResident` caches a FloatBruteForceIndex.
+    ///
+    /// Residency dispatch: `.diskBacked` always scans SQLite directly (no heap copy).
+    /// `.ramResident` attempts to serve from a cached FloatBruteForceIndex via
+    /// `_findNearestFloatCached`. When the cache returns `nil` — because the estate's
+    /// `residentIndexBudget` ceiling is exceeded or no rows exist — execution falls
+    /// through to the same table-scan path that `.diskBacked` uses. The query always
+    /// returns correct results; a refused index is a cache miss, not an error.
     public func findNearestFloat(
         probe: [Float],
         modelID: String,
         limit: Int
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
-        if storage.configuration.residencyHint == .ramResident {
-            return try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit)
+        if storage.configuration.residencyHint == .ramResident,
+           let cached = try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit) {
+            return cached
         }
+        // Table-scan path: used for .diskBacked estates, after admission refusal,
+        // and when no float rows exist for the model.
         // D5: fetch serving generation before the scan so VectorMatch can be tagged.
         // _floatScanFromTable also fetches it internally (D1 fix) — the second call
         // hits the in-memory servingGenerations cache and costs nothing.
@@ -2091,34 +2280,38 @@ public actor VectorStore {
 
     /// Float NN search via the cached FloatBruteForceIndex (ramResident path).
     ///
-    /// Builds the FloatBruteForceIndex lazily on first call for a given modelID
-    /// and initialises `liveFloatCounts[modelID]` from the record count. At/above
-    /// `hnswThreshold` live float vectors, queries are routed through the HNSW
-    /// approximate index (also built lazily on first qualifying call) for
-    /// sub-linear nearest-neighbour performance. Below the threshold the exact
+    /// Builds the FloatBruteForceIndex lazily on first call for a given modelID via
+    /// `_buildFloatIndexIfAdmitted`, which applies the estate's `residentIndexBudget`
+    /// admission ceiling. At/above `hnswThreshold` live float vectors, queries are
+    /// routed through the HNSW approximate index (also built lazily on first qualifying
+    /// call) for sub-linear nearest-neighbour performance. Below the threshold the exact
     /// FloatBruteForceIndex is used (O(N) scan, always sub-millisecond at small N).
+    ///
+    /// Returns `nil` when the index was not admitted (ceiling exceeded) or when no
+    /// float rows exist for the model. A `nil` return signals the public caller to fall
+    /// through to the table-scan path, which returns correct results. One seam: the
+    /// table-scan path lives only in `findNearestFloat`, not duplicated here.
     ///
     /// Farthest queries always use FloatBruteForceIndex regardless of threshold —
     /// HNSW is a nearest-only structure. See `_findFarthestFloatCached`.
-    private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+    private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]? {
         // D4+D5 fix: resolve serving generation once at the top. Used for:
         //   (a) generation check on the HNSW graph (D4)
         //   (b) VectorMatch generation tag on exact-scan results (D5)
         // _servingGeneration is cached in servingGenerations after first call — zero cost.
         let servingGen = try await _servingGeneration(for: modelID)
 
-        // Build FloatBruteForceIndex lazily on first access for this modelID.
-        // The brute-force index is always built; farthest queries depend on it
-        // even when HNSW is active for nearest queries.
+        // Build FloatBruteForceIndex lazily on first access for this modelID, subject
+        // to the estate's residentIndexBudget admission ceiling. The brute-force index
+        // is always built (when admitted); farthest queries depend on it even when HNSW
+        // is active for nearest queries.
         if floatIndices[modelID] == nil {
-            let records = try await _fetchFloatRecords(modelID: modelID)
-            guard let arr = Self.buildFloatArray(from: records) else { return [] }
-            let index = FloatBruteForceIndex()
-            await index.build(from: arr)
+            guard let index = try await _buildFloatIndexIfAdmitted(modelID: modelID) else {
+                // Not admitted (ceiling exceeded) or no rows.
+                // nil signals the public caller to fall through to the table-scan path.
+                return nil
+            }
             floatIndices[modelID] = index
-            // Seed the live count so the HNSW threshold check below is accurate
-            // from the very first findNearestFloat call on this partition.
-            liveFloatCounts[modelID] = UInt32(records.count)
         }
 
         // Route to HNSW when the live float count reaches the crossover threshold.
@@ -2155,11 +2348,9 @@ public actor VectorStore {
                 // D4 fix: stale graph — discard and fall through to the SHARED
                 // exact-scan path below. Do NOT duplicate the fallback here.
                 // ONE seam: interrupt case 4 (crash between publish and HNSW rebuild)
-                // must serve real results from the exact lane, never return [].
-                // Removing the duplicated block ensures floatIndices[modelID] == nil
-                // falls through to the `guard let modelIndex` below which returns [],
-                // matching the behaviour the no-graph path already had — but the
-                // float index IS built above, so in practice this always serves.
+                // must serve real results from the exact lane, never return nil.
+                // The float index IS built above (admission succeeded), so in practice
+                // the guard-let below always serves.
                 hnswIndices.removeValue(forKey: modelID)
             }
             // No resident graph (none persisted, or stale graph just discarded)
@@ -2169,7 +2360,7 @@ public actor VectorStore {
         // Below threshold or no HNSW graph available: exact scan via FloatBruteForceIndex.
         // FloatBruteForceIndex was built from serving-gen rows (_fetchFloatRecords filters
         // to servingGen). D5: tag matches with servingGen to satisfy the generation contract.
-        guard let modelIndex = floatIndices[modelID] else { return [] }
+        guard let modelIndex = floatIndices[modelID] else { return nil }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
         let hits = try await modelIndex.search(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
@@ -2208,8 +2399,14 @@ public actor VectorStore {
     /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
     ///   Empty if `limit` is non-positive, the probe is empty, or no float
     ///   rows exist for the model.
-    /// farthest float search. Same residencyHint dispatch as nearest, but always
-    /// uses FloatBruteForceIndex regardless of HNSW threshold — HNSW is a
+    ///
+    /// Residency dispatch: `.diskBacked` always scans SQLite directly (no heap copy).
+    /// `.ramResident` attempts to serve from a cached FloatBruteForceIndex via
+    /// `_findFarthestFloatCached`. When the cache returns `nil` — because the estate's
+    /// `residentIndexBudget` ceiling is exceeded or no rows exist — execution falls
+    /// through to the same table-scan path that `.diskBacked` uses. The query always
+    /// returns correct results; a refused index is a cache miss, not an error.
+    /// Always uses FloatBruteForceIndex regardless of HNSW threshold — HNSW is a
     /// nearest-only structure and anti-similarity retrieval requires a full scan
     /// that provides no speed benefit over brute-force. See `_findFarthestFloatCached`.
     public func findFarthestFloat(
@@ -2218,9 +2415,12 @@ public actor VectorStore {
         limit: Int
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
-        if storage.configuration.residencyHint == .ramResident {
-            return try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit)
+        if storage.configuration.residencyHint == .ramResident,
+           let cached = try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit) {
+            return cached
         }
+        // Table-scan path: used for .diskBacked estates, after admission refusal,
+        // and when no float rows exist for the model.
         // D5: fetch serving generation for VectorMatch generation tag.
         // _floatScanFromTable also fetches it (D1 fix) — second call hits cache.
         let servingGen = try await _servingGeneration(for: modelID)
@@ -2237,23 +2437,31 @@ public actor VectorStore {
     }
 
     /// Farthest float search via the cached FloatBruteForceIndex (ramResident path).
+    ///
     /// Always uses FloatBruteForceIndex regardless of HNSW threshold. HNSW is a
     /// nearest-only graph; anti-similarity (farthest) retrieval requires a full scan
     /// over all live nodes and gains no speed benefit from the graph structure.
-    /// Builds the index lazily on first call for a given modelID and caches it
-    /// for subsequent queries. Called when `residencyHint == .ramResident`.
-    private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+    /// Builds the index lazily on first call for a given modelID via
+    /// `_buildFloatIndexIfAdmitted`, which applies the estate's `residentIndexBudget`
+    /// admission ceiling.
+    ///
+    /// Returns `nil` when the index was not admitted (ceiling exceeded) or when no
+    /// float rows exist for the model. A `nil` return signals the public caller to fall
+    /// through to the table-scan path. One seam: the table-scan path lives only in
+    /// `findFarthestFloat`, not duplicated here.
+    private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]? {
         // D5: resolve serving generation for VectorMatch generation tag.
         // FloatBruteForceIndex is built from serving rows (_fetchFloatRecords filters).
         let servingGen = try await _servingGeneration(for: modelID)
         if floatIndices[modelID] == nil {
-            let records = try await _fetchFloatRecords(modelID: modelID)
-            guard let arr = Self.buildFloatArray(from: records) else { return [] }
-            let index = FloatBruteForceIndex()
-            await index.build(from: arr)
+            guard let index = try await _buildFloatIndexIfAdmitted(modelID: modelID) else {
+                // Not admitted (ceiling exceeded) or no rows.
+                // nil signals the public caller to fall through to the table-scan path.
+                return nil
+            }
             floatIndices[modelID] = index
         }
-        guard let modelIndex = floatIndices[modelID] else { return [] }
+        guard let modelIndex = floatIndices[modelID] else { return nil }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
         let hits = try await modelIndex.searchFarthest(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
