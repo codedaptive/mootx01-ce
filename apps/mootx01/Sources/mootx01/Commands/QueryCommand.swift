@@ -76,40 +76,12 @@ struct QueryCommand: AsyncParsableCommand {
 
     // MARK: - Resident HTTP path
 
-    /// TCP probe: is the daemon listening on `port`? 250 ms timeout mirrors
-    /// `daemon_client::alive` in the Rust vertical.
+    /// TCP probe: is the daemon listening on `port`? Delegates to the
+    /// shared `McpLoopback.daemonAlive` seam (BL-1) — one probe for query
+    /// and botlink, 250 ms timeout mirroring `daemon_client::alive` in the
+    /// Rust vertical.
     private func daemonAlive(port: Int) -> Bool {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return false }
-        defer { close(sock) }
-
-        // Non-blocking connect with poll for 250 ms.
-        let flags = fcntl(sock, F_GETFL, 0)
-        _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = 0x0100007F // 127.0.0.1 as little-endian host-byte-order (0x7F000001 in big-endian/network order)
-
-        let connectResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-
-        if connectResult == 0 { return true }
-        guard errno == EINPROGRESS else { return false }
-
-        var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
-        let ready = poll(&pfd, 1, 250) // 250 ms
-        guard ready > 0 else { return false }
-
-        // Confirm the connection completed without error.
-        var sockErr: Int32 = 0
-        var len = socklen_t(MemoryLayout<Int32>.size)
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, &sockErr, &len)
-        return sockErr == 0
+        McpLoopback.daemonAlive(port: port)
     }
 
     /// POST one JSON-RPC frame to the resident daemon and return the parsed
