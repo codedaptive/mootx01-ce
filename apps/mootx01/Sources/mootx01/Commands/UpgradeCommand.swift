@@ -695,13 +695,6 @@ struct UpgradeCommand: AsyncParsableCommand {
     }
 
     #if os(macOS)
-    /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
-    /// which does not mark files as internet downloads. Setting
-    /// com.apple.quarantine on remotely installed binaries lets Gatekeeper
-    /// assess them on the operator's next launch. This is best-effort
-    /// defense-in-depth, not the verification gate: artifact authentication is
-    /// the fail-closed minisign check inside ReleaseDownloader.download(),
-    /// which has already succeeded before any placed binary reaches this tag.
     /// The post-install convergence sequence, in order.
     ///
     /// Extracted so it has exactly one definition shared by two callers: the
@@ -762,6 +755,13 @@ struct UpgradeCommand: AsyncParsableCommand {
         return true
     }
 
+    /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
+    /// which does not mark files as internet downloads. Setting
+    /// com.apple.quarantine on remotely installed binaries lets Gatekeeper
+    /// assess them on the operator's next launch. This is best-effort
+    /// defense-in-depth, not the verification gate: artifact authentication is
+    /// the fail-closed minisign check inside ReleaseDownloader.download(),
+    /// which has already succeeded before any placed binary reaches this tag.
     private func applyGatekeeperQuarantine(paths: [String]) {
         let qts = String(Int(Date().timeIntervalSince1970), radix: 16)
         let qval = "0083;\(qts);mootx01-upgrade;"
