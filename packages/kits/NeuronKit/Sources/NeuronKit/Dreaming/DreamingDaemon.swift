@@ -1023,7 +1023,9 @@ public actor DreamingDaemon {
     ///     `max(reindexVocabGrowthFloor, ceil(fraction × baseline))` terms
     ///     since the last retrain — the same gate ALPHA's growth probe uses.
     ///   - After a successful retrain: `lastReindexVocab` advances so ALPHA's
-    ///     next delta window starts from the post-retrain baseline.
+    ///     next delta window starts from the post-retrain baseline. The caller
+    ///     persists the updated baseline via `saveDaemonState` after `fireTheta`
+    ///     returns.
     ///   - Probe error: fire unconditionally (safe fallback, same as nil-probe path).
     ///
     /// **Without `growthProbe` (nil):** fire unconditionally on every THETA
@@ -1232,6 +1234,18 @@ public actor DreamingDaemon {
             // the freshly re-embedded vectors. Same non-fatal pattern as the
             // retrain itself.
             await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
+            // Second persist: capture the updated lastReindexVocab baseline that
+            // fireTheta may have advanced above. The first save (before fireTheta)
+            // locks in lastThetaRunAt; this save locks in the retrain baseline so
+            // a restart loads the post-retrain value rather than the stale
+            // pre-retrain one — which on an estate where only THETA has ever
+            // retrained is still the -1 sentinel, and the sentinel makes
+            // fireTheta retrain unconditionally on every restart.
+            // fireTheta catches all errors internally, so this point is always
+            // reachable. Using try await for consistency with the pre-retrain save;
+            // the default store implementation is a no-op, and the manifest-backed
+            // store is a cheap write — no dirty-flag guard is needed.
+            try await policyStore.saveDaemonState(currentDaemonState())
             return nil
         }
 
@@ -1337,6 +1351,19 @@ public actor DreamingDaemon {
         // HNSW rebuild fires after the retrain so the graph is built from the
         // freshly re-embedded vectors. Non-fatal; see fireThetaHNSWRebuild.
         await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
+        // Second persist: capture the updated lastReindexVocab baseline that
+        // fireTheta may have advanced above. The first save (before fireTheta)
+        // locks in lastThetaRunAt and the consolidation result; this save locks
+        // in the retrain baseline so a restart loads the post-retrain value
+        // rather than the stale pre-retrain one — which on an estate where only
+        // THETA has ever retrained is still the -1 sentinel, and the sentinel
+        // makes fireTheta retrain unconditionally on every restart.
+        // fireTheta catches all errors internally,
+        // so this point is always reachable. Using try await for consistency
+        // with the pre-retrain save; the default store implementation is a
+        // no-op, and the manifest-backed store is a cheap write — no dirty-flag
+        // guard is needed.
+        try await policyStore.saveDaemonState(currentDaemonState())
 
         return DreamingCycleReport(
             tickedAt: now,
