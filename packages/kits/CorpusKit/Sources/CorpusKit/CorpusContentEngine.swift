@@ -2932,9 +2932,25 @@ public actor CorpusContentEngine {
     }
 
     /// Retrain every trainable slot from scratch on the full active corpus
-    /// and re-index every active content row. Deterministic ascending-ID
-    /// streaming order. Training is streamed (bounded) and each provider's
-    /// basis+counts commit is atomic.
+    /// and re-index every active content row without a serving gap.
+    ///
+    /// The operation is a shadow swap: trainable slots (RI, PPMI, LSA, NMF)
+    /// write new vectors into a shadow generation that is invisible to queries
+    /// until the atomic publish at the end. The serving generation remains
+    /// readable throughout the build. On publish, VectorStore flips the
+    /// serving generation in one transaction and rebuilds the HNSW graph from
+    /// the new serving rows inside the same operation. Non-trainable slots
+    /// (FDC binary, stateless) write directly to the serving generation as
+    /// today; the deferred-index bracket batches their resident-index updates.
+    ///
+    /// On failure mid-way (any thrown error after beginShadowGeneration), the
+    /// shadow remains 'building' and is reclaimable by the next REM-BETA cycle.
+    /// Reclamation is NOT called here — that is BETA's duty. The old serving
+    /// generation remains intact and keeps serving.
+    ///
+    /// `rebuildAfterPhysicalRemoval` calls this method and rides the swap
+    /// unchanged — its caller resets in-memory state before calling reindex,
+    /// so the shadow-swap path is transparent to it.
     ///
     /// - Parameters:
     ///   - now: Deterministic operation timestamp (passed in — never `Date()` inside
@@ -2944,12 +2960,34 @@ public actor CorpusContentEngine {
     ///     unchanged — this skips the BM25 write and binary rows, embedding only the
     ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
     public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
+        // Identify trainable model IDs: slots whose provider is a TrainableEmbeddingBasis
+        // (RI, PPMI, LSA, NMF). Their new vectors will be written into a shadow
+        // generation and published atomically. FDC and stateless slots are not swapped.
+        let trainableModelIDs = slots
+            .filter { $0.provider is (any TrainableEmbeddingBasis) }
+            .map { $0.provider.modelID }
+
+        // Open a shadow generation for each trainable model BEFORE training begins.
+        // The VectorStore will route all subsequent addPayloads calls for these models
+        // to the shadow generation automatically — the indexWholeContentBatch code
+        // does not need to know which models are in shadow. Non-trainable model writes
+        // land on the serving generation unchanged (their resident structures continue
+        // serving throughout the build).
+        if !trainableModelIDs.isEmpty {
+            try await vectorStore.beginShadowGeneration(modelIDs: trainableModelIDs)
+        }
+
+        // Retrain all trainable slots from scratch — produces the new basis blobs
+        // that the subsequent re-embed pass will use. No vector rows are written here.
         _ = try await trainTrainableSlots(now: now, force: true)
-        // Bulk-write bracket (same idiom as reconcileConfiguredProviders and
-        // the drain worker): defer the resident dense index for the whole
-        // O(corpus) rewrite and publish ONCE — per-record invalidation makes
-        // an estate-scale retrain rebuild the resident index per write.
+
+        // Bulk-write bracket for non-trainable model writes (FDC binary, stateless
+        // slots): defers resident dense-index updates for the O(corpus) pass and
+        // publishes once at the end. Trainable-model writes bypass resident structures
+        // by VectorStore shadow-write contract (shadow rows never enter the binary lane,
+        // float indices, or HNSW structures during the build phase).
         try await vectorStore.beginDeferredIndex()
+
         let ids = try await source.activeContentIDs()
         if case .wholeContent = configuration.indexUnit {
             // Bound both task admission and prepared-result memory. The batch
@@ -2976,7 +3014,21 @@ public actor CorpusContentEngine {
                 }
             }
         }
+
+        // Atomic publish for trainable models: one storage transaction flips
+        // serving_generation to shadow_generation, sets shadow_state 'pending-reclaim'
+        // on the old generation's rows, and rebuilds the HNSW graph from the new
+        // serving rows before returning. A reader sees the old set or the new set,
+        // never a mixture. Old-generation rows are left 'pending-reclaim'; deletion
+        // is REM-BETA's duty (idempotent, resumable, not called here).
+        if !trainableModelIDs.isEmpty {
+            try await vectorStore.publishShadowGeneration(modelIDs: trainableModelIDs)
+        }
+
+        // Publish deferred resident index for non-trainable model writes — the binary
+        // lane (MIH + brute-force) gets its one bulk rebuild here, same as before.
         try await vectorStore.publishResidentIndex()
+
         try await providerConfigurationStore.markCurrent(
             providerGenerationToken(), now: now)
     }

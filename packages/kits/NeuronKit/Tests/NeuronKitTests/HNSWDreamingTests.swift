@@ -4,10 +4,11 @@
 //
 // Three cadences carry HNSW duties; OMEGA does not:
 //
-//   HM-1: ALPHA — clearFloatIndex fires after vocabulary drift triggers a
-//          corpus reindex. Requires two pump() calls: the first establishes
-//          the vocab baseline; the second crosses the growth trigger and fires
-//          both the corpus reindex and the HNSW clear.
+//   HM-1: ALPHA — vocabulary drift triggers a corpus shadow swap (probe.reindex).
+//          The swap publishes a coherent new-generation HNSW graph atomically
+//          inside publishShadowGeneration; clearFloatIndex is NOT called.
+//          Requires two pump() calls: the first establishes the vocab baseline;
+//          the second crosses the growth trigger and fires the shadow swap.
 //
 //   HM-2: THETA (consolidation path) — rebuildFloatIndex fires once.
 //   HM-3: THETA (early-return / no-data path) — rebuildFloatIndex also fires.
@@ -33,7 +34,7 @@ import GeniusLocusKit
 
 // MARK: - Fake HNSWGraphMaintenance
 
-/// Recording fake. Tracks calls to all three maintenance methods.
+/// Recording fake. Tracks calls to all four maintenance methods.
 private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
 
     /// Timestamps passed to `clearFloatIndex(now:)`, in call order.
@@ -44,6 +45,9 @@ private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
 
     /// Timestamps passed to `compactFloatIndexTombstones(now:)`, in call order.
     private(set) var compactCalls: [Date] = []
+
+    /// Timestamps passed to `reclaimSupersededGenerations(now:)`, in call order.
+    private(set) var reclaimCalls: [Date] = []
 
     /// When true, every method throws a sentinel error (non-fatal test path).
     var shouldThrow: Bool
@@ -67,9 +71,15 @@ private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
         compactCalls.append(now)
     }
 
+    func reclaimSupersededGenerations(now: Date) async throws {
+        if shouldThrow { throw FakeMaintenanceError() }
+        reclaimCalls.append(now)
+    }
+
     var clearCount:   Int { clearCalls.count }
     var rebuildCount: Int { rebuildCalls.count }
     var compactCount: Int { compactCalls.count }
+    var reclaimCount: Int { reclaimCalls.count }
 }
 
 private struct FakeMaintenanceError: Error {}
@@ -98,10 +108,15 @@ private actor FakeGrowthProbe: CorpusGrowthProbe {
         return callCount == 1 ? firstVocab : laterVocab
     }
 
-    /// No-op reindex: the daemon calls this when the growth gate fires. The
-    /// probe itself does not need to do any real work; its purpose is to let
-    /// the daemon advance `lastReindexVocab` and then call clearFloatIndex.
-    func reindex(now: Date) async throws {}
+    /// Recording reindex: the daemon calls this when the growth gate fires.
+    /// The probe does no real work; it records the call so tests can assert
+    /// the shadow swap triggered exactly once.
+    private(set) var reindexCalls: [Date] = []
+    var reindexCount: Int { reindexCalls.count }
+
+    func reindex(now: Date) async throws {
+        reindexCalls.append(now)
+    }
 }
 
 // MARK: - Minimal seam fakes (shared across all tests)
@@ -184,16 +199,20 @@ private func twoUsedTraces() -> [RecallTraceItem] {
 @Suite("HNSWGraphMaintenance — dreaming cadence integration")
 struct HNSWDreamingTests {
 
-    // ── HM-1: ALPHA clear after vocab drift ────────────────────────────────
+    // ── HM-1: ALPHA shadow swap fires; clearFloatIndex is NOT called ──────
 
     /// Two pump() calls are needed:
     ///   • First: lastReindexVocab is –1 (sentinel) → baseline set to firstVocab=100.
-    ///     No reindex, no HNSW clear.
-    ///   • Second (1 ms later): delta = laterVocab – firstVocab = 100.
+    ///     No reindex, no HNSW action.
+    ///   • Second (2 s later): delta = laterVocab – firstVocab = 100.
     ///     Default trigger = max(25, floor(100 × 0.10)) = 25.
-    ///     100 ≥ 25 → reindex fires → HNSW clearFloatIndex fires.
-    @Test("HM-1: clearFloatIndex fires once after ALPHA vocab-drift reindex")
-    func hm1_alphaHNSWClearFiresAfterReindex() async throws {
+    ///     100 ≥ 25 → probe.reindex fires (shadow swap).
+    ///
+    /// clearFloatIndex must NOT fire: publishShadowGeneration ships the coherent
+    /// new-generation HNSW graph atomically inside the swap. Clearing would destroy
+    /// the freshly-published graph and reopen the serving gap. (F-3, BRR §6.)
+    @Test("HM-1: ALPHA shadow swap fires; clearFloatIndex is NOT called (swap publishes coherent graph)")
+    func hm1_alphaShadowSwapFiresNoHNSWClear() async throws {
         let hnsw = FakeHNSWMaintenance()
         let probe = FakeGrowthProbe(first: 100, later: 200)
         let daemon = makeAlphaDaemon(hnsw: hnsw, probe: probe)
@@ -206,13 +225,16 @@ struct HNSWDreamingTests {
         #expect(clearAfterFirst == 0,
             "no clear on the first pump (baseline-only cycle)")
 
-        // Second pump: 2 seconds later. delta=100 ≥ trigger=25 → reindex + HNSW clear.
-        // Use a generous interval (well above tickIntervalMs=1) to avoid floating-point
-        // precision edge cases in the elapsed-milliseconds gate comparison.
+        // Second pump: 2 seconds later. delta=100 ≥ trigger=25 → shadow swap fires
+        // via probe.reindex. clearFloatIndex must NOT be called — the swap publishes
+        // a coherent graph; clearing it would destroy fresh state.
         _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
         let clearAfterSecond = await hnsw.clearCount
-        #expect(clearAfterSecond == 1,
-            "clearFloatIndex must fire exactly once after vocab-drift reindex")
+        #expect(clearAfterSecond == 0,
+            "clearFloatIndex must NOT fire after shadow swap (publish ships the graph)")
+        let reindexAfterSecond = await probe.reindexCount
+        #expect(reindexAfterSecond == 1,
+            "probe.reindex (shadow swap) must fire exactly once after vocab drift crosses trigger")
     }
 
     // ── HM-2: THETA consolidation path → rebuild fires ─────────────────────
@@ -322,7 +344,7 @@ struct HNSWDreamingTests {
     // ── HM-9: OMEGA has no HNSW duty ─────────────────────────────────────────
 
     /// OMEGA retires dreamed tunnels. No HNSW graph maintenance fires.
-    /// Verify that none of the three maintenance methods are invoked.
+    /// Verify that none of the four maintenance methods are invoked.
     @Test("HM-9: OMEGA cycle does not invoke any HNSWGraphMaintenance method")
     func hm9_omegaHasNoHNSWDuty() async throws {
         let hnsw = FakeHNSWMaintenance()
@@ -334,8 +356,116 @@ struct HNSWDreamingTests {
         let clears   = await hnsw.clearCount
         let rebuilds = await hnsw.rebuildCount
         let compacts = await hnsw.compactCount
+        let reclaims = await hnsw.reclaimCount
         #expect(clears   == 0, "OMEGA must not call clearFloatIndex")
         #expect(rebuilds == 0, "OMEGA must not call rebuildFloatIndex")
         #expect(compacts == 0, "OMEGA must not call compactFloatIndexTombstones")
+        #expect(reclaims == 0, "OMEGA must not call reclaimSupersededGenerations")
+    }
+
+    // ── n1: Below-threshold vocab growth — no swap fires ──────────────────
+
+    /// Below-threshold growth on the HEALTHY probe path: probe.vocabAnchor
+    /// returns first=100 (baseline), then 101 (delta=1 < trigger=25). The
+    /// drift gate does NOT fire reindex; no shadow swap occurs.
+    @Test("n1: below-threshold vocab growth does not trigger shadow swap")
+    func n1_belowThresholdNoSwap() async throws {
+        // delta = 101 - 100 = 1, trigger = max(25, floor(100 * 0.10)) = 25 → gate skips
+        let hnsw = FakeHNSWMaintenance()
+        let probe = FakeGrowthProbe(first: 100, later: 101)
+        let daemon = makeAlphaDaemon(hnsw: hnsw, probe: probe)
+        let t0 = Date(timeIntervalSinceReferenceDate: 10_000_000)
+
+        // First pump: sets baseline to 100.
+        _ = try await daemon.pump(now: t0)
+        // Second pump: liveVocab=101, delta=1 < trigger=25 — gate skips.
+        _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
+
+        let reindexCount = await probe.reindexCount
+        #expect(reindexCount == 0, "probe.reindex must NOT fire when delta is below the trigger")
+
+        let clearCount = await hnsw.clearCount
+        #expect(clearCount == 0, "clearFloatIndex must not be called on a skipped-gate cycle")
+    }
+
+    // ── n2: Crossing threshold fires exactly once; second cycle with no growth skips ──
+
+    /// Crossing the drift threshold triggers probe.reindex exactly once.
+    /// A subsequent cycle where liveVocab has not grown does NOT fire again
+    /// (baseline was advanced to liveVocab after the first swap).
+    @Test("n2: crossing threshold triggers swap exactly once; baseline advance prevents second fire")
+    func n2_thresholdCrossOnceBaselineAdvances() async throws {
+        // delta = 200 - 100 = 100 ≥ trigger = 25 → fires on second pump.
+        // Third pump: liveVocab still 200, delta = 200 - 200 = 0 < trigger → skips.
+        let hnsw = FakeHNSWMaintenance()
+        let probe = FakeGrowthProbe(first: 100, later: 200)
+        let daemon = makeAlphaDaemon(hnsw: hnsw, probe: probe)
+        let t0 = Date(timeIntervalSinceReferenceDate: 11_000_000)
+
+        // First pump: sets baseline = 100.
+        _ = try await daemon.pump(now: t0)
+        let afterFirst = await probe.reindexCount
+        #expect(afterFirst == 0, "no swap on baseline-setting pump")
+
+        // Second pump: delta=100 ≥ 25 → swap fires.
+        _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
+        let afterSecond = await probe.reindexCount
+        #expect(afterSecond == 1, "probe.reindex must fire exactly once after threshold crossed")
+
+        // Third pump: liveVocab still 200. Baseline was advanced to 200 after
+        // the swap, so delta = 200 - 200 = 0 < 25 → gate skips.
+        _ = try await daemon.pump(now: t0.addingTimeInterval(4.0))
+        let afterThird = await probe.reindexCount
+        #expect(afterThird == 1,
+            "probe.reindex must NOT fire again when liveVocab has not grown since last swap")
+    }
+
+    // ── n4: BETA cycle calls reclaimSupersededGenerations exactly once ────
+
+    /// The BETA cycle fires both `compactFloatIndexTombstones` and
+    /// `reclaimSupersededGenerations` on the maintenance seam exactly once
+    /// per due cycle. The fake records both calls for witness.
+    @Test("n4: BETA cycle calls reclaimSupersededGenerations once alongside tombstone compaction")
+    func n4_betaReclaimsAlongWithCompact() async throws {
+        let hnsw = FakeHNSWMaintenance()
+        let daemon = makeThetaDaemon(hnsw: hnsw)
+        let now = Date(timeIntervalSinceReferenceDate: 14_000_000)
+
+        _ = try await daemon.runBetaCycle(now: now)
+
+        let compactCount = await hnsw.compactCount
+        let reclaimCount = await hnsw.reclaimCount
+        #expect(compactCount == 1, "compactFloatIndexTombstones must fire exactly once per BETA")
+        #expect(reclaimCount == 1, "reclaimSupersededGenerations must fire exactly once per BETA")
+    }
+
+    // ── n6: ALPHA-clear-removal regression guard ──────────────────────────
+
+    /// After the drift gate fires and the shadow swap completes (probe.reindex),
+    /// clearFloatIndex must NOT be called. The swap publishes a coherent
+    /// new-generation HNSW graph inside publishShadowGeneration; clearing it
+    /// would destroy the fresh graph and reopen the serving gap the swap closes.
+    @Test("n6: ALPHA drift-gate fires shadow swap without calling clearFloatIndex")
+    func n6_alphaSwapDoesNotCallClear() async throws {
+        let hnsw = FakeHNSWMaintenance()
+        let probe = FakeGrowthProbe(first: 100, later: 200)
+        let daemon = makeAlphaDaemon(hnsw: hnsw, probe: probe)
+        // Use the same reference epoch as n2 (11_000_000) where the bandit is
+        // known to select .timer for both pump calls. A different epoch can cause
+        // the bandit to select .event after pump #1, blocking pump #2. This is a
+        // bandit-seeding property of the timestamp, not the test's concern.
+        let t0 = Date(timeIntervalSinceReferenceDate: 11_000_000)
+
+        // First pump: baseline set.
+        _ = try await daemon.pump(now: t0)
+        // Second pump: drift gate crosses threshold → probe.reindex (shadow swap) fires.
+        _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
+
+        let reindexCount = await probe.reindexCount
+        #expect(reindexCount == 1, "shadow swap must fire (n6 precondition: gate did cross)")
+
+        let clearCount = await hnsw.clearCount
+        #expect(clearCount == 0,
+            "clearFloatIndex must NOT be called after shadow swap — clearing the newly-published graph would reopen the serving gap")
     }
 }

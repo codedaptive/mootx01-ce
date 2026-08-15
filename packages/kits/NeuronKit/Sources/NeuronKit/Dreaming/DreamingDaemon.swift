@@ -241,16 +241,18 @@ public actor DreamingDaemon {
     /// are logged at the error level but do not abort the THETA cycle.
     private let thetaRetrainHook: (any ThetaBasisRetrainHook)?
 
-    /// Optional HNSW graph maintenance seam for the three cadence duties.
+    /// Optional HNSW graph maintenance seam for the cadence duties.
     ///
-    /// When non-nil the daemon calls the three `HNSWGraphMaintenance` methods
-    /// at the appropriate cadences:
-    ///   • ALPHA auto-reindex fires → `clearFloatIndex(now:)` (stale graph dropped;
-    ///     lazy rebuild on next qualifying `findNearestFloat` call).
+    /// When non-nil the daemon calls `HNSWGraphMaintenance` methods at the
+    /// appropriate cadences:
+    ///   • ALPHA shadow swap fires → the swap publishes a coherent new-generation
+    ///     graph atomically inside VectorStore.publishShadowGeneration; no
+    ///     separate HNSW maintenance call is needed after the swap completes.
     ///   • THETA basis retrain fires → `rebuildFloatIndex(now:)` (graph rebuilt
     ///     from re-embedded vectors so topology matches new geometry).
     ///   • BETA compaction fires → `compactFloatIndexTombstones(now:)` (tombstones
-    ///     from item updates/deletes swept from every active partition).
+    ///     swept) and `reclaimSupersededGenerations(now:)` (superseded vector rows
+    ///     deleted from the estate, clearing 'pending-reclaim' registry state).
     /// Nil safely disables all HNSW duties (correct for estates with no float
     /// lane and for tests that do not require approximate NN).
     private let hnswMaintenance: (any HNSWGraphMaintenance)?
@@ -363,8 +365,10 @@ public actor DreamingDaemon {
     ///     Defaults to nil (duty disabled). Production callers pass an
     ///     `EstateThetaBasisRetrainHook` to activate the daily retrain lane.
     ///   - hnswMaintenance: optional HNSW graph maintenance seam. When non-nil,
-    ///     the daemon calls `clearFloatIndex` on ALPHA auto-reindex, `rebuildFloatIndex`
-    ///     on THETA after basis retrain, and `compactFloatIndexTombstones` on BETA.
+    ///     the daemon calls `rebuildFloatIndex` on THETA after basis retrain,
+    ///     `compactFloatIndexTombstones` and `reclaimSupersededGenerations` on BETA.
+    ///     The ALPHA shadow swap publishes a coherent new-generation graph atomically
+    ///     inside publishShadowGeneration; no separate clear duty fires after the swap.
     ///     Defaults to nil (all HNSW duties disabled). Production callers pass an
     ///     `EstateHNSWGraphMaintenance` to activate the approximate NN maintenance lane.
     public init(
@@ -895,30 +899,14 @@ public actor DreamingDaemon {
                         // Advance baseline to the vocabulary at retrain time so the
                         // next window measures growth from this retrain.
                         lastReindexVocab = liveVocab
-                        // ALPHA HNSW duty: clear all HNSW graphs and hnsw_graph
-                        // table rows so subsequent queries fall back to exact scan
-                        // (FloatBruteForceIndex) until the THETA cadence fires a
-                        // full rebuild via fireThetaHNSWRebuild. No rebuild ever
-                        // happens on the query path. Failure is non-fatal — exact
-                        // scan remains available throughout.
-                        if let m = hnswMaintenance {
-                            do {
-                                try await m.clearFloatIndex(now: now)
-                                Intellectus.report(.metric(
-                                    name: "neuronkit.dream.hnsw_clear",
-                                    value: 1.0,
-                                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
-                                    ts: now.timeIntervalSince1970
-                                ))
-                            } catch {
-                                Intellectus.report(.metric(
-                                    name: "neuronkit.dream.hnsw_clear_error",
-                                    value: 1.0,
-                                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
-                                    ts: now.timeIntervalSince1970
-                                ))
-                            }
-                        }
+                        // ALPHA HNSW note: no separate HNSW clear fires here.
+                        // probe.reindex() shadow-swaps the corpus internally —
+                        // VectorStore.publishShadowGeneration rebuilds the HNSW
+                        // graph from the new serving rows inside the same atomic
+                        // operation. The graph is coherent immediately after the
+                        // swap; clearing it would destroy the newly-published
+                        // graph and reopen the serving gap the swap was designed
+                        // to close. (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
                     }
                 }
             } catch {
@@ -1456,7 +1444,7 @@ public actor DreamingDaemon {
         _ = prunedConsolidated  // used by tests; suppress unused-result warning
         _ = prunedCoRecall
 
-        // BETA HNSW duty: compact tombstones accumulated since the last BETA
+        // BETA HNSW duty 1: compact tombstones accumulated since the last BETA
         // or THETA cycle. Items updated or deleted between runs leave tombstone
         // slots in the HNSW graph that waste memory and slightly degrade graph
         // quality (dead edges still occupy neighbour lists). Failure is non-fatal.
@@ -1472,6 +1460,30 @@ public actor DreamingDaemon {
             } catch {
                 Intellectus.report(.metric(
                     name: "neuronkit.dream.hnsw_compact_error",
+                    value: 1.0,
+                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            }
+
+            // BETA HNSW duty 2: reclaim superseded-generation vector rows left
+            // 'pending-reclaim' after a shadow swap publish. Deletes vectors +
+            // hnsw_graph rows whose generation is neither the serving generation
+            // nor an active shadow build, then clears 'pending-reclaim' registry
+            // state. Idempotent and resumable — re-running after a kill finishes
+            // without error and changes no query result. Failure is non-fatal;
+            // reclamation will be retried on the next BETA cycle.
+            do {
+                try await m.reclaimSupersededGenerations(now: now)
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_reclaim",
+                    value: 1.0,
+                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            } catch {
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_reclaim_error",
                     value: 1.0,
                     tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
                     ts: now.timeIntervalSince1970
