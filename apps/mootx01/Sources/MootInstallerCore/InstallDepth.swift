@@ -255,6 +255,16 @@ public enum DepthInstaller {
     ///     env on an HTTP entry is inert — nothing reads it. Defaults to
     ///     `false` (vault-on); absent `MOOTX01_VAULT` means vault-on per
     ///     the open 1.0 Vault posture.
+    ///   - preserveRecordedPluginDisable: when `true`, an EXPLICIT
+    ///     `enabledPlugins["mootx01@mootx01"] = false` already recorded in
+    ///     `~/.claude/settings.json` is preserved rather than flipped back
+    ///     to `true` during marketplace registration. `mootx01 upgrade`
+    ///     passes `true` — a routine upgrade must honour a disable the user
+    ///     deliberately recorded (Codex Finding #2). The default `false`
+    ///     keeps `mootx01 install`'s behavior: an explicit install run is
+    ///     itself the user's decision to have the integration active, so it
+    ///     (re-)enables. An ABSENT enabledPlugins entry is not a recorded
+    ///     decision and enables under both settings.
     ///   - claudeCLIRunner: injectable seam for the `claude plugin update`
     ///     stranded-cache refresh. Defaults to the
     ///     real process-based runner; tests inject a fake.
@@ -267,6 +277,7 @@ public enum DepthInstaller {
         homeDirectory: URL,
         binaryPath: String,
         vaultOff: Bool = false,
+        preserveRecordedPluginDisable: Bool = false,
         claudeCLIRunner: ClaudeCLIRunning = ProcessClaudeCLIRunner()
     ) throws -> DepthOutcome {
         if depth == .server { return .server }
@@ -288,6 +299,7 @@ public enum DepthInstaller {
                     homeDirectory: homeDirectory,
                     binaryPath: binaryPath,
                     vaultOff: vaultOff,
+                    preserveRecordedPluginDisable: preserveRecordedPluginDisable,
                     claudeCLIRunner: claudeCLIRunner
                 )
             }
@@ -377,6 +389,7 @@ public enum DepthInstaller {
         homeDirectory: URL,
         binaryPath: String,
         vaultOff: Bool,
+        preserveRecordedPluginDisable: Bool,
         claudeCLIRunner: ClaudeCLIRunning
     ) throws -> DepthOutcome {
         let files = InstallBundle.embedded.packageFiles(forHostID: host.id)
@@ -426,7 +439,9 @@ public enum DepthInstaller {
         // (Other hosts — Gemini, Cursor, Codex — carry their own registration in
         // their package payloads; this step is Claude Code specific.)
         if host.id == "claude-code" {
-            try registerClaudeCodeMarketplace(pluginDir: dest)
+            try registerClaudeCodeMarketplace(
+                pluginDir: dest,
+                preserveRecordedPluginDisable: preserveRecordedPluginDisable)
             if let line = refreshStrandedPluginCache(
                 homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner) {
                 print(line)
@@ -494,7 +509,20 @@ public enum DepthInstaller {
     /// discovers and loads it. Writes `.claude-plugin/marketplace.json` in the
     /// plugin dir and MERGES the two settings keys (never clobbering the user's
     /// other marketplaces/plugins). Takes effect after a Claude Code restart.
-    private static func registerClaudeCodeMarketplace(pluginDir: URL) throws {
+    ///
+    /// Enablement honours recorded user intent (Codex Finding #2): when
+    /// `preserveRecordedPluginDisable` is true and `enabledPlugins` already
+    /// carries an EXPLICIT `false` for `mootx01@mootx01` — the state Claude
+    /// Code records when the user disables the plugin — that decision
+    /// survives: the entry is left `false` and only the marketplace
+    /// registration is refreshed (so the package stays current for whenever
+    /// the user re-enables it). An absent entry is NOT a recorded decision
+    /// and enables under both settings, preserving default behavior for
+    /// users who never expressed one.
+    private static func registerClaudeCodeMarketplace(
+        pluginDir: URL,
+        preserveRecordedPluginDisable: Bool
+    ) throws {
         let market = "mootx01"
         let plugin = "mootx01"
         let fm = FileManager.default
@@ -537,7 +565,13 @@ public enum DepthInstaller {
         root["extraKnownMarketplaces"] = markets
 
         var enabled = root["enabledPlugins"] as? [String: Any] ?? [:]
-        enabled["\(plugin)@\(market)"] = true
+        let pluginKey = "\(plugin)@\(market)"
+        if preserveRecordedPluginDisable, (enabled[pluginKey] as? Bool) == false {
+            // Recorded user disable — an upgrade-shaped convergence must not
+            // override it. The key is left exactly as the user set it.
+        } else {
+            enabled[pluginKey] = true
+        }
         root["enabledPlugins"] = enabled
 
         let out = try JSONSerialization.data(

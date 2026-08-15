@@ -644,8 +644,12 @@ struct UpgradeCommand: AsyncParsableCommand {
     private func rematerializePluginDepth(home: URL, binaryPath: String) {
         for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
             do {
+                // preserveRecordedPluginDisable: an upgrade is routine
+                // convergence, not a user request to activate the plugin —
+                // an explicitly recorded disable survives it (Finding #2).
                 _ = try DepthInstaller.apply(
-                    clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
+                    clientID: host.id, depth: .plugin, homeDirectory: home,
+                    binaryPath: binaryPath, preserveRecordedPluginDisable: true
                 )
                 print("  ✓ \(host.displayName): plugin package rematerialized")
             } catch {
@@ -684,8 +688,12 @@ struct UpgradeCommand: AsyncParsableCommand {
         let binaryPath = MootPaths.installedBinaryURL(homeDirectory: home).path
         for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
             do {
+                // preserveRecordedPluginDisable: same posture as
+                // rematerializePluginDepth — the cache refresh keeps the
+                // package current without overriding a recorded disable.
                 _ = try DepthInstaller.apply(
-                    clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
+                    clientID: host.id, depth: .plugin, homeDirectory: home,
+                    binaryPath: binaryPath, preserveRecordedPluginDisable: true
                 )
                 print("  ✓ \(host.displayName): plugin manifest updated to \(Mootx01.currentVersion)")
             } catch {
