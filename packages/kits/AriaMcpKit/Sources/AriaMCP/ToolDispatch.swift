@@ -470,6 +470,34 @@ public struct ToolDispatcher: Sendable {
 
     // MARK: - Hint injection
 
+    /// Append `\nhint: <hint>` to the FIRST content block's text, carrying
+    /// every subsequent block through unchanged — the single append seam for
+    /// both hint appenders below.
+    ///
+    /// Block preservation is the point: multi-block results (`moot_json_import`
+    /// with `return_id_map` returns receipt + `{"id_map":…}` as separate
+    /// blocks) must keep their trailing machine-readable blocks intact. The
+    /// hint goes on the prose block only — a hint line inside a JSON block
+    /// would break the caller's parse, which is why the map is a separate
+    /// block in the first place. Mirrors Rust `dispatch.rs` `inject_hint` /
+    /// `inject_unknown_args_hint`, which mutate `content[0]["text"]` in place.
+    ///
+    /// Returns the result unchanged when it has no first text block to append
+    /// to. All other keys of the result object (`isError`, any future fields)
+    /// are carried through verbatim.
+    private static func appendingHint(_ hint: String, to result: JSONValue) -> JSONValue {
+        guard var obj = result.objectValue,
+              var content = obj["content"]?.arrayValue,
+              var first = content.first?.objectValue,
+              let text = first["text"]?.stringValue else {
+            return result
+        }
+        first["text"] = .string(text + "\nhint: " + hint)
+        content[0] = .object(first)
+        obj["content"] = .array(content)
+        return .object(obj)
+    }
+
     /// Append a hint line when the caller sent argument keys not declared in the
     /// tool's inputSchema. Returns the result unchanged on error results or when
     /// all keys are recognized. Also logs unrecognized keys to stderr for the
@@ -480,7 +508,9 @@ public struct ToolDispatcher: Sendable {
     /// wrappers), so `estateID` and `teachme` are always recognized.
     /// Returns nil from `acceptedArgKeys` for unknown tool names — no check runs.
     ///
-    /// Hint format: `hint: unrecognized argument(s) ignored: <sorted, comma-joined>`
+    /// Hint format: `hint: unrecognized argument(s) ignored: <sorted, comma-joined>`,
+    /// appended to the first block only; trailing blocks survive (see
+    /// `appendingHint(_:to:)`).
     private func appendUnknownArgsHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
         guard let accepted = ToolProjection.acceptedArgKeys(for: name) else {
             return result
@@ -492,16 +522,16 @@ public struct ToolDispatcher: Sendable {
         // Append hint to non-error results only — error results carry their own
         // message and must not be silently augmented.
         guard let obj = result.objectValue,
-              obj["isError"]?.boolValue == false,
-              let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue else {
+              obj["isError"]?.boolValue == false else {
             return result
         }
-        return Self.textResult(text + "\nhint: unrecognized argument(s) ignored: \(sorted)")
+        return Self.appendingHint("unrecognized argument(s) ignored: \(sorted)", to: result)
     }
 
     /// Append a coaching hint to a successful tool result when `CoachingEngine`
     /// detects a suboptimal call pattern. Returns the result unchanged when
-    /// `isError == true` or when no trigger fires.
+    /// `isError == true` or when no trigger fires. The hint lands on the first
+    /// block; trailing blocks survive (see `appendingHint(_:to:)`).
     private func applyHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
         guard let obj = result.objectValue,
               obj["isError"]?.boolValue == false,
@@ -511,7 +541,7 @@ public struct ToolDispatcher: Sendable {
         guard let hint = CoachingEngine.hint(name: name, args: args, resultText: text) else {
             return result
         }
-        return Self.textResult(text + "\nhint: " + hint)
+        return Self.appendingHint(hint, to: result)
     }
 
     // MARK: - Federation tool
