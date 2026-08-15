@@ -189,6 +189,21 @@ public enum Installer {
         }
         try fm.createSymbolicLink(atPath: proxySymlinkURL.path, withDestinationPath: "mootx01")
 
+        // 5. Create the sibling botLink symlink `mootx01-botLink → mootx01`
+        //    (BL-1) — same relative-symlink and same-directory rationale as
+        //    the proxy symlink above. Cloud agents exec `mootx01-botLink
+        //    <subcommand>` over a permissioned one-shot shell; ArgvDispatch
+        //    prepends the `botlink` subcommand automatically. Uninstall
+        //    symmetry matches the proxy sibling: both live inside the
+        //    install root that `removePlacedBinary` removes wholesale, so
+        //    neither needs an individual unlink there.
+        let botLinkSymlinkURL = MootPaths.botLinkSymlinkURL(homeDirectory: homeDirectory)
+        if fm.fileExists(atPath: botLinkSymlinkURL.path)
+            || (try? fm.destinationOfSymbolicLink(atPath: botLinkSymlinkURL.path)) != nil {
+            try fm.removeItem(at: botLinkSymlinkURL)
+        }
+        try fm.createSymbolicLink(atPath: botLinkSymlinkURL.path, withDestinationPath: "mootx01")
+
         return destURL.path
     }
 

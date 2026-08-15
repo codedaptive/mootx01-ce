@@ -437,6 +437,43 @@ struct InstallerTests {
         #expect(dest == "mootx01", "proxy symlink must survive re-install")
     }
 
+    @Test("placeBinary creates BOTH sibling symlinks: mootx01-proxy and mootx01-botLink (BL-1)")
+    func placeBinaryCreatesBotLinkSymlink() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let botLinkURL = MootPaths.botLinkSymlinkURL(homeDirectory: home)
+        #expect(botLinkURL.lastPathComponent == ArgvDispatch.botLinkInvocationName,
+                "the symlink name must match the argv0 dispatch constant exactly (capital L)")
+        let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: botLinkURL.path)
+        #expect(dest == "mootx01",
+                "botLink symlink must be a relative symlink pointing at 'mootx01', like the proxy sibling")
+
+        // Both siblings coexist in the same install directory.
+        let proxyDest = try? FileManager.default.destinationOfSymbolicLink(
+            atPath: MootPaths.proxySymlinkURL(homeDirectory: home).path)
+        #expect(proxyDest == "mootx01")
+    }
+
+    @Test("placeBinary re-run recreates the botLink symlink (idempotent)")
+    func placeBinaryBotLinkSymlinkIsIdempotent() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home, force: true)
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home, force: true)
+
+        let botLinkURL = MootPaths.botLinkSymlinkURL(homeDirectory: home)
+        let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: botLinkURL.path)
+        #expect(dest == "mootx01", "botLink symlink must survive re-install")
+    }
+
     @Test("removePlacedBinary removes the binary and the PATH symlink")
     func removePlacedBinaryCleansUp() throws {
         let home = try makeSandboxHome()

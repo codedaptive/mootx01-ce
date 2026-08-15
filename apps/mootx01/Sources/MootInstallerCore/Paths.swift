@@ -180,6 +180,22 @@ public enum MootPaths {
             .appendingPathComponent("mootx01-proxy", isDirectory: false)
     }
 
+    /// Absolute path of the same-directory botLink symlink (BL-1). Sits
+    /// beside the placed binary in `~/.mootx01/bin/` for the same
+    /// `Bundle.main` reasons as the proxy symlink above. Cloud agents exec
+    /// `mootx01-botLink <subcommand>` by this name; the argv0 name triggers
+    /// `ArgvDispatch` to prepend the `botlink` subcommand automatically.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin/mootx01-botLink` (capital L — must
+    ///   match `ArgvDispatch.botLinkInvocationName`). Does not touch the
+    ///   filesystem.
+    public static func botLinkSymlinkURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01-botLink", isDirectory: false)
+    }
+
     /// URL of the project-local Claude Code settings file.
     ///
     /// When `--local` is used during install, Claude Code is wired to
