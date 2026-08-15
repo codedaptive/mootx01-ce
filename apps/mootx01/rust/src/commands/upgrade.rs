@@ -434,24 +434,24 @@ fn run_shared_content_reclaim_if_pending() {
 /// predates CorpusKit v2), the step logs and returns; nothing is half-done.
 /// `mootx01 upgrade` is the only migration vehicle — the next run retries.
 ///
-/// Operates through `SqliteStorage` (not `EstateCoordinator`), the same
-/// surface used by `run_kg_fact_identity_backfill`. The estate and queue
-/// SQLite files are opened independently; the step is NOT schema-aware and
-/// does NOT run migrations — it touches only the two corpus tables that must
-/// pre-exist, and the manifest key-value table via the latch.
-
 /// The estate-mutation core of the corpus-counts migration, extracted so a
 /// test can drive the REAL operations on a scratch estate without the
 /// daemon-quiesce wrapper (which acts on the machine-global daemon and must
-/// never run from a test).  is quiesce + this +
-/// restart + report; everything that touches estate bytes is HERE.
+/// never run from a test). `run_corpus_counts_migration` is quiesce + this
+/// + restart + report; everything that touches estate bytes is HERE.
+///
+/// Operates through `SqliteStorage` (not `EstateCoordinator`), the same
+/// surface used by `run_kg_fact_identity_backfill`. The estate and queue
+/// SQLite files are opened independently; the core is NOT schema-aware and
+/// does NOT run migrations — it touches only the two corpus tables that must
+/// pre-exist, and the manifest key-value table via the latch.
 pub(crate) fn corpus_counts_migration_core(
     estate_config: &persistence_kit::storage::EstateConfiguration,
     now_ms: i64,
 ) -> Result<(usize, usize), String> {
     use corpus_kit::reindex_latch::reindex_required;
     use persistence_kit::sqlite::SqliteStorage;
-    use persistence_kit::storage::{EstateConfiguration, Storage};
+    use persistence_kit::storage::Storage;
     use persistence_kit::predicate::StoragePredicate;
     use persistence_kit::types::TypedValue;
     use queuekit::facade::QueueKit;
@@ -507,15 +507,7 @@ pub(crate) fn corpus_counts_migration_core(
 }
 
 fn run_corpus_counts_migration() {
-    use corpus_kit::reindex_latch::reindex_required;
-    use persistence_kit::sqlite::SqliteStorage;
-    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
-    use persistence_kit::predicate::StoragePredicate;
-    use std::collections::BTreeMap;
-    use queuekit::facade::QueueKit;
-    use queuekit::persistencekit::PersistenceKitBackend;
-    use persistence_kit::types::TypedValue;
-    use std::sync::Arc;
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
     use uuid::Uuid;
 
     let data = crate::core::paths::data_dir();
