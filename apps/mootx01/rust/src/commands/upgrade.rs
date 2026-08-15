@@ -187,6 +187,7 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
 fn run_convergence() {
     run_kg_fact_identity_backfill();
     run_shared_content_reclaim_if_pending();
+    run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
 }
 
@@ -401,6 +402,156 @@ fn run_shared_content_reclaim_if_pending() {
                 "  ✗ shared-content reclaim failed: {e}\n    \
                  If the inventory trim committed before this failure, freed pages remain\n    \
                  on the freelist until a VACUUM completes. Run `mootx01 upgrade` to retry."
+            );
+        }
+    }
+}
+
+/// CORPUS-COUNTS-01: clear the legacy text-keyed vocab rows and zero the
+/// stale PPMI counts blob so the next reindex starts from a clean slate.
+///
+/// ## What this step does
+///
+///   1. DELETE all rows from `corpus_provider_vocab` — the text-keyed v3 table
+///      superseded by the v4 integer-keyed pair (`corpus_provider_term_dictionary`
+///      + `corpus_provider_term_payload`). These are large blobs accumulated by
+///      the distributional providers and are no longer read; keeping them wastes
+///      disk and adds to every SQLite VACUUM's work.
+///
+///   2. UPDATE all rows in `corpus_provider_counts` SET counts = empty blob —
+///      zeros the opaque provider-serialized counts blob, which has been
+///      invalidated by the schema change. `doc_count` and `vocab_size` are
+///      durable monotone anchors and are intentionally preserved.
+///
+///   3. Call `reindex_required()` at the tail to enqueue a reindex marker job
+///      and set the estate-manifest latch. If the enqueue does not take (queue
+///      not reachable), the deferral line is printed and the next upgrade retries.
+///
+/// ## Failure posture
+///
+/// The DELETE and UPDATE are both full-table passes executed synchronously.
+/// If either fails (e.g. the table was never created because the estate
+/// predates CorpusKit v2), the step logs and returns; nothing is half-done.
+/// `mootx01 upgrade` is the only migration vehicle — the next run retries.
+///
+/// Operates through `SqliteStorage` (not `EstateCoordinator`), the same
+/// surface used by `run_kg_fact_identity_backfill`. The estate and queue
+/// SQLite files are opened independently; the step is NOT schema-aware and
+/// does NOT run migrations — it touches only the two corpus tables that must
+/// pre-exist, and the manifest key-value table via the latch.
+fn run_corpus_counts_migration() {
+    use corpus_kit::reindex_latch::reindex_required;
+    use persistence_kit::sqlite::SqliteStorage;
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+    use persistence_kit::predicate::StoragePredicate;
+    use std::collections::BTreeMap;
+    use queuekit::facade::QueueKit;
+    use queuekit::persistencekit::PersistenceKitBackend;
+    use persistence_kit::types::TypedValue;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    // Absent estate means first run — nothing to migrate.
+    if !estate.exists() {
+        return;
+    }
+
+    // Quiesce the daemon before opening SQLite (single-writer discipline).
+    // If the daemon will not stop, skip — nothing is half-done, and the next
+    // `mootx01 upgrade` retries.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        println!(
+            "  ✗ corpus-counts migration skipped — the resident daemon would not stop; \
+             run `mootx01 upgrade` again"
+        );
+        return;
+    }
+
+    // Open the estate SQLite directly (no schema ladder — we are touching only
+    // pre-existing tables, not running migrations). This is the same surface
+    // used by run_kg_fact_identity_backfill. The sibling `db.key` is adopted
+    // automatically by SqliteStorage::new for encrypted estates.
+    let estate_config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: estate.display().to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+
+    let now_ms = wall_now_millis();
+
+    let result = (|| -> Result<(usize, usize), String> {
+        let storage: Arc<dyn Storage> =
+            Arc::new(SqliteStorage::new(estate_config.clone()).map_err(|e| e.to_string())?);
+
+        // Step 1: DELETE all rows from `corpus_provider_vocab`.
+        // This table was created in the v2→v3 migration and is superseded by the
+        // v4 integer-keyed pair. If it never existed (estate predates v3) the
+        // delete returns an error, which we surface as a skip — not a failure.
+        let vocab_deleted = storage
+            .row_store()
+            .delete("corpus_provider_vocab", &StoragePredicate::IsTrue)
+            .map_err(|e| format!("vocab table delete failed: {e:?}"))?;
+
+        // Step 2: UPDATE all rows in `corpus_provider_counts` SET counts = b"".
+        // Zeroing the opaque blob invalidates the stale PPMI/RI/LSA/NMF
+        // serialized state so the next reindex rebuilds from scratch.
+        // doc_count and vocab_size are NOT in `values` — update() touches
+        // ONLY the specified columns, leaving the monotone anchors intact.
+        let mut zero_counts: BTreeMap<String, TypedValue> = BTreeMap::new();
+        zero_counts.insert("counts".to_string(), TypedValue::Blob(vec![]));
+        let counts_updated = storage
+            .row_store()
+            .update("corpus_provider_counts", zero_counts, &StoragePredicate::IsTrue)
+            .map_err(|e| format!("counts blob zero failed: {e:?}"))?;
+
+        // Step 3: open the queue sibling and call the reindex latch.
+        // The latch enqueues a full-reindex marker job on the "reindex" stream
+        // and writes the "corpus_reindex_required" key into the estate manifest
+        // table. If the enqueue does not take, it prints the deferral line.
+        let queue_config = estate_config
+            .queue_sibling("queue.sqlite")
+            .map_err(|e| format!("queue sibling path: {e:?}"))?;
+        let queue_storage: Arc<dyn Storage> =
+            Arc::new(SqliteStorage::new(queue_config).map_err(|e| e.to_string())?);
+        // open_schema is idempotent — ensures the queuekit_jobs table exists
+        // (it may predate this upgrade; open_schema is a no-op when the schema
+        // is already at the current version).
+        PersistenceKitBackend::open_schema(queue_storage.as_ref())
+            .map_err(|e| format!("queue schema open: {e:?}"))?;
+        let queue = QueueKit::new(PersistenceKitBackend::new(queue_storage));
+        reindex_required(&queue, storage.as_ref(), now_ms)
+            .map_err(|e| format!("reindex latch: {e}"))?;
+
+        let _ = storage.close();
+        Ok((vocab_deleted, counts_updated))
+    })();
+
+    // Restart the daemon before reporting.
+    if was_running {
+        let _ = daemon_start();
+    }
+
+    match result {
+        Ok((vocab_deleted, counts_updated)) => {
+            if vocab_deleted == 0 && counts_updated == 0 {
+                println!("  ✓ corpus-counts migration: nothing to clear");
+            } else {
+                println!(
+                    "  ✓ corpus-counts migration: {} vocab rows cleared, {} counts blobs zeroed",
+                    vocab_deleted, counts_updated
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "  ✗ corpus-counts migration failed: {e}\n    \
+                 The estate is readable in its current shape. Run `mootx01 upgrade` to retry."
             );
         }
     }
