@@ -85,8 +85,14 @@ pub struct GraphRow {
 
 impl GraphRow {
     /// Decode `neighbours_blob` to a `Vec<i32>` of compact node indices.
+    ///
+    /// The BLOB is UNTRUSTED persisted input (VH-01 Finding C): the decoded
+    /// count is capped at `HNSW_M0` — the maximum fan-out any layer can
+    /// legitimately persist (layer 0 caps at M0; layers ≥ 1 cap at M < M0) —
+    /// so a crafted oversized BLOB cannot drive the allocation size. Trailing
+    /// bytes beyond the last whole i32 are ignored (integer division).
     pub fn decode_neighbours(&self) -> Vec<i32> {
-        let count = self.neighbours_blob.len() / 4;
+        let count = (self.neighbours_blob.len() / 4).min(HNSW_M0);
         (0..count)
             .map(|i| {
                 let base = i * 4;
@@ -127,6 +133,15 @@ pub const HNSW_EF_SEARCH: usize = 50;
 /// Vector count per modelID partition above which HNSWIndex activates.
 /// Below this threshold FloatBruteForceIndex is faster (see module docstring §Crossover).
 pub const HNSW_DEFAULT_THRESHOLD: u32 = 5_000;
+
+/// Upper bound accepted for a persisted `hnsw_graph.layer` value (VH-01
+/// Finding C). Persisted graph rows are UNTRUSTED input; `layer` sizes the
+/// per-node neighbour-layer allocation, so it must be capped consistently
+/// with the index's own level generation: `assign_level` draws
+/// `floor(-ln(u) × mL)` with mL = 1/ln(16) ≈ 0.3607, so
+/// P(level ≥ 32) = exp(-32/mL) ≈ 3e-39 — an honest graph can never persist
+/// a layer this high. Any row above the cap is structurally invalid.
+pub const HNSW_MAX_PERSISTED_LAYER: usize = 32;
 
 // MARK: - Node
 
@@ -421,9 +436,16 @@ impl HNSWIndex {
     ///   - vector: float32 values. Must have the same dimensionality as all
     ///     previously inserted vectors.
     pub fn insert(&mut self, item_id: String, model_id: String, vector: Vec<f32>) {
-        // Upsert: tombstone any existing node for this item_id.
+        // Upsert: tombstone any existing node for this item_id. If that node
+        // was the graph entry point, repair the entry point IMMEDIATELY —
+        // before the descent below seeds from it (a tombstoned seed is
+        // skipped by search_layer, which would wire the replacement with no
+        // neighbours) and before either early return (VH-01 Finding B: an
+        // unrepaired entry point suppresses all recall for the partition
+        // while live_count > 0, until the next rebuild/compaction).
         if let Some(&existing_idx) = self.node_index.get(&item_id) {
             self.nodes[existing_idx as usize].tombstoned = true;
+            self.repair_entry_point();
         }
 
         let byte_count = vector.len() * 4;
@@ -640,6 +662,52 @@ impl HNSWIndex {
     pub fn tombstone(&mut self, item_id: &str) {
         if let Some(&idx) = self.node_index.get(item_id) {
             self.nodes[idx as usize].tombstoned = true;
+            // Entry-point invariant (VH-01 Finding B): tombstoning the entry
+            // node must re-seed the entry point, or search goes dark for the
+            // whole partition while live nodes remain.
+            self.repair_entry_point();
+        }
+    }
+
+    /// Re-seed `entry_point` if it refers to a tombstoned (or out-of-range)
+    /// node.
+    ///
+    /// Invariant established (VH-01 Finding B): whenever `live_count > 0`,
+    /// `entry_point` refers to a live, non-tombstoned node. Called after any
+    /// tombstoning mutation (`insert` upsert path, `tombstone`). Picks the
+    /// live node with the most layers (its top layer becomes `max_layer`,
+    /// keeping the search descent consistent); ties resolve to the
+    /// lowest-index node for determinism. O(n) scan — only runs when the
+    /// entry node was actually tombstoned, which is rare relative to inserts.
+    /// With no live nodes left, the graph resets to the empty-entry state.
+    fn repair_entry_point(&mut self) {
+        if let Some(ep) = self.entry_point {
+            let i = ep as usize;
+            if i < self.nodes.len() && !self.nodes[i].tombstoned {
+                return; // entry point is live — nothing to repair
+            }
+        } else {
+            return; // empty graph — nothing to repair
+        }
+        let mut best: Option<(usize, usize)> = None; // (top_layer, node idx)
+        for (i, n) in self.nodes.iter().enumerate() {
+            if n.tombstoned {
+                continue;
+            }
+            let top = n.neighbours.len().saturating_sub(1);
+            if best.map_or(true, |(bt, _)| top > bt) {
+                best = Some((top, i));
+            }
+        }
+        match best {
+            Some((top, i)) => {
+                self.entry_point = Some(i as i32);
+                self.max_layer = top;
+            }
+            None => {
+                self.entry_point = None;
+                self.max_layer = 0;
+            }
         }
     }
 
@@ -804,6 +872,27 @@ impl HNSWIndex {
         // the stamp colocated with the filtering logic (§4 ruling).
         // Note: rows is now filtered_rows; rebind to keep phase names intact.
         let rows = filtered_rows.as_slice();
+
+        // Phase 0: validate every row BEFORE any allocation is sized from row
+        // data. Persisted graph rows are UNTRUSTED input (VH-01 Finding C):
+        // `layer` drives the per-node layer-vector allocation and `node_idx`
+        // is a compact array index, so a crafted row must never reach the
+        // allocation phases. One invalid row rejects the WHOLE persisted
+        // graph — the index stays empty (`has_graph()` → false) and the
+        // caller falls back to exact scan until the next THETA rebuild —
+        // rather than reconstructing a partial topology from corrupt state.
+        // `query_hnsw_graph_rows` applies the same bounds at the store layer;
+        // this check also covers direct engine callers.
+        for row in rows {
+            let blob_len = row.neighbours_blob.len();
+            if row.node_idx < 0
+                || row.layer > HNSW_MAX_PERSISTED_LAYER
+                || blob_len % 4 != 0
+                || blob_len > HNSW_M0 * 4
+            {
+                return;
+            }
+        }
 
         // Phase 1: discover distinct compact node indices and per-node layer counts.
         // node_idx → number of layers to allocate for that node.
