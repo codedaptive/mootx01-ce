@@ -748,16 +748,24 @@ fn run_status(vault_path: &Path) -> Result<serde_json::Value, JSONRPCError> {
     }
 }
 
-/// `moot_vault_reconcile` — re-hash the vault's notes and report drift
-/// (added / modified / deleted) vs the export manifest.
+/// `moot_vault_reconcile` — re-hash the vault's notes, report drift
+/// (added / modified / deleted) vs the export manifest, and surface the
+/// full import set (candidates ∪ missing) in both modes.
 ///
-/// Dry-run mode (`apply` absent or `false`): returns the candidate list and
-/// writes nothing. Mirrors Swift `VaultTools.runReconcile`.
+/// Dry-run mode (`apply` absent or `false`): computes the selection via
+/// `VaultBridge::reconcile_selection` (one estate snapshot, no disk reads),
+/// reports the candidates and missing notes, writes nothing. Mirrors Swift
+/// `VaultTools.runReconcile`.
 ///
-/// Apply mode (`apply=true`): actions the added/modified candidates by calling
-/// `VaultBridge::import_vault` synchronously. Idempotent per note's
-/// `stable_source_key`. Deleted files are always reported only; no drawer is
-/// expunged. Mirrors Swift `VaultTools.runReconcile(apply:true)`.
+/// Apply mode (`apply=true`): actions the selection via
+/// `VaultBridge::import_vault_reconciling`, which returns the exact imported
+/// set alongside the `ImportReport`. The surfaced set and the imported set
+/// are computed by the same `missing_paths` body, so the review gate holds:
+/// apply can never import a note the dry-run would not list (VR-01 Finding B).
+/// After the import, the manifest is re-stamped with the imported paths' hashes
+/// from the `current` scan so those entries become v2 certifications.
+/// Idempotent per note's `stable_source_key`. Deleted files are always reported
+/// only; no drawer is expunged. Mirrors Swift `VaultTools.runReconcile(apply:true)`.
 fn run_reconcile(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
@@ -868,42 +876,42 @@ fn run_reconcile(
         lines.push(format!("  - {p}"));
     }
 
-    if apply {
-        // Apply mode imports the candidates UNION the notes the estate does not
-        // hold. Candidates alone was the V1 bug: they come from diffing the
-        // vault against the export manifest, and vault_export is what writes
-        // that manifest, so export-then-reconcile diffs the vault against
-        // itself — zero candidates, nothing imported, success reported, estate
-        // unchanged (silent data loss).
-        //
-        // The missing set closes that blind spot without discarding the
-        // manifest. It is computed, never scanned for: import_vault_reconciling
-        // takes the paths already hashed above and tests each against the estate
-        // snapshot it needs for the import anyway. Notes that are neither
-        // changed nor missing are never read from disk, so a recurring sync
-        // costs what changed rather than vault size.
-        //
-        // The drift report above (added/modified/deleted counts) still describes
-        // what changed since the last export — it is independent of the import
-        // call below, which actions a superset.
-        //
-        // mut: VaultBridge::new requires &mut EstateCoordinator (import routes
-        // through capture_with_mode — dual-path intake fix, G7).
-        let mut coord = open.coord.lock().map_err(|_| {
-            JSONRPCError::new(
-                JSONRPCErrorCode::INTERNAL_ERROR,
-                "vault_reconcile: estate coordinator lock poisoned",
-            )
-        })?;
-        let mut bridge = VaultBridge::new(
-            &mut coord,
-            Box::new(ObsidianAdapter::new()),
-            DrawerMapping::default(),
-        );
-        let now_ms = wall_now_ms();
-        // VaultKitError has Display — use it so no internal type names leak.
-        let all_paths: std::collections::HashSet<String> = current.keys().cloned().collect();
-        let report = bridge
+    // Both modes need the estate coordinator: apply calls
+    // import_vault_reconciling, dry-run calls reconcile_selection. The bridge
+    // is constructed once outside the if/else so the review gate holds: both
+    // modes compute the selected set via the same missing_paths body, meaning
+    // apply can never import a note the dry-run would not list (VR-01 Finding B).
+    //
+    // The drift report above (added/modified/deleted counts) describes what
+    // changed since the last export — it is independent of the selected set
+    // computed below, which may be a strict superset.
+    //
+    // mut: VaultBridge::new requires &mut EstateCoordinator (import routes
+    // through capture_with_mode — dual-path intake fix, G7). The lock is
+    // also held in dry-run so reconcile_selection can snapshot the estate.
+    let mut coord = open.coord.lock().map_err(|_| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::INTERNAL_ERROR,
+            "vault_reconcile: estate coordinator lock poisoned",
+        )
+    })?;
+    let mut bridge = VaultBridge::new(
+        &mut coord,
+        Box::new(ObsidianAdapter::new()),
+        DrawerMapping::default(),
+    );
+    let now_ms = wall_now_ms();
+    // VaultKitError has Display — use it so no internal type names leak.
+    let all_paths: HashSet<String> = current.keys().cloned().collect();
+
+    // Compute the selected set and (in apply mode) the ImportReport. The
+    // selected set is candidates ∪ missing. Missing notes are paths present in
+    // all_paths but absent from the estate under both identities (lineage and
+    // export path). This closes the blind spot that export-then-reconcile
+    // had: diffing against a manifest the export just wrote yields zero
+    // candidates, so only the missing set detects un-imported notes.
+    let (selected, report_opt): (HashSet<String>, Option<ImportReport>) = if apply {
+        let (report, sel) = bridge
             .import_vault_reconciling(
                 vault_path,
                 &all_paths,
@@ -919,7 +927,38 @@ fn run_reconcile(
                     format!("vault_reconcile: apply import failed: {e}"),
                 )
             })?;
-        lines.push("apply: true — candidates actioned via vault import".to_owned());
+        (sel, Some(report))
+    } else {
+        let sel = bridge
+            .reconcile_selection(&all_paths, &candidate_paths, &open.handle, now_ms)
+            .map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("vault_reconcile: reconcile_selection failed: {e}"),
+                )
+            })?;
+        (sel, None)
+    };
+
+    // Surface the missing set and full import set in both modes. The MCP client
+    // sees the same listing in dry-run and apply — the review gate's visibility
+    // guarantee (VR-01 Finding B). missing = selected \ candidate_paths.
+    let mut missing_sorted: Vec<String> = selected.difference(&candidate_paths).cloned().collect();
+    missing_sorted.sort();
+    let missing_count = missing_sorted.len();
+    lines.push("missing (estate lacks — apply imports these):".to_owned());
+    for path in &missing_sorted {
+        lines.push(format!("  * {path}"));
+    }
+    lines.push(format!(
+        "import set: {} note(s) — {} candidate(s) + {} missing",
+        selected.len(),
+        candidate_paths.len(),
+        missing_count
+    ));
+
+    if let Some(report) = report_opt {
+        lines.push("apply: true — imported exactly the surfaced import set".to_owned());
         lines.push(format!("  drawersWritten: {}", report.drawers_written));
         lines.push(format!("  drawersUpdated: {}", report.drawers_updated));
         lines.push(format!("  itemsSkipped: {}", report.items_skipped));
@@ -928,8 +967,43 @@ fn run_reconcile(
         lines.push(format!("  fdcUnclassified: {}", report.fdc_unclassified));
         lines.push(format!("  drawersSkippedUnchanged: {}", report.drawers_skipped_unchanged));
         lines.push(format!("  drawersSkippedTombstoned: {}", report.drawers_skipped_tombstoned));
+        // Re-stamp: overwrite manifest entries for imported paths with the
+        // hashes captured in `current` above. After the import the estate
+        // agrees with the disk content hashed at reconcile-start, so each
+        // imported path's stamp becomes a true v2 certification. Without this,
+        // a surfaced note (foreign, scope-excluded, or legacy-manifest) would
+        // re-surface on every reconcile forever. If a file changed mid-apply,
+        // the stale stamp fails toward surfacing on the next reconcile —
+        // correct behaviour. Entries for paths gone from disk are retained so
+        // deletions keep reporting. A legacy manifest converges to v2 here
+        // after its first apply (every current note was selected). This is the
+        // tool layer's manifest write; the dry-run branch writes nothing.
+        let mut restamped_files = manifest.files.clone();
+        for path in &selected {
+            if let Some(entry) = current.get(path) {
+                restamped_files.insert(path.clone(), entry.clone());
+            }
+        }
+        let restamped = ExportManifest {
+            version: Some(MANIFEST_SCHEMA_VERSION),
+            exported_at: manifest.exported_at.clone(),
+            note_count: restamped_files.len(),
+            files: restamped_files,
+        };
+        write_manifest(&restamped, vault_path).map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INTERNAL_ERROR,
+                format!("vault_reconcile: manifest re-stamp failed: {e}"),
+            )
+        })?;
+        lines.push(format!(
+            "manifest: re-stamped {} imported path(s) (schema v{})",
+            selected.len(),
+            MANIFEST_SCHEMA_VERSION
+        ));
     } else {
-        // Dry-run mode: report candidates only, write nothing.
+        // Dry-run mode: list the changed/needs-review candidates with their
+        // stable keys and hashes, write nothing.
         let mut sorted_candidates: Vec<&String> = candidate_paths.iter().collect();
         sorted_candidates.sort();
         lines.push("candidates (dry-run — pass apply=true to action):".to_owned());

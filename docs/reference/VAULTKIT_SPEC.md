@@ -1,6 +1,6 @@
 ---
 title: VaultKit Specification
-version: v0.4
+version: v0.5
 status: active
 date: 2026-08-15
 description: "Behavioral specification for VaultKit: invariants, behavioral contracts, and the guarantees the bridge makes to callers and the substrate."
@@ -317,13 +317,20 @@ export wrote — never a whole-disk enumeration. `moot_vault_reconcile`
 recomputes SHA-256 hashes and classifies notes as added (unstamped —
 changed / needs review), modified, or deleted; under a legacy manifest
 (no `version` key) prior hashes are unavailable and every current note
-classifies changed / needs review. Deleted notes are reported only,
-never actioned.
+classifies changed / needs review. After a successful apply import the
+tool layer re-stamps the manifest for the imported paths (hashes captured
+at reconcile start), converging certification to schema v2 so surfaced
+notes do not re-surface forever. Deleted notes are reported only, never
+actioned.
 
 **B-8 (candidate seam is return-only):** `moot_vault_reconcile` produces
-a candidate list (added + modified notes) but writes no Proposal noun and
-mounts no QueueKit instance. Deletions are reported in the diff, never
-actioned (no drawer is expunged through the vault channel).
+a candidate list (changed / needs-review notes) plus the missing set
+(estate-lacks) — the full import set an apply would action, surfaced in
+both modes so apply never imports a note the dry-run would not list
+(VR-01 Finding B) — but writes no Proposal noun and mounts no QueueKit
+instance. The dry-run writes nothing at all; apply's only side-channel
+write is the B-7 manifest re-stamp. Deletions are reported in the diff,
+never actioned (no drawer is expunged through the vault channel).
 
 **B-9 (palace pump KG envelope rides `source_closet`):** when
 `PalacePumpMapping.call(for:)` / `call(item)` maps a KG fact, the
@@ -470,6 +477,15 @@ fixture and the golden OKF round-trip fixture are asserted byte-identically
 in both ports.
 
 ## Changelog
+
+### v0.5 — 2026-08-15
+
+B-7/B-8 extended for VR-01 Part 3 (Codex Finding B — apply imported notes
+never surfaced for review): reconcile surfaces the full import set
+(candidates ∪ missing) in both modes via one shared computation, apply
+imports exactly the surfaced set, and a successful apply re-stamps the
+manifest for imported paths (schema-v2 convergence). Dry-run remains
+write-free; apply's only side-channel write is the B-7 manifest re-stamp.
 
 ### v0.4 — 2026-08-15
 

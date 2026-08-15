@@ -135,11 +135,14 @@ enum VaultTools {
             ProjectedTool(
                 name: "moot_vault_reconcile",
                 description: """
-                Re-hash a vault's notes and report drift (added / modified / deleted) vs the export \
-                manifest. Dry-run by default: returns candidates and writes nothing. Pass apply=true \
-                to action the added and modified candidates by importing them into the estate \
-                synchronously — completing the reconcile workflow. Deleted files are always reported \
-                only; no drawer is expunged by this tool.
+                Re-hash a vault's notes, report drift (added / modified / deleted) vs the export \
+                manifest, and surface the FULL import set: the changed/needs-review candidates plus \
+                the notes the estate does not hold. Dry-run by default: lists the set and writes \
+                nothing. Pass apply=true to import exactly the surfaced set synchronously and \
+                re-stamp the manifest for imported paths — apply never imports a note the dry-run \
+                would not list. Notes under a legacy (pre-certification) manifest are all surfaced \
+                as changed/needs review. Deleted files are always reported only; no drawer is \
+                expunged by this tool.
                 """,
                 inputSchema: objectSchema(
                     properties: [
@@ -491,18 +494,28 @@ enum VaultTools {
         """)
     }
 
-    /// Re-hash the vault and report drift against the export manifest.
+    /// Re-hash the vault, report drift against the export manifest, and
+    /// surface the FULL import set — the review gate (VR-01 Finding B).
     ///
-    /// Dry-run mode (`apply=false`, the default): returns the candidate list
-    /// and writes nothing. Each added/modified file is reported with its
-    /// stableSourceKey and new SHA-256. Deletions are always reported only;
-    /// no drawer is ever expunged here.
+    /// Both modes compute and list the same import set: the changed /
+    /// needs-review candidates union the notes the estate does not hold
+    /// ("missing"), derived by one body of VaultBridge code
+    /// (`reconcileSelection` / `importVaultReconciling`). The MCP surface is
+    /// stateless across calls, so the gate is a deterministic recompute:
+    /// apply re-derives the selection rather than trusting a caller-supplied
+    /// one, and can never import a note the dry-run would not have listed.
     ///
-    /// Apply mode (`apply=true`): actions the added/modified candidates by
-    /// calling `VaultBridge.importVault` synchronously. The import is
-    /// idempotent per note's `stableSourceKey` — a re-reconcile after a
-    /// partial run is safe. Returns the full drift report plus the import
-    /// counts. Deletions are still reported only, never actioned.
+    /// Dry-run mode (`apply=false`, the default): lists the import set and
+    /// writes nothing. Each candidate is reported with its stableSourceKey
+    /// and new SHA-256. Deletions are always reported only; no drawer is
+    /// ever expunged here.
+    ///
+    /// Apply mode (`apply=true`): imports exactly the surfaced set
+    /// synchronously (idempotent per note's `stableSourceKey` — a
+    /// re-reconcile after a partial run is safe), then re-stamps the
+    /// manifest for the imported paths so certification converges (schema
+    /// v2) and surfaced notes do not re-surface forever. Deletions are
+    /// still reported only, never actioned.
     ///
     /// `now` is the operation instant, supplied by the caller (determinism
     /// rule — this method never reads the wall clock).
@@ -571,33 +584,46 @@ enum VaultTools {
         lines.append("deleted (reported, not actioned):")
         lines += deletedSorted.map { "  - \($0)" }
 
+        // The review gate (VR-01 Finding B): the FULL import set — candidates
+        // union the notes the estate does not hold ("missing") — is computed
+        // by one body of VaultBridge code and surfaced in BOTH modes. The
+        // dry-run lists exactly what an apply over the same vault + estate
+        // state imports, so apply can never import a note the review step
+        // would not have listed. Deterministic recompute IS the gate: the MCP
+        // surface is stateless across calls, so apply re-derives the same
+        // selection rather than trusting a caller-supplied one.
+        let bridge = VaultBridge(kit: kit)
+        let selected: Set<String>
+        let report: ImportReport?
         if apply {
-            // Apply mode imports the candidates UNION the notes the estate does
-            // not hold. Candidates alone was the V1 bug: they come from diffing
-            // the vault against the export manifest, and vault_export is what
-            // writes that manifest, so export-then-reconcile diffs the vault
-            // against itself — zero candidates, nothing imported, success
-            // reported, estate unchanged (silent data loss).
-            //
-            // The missing set closes that blind spot without discarding the
-            // manifest. It is computed, never scanned for: importVaultReconciling
-            // takes the paths already hashed above and tests each against the
-            // estate snapshot it needs for the import anyway. Notes that are
-            // neither changed nor missing are never read from disk, so a
-            // recurring sync costs what changed rather than vault size.
-            //
-            // The drift report above (added/modified/deleted counts) still
-            // describes what changed since the last export — it is independent
-            // of the import call below, which actions a superset.
-            let bridge = VaultBridge(kit: kit)
-            let report = try await bridge.importVaultReconciling(
+            // Single estate snapshot: importVaultReconciling computes the
+            // selection and imports it in one pass, then returns both.
+            let outcome = try await bridge.importVaultReconciling(
                 at: vaultURL,
                 allPaths: Set(current.keys),
                 candidatePaths: candidatePaths,
                 into: handle,
                 now: now,
                 mode: .foreground)
-            lines.append("apply: true — candidates actioned via vault import")
+            selected = outcome.selectedPaths
+            report = outcome.report
+        } else {
+            // Dry-run: same selection, computed without importing (one estate
+            // snapshot, no note read, nothing written).
+            selected = try await bridge.reconcileSelection(
+                allPaths: Set(current.keys),
+                candidatePaths: candidatePaths,
+                into: handle)
+            report = nil
+        }
+        let missingSorted = selected.subtracting(candidatePaths).sorted()
+        lines.append("missing (estate lacks — apply imports these):")
+        lines += missingSorted.map { "  * \($0)" }
+        lines.append(
+            "import set: \(selected.count) note(s) — \(candidatePaths.count) candidate(s) + \(missingSorted.count) missing")
+
+        if let report {
+            lines.append("apply: true — imported exactly the surfaced import set")
             lines.append("  drawersWritten: \(report.drawersWritten)")
             lines.append("  drawersUpdated: \(report.drawersUpdated)")
             lines.append("  itemsSkipped: \(report.itemsSkipped)")
@@ -606,8 +632,33 @@ enum VaultTools {
             lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
             lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
             lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
+
+            // Re-stamp: the import above made the estate agree with the disk
+            // content hashed at reconcile start, so each imported path's stamp
+            // becomes a true certification (schema v2). Without this, a
+            // surfaced note (foreign, scope-excluded, or legacy-manifest)
+            // would re-surface on every reconcile forever. Stamps reuse the
+            // hashes captured in `current` above: if a file changed mid-apply,
+            // the stale stamp fails toward surfacing on the next reconcile.
+            // Entries for paths gone from disk are retained so deletions keep
+            // reporting; a legacy manifest converges to v2 here after its
+            // first apply (every current note was selected). Tool-layer
+            // manifest write — same owner as the export stamp (B-7); the
+            // dry-run branch writes nothing (B-8).
+            var restampedFiles = manifest.files
+            for path in selected {
+                if let entry = current[path] { restampedFiles[path] = entry }
+            }
+            let restamped = ExportManifest(
+                version: manifestSchemaVersion,
+                exportedAt: manifest.exportedAt,
+                noteCount: restampedFiles.count,
+                files: restampedFiles)
+            try writeManifest(restamped, to: vaultURL)
+            lines.append("manifest: re-stamped \(selected.count) imported path(s) (schema v\(manifestSchemaVersion))")
         } else {
-            // Dry-run mode: report candidates only, write nothing.
+            // Dry-run mode: list the changed/needs-review candidates with
+            // their stable keys and hashes, write nothing.
             lines.append("candidates (dry-run — pass apply=true to action):")
             for path in candidatePathsSorted {
                 let key = path.hasSuffix(".md") ? String(path.dropLast(3)) : path

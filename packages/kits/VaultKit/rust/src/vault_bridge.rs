@@ -152,6 +152,39 @@ type DrawerState = (
     std::collections::HashMap<Uuid, String>,
 );
 
+/// The vault paths the estate does not hold under either identity a note could
+/// have been imported under (the path's lineage for foreign notes; the export
+/// path for round-tripped notes). Shared by `reconcile_selection` (dry-run) and
+/// `import_vault_reconciling` (apply) so the surfaced set and the imported set
+/// are computed by one body of code. The tests err toward selecting: an
+/// over-selected note is read and then absorbed by the content-idempotent check
+/// without a write; erring the other way would drop a note, which is the defect
+/// this path prevents.
+/// Mirrors Swift `VaultBridge.missingPaths(allPaths:candidatePaths:drawerState:)`.
+fn missing_paths(
+    all_paths: &HashSet<String>,
+    candidate_paths: &HashSet<String>,
+    drawer_state: &DrawerState,
+) -> HashSet<String> {
+    let (existing_lineage_ids, _, _, stable_source_key_by_lineage) = drawer_state;
+    let export_paths: HashSet<&str> =
+        stable_source_key_by_lineage.values().map(String::as_str).collect();
+    let mut missing = HashSet::new();
+    for path in all_paths {
+        if candidate_paths.contains(path) {
+            continue;
+        }
+        let stable_key = path.strip_suffix(".md").unwrap_or(path).to_owned();
+        let path_lineage = DrawerMapping::lineage_id(&stable_key);
+        if !existing_lineage_ids.contains(&path_lineage)
+            && !export_paths.contains(stable_key.as_str())
+        {
+            missing.insert(path.clone());
+        }
+    }
+    missing
+}
+
 /// The public facade: bridges a MOOT estate and a Markdown vault in both
 /// directions. Mirrors Swift `VaultBridge`.
 ///
@@ -342,6 +375,14 @@ impl<'a> VaultBridge<'a> {
     /// `candidate_paths` is the added and modified set from the manifest diff.
     /// `now` is milliseconds-since-epoch, stamped on the audit receipt.
     /// `mode` sets the encode SPEED only.
+    ///
+    /// Returns the `ImportReport` for the selected notes plus the selected
+    /// set itself (`candidate_paths` ∪ missing). Returning the selection is
+    /// the review gate's audit surface: the tool layer reports exactly what
+    /// was imported, and `reconcile_selection` computes the identical set for
+    /// the dry-run, so apply can never import a note the review step would
+    /// not have listed (VR-01 Finding B).
+    ///
     /// Mirrors Swift `VaultBridge.importVaultReconciling(at:allPaths:candidatePaths:into:now:)`.
     pub fn import_vault_reconciling(
         &mut self,
@@ -352,29 +393,15 @@ impl<'a> VaultBridge<'a> {
         now: i64,
         progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
         mode: EncodeSpeed,
-    ) -> Result<ImportReport, VaultKitError> {
+    ) -> Result<(ImportReport, HashSet<String>), VaultKitError> {
         // One snapshot serves both the selection below and the import itself —
         // it is a full-hydration scan of every drawer, so taking it twice would
         // cost more than the rescan this method exists to avoid.
         let drawer_state = self.existing_drawer_state(handle, now)?;
-        let (existing_lineage_ids, _, _, stable_source_key_by_lineage) = &drawer_state;
-        let export_paths: HashSet<&str> =
-            stable_source_key_by_lineage.values().map(String::as_str).collect();
-        let mut selected = candidate_paths.clone();
-        for path in all_paths {
-            if candidate_paths.contains(path) {
-                continue;
-            }
-            let stable_key = path.strip_suffix(".md").unwrap_or(path).to_owned();
-            let path_lineage = DrawerMapping::lineage_id(&stable_key);
-            if !existing_lineage_ids.contains(&path_lineage)
-                && !export_paths.contains(stable_key.as_str())
-            {
-                selected.insert(path.clone());
-            }
-        }
+        let missing = missing_paths(all_paths, candidate_paths, &drawer_state);
+        let selected: HashSet<String> = candidate_paths.union(&missing).cloned().collect();
         let notes = self.adapter.to_ir_filtered(vault_path, Some(&selected))?;
-        self.import_notes(
+        let report = self.import_notes(
             &notes,
             handle,
             &vault_path.display().to_string(),
@@ -382,7 +409,42 @@ impl<'a> VaultBridge<'a> {
             progress,
             mode,
             Some(drawer_state),
-        )
+        )?;
+        Ok((report, selected))
+    }
+
+    /// The full set a reconcile apply would import: `candidate_paths` union the
+    /// notes the estate does not hold, computed against one estate snapshot
+    /// and returned WITHOUT importing anything.
+    ///
+    /// This is the dry-run half of the review gate (VR-01 Finding B): the tool
+    /// layer calls it so the dry-run surfaces exactly the set an apply over
+    /// the same vault + estate state imports. The computation is shared with
+    /// `import_vault_reconciling` (`missing_paths`), so the two cannot diverge —
+    /// apply can never import a note the dry-run would not have listed.
+    ///
+    /// Cost: one full-hydration estate snapshot (the same scan the import
+    /// itself needs); no note is read from disk.
+    ///
+    /// - `all_paths`: every vault-relative note path currently on disk.
+    /// - `candidate_paths`: the changed / needs-review paths from the manifest diff.
+    /// - `handle`: the estate the reconcile targets.
+    /// - `now`: milliseconds-since-epoch (required by `existing_drawer_state` —
+    ///   known port divergence from Swift's `reconcileSelection` which has no
+    ///   `now` param; the Date vs ms difference is fine).
+    /// - Returns: `candidate_paths` ∪ the missing set.
+    ///
+    /// Mirrors Swift `VaultBridge.reconcileSelection(allPaths:candidatePaths:into:)`.
+    pub fn reconcile_selection(
+        &self,
+        all_paths: &std::collections::HashSet<String>,
+        candidate_paths: &std::collections::HashSet<String>,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<HashSet<String>, VaultKitError> {
+        let drawer_state = self.existing_drawer_state(handle, now)?;
+        let missing = missing_paths(all_paths, candidate_paths, &drawer_state);
+        Ok(candidate_paths.union(&missing).cloned().collect())
     }
 
     /// Import one MemPalace palace directly into an estate — all three

@@ -10392,9 +10392,10 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         "all three notes must be ingested on the first apply; got: {seed_text}"
     );
 
-    // Change exactly one note. The manifest is still empty (bare-estate export
-    // stamped nothing), so the diff again reports all three as "added" — the
-    // manifest has no prior hashes to compare against.
+    // Change exactly one note. The first apply re-stamped the manifest with
+    // certified v2 hashes for Alpha, Beta, and Gamma (as-hashed at that
+    // apply's `current` scan). The second reconcile diffs against those stamps:
+    // only Beta's hash changed, so it is the sole candidate.
     std::fs::write(
         vault.join("Beta.md"),
         "# Beta\n\nEdited body for Beta.",
@@ -10416,21 +10417,26 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         "reconcile apply must be isError:false; got: {apply_result:?}"
     );
     let text = content_text(&apply_result);
-    // All three are "added" because the manifest from the bare-estate export
-    // has no stamped entries to compare against.
+    // After the first apply re-stamped the manifest, only Beta is modified
+    // (its hash no longer matches). Alpha and Gamma are certified unchanged.
     assert!(
-        text.contains("3 added, 0 modified, 0 deleted"),
-        "all three notes are added (manifest has no entries); got: {text}"
+        text.contains("0 added, 1 modified, 0 deleted"),
+        "after re-stamp only Beta is modified; got: {text}"
+    );
+    // Only Beta is in the selected set — candidates ∪ missing = {Beta.md}.
+    // Alpha and Gamma are in the estate and certified by the manifest,
+    // so they are neither candidates nor missing; they are not imported at all.
+    assert!(
+        text.contains("import set: 1 note(s)"),
+        "selected set must be exactly Beta; got: {text}"
     );
     assert!(
         text.contains("drawersUpdated: 1"),
         "the changed note (Beta) must be updated; got: {text}"
     );
-    // Alpha and Gamma are already in the estate with identical content — the
-    // import reads them (they are candidates), finds no change, and counts them
-    // as drawers_skipped_unchanged rather than re-writing.
+    // The manifest is re-stamped with Beta's new hash after apply.
     assert!(
-        text.contains("drawersSkippedUnchanged: 2"),
-        "unchanged, already-present notes must be absorbed without a write; got: {text}"
+        text.contains("manifest: re-stamped 1 imported path(s)"),
+        "manifest must be re-stamped for the one imported note; got: {text}"
     );
 }

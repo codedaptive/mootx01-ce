@@ -356,7 +356,12 @@ public struct VaultBridge: Sendable {
     ///   - now: the operation instant, supplied by the caller (determinism
     ///     rule) and stamped on the audit receipt.
     ///   - mode: encode SPEED (`.foreground` default / `.background`).
-    /// - Returns: an `ImportReport` reflecting only the selected notes.
+    /// - Returns: the `ImportReport` for the selected notes, plus the selected
+    ///   set itself (`candidatePaths` ∪ missing). Returning the selection is
+    ///   the review gate's audit surface: the tool layer reports exactly what
+    ///   was imported, and `reconcileSelection` computes the identical set for
+    ///   the dry-run, so apply can never import a note the review step would
+    ///   not have listed (VR-01 Finding B).
     public func importVaultReconciling(
         at vaultURL: URL,
         allPaths: Set<String>,
@@ -365,22 +370,15 @@ public struct VaultBridge: Sendable {
         now: Date,
         progress: VaultProgress? = nil,
         mode: EncodeSpeed = .foreground
-    ) async throws -> ImportReport {
+    ) async throws -> (report: ImportReport, selectedPaths: Set<String>) {
         // One snapshot serves both the selection below and the import itself —
         // it is a full-hydration scan of every drawer, so taking it twice would
         // cost more than the rescan this method exists to avoid.
         let drawerState = try await existingDrawerState(handle: handle)
-        let exportPaths = Set(drawerState.stableSourceKeyByLineage.values)
-        var selected = candidatePaths
-        for path in allPaths where !candidatePaths.contains(path) {
-            let stableKey = ObsidianAdapter.dropMarkdownExtension(path)
-            let pathLineage = DrawerMapping.lineageID(forStableSourceKey: stableKey)
-            if !drawerState.lineageIDs.contains(pathLineage), !exportPaths.contains(stableKey) {
-                selected.insert(path)
-            }
-        }
+        let selected = candidatePaths.union(missingPaths(
+            allPaths: allPaths, candidatePaths: candidatePaths, drawerState: drawerState))
         let notes = try adapter.toIR(vaultURL: vaultURL, includingPaths: selected)
-        return try await importNotes(
+        let report = try await importNotes(
             notes,
             into: handle,
             source: vaultURL.path,
@@ -388,6 +386,61 @@ public struct VaultBridge: Sendable {
             mode: mode,
             precomputedDrawerState: drawerState
         )
+        return (report: report, selectedPaths: selected)
+    }
+
+    /// The full set a reconcile apply would import: `candidatePaths` union the
+    /// notes the estate does not hold, computed against one estate snapshot
+    /// and returned WITHOUT importing anything.
+    ///
+    /// This is the dry-run half of the review gate (VR-01 Finding B): the tool
+    /// layer calls it so the dry-run surfaces exactly the set an apply over
+    /// the same vault + estate state imports. The computation is shared with
+    /// `importVaultReconciling` (`missingPaths`), so the two cannot diverge —
+    /// apply can never import a note the dry-run would not have listed.
+    ///
+    /// Cost: one full-hydration estate snapshot (the same scan the import
+    /// itself needs); no note is read from disk.
+    ///
+    /// - Parameters:
+    ///   - allPaths: every vault-relative note path currently on disk.
+    ///   - candidatePaths: the changed / needs-review paths from the manifest
+    ///     diff.
+    ///   - handle: the estate the reconcile targets.
+    /// - Returns: `candidatePaths` ∪ the missing set.
+    public func reconcileSelection(
+        allPaths: Set<String>,
+        candidatePaths: Set<String>,
+        into handle: EstateHandle
+    ) async throws -> Set<String> {
+        let drawerState = try await existingDrawerState(handle: handle)
+        return candidatePaths.union(missingPaths(
+            allPaths: allPaths, candidatePaths: candidatePaths, drawerState: drawerState))
+    }
+
+    /// The missing set: vault paths the estate does not hold under either
+    /// identity a note could have been imported under (the path's lineage for
+    /// foreign notes; the export path for round-tripped notes). Shared by
+    /// `reconcileSelection` (dry-run) and `importVaultReconciling` (apply) so
+    /// the surfaced set and the imported set are computed by one body of code.
+    /// The tests err toward selecting: an over-selected note is read and then
+    /// absorbed by the content-idempotent check without a write; erring the
+    /// other way would drop a note, which is the defect this path prevents.
+    private func missingPaths(
+        allPaths: Set<String>,
+        candidatePaths: Set<String>,
+        drawerState: DrawerState
+    ) -> Set<String> {
+        let exportPaths = Set(drawerState.stableSourceKeyByLineage.values)
+        var missing: Set<String> = []
+        for path in allPaths where !candidatePaths.contains(path) {
+            let stableKey = ObsidianAdapter.dropMarkdownExtension(path)
+            let pathLineage = DrawerMapping.lineageID(forStableSourceKey: stableKey)
+            if !drawerState.lineageIDs.contains(pathLineage), !exportPaths.contains(stableKey) {
+                missing.insert(path)
+            }
+        }
+        return missing
     }
 
     /// Import one MemPalace palace directly into an estate — all three
