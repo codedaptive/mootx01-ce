@@ -1951,8 +1951,14 @@ public actor Corpus {
                 continue
             }
             guard foldSafe else {
-                // RI: order-sensitive accumulation; corpus path preserves correct order.
-                _trainingPathDecisions[modelID] = .corpus(.deltaNotFoldSafe)
+                // Standalone RI rejection: the live accumulator folds counts in
+                // ingest-arrival order; a from-scratch train would fold in
+                // activeChunks() order. RI is float-order-sensitive, so the two
+                // fold sequences cannot be proven equal. This is NOT a pending-delta
+                // issue (no delta exists in standalone) — it is a fold-order
+                // provenance issue: we cannot verify the maintained counts match
+                // what a canonical from-scratch train would produce.
+                _trainingPathDecisions[modelID] = .corpus(.foldOrderProvenanceUnknown)
                 trainInputs.append((index, blob, fresh))
                 continue
             }

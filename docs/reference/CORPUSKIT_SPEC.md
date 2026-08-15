@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.18.0
+version: 1.18.1
 status: accepted-1.1-target
 date: 2026-08-15
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.0: CORPUS-INCREMENTAL-01 — retrain counts-path behavioral contract (B-22) and test-seam conformance requirement (C-15)."
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -434,10 +434,18 @@ routes to the corpus path:
 3. *notCountsCapable* — `finalizeFromCounts()` returned `false`; LSA and NMF
    always fall back here because their per-document TF rows are not persisted in
    the counts blob.
-4. *deltaNotFoldSafe* — the pending-reference delta is non-empty and
-   `countsDeltaFoldSafe` is `false`; RandomIndexing is restore-only because float
-   context-vector accumulation is order-sensitive (reviewer finding F-3, see
-   INTERFACE § 2 `TrainableEmbeddingBasis`).
+4. *deltaNotFoldSafe* (attached mode) / *foldOrderProvenanceUnknown* (standalone
+   mode) — RandomIndexing's float context-vector accumulation is order-sensitive;
+   the counts path cannot safely reconstruct an RI basis without knowing that the
+   accumulated fold order matches the canonical training order (reviewer finding
+   F-3, see INTERFACE § 2 `TrainableEmbeddingBasis`). In **attached** mode the
+   pending-reference delta is non-empty and `countsDeltaFoldSafe` is `false`; the
+   real pending delta IS the operative reason the counts path cannot proceed, so
+   the decision is `corpus(.deltaNotFoldSafe)`. In **standalone** mode there is no
+   pending-reference tracking; the maintained accumulator folds in ingest-arrival
+   order while a from-scratch train uses active-chunk order, and the two cannot
+   be proven equal, so the decision is `corpus(.foldOrderProvenanceUnknown)`
+   (reviewer finding F-11).
 5. *populationMismatch* — `PersistedBasis.trainedChunkCount` (frozen base document
    count written at the last corpus-path publication) plus the non-subsumed pending
    reference count does not equal the current active-content-ID count from the
@@ -458,9 +466,12 @@ counts are restored. Per-provider behavior is fixed:
   corpus text. The decision is `.countsDeltaFold(folded: N)` where N is the
   pending count; `.countsRestore` when the pending set is empty.
 - *RandomIndexing:* restore-only — `countsDeltaFoldSafe` is `false` so any
-  non-empty pending delta forces the corpus path. When the pending set IS empty
-  (counts reflect the full corpus), the guard-4 check passes and the decision is
-  `.countsRestore`. Zero bodies are paged in either case.
+  non-empty pending delta (attached mode) forces the corpus path with
+  `corpus(.deltaNotFoldSafe)`. Standalone RI always takes the corpus path with
+  `corpus(.foldOrderProvenanceUnknown)` because fold-order provenance cannot be
+  proven (guard 4; reviewer finding F-11). When the pending set IS empty in
+  attached mode (counts reflect the full corpus), the guard-4 check passes and the
+  decision is `.countsRestore`. Zero bodies are paged in either case.
 - *LSA / NMF:* always take the corpus path because `finalizeFromCounts()` returns
   `false` (guard 3).
 
@@ -585,7 +596,10 @@ after reopen.
 conform to `Equatable` so suites can assert on structure directly. Conformance
 suites MUST assert the expected decision for each guard-chain scenario: counts
 restore (all guards pass, empty pending), counts delta-fold (all guards pass,
-non-empty PPMI pending), and each of the six corpus-path reasons (B-22).
+non-empty PPMI pending), and each of the seven corpus-path reasons (B-22):
+firstTrain, noCountsRow, notCountsCapable, deltaNotFoldSafe (attached RI with
+non-empty pending delta), foldOrderProvenanceUnknown (standalone RI),
+populationMismatch, and pendingUnresolvable.
 Non-forced calls that skip already-trained slots return `nil` for those slots —
 the accessor is not populated for skipped slots.
 
@@ -887,6 +901,18 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.18.1 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 F-11 (corrective amendment): added `foldOrderProvenanceUnknown`
+to the `CorpusPathReason` set in **B-22** to precisely describe the standalone RI
+rejection (the maintained accumulator folds in ingest-arrival order; a from-scratch
+train uses active-chunk order; the two cannot be proven equal for a
+float-order-sensitive provider). Guard 4 and the RI per-provider behavior paragraph
+are updated to distinguish attached mode (`deltaNotFoldSafe` — a real pending delta
+is the operative reason) from standalone mode (`foldOrderProvenanceUnknown`). **C-15**
+updated from six to seven corpus-path reasons with the full list. No behavioral
+contract changed; this is a precision correction to reason naming only.
 
 ### 1.18.0 -- 2026-08-15
 

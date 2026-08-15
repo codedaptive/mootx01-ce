@@ -15,7 +15,10 @@
 //! exercise genuine primitive-form read-back (a TIMESTAMP column round-trips as
 //! a parsed `Timestamp(i64)` here), the same discipline as bundle_store_tests.
 
-use corpus_kit::{BasisStore, Corpus, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis, TrainableEmbeddingBasis};
+use corpus_kit::{
+    BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis,
+    TrainableEmbeddingBasis, TrainingPathDecision,
+};
 use corpus_kit_providers::{LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use serde::Deserialize;
@@ -114,6 +117,59 @@ fn reindex_persists_basis() {
         .expect("load")
         .expect("basis row must exist after reindex");
     assert_eq!(loaded.trained_chunk_count, RI_DOCS.len());
+}
+
+/// G-5a-RI (standalone): RI reindex records FoldOrderProvenanceUnknown — not
+/// DeltaNotFoldSafe.
+///
+/// The standalone path rejects RI from the counts path because the live
+/// accumulator folds counts in ingest-arrival order, while a from-scratch
+/// train uses activeChunks() order. RI is float-order-sensitive so these
+/// fold orders cannot be proven equal. The reason is fold-order PROVENANCE,
+/// not a pending delta (there is no delta in the standalone model).
+///
+/// After any `ingest()` call the in-memory counts accumulator is non-empty
+/// (chunks are folded immediately on ingest). The standalone counts-path probe
+/// sees: capable=true (RI supports finalize_from_counts), fold_safe=false
+/// (RI's counts_delta_fold_safe() always returns false). fold_safe=false →
+/// FoldOrderProvenanceUnknown before any basis-existence check. This fires on
+/// both the FIRST reindex (no prior basis) and subsequent reindexes.
+///
+/// DeltaNotFoldSafe is reserved for the ATTACHED engine path (ContentEngine)
+/// where a real pending delta exists and IS the reason for rejection.
+#[test]
+fn g5a_ri_standalone_reindex_records_fold_order_provenance_unknown() {
+    let _g = global_lock();
+    let path = scratch_path();
+    let corpus = fresh_ri_corpus(storage_at(&path));
+    for (i, doc) in RI_DOCS.iter().enumerate() {
+        corpus
+            .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+            .expect("ingest");
+    }
+
+    // First reindex: in-memory counts accumulator is non-empty from ingests.
+    // RI fold_safe=false → FoldOrderProvenanceUnknown. Corpus path trains fresh.
+    corpus.reindex(NOW_MILLIS).expect("first reindex");
+    let decisions = corpus.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FoldOrderProvenanceUnknown)),
+        "first reindex: standalone RI must record FoldOrderProvenanceUnknown (fold_safe=false \
+         fires before any basis-existence check once counts accumulator is non-empty)"
+    );
+
+    // Second reindex: basis row and healed counts exist from first reindex.
+    // RI fold_safe=false → FoldOrderProvenanceUnknown again. NOT DeltaNotFoldSafe.
+    corpus.reindex(NOW_MILLIS + 1000).expect("second reindex");
+    let decisions = corpus.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FoldOrderProvenanceUnknown)),
+        "second reindex: standalone RI must record FoldOrderProvenanceUnknown (fold-order \
+         provenance cannot be proven equal to canonical training order — no pending delta, \
+         different from DeltaNotFoldSafe which requires a real delta)"
+    );
 }
 
 // ── §3 first-ingest auto-train + growth retrain ──

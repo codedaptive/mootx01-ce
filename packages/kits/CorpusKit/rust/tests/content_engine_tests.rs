@@ -87,11 +87,27 @@ impl PublicationRaceSource {
         state.released = false;
     }
 
-    fn wait_until_blocked(&self) {
+    /// Wait until the blocked record's `record()` call has entered the blocking
+    /// section. Returns `true` if the block was entered before the deadline, or
+    /// `false` if the 10-second timeout expired. Callers must assert the return
+    /// value with a descriptive message so a hang surfaces as a test failure
+    /// rather than an indefinite suite stall.
+    fn wait_until_blocked(&self) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut state = self.state.lock().unwrap();
         while !state.block_entered {
-            state = self.condition.wait(state).unwrap();
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline - now;
+            let (guard, timed_out) = self.condition.wait_timeout(state, remaining).unwrap();
+            state = guard;
+            if timed_out.timed_out() {
+                return false;
+            }
         }
+        true
     }
 
     fn release_blocked_record(&self) {
@@ -608,7 +624,11 @@ fn provider_publication_preserves_post_snapshot_admission() {
             .train_trainable_slots(NOW + 1, true)
             .expect("force retrain");
     });
-    source.wait_until_blocked();
+    assert!(
+        source.wait_until_blocked(),
+        "provider_publication_preserves_post_snapshot_admission: timed out waiting for \
+         retrain thread to block on anchor record fetch"
+    );
 
     let late_text = "post snapshot vocabulary";
     let late = CorpusContentRecord {
@@ -715,7 +735,11 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
             .train_trainable_slots(NOW + 1, true)
             .expect("force retrain");
     });
-    source.wait_until_blocked();
+    assert!(
+        source.wait_until_blocked(),
+        "provider_publication_does_not_refold_pre_snapshot_pending_admission: timed out \
+         waiting for retrain thread to block on anchor record fetch"
+    );
     let admission_engine = Arc::clone(&engine);
     let pending_for_admission = pending.clone();
     let admission = std::thread::spawn(move || {
@@ -1803,5 +1827,352 @@ fn g6f_sentinel_fields_cannot_satisfy_admission_digest_equality() {
     assert_ne!(
         sentinel_revision, live_revision,
         "sentinel revision must differ from live record revision"
+    );
+}
+
+// ── G-5a-ENTRY: production entry point drives the decision seam ─────────────
+
+/// G-5a-ENTRY: the attached engine's public reindex entry records CountsDeltaFold.
+///
+/// The drift trigger calls `engine.reindex(now_millis)`, which internally calls
+/// `train_trainable_slots(force: true)`. This test drives the production entry
+/// (reindex) rather than train_trainable_slots directly, verifying the recorded
+/// decision is CountsDeltaFold(n) when a pending ref exists.
+#[test]
+fn g5a_entry_attached_reindex_records_counts_delta_fold() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+
+    // Seed two base documents.
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train via the public entry: internally calls train_trainable_slots.
+    // No basis → FirstTrain (corpus path).
+    engine.reindex(NOW).expect("first reindex via production entry");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain)),
+        "first reindex must record FirstTrain via production entry"
+    );
+
+    // Add a third document and insert a pending reference row.
+    source.put("doc-c", "concurrency channels and locks");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let row_store = storage.row_store();
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "ppmi-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-c".into(),
+                revision: 1,
+                digest: content_digest("concurrency channels and locks"),
+                updated_at_secs: NOW / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert pending ref for doc-c");
+
+    // Second reindex via the production entry: basis exists, PPMI fold-safe,
+    // population matches (2+1=3). The production entry invokes
+    // train_trainable_slots(force: true) internally — exactly as the drift
+    // trigger does. Expected: counts path with folded=1.
+    //
+    // NOTE: reindex() also re-embeds all corpus content after training (it calls
+    // index_whole_content_batch for every active ID). The re-embed phase fetches
+    // each record from source, so total fetch count = folded_refs + re-embed_reads.
+    // The decision seam (CountsDeltaFold) is the authoritative gate; fetch count
+    // is not asserted here because reindex() intentionally reads all content for
+    // the re-embed pass — only train_trainable_slots alone skips corpus reads on
+    // the counts path (F-1 gate, verified by g5a_ppmi_counts_path_delta_fold_positive).
+    engine.reindex(NOW + 1).expect("second reindex via production entry");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsDeltaFold { folded: 1 }),
+        "second reindex (via production entry) must record CountsDeltaFold {{ folded: 1 }}"
+    );
+}
+
+// ── F-10: counts-path publication twin ──────────────────────────────────────
+
+/// F-10: counts-path publication preserves post-publication admission.
+///
+/// The CORPUS-path race test `provider_publication_preserves_post_snapshot_admission`
+/// proves that a record admitted DURING publication (post-snapshot) survives.
+/// This is the COUNTS-PATH twin proving the same property.
+///
+/// Proof shape: NON-INTERLEAVING (lock-quoting).
+///
+/// The counts path (both CountsDeltaFold and CountsRestore) holds the engine's
+/// `counts_commit_lock` for its ENTIRE duration. The lock is acquired at the
+/// very top of `train_trainable_slots` in content_engine.rs:
+///
+///   let _commit_guard = self
+///       .counts_commit_lock
+///       .lock()
+///       .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
+///
+/// This is the SAME lock that `batch_commit` (the admission path) acquires
+/// before writing reference rows. Therefore NO admission can interleave with
+/// the counts-path publication: the two operations are strictly serialized by
+/// `counts_commit_lock`. We cannot block mid-fetch to interleave because the
+/// counts path makes NO `source.record()` calls during CountsDeltaFold — it
+/// reads only from storage (the persisted counts snapshot and the pending refs'
+/// stored text, which was already folded by admit time).
+///
+/// We prove the property sequentially: publication completes, then we insert a
+/// new reference row (simulating a post-publication admission), and assert that
+/// row EXISTS and is non-subsumed (pending, not folded by the just-completed
+/// publication). We then assert a subsequent force retrain delta-folds it.
+#[test]
+fn f10_counts_path_publication_preserves_post_publication_admission() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train: corpus path (FirstTrain), establishes basis and counts.
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // Set up CountsDeltaFold: add doc-c with a pending ref.
+    source.put("doc-c", "rust ownership channels locks");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let row_store = storage.row_store();
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "ppmi-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-c".into(),
+                revision: 1,
+                digest: content_digest("rust ownership channels locks"),
+                updated_at_secs: NOW / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert doc-c pending ref");
+
+    // Counts-path publication: folds doc-c (CountsDeltaFold { folded: 1 }).
+    // The engine holds counts_commit_lock for the entirety of this call —
+    // see the lock acquisition in content_engine.rs::train_trainable_slots
+    // quoted in this test's doc comment. No admission can interleave.
+    engine.train_trainable_slots(NOW + 1, true).expect("counts delta fold");
+    assert_eq!(
+        engine.training_path_decisions().get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsDeltaFold { folded: 1 }),
+        "F-10 setup: counts path must delta-fold doc-c"
+    );
+
+    // Post-publication admission: insert doc-d's reference row AFTER the
+    // counts-path publication completed and the lock was released.
+    // This simulates a record admitted immediately after a counts-path
+    // publication burst — the admission arrives after the publication window.
+    source.put("doc-d", "concurrency mutex condvar thread");
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "ppmi-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-d".into(),
+                revision: 1,
+                digest: content_digest("concurrency mutex condvar thread"),
+                updated_at_secs: (NOW + 2) / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert doc-d post-publication ref");
+
+    // Assert: doc-d's reference row EXISTS and is non-subsumed (pending).
+    // The counts path's per-ref delete removed ONLY doc-c (the folded ref).
+    // doc-d was admitted after the publication lock was released — its row
+    // was never touched by the publication and must survive intact.
+    let doc_d_ref = counts_store
+        .reference_for("ppmi-v1", "1.1.0", "doc-d")
+        .expect("load doc-d reference")
+        .expect("doc-d reference must exist — post-publication admission must survive");
+    assert!(
+        !doc_d_ref.is_subsumed,
+        "doc-d ref must be non-subsumed (pending): the counts path deletes ONLY the \
+         refs it folded (doc-c), not all refs — doc-d was admitted post-publication"
+    );
+    assert_eq!(
+        doc_d_ref.digest,
+        content_digest("concurrency mutex condvar thread"),
+        "doc-d ref digest must match the admitted record"
+    );
+
+    // Assert: a subsequent force retrain delta-folds doc-d (the pending ref),
+    // proving the post-publication admission is correctly picked up next cycle.
+    engine.train_trainable_slots(NOW + 2, true).expect("second counts fold");
+    assert_eq!(
+        engine.training_path_decisions().get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsDeltaFold { folded: 1 }),
+        "F-10: subsequent retrain must delta-fold doc-d (the post-publication admission)"
+    );
+}
+
+// ── G-5d: coverage consequence of identical-digest countsRestore ─────────────
+
+/// G-5d: after a countsRestore publication, existing coverage survives in the
+/// side table (corpus_provider_coverage), keyed by (model_id, basis_digest).
+///
+/// CountsRestore restores the same counts → same serialized basis bytes →
+/// same basis_digest. The coverage side table is keyed by (content_id,
+/// model_id, basis_digest). Since the digest is unchanged, existing coverage
+/// rows survive and covered_count returns the same value as before.
+///
+/// Two facts, both stated here per reviewer requirement:
+///   (i)  Migration repair relies on the basis-generation bump (which
+///        CountsRestore does trigger — the generation counter increments after
+///        any training job) to invalidate the content-row BITMAP coverage
+///        (is_fully_covered checks generation equality, not just the side
+///        table). This bitmap-based invalidation is what causes the re-embed
+///        path to fire when reindex() re-embeds all content. The side table
+///        (authoritative) survives; the per-row generation stamp goes stale,
+///        making the bitmap fast-path show rows as uncovered.
+///   (ii) Therefore a no-op reindex (CountsRestore + no content changes)
+///        re-embeds the corpus via the direct reindex() path — which always
+///        re-embeds all content regardless of coverage status. This matches
+///        the PRE-mission corpus-path behavior for a no-op force reindex (not
+///        a regression introduced by the counts path). Optimizing the no-op
+///        reindex to skip re-embed when the side-table coverage is complete is
+///        a named follow-up for Bob; it is out of this mission's scope.
+#[test]
+fn g5d_counts_restore_coverage_survives_in_side_table() {
+    use persistence_kit::{TypedValue, Column, StoragePredicate};
+
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train (FirstTrain): establishes the basis and counts. Captures the
+    // basis_digest before CountsRestore so we can compare after.
+    engine.train_trainable_slots(NOW, false).expect("first train");
+    let generations_before = engine.provider_generations();
+    let (model_id, digest_before) = generations_before
+        .into_iter()
+        .find(|(m, _)| m == "ppmi-v1")
+        .expect("ppmi-v1 slot must exist");
+    assert!(!digest_before.is_empty(), "basis_digest must be non-empty after first train");
+
+    // Insert synthetic coverage rows for both docs directly into the side table.
+    // CorpusProviderCoverageStore is not a public API; we write the rows via the
+    // storage row_store so the test does not depend on internal kit structure.
+    // The table schema: (content_id TEXT, model_id TEXT, basis_digest TEXT,
+    //                    updated_at TIMESTAMP) — primary key (content_id, model_id).
+    let row_store = storage.row_store();
+    for doc_id in &["doc-a", "doc-b"] {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("content_id".into(), TypedValue::Text(doc_id.to_string()));
+        values.insert("model_id".into(), TypedValue::Text(model_id.clone()));
+        values.insert("basis_digest".into(), TypedValue::Text(digest_before.clone()));
+        values.insert("updated_at".into(), TypedValue::Timestamp(NOW));
+        row_store
+            .upsert(
+                "corpus_provider_coverage",
+                values,
+                &["content_id".to_string(), "model_id".to_string()],
+            )
+            .expect("insert synthetic coverage row");
+    }
+
+    // Verify coverage is readable by the engine.
+    let pre_restore = engine.covered_count("ppmi-v1")
+        .expect("covered_count must not error")
+        .expect("ppmi-v1 must be a registered slot");
+    assert_eq!(
+        pre_restore, 2,
+        "both docs must be covered (in side table) before CountsRestore"
+    );
+
+    // CountsRestore: no pending refs → same counts → same serialized basis →
+    // same basis_digest. Generation counter is bumped after any training job.
+    engine.train_trainable_slots(NOW + 1, true).expect("force retrain CountsRestore");
+    assert_eq!(
+        engine.training_path_decisions().get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsRestore),
+        "no-pending force retrain must record CountsRestore"
+    );
+
+    // Assert: basis_digest is UNCHANGED after CountsRestore (same bytes →
+    // same digest). This is the structural invariant that makes coverage survive.
+    let generations_after = engine.provider_generations();
+    let (_, digest_after) = generations_after
+        .into_iter()
+        .find(|(m, _)| m == "ppmi-v1")
+        .expect("ppmi-v1 slot must still exist");
+    assert_eq!(
+        digest_after, digest_before,
+        "CountsRestore must produce the same basis_digest (same counts → same basis bytes)"
+    );
+
+    // Assert: coverage SURVIVES in the side table. The digest is identical →
+    // corpus_provider_coverage rows with (model_id, basis_digest) are still
+    // matched by covered_count. The side-table key is (content_id, model_id,
+    // basis_digest); generation is NOT part of the side-table key.
+    let post_restore = engine.covered_count("ppmi-v1")
+        .expect("covered_count must not error")
+        .expect("ppmi-v1 must still be registered");
+    assert_eq!(
+        post_restore, pre_restore,
+        "coverage_store must survive CountsRestore: identical digest → side-table rows \
+         remain valid; generation bump only stales the content-row bitmap fast path \
+         (is_fully_covered uses generation equality), not the authoritative side table \
+         (covered_count queries by (model_id, basis_digest) only)"
+    );
+
+    // Structural assertion: the coverage rows are still present with the original
+    // digest (not cleared or overwritten by CountsRestore).
+    let coverage_rows = row_store
+        .query(
+            "corpus_provider_coverage",
+            Some(&StoragePredicate::Eq(
+                Column::new("corpus_provider_coverage", "model_id"),
+                TypedValue::Text(model_id.clone()),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query corpus_provider_coverage");
+    let surviving_digests: Vec<_> = coverage_rows
+        .iter()
+        .filter_map(|row| match row.get("basis_digest") {
+            Some(TypedValue::Text(d)) => Some(d.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        surviving_digests.iter().all(|d| d == &digest_before),
+        "all surviving coverage rows must carry the original basis_digest — \
+         CountsRestore must not clear or rewrite the side table"
     );
 }

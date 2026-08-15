@@ -83,6 +83,30 @@ private actor PublicationRaceSource: CorpusContentSource {
         await withCheckedContinuation { enteredWaiters.append($0) }
     }
 
+    /// Bounded version: polls `blockEntered` with 10 ms intervals until the
+    /// source enters the blocked state or the deadline expires. The actor
+    /// releases isolation during each sleep interval so the retrain task can
+    /// call `record(for:)` and set `blockEntered = true`.
+    ///
+    /// Throws `WaitTimedOut` with a clear message instead of hanging the suite.
+    func waitUntilBlockedBounded(timeout: Duration = .seconds(5)) async throws {
+        struct WaitTimedOut: Error, CustomStringConvertible {
+            var description: String {
+                "waitUntilBlockedBounded: source did not enter blocked state within timeout — " +
+                "check that blockNextRecord was called with the correct ID and the " +
+                "retrain task was started"
+            }
+        }
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if blockEntered { return }
+            // Sleep releases actor isolation, allowing the retrain task to call
+            // record(for:) and set blockEntered = true before the next check.
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard blockEntered else { throw WaitTimedOut() }
+    }
+
     func releaseBlockedRecord() {
         releaseContinuation?.resume()
         releaseContinuation = nil
@@ -791,7 +815,9 @@ struct CorpusContentEngineTests {
             let retrain = Task {
                 try await engine.trainTrainableSlots(now: now, force: true)
             }
-            await source.waitUntilBlocked()
+            // Bounded wait: fails with a clear message after 5 s instead of
+            // hanging the suite if the retrain task never reaches the blocked record.
+            try await source.waitUntilBlockedBounded()
 
             let lateText = "post snapshot vocabulary"
             let late = CorpusContentRecord(
@@ -856,7 +882,9 @@ struct CorpusContentEngineTests {
             let retrain = Task {
                 try await engine.trainTrainableSlots(now: now, force: true)
             }
-            await source.waitUntilBlocked()
+            // Bounded wait: fails with a clear message after 5 s instead of
+            // hanging the suite if the retrain task never reaches the blocked record.
+            try await source.waitUntilBlockedBounded()
             let admission = Task {
                 try await engine.applyChange(
                     .upsert(
@@ -2040,6 +2068,264 @@ extension CorpusContentEngineTests {
                 modelID: "ppmi-v1", modelVersion: "1.1.0")
             #expect(basisRow?.trainedChunkCount == 3,
                     "growth retrain after adding sf-3 must train on all 3 docs (sf-3 was not silently consumed)")
+        }
+    }
+
+    // MARK: - G-5a-ENTRY: production entry point drives a counts-path decision
+
+    /// G-5a-ENTRY: the attached engine's public reindex entry
+    /// (`reindex(now:laneScope:)`) must record a counts-path decision when the
+    /// population guard passes. This gate is distinct from G-5a (which drives
+    /// `trainTrainableSlots` directly) because the production drift-trigger calls
+    /// `reindex`, not the internal train function. The decision must be
+    /// `countsDeltaFold(n)` with at least one folded ref, proving the production
+    /// entry invokes `trainTrainableSlots(force: true)` internally.
+    @Test("G-5a-ENTRY: reindex(now:laneScope:) records countsDeltaFold via the production entry point")
+    func ppmiCountsPathReindexEntry() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+
+            // Base doc: trained in the first corpus pass.
+            let baseDoc = CorpusContentRecord(
+                id: "entry-base", revision: 1,
+                digest: testDigest("entry-basev1"),
+                text: "the planet orbits the star in a year")
+            await source.addResolvable(baseDoc)
+
+            // Delta doc: listed but unresolvable during the first train.
+            // The corpus-path publication writes a non-subsumed sentinel ref.
+            // We do NOT call applyChange — on a young basis, applyChange would
+            // trigger settleYoungBasisIfGrown and absorb the delta before the
+            // force-retrain runs.
+            await source.listUnresolvable(id: "entry-delta")
+            let deltaDoc = CorpusContentRecord(
+                id: "entry-delta", revision: 1,
+                digest: testDigest("entry-deltav1"),
+                text: "gravity pulls mass toward the centre of the planet")
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source,
+                models: [.ppmi(provider: PpmiProvider())])
+
+            // First force-retrain: corpus path (no basis row → firstTrain).
+            // base resolves → subsumed; entry-delta nil → sentinel ref written.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.firstTrain),
+                    "first force-train must record firstTrain for a new slot")
+
+            // Make entry-delta resolvable; sentinel is the pending ref.
+            await source.addResolvable(deltaDoc)
+
+            // Drive the PRODUCTION ENTRY POINT — the call the drift trigger makes.
+            // `reindex(now:laneScope:)` calls `trainTrainableSlots(force: true)`
+            // internally, then proceeds to index content.  The counts-path guard
+            // sequence: basis✓ counts✓ capable✓ foldSafe✓ population✓ →
+            // countsDeltaFold(1).
+            try await engine.reindex(now: now)
+            let decision = await engine._trainingPathDecision(for: "ppmi-v1")
+            #expect(decision == .countsDeltaFold(folded: 1),
+                    "G-5a-ENTRY: reindex(now:laneScope:) must record countsDeltaFold(1) when one sentinel pending ref exists — production entry drives counts path")
+        }
+    }
+
+    // MARK: - F-10: counts-path publication admission survival (twin of corpus-path race test)
+
+    /// F-10 twin: proves the counts-path publication's per-reference delete
+    /// removes ONLY the folded pending refs and does NOT delete a reference row
+    /// written by a subsequent admission.
+    ///
+    /// Proof shape: sequential (without interleaving).
+    ///
+    /// Why interleaving cannot corrupt the counts path: `trainTrainableSlots`
+    /// acquires `acquireCountsAdmission()` at its entry point
+    /// (CorpusContentEngine.swift line 2484–2485, `defer { releaseCountsAdmission() }`),
+    /// which is held for the entire duration of the counts-path fold and
+    /// publication transaction. Any concurrent `applyChange` that tries to write
+    /// a reference row will block at the `acquireCountsAdmission()` call inside
+    /// `commitIndexBatch` (CorpusContentEngine.swift line 1626–1627) until the
+    /// counts-path transaction commits and admission is released. Therefore:
+    ///   - The set of pending refs deleted by the counts-path transaction is fixed
+    ///     at the snapshot captured before acquisition (line 2582–2584).
+    ///   - Any reference row written by an admission that runs after the
+    ///     transaction commits is NOT in that set and is NOT deleted.
+    ///
+    /// This sequential test observes the property directly: admit a record
+    /// immediately after a counts-path publication and assert its reference row
+    /// exists and is not affected by the previous publication's per-ref delete.
+    @Test("F-10: counts-path per-ref delete leaves post-publication admissions untouched")
+    func countsPathPublicationAdmissionSurvives() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+
+            // Three base docs + one sentinel pending ref.
+            let baseDocs: [CorpusContentRecord] = [
+                .init(id: "f10-1", revision: 1, digest: testDigest("f10-1v1"),
+                      text: "the tide rises and falls along the shore"),
+                .init(id: "f10-2", revision: 1, digest: testDigest("f10-2v1"),
+                      text: "salt water carries dissolved minerals"),
+                .init(id: "f10-3", revision: 1, digest: testDigest("f10-3v1"),
+                      text: "waves break when the depth equals half the wavelength"),
+            ]
+            for doc in baseDocs { await source.addResolvable(doc) }
+            await source.listUnresolvable(id: "f10-sentinel")
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source,
+                models: [.ppmi(provider: PpmiProvider())])
+
+            // First force-retrain: corpus path (firstTrain).
+            // base docs → subsumed refs; sentinel → non-subsumed sentinel ref.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.firstTrain),
+                    "F-10 setup: first train must record firstTrain")
+
+            // Make the sentinel resolvable; it is now a pending (non-subsumed) ref.
+            let sentinelDoc = CorpusContentRecord(
+                id: "f10-sentinel", revision: 1, digest: testDigest("f10-sentinelv1"),
+                text: "currents transport heat from the tropics to the poles")
+            await source.addResolvable(sentinelDoc)
+
+            // Counts-path fold: base✓ counts✓ capable✓ foldSafe✓ population✓
+            // (trainedChunkCount=3 + pending=1 == allIDs=4) → countsDeltaFold(1).
+            // The per-ref delete removes ONLY the sentinel ref from the store.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .countsDeltaFold(folded: 1),
+                    "F-10 setup: counts-path fold with 1 sentinel ref must record countsDeltaFold(1)")
+
+            // POST-PUBLICATION ADMISSION: admit a new record immediately after
+            // the counts-path publication completes. Its non-subsumed reference
+            // row is written by the admission path's commitIndexBatch and must
+            // NOT be affected by the previous publication's per-ref delete
+            // (which already committed and only touched the sentinel ref).
+            let lateDoc = CorpusContentRecord(
+                id: "f10-late", revision: 1, digest: testDigest("f10-latev1"),
+                text: "deep water currents are driven by temperature and salinity")
+            await source.addResolvable(lateDoc)
+            try await engine.applyChange(
+                .upsert(id: lateDoc.id, revision: lateDoc.revision, digest: lateDoc.digest),
+                cursor: nil, now: now)
+
+            // PROPERTY 1: the late record's non-subsumed reference row EXISTS.
+            // The counts path's per-ref delete only removed the sentinel ref;
+            // the late ref was written AFTER the transaction committed.
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let lateRef = try await countsStore.referenceFor(
+                modelID: "ppmi-v1", modelVersion: "1.1.0",
+                contentID: lateDoc.id)
+            #expect(lateRef != nil,
+                    "F-10: the late admission's reference row must exist after counts-path publication — the per-ref delete only removed the folded sentinel ref")
+            #expect(lateRef?.isSubsumed == false,
+                    "F-10: the late admission's reference must be non-subsumed (pending) — it was not folded into the counts-path basis")
+
+            // PROPERTY 2: the late record's terms are NOT in the counts-path
+            // published basis. Verify by forcing another retrain: the late ref is
+            // the only pending ref, so the next counts-path fold must record
+            // countsDeltaFold(1). If the late record had been silently folded into
+            // the previous publication, it would appear as a subsumed ref and the
+            // next retrain would record countsRestore(0).
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            let subsequentDecision = await engine._trainingPathDecision(for: "ppmi-v1")
+            #expect(subsequentDecision == .countsDeltaFold(folded: 1),
+                    "F-10: a subsequent force-retrain must fold the late record via countsDeltaFold(1) — proving the late record was NOT included in the previous counts-path publication")
+        }
+    }
+
+    // MARK: - G-5d: countsRestore publication invalidates coverage
+
+    /// G-5d: after a countsRestore publication, the global basis-generation
+    /// counter increments, invalidating all existing coverage bitmaps via
+    /// generation mismatch (O(1) invalidation — no estate-wide row writes).
+    ///
+    /// Two facts documented by this gate:
+    /// (i) Migration repair relies on the generation bump invalidating coverage
+    ///     so backfill re-embeds all content under the new basis — REQUIRED.
+    ///     The countsRestore path bumps the generation (trainedSlotsCount > 0 →
+    ///     incrementBasisGeneration) exactly like the corpus path.
+    /// (ii) Therefore a no-op reindex (countsRestore with identical bytes)
+    ///     re-embeds the entire corpus, which matches the PRE-MISSION corpus-path
+    ///     behaviour for a no-op force reindex and is NOT a regression introduced
+    ///     by the counts path. The no-op-reindex re-embed optimisation is a named
+    ///     follow-up for Bob, out of this mission's scope.
+    @Test("G-5d: countsRestore bumps basis generation, invalidating existing coverage bitmaps")
+    func countsRestorePublicationInvalidatesCoverage() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+
+            // Two base docs for a well-formed PPMI corpus.
+            let docs: [CorpusContentRecord] = [
+                .init(id: "g5d-1", revision: 1, digest: testDigest("g5d-1v1"),
+                      text: "light travels at three hundred thousand kilometres per second"),
+                .init(id: "g5d-2", revision: 1, digest: testDigest("g5d-2v1"),
+                      text: "photons carry energy proportional to their frequency"),
+            ]
+            for doc in docs { await source.addResolvable(doc) }
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source,
+                models: [.ppmi(provider: PpmiProvider())])
+
+            // Phase 1: full reindex — trains (firstTrain bumps gen to 1) then
+            // indexes content (stamps coverage bits at gen 1 via indexWholeContentBatch).
+            try await engine.reindex(now: now)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.firstTrain),
+                    "G-5d setup: first reindex must record firstTrain")
+
+            // Verify the index state row exists and record the operationalBitmap
+            // before the countsRestore so we can prove it does not change (O(1) tenet).
+            let indexStateStore = CorpusIndexStateStore(storage: storage)
+            let gen1 = try await indexStateStore.basisGeneration()
+            let stateAfterReindex = try await indexStateStore.state(for: docs[0].id)
+            #expect(stateAfterReindex != nil,
+                    "G-5d setup: corpus_index_state row must exist for g5d-1 after reindex")
+
+            // Phase 2: force countsRestore — no pending refs after the first
+            // corpus-path publication (all refs subsumed), so the second retrain
+            // takes the counts-restore path. trainedSlotsCount > 0 → generation
+            // bumps from gen1 to gen1+1, invalidating all existing coverage bitmaps.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .countsRestore,
+                    "G-5d: force-retrain after corpus-path publication must record countsRestore (no pending refs)")
+
+            // OBSERVED BEHAVIOUR (fact i): countsRestore bumps the global basis generation.
+            // The engine's `trainedSlotsCount > 0` branch calls `incrementBasisGeneration`
+            // exactly as the corpus path does. This is what invalidates all existing
+            // coverage bitmaps — migration repair relies on this: backfill re-embeds every
+            // content row because its stored basisGeneration field no longer matches the
+            // global counter, so isFullyCovered returns false.
+            //
+            // OBSERVED BEHAVIOUR (fact ii): no-op reindex (countsRestore with identical
+            // bytes) therefore re-embeds the entire corpus. This matches the PRE-MISSION
+            // corpus-path behaviour for a no-op force reindex and is NOT a regression
+            // introduced by the counts path. The no-op-reindex re-embed optimisation is a
+            // named follow-up for Bob, out of this mission's scope.
+            let gen2 = try await indexStateStore.basisGeneration()
+            #expect(gen2 == gen1 + 1,
+                    "G-5d: generation must increment from \(gen1) to \(gen1 + 1) after countsRestore")
+
+            if let state = stateAfterReindex {
+                // O(1) invalidation: the DB row bitmap is NOT rewritten during countsRestore.
+                // Invalidity is detected at read-time via generation mismatch (row's
+                // basisGeneration field != global gen2), so no estate-wide row writes occur.
+                let stateAfterRestore = try await indexStateStore.state(for: docs[0].id)
+                #expect(stateAfterRestore?.operationalBitmap == state.operationalBitmap,
+                        "G-5d: operational_bitmap must not change on countsRestore generation bump — O(1) invalidation, no estate-wide row writes")
+
+                // The row's stored generation stamp does not match the new global generation,
+                // proving that isFullyCovered(currentGeneration: gen2) returns false (stale).
+                // The bitmap guard in isFullyCovered is: `guard basisGeneration == currentGeneration`.
+                if let fresh = stateAfterRestore {
+                    #expect(fresh.basisGeneration != gen2,
+                            "G-5d: row basisGeneration must not equal new global gen — generation mismatch makes isFullyCovered return false at gen2")
+                }
+            }
         }
     }
 }

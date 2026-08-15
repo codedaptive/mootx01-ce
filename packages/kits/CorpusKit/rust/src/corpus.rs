@@ -219,7 +219,13 @@ pub enum CorpusPathReason {
     /// pending (unsubsumed) reference deltas — folding those deltas into a restored
     /// basis would violate order-sensitivity (RI). Empty-delta restore is still
     /// available for RI; this reason fires only when a non-empty delta exists.
+    /// Used exclusively by the ATTACHED engine path (ContentEngine).
     DeltaNotFoldSafe,
+    /// The provider's accumulation is order-sensitive and the maintained counts'
+    /// fold-order provenance cannot be proven equal to the canonical training order
+    /// (standalone RI: live counts fold in ingest-arrival order; from-scratch trains
+    /// in active-chunk order). Used exclusively by the STANDALONE path (Corpus).
+    FoldOrderProvenanceUnknown,
     /// trainedChunkCount + |pending| != |activeIDs|: the counts snapshot plus
     /// outstanding deltas do not cover the full active population. A removed or
     /// revised identity broke the additive chain; the corpus path heals it.
@@ -2336,9 +2342,13 @@ impl Corpus {
                 continue;
             }
             if !fold_safe {
-                // RI: ingest-arrival order != activeChunks() order → not safe to
-                // restore in standalone. Always corpus path for RI.
-                corpus_path_indices.push((slot_index, CorpusPathReason::DeltaNotFoldSafe));
+                // RI: the live accumulator folds counts in ingest-arrival order;
+                // a from-scratch train uses activeChunks() order. RI is float-
+                // order-sensitive, so these two fold orders cannot be proven
+                // equivalent — the standalone path cannot safely restore from the
+                // live accumulator. No pending delta exists here; the issue is
+                // provenance of the maintained counts' fold order.
+                corpus_path_indices.push((slot_index, CorpusPathReason::FoldOrderProvenanceUnknown));
                 continue;
             }
 

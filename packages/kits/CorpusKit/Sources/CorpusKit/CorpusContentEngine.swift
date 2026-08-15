@@ -78,6 +78,11 @@ public enum CorpusPathReason: Equatable, Sendable {
     /// The pending delta is non-empty but `countsDeltaFoldSafe` is false (RI).
     /// RI is restore-only; a non-empty delta forces the corpus path.
     case deltaNotFoldSafe
+    /// The provider's accumulation is order-sensitive and the maintained counts'
+    /// fold-order provenance cannot be proven equal to the canonical training
+    /// order (standalone RI: live counts fold in ingest-arrival order;
+    /// from-scratch trains in active-chunk order).
+    case foldOrderProvenanceUnknown
     /// Population mismatch: the frozen base count plus pending deltas does not
     /// equal the current active-ID count (attached), or the live doc count does
     /// not match the active-chunk count (standalone). Full corpus retrain required.

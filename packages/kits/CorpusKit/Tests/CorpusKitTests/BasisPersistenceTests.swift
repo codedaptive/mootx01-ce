@@ -178,6 +178,35 @@ struct BasisPersistenceTests {
         }
     }
 
+    // MARK: - §2b standalone RI gate: foldOrderProvenanceUnknown
+
+    /// Standalone RI gate: the Corpus (standalone) reindex always records
+    /// `.corpus(.foldOrderProvenanceUnknown)` for RandomIndexing because the live
+    /// accumulator folds counts in ingest-arrival order while a from-scratch train
+    /// would fold in activeChunks() order. RI is float-order-sensitive, so
+    /// provenance cannot be proven equal — a pending delta is irrelevant in
+    /// standalone mode; this is purely a fold-order provenance issue.
+    ///
+    /// This gate pins the `CorpusPathReason` case used for standalone RI so
+    /// it is not accidentally regressed to the attached-mode `deltaNotFoldSafe`
+    /// case (which describes a non-empty pending delta, a different condition).
+    @Test("Standalone RI reindex records foldOrderProvenanceUnknown — not deltaNotFoldSafe")
+    func standaloneRIDecisionIsFoldOrderProvenanceUnknown() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try storage(at: scratchURL())
+            let corpus = try await freshRICorpus(storage)
+            // Ingest the first two RI docs so the corpus is non-empty.
+            try await corpus.ingest(riDocs[0], sourceID: "doc-0", now: now)
+            try await corpus.ingest(riDocs[1], sourceID: "doc-1", now: now.addingTimeInterval(10))
+            // Reindex: RI's countsDeltaFoldSafe == false → standalone rejection
+            // with foldOrderProvenanceUnknown (live fold order ≠ activeChunks() order).
+            try await corpus.reindex(now: now.addingTimeInterval(20))
+            let decision = await corpus._trainingPathDecision(for: "random-indexing-v1")
+            #expect(decision == .corpus(.foldOrderProvenanceUnknown),
+                    "standalone RI reindex must record foldOrderProvenanceUnknown — not deltaNotFoldSafe, which is the attached-mode case for a non-empty pending delta")
+        }
+    }
+
     // MARK: - §3 first-ingest auto-train + growth retrain
 
     @Test("first ingest auto-trains; second ingest growth-retrains; third fold-ins")

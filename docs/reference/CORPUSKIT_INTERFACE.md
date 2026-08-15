@@ -4,8 +4,8 @@ status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-15
 spec_type: kit
-version: 1.21.0
-description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.21.0: CORPUS-INCREMENTAL-01 — finalizeFromCounts, countsDeltaFoldSafe, TrainingPathDecision / CorpusPathReason retrain counts-path surface.
+version: 1.21.1
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -1404,8 +1404,14 @@ public enum CorpusPathReason: Equatable, Sendable {
     case noCountsRow
     /// `finalizeFromCounts()` returned false (LSA, NMF).
     case notCountsCapable
-    /// Non-empty pending delta and `countsDeltaFoldSafe == false` (RI).
+    /// Non-empty pending delta and `countsDeltaFoldSafe == false` (attached RI:
+    /// a real pending delta exists and is the operative reason).
     case deltaNotFoldSafe
+    /// The provider's accumulation is order-sensitive and the maintained counts'
+    /// fold-order provenance cannot be proven equal to the canonical training order
+    /// (standalone RI: live counts fold in ingest-arrival order; from-scratch trains
+    /// in active-chunk order).
+    case foldOrderProvenanceUnknown
     /// `PersistedBasis.trainedChunkCount` + pending-ref count ≠ active-ID count.
     case populationMismatch
     /// A non-subsumed pending reference's `contentID` resolved to nil from source.
@@ -1417,8 +1423,16 @@ public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision?
 ```
 
 **Rust:** equivalent `TrainingPathDecision` and `CorpusPathReason` enums in
-`corpus_kit` core; `_training_path_decision(&self, model_id: &str) ->
+`corpus_kit` core, including `FoldOrderProvenanceUnknown`; `_training_path_decision(&self, model_id: &str) ->
 Option<TrainingPathDecision>` on `CorpusContentEngine`.
+
+> **Standalone vs attached RI:** `deltaNotFoldSafe` is recorded when attached RI
+> has a non-empty pending delta (`countsDeltaFoldSafe == false` and the pending set
+> is non-empty — a real pending delta IS the operative reason). `foldOrderProvenanceUnknown`
+> is recorded for standalone RI — no pending-reference tracking exists there; the
+> maintained accumulator folds in ingest-arrival order while a from-scratch train
+> uses active-chunk order, and the two cannot be proven equal for a
+> float-order-sensitive provider (SPEC B-22 guard 4; reviewer finding F-11).
 
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
 
@@ -2231,6 +2245,18 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.21.1 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 F-11 (corrective amendment): added `foldOrderProvenanceUnknown`
+/ `FoldOrderProvenanceUnknown` to `CorpusPathReason` in both Swift and Rust. Doc
+comment: "the provider's accumulation is order-sensitive and the maintained counts'
+fold-order provenance cannot be proven equal to the canonical training order
+(standalone RI: live counts fold in ingest-arrival order; from-scratch trains in
+active-chunk order)." Added a standalone-vs-attached RI callout block after the Rust
+seam declaration clarifying when each reason fires. `deltaNotFoldSafe` is unchanged
+and remains the correct reason for attached RI with a non-empty pending delta.
+ADDITIVE — no existing signature removed or changed.
 
 ### 1.21.0 -- 2026-08-15
 
