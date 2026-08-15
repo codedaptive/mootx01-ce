@@ -2850,6 +2850,16 @@ impl DrawerStore for DrawerStoreCore {
         unit_session_id: &str,
         marked_at: i64,
     ) -> Result<(), LocusKitError> {
+        // AV-01 (Codex finding, commit dc0f362): this is the single shared
+        // write boundary behind SqliteDrawerStore, InMemoryDrawerStore, AND
+        // PostgresDrawerStore (all three are thin pass-through newtypes
+        // over DrawerStoreCore) — validating here covers every backend at
+        // once, so the in-memory backend cannot be more permissive than
+        // SQLite (they are, in fact, the identical code path). Defense in
+        // depth alongside the same check in `Estate::append_dream_cycle_marker`
+        // (estate_verbs.rs): this trait method is `pub` and reachable
+        // without going through `Estate`.
+        crate::estate_verbs::audit_verbs::validate(verb, &crate::estate_verbs::audit_verbs::DREAM_CYCLE)?;
         if unit_session_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
                 "unitSessionID must not be empty".to_string(),

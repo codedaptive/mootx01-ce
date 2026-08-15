@@ -123,6 +123,60 @@ pub(crate) mod recall_stage {
     pub const TRACE_WRITE_FAILED: &str = "recall.trace_write_failed";
 }
 
+/// Defined verb sets for the two Rust write paths that accept a
+/// caller-supplied free-form verb string (AV-01, Codex finding, commit
+/// `dc0f362`). Every other audit-write path either threads a typed
+/// `RowVerb` through `substrate_lib::audit_gate::admit` (row-mutation
+/// verbs: capture/mutate/withdraw/... — never a bare string, already
+/// constrained by the type system) or hardcodes its own verb literal
+/// internally (`append_encode_complete_marker` → `"encodeComplete"`,
+/// `append_reindex_complete_marker` → `"reindexComplete"` — not
+/// caller-reachable). These two are the exception: `verb: &str` is a
+/// public parameter, so nothing before this module stopped a caller from
+/// writing an arbitrary string into the estate's evidence surface.
+///
+/// Centralised here (not duplicated ad hoc at each call site) so the two
+/// write boundaries that key off them — `Estate::append_dream_cycle_marker`
+/// / `Estate::append_supplementary_audit` below, and
+/// `DrawerStoreCore::append_dream_cycle_marker` in
+/// `drawer_store_inmemory.rs` (the actual storage boundary shared by the
+/// SQLite, in-memory, and Postgres backends) — cannot drift apart.
+pub(crate) mod audit_verbs {
+    /// Accepted verbs for `append_dream_cycle_marker` (A3). Byte-identical
+    /// to the two raw values of the Swift port's
+    /// `DrawerStore.DreamCyclePhase: String` enum
+    /// (`start = "dreamStart"`, `end = "dreamEnd"`) — Swift enforces this
+    /// set at compile time via the enum's type; Rust has no enum threaded
+    /// through the GLK → LocusKit seam (`coordinator.rs` passes a bare
+    /// `&str`), so this constant plus `validate` is the Rust-side mirror
+    /// of that Swift type constraint.
+    pub const DREAM_CYCLE: [&str; 2] = ["dreamStart", "dreamEnd"];
+
+    /// Accepted verbs for `append_supplementary_audit`. Currently exactly
+    /// one value: GLK's dataset-handle expunge path
+    /// (`VerbSurface.expunge` / Rust `coordinator.rs` ~5548) appends a
+    /// `"datasetTableDrop"` side-channel event when a `.dataset`-kind
+    /// handle's cross-kit table-drop succeeds. A genuine new supplementary
+    /// verb is a deliberate addition to this list — never a caller-supplied
+    /// free string.
+    pub const SUPPLEMENTARY: [&str; 1] = ["datasetTableDrop"];
+
+    /// Reject a verb that is not a member of `allowed`. Returns a typed
+    /// error (never a silent drop, never a substituted default) per the
+    /// mission's discipline: a silently-dropped or silently-substituted
+    /// audit entry is worse than a rejected write, because the evidence
+    /// surface would then lie by omission.
+    pub fn validate(verb: &str, allowed: &[&str]) -> Result<(), crate::error::LocusKitError> {
+        if allowed.contains(&verb) {
+            Ok(())
+        } else {
+            Err(crate::error::LocusKitError::InvalidContent(format!(
+                "unknown audit verb {verb:?}; expected one of {allowed:?}"
+            )))
+        }
+    }
+}
+
 impl Estate {
     // -----------------------------------------------------------------------
     // node-name resolution
@@ -1508,6 +1562,10 @@ impl Estate {
         unit_session_id: &str,
         marked_at: i64,
     ) -> Result<(), LocusKitError> {
+        // AV-01: reject before ever opening a transaction — no caller
+        // (dream markers included) writes an arbitrary verb. Mirrors the
+        // Swift port's compile-time `DreamCyclePhase` enum constraint.
+        audit_verbs::validate(verb, &audit_verbs::DREAM_CYCLE)?;
         self.store.append_dream_cycle_marker(verb, unit_session_id, marked_at)
     }
 
@@ -2195,6 +2253,10 @@ impl Estate {
         verb: &str,
         reason: &str,
     ) -> Result<(), LocusKitError> {
+        // AV-01: same free-string defect shape as append_dream_cycle_marker
+        // above — reject before computing the content-ID or constructing
+        // the event.
+        audit_verbs::validate(verb, &audit_verbs::SUPPLEMENTARY)?;
         let event_id = substrate_lib::audit_gate::content_id(
             from.estate_uuid,
             from.row_id,
