@@ -439,6 +439,73 @@ fn run_shared_content_reclaim_if_pending() {
 /// SQLite files are opened independently; the step is NOT schema-aware and
 /// does NOT run migrations — it touches only the two corpus tables that must
 /// pre-exist, and the manifest key-value table via the latch.
+
+/// The estate-mutation core of the corpus-counts migration, extracted so a
+/// test can drive the REAL operations on a scratch estate without the
+/// daemon-quiesce wrapper (which acts on the machine-global daemon and must
+/// never run from a test).  is quiesce + this +
+/// restart + report; everything that touches estate bytes is HERE.
+pub(crate) fn corpus_counts_migration_core(
+    estate_config: &persistence_kit::storage::EstateConfiguration,
+    now_ms: i64,
+) -> Result<(usize, usize), String> {
+    use corpus_kit::reindex_latch::reindex_required;
+    use persistence_kit::sqlite::SqliteStorage;
+    use persistence_kit::storage::{EstateConfiguration, Storage};
+    use persistence_kit::predicate::StoragePredicate;
+    use persistence_kit::types::TypedValue;
+    use queuekit::facade::QueueKit;
+    use queuekit::persistencekit::PersistenceKitBackend;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let storage: Arc<dyn Storage> =
+        Arc::new(SqliteStorage::new(estate_config.clone()).map_err(|e| e.to_string())?);
+
+
+    // Step 1: DELETE all rows from `corpus_provider_vocab`.
+    // This table was created in the v2→v3 migration and is superseded by the
+    // v4 integer-keyed pair. If it never existed (estate predates v3) the
+    // delete returns an error, which we surface as a skip — not a failure.
+    let vocab_deleted = storage
+        .row_store()
+        .delete("corpus_provider_vocab", &StoragePredicate::IsTrue)
+        .map_err(|e| format!("vocab table delete failed: {e:?}"))?;
+
+    // Step 2: UPDATE all rows in `corpus_provider_counts` SET counts = b"".
+    // Zeroing the opaque blob invalidates the stale PPMI/RI/LSA/NMF
+    // serialized state so the next reindex rebuilds from scratch.
+    // doc_count and vocab_size are NOT in `values` — update() touches
+    // ONLY the specified columns, leaving the monotone anchors intact.
+    let mut zero_counts: BTreeMap<String, TypedValue> = BTreeMap::new();
+    zero_counts.insert("counts".to_string(), TypedValue::Blob(vec![]));
+    let counts_updated = storage
+        .row_store()
+        .update("corpus_provider_counts", zero_counts, &StoragePredicate::IsTrue)
+        .map_err(|e| format!("counts blob zero failed: {e:?}"))?;
+
+    // Step 3: open the queue sibling and call the reindex latch.
+    // The latch enqueues a full-reindex marker job on the "reindex" stream
+    // and writes the "corpus_reindex_required" key into the estate manifest
+    // table. If the enqueue does not take, it prints the deferral line.
+    let queue_config = estate_config
+        .queue_sibling("queue.sqlite")
+        .map_err(|e| format!("queue sibling path: {e:?}"))?;
+    let queue_storage: Arc<dyn Storage> =
+        Arc::new(SqliteStorage::new(queue_config).map_err(|e| e.to_string())?);
+    // open_schema is idempotent — ensures the queuekit_jobs table exists
+    // (it may predate this upgrade; open_schema is a no-op when the schema
+    // is already at the current version).
+    PersistenceKitBackend::open_schema(queue_storage.as_ref())
+        .map_err(|e| format!("queue schema open: {e:?}"))?;
+    let queue = QueueKit::new(PersistenceKitBackend::new(queue_storage));
+    reindex_required(&queue, storage.as_ref(), now_ms)
+        .map_err(|e| format!("reindex latch: {e}"))?;
+
+    let _ = storage.close();
+    Ok((vocab_deleted, counts_updated))
+}
+
 fn run_corpus_counts_migration() {
     use corpus_kit::reindex_latch::reindex_required;
     use persistence_kit::sqlite::SqliteStorage;
@@ -485,52 +552,7 @@ fn run_corpus_counts_migration() {
 
     let now_ms = wall_now_millis();
 
-    let result = (|| -> Result<(usize, usize), String> {
-        let storage: Arc<dyn Storage> =
-            Arc::new(SqliteStorage::new(estate_config.clone()).map_err(|e| e.to_string())?);
-
-        // Step 1: DELETE all rows from `corpus_provider_vocab`.
-        // This table was created in the v2→v3 migration and is superseded by the
-        // v4 integer-keyed pair. If it never existed (estate predates v3) the
-        // delete returns an error, which we surface as a skip — not a failure.
-        let vocab_deleted = storage
-            .row_store()
-            .delete("corpus_provider_vocab", &StoragePredicate::IsTrue)
-            .map_err(|e| format!("vocab table delete failed: {e:?}"))?;
-
-        // Step 2: UPDATE all rows in `corpus_provider_counts` SET counts = b"".
-        // Zeroing the opaque blob invalidates the stale PPMI/RI/LSA/NMF
-        // serialized state so the next reindex rebuilds from scratch.
-        // doc_count and vocab_size are NOT in `values` — update() touches
-        // ONLY the specified columns, leaving the monotone anchors intact.
-        let mut zero_counts: BTreeMap<String, TypedValue> = BTreeMap::new();
-        zero_counts.insert("counts".to_string(), TypedValue::Blob(vec![]));
-        let counts_updated = storage
-            .row_store()
-            .update("corpus_provider_counts", zero_counts, &StoragePredicate::IsTrue)
-            .map_err(|e| format!("counts blob zero failed: {e:?}"))?;
-
-        // Step 3: open the queue sibling and call the reindex latch.
-        // The latch enqueues a full-reindex marker job on the "reindex" stream
-        // and writes the "corpus_reindex_required" key into the estate manifest
-        // table. If the enqueue does not take, it prints the deferral line.
-        let queue_config = estate_config
-            .queue_sibling("queue.sqlite")
-            .map_err(|e| format!("queue sibling path: {e:?}"))?;
-        let queue_storage: Arc<dyn Storage> =
-            Arc::new(SqliteStorage::new(queue_config).map_err(|e| e.to_string())?);
-        // open_schema is idempotent — ensures the queuekit_jobs table exists
-        // (it may predate this upgrade; open_schema is a no-op when the schema
-        // is already at the current version).
-        PersistenceKitBackend::open_schema(queue_storage.as_ref())
-            .map_err(|e| format!("queue schema open: {e:?}"))?;
-        let queue = QueueKit::new(PersistenceKitBackend::new(queue_storage));
-        reindex_required(&queue, storage.as_ref(), now_ms)
-            .map_err(|e| format!("reindex latch: {e}"))?;
-
-        let _ = storage.close();
-        Ok((vocab_deleted, counts_updated))
-    })();
+    let result = corpus_counts_migration_core(&estate_config, now_ms);
 
     // Restart the daemon before reporting.
     if was_running {
@@ -1030,6 +1052,140 @@ fn restart_services() {
 
 #[cfg(test)]
 mod tests {
+
+    /// REAL-PATH gate for the corpus-counts migration (Bob's ruling,
+    /// 2026-08-15): drives `corpus_counts_migration_core` — the exact estate
+    /// operations `mootx01 upgrade` runs — on a scratch SQLite estate seeded
+    /// with a POPULATED pre-v3 layout (ProviderVocabStorageTests precedent:
+    /// ee#49 shipped broken twice against fresh-database tests). The daemon
+    /// quiesce/restart wrapper is deliberately outside the core: a test must
+    /// never stop the machine-global daemon.
+    #[test]
+    fn corpus_counts_migration_core_clears_legacy_preserves_anchors_sets_latch() {
+        use persistence_kit::predicate::StoragePredicate;
+        use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
+        use persistence_kit::sqlite::SqliteStorage;
+        use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+        use persistence_kit::types::TypedValue;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = std::env::temp_dir().join(format!("counts-mig-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let estate = dir.join("estate.sqlite");
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: estate.display().to_string(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+
+        // ── Seed a POPULATED pre-v3 layout ────────────────────────────────
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let schema = SchemaDeclaration::new(
+                "MigTestSeed",
+                1,
+                vec![
+                    TableDeclaration::new(
+                        "corpus_provider_counts",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::blob("counts"),
+                            ColumnDeclaration::int("doc_count"),
+                            ColumnDeclaration::int("vocab_size"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "corpus_provider_vocab",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::text("model_version"),
+                            ColumnDeclaration::text("term"),
+                            ColumnDeclaration::blob("vector"),
+                        ],
+                        vec!["model_id".to_string(), "model_version".to_string(), "term".to_string()],
+                    ),
+                    TableDeclaration::new(
+                        "manifest",
+                        vec![ColumnDeclaration::text("key"), ColumnDeclaration::text("value")],
+                        vec!["key".to_string()],
+                    ),
+                ],
+            );
+            st.open(&schema).unwrap();
+            let rs = st.row_store();
+            let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+            row.insert("model_id".into(), TypedValue::Text("random-indexing-v1".into()));
+            row.insert("model_version".into(), TypedValue::Text("1".into()));
+            row.insert("counts".into(), TypedValue::Blob(b"legacy-serialized-counts".to_vec()));
+            row.insert("doc_count".into(), TypedValue::Int(42));
+            row.insert("vocab_size".into(), TypedValue::Int(17));
+            rs.upsert("corpus_provider_counts", row, &["model_id".to_string(), "model_version".to_string()]).unwrap();
+            for term in ["alpha", "beta"] {
+                let mut v: BTreeMap<String, TypedValue> = BTreeMap::new();
+                v.insert("model_id".into(), TypedValue::Text("random-indexing-v1".into()));
+                v.insert("model_version".into(), TypedValue::Text("1".into()));
+                v.insert("term".into(), TypedValue::Text(term.into()));
+                v.insert("vector".into(), TypedValue::Blob(vec![1, 2, 3]));
+                rs.upsert("corpus_provider_vocab", v, &["model_id".to_string(), "model_version".to_string(), "term".to_string()]).unwrap();
+            }
+            // Positive pre-state: the seed is POPULATED (falsification anchor —
+            // an empty seed would make every later assertion vacuous).
+            assert_eq!(rs.count("corpus_provider_vocab", None).unwrap(), 2);
+            let _ = st.close();
+        }
+
+        // ── Drive the REAL migration core ─────────────────────────────────
+        let (vocab_deleted, counts_updated) =
+            corpus_counts_migration_core(&cfg, 1_700_000_000_000).expect("core must succeed");
+        assert_eq!(vocab_deleted, 2, "both legacy vocab rows must be deleted");
+        assert_eq!(counts_updated, 1, "the counts blob row must be zeroed");
+
+        // ── Post-state: legacy gone, anchors kept, latch set, job queued ──
+        {
+            let st: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg.clone()).unwrap());
+            let rs = st.row_store();
+            assert_eq!(rs.count("corpus_provider_vocab", None).unwrap(), 0, "legacy vocab rows must be gone");
+            let rows = rs.query("corpus_provider_counts", None, &[], None, None).unwrap();
+            assert_eq!(rows.len(), 1);
+            match rows[0].get("counts") {
+                Some(TypedValue::Blob(b)) => assert!(b.is_empty(), "counts blob must be zeroed"),
+                other => panic!("counts column wrong shape: {other:?}"),
+            }
+            assert_eq!(rows[0].get("doc_count"), Some(&TypedValue::Int(42)), "doc_count anchor preserved");
+            assert_eq!(rows[0].get("vocab_size"), Some(&TypedValue::Int(17)), "vocab_size anchor preserved");
+            let flag = rs
+                .query(
+                    "manifest",
+                    Some(&StoragePredicate::Eq(
+                        persistence_kit::types::Column::new("manifest", "key"),
+                        TypedValue::Text("corpus_reindex_required".into()),
+                    )),
+                    &[],
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(flag.len(), 1, "latch manifest flag must be set");
+            assert_eq!(flag[0].get("value"), Some(&TypedValue::Text("1".into())));
+            let _ = st.close();
+        }
+        // Queue sibling carries the reindex job.
+        {
+            let qcfg = cfg.queue_sibling("queue.sqlite").unwrap();
+            let qst: Arc<dyn Storage> = Arc::new(SqliteStorage::new(qcfg).unwrap());
+            let jobs = qst.row_store().count("queuekit_jobs", None).unwrap();
+            assert!(jobs >= 1, "the reindex job must be enqueued in the queue sibling");
+            let _ = qst.close();
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
     use crate::core::depth::{self, InstallBundle, InstallDepth, ProcessClaudeCliRunner};
 

@@ -1065,6 +1065,23 @@ impl CorpusProviderCountsStore {
             .row_store()
             .delete("corpus_provider_counts", &StoragePredicate::IsTrue)
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // ALL term tables — v3 vocab AND the v4 dictionary/payload pair — are
+        // this store's state, so a wholesale clear must include every one
+        // (the restore path PREFERS the v4 pair, so stale v4 rows shadow the
+        // truth). corpus_provider_vocab was missing here even pre-v4 — a
+        // Swift/Rust parity gap this fix also closes.
+        self.storage
+            .row_store()
+            .delete("corpus_provider_vocab", &StoragePredicate::IsTrue)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        self.storage
+            .row_store()
+            .delete("corpus_provider_term_dictionary", &StoragePredicate::IsTrue)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        self.storage
+            .row_store()
+            .delete("corpus_provider_term_payload", &StoragePredicate::IsTrue)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         Ok(())
     }
 

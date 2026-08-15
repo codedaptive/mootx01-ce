@@ -940,13 +940,22 @@ public actor CorpusProviderCountsStore {
             table: "corpus_provider_counts",
             where: .isTrue
         )
-        // The term table is part of this store's state, so a wholesale clear
-        // must include it. Missing this would leave a previous generation's
-        // vocabulary behind after destroyRecallIndex or the shared-content
-        // migration's derived-state wipe, and the next load would read term
-        // rows that no longer match the counts row beside them.
+        // ALL term tables — v3 vocab AND the v4 dictionary/payload pair — are
+        // this store's state, so a wholesale clear must include every one.
+        // Missing any would leave a previous generation's vocabulary behind
+        // after destroyRecallIndex or the shared-content migration's
+        // derived-state wipe — worse for the v4 pair, which the restore path
+        // PREFERS over the blob.
         _ = try await storage.rowStore.delete(
             table: "corpus_provider_vocab",
+            where: .isTrue
+        )
+        _ = try await storage.rowStore.delete(
+            table: "corpus_provider_term_dictionary",
+            where: .isTrue
+        )
+        _ = try await storage.rowStore.delete(
+            table: "corpus_provider_term_payload",
             where: .isTrue
         )
     }

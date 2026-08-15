@@ -330,4 +330,42 @@ struct CorpusCountsMigrationConvergenceTests {
         await freshStorage.close()
         await migratedStorage.close()
     }
+
+    /// deleteAll must clear EVERY layout — v3 vocab AND the v4 pair. The v4
+    /// gap shipped once (wave-closing Adams CRITICAL 1): destroyRecallIndex
+    /// left dictionary/payload rows behind, and the restore path PREFERS the
+    /// v4 pair, so the stale vocabulary shadowed the truth.
+    @Test("deleteAll clears v3 vocab and the v4 dictionary/payload pair")
+    func deleteAllClearsEveryLayout() async throws {
+        let storage = try sqliteScratch()
+        try await storage.migrate(to: CorpusProviderCountsStore.schemaDeclaration)
+        let store = CorpusProviderCountsStore(storage: storage)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        try await store.upsert(PersistedCounts(
+            modelID: "random-indexing-v1", modelVersion: "1",
+            counts: Data("blob".utf8), documentCount: 1, vocabSize: 1, updatedAt: now))
+        try await store.replaceVocab(
+            modelID: "random-indexing-v1", modelVersion: "1",
+            terms: [(term: "legacy", vector: Data([9]))], into: storage.rowStore)
+        try await store.replaceTermPayloads(
+            modelID: "random-indexing-v1",
+            terms: [(term: "modern", vector: Data([7]))], into: storage.rowStore)
+        // Populated pre-state in BOTH layouts (falsification anchor).
+        #expect(try await store.loadTermPayloads(modelID: "random-indexing-v1").count == 1)
+        #expect(try await store.loadVocab(modelID: "random-indexing-v1", modelVersion: "1").count == 1)
+
+        try await store.deleteAll()
+
+        #expect(try await store.loadTermPayloads(modelID: "random-indexing-v1").isEmpty,
+                "v4 payloads must not survive deleteAll — stale v4 shadows the restore path")
+        #expect(try await store.loadVocab(modelID: "random-indexing-v1", modelVersion: "1").isEmpty,
+                "v3 vocab must not survive deleteAll")
+        let dictRows = try await storage.rowStore.query(
+            table: "corpus_provider_term_dictionary", where: .isTrue,
+            orderBy: [], limit: nil, offset: nil)
+        #expect(dictRows.isEmpty, "dictionary rows must not survive deleteAll")
+        await storage.close()
+    }
+
 }

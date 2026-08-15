@@ -19,7 +19,7 @@
 //! Uses file-backed SQLite (never InMemory): the migration ladder runs only
 //! through SqliteStorage, so InMemory cannot exercise it.
 
-use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+use corpus_kit::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
 use corpus_kit::reindex_latch::{reindex_required, REINDEX_MANIFEST_KEY};
 use persistence_kit::predicate::StoragePredicate;
 use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
@@ -535,4 +535,41 @@ fn fresh_and_migrated_v4_converge() {
     let _ = st_migrated.close();
     let _ = std::fs::remove_file(&fresh_path);
     let _ = std::fs::remove_file(&migrated_path);
+}
+
+/// delete_all must clear EVERY layout — v3 vocab AND the v4 pair (and the
+/// pre-existing Rust gap: vocab itself was missing from delete_all pre-v4).
+/// Wave-closing Adams CRITICAL 2. Twin of Swift deleteAllClearsEveryLayout.
+#[test]
+fn delete_all_clears_every_layout() {
+    let path = scratch_path();
+    let storage = open_storage(&path);
+    storage.migrate(&CorpusProviderCountsStore::schema_declaration()).unwrap();
+    let store = CorpusProviderCountsStore::new(storage.clone());
+    let rs = storage.row_store();
+
+    store.upsert(&PersistedCounts {
+        model_id: "random-indexing-v1".into(),
+        model_version: "1".into(),
+        counts: b"blob".to_vec(),
+        document_count: 1,
+        vocab_size: 1,
+        updated_at_secs: 1_700_000_000,
+    }).unwrap();
+    store.replace_vocab_into("random-indexing-v1", "1",
+        &[("legacy".to_string(), vec![9u8])], &rs).unwrap();
+    store.replace_term_payloads_into("random-indexing-v1",
+        &[("modern".to_string(), vec![7u8])], &rs).unwrap();
+    // Populated pre-state in BOTH layouts (falsification anchor).
+    assert_eq!(store.load_term_payloads("random-indexing-v1").unwrap().len(), 1);
+    assert_eq!(store.load_vocab("random-indexing-v1", "1").unwrap().len(), 1);
+
+    store.delete_all().unwrap();
+
+    assert!(store.load_term_payloads("random-indexing-v1").unwrap().is_empty(),
+        "v4 payloads must not survive delete_all — stale v4 shadows the restore path");
+    assert!(store.load_vocab("random-indexing-v1", "1").unwrap().is_empty(),
+        "v3 vocab must not survive delete_all");
+    assert_eq!(rs.count("corpus_provider_term_dictionary", None).unwrap(), 0,
+        "dictionary rows must not survive delete_all");
 }
