@@ -90,6 +90,18 @@ table=corpus_provider_coverage
   col=updated_at type=timestamp null=0 default=- role=-
   pk=content_id,model_id
   appendOnly=0 hashable=0
+table=corpus_provider_term_dictionary
+  col=term_id type=int null=0 default=- role=-
+  col=term type=text null=0 default=- role=-
+  col=models type=int null=0 default=- role=-
+  pk=term_id
+  appendOnly=0 hashable=0
+table=corpus_provider_term_payload
+  col=model_id type=int null=0 default=- role=-
+  col=term_id type=int null=0 default=- role=-
+  col=vector type=blob null=0 default=- role=-
+  pk=model_id,term_id
+  appendOnly=0 hashable=0
 table=corpus_provider_vocab
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
