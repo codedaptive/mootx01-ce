@@ -3392,40 +3392,99 @@ extension ToolDispatcher {
     /// Like `moot_drain_status`, no orientation block: this tool is called
     /// repeatedly by harnesses and duties, and the protocol would bloat
     /// every poll.
-    func runTimingReport(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let sinceMs = Int64(try optionalInt(args["since_ms"], argument: "since_ms") ?? 0)
+    /// Hard cap on audit events collected per `moot_timing_report` call.
+    ///
+    /// The MCP tool surface is reachable by any connected client, so an
+    /// uncapped `since_ms: 0` scan was a caller-triggerable resource
+    /// exhaustion: the 4096-per-page loop bounded peak memory per PAGE, but
+    /// the whole window still accumulated in memory before deriving.
+    ///
+    /// 262,144 = 64 full pages of 4,096. Chosen against measurement, not a
+    /// round number: the largest real estate observed (live CE estate,
+    /// 2026-08-15) carries 162,860 audit events (33 MB, ~216 B/row), so the
+    /// cap is ~1.6× that — every real estate today keeps single-call
+    /// full-history semantics, while the worst case is bounded at
+    /// ~57 MB transient (262,144 × ~220 B in-memory events) instead of
+    /// unbounded. Beyond the cap, the existing `watermark_ms` paging
+    /// contract continues the scan (clamp, not reject — rejecting would
+    /// break a legitimate first call on a large estate).
+    /// Parity: mirrors `TIMING_WINDOW_MAX_EVENTS` in Rust `interface_tools.rs`.
+    static let timingWindowMaxEvents = 262_144
 
-        // Page the audit log from `sinceMs` forward. The HLC cursor is seeded
-        // exactly as EstatePerformanceHealthDuty does: physicalTime = sinceMs,
-        // logicalCount = 0, nodeID = 0. This sits at the very start of the
-        // given millisecond; events from that same millisecond but with
-        // logicalCount > 0 are re-fetched, but deriveTimings' sinceExclusiveMs
-        // guard excludes their contribution (A6 exactly-once contract).
-        // When sinceMs == 0 the cursor is nil, meaning start from the beginning
-        // of the log. A nil seed and then using last.hlc to advance is the
-        // standard paging protocol; the audit-log index makes the resume cheap.
-        //
-        // 4096 events per page bounds peak memory without measurable extra latency.
-        // The FULL window must be collected before deriving — tier 3/4 pair captures
-        // have markers that can arrive many pages later.
+    /// Collect the audit window for the timing derivation, capped at
+    /// `maxEvents` total events for the call.
+    ///
+    /// Paging protocol: the HLC cursor is seeded exactly as
+    /// EstatePerformanceHealthDuty does — physicalTime = sinceMs,
+    /// logicalCount = 0, nodeID = 0 — sitting at the very start of the given
+    /// millisecond; events from that same millisecond but with
+    /// logicalCount > 0 are re-fetched, but deriveTimings' sinceExclusiveMs
+    /// guard excludes their contribution (A6 exactly-once contract). When
+    /// sinceMs == 0 the cursor is nil, meaning start from the beginning of
+    /// the log; advancing via last.hlc is the standard paging protocol and
+    /// the audit-log index makes the resume cheap. 4096 events per page
+    /// bounds peak memory per page; `maxEvents` bounds the CALL.
+    ///
+    /// Truncation semantics: when the cap cuts the window, tier 3/4 pair
+    /// captures whose markers land beyond the cut pair-lose for this call
+    /// (they surface in the report's `unbounded` counts), and events sharing
+    /// the boundary millisecond are excluded by the next call's
+    /// sinceExclusiveMs guard. Acceptable for a statistical p50/p95
+    /// maintenance metric; the alternative — unbounded collection — was the
+    /// defect. `truncated` is true when the window MAY have more events;
+    /// the caller pages forward with the returned watermark.
+    ///
+    /// Internal (not private) so tests can drive truncation with a small
+    /// `maxEvents` against a small seeded log.
+    func collectTimingWindow(
+        handle: EstateHandle,
+        sinceMs: Int64,
+        maxEvents: Int
+    ) async throws -> (events: [NeuronKit.TimingAuditEvent], truncated: Bool) {
         var events: [NeuronKit.TimingAuditEvent] = []
+        var truncated = false
         var cursor: HLC? = sinceMs > 0
             ? HLC(physicalTime: sinceMs, logicalCount: 0, nodeID: 0)
             : nil
         let pageSize = 4096
         while true {
+            let remaining = maxEvents - events.count
+            guard remaining > 0 else {
+                // Cap landed exactly on a full-page boundary — there may be
+                // more events; the watermark lets the caller find out.
+                truncated = true
+                break
+            }
             let page = try await kit.auditEvents(handle, after: cursor, limit: pageSize)
-            events.append(contentsOf: page.map {
+            let keep = page.prefix(remaining)
+            events.append(contentsOf: keep.map {
                 NeuronKit.TimingAuditEvent(
                     verb: $0.verb,
                     physicalTimeMs: $0.hlc.physicalTime,
                     rowID: $0.rowId,
                     reason: $0.reason)
             })
+            if page.count > remaining {
+                // Events from this page were discarded — definitely more left.
+                truncated = true
+                break
+            }
             guard page.count == pageSize, let last = page.last else { break }
             cursor = last.hlc
         }
+        return (events, truncated)
+    }
+
+    func runTimingReport(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let sinceMs = Int64(try optionalInt(args["since_ms"], argument: "since_ms") ?? 0)
+
+        // Collect the window, capped at the call level (see
+        // timingWindowMaxEvents for the measured justification). The window
+        // up to the cap is collected before deriving — tier 3/4 pair captures
+        // have markers that can arrive many pages later.
+        let (events, truncated) = try await collectTimingWindow(
+            handle: handle, sinceMs: sinceMs, maxEvents: Self.timingWindowMaxEvents)
 
         let d = NeuronKit.deriveTimings(events: events, sinceExclusiveMs: sinceMs)
 
@@ -3454,6 +3513,13 @@ extension ToolDispatcher {
         lines.append(line("cycle_novel", d.cycleNovelMs, unbounded: d.cycleNovelUnbounded))
         lines.append(line("cycle_dreamt", d.cycleDreamtMs, unbounded: d.cycleDreamtUnbounded))
         lines.append("  watermark_ms: \(d.watermarkMs)")
+        if truncated {
+            // Only emitted when the cap cut the window, so the untruncated
+            // report stays byte-identical to the pre-cap output shape
+            // (harness parsers prefix-match lines and skip unknown ones,
+            // but there is no reason to churn the common case).
+            lines.append("  window: truncated at \(Self.timingWindowMaxEvents) events — pass watermark_ms back as since_ms to continue")
+        }
         return Self.textResult(lines.joined(separator: "\n"))
     }
 
