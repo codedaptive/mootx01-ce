@@ -1056,6 +1056,19 @@ mod tests {
     }
 
     #[test]
+    fn ping_empty_bracket_id_yields_estate_and_build_no_id() {
+        // G-8 omission matrix case (d): an EMPTY bracket pair "[]" fills
+        // estate and build but omits estateId — Swift guards each field
+        // independently inside the bracket branch (`if !id.isEmpty`,
+        // BotLink.swift:213), so an empty id is dropped while the name
+        // beside it still parses.
+        let v = parse_pong("pong: estate Foo [] is live — build 2.0");
+        assert_eq!(v.estate.as_deref(), Some("Foo"), "estate must survive an empty id");
+        assert!(v.estate_id.is_none(), "empty [] → estateId must be None");
+        assert_eq!(v.build.as_deref(), Some("2.0"));
+    }
+
+    #[test]
     fn ping_is_error_true_returns_raw_result_exit_2() {
         // isError:true ping → raw result object, exit 2 (P-6).
         let result_obj = serde_json::json!({"isError": true, "content": [{"type":"text","text":"estate quiesced"}]});
