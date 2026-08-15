@@ -181,9 +181,12 @@ final class SQLiteConnection: @unchecked Sendable {
 
         Self.applyDataProtection(to: url)
 
-        // Restore 0600 permissions. FileManager.replaceItem(.usingNewMetadataOnly)
-        // copies the temp file's permissions (SQLite default 0644) to the
-        // destination. Owner-only access must be re-established after the swap.
+        // Re-assert owner-only (0600) on the DB, WAL, and SHM files. Since
+        // SQ-01 the swapped-in file already arrives 0600 — the VACUUM
+        // destination is pre-created owner-only and the swap's
+        // .usingNewMetadataOnly carries that mode onto the estate path — so
+        // for the main file this is defence-in-depth; it also covers WAL/SHM
+        // sidecars recreated on this fresh connection.
         for suffix in ["", "-wal", "-shm"] {
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: url.path + suffix)
