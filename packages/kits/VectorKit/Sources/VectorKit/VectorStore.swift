@@ -988,6 +988,28 @@ public actor VectorStore {
         log.info("VectorStore: float-lane indexes (BruteForce + HNSW) evicted under memory pressure")
     }
 
+    /// Invalidate the HNSW lane for one modelID partition after a durable
+    /// mutation (delete / replace / reconcile / batch write) touched its rows.
+    ///
+    /// Drops the in-memory graph, the live-count seed, and the partition's
+    /// dirty flag (VH-01 Finding A: every `floatIndices` invalidation must be
+    /// paired with this, or `findNearestFloat` keeps serving the stale graph —
+    /// HNSW nodes own raw vector bytes, so deleted/replaced content would
+    /// surface from memory after the durable rows are gone).
+    ///
+    /// Persisted `hnsw_graph` rows are deliberately NOT deleted here: the next
+    /// qualifying `findNearestFloat` reloads them via `_loadHNSWGraphIfPresent`,
+    /// which re-derives every node's bytes from the `vectors` table — nodes
+    /// whose row was deleted load as placeholder tombstones and cannot surface.
+    /// The dirty flag IS dropped so a later `flush()` does not see a dirty
+    /// partition with no in-memory graph and persist-delete those
+    /// still-serviceable rows.
+    private func _invalidateHNSWLane(for modelID: String) {
+        hnswIndices.removeValue(forKey: modelID)
+        liveFloatCounts.removeValue(forKey: modelID)
+        hnswGraphDirty.remove(modelID)
+    }
+
     // MARK: - HNSW graph maintenance (dreaming cadence duties)
 
     /// Clear all HNSW graphs for every modelID partition (ALPHA duty).
@@ -1776,11 +1798,22 @@ public actor VectorStore {
         //    than N incremental float adds and matches the delete-path coherence
         //    policy. Dropping the map entry is the invalidation (its presence is
         //    the built flag); other models' indices are untouched.
-        for input in batch where input.payload.kind == .float32 {
-            // diskBacked scans SQLite directly (no cache). ramResident
-            // still uses floatIndices — invalidate so stale entries don't survive.
-            if storage.configuration.residencyHint == .ramResident {
+        if storage.configuration.residencyHint == .ramResident {
+            // diskBacked scans SQLite directly (no cache). ramResident still
+            // uses floatIndices — invalidate so stale entries don't survive.
+            // The batch may have REPLACED existing float rows (upsert), so
+            // each touched model's HNSW lane is invalidated alongside — a
+            // stale graph would otherwise keep serving the pre-batch vector
+            // bytes (VH-01 Finding A). floatIndices keeps its historical
+            // unscoped removeAll; the HNSW invalidation is scoped to the
+            // models actually present in the batch.
+            let touchedFloatModels = Set(
+                batch.lazy.filter { $0.payload.kind == .float32 }.map(\.modelID))
+            if !touchedFloatModels.isEmpty {
                 floatIndices.removeAll()
+                for modelID in touchedFloatModels {
+                    _invalidateHNSWLane(for: modelID)
+                }
             }
         }
 
@@ -2974,8 +3007,11 @@ public actor VectorStore {
         // (dropping the map entry is the invalidation).
         // ramResident float coherence (SECURITY): drop this model's cached
         // FloatBruteForceIndex so a subsequent findNearestFloat cannot return
-        // the just-deleted vectors from memory.
+        // the just-deleted vectors from memory. The HNSW lane is invalidated
+        // alongside (VH-01 Finding A): its nodes own raw vector bytes, so a
+        // stale graph would keep serving the deleted content.
         floatIndices.removeValue(forKey: modelID)
+        _invalidateHNSWLane(for: modelID)
         // Tombstone every resident slot for this (itemID, modelID) pair.
         // Only if the index has been built — if not, the delete is already
         // reflected in the table and will be absent on first build.
@@ -3083,8 +3119,11 @@ public actor VectorStore {
         //    and drop this model's Lane D float index so it lazily rebuilds too.
         // ramResident float coherence (SECURITY): the model's vectors were
         // replaced, so drop its cached FloatBruteForceIndex — otherwise
-        // findNearestFloat would search the pre-replace vectors.
+        // findNearestFloat would search the pre-replace vectors. The HNSW
+        // lane is invalidated alongside (VH-01 Finding A): its nodes own the
+        // pre-replace raw bytes and would keep serving them.
         floatIndices.removeValue(forKey: modelID)
+        _invalidateHNSWLane(for: modelID)
         try await _rebuildBinaryIndexFromTable()
     }
 
@@ -3155,9 +3194,12 @@ public actor VectorStore {
         // Lane D coherence: a deleted key may have addressed a float row. Drop
         // ONLY the touched models' cached float indices so the next
         // findNearestFloat rebuilds them from the table; other models' float
-        // indices are untouched (scoped invalidation).
+        // indices are untouched (scoped invalidation). The HNSW lane is
+        // invalidated alongside (VH-01 Finding A): a stale graph owns the
+        // deleted vectors' raw bytes and would keep serving them.
         for modelID in Set(keySet.map(\.modelID)) {
             floatIndices.removeValue(forKey: modelID)
+            _invalidateHNSWLane(for: modelID)
         }
 
         // Binary-lane coherence: tombstone every resident slot whose logical
@@ -3277,8 +3319,11 @@ public actor VectorStore {
 
         // Coherence: this model's float index lazily rebuilds from the table;
         // the resident binary index is rebuilt once from the table (the
-        // reconcile may have touched an arbitrary mix of keys).
+        // reconcile may have touched an arbitrary mix of keys). The HNSW lane
+        // is invalidated alongside (VH-01 Finding A): the reconcile may have
+        // removed or replaced float rows whose raw bytes the graph still owns.
         floatIndices.removeValue(forKey: modelID)
+        _invalidateHNSWLane(for: modelID)
         try await _rebuildBinaryIndexFromTable()
         return (removed: staleKeys.count, upserted: expected.count)
     }
@@ -3326,7 +3371,16 @@ public actor VectorStore {
         // must be dropped or findNearestFloat would still return matches from
         // memory after the durable rows are gone.
         floatIndices.removeAll()
-        log.info("VectorStore.destroyAllVectors: all rows deleted, resident array reset")
+        // HNSW lane teardown (VH-01 Finding A): a full destroy must leave no
+        // graph behind, in memory OR on disk. Drop every model's resident
+        // graph, live-count seed, and dirty flag, and delete every persisted
+        // hnsw_graph row — the topology describes vectors that no longer
+        // exist, and the graph nodes own their raw bytes.
+        hnswIndices.removeAll(keepingCapacity: false)
+        liveFloatCounts.removeAll(keepingCapacity: false)
+        hnswGraphDirty.removeAll(keepingCapacity: false)
+        _ = try await storage.rowStore.delete(table: "hnsw_graph", where: .isTrue)
+        log.info("VectorStore.destroyAllVectors: all rows deleted, resident array and HNSW lane reset")
     }
 
     // MARK: - Private: resident index lifecycle
@@ -3735,7 +3789,10 @@ public actor VectorStore {
         // delete above must invalidate it or a subsequent findNearestFloat
         // returns the deleted vector from memory. Drop this model's float
         // index; it rebuilds lazily from the (now-updated) table on next use.
+        // The HNSW lane is invalidated alongside (VH-01 Finding A): its nodes
+        // own the deleted vector's raw bytes and would keep serving them.
         floatIndices.removeValue(forKey: modelID)
+        _invalidateHNSWLane(for: modelID)
         // Only touch the resident BINARY array if it has been built. If not,
         // the table delete is already authoritative and the entry will be
         // absent when the array is first built on the next findNearest call.
