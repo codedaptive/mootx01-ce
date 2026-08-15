@@ -67,7 +67,9 @@
 
 use crate::engine::brute_force::BruteForceIndex;
 use crate::engine::float_brute_force::FloatBruteForceIndex;
-use crate::engine::hnsw_index::{GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD};
+use crate::engine::hnsw_index::{
+    GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD, HNSW_M0, HNSW_MAX_PERSISTED_LAYER,
+};
 use crate::engine::key::VectorRecordKey;
 use crate::engine::metric::DenseMetric;
 use crate::engine::mih::{MIHBandCount, MIHIndex};
@@ -1483,6 +1485,10 @@ impl VectorStore {
                 state.float_indices.remove(model_id);
                 state.hnsw_indices.remove(model_id);
                 state.live_float_counts.remove(model_id);
+                // Dirty-flag hygiene (VH-01): see delete_and_tombstone — a
+                // dropped graph's dirty flag would make flush() delete the
+                // still-serviceable persisted rows.
+                state.hnsw_graph_dirty.remove(model_id);
             }
         }
 
@@ -2289,6 +2295,14 @@ impl VectorStore {
             .row_store()
             .delete("vectors", &StoragePredicate::IsTrue)
             .map_err(|e| VectorKitError::StoreUnavailable(format!("destroy_all_vectors failed: {e}")))?;
+        // HNSW lane teardown (VH-01 Finding A): a full destroy must leave no
+        // graph behind, in memory OR on disk. The persisted hnsw_graph rows
+        // describe vectors that no longer exist; delete them here (I/O outside
+        // the state lock, matching the vectors delete above).
+        self.storage
+            .row_store()
+            .delete("hnsw_graph", &StoragePredicate::IsTrue)
+            .map_err(|e| VectorKitError::StoreUnavailable(format!("destroy_all_vectors failed: {e}")))?;
 
         // Reset both indexes and live count to empty. The table is now empty.
         let mut state = self.state.lock().map_err(|_| {
@@ -2322,6 +2336,9 @@ impl VectorStore {
         state.float_indices.clear();
         state.hnsw_indices.clear();
         state.live_float_counts.clear();
+        // Dirty flags go with the graphs: every partition's persisted rows
+        // were just deleted, so there is nothing left for flush() to persist.
+        state.hnsw_graph_dirty.clear();
         Ok(())
     }
 
@@ -2456,6 +2473,12 @@ impl VectorStore {
         state.float_indices.remove(model_id);
         state.hnsw_indices.remove(model_id);
         state.live_float_counts.remove(model_id);
+        // Dirty-flag hygiene (VH-01): the graph was just dropped, so clear the
+        // partition's dirty flag too — otherwise the next flush() sees a dirty
+        // partition with no in-memory graph and deletes the still-serviceable
+        // persisted hnsw_graph rows (reload re-derives bytes from the vectors
+        // table, so those rows can never resurface deleted content).
+        state.hnsw_graph_dirty.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }
@@ -2570,6 +2593,12 @@ impl VectorStore {
         state.float_indices.remove(model_id);
         state.hnsw_indices.remove(model_id);
         state.live_float_counts.remove(model_id);
+        // Dirty-flag hygiene (VH-01): the graph was just dropped, so clear the
+        // partition's dirty flag too — otherwise the next flush() sees a dirty
+        // partition with no in-memory graph and deletes the still-serviceable
+        // persisted hnsw_graph rows (reload re-derives bytes from the vectors
+        // table, so those rows can never resurface deleted content).
+        state.hnsw_graph_dirty.remove(model_id);
         self.rebuild_binary_index_from_table_locked(&mut state)?;
         Ok(())
     }
@@ -2682,6 +2711,8 @@ impl VectorStore {
             state.float_indices.remove(model_id);
             state.hnsw_indices.remove(model_id);
             state.live_float_counts.remove(model_id);
+            // Dirty-flag hygiene (VH-01): see delete_and_tombstone.
+            state.hnsw_graph_dirty.remove(model_id);
         }
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
@@ -2893,6 +2924,12 @@ impl VectorStore {
         state.float_indices.remove(model_id);
         state.hnsw_indices.remove(model_id);
         state.live_float_counts.remove(model_id);
+        // Dirty-flag hygiene (VH-01): the graph was just dropped, so clear the
+        // partition's dirty flag too — otherwise the next flush() sees a dirty
+        // partition with no in-memory graph and deletes the still-serviceable
+        // persisted hnsw_graph rows (reload re-derives bytes from the vectors
+        // table, so those rows can never resurface deleted content).
+        state.hnsw_graph_dirty.remove(model_id);
         self.rebuild_binary_index_from_table_locked(&mut state)?;
         Ok((stale_keys.len(), expected.len()))
     }
@@ -3311,22 +3348,45 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
+        // Persisted hnsw_graph rows are UNTRUSTED input (VH-01 Finding C).
+        // Every INTEGER is converted with a checked cast and bounds-tested
+        // BEFORE it can size an allocation downstream; rows failing any check
+        // are skipped exactly like rows with missing/mistyped columns.
+        // `HNSWIndex::load_from_graph_rows` re-validates the same bounds and
+        // rejects the whole graph if an invalid row somehow reaches it.
         let mut graph_rows = Vec::with_capacity(rows.len());
         for row in rows {
+            // node_idx: compact array index — must fit i32 and be ≥ 0.
+            // A plain `as i32` would silently wrap out-of-range values.
             let node_idx = match row.get("node_idx") {
-                Some(TypedValue::Int(v)) => *v as i32,
+                Some(TypedValue::Int(v)) => match i32::try_from(*v) {
+                    Ok(v) if v >= 0 => v,
+                    _ => continue,
+                },
                 _ => continue,
             };
             let node_id = match row.get("node_id") {
                 Some(TypedValue::Text(s)) => s.clone(),
                 _ => continue,
             };
+            // layer: sizes the per-node layer allocation — must be ≥ 0 and
+            // within the level-generation cap. A plain `as usize` would turn
+            // a negative i64 into a huge allocation count.
             let layer = match row.get("layer") {
-                Some(TypedValue::Int(v)) => *v as usize,
+                Some(TypedValue::Int(v)) => match usize::try_from(*v) {
+                    Ok(l) if l <= HNSW_MAX_PERSISTED_LAYER => l,
+                    _ => continue,
+                },
                 _ => continue,
             };
+            // neighbours: packed LE i32 — must be whole i32s and within the
+            // per-layer fan-out cap (layer 0 persists at most M0 neighbours).
             let neighbours_blob = match row.get("neighbours") {
-                Some(TypedValue::Blob(b)) => b.clone(),
+                Some(TypedValue::Blob(b))
+                    if b.len() % 4 == 0 && b.len() <= HNSW_M0 * 4 =>
+                {
+                    b.clone()
+                }
                 _ => continue,
             };
             // generation column added in schema v6. Pre-v6 rows (or InMemory
@@ -3903,6 +3963,12 @@ impl VectorStore {
         state.float_indices.remove(model_id);
         state.hnsw_indices.remove(model_id);
         state.live_float_counts.remove(model_id);
+        // Dirty-flag hygiene (VH-01): the graph was just dropped, so clear the
+        // partition's dirty flag too — otherwise the next flush() sees a dirty
+        // partition with no in-memory graph and deletes the still-serviceable
+        // persisted hnsw_graph rows (reload re-derives bytes from the vectors
+        // table, so those rows can never resurface deleted content).
+        state.hnsw_graph_dirty.remove(model_id);
         if !state.index_built {
             return Ok(()); // table delete already applied; array not yet built
         }
