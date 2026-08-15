@@ -174,15 +174,21 @@ fn hca1_deleted_vector_not_returned_after_rebuild() {
 
 // ── HC-A-2: destroy_all_vectors leaves no HNSW graph resident ────────────────
 
-/// HC-A-2 (VH-01 Finding A REGRESSION): after `destroy_all_vectors`, a subsequent
-/// `find_nearest_float` must return empty results.
+/// HC-A-2 (VH-01 Finding A REGRESSION): after `destroy_all_vectors`, the persisted
+/// `hnsw_graph` rows must be deleted (durable state) AND `find_nearest_float` must
+/// return empty results (memory state).
 ///
-/// Without the fix, `destroy_all_vectors` cleared `float_indices` but not
-/// `hnsw_indices`. The HNSW graph remained resident and could serve items from
-/// a logically-empty estate.
+/// Without the fix, `destroy_all_vectors` cleared `float_indices` and `hnsw_indices`
+/// (memory) but did NOT delete `hnsw_graph` rows (storage). The in-memory assertion
+/// passed pre-fix because the vectors table was empty — but the DURABLE graph rows
+/// remained on disk, violating the contract that destroy wipes all HNSW state.
 ///
-/// With the fix, `destroy_all_vectors` clears `hnsw_indices`, `live_float_counts`,
-/// `hnsw_graph_dirty`, AND deletes every persisted `hnsw_graph` row.
+/// With the fix, `destroy_all_vectors` deletes every `hnsw_graph` row in addition
+/// to clearing the in-memory indices.
+///
+/// DISCRIMINATING ASSERTION: `hnsw_graph_row_count == 0` after destroy. Pre-fix,
+/// the rows survive in storage (count > 0 → assertion fails). Post-fix, rows are
+/// deleted (count == 0 → assertion passes).
 #[test]
 fn hca2_destroy_all_vectors_leaves_no_graph() {
     let db_path = std::env::temp_dir()
@@ -202,6 +208,21 @@ fn hca2_destroy_all_vectors_leaves_no_graph() {
     // Full teardown.
     store.destroy_all_vectors().expect("destroy all vectors");
 
+    // Durable gate: hnsw_graph rows must be gone from storage, not just evicted
+    // from the in-memory index. Pre-fix: rows survive (count > 0). Post-fix:
+    // destroy_all_vectors deletes them (count == 0).
+    let row_count = store
+        .hnsw_graph_row_count(MODEL_ID)
+        .expect("hnsw_graph_row_count after destroy");
+    assert_eq!(
+        row_count, 0,
+        "HC-A-2 (VH-01 Finding A REGRESSION): hnsw_graph rows must be deleted by \
+         destroy_all_vectors; pre-fix code only clears in-memory state, leaving {} \
+         rows on disk.",
+        row_count
+    );
+
+    // Memory gate: search must also return empty (confirms in-memory teardown).
     let mut rng = SplitMix64HP::new(111);
     let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
     let results = store
@@ -210,8 +231,7 @@ fn hca2_destroy_all_vectors_leaves_no_graph() {
 
     assert!(
         results.is_empty(),
-        "HC-A-2 (VH-01 Finding A REGRESSION): find_nearest_float must return empty after destroy_all_vectors; \
-         the HNSW graph must be fully torn down. Got {} results.",
+        "HC-A-2: find_nearest_float must return empty after destroy_all_vectors. Got {} results.",
         results.len()
     );
 
@@ -338,6 +358,9 @@ fn hcc1_huge_layer_rejected() {
         node_idx:        0,
         node_id:         "x".to_string(),
         layer:           HNSW_MAX_PERSISTED_LAYER + 1,  // 33 — one above the cap
+        // generation 0 = pre-shadow-swap serving generation. Engine-level fixtures
+        // are generation-agnostic; 0 is accepted by any generation filter.
+        generation: 0,
         neighbours_blob: Vec::new(),
     };
 
@@ -345,7 +368,7 @@ fn hcc1_huge_layer_rejected() {
     node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
 
     let rows = vec![bad_row];
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
 
     assert!(
         !idx.has_graph(),
@@ -357,22 +380,23 @@ fn hcc1_huge_layer_rejected() {
 
 // ── HC-C-2: negative node_idx rejects whole graph ────────────────────────────
 
-/// HC-C-2 (VH-01 Finding C REGRESSION): a row with `node_idx = -1` must reject
-/// the whole graph. `has_graph()` must be false.
+/// HC-C-2 (VH-01 Finding C REGRESSION): a row with `node_idx = -1` placed alongside
+/// valid rows 0 and 1 must cause `load_from_graph_rows` to reject the WHOLE graph.
+/// `has_graph()` must be false.
 ///
-/// Without the fix, a negative i32 was used in downstream array lookups.
-/// With the fix, Phase-0 checks `node_idx < 0` → rejects whole graph.
+/// Without the fix (no Phase-0 guard), the negative row is accepted and processed as
+/// a tombstone (node_bytes has no entry for -1). Rows 0 and 1 are live nodes with
+/// valid float bytes. `has_graph()` becomes true — the graph loads despite the
+/// corrupt negative index.
 ///
-/// NOTE — partial discrimination: `node_bytes` is intentionally empty so the test
-/// focuses on the Phase-0 guard. Pre-fix code would have reached the `node_bytes`
-/// lookup for node_idx=-1, found nothing, and `continue`d — also leaving
-/// `has_graph()=false`, but for the wrong reason (nodeBytes miss, not Phase-0 guard).
-/// Both pre-fix and post-fix produce the same observable result for this input; the
-/// guard versus the nodeBytes miss are indistinguishable from the outside. The
-/// truly discriminating scenario requires nodeBytes[-1] to be populated, but i32
-/// sign limitations make a negative key in a HashMap<i32, _> unusual in test code.
-/// HC-F1 provides the F1/F7 discriminating test with a missing index-0 and live
-/// index-1 and index-2.
+/// With the fix, Phase-0 checks `node_idx < 0` on every row before any state is
+/// built. Finding -1 → the whole graph is rejected. `has_graph()` must be false.
+///
+/// Fixture note: valid rows 0 and 1 are REQUIRED for discrimination. A test with
+/// only the -1 row and empty node_bytes cannot discriminate: pre-fix code exits at
+/// the "no bytes → return" guard in Phase 2, yielding has_graph()=false by a
+/// different path. Pairing -1 with live nodes forces pre-fix to succeed while
+/// post-fix rejects.
 #[test]
 fn hcc2_negative_node_idx_rejected() {
     use vectorkit::engine::HNSWIndex;
@@ -380,20 +404,46 @@ fn hcc2_negative_node_idx_rejected() {
     let mut idx = HNSWIndex::new(42);
     let model_id = "hcc2-model";
 
-    let bad_row = vectorkit::GraphRow {
-        node_idx:        -1,
-        node_id:         "x".to_string(),
-        layer:           0,
-        neighbours_blob: Vec::new(),
-    };
+    // Row with invalid node_idx=-1 alongside two valid live rows.
+    // Pre-fix: -1 is treated as a tombstone (no bytes), 0 and 1 are live →
+    //   has_graph()=true (wrong). Post-fix: Phase-0 rejects -1 → has_graph()=false.
+    let rows = vec![
+        vectorkit::GraphRow {
+            node_idx:        -1,
+            node_id:         "bad".to_string(),
+            layer:           0,
+            generation:      0,
+            neighbours_blob: Vec::new(),
+        },
+        vectorkit::GraphRow {
+            node_idx:        0,
+            node_id:         "p".to_string(),
+            layer:           0,
+            generation:      0,
+            neighbours_blob: vec![0x01, 0x00, 0x00, 0x00],
+        },
+        vectorkit::GraphRow {
+            node_idx:        1,
+            node_id:         "q".to_string(),
+            layer:           0,
+            generation:      0,
+            neighbours_blob: vec![0x00, 0x00, 0x00, 0x00],
+        },
+    ];
 
-    let node_bytes = std::collections::HashMap::new();
-    let rows = vec![bad_row];
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    let mut node_bytes = std::collections::HashMap::new();
+    // Valid float bytes for nodes 0 and 1 (1.0 and 0.5 as LE f32).
+    node_bytes.insert(0i32, ("p".to_string(), vec![0x00u8, 0x00, 0x80, 0x3f]));
+    node_bytes.insert(1i32, ("q".to_string(), vec![0x00u8, 0x00, 0x00, 0x3f]));
+
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
 
     assert!(
         !idx.has_graph(),
-        "HC-C-2 (VH-01 Finding C REGRESSION): row with node_idx=-1 must reject whole graph; has_graph() must be false."
+        "HC-C-2 (VH-01 Finding C REGRESSION): row with node_idx=-1 alongside valid \
+         rows must reject the whole graph; has_graph() must be false. Pre-fix code \
+         processes the -1 row as a tombstone and loads the live rows, leaving \
+         has_graph()=true."
     );
 }
 
@@ -416,13 +466,13 @@ fn hcc3_misaligned_blob_rejected() {
         node_idx:        0,
         node_id:         "x".to_string(),
         layer:           0,
-        neighbours_blob: vec![0, 0, 0, 0, 0xFF],  // 5 bytes — not divisible by 4
+        generation: 0, neighbours_blob: vec![0, 0, 0, 0, 0xFF],  // 5 bytes — not divisible by 4
     };
 
     let mut node_bytes = std::collections::HashMap::new();
     node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
     let rows = vec![bad_row];
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
 
     assert!(
         !idx.has_graph(),
@@ -452,13 +502,13 @@ fn hcc4_oversized_blob_rejected() {
         node_idx:        0,
         node_id:         "x".to_string(),
         layer:           0,
-        neighbours_blob: oversized_blob,
+        generation: 0, neighbours_blob: oversized_blob,
     };
 
     let mut node_bytes = std::collections::HashMap::new();
     node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
     let rows = vec![bad_row];
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
 
     assert!(
         !idx.has_graph(),
@@ -469,21 +519,28 @@ fn hcc4_oversized_blob_rejected() {
 
 // ── HC-F1: tombstone at compact index 0 does not suppress search ─────────────
 
-/// HC-F1 (VH-01 F1 discriminating): when nodeIdx=0 is absent from node_bytes
-/// (deleted from `vectors` before reload), `load_from_graph_rows` must insert a
-/// placeholder tombstone at compact index 0, NOT `continue` past it.
+/// HC-F1 (PARITY SAFEGUARD — F1 and F7 affected Swift only).
 ///
-/// Without the F1 fix: `continue` shifts all subsequent compact indices down by one,
-///   mis-wiring every neighbour edge. Neighbour "node 2" would address whatever
-///   happened to land at index 1 after the skip.
+/// F1 defect: Swift's `loadFromGraphRows` used `continue` when nodeIdx=0 was absent
+/// from nodeBytes, shifting all compact indices down by one and mis-wiring every
+/// neighbour edge. Rust's implementation inserted a placeholder tombstone from the
+/// beginning, so F1 never existed here.
 ///
-/// With the F1 fix: a tombstone placeholder preserves compact addressing.
-///   Entry-point election skips tombstones → `has_graph()` is true and search
-///   returns live nodes.
+/// F7 defect: Swift derived `vectorStride` from `nodes.first`, which after the F1
+/// fix could be a placeholder tombstone with zero bytes, yielding stride=0 and
+/// suppressing all search. Rust derives stride from `node_bytes` (the
+/// nodeIdx→bytes map), bypassing `nodes` entirely — so F7 also never existed here.
 ///
-/// NOTE: Rust is immune to the F7 stride regression that affected Swift (Rust
-/// derives stride from `node_bytes`, the nodeIdx→bytes map, not the nodes Vec),
-/// so search succeeds without a separate stride fix in Rust.
+/// This test verifies the observable contract that BOTH ports must satisfy:
+/// when nodeIdx=0 is absent (deleted vector), a graph with live nodes at indices
+/// 1 and 2 must load successfully (`has_graph()=true`) and search must return
+/// those live nodes. It passes against pre-fix Rust code — confirming the Rust
+/// port was already correct — and against HEAD.
+///
+/// NOTE: This test is not a discriminating gate for this port. Its value is to
+/// pin the contract so a future Rust change that regresses toward the Swift
+/// pre-fix shape is caught immediately. See hcf4 for the endpoint-identity
+/// parity lock on the same contract.
 #[test]
 fn hcf1_tombstone_at_compact_index_zero_does_not_suppress_search() {
     use vectorkit::engine::HNSWIndex;
@@ -503,23 +560,23 @@ fn hcf1_tombstone_at_compact_index_zero_does_not_suppress_search() {
             node_id:         "deleted-a".to_string(),
             layer:           0,
             // Neighbours: [1, 2] in old nodeIdx space (LE i32).
-            neighbours_blob: vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+            generation: 0, neighbours_blob: vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
         },
         vectorkit::GraphRow {
             node_idx:        1,
             node_id:         "live-b".to_string(),
             layer:           0,
-            neighbours_blob: vec![0x00, 0x00, 0x00, 0x00],  // neighbour: nodeIdx=0
+            generation: 0, neighbours_blob: vec![0x00, 0x00, 0x00, 0x00],  // neighbour: nodeIdx=0
         },
         vectorkit::GraphRow {
             node_idx:        2,
             node_id:         "live-c".to_string(),
             layer:           0,
-            neighbours_blob: vec![0x00, 0x00, 0x00, 0x00],
+            generation: 0, neighbours_blob: vec![0x00, 0x00, 0x00, 0x00],
         },
     ];
 
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
 
     assert!(
         idx.has_graph(),
@@ -542,15 +599,25 @@ fn hcf1_tombstone_at_compact_index_zero_does_not_suppress_search() {
 
 // ── HC-F2b: empty reload clears state ─────────────────────────────────────────
 
-/// HC-F2b (VH-01 F2b discriminating): after loading a valid graph, calling
-/// `load_from_graph_rows(&[], &{}, model_id)` must reset all state so that
-/// `has_graph()` returns false.
+/// HC-F2b (PARITY SAFEGUARD — F2b affected Swift only).
 ///
-/// Without the F2b fix: the empty-rows guard (`if rows.is_empty() { return }`) fired
-///   before `self.clear()` → entryPoint/nodes survived → `has_graph()` stayed true.
+/// F2b defect (Swift): `loadFromGraphRows` guarded `rows.isEmpty` BEFORE calling
+/// `self.clear()`. An empty reload returned early without wiping state, so the
+/// previous graph remained resident.
 ///
-/// With the F2b fix: `self.clear()` runs BEFORE the empty-rows check (matching
-///   Swift's F2b reset block). An empty reload leaves a clean, empty index.
+/// Rust was not affected: TASK-MXE-2026-0332 (shadow-swap) restructured
+/// `load_from_graph_rows` to call `self.clear()` before any guard, as a side
+/// effect of the generation-filter architecture. Empirical measurement against
+/// BASE_A (7265a1834) confirms this test passes pre-fix — the Rust implementation
+/// already cleared state before the empty check before VH-01 began.
+///
+/// This test verifies the observable contract: an empty reload of a previously
+/// populated graph must leave `has_graph()=false`. It is retained as a parity
+/// safeguard so a future Rust change that regresses toward the Swift pre-fix shape
+/// (moving self.clear() below the guard) would be caught.
+///
+/// NOTE: This test is not a discriminating gate for this port. Swift was the
+/// affected port. The VH-01 F2b fix in Swift aligns it with Rust's behavior here.
 #[test]
 fn hcf2b_empty_reload_clears_state() {
     use vectorkit::engine::HNSWIndex;
@@ -565,11 +632,11 @@ fn hcf2b_empty_reload_clears_state() {
 
     let rows = vec![
         vectorkit::GraphRow { node_idx: 0, node_id: "x".to_string(), layer: 0,
-                              neighbours_blob: vec![0x01, 0x00, 0x00, 0x00] },
+                              generation: 0, neighbours_blob: vec![0x01, 0x00, 0x00, 0x00] },
         vectorkit::GraphRow { node_idx: 1, node_id: "y".to_string(), layer: 0,
-                              neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
+                              generation: 0, neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
     ];
-    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
     assert!(idx.has_graph(), "HC-F2b setup: graph must be resident after valid load");
 
     // Step 2: reload with empty rows.
@@ -577,7 +644,7 @@ fn hcf2b_empty_reload_clears_state() {
     // Post-fix F2b: self.clear() before empty guard → clean empty index → has_graph=false.
     let empty: Vec<vectorkit::GraphRow> = vec![];
     let empty_bytes: std::collections::HashMap<i32, (String, Vec<u8>)> = std::collections::HashMap::new();
-    idx.load_from_graph_rows(&empty, &empty_bytes, model_id);
+    idx.load_from_graph_rows(&empty, &empty_bytes, model_id, 0);
 
     assert!(
         !idx.has_graph(),
@@ -588,21 +655,24 @@ fn hcf2b_empty_reload_clears_state() {
 
 // ── HC-F2a: two-load sequence then full tombstone — no crash ──────────────────
 
-/// HC-F2a (VH-01 F2a+F2b discriminating): after loading a 3-node graph and then
-/// reloading with a 1-node graph, tombstoning the remaining node must cleanly set
-/// `has_graph()=false` without accessing out-of-bounds memory.
+/// HC-F2a (VH-01 Finding B discriminating): after loading a 3-node graph and then
+/// reloading with a 1-node graph, tombstoning the remaining node must result in
+/// `has_graph()=false`.
 ///
-/// Without F2b: the second `load_from_graph_rows` would APPEND the 1 new node to
-///   the existing 3 (nodes never cleared). `tombstone("x")` would set nodes[3]
-///   tombstoned while old nodes [0–2] remained live → `repair_entry_point` would
-///   find a stale live entry → `has_graph()` stayed true (wrong).
+/// EMPIRICAL NOTE: This test was designed to gate F2a (repair_entry_point out-of-
+/// bounds) and F2b (clear before empty-rows check). Measurement against BASE_A
+/// (7265a1834) shows it DOES discriminate, but for Finding B reasons: BASE_A's
+/// `tombstone()` marks nodes as dead without calling `repair_entry_point()`.
+/// After tombstoning "x", `entry_point` still refers to it → `has_graph()=true`.
+/// In the VH-01 fixed code, `tombstone()` calls `repair_entry_point()`, which
+/// finds no live nodes and sets `entry_point=None` → `has_graph()=false`.
 ///
-/// Without F2a: if a stale entryPoint pointed past `nodes.len()` after a two-load
-///   sequence, `repair_entry_point()` would access nodes[ep] out of bounds.
-///   The F2a bounds guard prevents this panic.
+/// The two-load sequence (3-node → 1-node) exercises the state-reset path but
+/// the discriminating assertion is identical to hcb1/hcb2: tombstone must
+/// trigger entry-point repair. BASE_A lacks that repair in `tombstone()`.
 ///
-/// With both fixes: second load fully resets state and rebuilds with 1 node;
-///   `tombstone("x")` triggers a clean repair → `has_graph()=false`.
+/// With the fix: second load resets state (self.clear() first), rebuilds with 1
+/// node, and `tombstone("x")` triggers repair → `has_graph()=false`.
 #[test]
 fn hcf2a_two_load_sequence_then_tombstone_all_no_crash() {
     use vectorkit::engine::HNSWIndex;
@@ -618,35 +688,39 @@ fn hcf2a_two_load_sequence_then_tombstone_all_no_crash() {
 
     let rows3 = vec![
         vectorkit::GraphRow { node_idx: 0, node_id: "a".to_string(), layer: 0,
-                              neighbours_blob: vec![0x01, 0x00, 0x00, 0x00] },
+                              generation: 0, neighbours_blob: vec![0x01, 0x00, 0x00, 0x00] },
         vectorkit::GraphRow { node_idx: 1, node_id: "b".to_string(), layer: 0,
-                              neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
+                              generation: 0, neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
         vectorkit::GraphRow { node_idx: 2, node_id: "c".to_string(), layer: 0,
-                              neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
+                              generation: 0, neighbours_blob: vec![0x00, 0x00, 0x00, 0x00] },
     ];
-    idx.load_from_graph_rows(&rows3, &bytes3, model_id);
+    idx.load_from_graph_rows(&rows3, &bytes3, model_id, 0);
     assert!(idx.has_graph(), "HC-F2a setup: 3-node graph must be resident");
 
-    // Step 2: reload with a 1-node graph. F2b ensures self.clear() runs first.
+    // Step 2: reload with a 1-node graph. The second load resets state before
+    // processing (self.clear() runs first, as confirmed by BASE_A inspection).
     let mut bytes1 = std::collections::HashMap::new();
     bytes1.insert(0i32, ("x".to_string(), vec![0x00u8, 0x00, 0x80, 0x3f]));
 
     let rows1 = vec![
         vectorkit::GraphRow { node_idx: 0, node_id: "x".to_string(), layer: 0,
-                              neighbours_blob: vec![] },
+                              generation: 0, neighbours_blob: vec![] },
     ];
-    idx.load_from_graph_rows(&rows1, &bytes1, model_id);
+    idx.load_from_graph_rows(&rows1, &bytes1, model_id, 0);
     assert!(idx.has_graph(), "HC-F2a: 1-node graph must be resident after second load");
 
-    // Step 3: tombstone the only live node. repair_entry_point must not panic (F2a)
-    // and has_graph() must become false (F2b guarantee).
+    // Step 3: tombstone the only live node. Post-fix: tombstone() calls
+    // repair_entry_point() → no live nodes → entry_point=None → has_graph()=false.
+    // Pre-fix: tombstone() only marks the node dead, does not repair entry_point
+    // → entry_point still set → has_graph()=true (Finding B defect).
     idx.tombstone("x");
 
     assert!(
         !idx.has_graph(),
-        "HC-F2a Rust REGRESSION (F2a+F2b): after tombstoning the only node in the \
-         second (smaller) load, has_graph() must be false. Without F2b, stale nodes \
-         from the first load survive and keep has_graph() true."
+        "HC-F2a Rust REGRESSION (Finding B — tombstone without entry-point repair): \
+         after tombstoning the only node, has_graph() must be false. Pre-fix \
+         tombstone() skips repair_entry_point(), leaving entry_point set to \
+         the now-dead node."
     );
 }
 
@@ -743,6 +817,165 @@ fn hcf3_store_layer_corrupt_row_falls_back_to_exact_scan() {
     );
 
     let _ = std::fs::remove_file(&db_path);
+}
+
+// ── HC-F4: F1 endpoint-identity parity lock ───────────────────────────────────
+
+/// HC-F4 (PARITY SAFEGUARD — F1 endpoint-identity contract).
+///
+/// F1 in Swift: `loadFromGraphRows` used `continue` when nodeIdx=0 was absent from
+/// nodeBytes, shifting compact indices by one and mis-wiring every neighbour edge.
+/// A surviving node at old compact index 1 was shifted to compact index 0, and its
+/// neighbours (stored in old compact index space) now resolved to wrong nodes.
+///
+/// Rust never had F1 — it inserted a placeholder tombstone, preserving compact
+/// addressing. This test verifies the same observable contract that the Swift
+/// HC-D-5 gate verifies: after a load where nodeIdx=0 is absent, each surviving
+/// node's neighbours must resolve via the compact-index map to the SAME itemID
+/// they named before the delete.
+///
+/// Verification method: `graph_rows()` re-emits the loaded graph with each row's
+/// nodeIdx in compact space and the raw neighbours_blob. Build a
+/// compact-index → itemID map from the emitted rows, decode each row's neighbours
+/// through that map, and assert endpoint identity — the resolved itemIDs must match
+/// the pre-delete topology.
+///
+/// Fixture: nodeIdx=0 ("deleted-a") absent from node_bytes; nodeIdx=1 ("live-b")
+/// and nodeIdx=2 ("live-c") present. Row topology:
+///   nodeIdx=0 → neighbours [1, 2] (original compact space)
+///   nodeIdx=1 → neighbours [0]    (points at deleted-a's slot)
+///   nodeIdx=2 → neighbours [0]    (points at deleted-a's slot)
+///
+/// Post-fix (Rust, always): compact_to_pos maps 0→tombstone, 1→live-b, 2→live-c.
+/// graph_rows() skips the tombstone, emitting live-b at nodeIdx=1 and live-c at
+/// nodeIdx=2. Neighbour [2] from live-b resolves to "live-c" (correct). Neighbour
+/// [1] from live-c resolves to "live-b" (correct). Endpoint identity holds.
+///
+/// This test passes against pre-fix Rust because Rust never had F1. Its value is
+/// that it pins the same contract the Swift gate pins, catching a future Rust
+/// regression that drifts toward the Swift pre-fix shape.
+#[test]
+fn hcf4_endpoint_identity_after_missing_compact_index_zero() {
+    use vectorkit::engine::HNSWIndex;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcf4-model";
+
+    // nodeIdx=0 absent from node_bytes — deleted from `vectors` before reload.
+    // nodeIdx=1 ("live-b") and nodeIdx=2 ("live-c") are live 1-d float vectors.
+    let mut node_bytes = std::collections::HashMap::new();
+    node_bytes.insert(1i32, ("live-b".to_string(), vec![0x00u8, 0x00, 0x80, 0x3f]));  // 1.0f LE
+    node_bytes.insert(2i32, ("live-c".to_string(), vec![0x00u8, 0x00, 0x00, 0x3f]));  // 0.5f LE
+
+    let rows = vec![
+        vectorkit::GraphRow {
+            node_idx:        0,
+            node_id:         "deleted-a".to_string(),
+            layer:           0,
+            generation:      0,
+            // deleted-a had neighbours [1, 2] in compact space.
+            neighbours_blob: vec![0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        },
+        vectorkit::GraphRow {
+            node_idx:        1,
+            node_id:         "live-b".to_string(),
+            layer:           0,
+            generation:      0,
+            // live-b had neighbour [2] in compact space → should resolve to "live-c".
+            neighbours_blob: vec![0x02, 0x00, 0x00, 0x00],
+        },
+        vectorkit::GraphRow {
+            node_idx:        2,
+            node_id:         "live-c".to_string(),
+            layer:           0,
+            generation:      0,
+            // live-c had neighbour [1] in compact space → should resolve to "live-b".
+            neighbours_blob: vec![0x01, 0x00, 0x00, 0x00],
+        },
+    ];
+
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id, 0);
+
+    assert!(
+        idx.has_graph(),
+        "HC-F4: graph must load with a tombstone placeholder at compact index 0"
+    );
+
+    // Build a compact-index → itemID map from graph_rows() output.
+    // graph_rows() skips tombstoned nodes; live rows carry the compact nodeIdx
+    // and the raw neighbours_blob in compact-index space.
+    let emitted = idx.graph_rows();
+    assert!(
+        !emitted.is_empty(),
+        "HC-F4: graph_rows() must emit at least one row for the live nodes"
+    );
+
+    let mut compact_to_id: std::collections::HashMap<i32, String> =
+        std::collections::HashMap::new();
+    for row in &emitted {
+        compact_to_id.insert(row.node_idx, row.node_id.clone());
+    }
+
+    // Resolve each live node's neighbours through the compact map and assert
+    // endpoint identity: the resolved itemID must be the correct OTHER node.
+    for row in &emitted {
+        let neighbours: Vec<i32> = row.decode_neighbours();
+        for &neighbour_compact in &neighbours {
+            if let Some(resolved_id) = compact_to_id.get(&neighbour_compact) {
+                assert_ne!(
+                    *resolved_id, row.node_id,
+                    "HC-F4 (PARITY LOCK — F1 endpoint-identity): node '{}' has a \
+                     neighbour that resolves to itself (compact index {} → '{}'); \
+                     this indicates compact index mis-wiring (the Swift pre-fix F1 \
+                     shape). Rust must never produce self-referential neighbours.",
+                    row.node_id, neighbour_compact, resolved_id
+                );
+                assert_ne!(
+                    *resolved_id, "deleted-a",
+                    "HC-F4: node '{}' has a neighbour that resolves to the deleted \
+                     node 'deleted-a' (compact index {}); placeholder tombstone \
+                     must not be reachable as a live endpoint.",
+                    row.node_id, neighbour_compact
+                );
+            }
+        }
+    }
+
+    // Verify the specific expected endpoint identities for this fixture.
+    // graph_rows() remaps internal positions to compact live-only indices (0,1,...).
+    // After the tombstone placeholder at internal pos 0, live-b is at internal pos 1
+    // and live-c at internal pos 2. graph_rows() maps them to compact 0 and 1.
+    // live-b's neighbour was live-c (internal pos 2 → compact 1 in graph_rows space).
+    // live-c's neighbour was live-b (internal pos 1 → compact 0 in graph_rows space).
+    // We verify via the id map, not by hardcoding the remapped compact indices.
+
+    let live_b_row = emitted.iter().find(|r| r.node_id == "live-b")
+        .expect("HC-F4: live-b must be in graph_rows()");
+    let live_b_neighbour_ids: Vec<&str> = live_b_row.decode_neighbours()
+        .iter()
+        .filter_map(|ci| compact_to_id.get(ci).map(|s| s.as_str()))
+        .collect();
+    assert_eq!(
+        live_b_neighbour_ids, vec!["live-c"],
+        "HC-F4 (PARITY LOCK — F1 endpoint-identity): live-b's neighbour must resolve \
+         to 'live-c'. Got: {:?}. Pre-fix F1 in Swift would shift compact indices, \
+         making live-b point at the wrong node or itself.",
+        live_b_neighbour_ids
+    );
+
+    let live_c_row = emitted.iter().find(|r| r.node_id == "live-c")
+        .expect("HC-F4: live-c must be in graph_rows()");
+    let live_c_neighbour_ids: Vec<&str> = live_c_row.decode_neighbours()
+        .iter()
+        .filter_map(|ci| compact_to_id.get(ci).map(|s| s.as_str()))
+        .collect();
+    assert_eq!(
+        live_c_neighbour_ids, vec!["live-b"],
+        "HC-F4 (PARITY LOCK — F1 endpoint-identity): live-c's neighbour must resolve \
+         to 'live-b'. Got: {:?}. Pre-fix F1 in Swift would shift compact indices, \
+         making live-c point at the wrong node or itself.",
+        live_c_neighbour_ids
+    );
 }
 
 // ── HP-1: exit gates A and B ──────────────────────────────────────────────────
