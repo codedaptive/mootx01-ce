@@ -5,7 +5,9 @@
 // The Perf Health panel surfaces the daily performance-health indicator
 // written by NeuronKit's EstatePerformanceHealthDuty (A7) into
 // PersistenceStatsSink. One current sample (all 11 metric fields,
-// audit-derived) and an ingest-p50 trend series (oldest first) are exposed.
+// audit-derived) and an ingest-p50 trend series (oldest first, capped at
+// the newest 366 points) are exposed. The store query is bounded to the
+// newest `StatsStore.maxMetricRowsPerNamedQuery` rows (PH-01).
 //
 // D6 boundary (docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md):
 //   display only — no alert thresholds, no general query surface.
@@ -141,6 +143,16 @@ extension MootManager {
 
     // The 11 metric keys written by EstatePerformanceHealthDuty (A7).
     // Source: NeuronKit/Sources/NeuronKit/Maintenance/EstatePerformanceHealthDuty.swift
+    /// Maximum number of trend points returned in a perf-health payload.
+    ///
+    /// One trend point corresponds to one daily `EstatePerformanceHealthDuty`
+    /// run, so 366 covers a full year of daily samples. The surface is
+    /// display-only by locked decision D6 (no general query surface), so a
+    /// year of daily points is generous for any legitimate dashboard render
+    /// while bounding the response size. Older points are dropped (newest
+    /// kept) — see `perfHealthPayload`.
+    private static let perfHealthMaxTrendPoints = 366
+
     private static let perfHealthMetricNames: Set<String> = [
         "neuronkit.perf_health.ingest_p50_ms",
         "neuronkit.perf_health.ingest_p95_ms",
@@ -161,6 +173,12 @@ extension MootManager {
     /// ingest-p50 trend series (oldest first). Both are filtered to the given
     /// estate UUID when supplied. With no filter, data spans all estates.
     ///
+    /// Bounded (Codex finding #30 / PH-01): the store query reads at most the
+    /// newest `StatsStore.maxMetricRowsPerNamedQuery` rows (enforced both
+    /// here and inside the store), and the trend series is capped at the
+    /// newest `perfHealthMaxTrendPoints` points, so no request can drive
+    /// unbounded work or an unbounded response regardless of store contents.
+    ///
     /// Values originate in `PersistenceStatsSink` rows written by
     /// `EstatePerformanceHealthDuty` on a 24 h cadence (A7). Expect at most
     /// one new trend point per estate per day.
@@ -172,10 +190,11 @@ extension MootManager {
     /// - Returns: A valid `PerfHealthPayload`. Returns `pending: true` when
     ///   the manager has not been started. Returns `latestSample: nil, trend: []`
     ///   when no samples have been written yet.
-    // Deliberately one function rather than split helpers: the body is seven
-    // sequential phases over ONE query result (guard → query → estate filter →
-    // build-latest-map → derive trend anchor → build latest sample → build
-    // trend series), and each later phase reads the same intermediate maps.
+    // Deliberately one function rather than split helpers: the body is
+    // sequential phases over ONE query result (guard → bounded query →
+    // ascending re-sort → estate filter → build-latest-map → derive trend
+    // anchor → build latest sample → build capped trend series), and each
+    // later phase reads the same intermediate maps.
     // Splitting would thread three dictionaries through five signatures for
     // no clarity gain.
     public func perfHealthPayload(estate: String? = nil) async throws -> PerfHealthPayload {
@@ -187,10 +206,21 @@ extension MootManager {
                                      latestSample: nil, trend: [])
         }
 
-        // Query all perf-health metric rows ascending (oldest first, no limit).
-        // Each row carries an `estate` tag containing the estate UUID, written
-        // by EstatePerformanceHealthDuty at duty-run time.
-        let rows = try await store.queryMetricsByNames(Self.perfHealthMetricNames)
+        // Bounded query (Codex finding #30 / PH-01): fetch at most the store
+        // cap of the NEWEST perf-health rows. The store returns them ts
+        // descending when a limit is supplied, and clamps the limit again
+        // internally, so the bound holds even if this constant drifts. Rows
+        // are re-sorted ascending here because every phase below (latest-map
+        // overwrite, trend build) assumes oldest-first order. Each row
+        // carries an `estate` tag containing the estate UUID, written by
+        // EstatePerformanceHealthDuty at duty-run time. Legitimate volume is
+        // 11 rows/estate/day, so the cap only truncates a store flooded far
+        // beyond real duty output — and truncation drops the OLDEST rows.
+        let fetched = try await store.queryMetricsByNames(
+            Self.perfHealthMetricNames,
+            limit: StatsStore.maxMetricRowsPerNamedQuery
+        )
+        let rows = fetched.sorted { $0.ts < $1.ts }
 
         // Apply estate-UUID filter when requested.
         let filtered: [MetricRow]
@@ -231,9 +261,13 @@ extension MootManager {
             )
         }
 
-        // Build the ingest-p50 trend series from all ingest_p50_ms rows in
-        // ascending (oldest-first) order.
-        let trendRows = filtered.filter { $0.name == "neuronkit.perf_health.ingest_p50_ms" }
+        // Build the ingest-p50 trend series from the ingest_p50_ms rows in
+        // ascending (oldest-first) order, capped to the NEWEST
+        // `perfHealthMaxTrendPoints` points (suffix of the ascending series)
+        // so the payload size stays bounded regardless of store contents.
+        let trendRows = filtered
+            .filter { $0.name == "neuronkit.perf_health.ingest_p50_ms" }
+            .suffix(Self.perfHealthMaxTrendPoints)
         let trend: [PerfHealthTrendPointPayload] = trendRows.map { row in
             PerfHealthTrendPointPayload(
                 ts: Self.iso8601String(from: row.ts),

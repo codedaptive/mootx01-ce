@@ -517,6 +517,22 @@ impl StatsStore {
     ///     seeks instead of scanning the hot-dropbox prefix (0.45s → sub-ms).
     pub const SCHEMA_VERSION: i32 = 5;
 
+    /// Hard cap on the row count of any bounded `query_metrics_by_names` call.
+    ///
+    /// A supplied `limit` larger than this is clamped, so no single named-set
+    /// query can materialize more than this many rows even if a caller passes
+    /// an oversized (or attacker-influenced) limit. Justified by legitimate
+    /// production rates: the perf-health duty writes 11 metric rows per estate
+    /// per 24 h cadence and default retention is 7 days (steady state ≈ 77
+    /// rows/estate); 8192 covers >100 estates at default retention, or ~2
+    /// estate-years of daily samples with retention disabled. Mirrors Swift
+    /// `StatsStore.maxMetricRowsPerNamedQuery`.
+    ///
+    /// The `None`-limit path is NOT affected — it keeps the legacy unbounded
+    /// ascending behavior for full-history consumers (tracked as a follow-up
+    /// finding; see PH-01 blast radius report).
+    pub const MAX_METRIC_ROWS_PER_NAMED_QUERY: usize = 8192;
+
     // MARK: - Initialisation
 
     /// Create a `StatsStore` backed by a SQLite database at `path`.
@@ -904,8 +920,11 @@ impl StatsStore {
     /// Query metric samples matching any of the given `names`, optionally
     /// filtered by `dropbox_id`.
     ///
-    /// Returns rows ordered by `ts` ascending.
-    /// Mirrors Swift `StatsStore.queryMetricsByNames(_:dropboxID:)`.
+    /// Returns rows ordered by `ts` ascending when `limit` is `None`;
+    /// descending (newest first, capped) when `limit` is supplied. A supplied
+    /// limit is clamped to `MAX_METRIC_ROWS_PER_NAMED_QUERY` so the bound
+    /// holds at the store even for an oversized caller value.
+    /// Mirrors Swift `StatsStore.queryMetricsByNames(_:dropboxID:limit:)`.
     pub fn query_metrics_by_names(
         &self,
         names: &[&str],
@@ -938,8 +957,12 @@ impl StatsStore {
         };
         // When a `limit` is supplied the caller wants the most-recent rows (it
         // dedups to latest-per-key downstream), so order DESCENDING and cap —
-        // this bounds an otherwise unbounded historical scan. Without a limit
+        // this bounds an otherwise unbounded historical scan. The supplied
+        // limit is clamped to MAX_METRIC_ROWS_PER_NAMED_QUERY so the bound
+        // holds AT THE STORE: an oversized caller value cannot drive
+        // unbounded work (Codex finding #30 / mission PH-01). Without a limit
         // the legacy ascending, unbounded behavior is preserved.
+        let limit = limit.map(|l| l.min(Self::MAX_METRIC_ROWS_PER_NAMED_QUERY));
         let direction = if limit.is_none() {
             OrderDirection::Ascending
         } else {

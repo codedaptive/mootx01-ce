@@ -1,10 +1,10 @@
 ---
 title: ObserverSink Interface
-version: v1.1
+version: v1.2
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-06
+date: 2026-08-15
 relates_to:
   - docs/reference/OBSERVERSINK_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
@@ -81,10 +81,16 @@ public final class StatsStore: Sendable {
     /// Query metric samples, optionally filtered by dropbox. Ordered by ts ascending.
     public func queryMetrics(dropboxID: String?) async throws -> [MetricRow]
 
+    /// Hard cap applied to any supplied `limit` in queryMetricsByNames.
+    /// Mirrors Rust `MAX_METRIC_ROWS_PER_NAMED_QUERY`.
+    public static let maxMetricRowsPerNamedQuery: Int  // 8192
+
     /// Query metric samples whose name is in `names` via SQL `WHERE name IN (...)`.
     /// Returns [] immediately if `names` is empty.
     /// When `limit` is nil, ordered by ts ascending (full history).
-    /// When `limit` is non-nil, ordered by ts descending (most-recent first, capped).
+    /// When `limit` is non-nil, ordered by ts descending (most-recent first,
+    /// capped); the effective limit is clamped to `maxMetricRowsPerNamedQuery`
+    /// so an oversized caller value cannot drive unbounded work.
     /// Use in hot read-API paths instead of queryMetrics + Swift-side filter.
     public func queryMetricsByNames(
         _ names: Set<String>,
@@ -322,9 +328,14 @@ impl StatsStore {
         dropbox_id: Option<&str>,
     ) -> Result<Vec<MetricRow>, StorageError>;
 
+    /// Hard cap applied to any supplied limit in query_metrics_by_names.
+    /// Mirrors Swift `maxMetricRowsPerNamedQuery`.
+    pub const MAX_METRIC_ROWS_PER_NAMED_QUERY: usize; // 8192
+
     /// Query metrics matching any of `names`, optionally filtered by dropbox.
     /// When `limit` is None, ordered by ts ascending (full history).
-    /// When `limit` is Some, ordered by ts descending (most-recent first, capped).
+    /// When `limit` is Some, ordered by ts descending (most-recent first,
+    /// capped); the value is clamped to `MAX_METRIC_ROWS_PER_NAMED_QUERY`.
     pub fn query_metrics_by_names(
         &self,
         names: &[&str],
@@ -519,7 +530,7 @@ ports agree under the conformance suite cited.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Stats store | `StatsStore` (final class) | `StatsStore` (struct) | public / pub | Swift `async` actor-safe `final class` / Rust sync `struct`; same SQLite schema + control rows | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
-| Filtered metric query | `queryMetricsByNames(_:dropboxID:limit:)` | `query_metrics_by_names` | public / pub | SQL IN predicate on name set; optional dropbox filter; optional limit (when set, ordering flips to ts DESC). Swift `Set<String>` / Rust `&[&str]`. | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Filtered metric query | `queryMetricsByNames(_:dropboxID:limit:)` | `query_metrics_by_names` | public / pub | SQL IN predicate on name set; optional dropbox filter; optional limit (when set, ordering flips to ts DESC and the value is clamped to `maxMetricRowsPerNamedQuery` / `MAX_METRIC_ROWS_PER_NAMED_QUERY` = 8192). Swift `Set<String>` / Rust `&[&str]`. | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
 | Metric count | `countMetrics()` | `count_metrics` | public / pub | SQL COUNT(*) on `metric_samples`; no row decoding. | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
 | Latest-per-pair query | `queryLatestMetricsByNamesAndDropboxes(_:dropboxIDs:)` | `query_latest_metrics_by_names_and_dropboxes` | public / pub | One indexed `WHERE name=? AND dropbox_id=? ORDER BY ts DESC LIMIT 1` per (name, dropboxID) pair; O(log n) per pair. | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
 | Dropbox aggregates | `queryMetricAggregatesByDropbox(forDropboxIDs:)` | `query_metric_aggregates_by_dropbox` | public / pub | Indexed COUNT(*) + single-row ts probe per dropbox; returns `DropboxMetricAggregate`. | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
@@ -568,3 +579,14 @@ Shape differences across ports:
 | `StatsStoreSchema.generatedAtColumn` | `StatsStoreSchema::GENERATED_AT_COLUMN` | `"generated_at"` |
 | `StatsStoreSchema.payloadColumn` | `StatsStoreSchema::PAYLOAD_COLUMN` | `"payload"` |
 | `StatsStoreSchema.topologyFingerprintColumn` | `StatsStoreSchema::TOPOLOGY_FINGERPRINT_COLUMN` | `"topology_fingerprint"` |
+
+---
+
+## Changelog
+
+- **v1.2 (2026-08-15)** — PH-01: documented the named-query row cap.
+  `queryMetricsByNames` / `query_metrics_by_names` now clamp a supplied
+  `limit` to `maxMetricRowsPerNamedQuery` / `MAX_METRIC_ROWS_PER_NAMED_QUERY`
+  (8192) in both ports; new public constant added. Nil/None-limit behavior
+  unchanged.
+- **v1.1 (2026-06-06)** — prior surface (changelog section introduced in v1.2).
