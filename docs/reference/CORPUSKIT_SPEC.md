@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.18.1
+version: 1.18.2
 status: accepted-1.1-target
 date: 2026-08-15
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -476,7 +476,7 @@ counts are restored. Per-provider behavior is fixed:
   `false` (guard 3).
 
 **Publication** for the counts path occurs in a single serializable transaction:
-basis row upsert (`PersistedBasis` with `trainedChunkCount` = frozen base +
+basis row upsert (`PersistedBasis` with `trainedChunkCount` = frozen base document count +
 pending count), counts row persist via `persistCounts`, and per-reference delete
 for every folded pending row. *Per-reference delete* — not `deleteReferences` —
 is required to preserve subsumed markers written by earlier corpus-path
@@ -767,7 +767,7 @@ text, tokens, or passages. A new identity increments the document anchor once;
 a changed digest refreshes the existing identity reference, folds its text for
 novel vocabulary, and MUST NOT increment the document anchor; an identical
 digest is an idempotent no-op. Both anchors are nondecreasing. Open reconstructs
-the working accumulator from the frozen base plus canonical-source hydration of
+the working accumulator from the frozen base counts blob plus canonical-source hydration of
 pending references, then restores the stored anchor columns as the governor's
 durable authority. A provider retrain/publication atomically replaces its base,
 publishes matching anchors, and deletes only that provider generation's
@@ -902,6 +902,15 @@ concurrent compute) carries forward unchanged — only the pool's location moves
 
 ## Changelog
 
+### 1.18.2 -- 2026-08-15
+
+Vocabulary disambiguation (Nagatha step-18 finding): "frozen base" was
+naming both the persisted counts blob (pre-existing usage, §7/§B-13 area)
+and the scalar `PersistedBasis.trainedChunkCount` (new B-22 usage). Each
+site now carries its qualifier — "frozen base counts blob" vs "frozen base
+document count" — so the two persisted quantities cannot be conflated by
+name (the F-5 defect class, applied to prose).
+
 ### 1.18.1 -- 2026-08-15
 
 CORPUS-INCREMENTAL-01 F-11 (corrective amendment): added `foldOrderProvenanceUnknown`
@@ -926,7 +935,7 @@ restore-only (pages zero when pending is empty; corpus path otherwise), LSA/NMF
 always take the corpus path. Publication side-effects (basis + counts in one
 serializable transaction, per-reference delete preserving subsumed markers,
 generation bump without corpus re-embedding) are normative. The population guard
-uses `PersistedBasis.trainedChunkCount` (frozen base) + pending-reference count
+uses `PersistedBasis.trainedChunkCount` (the frozen base document count) + pending-reference count
 vs active-content-ID count. Added **C-15** documenting the
 `TrainingPathDecision` / `CorpusPathReason` test seam and its conformance
 obligations.
