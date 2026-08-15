@@ -69,7 +69,7 @@ struct QueryCommand: AsyncParsableCommand {
         } else {
             // No resident daemon (daemon down or --db pins a specific estate the
             // resident doesn't serve). Spawn a short-lived stdio subprocess.
-            let result = try await subprocessCall(toolsCall: toolsCall)
+            let result = try await subprocessCall(frame: toolsCall)
             try render(result)
         }
     }
@@ -149,22 +149,13 @@ struct QueryCommand: AsyncParsableCommand {
 
     // MARK: - stdio subprocess path
 
-    /// Spawn a short-lived `mootx01 serve [--db name]` subprocess, send the
-    /// MCP handshake (initialize → initialized notification → tools/call), and
-    /// return the id=2 response object. Mirrors `subprocess_call` in query.rs.
-    ///
-    /// Wire shape note: the Rust vertical sends only `initialize` + `tools/call`
-    /// (skipping the `initialized` notification). This Swift path sends all three
-    /// frames. The server accepts both — `initialized` is a no-op notification;
-    /// the extra frame adds no observable latency difference. Both are valid MCP.
-    private func subprocessCall(toolsCall: String) async throws -> [String: Any] {
-        let initRequest = jsonrpc(id: 1, method: "initialize", params: [
-            "protocolVersion": "2024-11-05",
-            "capabilities": [:] as [String: Any],
-            "clientInfo": ["name": "mootx01-query", "version": "1.0.0"]
-        ])
-        let initializedNotif = jsonrpc(id: nil, method: "initialized", params: [:] as [String: Any])
-
+    /// Spawn a short-lived `mootx01 serve [--db name]` subprocess and send one
+    /// JSON-RPC frame through `McpOneShot.subprocessCall` (MootInstallerCore) —
+    /// the shared handshake + one-frame machinery this method's body was
+    /// generalized into for BL-1 so `mootx01 botlink` uses the same seam.
+    /// Accepts any JSON-RPC method frame; `query` itself always passes a
+    /// `tools/call` frame with id 2. Mirrors `subprocess_call` in query.rs.
+    private func subprocessCall(frame: String) async throws -> [String: Any] {
         // Resolve the absolute binary path from the bundle rather than argv[0].
         // CommandLine.arguments.first returns whatever the parent passed as argv[0],
         // which can be a relative path or a bare name controlled by the caller.
@@ -175,67 +166,28 @@ struct QueryCommand: AsyncParsableCommand {
             fputs("mootx01 query: cannot resolve absolute executable path for subprocess\n", stderr)
             throw ExitCode.failure
         }
-        let binaryPath = execURL.path
         var serveArgs = ["serve"]
         if let dbName = db {
             serveArgs.append(contentsOf: ["--db", dbName])
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binaryPath)
-        process.arguments = serveArgs
-
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        // INHERIT the parent's stderr rather than piping it. A captured-but-never-
-        // drained stderr pipe deadlocks any tool that writes more than the OS pipe
-        // buffer (~64KB) to stderr: the child blocks in fputs() once the buffer
-        // fills while the parent blocks in readDataToEndOfFile() on stdout, so
-        // neither side progresses. `moot_palace_import` emits a progress line every
-        // 10 records (~4,800 lines for a 48K-drawer palace), which overflows the
-        // buffer and hangs the import. Inheriting forwards the child's live
-        // progress straight to the user's terminal and removes the pipe entirely.
-        process.standardError = FileHandle.standardError
-
-        try process.run()
-
-        let inputHandle = stdinPipe.fileHandleForWriting
-        func writeLine(_ msg: String) {
-            if let data = (msg + "\n").data(using: .utf8) {
-                inputHandle.write(data)
+        do {
+            guard let obj = try await McpOneShot.subprocessCall(
+                binaryPath: execURL.path,
+                serveArgs: serveArgs,
+                frame: frame,
+                expectID: 2,
+                clientName: "mootx01-query"
+            ) else {
+                // Unreachable with a non-nil expectID; kept for exhaustiveness.
+                fputs("mootx01 query: no response received from serve subprocess\n", stderr)
+                throw ExitCode.failure
             }
-        }
-
-        writeLine(initRequest)
-        // Brief settle: allow the server to process initialize before sending
-        // initialized + call. 100 ms is sufficient on macOS — the subprocess
-        // is local and the estate is already on disk.
-        try await Task.sleep(nanoseconds: 100_000_000)
-        writeLine(initializedNotif)
-        writeLine(toolsCall)
-
-        // Give the server time to process the call, then close stdin to signal
-        // end-of-input so it exits cleanly.
-        try await Task.sleep(nanoseconds: 500_000_000)
-        inputHandle.closeFile()
-
-        let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        let lines = String(decoding: outputData, as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true)
-
-        for line in lines {
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let id = obj["id"] as? Int, id == 2 else { continue }
             return obj
+        } catch is McpOneShotError {
+            fputs("mootx01 query: no response received from serve subprocess\n", stderr)
+            throw ExitCode.failure
         }
-
-        fputs("mootx01 query: no response received from serve subprocess\n", stderr)
-        throw ExitCode.failure
     }
 
     // MARK: - Render
@@ -329,14 +281,9 @@ struct QueryCommand: AsyncParsableCommand {
 
     // MARK: - JSON-RPC helpers
 
+    /// Frame encoding delegates to the shared `McpOneShot.encodeFrame` seam
+    /// (BL-1) — one encoder for query and botlink, no parallel implementations.
     private func jsonrpc(id: Int?, method: String, params: [String: Any]) -> String {
-        var msg: [String: Any] = [
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        ]
-        if let id { msg["id"] = id }
-        guard let data = try? JSONSerialization.data(withJSONObject: msg) else { return "" }
-        return String(decoding: data, as: UTF8.self)
+        McpOneShot.encodeFrame(id: id, method: method, params: params)
     }
 }
