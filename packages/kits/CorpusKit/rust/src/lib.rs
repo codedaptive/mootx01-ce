@@ -51,6 +51,7 @@ pub mod index_state_store;
 pub mod index_configuration_store;
 pub mod provider_configuration_store;
 pub mod provider_coverage_store;
+pub mod reindex_latch;
 pub mod removed_source_store;
 pub mod schema_profile;
 pub mod sub_span_scoring;
