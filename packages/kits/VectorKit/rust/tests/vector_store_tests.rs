@@ -586,14 +586,15 @@ fn default_sidecar_path_derives_vec_beside_sqlite_and_none_for_inmemory() {
 
 /// Schema version is v5 (VEC-HNSW-01: hnsw_graph table added).
 ///
-/// Guards the version bump: if schema_version drifts below 5, the hnsw_graph
-/// table will not be created for new estates and the GeniusLocusKit composite
-/// version gate will reject fresh estate opens. v4 added
-/// idx_vectors_filed_at_item; v5 adds the HNSW graph storage table.
+/// Guards the version bump: if schema_version drifts below 6, the shadow-swap
+/// generation columns and vector_generations registry will not be created for
+/// new estates. v4 added idx_vectors_filed_at_item; v5 added hnsw_graph;
+/// v6 adds generation columns, vector_generations registry, and widens the
+/// UNIQUE constraint on vectors to (item_id, vector_index, model_id, generation).
 #[test]
 fn schema_declaration_is_version_five() {
     let schema = VectorStore::schema_declaration();
-    assert_eq!(schema.version, 5, "VectorKit schema must be v5 after hnsw_graph table was added");
+    assert_eq!(schema.version, 6, "VectorKit schema must be v6 after shadow-swap generation support was added");
 }
 
 /// The schema declaration includes idx_vectors_filed_at_item (added at v4).
@@ -650,9 +651,11 @@ fn schema_declaration_contains_hnsw_graph_table() {
     let tbl = tbl.unwrap();
 
     // Column names in declaration order (must match Swift for fixture parity).
+    // v6 added the `generation` column so hnsw_graph rows carry their generation tag —
+    // `load_hnsw_graph_if_present` filters by expected_generation (§4 identity check).
     let col_names: Vec<&str> = tbl.columns.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours"],
-        "hnsw_graph columns must match Swift declaration order");
+    assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours", "generation"],
+        "hnsw_graph columns must match Swift declaration order (v6 adds generation)");
 
     // Primary key.
     assert_eq!(tbl.primary_key, vec!["model_id", "node_idx", "layer"],

@@ -77,6 +77,10 @@ pub struct GraphRow {
     pub layer: usize,
     /// Packed little-endian i32 neighbour node indices at this layer.
     pub neighbours_blob: Vec<u8>,
+    /// Shadow-swap generation this graph row belongs to. Matches the
+    /// `hnsw_graph.generation` column (v6). Rows whose generation ≠ the
+    /// store's current serving generation are ignored at load time (§4).
+    pub generation: i64,
 }
 
 impl GraphRow {
@@ -184,6 +188,20 @@ pub struct HNSWIndex {
 
     /// Byte count per vector (float32 stride = dim × 4). None before first insert.
     vector_stride: Option<usize>,
+
+    /// Shadow-swap generation identity. Fixed at build or load time.
+    ///
+    /// Set to the store's serving generation when the graph is built via
+    /// `rebuild_hnsw_index` (D6 fix: stamped BEFORE persisting so a crash
+    /// between stamp and persist leaves an absent graph, not a mismatched one).
+    /// Set to `expected_generation` when loaded via `load_from_graph_rows`.
+    ///
+    /// `find_nearest_float` checks this value against the current serving
+    /// generation before routing a query here. A mismatch means the graph is
+    /// stale (crash between flip-commit and rebuild) and the query falls back
+    /// to exact scan. DEFAULT 0 matches new graphs built before the shadow-swap
+    /// feature shipped, which always served generation 0.
+    generation: i64,
 }
 
 impl HNSWIndex {
@@ -202,6 +220,9 @@ impl HNSWIndex {
             max_layer: 0,
             rng_state: seed,
             vector_stride: None,
+            // New graphs start at generation 0. VectorStore.rebuild_hnsw_index
+            // calls set_generation(serving_gen) before persisting (D6).
+            generation: 0,
         }
     }
 
@@ -210,6 +231,27 @@ impl HNSWIndex {
     /// The canonical entry point for all non-test callers.
     pub fn new_default() -> Self {
         Self::new(42)
+    }
+
+    /// The shadow-swap generation this index was built for or loaded from.
+    ///
+    /// `find_nearest_float` compares this against the store's current serving
+    /// generation before routing a query here. A mismatch means the graph is
+    /// stale (crash between flip-commit and rebuild) and the query falls back
+    /// to exact scan (§4 HNSW generation identity ruling).
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    /// Stamp this graph with the given generation.
+    ///
+    /// Called by `VectorStore::rebuild_hnsw_index` AFTER building the graph
+    /// and BEFORE persisting it (D6 fix). The stamp ensures that if the process
+    /// crashes between persist and the serving-generation registry flip, the
+    /// next open sees a generation-0 graph for a non-0 serving generation and
+    /// correctly treats it as absent, falling back to exact scan.
+    pub fn set_generation(&mut self, gen: i64) {
+        self.generation = gen;
     }
 
     // MARK: - SplitMix64 RNG
@@ -575,6 +617,11 @@ impl HNSWIndex {
                     item_id: node.item_id.clone(),
                     distance: (dist * 10_000.0).round() as i32,
                     model_id: node.model_id.clone(),
+                    // Rows served by this HNSW instance belong to its generation.
+                    // The caller filters graph instances by generation before use
+                    // (§4 generation-identity check), so self.generation equals the
+                    // serving generation at the time this search fires.
+                    generation: self.generation,
                 }
             })
             .collect();
@@ -631,13 +678,15 @@ impl HNSWIndex {
     ///
     /// Drops all nodes, connections, and vector bytes. O(1) — just releases the
     /// allocated Vecs. After `clear()`, the next `insert` or rebuild starts a
-    /// fresh graph from an empty state.
+    /// fresh graph from an empty state. Generation is reset to 0; the caller
+    /// (rebuild_hnsw_index via set_generation) stamps it before persisting.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.node_index.clear();
         self.entry_point = None;
         self.max_layer = 0;
         self.vector_stride = None;
+        self.generation = 0;
     }
 
     // MARK: - Persistence (hnsw_graph table)
@@ -697,6 +746,9 @@ impl HNSWIndex {
                     node_id: node.item_id.clone(),
                     layer,
                     neighbours_blob: blob,
+                    // Emit the graph's generation so VectorStore can filter rows
+                    // by serving generation at load time (§4 generation identity).
+                    generation: self.generation,
                 });
             }
         }
@@ -711,18 +763,47 @@ impl HNSWIndex {
     /// skipped. `model_id` is set on every reconstructed node so `search`'s
     /// model-id filter returns results correctly.
     ///
-    /// Clears any existing graph before loading. If `rows` is empty or every
-    /// node's vector is absent, the graph remains empty (has_graph() → false).
+    /// Only rows whose `generation == expected_generation` are used (§4 HNSW
+    /// generation identity ruling). Rows for a different generation are silently
+    /// skipped — they belong to a retired or shadow generation. If no rows
+    /// match `expected_generation`, the graph remains empty (has_graph() → false).
+    /// On a successful load, `self.generation` is set to `expected_generation`.
+    ///
+    /// Clears any existing graph before loading.
     pub fn load_from_graph_rows(
         &mut self,
         rows: &[GraphRow],
         node_bytes: &std::collections::HashMap<i32, (String, Vec<u8>)>,
         model_id: &str,
+        expected_generation: i64,
     ) {
         self.clear();
         if rows.is_empty() {
             return;
         }
+        // Filter to rows whose generation matches the expected (serving) generation.
+        // Rows for retired or shadow generations are silently skipped — they belong
+        // to a different swap window and must not pollute the reconstructed graph.
+        let filtered_rows: Vec<GraphRow> = rows
+            .iter()
+            .filter(|r| r.generation == expected_generation)
+            .map(|r| GraphRow {
+                node_idx: r.node_idx,
+                node_id: r.node_id.clone(),
+                layer: r.layer,
+                neighbours_blob: r.neighbours_blob.clone(),
+                generation: r.generation,
+            })
+            .collect();
+        if filtered_rows.is_empty() {
+            return;
+        }
+        // Shadow-swap generation identity: stamp this graph with the expected
+        // generation so the store can verify it before routing queries here.
+        // Performed here (at load time) rather than at the call site to keep
+        // the stamp colocated with the filtering logic (§4 ruling).
+        // Note: rows is now filtered_rows; rebind to keep phase names intact.
+        let rows = filtered_rows.as_slice();
 
         // Phase 1: discover distinct compact node indices and per-node layer counts.
         // node_idx → number of layers to allocate for that node.
@@ -822,6 +903,13 @@ impl HNSWIndex {
         if let Some(pos) = best_pos {
             self.entry_point = Some(pos as i32);
             self.max_layer = best_layers.saturating_sub(1);
+        }
+
+        // Stamp the generation AFTER the graph is successfully loaded (§4).
+        // If has_graph() is false (all nodes were deleted), the generation stays
+        // at 0 — the store treats an absent graph as absent regardless.
+        if self.has_graph() {
+            self.generation = expected_generation;
         }
     }
 

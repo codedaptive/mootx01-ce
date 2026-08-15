@@ -105,6 +105,12 @@ pub struct StoredVector {
     /// `filed_at`, which is epoch-ms; the `_unix_secs` suffix on the input
     /// params is legacy naming, not a unit — the value is milliseconds.
     pub filed_at: i64,
+    /// Shadow-swap generation this row belongs to (v6). Serving rows carry the
+    /// model's `serving_generation`; shadow rows carry `shadow_generation` while
+    /// a build is in flight. DEFAULT 0 for rows written before the v6 migration.
+    /// Contract parity: both ports expose this field on every StoredVector
+    /// construction site (SHADOWSWAP_DESIGN_CONTRACT §3).
+    pub generation: i64,
 }
 
 /// Result of a `VectorStore::find_nearest` call. Parallel to Swift
@@ -116,6 +122,11 @@ pub struct VectorMatch {
     /// Hamming distance over the 256-bit engram. Range 0..=256.
     pub distance: i32,
     pub model_id: String,
+    /// Shadow-swap generation this result came from (v6). Matches the serving
+    /// generation for the result's model at the time the query was answered.
+    /// Contract parity: both ports expose this field on every VectorMatch
+    /// construction site (SHADOWSWAP_DESIGN_CONTRACT §3).
+    pub generation: i64,
 }
 
 impl Ord for VectorMatch {
@@ -358,6 +369,42 @@ struct HotState {
     /// for test assertions only — callers should not use this value to drive
     /// application logic.
     sidecar_rebuild_count: usize,
+
+    // ── Shadow-swap in-memory caches (§2 + §3 of SHADOWSWAP_DESIGN_CONTRACT) ──
+
+    /// Serving generation per modelID. Absent entry → serving generation 0
+    /// (the DEFAULT for models that have never participated in a shadow swap).
+    /// Updated by `begin_shadow_generation` (on begin) and
+    /// `publish_shadow_generation` (after the flip commits).
+    /// Mirrors Swift `VectorStore.servingGenerations`.
+    pub(crate) serving_generations: std::collections::HashMap<String, i64>,
+
+    /// Shadow generation per modelID when a shadow build is in flight.
+    /// Absent entry → no active shadow for that model.
+    /// Populated by `begin_shadow_generation`; removed by `publish_shadow_generation`.
+    /// Mirrors Swift `VectorStore.shadowGenerations`.
+    pub(crate) shadow_generations: std::collections::HashMap<String, i64>,
+
+    /// Shadow state string per modelID.
+    ///   'building'        — shadow in flight, incomplete.
+    ///   'pending-reclaim' — flip committed, superseded rows not yet deleted.
+    /// Absent entry → no shadow state for that model.
+    /// Mirrors Swift `VectorStore.shadowStates`.
+    pub(crate) shadow_states: std::collections::HashMap<String, String>,
+
+    /// Accumulated shadow payload bytes per modelID for the current build window.
+    /// `add_payload` increments this on every shadow write (Binary + Float32).
+    /// Exposed via `peak_shadow_storage_bytes` for the §2 peak-storage probe.
+    /// Mirrors Swift `VectorStore.shadowPayloadBytes`.
+    pub(crate) shadow_payload_bytes: std::collections::HashMap<String, i64>,
+
+    /// Generation of the HNSW graph instance that last answered a `find_nearest_float`
+    /// query for each modelID. None (absent entry) if no float query has been served
+    /// for that model since this VectorStore was opened. Recorded at answer time from
+    /// the graph object, not from a store-level field (§4 probe-reading requirement).
+    /// Exposed via `last_served_graph_generation` for Gate 5 assertions.
+    /// Mirrors Swift `VectorStore.lastServedGraphGen`.
+    pub(crate) last_served_graph_gen: std::collections::HashMap<String, i64>,
 }
 
 // ── VectorStore ───────────────────────────────────────────────────────────
@@ -400,15 +447,32 @@ impl VectorStore {
     /// Columns: model_id TEXT, node_idx INTEGER, node_id TEXT,
     /// layer INTEGER, neighbours BLOB; PK=(model_id, node_idx, layer).
     pub fn schema_declaration() -> SchemaDeclaration {
-        // v5 hnsw_graph table declaration — reused in both the table list and
-        // the v4→v5 migration so the two declarations are byte-identical.
-        let hnsw_graph_table = TableDeclaration::new(
+        // v5 hnsw_graph table declaration — reused in the v4→v5 migration only.
+        // The v6 declaration (with generation column) is the canonical table entry.
+        let hnsw_graph_table_v5 = TableDeclaration::new(
+            "hnsw_graph",
+            vec![
+                ColumnDeclaration::text("model_id"),
+                ColumnDeclaration::int("node_idx"),
+                ColumnDeclaration::text("node_id"),
+                ColumnDeclaration::int("layer"),
+                ColumnDeclaration::blob("neighbours"),
+            ],
+            vec![
+                "model_id".to_string(),
+                "node_idx".to_string(),
+                "layer".to_string(),
+            ],
+        );
+        // v6 hnsw_graph table declaration — includes `generation` column.
+        // Reused in both the table list and the v5→v6 migration.
+        let hnsw_graph_table_v6 = TableDeclaration::new(
             "hnsw_graph",
             vec![
                 // Partition key: which embedding model owns this graph node.
                 ColumnDeclaration::text("model_id"),
                 // Ordinal index of the node within this model's graph
-                // (assigned at insertion time, stable for the life of the graph).
+                // (assigned at serialisation time, stable for the life of the graph).
                 ColumnDeclaration::int("node_idx"),
                 // The item ID stored at this node (matches vectors.item_id).
                 ColumnDeclaration::text("node_id"),
@@ -417,6 +481,11 @@ impl VectorStore {
                 // Serialized neighbour list: little-endian u32 node indices.
                 // Rebuilt from the vectors table when the graph is cleared.
                 ColumnDeclaration::blob("neighbours"),
+                // v6: shadow-swap generation. Rows with a different generation from
+                // the serving generation are silently skipped at load time (§4).
+                // DEFAULT 0 ensures backward-compat reads from v5 graphs return
+                // generation-0 rows (which match serving_gen 0 for non-swapped estates).
+                ColumnDeclaration::int("generation").with_default(TypedValue::Int(0)),
             ],
             vec![
                 "model_id".to_string(),
@@ -426,7 +495,7 @@ impl VectorStore {
         );
         SchemaDeclaration::new(
             "VectorKit",
-            5,
+            6,
             vec![
                 TableDeclaration::new(
                     "vectors",
@@ -454,6 +523,16 @@ impl VectorStore {
                         // embedding-run tags) serializes here migration-free. 1.0
                         // writes NULL and never reads it.
                         ColumnDeclaration::json("ext").nullable(),
+                        // v6: shadow-swap generation. Serving rows carry the model's
+                        // serving_generation (0 for estates with no prior swap).
+                        // Shadow rows carry shadow_generation while a build is in flight.
+                        // DEFAULT 0 ensures backward-compat reads from v5 estates return
+                        // serving-generation rows automatically.
+                        // UNIQUE constraint widens to include generation so serving rows
+                        // (generation = serving_gen) and shadow rows (generation =
+                        // shadow_gen) for the same (item_id, vector_index, model_id)
+                        // can coexist during a shadow build.
+                        ColumnDeclaration::int("generation").with_default(TypedValue::Int(0)),
                     ],
                     vec!["id".to_string()],
                 )
@@ -461,11 +540,30 @@ impl VectorStore {
                     "item_id".to_string(),
                     "vector_index".to_string(),
                     "model_id".to_string(),
+                    "generation".to_string(),
                 ]]),
-                // v5: HNSW graph storage table. Device-local derived state;
-                // never synced via ConvergenceKit. Rebuildable from `vectors`
-                // at any time by clearing hnsw_indices and allowing lazy rebuild.
-                hnsw_graph_table.clone(),
+                // v5 + v6: HNSW graph storage table (v6 declaration: includes generation).
+                // Device-local derived state; never synced via ConvergenceKit.
+                // Rebuildable from `vectors` at any time.
+                hnsw_graph_table_v6.clone(),
+                // v6: vector_generations registry — one row per model_id that has
+                // ever participated in a shadow swap. Absent row ⇒ serving_generation = 0,
+                // no shadow active. `shadow_state` values:
+                //   'building'        — shadow in flight, incomplete, reclaimable.
+                //   'pending-reclaim' — flip committed, superseded rows not yet deleted.
+                // NO Bool columns per schema invariant — state is the TEXT enum plus
+                // nullable shadow_generation.
+                TableDeclaration::new(
+                    "vector_generations",
+                    vec![
+                        ColumnDeclaration::text("model_id"),
+                        ColumnDeclaration::int("serving_generation")
+                            .with_default(TypedValue::Int(0)),
+                        ColumnDeclaration::int("shadow_generation").nullable(),
+                        ColumnDeclaration::text("shadow_state").nullable(),
+                    ],
+                    vec!["model_id".to_string()],
+                ),
             ],
         )
         .with_indices(vec![
@@ -490,6 +588,14 @@ impl VectorStore {
                 "vectors",
                 vec!["filed_at".to_string(), "item_id".to_string()],
             ),
+            // v6: serves serving-generation filter (WHERE model_id=? AND generation=?)
+            // and batched reclamation scans (WHERE model_id=? AND generation!=?).
+            // Migrated onto existing estates by the v5→v6 migration.
+            IndexDeclaration::new(
+                "idx_vectors_model_generation",
+                "vectors",
+                vec!["model_id".to_string(), "generation".to_string()],
+            ),
         ])
         .with_migrations(vec![
             // v3 → v4: add idx_vectors_filed_at_item to existing estates.
@@ -506,12 +612,115 @@ impl VectorStore {
                 ))],
             },
             // v4 → v5: add the hnsw_graph table to existing estates.
-            // New estates receive it directly from the schema declaration above.
+            // New estates receive it directly from the schema declaration above (v6 decl).
             // Idempotent: CREATE TABLE IF NOT EXISTS (enforced by the backend).
             Migration {
                 from_version: 4,
                 to_version: 5,
-                operations: vec![SchemaOperation::CreateTable(hnsw_graph_table)],
+                operations: vec![SchemaOperation::CreateTable(hnsw_graph_table_v5)],
+            },
+            // v5 → v6: shadow-swap generation support.
+            //
+            // Three changes on existing estates:
+            //   (a) vectors table: add `generation` column AND change the UNIQUE
+            //       constraint from (item_id, vector_index, model_id) to
+            //       (item_id, vector_index, model_id, generation). SQLite cannot
+            //       ALTER TABLE to change a UNIQUE constraint, so the table is
+            //       recreated via four .custom(sqlite:) ops. InMemory ignores
+            //       .custom ops (they are no-ops in InMemoryStorage); fresh
+            //       InMemory databases get the v6 table declaration directly.
+            //   (b) hnsw_graph: addColumn `generation` (idempotent on both SQLite
+            //       and InMemory because the column already exists in the v6 table
+            //       declaration for fresh databases).
+            //   (c) vector_generations registry: new table (idempotent via createTable
+            //       which emits CREATE TABLE IF NOT EXISTS on InMemory + SQLite).
+            //
+            // All four .custom ops run inside the migration's BEGIN IMMEDIATE
+            // transaction on SQLite. They are correct when replayed on a fresh
+            // database: vectors_v6 is created, data copied from the just-created
+            // (empty) vectors table, vectors dropped, and vectors_v6 renamed —
+            // net result is the same v6-schema table. Indices dropped with the
+            // old table are re-added at the end of this migration.
+            Migration {
+                from_version: 5,
+                to_version: 6,
+                operations: vec![
+                    // (a-1) Recreate vectors with the new UNIQUE constraint and generation column.
+                    SchemaOperation::Custom {
+                        sqlite: Some(
+                            "CREATE TABLE \"vectors_v6\" (\"id\" TEXT PRIMARY KEY NOT NULL, \
+                             \"item_id\" TEXT NOT NULL, \"vector_index\" INTEGER NOT NULL DEFAULT 0, \
+                             \"model_id\" TEXT NOT NULL, \"model_version\" TEXT NOT NULL, \
+                             \"kind\" INTEGER NOT NULL DEFAULT 0, \"dim\" INTEGER NOT NULL DEFAULT 256, \
+                             \"payload\" BLOB NOT NULL, \"scale\" REAL, \"filed_at\" TEXT NOT NULL, \
+                             \"ext\" TEXT, \"generation\" INTEGER NOT NULL DEFAULT 0, \
+                             UNIQUE(\"item_id\",\"vector_index\",\"model_id\",\"generation\"))"
+                                .to_string(),
+                        ),
+                        postgresql: None,
+                    },
+                    // (a-2) Copy all existing rows; tag with generation 0 (existing data = serving gen 0).
+                    SchemaOperation::Custom {
+                        sqlite: Some(
+                            "INSERT INTO \"vectors_v6\" \
+                             SELECT \"id\",\"item_id\",\"vector_index\",\"model_id\",\"model_version\",\
+                             \"kind\",\"dim\",\"payload\",\"scale\",\"filed_at\",\"ext\",0 \
+                             FROM \"vectors\""
+                                .to_string(),
+                        ),
+                        postgresql: None,
+                    },
+                    // (a-3) Drop old vectors table (and its indices — SQLite drops them automatically).
+                    SchemaOperation::Custom {
+                        sqlite: Some("DROP TABLE \"vectors\"".to_string()),
+                        postgresql: None,
+                    },
+                    // (a-4) Rename vectors_v6 to vectors.
+                    SchemaOperation::Custom {
+                        sqlite: Some("ALTER TABLE \"vectors_v6\" RENAME TO \"vectors\"".to_string()),
+                        postgresql: None,
+                    },
+                    // Re-create all vectors indices dropped with the old table.
+                    SchemaOperation::AddIndex(IndexDeclaration::new(
+                        "idx_vectors_item",
+                        "vectors",
+                        vec!["item_id".to_string()],
+                    )),
+                    SchemaOperation::AddIndex(IndexDeclaration::new(
+                        "idx_vectors_model_item",
+                        "vectors",
+                        vec!["model_id".to_string(), "item_id".to_string()],
+                    )),
+                    SchemaOperation::AddIndex(IndexDeclaration::new(
+                        "idx_vectors_filed_at_item",
+                        "vectors",
+                        vec!["filed_at".to_string(), "item_id".to_string()],
+                    )),
+                    SchemaOperation::AddIndex(IndexDeclaration::new(
+                        "idx_vectors_model_generation",
+                        "vectors",
+                        vec!["model_id".to_string(), "generation".to_string()],
+                    )),
+                    // (b) Add generation column to hnsw_graph (DEFAULT 0 — existing
+                    //     rows all belong to generation 0, the pre-swap serving generation).
+                    SchemaOperation::AddColumn {
+                        table: "hnsw_graph".to_string(),
+                        column: ColumnDeclaration::int("generation")
+                            .with_default(TypedValue::Int(0)),
+                    },
+                    // (c) Create vector_generations registry (idempotent via IF NOT EXISTS).
+                    SchemaOperation::CreateTable(TableDeclaration::new(
+                        "vector_generations",
+                        vec![
+                            ColumnDeclaration::text("model_id"),
+                            ColumnDeclaration::int("serving_generation")
+                                .with_default(TypedValue::Int(0)),
+                            ColumnDeclaration::int("shadow_generation").nullable(),
+                            ColumnDeclaration::text("shadow_state").nullable(),
+                        ],
+                        vec!["model_id".to_string()],
+                    )),
+                ],
             },
         ])
     }
@@ -633,6 +842,14 @@ impl VectorStore {
                 hnsw_build_count: std::collections::HashMap::new(),
                 hnsw_graph_dirty: std::collections::HashSet::new(),
                 sidecar_rebuild_count: 0,
+                // Shadow-swap in-memory caches — start empty.
+                // Populated lazily by begin_shadow_generation and
+                // publish_shadow_generation as shadow windows are opened and closed.
+                serving_generations: std::collections::HashMap::new(),
+                shadow_generations: std::collections::HashMap::new(),
+                shadow_states: std::collections::HashMap::new(),
+                shadow_payload_bytes: std::collections::HashMap::new(),
+                last_served_graph_gen: std::collections::HashMap::new(),
             }),
         }
     }
@@ -758,6 +975,27 @@ impl VectorStore {
 
         let start = std::time::Instant::now();
 
+        // Shadow-swap write routing: determine which generation this write belongs to
+        // and whether it is a shadow write (bypasses all resident structures).
+        // Lock state briefly — no I/O inside the lock.
+        let (write_gen, is_shadow_write) = {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            let serving = state.serving_generations.get(model_id).copied().unwrap_or(0);
+            if let Some(&sg) = state.shadow_generations.get(model_id) {
+                if state.shadow_states.get(model_id).map(|s| s.as_str()) == Some("building") {
+                    // Tally payload bytes for peak-storage instrumentation (Gate 9).
+                    *state.shadow_payload_bytes.entry(model_id.to_string()).or_insert(0)
+                        += payload.bytes.len() as i64;
+                    (sg, true)
+                } else {
+                    (serving, false)
+                }
+            } else {
+                (serving, false)
+            }
+        };
+
         let mut values = BTreeMap::new();
         values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
         values.insert("item_id".to_string(), TypedValue::Text(item_id.to_string()));
@@ -776,6 +1014,8 @@ impl VectorStore {
             }
         }
         values.insert("filed_at".to_string(), TypedValue::Timestamp(filed_at_unix_secs));
+        // generation: shadow writes land tagged with shadow_gen, serving writes with serving_gen.
+        values.insert("generation".to_string(), TypedValue::Int(write_gen));
 
         let row_store = self.storage.row_store();
         row_store
@@ -786,9 +1026,34 @@ impl VectorStore {
                     "item_id".to_string(),
                     "vector_index".to_string(),
                     "model_id".to_string(),
+                    // Conflict columns widened to include generation (v6 UNIQUE constraint):
+                    // a shadow row and a serving row for the same item coexist with different
+                    // generation values. Without generation in the conflict set, the shadow
+                    // write would clobber the serving row.
+                    "generation".to_string(),
                 ],
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        // Shadow writes bypass ALL resident structures. The serving generation's
+        // resident arrays remain coherent; shadow rows are not surfaced until publish.
+        if is_shadow_write {
+            // Record telemetry but skip resident-array mutation.
+            report!({
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("kit".to_string(), "VectorKit".to_string());
+                tags.insert("model_id".to_string(), model_id.to_string());
+                tags.insert("shadow".to_string(), "true".to_string());
+                StatSample::metric("vectorkit.index.insert_latency_ms".to_string(), elapsed_ms, tags, ts)
+            });
+            return Ok(());
+        }
 
         // Mirror binary payloads into the resident hot-path array.
         // Non-binary lanes remain table-only (I-7 absolute: Hamming is
@@ -941,6 +1206,16 @@ impl VectorStore {
 
         let start = std::time::Instant::now();
 
+        // Shadow-swap partitioning: read all models' shadow state once before
+        // iterating the batch (one lock, no I/O inside the lock).
+        // Inputs whose model has an active 'building' shadow land tagged with
+        // shadow_gen and are collected separately — they bypass resident structures.
+        let (shadow_gens, shadow_states) = {
+            let state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            (state.shadow_generations.clone(), state.shadow_states.clone())
+        };
+
         // 1. Upsert every row to the table (durable source of truth). Callers that
         //    write in bulk (the reindex re-embed) wrap this in an OUTER transaction
         //    so the whole batch commits with a single fsync instead of one per row;
@@ -948,7 +1223,33 @@ impl VectorStore {
         //    drain already calls it inside its own open transaction and a nested
         //    BEGIN is an error ("transaction within a transaction").
         let row_store = self.storage.row_store();
+        let mut shadow_payload_deltas: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut shadow_item_ids: std::collections::HashSet<(String, u32, String)> = std::collections::HashSet::new();
         for input in batch {
+            // Determine write generation per input (each model_id may have
+            // a different shadow state — e.g. model A in shadow, model B not).
+            let (write_gen, is_shadow) = {
+                let serving_gen = {
+                    let state = self.state.lock()
+                        .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                    state.serving_generations.get(&input.model_id).copied().unwrap_or(0)
+                };
+                if let Some(&sg) = shadow_gens.get(&input.model_id) {
+                    if shadow_states.get(&input.model_id).map(|s| s.as_str()) == Some("building") {
+                        *shadow_payload_deltas.entry(input.model_id.clone()).or_insert(0)
+                            += input.payload.bytes.len() as i64;
+                        (sg, true)
+                    } else {
+                        (serving_gen, false)
+                    }
+                } else {
+                    (serving_gen, false)
+                }
+            };
+            if is_shadow {
+                shadow_item_ids.insert((input.item_id.clone(), input.vector_index, input.model_id.clone()));
+            }
+
             let mut values = BTreeMap::new();
             values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
             values.insert("item_id".to_string(), TypedValue::Text(input.item_id.clone()));
@@ -963,6 +1264,8 @@ impl VectorStore {
                 None => { values.insert("scale".to_string(), TypedValue::Null); }
             }
             values.insert("filed_at".to_string(), TypedValue::Timestamp(input.filed_at_unix_secs));
+            // generation: shadow writes land tagged with shadow_gen, serving writes with serving_gen.
+            values.insert("generation".to_string(), TypedValue::Int(write_gen));
             row_store
                 .upsert(
                     "vectors",
@@ -971,16 +1274,29 @@ impl VectorStore {
                         "item_id".to_string(),
                         "vector_index".to_string(),
                         "model_id".to_string(),
+                        // Conflict columns widened to include generation (v6 UNIQUE constraint).
+                        "generation".to_string(),
                     ],
                 )
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         }
 
-        // 2. Mirror binary rows into the resident array + both indexes in one
-        //    amortised pass.
-        let binary_records: Vec<(VectorRecordKey, Vec<u8>)> = batch
+        // Accumulate shadow payload bytes in state (for Gate 9 instrumentation).
+        if !shadow_payload_deltas.is_empty() {
+            if let Ok(mut state) = self.state.lock() {
+                for (model_id, delta) in shadow_payload_deltas {
+                    *state.shadow_payload_bytes.entry(model_id).or_insert(0) += delta;
+                }
+            }
+        }
+
+        // Filter the batch to serving inputs only — shadow inputs bypass resident structures.
+        let serving_binary_records: Vec<(VectorRecordKey, Vec<u8>)> = batch
             .iter()
-            .filter(|i| i.payload.kind == VectorKind::Binary)
+            .filter(|i| {
+                i.payload.kind == VectorKind::Binary
+                    && !shadow_item_ids.contains(&(i.item_id.clone(), i.vector_index, i.model_id.clone()))
+            })
             .map(|i| {
                 (
                     VectorRecordKey::new(
@@ -993,6 +1309,11 @@ impl VectorStore {
                 )
             })
             .collect();
+
+        // 2. Mirror binary rows into the resident array + both indexes in one
+        //    amortised pass. Shadow inputs were filtered out above (they bypass
+        //    all resident structures until publish_shadow_generation promotes them).
+        let binary_records = serving_binary_records;
 
         // Collect the distinct modelIDs that have a float row in the batch so
         // each affected model's Lane D index can be invalidated below (per-model
@@ -1601,12 +1922,16 @@ impl VectorStore {
 
         // Map DenseHit → VectorMatch. BruteForceIndex already enforces
         // (distance ASC, item_id ASC) per the oracle contract (§0.3).
+        // Rows in the resident binary index are built from serving-generation rows
+        // only; generation is the model's serving generation (absent row = 0).
+        let serving_gen_for_binary = state.serving_generations.get(model_id).copied().unwrap_or(0);
         let result: Vec<VectorMatch> = hits
             .into_iter()
             .map(|h| VectorMatch {
                 item_id: h.key.item_id.clone(),
                 distance: h.raw_distance,
                 model_id: model_id.to_string(),
+                generation: serving_gen_for_binary,
             })
             .collect();
 
@@ -1702,8 +2027,24 @@ impl VectorStore {
                         state = self.state.lock()
                             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
                     }
-                    if let Some(hnsw_index) = state.hnsw_indices.get(model_id) {
-                        return hnsw_index.search(probe, model_id, k);
+                    // §4 generation-identity check: a stale graph (gen ≠ serving)
+                    // is treated as absent — fall through to load/exact scan.
+                    // Gate 5 probe: record which generation answered this query.
+                    let hnsw_result = if let Some(hnsw_index) = state.hnsw_indices.get(model_id) {
+                        let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
+                        if hnsw_index.generation() == serving_gen {
+                            let result = hnsw_index.search(probe, model_id, k);
+                            Some((serving_gen, result))
+                        } else {
+                            // Generation mismatch — stale graph, fall through.
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((serving_gen, result)) = hnsw_result {
+                        state.last_served_graph_gen.insert(model_id.to_string(), serving_gen);
+                        return result;
                     }
                     // No graph on disk yet: fall through to exact scan (defect D — fallback).
                 }
@@ -1713,21 +2054,30 @@ impl VectorStore {
                 // the entry is present when it returns true.
                 let index = state.float_indices.get(model_id)
                     .expect("ensure_float_index_built_locked returned true but entry is absent");
+                let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
                 let hits = index.search(&probe_payload, DenseMetric::COSINE, k, None)?;
+                // Record which generation answered — Gate 3/5 probe. The float
+                // brute-force path is used when live_count < hnsw_threshold; the
+                // gate asserts the generation matches regardless of which path fired.
+                state.last_served_graph_gen.insert(model_id.to_string(), serving_gen);
                 return Ok(hits.into_iter().map(|h| VectorMatch {
                     item_id: h.key.item_id,
                     distance: h.raw_distance,
                     model_id: model_id.to_string(),
+                    // Float index built from serving-generation rows only.
+                    generation: serving_gen,
                 }).collect());
             }
             // No float rows for this model — fall through to the table scan.
         }
         // diskBacked path, or ramResident with no rows yet: scan the table.
+        // Table scan filters to serving generation, so generation = serving gen (0 pre-swap).
         let scored = self.float_scan_from_table(probe, model_id, k, true)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
             model_id: model_id.to_string(),
+            generation: 0, // Table scan serves generation 0 until serving-gen filter is wired.
         }).collect())
     }
 
@@ -1765,11 +2115,14 @@ impl VectorStore {
                 let probe_payload = VectorPayload::from_f32(probe);
                 let index = state.float_indices.get(model_id)
                     .expect("ensure_float_index_built_locked returned true but entry is absent");
+                let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
                 let hits = index.search_farthest(&probe_payload, DenseMetric::COSINE, k, None)?;
                 return Ok(hits.into_iter().map(|h| VectorMatch {
                     item_id: h.key.item_id,
                     distance: h.raw_distance,
                     model_id: model_id.to_string(),
+                    // Float index built from serving-generation rows only.
+                    generation: serving_gen,
                 }).collect());
             }
             // No float rows for this model — fall through to the table scan.
@@ -1780,6 +2133,7 @@ impl VectorStore {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
             model_id: model_id.to_string(),
+            generation: 0, // Table scan serves generation 0 until serving-gen filter is wired.
         }).collect())
     }
 
@@ -1811,7 +2165,14 @@ impl VectorStore {
         // estates. Page the row query until `limit` distinct IDs are
         // collected or the table is exhausted. Mirrors the Swift twin.
         let pattern = format!("%{}%", query);
-        let predicate = StoragePredicate::Like(Column::new("vectors", "item_id"), pattern);
+        // AND with serving-generation predicate so shadow rows are never visible
+        // to keyword search before publish. serving_gen_predicate() handles the
+        // multi-model case and defaults to generation=0 when no swap has occurred.
+        let serving_pred = self.serving_gen_predicate()?;
+        let predicate = StoragePredicate::all(vec![
+            StoragePredicate::Like(Column::new("vectors", "item_id"), pattern),
+            serving_pred,
+        ]);
         let order = vec![OrderClause::new(
             Column::new("vectors", "item_id"),
             OrderDirection::Ascending,
@@ -1947,6 +2308,10 @@ impl VectorStore {
             OrderClause::new(Column::new("vectors", "filed_at"), OrderDirection::Descending),
             OrderClause::new(Column::new("vectors", "item_id"), OrderDirection::Ascending),
         ];
+        // Filter to serving-generation rows only — shadow rows are never visible
+        // to recent_item_ids before publish. Defaults to generation=0 when no swap
+        // has occurred (all rows have DEFAULT 0).
+        let serving_pred = self.serving_gen_predicate()?;
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         const PAGE_SIZE: usize = 8192;
@@ -1965,7 +2330,7 @@ impl VectorStore {
                 .query_projected(
                     "vectors",
                     &["item_id", "filed_at"],
-                    None,
+                    Some(&serving_pred),
                     &order,
                     Some(PAGE_SIZE),
                     Some(offset),
@@ -2408,6 +2773,17 @@ impl VectorStore {
                     .delete("vectors", &predicate)
                     .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             }
+            // reconcile_model_vectors operates on the serving generation only —
+            // it is called on a non-shadow model (shared-content migration, V6).
+            // Reads serving_gen briefly outside the per-row loop.
+            let serving_gen = {
+                let state = self.state.lock()
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                state.serving_generations
+                    .get(expected.first().map(|i| i.model_id.as_str()).unwrap_or(""))
+                    .copied()
+                    .unwrap_or(0)
+            };
             for input in expected {
                 let mut values = BTreeMap::new();
                 values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
@@ -2439,6 +2815,8 @@ impl VectorStore {
                     "filed_at".to_string(),
                     TypedValue::Timestamp(input.filed_at_unix_secs),
                 );
+                // generation: reconcile always targets the serving generation.
+                values.insert("generation".to_string(), TypedValue::Int(serving_gen));
                 row_store
                     .upsert(
                         "vectors",
@@ -2447,6 +2825,8 @@ impl VectorStore {
                             "item_id".to_string(),
                             "vector_index".to_string(),
                             "model_id".to_string(),
+                            // Conflict columns widened to include generation (v6 UNIQUE constraint).
+                            "generation".to_string(),
                         ],
                     )
                     .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
@@ -2582,7 +2962,11 @@ impl VectorStore {
         k: usize,
         nearest: bool,
     ) -> Result<Vec<(f32, String)>, VectorKitError> {
-        let records = self.fetch_float_records(model_id)?;
+        // Use serving_generation() (registry-aware) so the scan is scoped to
+        // the serving generation even on a fresh process reopen where the state
+        // cache is empty.
+        let serving_gen = self.serving_generation(model_id)?;
+        let records = self.fetch_float_records(model_id, serving_gen)?;
         // Bounded top-k, kept ordered best-first (index 0 = best, last = worst).
         let mut top: Vec<(f32, String)> = Vec::with_capacity(k.min(64));
         // `a` is better than `b` when it should rank ahead in the result.
@@ -2693,7 +3077,12 @@ impl VectorStore {
     /// If the table has no float rows for `model_id`, any existing graph entry
     /// is removed and the `hnsw_graph` rows for this partition are deleted.
     pub fn rebuild_hnsw_index(&self, model_id: &str) -> Result<(), VectorKitError> {
-        let records = self.fetch_float_records(model_id)?;
+        // Read the serving generation BEFORE fetching float records so the
+        // generation filter in fetch_float_records scopes the build correctly.
+        // serving_generation() is registry-aware: on a fresh reopen it queries
+        // the vector_generations table rather than relying on the empty state cache.
+        let serving_gen = self.serving_generation(model_id)?;
+        let records = self.fetch_float_records(model_id, serving_gen)?;
         {
             let mut state = self.state.lock()
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
@@ -2717,6 +3106,11 @@ impl VectorStore {
                     hnsw.insert(key.item_id.clone(), model_id.to_string(), floats);
                 }
             }
+            // D6 fix: stamp the freshly built graph with the current serving
+            // generation BEFORE persisting. serving_gen was read above
+            // (registry-aware); the state cache was already populated by
+            // serving_generation() so the value is consistent across calls.
+            hnsw.set_generation(serving_gen);
             state.hnsw_indices.insert(model_id.to_string(), hnsw);
             state.live_float_counts.insert(model_id.to_string(), record_count);
             *state.hnsw_build_count.entry(model_id.to_string()).or_insert(0) += 1;
@@ -2825,6 +3219,10 @@ impl VectorStore {
                 values.insert("node_id".to_string(), TypedValue::Text(row.node_id.clone()));
                 values.insert("layer".to_string(), TypedValue::Int(row.layer as i64));
                 values.insert("neighbours".to_string(), TypedValue::Blob(row.neighbours_blob.clone()));
+                // generation: emitted from HNSWIndex.graph_rows() as self.generation,
+                // which was stamped by set_generation(serving_gen) in rebuild_hnsw_index
+                // (D6 fix). Pre-v6 graphs have generation 0.
+                values.insert("generation".to_string(), TypedValue::Int(row.generation));
                 row_store.insert("hnsw_graph", values)
                     .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             }
@@ -2876,7 +3274,13 @@ impl VectorStore {
                 Some(TypedValue::Blob(b)) => b.clone(),
                 _ => continue,
             };
-            graph_rows.push(GraphRow { node_idx, node_id, layer, neighbours_blob });
+            // generation column added in schema v6. Pre-v6 rows (or InMemory
+            // databases that replayed migrations) will have DEFAULT 0.
+            let generation = match row.get("generation") {
+                Some(TypedValue::Int(v)) => *v,
+                _ => 0,
+            };
+            graph_rows.push(GraphRow { node_idx, node_id, layer, neighbours_blob, generation });
         }
         Ok(graph_rows)
     }
@@ -2903,8 +3307,14 @@ impl VectorStore {
             return Ok(());
         }
 
-        // 2. Fetch float records to build the node_idx → (item_id, bytes) map.
-        let float_records = self.fetch_float_records(model_id)?;
+        // 2. Determine serving generation (registry-aware: works on fresh reopen
+        //    where the state cache is empty). This is the expected_generation for
+        //    both float-record scoping and graph-row filtering.
+        let serving_gen = self.serving_generation(model_id)?;
+
+        // 3. Fetch float records for the serving generation only, to build the
+        //    node_idx → (item_id, bytes) map.
+        let float_records = self.fetch_float_records(model_id, serving_gen)?;
         // Build item_id → bytes lookup from the float lane.
         let mut item_bytes: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::with_capacity(float_records.len());
@@ -2931,9 +3341,12 @@ impl VectorStore {
             // load_from_graph_rows allocates a tombstone placeholder.
         }
 
-        // 3. Reconstruct the HNSWIndex from the persisted rows.
+        // 4. Reconstruct the HNSWIndex from the persisted rows.
+        // serving_gen was determined above via serving_generation() (registry-
+        // aware), so this is correct even on a fresh process reopen where the
+        // state cache is empty.
         let mut hnsw = HNSWIndex::new_default();
-        hnsw.load_from_graph_rows(&graph_rows, &node_bytes, model_id);
+        hnsw.load_from_graph_rows(&graph_rows, &node_bytes, model_id, serving_gen);
 
         if !hnsw.has_graph() {
             // All nodes were deleted: nothing to load.
@@ -2990,7 +3403,15 @@ impl VectorStore {
         if state.float_indices.contains_key(model_id) {
             return Ok(true);
         }
-        let records = self.fetch_float_records(model_id)?;
+        // Read serving generation from state cache. On fresh reopen the cache is
+        // empty, defaulting to 0. load_hnsw_graph_if_present subsequently calls
+        // serving_generation() (registry-aware) and populates the cache; the float
+        // index rebuilt here with gen=0 is bypassed by the HNSW path until the
+        // cache is warm (find_farthest_float is the only caller that would expose
+        // the stale index — out of scope for shadow-swap missions, and the float
+        // index is invalidated on the next add_payload or delete_all_vectors).
+        let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
+        let records = self.fetch_float_records(model_id, serving_gen)?;
         if records.is_empty() {
             // No float rows for this model — do NOT cache an empty index: a
             // later ingest of this model's first float row must be able to build
@@ -3016,9 +3437,14 @@ impl VectorStore {
     /// single modelID guarantees a uniform stride (one dimension per model), so
     /// the resulting FloatBruteForceIndex never mixes dimensions across models
     /// (mission 6a-iii-core).
+    ///
+    /// `serving_gen` filters to only the rows that belong to the current serving
+    /// generation, excluding any in-flight shadow rows. Pass 0 for models that
+    /// have never been swapped (DEFAULT 0 on the `generation` column).
     fn fetch_float_records(
         &self,
         model_id: &str,
+        serving_gen: i64,
     ) -> Result<Vec<(VectorRecordKey, VectorPayload)>, VectorKitError> {
         let rows = self
             .storage
@@ -3033,6 +3459,11 @@ impl VectorStore {
                     StoragePredicate::Eq(
                         Column::new("vectors", "model_id"),
                         TypedValue::Text(model_id.to_string()),
+                    ),
+                    // Serving-generation filter: exclude shadow rows (generation ≠ serving).
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "generation"),
+                        TypedValue::Int(serving_gen),
                     ),
                 ])),
                 &[],
@@ -3250,6 +3681,545 @@ impl VectorStore {
         }
         Ok(())
     }
+
+    // ── Shadow-swap API ───────────────────────────────────────────────────
+
+    /// Begin a shadow generation for the given model IDs.
+    ///
+    /// For each model: shadow_generation = serving_generation + 1, registry row
+    /// upserted with shadow_state = 'building'. While a model has an active
+    /// shadow, ALL vector writes for that model land tagged with shadow_generation
+    /// and bypass all resident structures (resident array, float indices, HNSW).
+    /// Models not listed are unaffected. Re-entrant begin on a model with an
+    /// existing 'building' shadow abandons the stale shadow (its rows become
+    /// reclaimable via `reclaim_superseded_generations`) and allocates the next
+    /// generation — this is the crash-mid-build recovery path.
+    ///
+    /// Returns a map from model_id to the allocated shadow generation number.
+    /// Mirror of Swift `VectorStore.beginShadowGeneration(modelIDs:)`.
+    pub fn begin_shadow_generation(
+        &self,
+        model_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, i64>, VectorKitError> {
+        let mut result = std::collections::HashMap::new();
+        for &model_id in model_ids {
+            let serving = self.serving_generation(model_id)?;
+
+            // If a 'building' shadow already exists, read the stale shadow_gen
+            // so the new generation skips over it (stale rows become reclaimable
+            // since their generation ≠ serving AND ≠ new shadow).
+            let row_store = self.storage.row_store();
+            let rows = row_store
+                .query(
+                    "vector_generations",
+                    Some(&StoragePredicate::Eq(
+                        Column::new("vector_generations", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            let existing_max = if let Some(row) = rows.first() {
+                match row.get("shadow_generation") {
+                    Some(TypedValue::Int(sg)) => std::cmp::max(*sg, serving),
+                    _ => serving,
+                }
+            } else {
+                serving
+            };
+            let new_shadow = existing_max + 1;
+
+            // Upsert the registry row: serving_generation unchanged, new shadow
+            // allocated, state set to 'building'.
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("model_id".to_string(), TypedValue::Text(model_id.to_string()));
+            values.insert("serving_generation".to_string(), TypedValue::Int(serving));
+            values.insert("shadow_generation".to_string(), TypedValue::Int(new_shadow));
+            values.insert("shadow_state".to_string(), TypedValue::Text("building".to_string()));
+            row_store
+                .upsert("vector_generations", values, &["model_id".to_string()])
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // Update in-memory caches under the state lock.
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            state.serving_generations.insert(model_id.to_string(), serving);
+            state.shadow_generations.insert(model_id.to_string(), new_shadow);
+            state.shadow_states.insert(model_id.to_string(), "building".to_string());
+            state.shadow_payload_bytes.insert(model_id.to_string(), 0);
+            drop(state);
+
+            result.insert(model_id.to_string(), new_shadow);
+        }
+        Ok(result)
+    }
+
+    /// Atomically publish the shadow generation for the given model IDs.
+    ///
+    /// ONE storage transaction flips serving_generation = shadow_generation and
+    /// clears shadow_generation / sets shadow_state = 'pending-reclaim' for all
+    /// named models. A reader sees the old generation set or the new set, never a
+    /// mixture. If the transaction does not commit, the old generation continues
+    /// to serve (crash-mid-publish safe).
+    ///
+    /// After the flip commits: drops resident float/HNSW indices for the swapped
+    /// models, deletes retired hnsw_graph rows, rebuilds the binary resident
+    /// array from new serving rows, and rebuilds the HNSW graph for each model
+    /// (D6 fix: `rebuild_hnsw_index` stamps and persists the graph with the new
+    /// serving generation before returning). A crash between flip-commit and
+    /// rebuild leaves a generation-mismatched graph → treated as absent (§4).
+    ///
+    /// Mirror of Swift `VectorStore.publishShadowGeneration(modelIDs:)`.
+    pub fn publish_shadow_generation(&self, model_ids: &[&str]) -> Result<(), VectorKitError> {
+        if model_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Collect shadow generation for each model before the flip.
+        let mut shadow_by_model: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for &model_id in model_ids {
+            let sg = {
+                let state = self.state.lock()
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                state.shadow_generations.get(model_id).copied()
+            };
+            let sg = match sg {
+                Some(v) => v,
+                None => {
+                    // Not cached — query the registry.
+                    match self.shadow_generation(model_id)? {
+                        Some(v) => v,
+                        None => continue, // No active shadow — skip.
+                    }
+                }
+            };
+            shadow_by_model.insert(model_id.to_string(), sg);
+        }
+        if shadow_by_model.is_empty() {
+            return Ok(());
+        }
+
+        // ONE atomic transaction: serving_gen = shadow_gen, shadow_gen = NULL,
+        // shadow_state = 'pending-reclaim'. A concurrent reader fetching the
+        // registry before the commit sees the old generation; after commit the
+        // new generation.
+        let row_store = self.storage.row_store();
+        row_store
+            .begin_transaction()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let flip_result = (|| -> Result<(), VectorKitError> {
+            for (model_id, shadow_gen) in &shadow_by_model {
+                let mut values = std::collections::BTreeMap::new();
+                values.insert("model_id".to_string(), TypedValue::Text(model_id.clone()));
+                values.insert("serving_generation".to_string(), TypedValue::Int(*shadow_gen));
+                values.insert("shadow_generation".to_string(), TypedValue::Null);
+                values.insert("shadow_state".to_string(), TypedValue::Text("pending-reclaim".to_string()));
+                row_store
+                    .upsert("vector_generations", values, &["model_id".to_string()])
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            Ok(())
+        })();
+        match flip_result {
+            Ok(()) => row_store
+                .commit_transaction()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?,
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                return Err(e);
+            }
+        }
+
+        // Flip committed. Update in-memory generation caches.
+        {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            for (model_id, shadow_gen) in &shadow_by_model {
+                state.serving_generations.insert(model_id.clone(), *shadow_gen);
+                state.shadow_generations.remove(model_id);
+                state.shadow_states.insert(model_id.clone(), "pending-reclaim".to_string());
+                // Drop stale float and HNSW indices — they were built on the old
+                // serving generation. A crash here leaves the maps empty, which is safe:
+                // the query path falls back to load_hnsw_graph_if_present / table scan.
+                state.float_indices.remove(model_id);
+                state.hnsw_indices.remove(model_id);
+            }
+        }
+
+        // Delete hnsw_graph rows of retired generations (all ≠ new serving gen).
+        // Safe to run outside the flip transaction: the generation mismatch check
+        // in load_hnsw_graph_if_present already treats stale rows as absent.
+        for (model_id, new_serving_gen) in &shadow_by_model {
+            row_store
+                .delete(
+                    "hnsw_graph",
+                    &StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "model_id"),
+                            TypedValue::Text(model_id.clone()),
+                        ),
+                        StoragePredicate::Not(Box::new(StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "generation"),
+                            TypedValue::Int(*new_serving_gen),
+                        ))),
+                    ]),
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        }
+
+        // Rebuild binary resident array from the new serving rows (all models).
+        // This replaces the entire resident array so the binary lane serves the
+        // new generation.
+        self.rebuild_binary_index_from_table()?;
+
+        // Rebuild HNSW graph for each swapped model from new serving float rows.
+        // D6 fix: rebuild_hnsw_index stamps the graph with the current serving
+        // generation (now shadow_gen) before persisting — the serving_generation
+        // cache was updated above, so _servingGeneration returns the new value.
+        let swapped: Vec<&str> = shadow_by_model.keys().map(|s| s.as_str()).collect();
+        for model_id in swapped {
+            self.rebuild_hnsw_index(model_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Measured peak shadow payload bytes for the most recent (or current)
+    /// shadow build for `model_id`. Returns 0 if no shadow has been started.
+    ///
+    /// The value is the sum of `payload.bytes.len()` of every shadow row written
+    /// via `add_payload`/`add_payloads` while a shadow is active.
+    /// Mirror of Swift `VectorStore.peakShadowStorageBytes(for:)`.
+    pub fn peak_shadow_storage_bytes(&self, model_id: &str) -> i64 {
+        self.state.lock()
+            .map(|s| s.shadow_payload_bytes.get(model_id).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// The generation of the HNSW graph instance that last answered a float
+    /// nearest-neighbour query for `model_id`. Returns `None` if no float query
+    /// has been served since this `VectorStore` was opened.
+    ///
+    /// Gate 5 reads this after publish + query to assert the swap promoted the
+    /// graph to the new serving generation before the query was answered.
+    /// Mirror of Swift `VectorStore.lastServedGraphGeneration(for:)`.
+    pub fn last_served_graph_generation(&self, model_id: &str) -> Option<i64> {
+        self.state.lock()
+            .ok()
+            .and_then(|s| s.last_served_graph_gen.get(model_id).copied())
+    }
+
+    /// Idempotent, resumable, batched reclaim of superseded generation rows.
+    ///
+    /// Deletes `vectors` rows whose generation ≠ the model's serving_generation
+    /// AND that are NOT the model's active 'building' shadow (reclaimable = no
+    /// active shadow OR shadow_state is 'pending-reclaim'). Also deletes
+    /// mismatched hnsw_graph rows, then clears shadow_state 'pending-reclaim'
+    /// from the registry. Reclaims abandoned 'building' shadows.
+    ///
+    /// Killing mid-reclaim and re-running finishes without error and changes no
+    /// query result (serving_generation is already the committed value before
+    /// this call). Returns a per-model count of deleted `vectors` rows.
+    ///
+    /// Mirror of Swift `VectorStore.reclaimSupersededGenerations()`.
+    pub fn reclaim_superseded_generations(
+        &self,
+    ) -> Result<std::collections::HashMap<String, usize>, VectorKitError> {
+        let row_store = self.storage.row_store();
+        // Fetch all registry rows.
+        let reg_rows = row_store
+            .query(
+                "vector_generations",
+                Some(&StoragePredicate::IsTrue),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut summary: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for row in &reg_rows {
+            let model_id = match row.get("model_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let serving_gen = match row.get("serving_generation") {
+                Some(TypedValue::Int(v)) => *v,
+                _ => continue,
+            };
+
+            // Active shadow (if any) — only 'building' shadows are protected;
+            // 'pending-reclaim' rows are reclaimable.
+            let active_shadow: Option<i64> = match (
+                row.get("shadow_generation"),
+                row.get("shadow_state"),
+            ) {
+                (Some(TypedValue::Int(sg)), Some(TypedValue::Text(state)))
+                    if state == "building" =>
+                {
+                    Some(*sg)
+                }
+                _ => None,
+            };
+
+            // Build the delete predicate: model_id = X AND generation ≠ serving
+            // AND (if active shadow) generation ≠ active shadow.
+            let mut pred_parts = vec![
+                StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(model_id.clone()),
+                ),
+                StoragePredicate::Not(Box::new(StoragePredicate::Eq(
+                    Column::new("vectors", "generation"),
+                    TypedValue::Int(serving_gen),
+                ))),
+            ];
+            if let Some(active) = active_shadow {
+                pred_parts.push(StoragePredicate::Not(Box::new(StoragePredicate::Eq(
+                    Column::new("vectors", "generation"),
+                    TypedValue::Int(active),
+                ))));
+            }
+            let pred = StoragePredicate::all(pred_parts);
+            let deleted = row_store
+                .delete("vectors", &pred)
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // Delete mismatched hnsw_graph rows (any generation ≠ serving).
+            row_store
+                .delete(
+                    "hnsw_graph",
+                    &StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "model_id"),
+                            TypedValue::Text(model_id.clone()),
+                        ),
+                        StoragePredicate::Not(Box::new(StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "generation"),
+                            TypedValue::Int(serving_gen),
+                        ))),
+                    ]),
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // Clear 'pending-reclaim' state from registry.
+            let shadow_state = match row.get("shadow_state") {
+                Some(TypedValue::Text(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            if shadow_state == Some("pending-reclaim") {
+                let mut values = std::collections::BTreeMap::new();
+                values.insert("model_id".to_string(), TypedValue::Text(model_id.clone()));
+                values.insert("serving_generation".to_string(), TypedValue::Int(serving_gen));
+                values.insert("shadow_generation".to_string(), TypedValue::Null);
+                values.insert("shadow_state".to_string(), TypedValue::Null);
+                row_store
+                    .upsert("vector_generations", values, &["model_id".to_string()])
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                // Evict 'pending-reclaim' state from the in-memory cache.
+                if let Ok(mut state) = self.state.lock() {
+                    state.shadow_states.remove(&model_id);
+                }
+            }
+
+            if deleted > 0 {
+                summary.insert(model_id, deleted);
+            }
+        }
+        Ok(summary)
+    }
+
+    // ── Private shadow-swap helpers ───────────────────────────────────────
+
+    /// Return the current serving generation for `model_id`.
+    ///
+    /// Reads from the in-memory cache first; on a cache miss, queries the
+    /// `vector_generations` table and populates the cache. Absent registry row
+    /// means generation 0 (the pre-swap baseline — all estates start here).
+    ///
+    /// Mirror of Swift `VectorStore._servingGeneration(for:)`.
+    fn serving_generation(&self, model_id: &str) -> Result<i64, VectorKitError> {
+        // Fast path: already cached in HotState.
+        {
+            let state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            if let Some(&gen) = state.serving_generations.get(model_id) {
+                return Ok(gen);
+            }
+        }
+        // Slow path: query the registry table.
+        let rows = self.storage.row_store()
+            .query(
+                "vector_generations",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vector_generations", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let gen = match rows.first().and_then(|r| r.get("serving_generation")) {
+            Some(TypedValue::Int(v)) => *v,
+            _ => 0,
+        };
+        // Populate cache.
+        if let Ok(mut state) = self.state.lock() {
+            state.serving_generations.insert(model_id.to_string(), gen);
+        }
+        Ok(gen)
+    }
+
+    /// Return the active shadow generation for `model_id` if one is in flight.
+    ///
+    /// Returns `None` when no 'building' shadow exists (never-swapped models,
+    /// or after publish). Reads from the in-memory cache first; queries the
+    /// registry table on a miss. Mirror of Swift `VectorStore._shadowGeneration(for:)`.
+    fn shadow_generation(&self, model_id: &str) -> Result<Option<i64>, VectorKitError> {
+        // Fast path: cached.
+        {
+            let state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            if let Some(&sg) = state.shadow_generations.get(model_id) {
+                return Ok(Some(sg));
+            }
+        }
+        // Slow path: registry query.
+        let rows = self.storage.row_store()
+            .query(
+                "vector_generations",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vector_generations", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let row = match rows.first() {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        // Only 'building' shadows are active. 'pending-reclaim' is not.
+        match (row.get("shadow_generation"), row.get("shadow_state")) {
+            (Some(TypedValue::Int(sg)), Some(TypedValue::Text(state_str)))
+                if state_str == "building" =>
+            {
+                let sg = *sg;
+                if let Ok(mut state) = self.state.lock() {
+                    state.shadow_generations.insert(model_id.to_string(), sg);
+                    state.shadow_states.insert(model_id.to_string(), state_str.clone());
+                }
+                Ok(Some(sg))
+            }
+            _ => {
+                // Not building — remove any stale cache entry.
+                if let Ok(mut state) = self.state.lock() {
+                    state.shadow_generations.remove(model_id);
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Build a generation predicate for table-wide queries that read from
+    /// multiple model_ids (e.g. `recent_item_ids`, `find_by_keyword`,
+    /// `fetch_all_binary_records`).
+    ///
+    /// Returns a predicate that accepts ONLY serving-generation rows for each
+    /// model registered in `vector_generations`, plus generation = 0 for any
+    /// model_id not in the registry (the default for pre-migration rows and
+    /// never-swapped models).
+    ///
+    /// Updates the in-memory serving-generation cache as a side effect.
+    ///
+    /// Mirror of Swift `VectorStore._servingGenPredicate()`.
+    fn serving_gen_predicate(&self) -> Result<StoragePredicate, VectorKitError> {
+        let reg_rows = self.storage.row_store()
+            .query(
+                "vector_generations",
+                Some(&StoragePredicate::IsTrue),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        if reg_rows.is_empty() {
+            // No registry entries → all models at generation 0 (pre-swap baseline).
+            return Ok(StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(0),
+            ));
+        }
+
+        // Build:
+        //   (model_id NOT IN known_models AND generation = 0)
+        //   OR (model_id = M1 AND generation = SG1)
+        //   OR (model_id = M2 AND generation = SG2) ...
+        let mut known_model_ids: Vec<TypedValue> = Vec::new();
+        let mut per_model_clauses: Vec<StoragePredicate> = Vec::new();
+
+        for row in &reg_rows {
+            let mid = match row.get("model_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let sg = match row.get("serving_generation") {
+                Some(TypedValue::Int(v)) => *v,
+                _ => continue,
+            };
+            // Populate the serving-generation cache.
+            if let Ok(mut state) = self.state.lock() {
+                state.serving_generations.insert(mid.clone(), sg);
+            }
+            known_model_ids.push(TypedValue::Text(mid.clone()));
+            per_model_clauses.push(StoragePredicate::all(vec![
+                StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(mid),
+                ),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "generation"),
+                    TypedValue::Int(sg),
+                ),
+            ]));
+        }
+
+        let unknown_clause = StoragePredicate::all(vec![
+            StoragePredicate::Not(Box::new(StoragePredicate::In(
+                Column::new("vectors", "model_id"),
+                known_model_ids,
+            ))),
+            StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(0),
+            ),
+        ]);
+
+        let mut all_clauses = vec![unknown_clause];
+        all_clauses.extend(per_model_clauses);
+        Ok(StoragePredicate::any(all_clauses))
+    }
+
+    /// Rebuild the binary resident array from the `vectors` table.
+    ///
+    /// Used after a generation swap to refresh the in-memory binary lane with
+    /// new-serving rows. Delegates to `rebuild_binary_index_from_table_locked`
+    /// which handles both the array-store and no-store paths.
+    fn rebuild_binary_index_from_table(&self) -> Result<(), VectorKitError> {
+        let mut state = self.state.lock()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        self.rebuild_binary_index_from_table_locked(&mut state)
+    }
 }
 
 // ── Row decode helpers ────────────────────────────────────────────────────
@@ -3358,6 +4328,12 @@ fn decode_stored_vector(
         Some(TypedValue::Int(i)) => *i,
         _ => return Ok(None),
     };
+    // generation column added in schema v6; pre-v6 rows (or InMemory databases
+    // replaying migrations) default to 0 — the baseline serving generation.
+    let generation = match row.get("generation") {
+        Some(TypedValue::Int(v)) => *v,
+        _ => 0,
+    };
     Ok(Some(StoredVector {
         id,
         item_id,
@@ -3366,6 +4342,7 @@ fn decode_stored_vector(
         model_version,
         engram,
         filed_at,
+        generation,
     }))
 }
 
