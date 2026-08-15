@@ -8,9 +8,14 @@
 // hop, not a server — it POSTs to the loopback daemon or spawns a local
 // serve subprocess, and nothing else. `validateLoopbackHTTP` is the gate:
 // any `--http` value that is not 127.0.0.1 / localhost / [::1] over plain
-// http is rejected BEFORE any request is constructed (fails CLOSED, exit
-// 64, zero requests sent). The guard is copied from ProxyCommand's inline
-// guard, not refactored out of it — ProxyCommand is untouched by BL-1.
+// http, or that addresses anything below the root path, is rejected
+// BEFORE any request is constructed (fails CLOSED, exit 64, zero requests
+// sent). The host guard is copied from ProxyCommand's inline guard, not
+// refactored out of it — ProxyCommand is untouched by BL-1. The root-path
+// restriction is BL-01's (Codex #42): the daemon's control plane shares
+// this listener, so an unrestricted path let this transport reach
+// `POST /api/control/unlock` and grant a sensitivity tier without ever
+// meeting the unlock authority.
 //
 // Engine/wrapper split: this file is the testable engine (MootInstallerCore,
 // exercised by BotLinkCommandTests via closure-injected transports). The
@@ -74,13 +79,31 @@ public enum BotLink {
 
     // MARK: - Loopback guard (security boundary)
 
-    /// Validate a `--http` override as a loopback-only HTTP URL.
+    /// Validate a `--http` override as a loopback-only HTTP URL addressing
+    /// the MCP JSON-RPC endpoint at the server root.
     ///
-    /// Accepts exactly `http://127.0.0.1:*`, `http://localhost:*`, and
-    /// `http://[::1]:*` (any port, any path). Everything else — other
-    /// hosts, https, non-http schemes, unparseable strings — returns `nil`
-    /// and the command layer exits 64 WITHOUT constructing any request.
-    /// Copy of ProxyCommand's guard semantics (fails CLOSED).
+    /// Accepts exactly `http://127.0.0.1`, `http://localhost`, and
+    /// `http://[::1]` (any port) with no path beyond the root. Everything
+    /// else — other hosts, https, non-http schemes, unparseable strings —
+    /// returns `nil` and the command layer exits 64 WITHOUT constructing
+    /// any request (fails CLOSED).
+    ///
+    /// ROOT-PATH ONLY (BL-01, Codex #42). botLink is an MCP JSON-RPC
+    /// transport and speaks to the dispatcher at `/` — nothing else. The
+    /// daemon also serves control-plane routes on the same loopback
+    /// listener (`POST /api/control/unlock` grants a sensitivity tier on a
+    /// fresh timestamp alone, because authentication is the CLI's job —
+    /// see HTTPServer.route). A guard that validated only scheme and host
+    /// let `botlink rpc --http http://127.0.0.1:4242/api/control/unlock`
+    /// POST a caller-authored body straight to that route, silently
+    /// granting the secret tier and bypassing `mootx01 unlock`'s
+    /// LocalAuthentication gate. Restricting the path here closes that by
+    /// construction and keeps future `/api/control/*` routes unreachable
+    /// from this transport without further work.
+    ///
+    /// A query or fragment is rejected for the same reason: neither has a
+    /// legitimate use on the JSON-RPC endpoint, and `url.path` alone does
+    /// not capture them.
     ///
     /// - Parameter urlString: the raw `--http` argument.
     /// - Returns: the parsed URL when loopback-valid, else `nil`.
@@ -89,6 +112,14 @@ public enum BotLink {
               url.scheme == "http",
               let host = url.host,
               host == "127.0.0.1" || host == "localhost" || host == "::1" else {
+            return nil
+        }
+        // Root path only: "" (no trailing slash) and "/" are the two
+        // spellings of the JSON-RPC endpoint; anything deeper is a
+        // different route and is refused.
+        guard url.path.isEmpty || url.path == "/",
+              url.query == nil,
+              url.fragment == nil else {
             return nil
         }
         return url

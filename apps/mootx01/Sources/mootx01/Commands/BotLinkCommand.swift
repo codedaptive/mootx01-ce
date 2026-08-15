@@ -14,9 +14,13 @@
 // no session file is written.
 //
 // SECURITY BOUNDARY: `--http` accepts loopback URLs ONLY
-// (http://127.0.0.1:*, http://localhost:*, http://[::1]:*). A rejected
-// URL exits 64 before any URLRequest is constructed — the estate never
-// leaves the Mac; botLink is a local hop, not a server.
+// (http://127.0.0.1:*, http://localhost:*, http://[::1]:*), and only at
+// the JSON-RPC root path — no deeper route, no query, no fragment. A
+// rejected URL exits 64 before any URLRequest is constructed — the estate
+// never leaves the Mac; botLink is a local hop, not a server. The
+// root-path rule (BL-01, Codex #42) keeps this transport off the daemon's
+// control plane, which shares the same loopback listener and grants
+// sensitivity tiers to whoever POSTs a fresh timestamp.
 
 import ArgumentParser
 import Foundation

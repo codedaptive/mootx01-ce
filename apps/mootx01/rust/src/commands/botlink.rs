@@ -236,6 +236,35 @@ pub fn resolve_transport(
         None
     };
 
+    // Step 1b: ROOT PATH ONLY (BL-01, Codex #42). botLink is an MCP JSON-RPC
+    // transport and addresses the dispatcher at `/`. The daemon serves
+    // control-plane routes on the same loopback listener — `POST
+    // /api/control/unlock` grants a sensitivity tier on a fresh timestamp
+    // alone, because authenticating the user is the CLI's job. Letting a
+    // `--http` override carry an arbitrary path would aim this transport at
+    // that route and bypass the unlock authority entirely (the Swift vertical
+    // was reachable this way; see BotLink.validateLoopbackHTTP).
+    //
+    // Enforced HERE rather than inside `validate_loopback_http` for one
+    // reason: two shipped BL-2 gates pin the validator's path-accepting
+    // behaviour and the F-2 attribution semantics built on `path_suffix`
+    // (loopback_guard_accepts_valid_urls, f2_portless_endpoint_attribution).
+    // This function is the validator's ONLY caller, so refusing here yields
+    // the identical invariant — no transport is ever constructed for a
+    // path-bearing URL — without rewriting those gates.
+    //
+    // Today `daemon_client::post_frame` hardcodes `POST /`, so the Rust
+    // vertical is not exploitable through this path; this guard keeps a
+    // future URL-respecting HTTP client from silently reintroducing it.
+    if let Some(v) = validated_url.as_ref() {
+        if !v.path_suffix.is_empty() {
+            return Err(Outcome::usage_error(&format!(
+                "'--http' must address the JSON-RPC root path (e.g. http://127.0.0.1:4242), got '{}'",
+                http.unwrap_or("")
+            )));
+        }
+    }
+
     // Step 2: --db absent → try HTTP transport.
     if db.is_none() {
         let port = validated_url
