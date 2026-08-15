@@ -138,6 +138,51 @@ public enum BotLink {
         return url
     }
 
+    // MARK: - Bounded stdin read
+
+    /// Maximum `rpc` frame accepted from stdin, in bytes (BL-01, Codex #47).
+    ///
+    /// 4 MiB, matching the daemon's own `HTTPServer.maxBodyBytes` default
+    /// (and the Rust vertical's `max_body_bytes`). A frame larger than this
+    /// is refused by the receiving end regardless, so buffering more than
+    /// the daemon will ever read is pure waste. The largest legitimate
+    /// botLink payload is a single `tools/call` frame, orders of magnitude
+    /// below the cap.
+    public static let maxStdinFrameBytes = 4 * 1024 * 1024
+
+    /// Read one `rpc` frame from `handle` under a hard byte cap.
+    ///
+    /// `readDataToEndOfFile()` grows without limit, so a large or
+    /// never-terminating producer on the other end of the pipe exhausts
+    /// local memory. This reads at most `limit + 1` bytes: the extra byte
+    /// distinguishes "exactly at the cap" from "over the cap", so an
+    /// oversized frame is REFUSED rather than silently truncated into a
+    /// malformed one.
+    ///
+    /// Lives in the engine rather than the command layer so it is reachable
+    /// from tests — `MootInstallerCoreTests` cannot see the `mootx01`
+    /// executable target.
+    ///
+    /// - Parameters:
+    ///   - handle: the input to drain (stdin in production, a pipe in tests).
+    ///   - limit: the byte cap; defaults to `maxStdinFrameBytes`.
+    /// - Returns: the trimmed frame, or `nil` when the input exceeded `limit`.
+    /// - Throws: whatever `FileHandle.read(upToCount:)` throws.
+    public static func readBoundedFrame(
+        from handle: FileHandle,
+        limit: Int = maxStdinFrameBytes
+    ) throws -> String? {
+        var data = Data()
+        while data.count <= limit {
+            guard let chunk = try handle.read(upToCount: limit + 1 - data.count),
+                  !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= limit else { return nil }
+        return String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Argument parsing
 
     /// Parse a `--args` JSON string into a dictionary.

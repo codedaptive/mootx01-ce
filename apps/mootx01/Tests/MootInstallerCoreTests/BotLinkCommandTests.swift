@@ -207,6 +207,113 @@ struct BotLinkLoopbackGuardTests {
         #expect(BotLink.validateLoopbackHTTP("file:///etc/passwd") == nil)
     }
 
+    // MARK: - BL-01 regressions (Codex #42, #41, #47)
+
+    @Test("the control plane is unreachable: a non-root --http path is refused")
+    func controlPlanePathRefused() {
+        // Codex #42. The daemon serves POST /api/control/unlock on the same
+        // loopback listener as the JSON-RPC endpoint, and that route grants a
+        // sensitivity tier on a fresh timestamp alone (authenticating the user
+        // is the CLI's job). A guard that checked only scheme and host let
+        //   botlink rpc --http http://127.0.0.1:4242/api/control/unlock
+        // POST a caller-authored body straight to it, silently granting the
+        // secret tier and bypassing `mootx01 unlock`'s LocalAuthentication.
+        // Pre-fix these all returned non-nil.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/api/control/unlock") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/api/control/lock") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://localhost:4242/api/graph") == nil)
+        // Traversal and encoded spellings resolve to a non-root path too.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/../api/control/unlock") == nil)
+        // A query or fragment is refused for the same reason: neither has a
+        // legitimate use on the JSON-RPC endpoint, and `url.path` alone does
+        // not capture them.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/?x=1") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/#frag") == nil)
+    }
+
+    @Test("the legitimate root-path flow still works (both spellings)")
+    func rootPathStillAccepted() {
+        // The fix must not cost botLink its actual job. Bare authority and a
+        // lone trailing slash are the two spellings of the JSON-RPC endpoint.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242") != nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:4242/") != nil)
+        #expect(BotLink.validateLoopbackHTTP("http://localhost/") != nil)
+        #expect(BotLink.validateLoopbackHTTP("http://[::1]:4242/") != nil)
+    }
+
+    @Test("an out-of-range port is a clean rejection, not a crash")
+    func portRangeRefused() {
+        // Codex #41. URL(string:) does not range-check the port: it parses
+        // ":99999" and reports port == 99999, which reached daemonAlive's
+        // `UInt16(port)` narrowing and TRAPPED ("Not enough bits to represent
+        // the passed value", exit 133). Pre-fix these returned non-nil.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:0") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:65536") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:99999") == nil)
+        #expect(BotLink.validateLoopbackHTTP("http://[::1]:70000") == nil)
+        // A negative port never reached the trap — URL(string:) returns nil
+        // for it — but it must stay rejected.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:-1") == nil)
+        // The boundary values themselves are legal ports.
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:1") != nil)
+        #expect(BotLink.validateLoopbackHTTP("http://127.0.0.1:65535") != nil)
+    }
+
+    @Test("daemonAlive refuses an out-of-range port instead of trapping")
+    func daemonAliveGuardsNarrowing() {
+        // Defense in depth for the same narrowing: this path is also reached
+        // with the RESOLVED default port, which never passes through
+        // validateLoopbackHTTP, so a corrupt port file could otherwise trap
+        // here. Pre-fix these calls crashed the process rather than returning.
+        #expect(McpLoopback.daemonAlive(port: 99999) == false)
+        #expect(McpLoopback.daemonAlive(port: 65536) == false)
+        #expect(McpLoopback.daemonAlive(port: 0) == false)
+        #expect(McpLoopback.daemonAlive(port: -1) == false)
+    }
+
+    @Test("an oversized stdin frame is refused, not truncated")
+    func stdinFrameBounded() throws {
+        // Codex #47. An unbounded read lets a large or never-terminating
+        // producer exhaust local memory. A small limit is used here so the
+        // test stays fast; the production cap is BotLink.maxStdinFrameBytes.
+        let limit = 1024
+
+        // Over the cap: refused outright. Returning nil rather than a
+        // truncated prefix is the point — a silently truncated frame would
+        // reach the parser as malformed JSON and misreport the cause.
+        let overPipe = Pipe()
+        try overPipe.fileHandleForWriting.write(
+            contentsOf: Data(repeating: UInt8(ascii: "a"), count: limit + 1))
+        try overPipe.fileHandleForWriting.close()
+        #expect(try BotLink.readBoundedFrame(
+            from: overPipe.fileHandleForReading, limit: limit) == nil)
+
+        // Exactly at the cap: accepted, whole, unmodified.
+        let atPipe = Pipe()
+        try atPipe.fileHandleForWriting.write(
+            contentsOf: Data(repeating: UInt8(ascii: "b"), count: limit))
+        try atPipe.fileHandleForWriting.close()
+        let atFrame = try BotLink.readBoundedFrame(
+            from: atPipe.fileHandleForReading, limit: limit)
+        #expect(atFrame?.count == limit)
+
+        // A normal frame round-trips and is trimmed, exactly as the old
+        // readDataToEndOfFile path did.
+        let okPipe = Pipe()
+        try okPipe.fileHandleForWriting.write(contentsOf: Data("  {\"id\":1}\n".utf8))
+        try okPipe.fileHandleForWriting.close()
+        #expect(try BotLink.readBoundedFrame(
+            from: okPipe.fileHandleForReading, limit: limit) == "{\"id\":1}")
+    }
+
+    @Test("the production stdin cap matches the daemon's own body limit")
+    func stdinCapMatchesDaemonBodyLimit() {
+        // Derived, not invented: HTTPServer.maxBodyBytes defaults to 4 MiB on
+        // both verticals, so a larger frame is refused by the receiving end
+        // regardless. If that default moves, this cap should move with it.
+        #expect(BotLink.maxStdinFrameBytes == 4 * 1024 * 1024)
+    }
+
     @Test("a rejected --http URL means the transport is never invoked (zero requests)")
     func rejectedURLSendsNothing() async {
         // Mirrors the command layer's wiring: validation gates transport

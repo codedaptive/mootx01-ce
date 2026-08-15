@@ -1027,6 +1027,89 @@ mod tests {
 
     // ── Loopback guard unit cases ──────────────────────────────────────────────
 
+    // ── BL-01 regressions (Codex #42, #41, #47) ────────────────────────────
+
+    #[test]
+    fn bl01_control_plane_path_is_refused() {
+        // Codex #42. The daemon serves POST /api/control/unlock on the same
+        // loopback listener as the JSON-RPC endpoint, and that route grants a
+        // sensitivity tier on a fresh timestamp alone. botLink is a JSON-RPC
+        // transport and must never address anything but the root.
+        //
+        // Enforced at resolve_transport rather than inside
+        // validate_loopback_http: two shipped BL-2 gates pin that function's
+        // path-accepting behaviour and the F-2 attribution semantics, and this
+        // is its only caller, so the invariant is identical either way.
+        for url in [
+            "http://127.0.0.1:4242/api/control/unlock",
+            "http://127.0.0.1:4242/api/control/lock",
+            "http://localhost:4242/api/graph",
+            "http://[::1]:4242/x",
+        ] {
+            let err = resolve_transport(Some(url), None)
+                .err()
+                .unwrap_or_else(|| panic!("{url} must be refused"));
+            assert_eq!(err.code, 64, "{url} must exit 64");
+        }
+    }
+
+    #[test]
+    fn bl01_root_path_still_resolves() {
+        // The fix must not cost botLink its actual job: both spellings of the
+        // JSON-RPC endpoint still resolve a transport.
+        for url in ["http://127.0.0.1:4242", "http://127.0.0.1:4242/"] {
+            assert!(
+                resolve_transport(Some(url), Some("pinned")).is_ok(),
+                "{url} must still resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn bl01_out_of_range_port_is_refused() {
+        // Codex #41. Rust never crashed here (parse::<u16>() type-bounds the
+        // value) but had the mirror-image defect: out-of-range silently became
+        // None, indistinguishable downstream from "portless", so :99999
+        // quietly retargeted the request at the resolved daemon port. Port 0
+        // parsed as Some(0), which no listener can ever hold.
+        for url in [
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:99999",
+            "http://[::1]:70000",
+            "http://127.0.0.1:-1",
+            "http://127.0.0.1:notaport",
+        ] {
+            assert!(
+                validate_loopback_http(url).is_none(),
+                "{url} must be rejected, not silently treated as portless"
+            );
+        }
+        // Boundary values are legal ports.
+        assert_eq!(
+            validate_loopback_http("http://127.0.0.1:1").unwrap().explicit_port,
+            Some(1)
+        );
+        assert_eq!(
+            validate_loopback_http("http://127.0.0.1:65535").unwrap().explicit_port,
+            Some(65535)
+        );
+        // Absent stays portless — that is NOT an error, and the F-2
+        // attribution path depends on it.
+        assert!(validate_loopback_http("http://localhost")
+            .unwrap()
+            .explicit_port
+            .is_none());
+    }
+
+    #[test]
+    fn bl01_stdin_cap_matches_daemon_body_limit() {
+        // Codex #47. Derived, not invented: the daemon's max_body_bytes
+        // default is 4 MiB on both verticals, so a larger frame is refused by
+        // the receiving end regardless. If that default moves, this moves.
+        assert_eq!(MAX_STDIN_FRAME_BYTES, 4 * 1024 * 1024);
+    }
+
     #[test]
     fn loopback_guard_accepts_valid_urls() {
         assert!(validate_loopback_http("http://127.0.0.1:9").is_some());
