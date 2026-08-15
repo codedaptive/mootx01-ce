@@ -985,7 +985,13 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             OPTIONS:\n\
             \x20 --db <name>             Named estate to query. Default: active estate.\n\
-            \x20 --json                  Output raw JSON instead of human-readable text.".into(),
+            \x20 --json                  Output raw JSON instead of human-readable text.\n\
+            \n\
+            If you are a cloud agent that cannot reach `127.0.0.1` on the user's\n\
+            machine and MCP `moot_*` tools are absent, use `mootx01-botLink` on the\n\
+            user's computer. Do not use `mootx01 query`. Do not open a remote MCP\n\
+            URL. If `moot_*` MCP tools exist (Cursor on the Mac), use those and\n\
+            stop.".into(),
         "botlink" => "One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
             \n\
             USAGE: mootx01 botlink <ping|list|call|rpc> [--http <url>] [--db <name>]\n\
