@@ -21,7 +21,7 @@
 //! vector) the engram is bit-identical Swift/Rust (SPEC § 8.2).
 
 use crate::basis_store::{BasisStore, PersistedBasis};
-use crate::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
+use crate::corpus_provider_counts_store::CorpusProviderCountsStore;
 use crate::removed_source_store::RemovedSourceStore;
 use crate::bundle_store::BundleStore;
 use crate::engine::inverted_index::Algorithm;
@@ -38,7 +38,7 @@ use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use engram_lib::Engram;
 use substrate_types::merkle_root::MerkleRoot;
 use intellectus_lib::{report, StatSample};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
@@ -197,6 +197,57 @@ pub type NamedInferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Sen
 
 /// Selects the embedding model the `Corpus` struct uses internally.
 ///
+// MARK: - Training path decision seam (Part 3)
+
+/// Why a particular retrain slot fell back to the full corpus path instead of
+/// using the maintained-counts shortcut. Recorded per modelID in the engine's
+/// `training_path_decisions` seam so tests can assert the BRANCH, not just
+/// the digest. Mirrors Swift `CorpusPathReason`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorpusPathReason {
+    /// No persisted basis row exists for the provider key — a genuine first
+    /// training, forced or not. An untrained slot on a non-force call also
+    /// records `Corpus(FirstTrain)` when it trains via the corpus path.
+    /// Counts path cannot restore what was never written.
+    FirstTrain,
+    /// No persisted counts row exists for this provider generation.
+    NoCountsRow,
+    /// The provider's `finalize_from_counts()` returned `false` — counts-only
+    /// basis derivation is not supported for this provider type (LSA/NMF).
+    NotCountsCapable,
+    /// The provider's `counts_delta_fold_safe()` returned `false` and there are
+    /// pending (unsubsumed) reference deltas — folding those deltas into a restored
+    /// basis would violate order-sensitivity (RI). Empty-delta restore is still
+    /// available for RI; this reason fires only when a non-empty delta exists.
+    DeltaNotFoldSafe,
+    /// trainedChunkCount + |pending| != |activeIDs|: the counts snapshot plus
+    /// outstanding deltas do not cover the full active population. A removed or
+    /// revised identity broke the additive chain; the corpus path heals it.
+    PopulationMismatch,
+    /// A pending reference's contentID could not be resolved by the source. The
+    /// counts path discards the attempt; the corpus path immediately heals by
+    /// deleting all refs and re-publishing.
+    PendingUnresolvable,
+}
+
+/// Which path the engine took for a given retrain slot. Recorded per modelID in
+/// `training_path_decisions` after each `train_trainable_slots` /
+/// `Corpus::reindex` call. Reset at the start of each pass.
+/// Mirrors Swift `TrainingPathDecision`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingPathDecision {
+    /// Counts path: restored the basis from the persisted counts snapshot with
+    /// NO outstanding delta to fold (empty pending set). Zero corpus reads.
+    CountsRestore,
+    /// Counts path: restored the basis from the persisted counts snapshot AND
+    /// folded `folded` pending reference bodies into the restored counts before
+    /// finalizing. Exactly `folded` `source.record()` calls were made.
+    CountsDeltaFold { folded: usize },
+    /// Corpus path: read every active chunk text and retrained from scratch.
+    /// The inner value names why the counts path was not taken.
+    Corpus(CorpusPathReason),
+}
+
 /// Rust counterpart to Swift's `EmbeddingModel`. Model inference is
 /// host-supplied on every platform, so the named cases each carry an
 /// inference closure the host injects — exactly as the Swift cases do.
@@ -652,6 +703,11 @@ pub struct Corpus {
     pub(crate) ingest_failure_hook: Mutex<Option<IngestFailureHook>>,
     #[cfg(any(test, feature = "test-seams"))]
     pub forced_float_error: Mutex<Option<String>>,
+    /// Training path decisions recorded per modelID on the last
+    /// `reindex` pass. Reset at the start of each pass. External tests
+    /// read this via `training_path_decisions()` to assert the BRANCH taken,
+    /// not only the basis digest — the gate the wave process requires.
+    training_path_decisions: Mutex<BTreeMap<String, TrainingPathDecision>>,
 }
 
 impl Corpus {
@@ -662,6 +718,18 @@ impl Corpus {
         if let Ok(mut guard) = self.encode_speed.lock() {
             *guard = speed;
         }
+    }
+
+    /// Read-only snapshot of the training path decisions recorded on the last
+    /// `reindex` pass (reset at the start of each pass). External tests read
+    /// this to assert the BRANCH (CountsRestore / CountsDeltaFold / Corpus) taken
+    /// for each provider, not only the resulting basis digest.
+    /// Mirrors the Swift `_trainingPathDecisions` test-seam accessor.
+    pub fn training_path_decisions(&self) -> BTreeMap<String, TrainingPathDecision> {
+        self.training_path_decisions
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Max concurrent embed operations for the current `encode_speed` (T1 QoS
@@ -811,6 +879,7 @@ impl Corpus {
             ingest_failure_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
+            training_path_decisions: Mutex::new(BTreeMap::new()),
         };
 
         Ok(corpus)
@@ -1080,6 +1149,7 @@ impl Corpus {
             ingest_failure_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
+            training_path_decisions: Mutex::new(BTreeMap::new()),
         };
 
         Ok(corpus)
@@ -2191,45 +2261,297 @@ impl Corpus {
             self.slots.len()
         );
 
-        // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
-        // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
-        // trainings are independent computations over the same chunk snapshot:
-        // each touches only ITS slot's counts accumulator + serving handle (both
-        // per-slot Mutexes), and persists via single-statement upserts serialized
-        // by the storage mutex. Running them serially made a large reindex wait
-        // ΣT(train) on one core with LSA's SVD + NMF's ALS dominating; concurrent
-        // slots wait max(T) instead. Per-slot output is byte-identical to the
-        // serial loop — the fixed-sweep kernels are untouched and no
-        // slot reads another's state. LSA and NMF each derive the shared reduced embedding vocabulary reduced
-        // vocabulary with the same pure deterministic selection, so concurrent
-        // duplicate computation of it is benign (identical artifact). For N=1
-        // this spawns one thread — same work, same result as the plain call.
-        std::thread::scope(|scope| -> CorpusKitResult<()> {
-            let chunks_ref = &chunks;
-            let mut handles = Vec::new();
-            for slot_index in 0..self.slots.len() {
-                if self.slots[slot_index].fresh_basis_blob.is_some() {
-                    // Train a FRESH basis on the full corpus snapshot and install
-                    // the trained provider for this slot. Training fresh (not in
-                    // place) is required because train_on_corpus is additive — see
-                    // ProviderSlot::fresh_basis_blob.
+        // Reset the training-path decision seam at the start of each pass so
+        // prior reindex decisions do not bleed through to subsequent calls.
+        {
+            let mut decisions = self.training_path_decisions.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+            })?;
+            decisions.clear();
+        }
+
+        // Phase 1 — train/restore each trainable slot.
+        //
+        // Two paths per slot:
+        //
+        //   COUNTS PATH (PPMI only in standalone): available when
+        //     (a) finalizeFromCounts() on a fresh empty instance returns true, AND
+        //     (b) countsDeltaFoldSafe() returns true (PPMI returns true; RI returns
+        //         false because f32 running sums are not commutative, and ingest-
+        //         arrival order cannot be proven equal to activeChunks() order).
+        //   When both hold AND the population guard passes, we restore from the
+        //   persisted counts snapshot without re-reading any corpus text.
+        //
+        //   CORPUS PATH (RI / LSA / NMF always; PPMI when a guard rejects):
+        //   Trains a fresh basis on the full active-chunk text snapshot (same as
+        //   before this wave). Adds the F-2 heal: rebuilds the counts accumulator
+        //   from the same active texts so `persist_maintained_counts` persists an
+        //   exact snapshot rather than a stale monotonic accumulator.
+        //
+        // Counts-path slots are processed sequentially (fast — DB reads only).
+        // Corpus-path slots are fanned out to parallel threads (same as before).
+        let mut corpus_path_indices: Vec<(usize, CorpusPathReason)> = Vec::new();
+
+        for slot_index in 0..self.slots.len() {
+            let slot = &self.slots[slot_index];
+            let Some(fresh_blob) = slot.fresh_basis_blob.as_ref() else {
+                continue; // non-trainable — skip
+            };
+
+            // Read model_version from the slot handle FIRST (before the counts
+            // lock) to avoid acquiring both locks simultaneously.
+            let model_version = Self::slot_model_version(slot)?;
+
+            // Probe capability and population from the counts accumulator.
+            //
+            // Two conditions must BOTH hold for the counts path:
+            //   (a) finalizeFromCounts() on an empty fresh instance returns true.
+            //       Checked via a throwaway reconstruction so the accumulator is
+            //       not mutated. (PPMI → true; RI → true; LSA/NMF → false.)
+            //   (b) countsDeltaFoldSafe() returns true.
+            //       (PPMI → true; RI → false — RI fold order is not commutative.)
+            let (capable, fold_safe, doc_count) = {
+                let guard = slot.counts.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator lock poisoned in reindex probe".into(),
+                    )
+                })?;
+                let state = match guard.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        corpus_path_indices
+                            .push((slot_index, CorpusPathReason::NoCountsRow));
+                        continue;
+                    }
+                };
+                // Probe via throwaway fresh instance — does not touch the accumulator.
+                let mut probe = state.accumulator.reconstruct_trainable_basis(fresh_blob)?;
+                let capable = probe.finalize_from_counts();
+                let fold_safe = probe.counts_delta_fold_safe();
+                (capable, fold_safe, state.document_count)
+            };
+
+            if !capable {
+                corpus_path_indices.push((slot_index, CorpusPathReason::NotCountsCapable));
+                continue;
+            }
+            if !fold_safe {
+                // RI: ingest-arrival order != activeChunks() order → not safe to
+                // restore in standalone. Always corpus path for RI.
+                corpus_path_indices.push((slot_index, CorpusPathReason::DeltaNotFoldSafe));
+                continue;
+            }
+
+            // Population guard (standalone):
+            //   LHS: state.document_count — monotonic fold anchor, incremented by
+            //        corpus.rs fold_chunks_into_counts (`state.document_count += chunks.len()`),
+            //        never decremented; restored across reopen from the persisted row
+            //        written by persist_maintained_counts.
+            //   RHS: active_chunks() count — excludes removed sources.
+            //   These are DIFFERENT populations whose every divergence is reject-safe:
+            //   a removed-after-fold source drives LHS > RHS → corpus path heals;
+            //   a removed-then-reingested source also drives LHS > RHS → corpus path.
+            //   Do NOT describe them as the same population.
+            if doc_count != chunks.len() {
+                corpus_path_indices
+                    .push((slot_index, CorpusPathReason::PopulationMismatch));
+                continue;
+            }
+
+            // ── Counts path ───────────────────────────────────────────────────
+            // Step 1: flush the live accumulator to storage so the subsequent
+            // store-read sees a consistent snapshot.
+            {
+                let guard = slot.counts.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator lock poisoned at flush".into(),
+                    )
+                })?;
+                let state = guard.as_ref().ok_or_else(|| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator vanished between probe and flush".into(),
+                    )
+                })?;
+                self.counts_store.persist_counts_into(
+                    state.accumulator.as_ref(),
+                    &slot.model_id,
+                    &model_version,
+                    state.document_count,
+                    state.accumulator.counts_vocabulary_size(),
+                    filed_at_secs,
+                    &self.storage.row_store(),
+                )?;
+            }
+
+            // Step 2: reconstruct a fresh provider and restore counts from the
+            // STORE. The restore path prefers v4 term rows and falls back to the
+            // blob — we do not reimplement that choice.
+            let mut serving = {
+                let guard = slot.counts.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator lock poisoned at restore".into(),
+                    )
+                })?;
+                let state = guard.as_ref().ok_or_else(|| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator vanished before restore".into(),
+                    )
+                })?;
+                state.accumulator.reconstruct_trainable_basis(fresh_blob)?
+            };
+            let restored = self.counts_store.restore_counts_into(
+                serving.as_mut(),
+                &slot.model_id,
+                &model_version,
+            )?;
+            if !restored {
+                // Counts row disappeared between flush and restore — corpus path.
+                corpus_path_indices.push((slot_index, CorpusPathReason::NoCountsRow));
+                continue;
+            }
+
+            // Step 3: finalize the serving basis from the restored counts.
+            if !serving.finalize_from_counts() {
+                // Defensive: probe said true; guard against a corrupted blob.
+                corpus_path_indices
+                    .push((slot_index, CorpusPathReason::NotCountsCapable));
+                continue;
+            }
+
+            // Step 4: serialize before moving serving into the handle.
+            let basis_blob = serving.serialize_basis();
+            let basis_digest =
+                crate::content::content_digest_bytes(&basis_blob);
+
+            // Step 5: install the finalized provider.
+            {
+                let mut handle = slot.handle.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "provider handle lock poisoned at install".into(),
+                    )
+                })?;
+                *handle = ProviderHandle::Trainable(serving);
+            }
+            // Update the cached basis digest so backfill coverage reads it correctly.
+            *slot.basis_digest.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("basis digest lock poisoned".into())
+            })? = basis_digest;
+
+            // Step 6: persist basis with trainedChunkCount = active chunk count.
+            self.basis_store.upsert(&PersistedBasis {
+                model_id: slot.model_id.clone(),
+                model_version: model_version.clone(),
+                basis: basis_blob,
+                trained_at_secs: filed_at_secs,
+                trained_chunk_count: chunks.len(),
+            })?;
+
+            // Record decision: CountsRestore. Standalone reindex has no pending
+            // delta refs (the live accumulator IS the full folded history).
+            {
+                let mut decisions = self.training_path_decisions.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "training_path_decisions lock poisoned".into(),
+                    )
+                })?;
+                decisions.insert(
+                    slot.model_id.clone(),
+                    TrainingPathDecision::CountsRestore,
+                );
+            }
+
+            eprintln!(
+                "[corpus] reindex: slot {} took counts path (restore), {} chunks",
+                slot.model_id,
+                chunks.len()
+            );
+        }
+
+        // Corpus-path slots: fan out to parallel training threads (same as the
+        // pre-Part-3 path). Each thread trains a FRESH basis from scratch so
+        // train_on_corpus's additive semantics start clean.
+        let corpus_indices_only: Vec<usize> =
+            corpus_path_indices.iter().map(|(i, _)| *i).collect();
+        if !corpus_indices_only.is_empty() {
+            std::thread::scope(|scope| -> CorpusKitResult<()> {
+                let chunks_ref = &chunks;
+                let mut handles = Vec::new();
+                for &slot_index in &corpus_indices_only {
                     handles.push(scope.spawn(move || {
                         self.train_and_persist_basis(slot_index, chunks_ref, filed_at_secs)
                     }));
                 }
-            }
-            if !handles.is_empty() {
                 eprintln!(
-                    "[corpus] reindex: training {} trainable slots concurrently over {} texts",
+                    "[corpus] reindex: training {} corpus-path slots concurrently over {} texts",
                     handles.len(),
                     chunks_ref.len()
                 );
+                for h in handles {
+                    h.join().expect("slot train thread panicked")?;
+                }
+                Ok(())
+            })?;
+        }
+
+        // F-2 heal: for every corpus-path slot, rebuild a FRESH counts
+        // accumulator by folding the active chunk texts in activeChunks() order.
+        // This replaces a potentially-stale monotonic accumulator (which includes
+        // removed-source counts) with an exact snapshot matching the retrained
+        // basis. The tail `persist_maintained_counts` call then persists this
+        // healed exact state. Without this heal, a reindex after a source removal
+        // would persist accumulator counts that included the removed source's
+        // contributions — the next reindex's population guard would pass
+        // incorrectly and the restored basis would mismatch the corpus.
+        for (slot_index, reason) in &corpus_path_indices {
+            let slot = &self.slots[*slot_index];
+            let Some(fresh_blob) = slot.fresh_basis_blob.as_ref() else {
+                continue;
+            };
+            // Reconstruct a fresh accumulator and fold all active chunk texts.
+            let mut fresh_acc = {
+                let guard = slot.counts.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator lock poisoned at F-2 heal".into(),
+                    )
+                })?;
+                let state = guard.as_ref().ok_or_else(|| {
+                    CorpusKitError::StoreUnavailable(
+                        "counts accumulator absent at F-2 heal".into(),
+                    )
+                })?;
+                state.accumulator.reconstruct_trainable_basis(fresh_blob)?
+            };
+            for chunk in &chunks {
+                fresh_acc.add_to_counts(&chunk.text);
             }
-            for h in handles {
-                h.join().expect("slot train thread panicked")?;
+            let fresh_vocab = fresh_acc.counts_vocabulary_size();
+            // Replace the slot's counts state with the healed accumulator.
+            let mut guard = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable(
+                    "counts accumulator lock poisoned at F-2 heal replace".into(),
+                )
+            })?;
+            *guard = Some(CountsState {
+                accumulator: fresh_acc,
+                document_count: chunks.len(),
+                vocab_anchor: fresh_vocab,
+                growth_term_digests: std::collections::BTreeSet::new(),
+            });
+
+            // Record decision: Corpus(reason).
+            {
+                let mut decisions = self.training_path_decisions.lock().map_err(|_| {
+                    CorpusKitError::StoreUnavailable(
+                        "training_path_decisions lock poisoned at record".into(),
+                    )
+                })?;
+                decisions.insert(
+                    slot.model_id.clone(),
+                    TrainingPathDecision::Corpus(reason.clone()),
+                );
             }
-            Ok(())
-        })?;
+        }
+
         eprintln!("[corpus] reindex: training complete — bases persisted");
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained

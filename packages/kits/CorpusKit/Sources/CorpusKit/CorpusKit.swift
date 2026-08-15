@@ -649,6 +649,22 @@ public actor Corpus {
     /// this property for production logic.
     var _forcedFloatError: Error? = nil
 
+    // MARK: - Training path decision seam (Part 3, standalone reindex)
+
+    /// Per-modelID training decisions from the most recent `reindex` call.
+    /// Reset at the start of each `reindex`. Test seam exposed via
+    /// `_trainingPathDecision(for:)`.
+    ///
+    /// Uses the same `TrainingPathDecision`/`CorpusPathReason` types as
+    /// `CorpusContentEngine` (both are in the CorpusKit module).
+    var _trainingPathDecisions: [String: TrainingPathDecision] = [:]
+
+    /// Read the training decision recorded for `modelID` during the most recent
+    /// `reindex` pass. Returns nil for non-trainable slots. Test seam.
+    public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision? {
+        _trainingPathDecisions[modelID]
+    }
+
     // MARK: - Ingest queue (the Corpus-owned encode pipeline)
     //
     // CorpusKit is a standalone database substrate: it owns the encode QUEUE,
@@ -1879,6 +1895,9 @@ public actor Corpus {
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
     ///   never call `Date()` inside the engine.
     public func reindex(now: Date) async throws {
+        // Reset the per-pass decision seam before any path is chosen.
+        _trainingPathDecisions.removeAll()
+
         // Active chunks only: a source cleared by `remove(sourceID:)` must NOT be
         // re-embedded back into recall by a (possibly auto-triggered) reindex.
         let chunks = try await activeChunks()
@@ -1890,30 +1909,116 @@ public actor Corpus {
         corpusLog.info(
             "reindex: start — \(chunks.count, privacy: .public) active chunks, \(self.slots.count, privacy: .public) provider slots")
 
-        // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
-        // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
-        // trainings are independent computations over the same chunk snapshot.
-        // Running them serially made a large reindex wait ΣT(train) on one core
-        // with LSA's SVD + NMF's ALS dominating; concurrent slots wait max(T)
-        // instead. The heavy compute (reconstructBasis + trainOnCorpus) is a pure
-        // function of (freshBlob, texts) — hoisted OFF the actor into a task
-        // group; install + persist stay serial on the actor. Per-slot output is
-        // byte-identical to the serial loop (kernels untouched, shared reduced embedding vocabulary). LSA and
-        // NMF each derive the shared reduced embedding vocabulary reduced vocabulary with the same pure
-        // deterministic selection, so concurrent duplicate computation of it is
-        // benign (identical artifact). For N=1 this runs one task — same result.
+        // Phase 1 — train every trainable slot. Slots that meet the counts-path
+        // guard (PPMI only: finalizeFromCounts == true AND countsDeltaFoldSafe == true
+        // AND population guard passes) are handled serially here from the persisted
+        // counts snapshot — NO corpus text paged. Remaining slots go to a concurrent
+        // task group (corpus path): trainOnCorpus over all chunk texts.
+        //
+        // The concurrent task group is preserved for the corpus-path slots because
+        // LSA's SVD and NMF's ALS dominate wall time; running them in parallel
+        // prevents waiting ΣT(train) on one core. Counts-path slots are serial
+        // (store reads on the actor) but cheap — no SVD, no ALS.
         // Rust twin: the scoped-thread Phase 1 in `Corpus::reindex`.
         let texts = chunks.map(\.text)
+        // Slots that did NOT take the counts path go to the corpus-path task group.
         var trainInputs: [(index: Int, blob: Data, fresh: any TrainableEmbeddingBasis)] = []
+
         for index in slots.indices {
-            if let blob = slots[index].freshBasisBlob,
-               let fresh = slots[index].provider as? any TrainableEmbeddingBasis {
+            guard let blob = slots[index].freshBasisBlob,
+                  let fresh = slots[index].provider as? any TrainableEmbeddingBasis
+            else { continue }
+            let modelID = slots[index].provider.modelID
+            let modelVersion = slots[index].provider.modelVersion
+
+            // Probe capability and fold-safety on a fresh (throwaway) instance.
+            let probe = try fresh.reconstructBasis(from: blob)
+            guard let probeTrainable = probe as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
                 trainInputs.append((index, blob, fresh))
+                continue
             }
+            let capable = probeTrainable.finalizeFromCounts()
+            // countsDeltaFoldSafe == false for RI: float accumulation is
+            // order-sensitive, so the live fold order (ingest arrival) cannot be
+            // proven equal to activeChunks() order. RI standalone stays corpus path.
+            let foldSafe = fresh.countsDeltaFoldSafe
+
+            guard capable else {
+                // LSA/NMF: finalizeFromCounts() == false; corpus re-tokenize required.
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+            guard foldSafe else {
+                // RI: order-sensitive accumulation; corpus path preserves correct order.
+                _trainingPathDecisions[modelID] = .corpus(.deltaNotFoldSafe)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Population guard.
+            // LHS: slots[index].countsDocumentCount — monotonic, incremented by
+            //   +=chunks.count per ingest fold (CorpusKit.swift:1772,
+            //   foldChunksIntoCounts); restored across reopen at :982 from the
+            //   persisted row written at :1819 (persistMaintainedCounts).
+            // RHS: chunks.count — activeChunks() excludes removed sources (:1783-1784).
+            // These are DIFFERENT populations whose every divergence is reject-safe:
+            //   - removed-after-fold: LHS > RHS → corpus path (correct: removed content
+            //     was in the counts but is not in activeChunks)
+            //   - removed-then-reingested: LHS > RHS → corpus path (count doubled on
+            //     the re-ingest fold).
+            // Do NOT describe them as the same population — they are not; every
+            // divergence drives LHS > RHS and the corpus path heals correctly.
+            guard slots[index].countsDocumentCount == chunks.count else {
+                _trainingPathDecisions[modelID] = .corpus(.populationMismatch)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Counts path eligible — PPMI slot whose population guard passed.
+            // Flush live accumulators to storage BEFORE restoring so the store reflects
+            // the latest state (including any ingest folds since the last batch persist).
+            corpusLog.info(
+                "reindex: counts path for \(modelID, privacy: .public) — population consistent")
+            try await persistMaintainedCounts(now: now)
+
+            // Reconstruct a fresh instance and restore from the store. The store
+            // prefers v4 integer-keyed term rows and falls back to the legacy blob —
+            // the same decision as the on-open restore path, exercising v4 rows
+            // end-to-end.
+            let countsFresh = try fresh.reconstructBasis(from: blob)
+            guard let countsTrainable = countsFresh as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+            try await countsStore.restoreCounts(
+                into: countsTrainable, modelID: modelID, modelVersion: modelVersion)
+
+            guard countsTrainable.finalizeFromCounts() else {
+                // Defensive: guaranteed by the probe above; treat false as
+                // notCountsCapable to avoid serving a partially-finalized basis.
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Install the counts-path provider and persist the basis. trainedChunkCount
+            // anchors the population guard on the NEXT reindex call.
+            slots[index].provider = countsFresh
+            try await basisStore.upsert(PersistedBasis(
+                modelID: modelID, modelVersion: modelVersion,
+                basis: countsTrainable.serializeBasis(),
+                trainedAt: now, trainedChunkCount: chunks.count))
+            _trainingPathDecisions[modelID] = .countsRestore
+            corpusLog.info(
+                "reindex: counts path complete for \(modelID, privacy: .public)")
         }
+
         if !trainInputs.isEmpty {
             corpusLog.info(
-                "reindex: training \(trainInputs.count, privacy: .public) trainable slots concurrently over \(texts.count, privacy: .public) texts")
+                "reindex: training \(trainInputs.count, privacy: .public) corpus-path slots concurrently over \(texts.count, privacy: .public) texts")
             let trained: [(Int, any EmbeddingProvider)] =
                 try await withThrowingTaskGroup(of: (Int, any EmbeddingProvider).self) { group in
                     for input in trainInputs {
@@ -1948,8 +2053,26 @@ public actor Corpus {
                     trainedAt: now,
                     trainedChunkCount: chunks.count
                 ))
+                // F-2 heal (design doc §2 "delete/mutate re-applies"): rebuild a FRESH
+                // counts accumulator by folding the SAME texts in the SAME order as
+                // trainOnCorpus just used. This replaces the slot accumulator with an
+                // exact snapshot matching the just-published basis so that on the next
+                // reindex call the population guard sees countsDocumentCount == chunks.count
+                // (when no sources changed) and the counts path is eligible again.
+                //
+                // Uses the freshBasisBlob (empty factory) not the trained blob so the
+                // accumulator starts from scratch — trainOnCorpus is additive, so a
+                // healed accumulator must begin empty.
+                if let freshBlob = slots[index].freshBasisBlob,
+                   let healed = try trainable.reconstructBasis(from: freshBlob)
+                     as? any TrainableEmbeddingBasis
+                {
+                    for text in texts { healed.addToCounts(text: text) }
+                    slots[index].countsAccumulator = healed
+                    slots[index].countsDocumentCount = chunks.count
+                }
             }
-            corpusLog.info("reindex: training complete — bases persisted")
+            corpusLog.info("reindex: corpus-path training complete — bases persisted")
         }
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained

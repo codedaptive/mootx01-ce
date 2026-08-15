@@ -145,9 +145,16 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     // O(N·vocab) over an import — the very wall this change set removes. The
     // provider accumulates in memory; `Corpus` snapshots via `serializeCounts()`
     // when a batch closes and on shutdown points, and `restoreCounts(from:)`
-    // resumes that snapshot on open. NOTE: the maintained-counts path is
-    // infrastructure only; Corpus.reindex currently still trains from active
-    // chunk text via trainOnCorpus(texts:), not from these maintained counts.
+    // resumes that snapshot on open. The maintained counts are consumed by:
+    //   - Corpus.reindex (standalone): PPMI only, when the population guard passes
+    //     (countsDocumentCount == activeChunks count), restored counts finalize into
+    //     the serving basis (countsRestore decision). RI stays on the corpus path
+    //     (countsDeltaFoldSafe == false; float accumulation is order-sensitive).
+    //     LSA/NMF keep the corpus path because finalizeFromCounts() == false.
+    //   - CorpusContentEngine.trainTrainableSlots (attached): PPMI may delta-fold
+    //     pending reference rows into the restored counts (countsDeltaFold decision).
+    //     RI is restore-only with an empty pending delta. LSA/NMF always use the
+    //     full corpus re-tokenize path.
 
     /// Fold one chunk's raw text into the maintained accumulated counts.
     ///

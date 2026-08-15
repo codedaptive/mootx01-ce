@@ -44,6 +44,49 @@ import VectorKit
 // Logger shared by the engine and its queue extension (CorpusContentEngineQueue.swift).
 private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
+// MARK: - Training path decision seam (module-level; shared by CorpusContentEngine and Corpus)
+
+/// The reason-carrying outcome of a training pass, recorded per modelID.
+/// Both `CorpusContentEngine.trainTrainableSlots` (attached mode) and
+/// `Corpus.reindex` (standalone mode) record one of these per trainable slot.
+///
+/// Value trees conform to Equatable so tests can assert on structure directly
+/// rather than on derived outputs (house rule for Equatable value trees).
+public enum TrainingPathDecision: Equatable, Sendable {
+    /// Counts path succeeded: the persisted counts row was fully restored;
+    /// the pending delta (attached) or population (standalone) was empty —
+    /// no corpus text was paged.
+    case countsRestore
+    /// Counts path succeeded: `folded` non-subsumed reference rows were
+    /// delta-folded into the restored counts — `folded` bodies were paged.
+    case countsDeltaFold(folded: Int)
+    /// Corpus path ran; `reason` names why the counts path was not taken.
+    case corpus(CorpusPathReason)
+}
+
+/// Reason a training pass fell back to the full corpus re-tokenize path.
+public enum CorpusPathReason: Equatable, Sendable {
+    /// No persisted basis row exists for this provider key — this is a genuine
+    /// first training, forced or not. An untrained slot on a non-force call also
+    /// records this reason when it trains via the corpus path.
+    case firstTrain
+    /// No persisted counts row found for this provider key.
+    case noCountsRow
+    /// `finalizeFromCounts()` returned false — the provider cannot derive its
+    /// basis from counts alone (LSA, NMF). Corpus re-tokenization is required.
+    case notCountsCapable
+    /// The pending delta is non-empty but `countsDeltaFoldSafe` is false (RI).
+    /// RI is restore-only; a non-empty delta forces the corpus path.
+    case deltaNotFoldSafe
+    /// Population mismatch: the frozen base count plus pending deltas does not
+    /// equal the current active-ID count (attached), or the live doc count does
+    /// not match the active-chunk count (standalone). Full corpus retrain required.
+    case populationMismatch
+    /// A non-subsumed pending reference's contentID resolved to nil from the source.
+    /// The corpus path heals by deleting all refs and republishing.
+    case pendingUnresolvable
+}
+
 // MARK: - Results
 
 /// Range evidence for a standalone passage hit. Never changes result
@@ -2250,6 +2293,22 @@ public actor CorpusContentEngine {
         _trainFaultBeforeCommitModelID = beforeCommitModelID
     }
 
+    // MARK: - Training path decision seam (module-level types above; actor storage below)
+
+    /// Per-modelID training decisions from the most recent `trainTrainableSlots`
+    /// call. Reset at the start of each call. Internal (not private) so that
+    /// `@testable` tests can read it.
+    var _trainingPathDecisions: [String: TrainingPathDecision] = [:]
+
+    /// Read the training decision recorded for `modelID` during the most recent
+    /// `trainTrainableSlots` pass. Returns nil for slots that were skipped because
+    /// the call was non-forced and the slot was already trained (basisDigest is not
+    /// the untrained sentinel) — the drift gate owns WHEN a retrain fires.
+    /// Test seam — not for production use.
+    public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision? {
+        _trainingPathDecisions[modelID]
+    }
+
     /// One provider's immutable input to the bounded training fan-out.
     private struct ProviderTrainingJob: Sendable {
         let slotIndex: Int
@@ -2269,6 +2328,10 @@ public actor CorpusContentEngine {
         let countsRow: PersistedCounts
         let basisDigest: String
         let subsumedReferences: [PersistedCountsReference]
+        /// Content IDs that listed in activeContentIDs() but resolved nil from
+        /// the source during corpus preparation. Each will become a non-subsumed
+        /// sentinel reference row after publication (F-6).
+        let skippedIDs: [CorpusContentID]
     }
 
     /// Conservative memory admission for concurrent provider training. The
@@ -2316,6 +2379,12 @@ public actor CorpusContentEngine {
         }
 
         var subsumedPendingReferences: [PersistedCountsReference] = []
+        // F-6: IDs that listed in activeContentIDs() but resolved nil from the
+        // source during corpus preparation. Each becomes a non-subsumed sentinel
+        // reference row after the publication transaction so that
+        // trainedChunkCount + |pending| == |allIDs| stays population-consistent
+        // by construction. The actor logs them at warning level before upserting.
+        var skippedIDs: [CorpusContentID] = []
         var documentCount = 0
         var cursor = 0
         while cursor < allIDs.count {
@@ -2349,6 +2418,12 @@ public actor CorpusContentEngine {
                                 updatedAt: now,
                                 isSubsumed: true))
                     }
+                } else {
+                    // F-6: source returned nil for a listed ID — skipped. A sentinel
+                    // reference row is written after publication (non-subsumed, so it
+                    // counts as a pending delta on the next pass) to keep the
+                    // population invariant: trainedChunkCount + |pending| == |allIDs|.
+                    skippedIDs.append(id)
                 }
             }
             trainable.accumulateTraining(texts: texts)
@@ -2378,7 +2453,8 @@ public actor CorpusContentEngine {
                 vocabSize: countsAccumulator.countsVocabularySize,
                 updatedAt: now),
             basisDigest: digest,
-            subsumedReferences: subsumedPendingReferences)
+            subsumedReferences: subsumedPendingReferences,
+            skippedIDs: skippedIDs)
     }
 
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
@@ -2411,6 +2487,10 @@ public actor CorpusContentEngine {
             try await indexState.allStates()
                 .filter { $0.contentID != Self.feedCursorRowID }
                 .map { ($0.contentID, $0) })
+        // Reset the per-pass decision seam before any path is chosen.
+        // Placement here (before the slot loop) ensures no stale decision from
+        // a prior pass survives into the current guard evaluation.
+        _trainingPathDecisions.removeAll()
         var digests: [String: String] = [:]
         var jobs: [ProviderTrainingJob] = []
         for slotIndex in slots.indices {
@@ -2418,12 +2498,11 @@ public actor CorpusContentEngine {
                   let fresh = slots[slotIndex].provider as? any TrainableEmbeddingBasis
             else { continue }
             let modelID = slots[slotIndex].provider.modelID
-            if !force, slots[slotIndex].basisDigest != Self.untrainedDigest {
-                // Already trained (persisted basis loaded at open or a
-                // prior pass this run) — resume skips it.
-                digests[modelID] = slots[slotIndex].basisDigest
-                continue
-            }
+            // Every slot (trained or untrained) enters the job queue so the
+            // counts-path guards can evaluate already-trained slots with pending
+            // delta refs. The counts path emits countsRestore and continues
+            // without republication when the population guard passes and no
+            // pending refs are present.
             jobs.append(ProviderTrainingJob(
                 slotIndex: slotIndex,
                 modelID: modelID,
@@ -2434,6 +2513,238 @@ public actor CorpusContentEngine {
 
         let allIDs = try await source.activeContentIDs()
         guard !allIDs.isEmpty else { return digests }
+
+        // Part B — counts-path attempt (serial, on actor) before the corpus-path
+        // fan-out. Each job is either published here (counts path) or deferred to
+        // prepareProviderTraining (corpus path). The guard sequence is strict: the
+        // first failure records a named reason and falls to the corpus path.
+        var remainingJobs: [ProviderTrainingJob] = []
+        // Track total trained slots for the generation-counter bump. Counts-path
+        // and corpus-path publications both count as successful retrains.
+        var trainedSlotsCount = 0
+
+        for job in jobs {
+            // Load the persisted basis row once; used for the firstTrain check and Guard 5.
+            let basisRow = try await basisStore.load(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+
+            // Non-force trained-slot skip: a slot already trained (basisDigest differs
+            // from the untrained sentinel) records its current digest and is skipped —
+            // the drift gate owns WHEN a retrain fires. The decision seam records
+            // nothing for skipped slots (nil/absent semantics); callers can distinguish
+            // a skip from any training decision by checking for nil from
+            // _trainingPathDecision(for:).
+            if !force && slots[job.slotIndex].basisDigest != Self.untrainedDigest {
+                digests[job.modelID] = slots[job.slotIndex].basisDigest
+                continue
+            }
+
+            // firstTrain: no persisted basis row exists for this provider key — this
+            // is a genuine first training, forced or not. An untrained slot on a
+            // non-force call also takes this path since no counts snapshot to restore
+            // from exists. force==true with a basisRow falls through to the counts-path
+            // guard chain below.
+            guard basisRow != nil else {
+                _trainingPathDecisions[job.modelID] = .corpus(.firstTrain)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 2: counts row absent → cannot restore counts.
+            guard let _ = try await countsStore.load(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.noCountsRow)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 3: capability probe — reconstruct a fresh instance and call
+            // finalizeFromCounts(). Returns false for LSA and NMF (they keep the
+            // corpus path and re-tokenize at refactor time — the escape clause
+            // documented in the design doc §3). finalizeFromCounts() may mutate
+            // the probe instance; it is discarded after this guard.
+            let capabilityProbe = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let probeTrainable = capabilityProbe as? any TrainableEmbeddingBasis,
+                  probeTrainable.finalizeFromCounts()
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 4: pending-delta safety.
+            // pending = non-subsumed references for (modelID, modelVersion) — content
+            // that was admitted after the last publication but is not yet in the base.
+            // RI (RandomIndexing): countsDeltaFoldSafe == false because float context
+            // vector addition is not associative; a non-empty delta forces corpus path.
+            // PPMI: countsDeltaFoldSafe == true (integer count maps are commutative).
+            let allRefs = try await countsStore.references(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            let pendingRefs = allRefs.filter { !$0.isSubsumed }
+            if !pendingRefs.isEmpty && !job.witness.countsDeltaFoldSafe {
+                _trainingPathDecisions[job.modelID] = .corpus(.deltaNotFoldSafe)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 5: population guard. Both sides quoted here per the wave process gate.
+            // LHS: basisRow.trainedChunkCount — resolved records folded at publication
+            //   (this func's corpus-path publication ~:2590-2595) — the frozen base;
+            //   sole writers are training publications committed in the SAME serializable
+            //   transaction as the counts row.
+            // RHS: allIDs.count — current listed IDs from source.activeContentIDs().
+            // Require basisRow.trainedChunkCount + pending.count == allIDs.count.
+            // This is population-consistent BY CONSTRUCTION: skipped IDs (section C)
+            // become non-subsumed reference rows after corpus-path publication, so they
+            // appear in pending on the next pass. A revision or removal drives
+            // LHS != RHS → corpus path. PersistedCounts.documentCount is NEVER used
+            // here (it is the LIVE monotonic anchor, not the frozen base).
+            guard let frozenBase = basisRow,
+                  frozenBase.trainedChunkCount + pendingRefs.count == allIDs.count
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.populationMismatch)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 6: delta fold.
+            // pendingRefs may be empty (countsRestore case: the existing basis already
+            // reflects the full corpus). An empty pending set flows through the SAME
+            // counts path with zero folds: restore counts, finalize, publish
+            // (identical-bytes basis upsert with trainedAt = now, persistCounts, no
+            // reference deletes), install slot, bump generation, record countsRestore.
+            // The win is ZERO TEXT PAGING — publication is never skipped.
+            // Reconstruct TWO fresh instances from the factory blob:
+            //   serving — trained and finalized; will be installed as the slot provider.
+            //   newAccum — same state; will replace the slot's counts accumulator for
+            //              ongoing ingest folds.
+            let servingProvider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let servingTrainable = servingProvider as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+            let newAccumProvider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let newAccumTrainable = newAccumProvider as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Restore the persisted counts into BOTH instances. The store prefers v4
+            // integer-keyed term rows and falls back to the legacy single blob — the
+            // same decision point as the on-open restore path, kept in the store so the
+            // two paths cannot diverge.
+            try await countsStore.restoreCounts(
+                into: servingTrainable,
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            try await countsStore.restoreCounts(
+                into: newAccumTrainable,
+                modelID: job.modelID, modelVersion: job.modelVersion)
+
+            // For each pending ref sorted by contentID ascending: resolve the record
+            // from the source and fold into BOTH instances. Count every record() call
+            // (bodies-paged metric exposed via the decision enum).
+            let sortedPending = pendingRefs.sorted { $0.contentID < $1.contentID }
+            var bodiesPaged = 0
+            var unresolvable = false
+            for ref in sortedPending {
+                guard let record = try await source.record(for: ref.contentID) else {
+                    // pendingUnresolvable: discard the counts-path attempt entirely.
+                    // The corpus path immediately heals: it deletes all refs and
+                    // republishes from the full corpus.
+                    _trainingPathDecisions[job.modelID] = .corpus(.pendingUnresolvable)
+                    unresolvable = true
+                    break
+                }
+                servingTrainable.addToCounts(text: record.effectiveDenseText)
+                newAccumTrainable.addToCounts(text: record.effectiveDenseText)
+                bodiesPaged += 1
+            }
+            if unresolvable {
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 7: finalize. Guaranteed true by the Guard 3 probe; treat false as
+            // notCountsCapable defensively (should never happen if the probe was correct).
+            guard servingTrainable.finalizeFromCounts() else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+            let countsBasisBlob = servingTrainable.serializeBasis()
+            let countsBasisDigest = CorpusContentDigest.digest(countsBasisBlob)
+            let countsDocumentCount = frozenBase.trainedChunkCount + pendingRefs.count
+
+            // Guard 8: publication — same shape as the corpus-path transaction.
+            // CRITICAL ordering: per-reference delete instead of deleteReferences.
+            // Existing subsumed markers must survive — they are consumed by delayed
+            // admissions that already held a training-snapshot marker when the last
+            // corpus-path publication ran. deleteReferences would erase them.
+            if _trainFaultBeforeCommitModelID == job.modelID {
+                _trainFaultBeforeCommitModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault before commit: \(job.modelID)")
+            }
+            let countsBasisRow = PersistedBasis(
+                modelID: job.modelID, modelVersion: job.modelVersion,
+                basis: countsBasisBlob, trainedAt: now,
+                trainedChunkCount: countsDocumentCount)
+            let basisStoreRef = basisStore
+            let countsStoreRef = countsStore
+            let pendingToDelete = sortedPending
+            let modelIDForTxn = job.modelID
+            let modelVersionForTxn = job.modelVersion
+            try await storage.transaction(isolation: .serializable) { txn in
+                try await basisStoreRef.upsert(countsBasisRow, into: txn.rowStore)
+                // Routed through persistCounts so vocabulary-scale providers write
+                // as term rows rather than one bind (ee#49).
+                try await countsStoreRef.persistCounts(
+                    provider: newAccumTrainable,
+                    modelID: modelIDForTxn,
+                    modelVersion: modelVersionForTxn,
+                    documentCount: countsDocumentCount,
+                    vocabSize: newAccumTrainable.countsVocabularySize,
+                    updatedAt: now,
+                    into: txn.rowStore)
+                // Per-reference delete: consume only the folded pending refs.
+                // DO NOT call deleteReferences here — that deletes ALL refs
+                // (including subsumed markers needed for delayed admissions).
+                for ref in pendingToDelete {
+                    try await countsStoreRef.deleteReference(
+                        modelID: modelIDForTxn, modelVersion: modelVersionForTxn,
+                        contentID: ref.contentID, into: txn.rowStore)
+                }
+            }
+
+            // Install the counts-path result into the slot (same fields as the
+            // corpus-path publication below).
+            let slotIdx = job.slotIndex
+            slots[slotIdx].provider = servingProvider
+            slots[slotIdx].basisDigest = countsBasisDigest
+            slots[slotIdx].countsAccumulator = newAccumTrainable
+            slots[slotIdx].countsDocumentCount = countsDocumentCount
+            slots[slotIdx].growthTermDigests = []
+            slots[slotIdx].countsVocabAnchor = newAccumTrainable.countsVocabularySize
+            digests[job.modelID] = countsBasisDigest
+            trainedSlotsCount += 1
+
+            if _trainFaultAfterModelID == job.modelID {
+                _trainFaultAfterModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault after commit: \(job.modelID)")
+            }
+
+            // Guard 9: record the decision.
+            _trainingPathDecisions[job.modelID] = pendingRefs.isEmpty
+                ? .countsRestore
+                : .countsDeltaFold(folded: pendingRefs.count)
+        }
+        // Remaining jobs (counts-path failures) go to the corpus-path fan-out.
+        jobs = remainingJobs
+
         let cap = Self.providerTrainingParallelism(
             contentCount: allIDs.count, providerCount: jobs.count)
         let trainingSource = source
@@ -2473,6 +2784,9 @@ public actor CorpusContentEngine {
                 }
                 let basisStore = self.basisStore
                 let countsStore = self.countsStore
+                let skippedForTxn = result.skippedIDs
+                let indexedStatesForTxn = indexedStates
+                let nowForTxn = now
                 try await storage.transaction(isolation: .serializable) { txn in
                     try await basisStore.upsert(result.basisRow, into: txn.rowStore)
                     // Routed through persistCounts so a provider whose counts
@@ -2495,6 +2809,40 @@ public actor CorpusContentEngine {
                         try await countsStore.upsertReference(
                             reference, into: txn.rowStore)
                     }
+                    // F-6: upsert sentinel reference rows for IDs that listed in
+                    // activeContentIDs() but resolved nil during corpus preparation.
+                    // ORDERING MATTERS (G-6d): this upsert runs AFTER deleteReferences
+                    // so the sentinel rows are not silently erased by the delete.
+                    // Rationale: an identity listed but unresolved at publication is
+                    // by definition not in the trained base — exactly what a
+                    // non-subsumed reference row means. This keeps
+                    // trainedChunkCount + |pending| == |allIDs| population-consistent
+                    // by construction, so the counts-path population guard passes
+                    // on the next pass once the identity becomes resolvable.
+                    // Sentinel revision/digest: taken from indexed state when present
+                    // (the last successfully indexed revision), else revision 0 /
+                    // digest "" to signal "never indexed". The sentinel must never
+                    // be treated as subsumed (isSubsumed: false).
+                    for skippedID in skippedForTxn {
+                        let indexed = indexedStatesForTxn[skippedID]
+                        try await countsStore.upsertReference(
+                            PersistedCountsReference(
+                                modelID: result.job.modelID,
+                                modelVersion: result.job.modelVersion,
+                                contentID: skippedID,
+                                revision: indexed?.revision ?? 0,
+                                digest: indexed?.digest ?? "",
+                                updatedAt: nowForTxn,
+                                isSubsumed: false,
+                                growthTermDigests: []),
+                            into: txn.rowStore)
+                    }
+                }
+                // Log skipped IDs at warning level outside the transaction closure.
+                for skippedID in result.skippedIDs {
+                    let mid = result.job.modelID
+                    contentEngineLog.warning(
+                        "trainTrainableSlots: source returned nil for listed ID \(skippedID, privacy: .public) during corpus preparation for \(mid, privacy: .public) — sentinel reference row written")
                 }
                 let slotIndex = result.job.slotIndex
                 slots[slotIndex].provider = result.provider
@@ -2505,6 +2853,7 @@ public actor CorpusContentEngine {
                 slots[slotIndex].growthTermDigests = []
                 slots[slotIndex].countsVocabAnchor = result.countsRow.vocabSize
                 digests[modelID] = result.basisDigest
+                trainedSlotsCount += 1
 
                 if _trainFaultAfterModelID == modelID {
                     _trainFaultAfterModelID = nil
@@ -2516,11 +2865,11 @@ public actor CorpusContentEngine {
         }
 
         // Bump the global basis-generation counter after any successful
-        // retrain pass (whether force or first-ingest). This invalidates all
-        // existing coverage bitmap bits via generation mismatch — no estate-wide
-        // write; backfill lazily re-stamps each row under the new generation.
-        // Only bump when at least one slot was (re)trained.
-        if !jobs.isEmpty {
+        // retrain pass (whether force or first-ingest, counts path or corpus path).
+        // This invalidates all existing coverage bitmap bits via generation mismatch
+        // — no estate-wide write; backfill lazily re-stamps each row under the new
+        // generation. Bump when any slot was (re)trained on either path.
+        if trainedSlotsCount > 0 {
             let newGeneration = try await indexState.incrementBasisGeneration()
             if newGeneration == 0 {
                 // Wraparound: the 4-bit counter rolled from 15 back to 0.

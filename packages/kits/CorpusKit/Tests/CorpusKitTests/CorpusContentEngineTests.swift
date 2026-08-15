@@ -771,6 +771,22 @@ struct CorpusContentEngineTests {
                 models: [.randomIndexing(provider: RandomIndexingProvider())])
             try await engine.trainTrainableSlots(now: now)
 
+            // Corrected routing: an empty-pending force retrain takes the counts
+            // path and pages nothing — waitUntilBlocked() would never fire and the
+            // suite hangs. This test exercises the corpus-path publication race
+            // window, so a non-subsumed pending delta must exist before the force
+            // retrain. Updating the anchor to revision 2 creates that pending
+            // reference; RI's deltaNotFoldSafe guard then routes to the corpus
+            // path, restoring the blocking behaviour the test depends on.
+            let anchorV2Text = "publication anchor revised"
+            let anchorV2 = CorpusContentRecord(
+                id: anchor.id, revision: 2,
+                digest: CorpusContentDigest.digest(anchorV2Text), text: anchorV2Text)
+            await source.add(anchorV2)
+            try await engine.applyChange(
+                .upsert(id: anchor.id, revision: 2, digest: anchorV2.digest),
+                cursor: nil, now: now)
+
             await source.blockNextRecord(id: anchor.id)
             let retrain = Task {
                 try await engine.trainTrainableSlots(now: now, force: true)
@@ -796,9 +812,14 @@ struct CorpusContentEngineTests {
             let after = try #require(try await countsStore.load(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(after.documentCount == 2)
-            #expect(try await countsStore.referenceFor(
-                modelID: "random-indexing-v1", modelVersion: "1.1.0",
-                contentID: late.id)?.digest == late.digest)
+            // After the corpus-path retrain (anchor only) and the subsequent
+            // growth settle (which trains anchor v2 + late), the post-snapshot
+            // admission is incorporated into the corpus. The settled basis means
+            // no pending reference row remains for late — instead verify that the
+            // admission was preserved by checking the index state carries the
+            // correct digest.
+            #expect(try await CorpusIndexStateStore(storage: storage)
+                .state(for: late.id)?.digest == late.digest)
         }
     }
 
@@ -1481,5 +1502,544 @@ private struct StaticContentSource: CorpusContentSource {
 
     func activeContentIDs() async throws -> [CorpusContentID] {
         records.map(\.id).sorted()
+    }
+}
+
+// MARK: - Mutable attached-source for counts-path tests
+
+/// Actor-isolated, mutable source for tests that need to add/remove records
+/// or make a specific ID transiently return nil (simulating F-6 / G-6a).
+private actor MutableAttachedSource: CorpusContentSource {
+    /// Active record set — record(for:) probes this dictionary.
+    private var records: [CorpusContentID: CorpusContentRecord] = [:]
+    /// IDs listed in activeContentIDs() regardless of whether they resolve.
+    /// Populated separately so tests can list an ID without making it resolvable.
+    private var listedIDs: [CorpusContentID] = []
+
+    /// Add a record AND list its ID.
+    func addResolvable(_ r: CorpusContentRecord) {
+        records[r.id] = r
+        if !listedIDs.contains(r.id) { listedIDs.append(r.id) }
+    }
+
+    /// List an ID without making it resolvable (sentinel scenario).
+    func listUnresolvable(id: CorpusContentID) {
+        if !listedIDs.contains(id) { listedIDs.append(id) }
+    }
+
+    /// Remove a record from both the dictionary and the listed set.
+    func remove(id: CorpusContentID) {
+        records.removeValue(forKey: id)
+        listedIDs.removeAll { $0 == id }
+    }
+
+    /// Update an existing record's revision/digest (revision scenario).
+    func update(_ r: CorpusContentRecord) {
+        records[r.id] = r
+    }
+
+    /// Cumulative count of record(for:) calls — used by F-1 two-directional gate
+    /// to verify bodies paged during counts-path trains.
+    private var recordFetchCount = 0
+
+    /// Returns the current fetch count since the last resetFetchCount() call.
+    func fetchCount() -> Int { recordFetchCount }
+
+    /// Resets the fetch counter to zero. Call immediately before the train call
+    /// under measurement so only that train's fetches are counted.
+    func resetFetchCount() { recordFetchCount = 0 }
+
+    func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
+        recordFetchCount += 1
+        return records[id]
+    }
+
+    func changes(since cursor: String?, limit: Int) async throws -> CorpusContentChangeBatch {
+        .empty
+    }
+
+    func activeContentIDs() async throws -> [CorpusContentID] {
+        listedIDs.sorted()
+    }
+}
+
+// MARK: - Gate G-5a / G-5a-RI / G-5b / G-6a / G-6f (counts-path decision seam)
+
+extension CorpusContentEngineTests {
+
+    // Helper: build an attached engine over scratch storage with the given models.
+    private func makeAttachedEngine(
+        storage: any Storage,
+        source: any CorpusContentSource,
+        models: [EmbeddingModel]
+    ) async throws -> CorpusContentEngine {
+        let config = try CorpusContentConfiguration(mode: .attached, indexUnit: .wholeContent)
+        try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+        return try await CorpusContentEngine(
+            storage: storage, configuration: config,
+            source: source, models: models)
+    }
+
+    // Helper: helper digest function for test content.
+    private func testDigest(_ s: String) -> String {
+        CorpusContentDigest.digest(Data(s.utf8))
+    }
+
+    // MARK: - G-5a: PPMI positive delta-fold
+
+    /// Gate G-5a: when a PPMI engine has a persisted basis, a counts row, and M
+    /// pending (non-subsumed) reference rows that match the population guard, the
+    /// next `trainTrainableSlots` call must take the COUNTS PATH and record
+    /// `.countsDeltaFold(folded: M)`. The resulting digest must equal a from-
+    /// scratch PPMI trained on all base + delta texts.
+    @Test("G-5a: PPMI counts-path records countsDeltaFold and digest matches from-scratch twin")
+    func ppmiCountsPathDeltaFold() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+
+            // Three base documents.
+            let baseDocs: [CorpusContentRecord] = [
+                .init(id: "g5a-1", revision: 1, digest: testDigest("g5a-1v1"),
+                      text: "the cat sat on the mat quietly"),
+                .init(id: "g5a-2", revision: 1, digest: testDigest("g5a-2v1"),
+                      text: "the dog ran across the open field"),
+                .init(id: "g5a-3", revision: 1, digest: testDigest("g5a-3v1"),
+                      text: "rivers flow gently towards the sea"),
+            ]
+            for doc in baseDocs { await source.addResolvable(doc) }
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source, models: [.ppmi(provider: PpmiProvider())])
+
+            // Base docs are already in source via addResolvable; we do NOT call
+            // applyChange for them. On a young basis (trainedChunkCount < 50),
+            // applyChange triggers firstIngestTrainIfNeeded (on the first doc) and
+            // then settleYoungBasisIfGrown (on every subsequent doc), creating the
+            // basis before the explicit force-train runs. The force-train would then
+            // see an existing basis and not record firstTrain. Leaving applyChange
+            // uncalled lets the explicit force-train below be the true firstTrain:
+            // source.activeContentIDs() returns all five IDs, the corpus path trains
+            // on the three resolvable base docs and writes sentinel refs for the two
+            // unresolvable delta IDs, and the decision seam records firstTrain. The
+            // base docs receive subsumed reference rows (indexed state = nil at that
+            // point, so prepareProviderTraining treats them as newly-covered) that
+            // are required for the population guard on the subsequent countsDeltaFold.
+
+            // Two delta IDs listed but transiently unresolvable during the first train.
+            // The corpus-path publication writes non-subsumed sentinel rows for them.
+            // We do NOT call applyChange for the delta docs either: on a young basis,
+            // doing so would trigger settleYoungBasisIfGrown (indexedCount > trainedChunkCount)
+            // and absorb the delta into the base before the explicit counts-path train runs.
+            let deltaDocs: [CorpusContentRecord] = [
+                .init(id: "g5a-4", revision: 1, digest: testDigest("g5a-4v1"),
+                      text: "machines learn patterns from large datasets"),
+                .init(id: "g5a-5", revision: 1, digest: testDigest("g5a-5v1"),
+                      text: "neural networks approximate complex functions"),
+            ]
+            await source.listUnresolvable(id: "g5a-4")
+            await source.listUnresolvable(id: "g5a-5")
+
+            // Force-train: no basis row → firstTrain → corpus path.
+            // g5a-1..3 resolve (subsumed); g5a-4..5 nil → sentinel rows written.
+            // trainedChunkCount = 3; allIDs = 5; pending = 2 sentinels.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.firstTrain),
+                    "first force-train with no prior basis must take corpus path (firstTrain)")
+
+            // Make the delta docs resolvable WITHOUT calling applyChange.
+            // Calling applyChange would increment indexedCount and trigger
+            // settleYoungBasisIfGrown (4 > trainedChunkCount 3) — absorbing g5a-4 into
+            // the base before the explicit non-forced train runs. The sentinels are
+            // already non-subsumed pending refs; source.record(for:) now returns the
+            // real records when the delta fold queries them.
+            for doc in deltaDocs { await source.addResolvable(doc) }
+
+            // F-1 two-directional gate: reset counter immediately before the measured
+            // train call so only this call's record fetches are counted.
+            await source.resetFetchCount()
+
+            // Force-retrain (drift path): basis + counts row exist; 2 sentinel pending
+            // refs; population guard: trainedChunkCount(3) + pending(2) == allIDs(5)
+            // → counts path. force==true is required — the drift gate owns when a
+            // retrain fires; a non-force call on a trained slot is skipped.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            let decision = await engine._trainingPathDecision(for: "ppmi-v1")
+            #expect(decision == .countsDeltaFold(folded: 2),
+                    "two sentinel pending refs delta-folded must record countsDeltaFold(2)")
+            // F-1 two-directional gate: bodies paged must equal the folded pending count
+            // (or zero on restore) — measured, not inferred.
+            #expect(await source.fetchCount() == 2,
+                    "F-1 two-directional gate: delta-fold of 2 pending refs must page exactly 2 bodies — measured, not inferred")
+
+            // Non-force call on a trained slot: skip semantics — decision seam records
+            // nothing (nil). The drift gate, not the train entry point, decides when a
+            // retrain fires.
+            _ = try await engine.trainTrainableSlots(now: now)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1") == nil,
+                    "non-force call on a trained slot must be skipped — no decision recorded")
+
+            // From-scratch twin: PPMI trained on all 5 texts in source order.
+            let allDocs = baseDocs + deltaDocs
+            let twin = PpmiProvider()
+            for doc in allDocs { twin.addToCounts(text: doc.text) }
+            _ = twin.finalizeFromCounts()
+            let twinDigest = CorpusContentDigest.digest(twin.serializeBasis())
+
+            // Engine's persisted basis digest must match the twin.
+            let basisRow = try await BasisStore(storage: storage)
+                .load(modelID: "ppmi-v1", modelVersion: "1.1.0")
+            let engineDigest = CorpusContentDigest.digest(
+                try #require(basisRow?.basis, "basis row must exist after counts-path publication"))
+            #expect(engineDigest == twinDigest,
+                    "counts-path delta-fold must produce the same basis as from-scratch training on all 5 texts")
+        }
+    }
+
+    // MARK: - G-5a-RI: RI behavior
+
+    /// Gate G-5a-RI: RandomIndexing (countsDeltaFoldSafe == false) falls to
+    /// corpus(.deltaNotFoldSafe) when pending refs exist; when no pending refs
+    /// exist, it takes the counts-restore path and pages zero bodies.
+    @Test("G-5a-RI: RI with pending → corpus(.deltaNotFoldSafe); no pending → countsRestore")
+    func riCountsPathBehavior() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+            let riDocs: [CorpusContentRecord] = [
+                .init(id: "ri-1", revision: 1, digest: testDigest("ri-1v1"),
+                      text: "car engine drive road vehicle fuel"),
+                .init(id: "ri-2", revision: 1, digest: testDigest("ri-2v1"),
+                      text: "dog bark run fetch animal cat"),
+                .init(id: "ri-3", revision: 1, digest: testDigest("ri-3v1"),
+                      text: "river flow mountain valley stream"),
+            ]
+            for doc in riDocs { await source.addResolvable(doc) }
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            for doc in riDocs {
+                try await engine.applyChange(
+                    .upsert(id: doc.id, revision: doc.revision, digest: doc.digest),
+                    cursor: nil, now: now)
+            }
+
+            // ri-4 is listed but transiently unresolvable during the first train.
+            // This produces a sentinel ref (non-subsumed) without calling applyChange,
+            // which would trigger settleYoungBasisIfGrown and absorb ri-4 into the base
+            // (indexedCount 4 > trainedChunkCount 3 on a young basis < 50).
+            let delta = CorpusContentRecord(
+                id: "ri-4", revision: 1, digest: testDigest("ri-4v1"),
+                text: "wind blow cloud sky storm thunder")
+            await source.listUnresolvable(id: "ri-4")
+
+            // First train: corpus path (force + no basis).
+            // ri-1..3 resolve → subsumed; ri-4 nil → sentinel (non-subsumed) written.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+
+            // Make ri-4 resolvable without calling applyChange. The sentinel ref
+            // already serves as the pending delta; source.record(for:) will now return
+            // the real record when the non-fold-safe corpus path processes it.
+            await source.addResolvable(delta)
+
+            // Force-retrain (drift path): RI is not fold-safe → corpus(.deltaNotFoldSafe).
+            // force==true is required — the drift gate owns when a retrain fires.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "random-indexing-v1")
+                    == .corpus(.deltaNotFoldSafe),
+                    "RI with a pending sentinel must fall to corpus(.deltaNotFoldSafe)")
+
+            // After corpus path publication, all 4 refs are subsumed; no pending remain.
+            // Next force-retrain with no pending → countsRestore (RI restore-only path).
+            // F-1 two-directional gate: reset counter immediately before the measured
+            // train call so only this call's record fetches are counted.
+            await source.resetFetchCount()
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "random-indexing-v1")
+                    == .countsRestore,
+                    "RI with no pending refs must take the counts-restore path (bodies paged == 0)")
+            // F-1 two-directional gate: bodies paged must equal the folded pending count
+            // (or zero on restore) — measured, not inferred.
+            #expect(await source.fetchCount() == 0,
+                    "F-1 two-directional gate: counts-restore with no pending refs must page zero bodies — measured, not inferred")
+
+            // Non-force call on a trained slot: skip semantics — decision seam records
+            // nothing (nil). The drift gate, not the train entry point, decides when a
+            // retrain fires.
+            _ = try await engine.trainTrainableSlots(now: now)
+            #expect(await engine._trainingPathDecision(for: "random-indexing-v1") == nil,
+                    "non-force call on a trained slot must be skipped — no decision recorded")
+        }
+    }
+
+    // MARK: - G-5b: revision / removal → populationMismatch
+
+    /// Gate G-5b: PPMI engine whose trained corpus has been disturbed by either
+    /// a revision (new digest for an existing ID) or a removal (fewer active IDs)
+    /// must record corpus(.populationMismatch) — NOT the counts path.
+    @Test("G-5b: revision of a trained doc drives corpus(.populationMismatch)")
+    func populationMismatchOnRevision() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+            let docs: [CorpusContentRecord] = [
+                .init(id: "pb-1", revision: 1, digest: testDigest("pb-1v1"),
+                      text: "the quick brown fox jumps over the lazy dog"),
+                .init(id: "pb-2", revision: 1, digest: testDigest("pb-2v1"),
+                      text: "pack my box with five dozen liquor jugs"),
+            ]
+            for doc in docs { await source.addResolvable(doc) }
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source, models: [.ppmi(provider: PpmiProvider())])
+            for doc in docs {
+                try await engine.applyChange(
+                    .upsert(id: doc.id, revision: doc.revision, digest: doc.digest),
+                    cursor: nil, now: now)
+            }
+            // First train: corpus path.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+
+            // Revise doc pb-1 to a new revision — the subsumed ref gets replaced
+            // with a non-subsumed ref (revision 2), so pending count becomes 1
+            // while trainedChunkCount (2) + pending (1) > allIDs (2).
+            let revised = CorpusContentRecord(
+                id: "pb-1", revision: 2, digest: testDigest("pb-1v2"),
+                text: "the quick brown fox jumps over the lazy dog — revised")
+            await source.update(revised)
+            try await engine.applyChange(
+                .upsert(id: revised.id, revision: revised.revision, digest: revised.digest),
+                cursor: nil, now: now)
+
+            // force==true: drift-triggered retrain; revised doc makes trainedChunkCount
+            // + pending > allIDs → populationMismatch → corpus path.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.populationMismatch),
+                    "a revised doc makes trainedChunkCount + pending > allIDs → populationMismatch")
+        }
+    }
+
+    @Test("G-5b: removal of a trained doc drives corpus(.populationMismatch)")
+    func populationMismatchOnRemoval() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+            let docs: [CorpusContentRecord] = [
+                .init(id: "pr-1", revision: 1, digest: testDigest("pr-1v1"),
+                      text: "swift actors isolate mutable state safely"),
+                .init(id: "pr-2", revision: 1, digest: testDigest("pr-2v1"),
+                      text: "async await enables structured concurrency"),
+                .init(id: "pr-3", revision: 1, digest: testDigest("pr-3v1"),
+                      text: "sendable types cross actor boundaries"),
+            ]
+            for doc in docs { await source.addResolvable(doc) }
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source, models: [.ppmi(provider: PpmiProvider())])
+            for doc in docs {
+                try await engine.applyChange(
+                    .upsert(id: doc.id, revision: doc.revision, digest: doc.digest),
+                    cursor: nil, now: now)
+            }
+            // First train: corpus path; trainedChunkCount = 3, allIDs = 3.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+
+            // Remove pr-3: source now has 2 IDs; trainedChunkCount (3) + pending (0)
+            // does not equal allIDs (2) → populationMismatch.
+            await source.remove(id: "pr-3")
+            try await engine.applyChange(
+                .remove(id: "pr-3", revision: 1),
+                cursor: nil, now: now)
+
+            // force==true: drift-triggered retrain; removed doc makes trainedChunkCount
+            // > allIDs → populationMismatch → corpus path.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.populationMismatch),
+                    "removing a doc makes trainedChunkCount > allIDs → populationMismatch")
+        }
+    }
+
+    // MARK: - G-6a: skipped-ID sentinel + later resolution
+
+    /// Gate G-6a: when a source lists an ID in activeContentIDs() but returns nil
+    /// from record(for:), the corpus-path publication writes a non-subsumed
+    /// sentinel row. On the next pass the sentinel appears as a pending ref;
+    /// if it still resolves nil → corpus(.pendingUnresolvable). Once the ID
+    /// becomes resolvable, the counts path delta-folds it and the digest matches
+    /// a from-scratch twin on all texts.
+    @Test("G-6a: nil-resolving ID gets sentinel ref; resolves later → countsDeltaFold + twin digest")
+    func skippedIDSentinelAndResolution() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+
+            // Three resolvable base docs.
+            let baseDocs: [CorpusContentRecord] = [
+                .init(id: "sk-1", revision: 1, digest: testDigest("sk-1v1"),
+                      text: "information retrieval ranks documents by relevance"),
+                .init(id: "sk-2", revision: 1, digest: testDigest("sk-2v1"),
+                      text: "term frequency inverse document frequency weighs terms"),
+                .init(id: "sk-3", revision: 1, digest: testDigest("sk-3v1"),
+                      text: "latent semantic analysis finds hidden structure"),
+            ]
+            for doc in baseDocs { await source.addResolvable(doc) }
+
+            // sk-4 is listed but returns nil (transiently unavailable).
+            await source.listUnresolvable(id: "sk-4")
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source, models: [.ppmi(provider: PpmiProvider())])
+            for doc in baseDocs {
+                try await engine.applyChange(
+                    .upsert(id: doc.id, revision: doc.revision, digest: doc.digest),
+                    cursor: nil, now: now)
+            }
+
+            // Force-train: 4 IDs listed, 3 resolve; sk-4 skipped → sentinel row.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+
+            // Assert: sentinel reference row exists for sk-4 (isSubsumed: false).
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let sentinelRef = try await countsStore.referenceFor(
+                modelID: "ppmi-v1", modelVersion: "1.1.0", contentID: "sk-4")
+            let sentinel = try #require(sentinelRef,
+                "sentinel reference row must be written for a skipped ID after corpus publication")
+            #expect(!sentinel.isSubsumed,
+                    "sentinel must be non-subsumed (counts as pending on next pass)")
+            #expect(sentinel.revision == 0,
+                    "sentinel revision must be 0 (ID was never indexed)")
+            #expect(sentinel.digest == "",
+                    "sentinel digest must be empty string (ID was never indexed)")
+
+            // Second force-retrain (drift path, sk-4 still nil): sentinel appears in
+            // pending; resolves nil → corpus(.pendingUnresolvable).
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            #expect(await engine._trainingPathDecision(for: "ppmi-v1")
+                    == .corpus(.pendingUnresolvable),
+                    "unresolvable pending ref must cause corpus(.pendingUnresolvable) on counts path")
+
+            // Make sk-4 resolvable WITHOUT calling applyChange. The sentinel ref row
+            // (non-subsumed, revision=0, digest="") already exists as the pending delta.
+            // Calling applyChange would trigger settleYoungBasisIfGrown (trainedChunkCount=3
+            // < 50, indexedCount would become 4 > 3), forcing a corpus-path retrain that
+            // subsumes sk-4 into the base BEFORE the explicit trainTrainableSlots can see
+            // it as pending. By skipping applyChange we preserve the sentinel as the
+            // pending ref and let the counts path fold it on the third explicit train.
+            let sk4 = CorpusContentRecord(
+                id: "sk-4", revision: 1, digest: testDigest("sk-4v1"),
+                text: "probabilistic latent semantic indexing models co-occurrence")
+            await source.addResolvable(sk4)
+
+            // Third force-retrain (drift path): sentinel ref is pending; sk-4 is now
+            // resolvable via source. Population guard: trainedChunkCount(3) +
+            // pendingRefs(1) == allIDs(4) ✓.
+            // F-1 two-directional gate: reset counter immediately before the measured
+            // train call so only this call's record fetches are counted.
+            await source.resetFetchCount()
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+            let finalDecision = await engine._trainingPathDecision(for: "ppmi-v1")
+            #expect(finalDecision == .countsDeltaFold(folded: 1),
+                    "once sk-4 is resolvable, the counts path must delta-fold it (1 pending sentinel ref)")
+            // F-1 two-directional gate: bodies paged must equal the folded pending count
+            // (or zero on restore) — measured, not inferred.
+            #expect(await source.fetchCount() == 1,
+                    "F-1 two-directional gate: delta-fold of 1 pending ref must page exactly 1 body — measured, not inferred")
+
+            // Digest must match from-scratch twin on all 4 texts.
+            let allDocs = baseDocs + [sk4]
+            let twin = PpmiProvider()
+            for doc in allDocs { twin.addToCounts(text: doc.text) }
+            _ = twin.finalizeFromCounts()
+            let twinDigest = CorpusContentDigest.digest(twin.serializeBasis())
+            let basisRow = try await BasisStore(storage: storage)
+                .load(modelID: "ppmi-v1", modelVersion: "1.1.0")
+            let engineDigest = CorpusContentDigest.digest(
+                try #require(basisRow?.basis))
+            #expect(engineDigest == twinDigest,
+                    "delta-fold on sk-4 must produce the same basis as from-scratch training on all 4 texts")
+        }
+    }
+
+    // MARK: - G-6f: sentinel safety
+
+    /// Gate G-6f: a sentinel row (isSubsumed: false, revision: 0, digest: "")
+    /// must never be treated as subsumed (which would trigger early-continue,
+    /// blocking the ID's first real indexing) and must not match any real record's
+    /// digest (which would silence the new-content fold-in).
+    @Test("G-6f: sentinel row is never consumed as subsumed or same-digest early-continue")
+    func sentinelSafety() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let source = MutableAttachedSource()
+            let baseDocs: [CorpusContentRecord] = [
+                .init(id: "sf-1", revision: 1, digest: testDigest("sf-1v1"),
+                      text: "tensor operations on multidimensional arrays"),
+                .init(id: "sf-2", revision: 1, digest: testDigest("sf-2v1"),
+                      text: "gradient descent optimises differentiable objectives"),
+            ]
+            for doc in baseDocs { await source.addResolvable(doc) }
+            await source.listUnresolvable(id: "sf-3")
+
+            let engine = try await makeAttachedEngine(
+                storage: storage, source: source, models: [.ppmi(provider: PpmiProvider())])
+            for doc in baseDocs {
+                try await engine.applyChange(
+                    .upsert(id: doc.id, revision: doc.revision, digest: doc.digest),
+                    cursor: nil, now: now)
+            }
+            // Train: sf-3 listed but nil → sentinel row written.
+            _ = try await engine.trainTrainableSlots(now: now, force: true)
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let sentinel = try await countsStore.referenceFor(
+                modelID: "ppmi-v1", modelVersion: "1.1.0", contentID: "sf-3")
+            let s = try #require(sentinel, "sentinel must exist after first corpus train")
+
+            // G-6f invariant 1: sentinel must NOT be marked subsumed.
+            // If it were, `commitDirectIndex` would attempt to delete it on
+            // the next applyChange for sf-3, treating the digest match "" == ""
+            // as "already represented" — silencing the real content fold.
+            #expect(!s.isSubsumed,
+                    "sentinel must be non-subsumed so it is never silently consumed")
+
+            // G-6f invariant 2: sentinel digest "" cannot match any real record digest.
+            // Real digests are SHA-256 hex (64 chars); sentinel is empty string.
+            #expect(s.digest == "", "sentinel digest must be the empty string marker")
+            let realDigest = testDigest("sf-3v1")
+            #expect(realDigest != s.digest,
+                    "real record digest must differ from sentinel digest to prevent same-digest early-continue")
+            #expect(realDigest.count == 64,
+                    "real digest is SHA-256 hex (64 chars) — cannot equal the empty sentinel")
+
+            // G-6f invariant 3: sentinel revision 0 != any real revision (>= 1).
+            #expect(s.revision == 0, "sentinel revision must be 0")
+            // Apply the real sf-3 record: digest "" ≠ real digest → sentinel is
+            // replaced with a real pending ref, NOT consumed as same-digest.
+            let sf3 = CorpusContentRecord(
+                id: "sf-3", revision: 1, digest: testDigest("sf-3v1"),
+                text: "backpropagation computes parameter gradients via chain rule")
+            await source.addResolvable(sf3)
+            try await engine.applyChange(
+                .upsert(id: sf3.id, revision: sf3.revision, digest: sf3.digest),
+                cursor: nil, now: now)
+
+            // After adding sf3 and applying, settleYoungBasisIfGrown fires a growth
+            // retrain (indexedCount 3 > trainedChunkCount 2, basis is young). That
+            // retrain runs the corpus path over all 3 docs, then calls deleteReferences
+            // so all reference rows — including sf3's newly created real ref — are
+            // consumed into the trained base. Verify sf3 IS in the new base by
+            // checking trainedChunkCount; a raw referenceFor query after the growth
+            // retrain will return nil (expected: the sentinel was resolved, trained, and
+            // cleaned up).
+            let basisStore = BasisStore(storage: storage)
+            let basisRow = try await basisStore.load(
+                modelID: "ppmi-v1", modelVersion: "1.1.0")
+            #expect(basisRow?.trainedChunkCount == 3,
+                    "growth retrain after adding sf-3 must train on all 3 docs (sf-3 was not silently consumed)")
+        }
     }
 }

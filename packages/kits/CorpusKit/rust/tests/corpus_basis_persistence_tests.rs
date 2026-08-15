@@ -958,6 +958,39 @@ fn t3_ri_permuted_fold_order_observed_outcome() {
         p.serialize_basis()
     };
 
+    // F-8c precondition: verify the counts-side provider's accumulated values stay
+    // within the exact-integer f32 regime (< 2^24 = 16_777_216.0). Equality below
+    // this bound is arithmetic necessity, not an order-safety property; exceeding it
+    // is the F-3 divergence regime, and a fixture that outgrows the regime must fail
+    // HERE rather than on the equality.
+    //
+    // Method: build a fresh counts-side provider over DIGEST_CORPUS, enumerate all
+    // vocabulary terms via the canonical tokenizer, fetch each term's raw context
+    // vector via the public accessor, and compute the maximum absolute per-dimension
+    // accumulated value.
+    {
+        let mut counts_probe = RandomIndexingProvider::new();
+        for doc in &DIGEST_CORPUS {
+            counts_probe.add_to_counts(doc);
+        }
+        let terms: std::collections::HashSet<String> = DIGEST_CORPUS
+            .iter()
+            .flat_map(|doc| corpus_kit::default_keyword_tokens(doc))
+            .collect();
+        let max_abs = terms
+            .iter()
+            .filter_map(|term| counts_probe.context_vector_for_term(term))
+            .flat_map(|cv| cv.iter().map(|x| x.abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_abs < 16_777_216.0,
+            "F-8c: counts-side accumulated value {max_abs} >= 2^24 = 16_777_216.0. \
+             Equality below this bound is arithmetic necessity, not an order-safety \
+             property; exceeding it is the F-3 divergence regime, and a fixture that \
+             outgrows the regime must fail HERE rather than on the equality."
+        );
+    }
+
     // OBSERVED: equal for this small 8-document corpus (all accumulated values are
     // exact f32 integers). See the test comment above for the full explanation.
     // countsDeltaFoldSafe remains false for RI despite this equality — the general

@@ -1,12 +1,13 @@
 //! Canonical-ID engine coverage (GLK shared-content 1.1, P2).
 //! Rust twin of the Swift `CorpusContentEngineTests`.
 
-use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+use corpus_kit::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCountsReference};
 use corpus_kit::{
     content_digest, ContentIndexJob, CorpusContentChange, CorpusContentConfiguration,
     CorpusContentEngine, CorpusContentId, CorpusContentRecord, CorpusContentSource,
     CorpusContentStore, CorpusDocumentStore, CorpusIndexStateStore, CorpusIndexUnitPolicy,
-    CorpusKitError, CorpusOperatingMode, EmbeddingModelConfig,
+    CorpusKitError, CorpusOperatingMode, CorpusPathReason, EmbeddingModelConfig,
+    TrainingPathDecision,
 };
 use persistence_kit::database_inventory::capture_inventory;
 use persistence_kit::inmemory::InMemoryStorage;
@@ -1359,4 +1360,448 @@ fn reindex_reindexes_every_active_content_row() {
     engine.reindex(NOW).unwrap();
     let after = capture_inventory(&storage, &["vectors"], &exclusions).unwrap();
     assert_eq!(before, after);
+}
+
+// ── Part 3 gate tests: training-path decision seam ───────────────────────────
+//
+// These tests exercise the counts path / corpus path dispatch added in
+// CORPUS-INCREMENTAL-01 Part 3. They use the `training_path_decisions()`
+// seam getter to assert the branch taken, without re-reading corpus text.
+
+// A source backed by a shared mutable map; tests mutate it to add/remove records.
+//
+// `fetch_count` is an atomic counter incremented on every `record()` call.
+// Tests that measure the F-1 two-directional gate use `reset_fetch_count()`
+// immediately before the train call under observation, then read `fetch_count()`
+// afterwards to verify that exactly the expected number of bodies were paged.
+struct MutableSource {
+    records: Mutex<BTreeMap<String, CorpusContentRecord>>,
+    fetch_count: AtomicUsize,
+}
+
+impl MutableSource {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { records: Mutex::new(BTreeMap::new()), fetch_count: AtomicUsize::new(0) })
+    }
+
+    /// Returns the total number of `record()` calls since the last reset.
+    fn fetch_count(&self) -> usize {
+        self.fetch_count.load(Ordering::SeqCst)
+    }
+
+    /// Resets the fetch counter to zero. Call immediately before the train
+    /// call under measurement so only that call's body-page traffic is counted.
+    fn reset_fetch_count(&self) {
+        self.fetch_count.store(0, Ordering::SeqCst);
+    }
+
+    fn put(&self, id: &str, text: &str) {
+        let mut r = self.records.lock().unwrap();
+        r.insert(
+            id.to_string(),
+            CorpusContentRecord {
+                id: id.to_string(),
+                revision: 1,
+                digest: content_digest(text),
+                text: text.to_string(),
+                dense_composition_text: None,
+            },
+        );
+    }
+
+    fn remove(&self, id: &str) {
+        self.records.lock().unwrap().remove(id);
+    }
+}
+
+impl CorpusContentSource for MutableSource {
+    fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        // Increment on every body-fetch so tests can measure source traffic.
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
+        Ok(self.records.lock().unwrap().get(id).cloned())
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<corpus_kit::CorpusContentChangeBatch, CorpusKitError> {
+        Ok(corpus_kit::CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        let r = self.records.lock().unwrap();
+        let mut ids: Vec<String> = r.keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
+    }
+}
+
+// A source that always returns None for record() — simulates a dead source.
+struct NilSource {
+    ids: Vec<String>,
+}
+
+impl CorpusContentSource for NilSource {
+    fn record(&self, _id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        Ok(None)
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<corpus_kit::CorpusContentChangeBatch, CorpusKitError> {
+        Ok(corpus_kit::CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        Ok(self.ids.clone())
+    }
+}
+
+fn ppmi_config() -> EmbeddingModelConfig {
+    use corpus_kit_providers::PpmiProvider;
+    EmbeddingModelConfig::Ppmi { provider: Box::new(PpmiProvider::new()) }
+}
+
+fn ri_config() -> EmbeddingModelConfig {
+    use corpus_kit_providers::RandomIndexingProvider;
+    EmbeddingModelConfig::RandomIndexing { provider: Box::new(RandomIndexingProvider::new()) }
+}
+
+fn open_attached_engine(
+    storage: &Arc<dyn Storage>,
+    source: Arc<dyn CorpusContentSource>,
+    models: Vec<EmbeddingModelConfig>,
+) -> CorpusContentEngine {
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .unwrap();
+    storage
+        .migrate(&corpus_kit::attached_declaration())
+        .expect("migrate attached");
+    CorpusContentEngine::open(Arc::clone(storage), config, source, models).expect("open engine")
+}
+
+/// G-5a: PPMI delta-fold positive.
+///
+/// After an initial full train, one pending reference is introduced and the
+/// second `train_trainable_slots` call (with force=true, as the drift gate
+/// does) must take the counts path (CountsDeltaFold { folded: 1 }), without
+/// re-training from corpus text.
+#[test]
+fn g5a_ppmi_counts_path_delta_fold_positive() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+
+    // Seed three base documents.
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+    source.put("doc-c", "rust ownership and memory safety");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train: no existing basis → corpus path (FirstTrain). force=false is
+    // fine here because an untrained slot always routes to corpus path regardless.
+    engine.train_trainable_slots(NOW, false).expect("first train");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain)),
+        "first train must be corpus path (FirstTrain — no persisted basis)"
+    );
+
+    // Add a fourth document to the source and insert a pending reference row.
+    // The pending ref simulates what the queue batch-commit path writes when a
+    // new document is admitted between publications.
+    source.put("doc-d", "concurrency channels and locks");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let row_store = storage.row_store();
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "ppmi-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-d".into(),
+                revision: 1,
+                digest: content_digest("concurrency channels and locks"),
+                updated_at_secs: NOW / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert pending ref");
+
+    // Second train: force=true (drift gate). Basis exists, PPMI fold-safe,
+    // population matches (3+1=4). Expected: counts path with folded=1.
+    //
+    // F-1 two-directional gate: reset the fetch counter immediately before
+    // this train call so only the counts-path body-page traffic is measured.
+    source.reset_fetch_count();
+    engine.train_trainable_slots(NOW, true).expect("second train");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsDeltaFold { folded: 1 }),
+        "second train (force=true) must be counts delta-fold path with folded=1"
+    );
+    // F-1 two-directional gate: bodies paged must equal the folded pending count
+    // (or zero on restore) — measured, not inferred.
+    // One pending ref (doc-d) was inserted, so exactly 1 record fetch is expected.
+    assert_eq!(
+        source.fetch_count(),
+        1,
+        "F-1 two-directional gate: bodies paged must equal the folded pending count (or zero on restore) — measured, not inferred"
+    );
+}
+
+/// G-5a-RI: RI behavior on the training-path dispatch.
+///
+/// RI reports `counts_delta_fold_safe()=false` because its f32 running sums
+/// are not commutative. The dispatch (force=true, as the drift gate does) must
+/// record DeltaNotFoldSafe and fall through to the corpus path, NOT the
+/// delta-fold path.
+#[test]
+fn g5a_ri_counts_path_delta_not_fold_safe() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ri_config()],
+    );
+
+    // First train: corpus path (FirstTrain — no persisted basis).
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // Add a document and a pending ref.
+    source.put("doc-c", "rust concurrency primitives");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let row_store = storage.row_store();
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "random-indexing-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-c".into(),
+                revision: 1,
+                digest: content_digest("rust concurrency primitives"),
+                updated_at_secs: NOW / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert pending ref");
+
+    // Second train: force=true (drift gate). RI → DeltaNotFoldSafe (corpus path).
+    engine.train_trainable_slots(NOW, true).expect("second train");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::DeltaNotFoldSafe)),
+        "RI must always take corpus path (DeltaNotFoldSafe)"
+    );
+}
+
+/// G-5b: negative case — population mismatch drives corpus path.
+///
+/// When the corpus size changes (a document is removed) and the drift gate
+/// triggers a retrain (force=true), the counts path guard detects
+/// basisRow.trainedChunkCount + pending.len() ≠ all_ids.len() and records
+/// PopulationMismatch, falling through to corpus path.
+#[test]
+fn g5b_population_mismatch_drives_corpus_path() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "first document content");
+    source.put("doc-b", "second document content");
+    source.put("doc-c", "third document content");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train: corpus path (FirstTrain — no persisted basis).
+    // basis records trainedChunkCount=3.
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // Remove one document: now all_ids.len()=2, but basisRow.trainedChunkCount=3
+    // and pending=0 → 3+0 ≠ 2 → PopulationMismatch.
+    source.remove("doc-c");
+
+    // force=true: drift gate triggered; basis exists, so we attempt counts path.
+    engine.train_trainable_slots(NOW, true).expect("second train after remove");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::PopulationMismatch)),
+        "removed document must produce PopulationMismatch"
+    );
+}
+
+/// G-5c: non-force call on a trained slot records NOTHING in the seam.
+///
+/// Skip semantics restored: a non-force train_trainable_slots call on a slot
+/// whose basis digest is not empty (already trained) must NOT touch the counts
+/// path or the corpus path — the decision seam must be empty (absent) for that
+/// model. The drift gate owns WHEN a retrain happens.
+#[test]
+fn g5c_non_force_trained_slot_skip_records_nothing() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train: corpus path (FirstTrain).
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // Second call: non-force, slot is already trained → skip.
+    engine.train_trainable_slots(NOW, false).expect("non-force on trained slot");
+    let decisions = engine.training_path_decisions();
+    assert!(
+        decisions.get("ppmi-v1").is_none(),
+        "non-force call on trained slot must record nothing in the decision seam (skip semantics)"
+    );
+}
+
+/// G-5d: force call on a trained slot with no pending refs → CountsRestore.
+///
+/// When force=true is called (drift gate or migration rebuild) and the slot is
+/// already trained with no pending delta refs, the counts path runs its full
+/// publication (restore both instances, fold nothing, finalize, publish), bumps
+/// the generation counter, and records CountsRestore. Zero text paging.
+#[test]
+fn g5d_force_trained_slot_no_pending_records_counts_restore() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // First train: corpus path (FirstTrain), establishes basis and counts.
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // No pending refs added — force=true triggers migration-rebuild path.
+    // All guards pass (basis exists, PPMI fold-safe, population exact: 2+0=2).
+    //
+    // F-1 two-directional gate: reset the fetch counter immediately before
+    // this train call so only the restore-path body-page traffic is measured.
+    source.reset_fetch_count();
+    engine.train_trainable_slots(NOW, true).expect("force retrain no pending");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("ppmi-v1"),
+        Some(&TrainingPathDecision::CountsRestore),
+        "force retrain with no pending refs must record CountsRestore"
+    );
+    // F-1 two-directional gate: bodies paged must equal the folded pending count
+    // (or zero on restore) — measured, not inferred.
+    // CountsRestore reconstructs from persisted counts only — no source fetches.
+    assert_eq!(
+        source.fetch_count(),
+        0,
+        "F-1 two-directional gate: bodies paged must equal the folded pending count (or zero on restore) — measured, not inferred"
+    );
+}
+
+/// G-6a: skipped-ID sentinel is durable after training.
+///
+/// When `source.record()` returns None for an active ID during training,
+/// the corpus path must upsert a non-subsumed sentinel row
+/// (revision=0, digest="") after delete-all-references. This test confirms
+/// the sentinel row exists in the store after training completes.
+#[test]
+fn g6a_skipped_id_sentinel_is_durable_after_training() {
+    let storage = in_memory_storage();
+    // Use a static source with one valid record and one whose `record()` always
+    // returns None. We simulate this by using a NilSource for the engine but
+    // exposing one "active" ID that will resolve to nil.
+    let source = Arc::new(NilSource {
+        ids: vec!["doc-ghost".to_string()],
+    });
+
+    let engine = open_attached_engine(
+        &storage,
+        source as Arc<dyn CorpusContentSource>,
+        vec![ppmi_config()],
+    );
+
+    // Train: doc-ghost resolves to nil → logged as skipped, sentinel upserted.
+    engine.train_trainable_slots(NOW, false).expect("train with ghost id");
+
+    // Verify the sentinel row exists: non-subsumed, revision=0, digest="".
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let refs = counts_store
+        .references("ppmi-v1", "1.1.0")
+        .expect("load references");
+    let sentinel = refs.iter().find(|r| r.content_id == "doc-ghost");
+    assert!(
+        sentinel.is_some(),
+        "sentinel row must exist for skipped ID 'doc-ghost'"
+    );
+    let s = sentinel.unwrap();
+    assert!(
+        !s.is_subsumed,
+        "sentinel must be non-subsumed (admission-check gate)"
+    );
+    assert_eq!(s.revision, 0, "sentinel revision must be 0");
+    assert_eq!(s.digest, "", "sentinel digest must be empty string");
+}
+
+/// G-6f: sentinel safety — a sentinel row with revision=0 and digest="" does
+/// NOT satisfy the admission digest-equality check. This test confirms that
+/// the sentinel's fields are distinct from any live content record's digest.
+///
+/// The admission check compares `reference.digest == record.digest`. A real
+/// record always has a non-empty SHA-256 hex digest. A sentinel has digest="".
+/// This structural test verifies the invariant without running the admission
+/// path (which is engine-internal), relying on the content_digest function
+/// always returning a non-empty hex string.
+#[test]
+fn g6f_sentinel_fields_cannot_satisfy_admission_digest_equality() {
+    // Sentinel values.
+    let sentinel_revision: i64 = 0;
+    let sentinel_digest = "";
+
+    // Any real content record digest is non-empty hex.
+    let live_digest = content_digest("some real document text");
+    assert!(!live_digest.is_empty(), "live digest must be non-empty");
+    assert_ne!(
+        sentinel_digest, live_digest.as_str(),
+        "sentinel digest must not equal any live content digest"
+    );
+
+    // Revision=0 is not a valid positive revision.
+    assert_eq!(sentinel_revision, 0, "sentinel revision is zero");
+    // Any real record would have revision >= 1.
+    let live_revision: i64 = 1;
+    assert_ne!(
+        sentinel_revision, live_revision,
+        "sentinel revision must differ from live record revision"
+    );
 }

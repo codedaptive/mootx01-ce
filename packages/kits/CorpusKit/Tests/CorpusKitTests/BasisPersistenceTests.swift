@@ -723,6 +723,28 @@ struct CountsRefactorDigestGates {
         "engine runs road speed distance route"
     ]
 
+    // MARK: - Storage helpers for corpus-path gates
+
+    /// Fixed point-in-time date used as `now` throughout corpus-path gates so
+    /// all test runs are deterministic.
+    private let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// A unique on-disk SQLite file URL. Tests use the real SQLite backend to
+    /// exercise the persist→reopen path (in-RAM backend preserves semantic
+    /// TypedValues and hides reopen bugs).
+    private func scratchURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("corpuskit-counts-\(UUID().uuidString).sqlite3")
+    }
+
+    /// Open a fresh SQLiteStorage over `url`. Constructing a second storage over
+    /// the same url reopens the persisted file, exercising the load-on-open path.
+    private func storage(at url: URL) throws -> any Storage {
+        try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: url, busyTimeout: 5.0)))
+    }
+
     // MARK: - T1: RI restore → finalize byte-identity
 
     /// Scratch `trainOnCorpus` and counts-side `addToCounts` + `restoreCounts` +
@@ -806,6 +828,22 @@ struct CountsRefactorDigestGates {
         try restoredReversed.restoreCounts(from: reversedBlob)
         _ = restoredReversed.finalizeFromCounts()
         let d = restoredReversed.serializeBasis()
+
+        // F-8c precondition: the equality a == d is arithmetic necessity only
+        // while every per-dimension accumulated value stays inside float32's
+        // exact-integer range (2^24 ≈ 16.7M). Assert this holds for the fixture
+        // corpus before relying on the equality below. A fixture that outgrows
+        // the bound must fail HERE with an actionable message rather than on
+        // the equality assertion, which is inscrutable without this context.
+        let allCorpusTerms = Set(corpus.flatMap { defaultKeywordTokens($0) })
+        let maxAbsAccumulated: Float = allCorpusTerms
+            .compactMap { reversed.contextVector(forTerm: $0) }
+            .flatMap { $0 }
+            .map { abs($0) }
+            .max() ?? 0.0
+        #expect(
+            maxAbsAccumulated < 16_777_216,
+            "F-8c precondition: equality below 2^24 is arithmetic necessity, not an order-safety property; exceeding it is the F-3 divergence regime — a fixture that outgrows this bound must fail HERE rather than on the equality assertion below")
 
         // OBSERVED OUTCOME (run first, assertion updated to match):
         // For this 8-doc corpus each per-dimension sum is bounded by
@@ -1031,5 +1069,156 @@ struct CountsRefactorDigestGates {
                 "T10: NMF finalizeFromCounts must return false (TF rows not persisted)")
         #expect(nmfRestored.serializeBasis() == pre,
                 "T10: NMF state must be unchanged after finalizeFromCounts() == false")
+    }
+
+    // MARK: - F-2 gate: corpus path heal → counts accumulator rebuilt
+
+    /// Gate F-2: after a corpus-path reindex, the F-2 heal rebuilds the slot's
+    /// counts accumulator by folding the same texts in the same order. This means
+    /// the next reindex call (when no sources have changed) can take the counts
+    /// path (countsDocumentCount == chunks.count). Conversely, removing a source
+    /// after the corpus-path reindex drives a population mismatch on the next
+    /// reindex call.
+    ///
+    /// Sequence: ingest A and B → reindex (corpus path, F-2 heal applied) →
+    /// remove A → reindex → decision must be corpus(.populationMismatch) and
+    /// the new trainedChunkCount must be 1 (B only).
+    @Test("F-2: remove after corpus-path reindex drives populationMismatch + retrain on B only")
+    func f2HealDrivesPopulationMismatchAfterRemoval() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = scratchURL()
+            let stor = try storage(at: url)
+            let corpus = try await Corpus(
+                storage: stor,
+                model: .ppmi(provider: PpmiProvider()))
+
+            // Two distinct texts: A uses unique terms, B uses different unique terms.
+            // This lets us verify A-terms are absent after retraining on B only.
+            let textA = "xenon argon krypton noble gases rare elements unique"
+            let textB = "fibonacci sequence golden ratio mathematics number theory"
+
+            try await corpus.ingest(textA, sourceID: "f2-source-a", now: now)
+            try await corpus.ingest(textB, sourceID: "f2-source-b", now: now)
+
+            // First reindex: corpus path (first call, no prior basis via counts path).
+            // F-2 heal runs inside the corpus-path install loop: rebuilds counts
+            // accumulator from both texts; countsDocumentCount == 2.
+            try await corpus.reindex(now: now.addingTimeInterval(10))
+            // The decision on the first reindex is corpus path (no counts row yet at
+            // construction; the counts accumulator from ingest is not yet stored as
+            // a countsRestore-eligible snapshot). After reindex, a second immediate
+            // reindex with no changes would take countsRestore.
+            let firstDecision = await corpus._trainingPathDecision(for: "ppmi-v1")
+            // First reindex decision: countsRestore when auto-training during ingest
+            // has already populated countsDocumentCount == chunks.count (counts path
+            // eligible), or a corpus(.populationMismatch) when countsDocumentCount
+            // and chunks.count diverged. Both are valid — the critical F-2 invariant
+            // is verified by the second reindex decision below.
+            #expect(firstDecision != nil,
+                    "F-2 gate: first reindex must record a decision")
+
+            let basisStoreFirst = BasisStore(storage: stor)
+            let rowAfterFirst = try await basisStoreFirst.load(
+                modelID: "ppmi-v1", modelVersion: "1.1.0")
+            #expect(rowAfterFirst?.trainedChunkCount == 2,
+                    "F-2: corpus-path reindex on 2 sources must set trainedChunkCount = 2")
+
+            // Remove source A. Now only B remains (chunks.count = 1).
+            // countsDocumentCount (from F-2 heal) = 2 ≠ 1 → populationMismatch.
+            try await corpus.remove(sourceID: "f2-source-a")
+
+            // Second reindex: population mismatch → corpus path → retrain on B only.
+            try await corpus.reindex(now: now.addingTimeInterval(20))
+            let secondDecision = await corpus._trainingPathDecision(for: "ppmi-v1")
+            #expect(secondDecision == .corpus(.populationMismatch),
+                    "F-2: after removing A, countsDocumentCount (2) ≠ chunks.count (1) → populationMismatch")
+
+            // doc_count decreased: trainedChunkCount must now be 1 (B only).
+            let stor2 = try storage(at: url)
+            let rowAfterSecond = try await BasisStore(storage: stor2)
+                .load(modelID: "ppmi-v1", modelVersion: "1.1.0")
+            #expect(rowAfterSecond?.trainedChunkCount == 1,
+                    "F-2: after removing A, retraining on B only must set trainedChunkCount = 1")
+
+            // Verify the new basis equals from-scratch PPMI on B only.
+            // This proves A-terms are absent (they were in the old basis trained on A+B).
+            let twin = PpmiProvider()
+            twin.trainOnCorpus(texts: [textB])
+            let twinDigest = CorpusContentDigest.digest(twin.serializeBasis())
+            let engineDigest = CorpusContentDigest.digest(
+                try #require(rowAfterSecond?.basis,
+                             "F-2: basis row must exist after corpus-path reindex on B only"))
+            #expect(engineDigest == twinDigest,
+                    "F-2: basis after removing A must match from-scratch PPMI trained on B only (A-terms absent)")
+        }
+    }
+
+    // MARK: - Standalone byte-identity gate
+
+    /// Standalone byte-identity: ingest N docs via Corpus (standalone), call
+    /// reindex. When countsDocumentCount matches chunks.count (F-2 heal ensures
+    /// this is possible on the second reindex after the first corpus-path pass),
+    /// the counts-restore path must yield a basis byte-identical to a from-scratch
+    /// PPMI trained on the same texts.
+    ///
+    /// This gate exercises the complete counts-path round-trip for the standalone
+    /// Corpus: ingest folds texts into the live accumulator; persistMaintainedCounts
+    /// flushes to storage; restoreCounts reconstructs; finalizeFromCounts produces
+    /// the serving basis. The result is byte-identical to trainOnCorpus on the same
+    /// texts because PPMI co-occurrence counts are commutative.
+    @Test("Standalone byte-identity: counts-restore digest matches from-scratch twin")
+    func standaloneCountsRestoreDigestMatchesTwin() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = scratchURL()
+            let stor = try storage(at: url)
+            let corpus = try await Corpus(
+                storage: stor,
+                model: .ppmi(provider: PpmiProvider()))
+
+            // Five distinct texts — the same texts used for PPMI fixture conformance
+            // in the provider tests, so the token space is well-exercised.
+            let texts = [
+                "car engine drive road vehicle transport",
+                "vehicle road transport car fuel combustion",
+                "engine fuel combustion power car exhaust",
+                "dog bark run fetch animal companion",
+                "animal run cat dog pet friend"
+            ]
+
+            // Ingest all texts. The ingest path folds each into the live counts
+            // accumulator AND triggers auto-training (first-ingest + doubling paths).
+            for (i, text) in texts.enumerated() {
+                try await corpus.ingest(text, sourceID: "sid-\(i)", now: now)
+            }
+
+            // First reindex: corpus path (auto-training may have trained a basis,
+            // but the standalone reindex's counts-path eligibility also requires
+            // countsDocumentCount == chunks.count — the F-2 heal from the corpus-
+            // path pass inside reindex sets this for the NEXT reindex call).
+            try await corpus.reindex(now: now.addingTimeInterval(10))
+
+            // Second reindex: F-2 heal from the first pass has set countsDocumentCount
+            // == 5 == chunks.count. PPMI is capable and fold-safe → counts path.
+            try await corpus.reindex(now: now.addingTimeInterval(20))
+            let secondDecision = await corpus._trainingPathDecision(for: "ppmi-v1")
+            #expect(secondDecision == .countsRestore,
+                    "byte-identity gate: second reindex with matching population must take countsRestore path")
+
+            // From-scratch twin: PPMI trained on all 5 texts via the same trainOnCorpus
+            // call that the corpus-path reindex uses (addToCounts × N + finalizeFromCounts).
+            let twin = PpmiProvider()
+            twin.trainOnCorpus(texts: texts)
+            let twinDigest = CorpusContentDigest.digest(twin.serializeBasis())
+
+            // Engine's persisted basis (from counts path) must match.
+            let stor2 = try storage(at: url)
+            let basisRow = try await BasisStore(storage: stor2)
+                .load(modelID: "ppmi-v1", modelVersion: "1.1.0")
+            let engineDigest = CorpusContentDigest.digest(
+                try #require(basisRow?.basis,
+                             "byte-identity gate: basis row must exist after counts-restore reindex"))
+            #expect(engineDigest == twinDigest,
+                    "byte-identity gate: counts-restore basis must be byte-identical to from-scratch twin")
+        }
     }
 }

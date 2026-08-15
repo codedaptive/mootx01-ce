@@ -81,10 +81,12 @@ pub use content_engine::passage_ranges;
 #[cfg(feature = "standalone-passages")]
 pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
+pub use corpus::CorpusPathReason;
 pub use corpus::EmbeddingModelConfig;
 pub use corpus::FloatDiscriminationSignal;
 pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
+pub use corpus::TrainingPathDecision;
 pub use document_store::CorpusDocumentStore;
 pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
 pub use schema_profile::{

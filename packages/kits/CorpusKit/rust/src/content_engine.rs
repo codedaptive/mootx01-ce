@@ -19,8 +19,8 @@ use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
 use crate::corpus::{
-    discrimination_signal_from_outcome, Corpus, EmbeddingModelConfig, EncodeSpeed,
-    FloatDiscriminationSignal, FloatLaneOutcome, ProviderSlot,
+    discrimination_signal_from_outcome, Corpus, CorpusPathReason, EmbeddingModelConfig, EncodeSpeed,
+    FloatDiscriminationSignal, FloatLaneOutcome, ProviderSlot, TrainingPathDecision,
 };
 use crate::corpus_provider_counts_store::{
     CorpusProviderCountsStore, PersistedCounts, PersistedCountsReference,
@@ -359,6 +359,12 @@ struct PreparedProviderTraining {
     counts_row: PersistedCounts,
     basis_digest: String,
     subsumed_references: Vec<PersistedCountsReference>,
+    /// IDs for which `source.record()` returned `None` during training (F-6).
+    /// The publication loop upserts a non-subsumed sentinel row (revision=0,
+    /// digest="") for each so that future queue reference admission does not
+    /// attempt to fold an ID the source can no longer resolve — the sentinel
+    /// fails the admission digest-equality check and keeps the corpus clean.
+    skipped_references: Vec<PersistedCountsReference>,
 }
 
 /// The canonical-ID indexing/recall engine. One engine serves BOTH
@@ -406,6 +412,11 @@ pub struct CorpusContentEngine {
     /// `corpus_bitmap_generation` at engine open; bumped in-memory after each
     /// `train_trainable_slots` call. All bitmap coverage writes stamp this value.
     current_basis_generation: AtomicI64,
+    /// Training-path decision seam (Part 3). Keyed by model_id. Reset at the
+    /// start of every `train_trainable_slots` call. Tests use this to assert
+    /// that the counts path (not corpus path) was taken, without re-reading
+    /// corpus text. Mirrors the same seam on `Corpus` (standalone mode).
+    training_path_decisions: Mutex<BTreeMap<String, TrainingPathDecision>>,
 }
 
 impl CorpusContentEngine {
@@ -508,6 +519,7 @@ impl CorpusContentEngine {
             train_fault_before_commit_model: Mutex::new(None),
             backfill_fault_hook: Mutex::new(None),
             current_basis_generation: AtomicI64::new(initial_basis_generation),
+            training_path_decisions: Mutex::new(BTreeMap::new()),
         };
         // Rehydrate the base snapshot plus crash-durable reference deltas.
         engine.reload_counts_from_storage()?;
@@ -644,6 +656,17 @@ impl CorpusContentEngine {
         if let Ok(mut guard) = self.encode_speed.lock() {
             *guard = speed;
         }
+    }
+
+    /// Returns a snapshot of the training-path decisions recorded by the most
+    /// recent `train_trainable_slots` call. Tests use this to assert the branch
+    /// taken (counts path vs. corpus path with reason) without re-reading corpus
+    /// text. Clones and returns so callers do not hold the mutex.
+    pub fn training_path_decisions(&self) -> BTreeMap<String, TrainingPathDecision> {
+        self.training_path_decisions
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     fn embed_concurrency_cap(&self) -> usize {
@@ -2566,6 +2589,319 @@ impl CorpusContentEngine {
         provider_count.min(cpu_workers).min(memory_workers).max(1)
     }
 
+    /// Record a training-path decision for the given model_id, overwriting any
+    /// prior entry for this model within this train call.
+    fn record_path_decision(
+        &self,
+        model_id: &str,
+        decision: TrainingPathDecision,
+    ) -> CorpusKitResult<()> {
+        let mut guard = self.training_path_decisions.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+        })?;
+        guard.insert(model_id.to_string(), decision);
+        Ok(())
+    }
+
+    /// Record a training-path decision ONLY if no decision is already recorded
+    /// for the given model_id within this train call. Used by the corpus-path
+    /// publication loop to avoid overwriting a decision already set by the
+    /// retain-loop guard path.
+    fn record_path_decision_if_absent(
+        &self,
+        model_id: &str,
+        decision: TrainingPathDecision,
+    ) -> CorpusKitResult<()> {
+        let mut guard = self.training_path_decisions.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+        })?;
+        guard.entry(model_id.to_string()).or_insert(decision);
+        Ok(())
+    }
+
+    /// Attempt the counts path for one provider job. Returns:
+    ///   `Ok(Some(decision))` — counts path succeeded; caller removes job from
+    ///                          `jobs` and does not pass it to `prepare_provider_training`.
+    ///   `Ok(None)`           — counts path not eligible; guard-rejection reason
+    ///                          already recorded in `training_path_decisions`.
+    ///   `Err(_)`             — unexpected I/O failure; caller falls back to corpus path.
+    ///
+    /// ## Guard order (attached engine)
+    /// 1. Basis row must exist (`basis_store.load` returns `Some`) → else `NoCountsRow`
+    /// 2. Fresh-probe `finalize_from_counts()` must return `true` → else `NotCountsCapable`
+    /// 3. `counts_delta_fold_safe()` must return `true` → else `DeltaNotFoldSafe`
+    /// 4. Population: `basisRow.trainedChunkCount + pendingRefs.len() == allIDs.len()`
+    ///    → else `PopulationMismatch`
+    /// 5. Every pending ref must resolve via `source.record()` → else `PendingUnresolvable`
+    ///
+    /// On all guards passing:
+    ///   - reconstructs TWO fresh instances (serving + accumulator)
+    ///   - restores counts into both from the durable store
+    ///   - folds each pending ref's effective_dense_text into both
+    ///   - finalizes serving
+    ///   - publishes basis + updated counts + deletes ONLY the folded pending refs
+    ///   - installs the finalized serving provider
+    ///   - returns `Ok(Some(CountsRestore))` when `pending` is empty (zero folds),
+    ///     or `Ok(Some(CountsDeltaFold { folded }))` when pending is non-empty
+    fn try_counts_path_for_job(
+        &self,
+        job: &ProviderTrainingJob,
+        all_ids: &[CorpusContentId],
+        _indexed_count: usize,
+    ) -> CorpusKitResult<Option<TrainingPathDecision>> {
+        let slot = &self.slots[job.slot_index];
+
+        // Guard 2: basis row must exist (first-ever train has no row).
+        let basis_row = match self.basis_store.load(&job.model_id, &job.model_version)? {
+            Some(b) => b,
+            None => {
+                let _ = self.record_path_decision(
+                    &job.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::NoCountsRow),
+                );
+                return Ok(None);
+            }
+        };
+
+        // Guard 3: finalize_from_counts() probe on a throwaway fresh instance.
+        let capable = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("counts lock poisoned in counts-path probe".into())
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} in counts-path probe",
+                    job.model_id
+                ))
+            })?;
+            let mut probe = state
+                .accumulator
+                .reconstruct_trainable_basis(&job.fresh_basis_blob)?;
+            probe.finalize_from_counts()
+        };
+        if !capable {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+            );
+            return Ok(None);
+        }
+
+        // Guard 4: counts_delta_fold_safe() on the live accumulator (pure property).
+        let fold_safe = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable(
+                    "counts lock poisoned in fold-safe probe".into(),
+                )
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} in fold-safe probe",
+                    job.model_id
+                ))
+            })?;
+            state.accumulator.counts_delta_fold_safe()
+        };
+        if !fold_safe {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::DeltaNotFoldSafe),
+            );
+            return Ok(None);
+        }
+
+        // Collect ALL references; pending = non-subsumed.
+        let all_refs = self
+            .counts_store
+            .references(&job.model_id, &job.model_version)?;
+        let pending: Vec<&PersistedCountsReference> =
+            all_refs.iter().filter(|r| !r.is_subsumed).collect();
+
+        // Guard 5: population check.
+        //   basisRow.trained_chunk_count + pending.len() == all_ids.len()
+        //   LHS: frozen base document count written at last publication.
+        //   RHS: live active-content-id count from the source.
+        //   Every divergence is reject-safe: additions drive RHS > LHS+pending,
+        //   removals drive LHS+pending > RHS. Both mean "corpus has changed since
+        //   the last counts snapshot" → corpus path rebuilds cleanly.
+        let expected = basis_row.trained_chunk_count + pending.len();
+        if expected != all_ids.len() {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::PopulationMismatch),
+            );
+            return Ok(None);
+        }
+
+        // Guard 6: all pending refs must resolve via source.record().
+        let mut pending_texts: Vec<String> = Vec::with_capacity(pending.len());
+        for pref in &pending {
+            match self.source.record(&pref.content_id)? {
+                Some(record) => {
+                    pending_texts.push(record.effective_dense_text().to_string());
+                }
+                None => {
+                    let _ = self.record_path_decision(
+                        &job.model_id,
+                        TrainingPathDecision::Corpus(CorpusPathReason::PendingUnresolvable),
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+
+        // ── All guards passed — execute the counts path ───────────────────────
+        //
+        // Reconstruct TWO fresh providers: `serving` (will be finalized and
+        // installed) and `new_accumulator` (will replace the slot's counts state
+        // and persist the updated accumulated statistics).
+        let (mut serving, mut new_accumulator) = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable(
+                    "counts lock poisoned before counts-path restore".into(),
+                )
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} before restore",
+                    job.model_id
+                ))
+            })?;
+            (
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+            )
+        };
+
+        // Restore base counts into both fresh instances from the durable store.
+        let restored_serving = self.counts_store.restore_counts_into(
+            serving.as_mut(),
+            &job.model_id,
+            &job.model_version,
+        )?;
+        let restored_acc = self.counts_store.restore_counts_into(
+            new_accumulator.as_mut(),
+            &job.model_id,
+            &job.model_version,
+        )?;
+        if !restored_serving || !restored_acc {
+            // Counts row disappeared between guard check and restore — fall back.
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NoCountsRow),
+            );
+            return Ok(None);
+        }
+
+        // Fold every pending ref's text into both providers.
+        for text in &pending_texts {
+            serving.add_to_counts(text);
+            new_accumulator.add_to_counts(text);
+        }
+        let folded = pending.len();
+
+        // Finalize the serving provider.
+        if !serving.finalize_from_counts() {
+            // Defensive guard: probe said true, post-restore said false.
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+            );
+            return Ok(None);
+        }
+
+        // Serialize the serving basis and compute its digest.
+        let basis_blob = serving.serialize_basis();
+        let basis_digest = crate::content::content_digest_bytes(&basis_blob);
+        let now_secs = basis_row.trained_at_secs; // use the stored timestamp for determinism
+        let new_doc_count = basis_row.trained_chunk_count + folded;
+        let vocab_size = new_accumulator.counts_vocabulary_size();
+
+        // Publication: basis + updated counts + delete ONLY the folded pending refs.
+        // Do NOT delete all references (corpus path does delete-all; counts path
+        // deletes only the refs it folded, leaving subsumed refs untouched).
+        let basis_store = &self.basis_store;
+        let counts_store = &self.counts_store;
+        let new_basis_row = PersistedBasis {
+            model_id: job.model_id.clone(),
+            model_version: job.model_version.clone(),
+            basis: basis_blob,
+            trained_at_secs: now_secs,
+            trained_chunk_count: new_doc_count,
+        };
+        let pending_content_ids: Vec<String> = pending
+            .iter()
+            .map(|r| r.content_id.clone())
+            .collect();
+        self.storage
+            .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                let rows = txn.row_store();
+                basis_store
+                    .upsert_into(&new_basis_row, &rows)
+                    .map_err(|e| persistence_kit::StorageError::BackendError {
+                        underlying: format!("{e:?}"),
+                    })?;
+                counts_store
+                    .persist_counts_into(
+                        new_accumulator.as_ref(),
+                        &job.model_id,
+                        &job.model_version,
+                        new_doc_count,
+                        vocab_size,
+                        now_secs,
+                        &rows,
+                    )
+                    .map_err(|e| persistence_kit::StorageError::BackendError {
+                        underlying: format!("{e:?}"),
+                    })?;
+                // Delete ONLY the folded pending refs — never delete-all here.
+                for content_id in &pending_content_ids {
+                    counts_store
+                        .delete_reference_into(
+                            &job.model_id,
+                            &job.model_version,
+                            content_id,
+                            &rows,
+                        )
+                        .map_err(|e| persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        })?;
+                }
+                Ok(())
+            })
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+
+        // Install the finalized serving provider and update the in-memory slot.
+        {
+            let mut handle = slot.handle.lock().unwrap();
+            *handle = crate::corpus::ProviderHandle::Trainable(serving);
+        }
+        *slot.basis_digest.lock().unwrap() = basis_digest.clone();
+        {
+            let mut counts = slot.counts.lock().unwrap();
+            *counts = Some(crate::corpus::CountsState {
+                accumulator: new_accumulator,
+                document_count: new_doc_count,
+                vocab_anchor: vocab_size,
+                growth_term_digests: BTreeSet::new(),
+            });
+        }
+
+        // Zero pending → restore only (no folds), CountsRestore.
+        // Non-zero pending → delta fold, CountsDeltaFold.
+        // Both cases run through the identical publication path above; the win of
+        // the counts path is ZERO TEXT PAGING, never skipped publication.
+        if folded == 0 {
+            Ok(Some(TrainingPathDecision::CountsRestore))
+        } else {
+            Ok(Some(TrainingPathDecision::CountsDeltaFold { folded }))
+        }
+    }
+
     fn prepare_provider_training(
         &self,
         job: ProviderTrainingJob,
@@ -2595,36 +2931,68 @@ impl CorpusContentEngine {
         };
 
         let mut subsumed_references = Vec::new();
+        // F-6: IDs for which source.record() returned None. Each gets a durable
+        // sentinel row (revision=0, digest="") after the delete-all so the queue
+        // reference admission path does not try to fold a content ID the source
+        // no longer knows. The sentinel fails the admission digest-equality check
+        // (revision=0 and digest="" never match a live record's digest) and
+        // prevents the id from being re-admitted as pending delta until the source
+        // can resolve it again.
+        let mut skipped_references = Vec::new();
         let mut document_count = 0usize;
         let mut cursor = 0usize;
         while cursor < all_ids.len() {
             let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
             let mut texts = Vec::with_capacity(end - cursor);
             for id in &all_ids[cursor..end] {
-                if let Some(record) = self.source.record(id)? {
-                    let indexed = indexed_states.get(&record.id);
-                    if indexed.map_or(true, |state| {
-                        state.revision != record.revision
-                            || state.digest != record.digest
-                            || state.index_version != CONTENT_ENGINE_INDEX_VERSION
-                    }) {
-                        subsumed_references.push(PersistedCountsReference {
+                match self.source.record(id)? {
+                    Some(record) => {
+                        let indexed = indexed_states.get(&record.id);
+                        if indexed.map_or(true, |state| {
+                            state.revision != record.revision
+                                || state.digest != record.digest
+                                || state.index_version != CONTENT_ENGINE_INDEX_VERSION
+                        }) {
+                            subsumed_references.push(PersistedCountsReference {
+                                model_id: job.model_id.clone(),
+                                model_version: job.model_version.clone(),
+                                content_id: record.id.clone(),
+                                revision: record.revision,
+                                digest: record.digest.clone(),
+                                updated_at_secs: now_millis / 1000,
+                                is_subsumed: true,
+                                growth_term_digests: Vec::new(),
+                            });
+                        }
+                        // Training coherence: the basis vocabulary must match the text
+                        // that gets projected through it at embed time. Use
+                        // effective_dense_text so the basis is trained on the same
+                        // representation the float-lane will embed later. For records
+                        // with no dense_composition_text this is identical to record.text.
+                        texts.push(record.effective_dense_text().to_string());
+                    }
+                    None => {
+                        // F-6: source cannot resolve this ID. Log at warning level and
+                        // record a sentinel so queue admission does not fold a ghost
+                        // reference. Sentinel uses revision=0 and digest="" — values that
+                        // can never satisfy the digest-equality check used at admission.
+                        eprintln!(
+                            "[corpus-content-engine] WARNING: source.record({}) returned nil \
+                             during training for model '{}' — content ID skipped; sentinel \
+                             reference row will be upserted after publication",
+                            id, job.model_id
+                        );
+                        skipped_references.push(PersistedCountsReference {
                             model_id: job.model_id.clone(),
                             model_version: job.model_version.clone(),
-                            content_id: record.id.clone(),
-                            revision: record.revision,
-                            digest: record.digest.clone(),
+                            content_id: id.clone(),
+                            revision: 0,
+                            digest: String::new(),
                             updated_at_secs: now_millis / 1000,
-                            is_subsumed: true,
+                            is_subsumed: false,
                             growth_term_digests: Vec::new(),
                         });
                     }
-                    // Training coherence: the basis vocabulary must match the text
-                    // that gets projected through it at embed time. Use
-                    // effective_dense_text so the basis is trained on the same
-                    // representation the float-lane will embed later. For records
-                    // with no dense_composition_text this is identical to record.text.
-                    texts.push(record.effective_dense_text().to_string());
                 }
             }
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -2660,6 +3028,7 @@ impl CorpusContentEngine {
             counts_accumulator,
             basis_digest,
             subsumed_references,
+            skipped_references,
         })
     }
 
@@ -2698,23 +3067,45 @@ impl CorpusContentEngine {
             .map(|state| (state.content_id.clone(), state))
             .collect();
         let mut digests = BTreeMap::new();
-        let mut jobs = Vec::new();
+
+        // Reset the training-path decision seam so the previous call's results
+        // do not bleed into the assertions of a fresh train.
+        {
+            let mut decisions = self.training_path_decisions.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+            })?;
+            decisions.clear();
+        }
+
+        let all_ids = self.source.active_content_ids()?;
+        if all_ids.is_empty() {
+            return Ok(digests);
+        }
+
+        // Build the candidate list: ALL trainable slots, with their current
+        // digest and fresh-basis blob. The counts path attempt below decides
+        // for each candidate whether it needs corpus training, counts training,
+        // or can be skipped entirely (already current, no pending refs).
+        struct TrainCandidate {
+            slot_index: usize,
+            model_id: String,
+            model_version: String,
+            fresh_basis_blob: Vec<u8>,
+            existing_digest: String, // empty = first-ever train
+        }
+        let mut candidates: Vec<TrainCandidate> = Vec::new();
         for (slot_index, slot) in self.slots.iter().enumerate() {
             let Some(blob) = &slot.fresh_basis_blob else {
                 continue;
             };
             let model_id = slot.model_id.clone();
-            let digest = slot
+            let existing_digest = slot
                 .basis_digest
                 .lock()
                 .map_err(|_| {
                     CorpusKitError::StoreUnavailable("basis digest mutex poisoned".into())
                 })?
                 .clone();
-            if !force && !digest.is_empty() {
-                digests.insert(model_id, digest);
-                continue;
-            }
             let model_version = slot
                 .handle
                 .lock()
@@ -2724,18 +3115,95 @@ impl CorpusContentEngine {
                 .provider()
                 .model_version()
                 .to_string();
-            jobs.push(ProviderTrainingJob {
+            candidates.push(TrainCandidate {
                 slot_index,
                 model_id,
                 model_version,
                 fresh_basis_blob: blob.clone(),
+                existing_digest,
             });
         }
 
-        let all_ids = self.source.active_content_ids()?;
-        if all_ids.is_empty() {
-            return Ok(digests);
+        // ── Routing: non-force skip / first-train / counts-path (Part 3) ────────
+        //
+        // Corrected routing (drift-gate design):
+        //   1. non-force + trained slot (existing basis) → SKIP entirely. The
+        //      drift gate owns WHEN a retrain happens; non-force callers (engine
+        //      open, ingest-path triggers) must NOT opportunistically retrain
+        //      trained slots. The decision seam records nothing for skipped slots
+        //      (absent = skip semantics).
+        //   2. no persisted basis row (empty existing_digest) → first training,
+        //      force or not. Counts path cannot restore what was never written.
+        //      Records Corpus(FirstTrain).
+        //   3. force == true AND basis exists → attempt the counts path. The guard
+        //      chain (NoCountsRow, NotCountsCapable, DeltaNotFoldSafe,
+        //      PopulationMismatch, PendingUnresolvable) decides. An empty pending
+        //      delta folds nothing, publishes, and records CountsRestore.
+        //
+        // Drift-triggered reindex and migration rebuild call with force == true —
+        // they are the mission's target consumers of the counts path. force callers
+        // rely on publication side-effects: the basis-generation bump that
+        // invalidates coverage and triggers the re-embed backfill.
+        let mut jobs = Vec::new();
+        for candidate in &candidates {
+            let job_proto = ProviderTrainingJob {
+                slot_index: candidate.slot_index,
+                model_id: candidate.model_id.clone(),
+                model_version: candidate.model_version.clone(),
+                fresh_basis_blob: candidate.fresh_basis_blob.clone(),
+            };
+
+            // Non-force + already trained (has a persisted basis) → skip.
+            // The drift gate owns when retraining happens; skip without recording
+            // a decision (absent from seam = skip semantics, see seam doc).
+            if !force && !candidate.existing_digest.is_empty() {
+                digests.insert(
+                    candidate.model_id.clone(),
+                    candidate.existing_digest.clone(),
+                );
+                continue;
+            }
+
+            // No persisted basis row → first training, force or not.
+            // Counts path cannot restore what was never written.
+            if candidate.existing_digest.is_empty() {
+                let _ = self.record_path_decision(
+                    &candidate.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain),
+                );
+                jobs.push(job_proto);
+                continue;
+            }
+
+            // force == true AND basis exists → try the counts path. The guard
+            // chain decides; an empty pending delta folds nothing, publishes,
+            // and records CountsRestore.
+            match self.try_counts_path_for_job(&job_proto, &all_ids, indexed_states.len()) {
+                Ok(Some(decision)) => {
+                    // Counts path succeeded. Record decision and collect the
+                    // new basis digest so it can be returned in `digests`.
+                    let new_digest = self.slots[candidate.slot_index]
+                        .basis_digest
+                        .lock()
+                        .map(|g| g.clone())
+                        .unwrap_or_default();
+                    let _ = self.record_path_decision(&candidate.model_id, decision);
+                    digests.insert(candidate.model_id.clone(), new_digest);
+                    // Do NOT push to jobs — counts path handled it.
+                }
+                Ok(None) => {
+                    // Guard chain rejected; decision already recorded by
+                    // try_counts_path_for_job. Fall through to corpus path.
+                    jobs.push(job_proto);
+                }
+                Err(_) => {
+                    // Unexpected I/O failure. Fall back to corpus path so the
+                    // engine does not stall permanently.
+                    jobs.push(job_proto);
+                }
+            }
         }
+
         let cap = Self::provider_training_parallelism(all_ids.len(), jobs.len());
         for job_batch in jobs.chunks(cap) {
             let prepared: Vec<PreparedProviderTraining> = std::thread::scope(|scope| {
@@ -2825,6 +3293,21 @@ impl CorpusContentEngine {
                                     underlying: format!("{e:?}"),
                                 })?;
                         }
+                        // F-6: upsert sentinel rows for IDs that source.record()
+                        // could not resolve during training. These must be written
+                        // AFTER delete_references_into so the delete does not
+                        // immediately erase the sentinels. Sentinel rows have
+                        // revision=0 and digest="" — values that never satisfy the
+                        // admission digest-equality check, preventing ghost refs
+                        // from being admitted as pending deltas until the source
+                        // can resolve them again.
+                        for reference in &result.skipped_references {
+                            counts_store
+                                .upsert_reference_into(reference, &rows)
+                                .map_err(|e| persistence_kit::StorageError::BackendError {
+                                    underlying: format!("{e:?}"),
+                                })?;
+                        }
                         Ok(())
                     })
                     .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
@@ -2845,6 +3328,17 @@ impl CorpusContentEngine {
                     });
                 }
                 digests.insert(model_id.clone(), result.basis_digest);
+                // Record corpus-path decision for this model if not already set
+                // by the routing block above (first-train or guard-rejection).
+                // With the corrected routing every corpus-path job either had
+                // FirstTrain already recorded (new slot) or a guard reason set
+                // by try_counts_path_for_job (force path). This is the I/O-
+                // failure fallback: if neither was recorded, note FirstTrain as
+                // a safe default (the slot arrived here without a valid basis).
+                let _ = self.record_path_decision_if_absent(
+                    &model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain),
+                );
 
                 {
                     let mut seam = self.train_fault_after_model.lock().unwrap();
