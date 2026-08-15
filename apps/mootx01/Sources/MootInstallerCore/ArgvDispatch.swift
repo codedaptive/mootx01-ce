@@ -17,11 +17,11 @@
 // `mootx01-botLink` (BL-1): the explicit AI data path for cloud agents
 // whose only channel to this Mac is a permissioned one-shot shell. The
 // agent execs `mootx01-botLink <subcommand>` by name; argv0 dispatch
-// routes it to `BotLinkCommand` exactly as `mootx01-proxy` routes to
-// `ProxyCommand`. Unlike the proxy route, botLink invocations normally
-// carry explicit subcommand args (`ping`/`list`/`call`/`rpc`), so this
-// route only fires for a bare `mootx01-botLink` invocation and yields
-// BotLinkCommand's usage text via its default behavior.
+// prepends `botlink` so the invocation reaches `BotLinkCommand`'s
+// subcommands (`ping`/`list`/`call`/`rpc`). Unlike the proxy route —
+// which is a bare-invocation default because ProxyCommand takes no
+// subcommands — the botLink route namespaces args-carrying invocations
+// too: `mootx01-botLink ping` becomes `botlink ping`.
 //
 // This file is the PURE decision logic only — extracted into
 // MootInstallerCore (rather than living inline in MootMain.swift, an
@@ -50,22 +50,23 @@ public enum ArgvDispatch {
     /// Resolve the effective CLI arguments given the raw argv and how
     /// the binary was invoked.
     ///
-    /// Three injections, evaluated in this order, and ALL of them
-    /// only ever apply to a truly bare invocation (`rawArgs.isEmpty`).
-    /// None fires when the caller already named an explicit
-    /// subcommand (or passed `--help`/`--version`) — argv0 dispatch and
-    /// the bare-serve default are defaults for absent input, never
-    /// overrides of explicit input.
+    /// Three injections, evaluated in this order:
     ///
-    /// 1. `argv0`'s last path component is `mootx01-proxy` → inject
-    ///    `["proxy"]`.
-    /// 2. `argv0`'s last path component is `mootx01-botLink` → inject
-    ///    `["botlink"]` (BL-1, same mechanism as the proxy route).
-    /// 3. Otherwise, `stdinIsPipe` (non-interactive) → inject `["serve"]`.
-    ///    This is the PRE-EXISTING MCP-client back-compat default
-    ///    (originally inline in MootMain.swift: a client config with
-    ///    `"command": "mootx01"` and no subcommand still starts the
-    ///    server). Moved here unchanged so all defaults share one
+    /// 1. `argv0`'s last path component is `mootx01-botLink` → PREPEND
+    ///    `"botlink"` to the raw args (BL-1). This route namespaces rather
+    ///    than defaulting: the symlink IS the cloud agent's command surface,
+    ///    so `mootx01-botLink ping` must reach `botlink ping` and
+    ///    `mootx01-botLink --help` must print botlink usage. A leading
+    ///    explicit `botlink` is left untouched (no double-prepend).
+    /// 2. `argv0`'s last path component is `mootx01-proxy` AND the
+    ///    invocation is truly bare (`rawArgs.isEmpty`) → inject `["proxy"]`.
+    ///    ProxyCommand takes no subcommands, so the bare-only default is the
+    ///    whole surface; explicit args always pass through unchanged.
+    /// 3. Otherwise, bare invocation with `stdinIsPipe` (non-interactive) →
+    ///    inject `["serve"]`. This is the PRE-EXISTING MCP-client
+    ///    back-compat default (originally inline in MootMain.swift: a client
+    ///    config with `"command": "mootx01"` and no subcommand still starts
+    ///    the server). Moved here unchanged so all defaults share one
     ///    tested decision point.
     ///
     /// - Parameters:
@@ -83,13 +84,17 @@ public enum ArgvDispatch {
         rawArgs: [String],
         stdinIsPipe: Bool
     ) -> [String] {
-        guard rawArgs.isEmpty else { return rawArgs }
         let basename = (argv0 as NSString).lastPathComponent
+        if basename == botLinkInvocationName {
+            // Namespacing route — see rule 1 in the doc comment. Evaluated
+            // before the bare-invocation guard because it applies to args-
+            // carrying invocations too (`mootx01-botLink ping`).
+            if rawArgs.first == "botlink" { return rawArgs }
+            return ["botlink"] + rawArgs
+        }
+        guard rawArgs.isEmpty else { return rawArgs }
         if basename == proxyInvocationName {
             return ["proxy"]
-        }
-        if basename == botLinkInvocationName {
-            return ["botlink"]
         }
         if stdinIsPipe {
             return ["serve"]

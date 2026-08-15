@@ -82,14 +82,28 @@ struct ArgvDispatchTests {
         ) == ["botlink"], "argv0 dispatch takes precedence over the bare-pipe serve default")
     }
 
-    @Test("argv0 mootx01-botLink with an explicit subcommand is left untouched")
-    func argv0BotLinkBasenameWithExplicitArgsUntouched() {
+    @Test("argv0 mootx01-botLink namespaces subcommand args under botlink")
+    func argv0BotLinkBasenamePrependsBotlink() {
+        // Unlike the proxy route (bare-only — ProxyCommand takes no
+        // subcommands), the botLink symlink IS the command surface for cloud
+        // agents: `mootx01-botLink ping` must reach `botlink ping`, so the
+        // route prepends rather than firing on bare argv0 only.
         #expect(ArgvDispatch.resolvedArguments(
             argv0: "/usr/local/bin/mootx01-botLink", rawArgs: ["ping"], stdinIsPipe: false
-        ) == ["ping"])
+        ) == ["botlink", "ping"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["call", "estate_ping"], stdinIsPipe: true
+        ) == ["botlink", "call", "estate_ping"])
         #expect(ArgvDispatch.resolvedArguments(
             argv0: "mootx01-botLink", rawArgs: ["--help"], stdinIsPipe: true
-        ) == ["--help"], "explicit flags must fall through to ArgumentParser, never be overridden")
+        ) == ["botlink", "--help"], "help under the symlink shows botlink usage, not the root usage")
+    }
+
+    @Test("argv0 mootx01-botLink with an explicit leading botlink does not double-prepend")
+    func argv0BotLinkExplicitBotlinkNotDoubled() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["botlink", "ping"], stdinIsPipe: false
+        ) == ["botlink", "ping"])
     }
 
     @Test("only the exact basename mootx01-botLink triggers dispatch — a partial match does not")
