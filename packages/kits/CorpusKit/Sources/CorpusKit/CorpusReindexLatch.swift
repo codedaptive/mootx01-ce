@@ -6,8 +6,10 @@
 // after a successful rebuild completes.
 //
 // Protocol (REINDEX_REQUIRED_MIGRATION_DESIGN §3.2):
-//   1. Check the reindex stream: if a job already exists, go straight to
-//      the bit-set step.
+//   0. Read the manifest flag. If already set, a rebuild is already owed —
+//      return immediately without touching the queue.
+//   1. Check the reindex stream: if a pending ('new') job already exists,
+//      go straight to the bit-set step.
 //   2. Enqueue a reindex marker job (best-effort; errors captured, not thrown).
 //   3. Read back once — a call that returns without erroring is not proof
 //      of a durable row.
@@ -15,13 +17,20 @@
 //   5. No job: leave the flag clear, print the deferral line.
 //
 // Rules (§3.2):
+//   • Dedupe via the manifest flag (step 0) — not via the stream count.
+//     `pendingCount(stream:)` counts only `status = 'new'` rows; once the
+//     drainer claims the job ('new' → 'cur') or the job completes ('done'),
+//     it returns 0 and a naive stream-count guard would fire a second enqueue.
+//     The manifest flag is the durable "rebuild owed" record and is cleared
+//     only by a successful rebuild; checking it first closes both the
+//     claim-window and the completion-window.
 //   • Enqueue first, record after. Bit-without-job is the silent failure.
 //   • Verify by read-back, not by trusting the enqueue return value.
 //   • No retry loop. The shape reads like it wants a `while`; one attempt
 //     only, then out.
-//   • Keyed on a fixed stream ID. A second enqueue is a no-op; the stream
-//     key deduplicates at the backend.
-//   • Called at the tail of the train. N steps produce exactly one rebuild.
+//   • Called at the tail of a sequential migration train. N steps produce
+//     exactly one rebuild. Concurrent callers are outside the documented
+//     contract; window (iii) is not addressed here.
 //   • Cleared only by a successful rebuild — never here.
 
 import Foundation
@@ -33,9 +42,11 @@ import SubstrateTypes
 // OSLog category matches the CorpusKit convention (category = module name).
 private let latchLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
-/// The QueueKit stream for reindex marker jobs. Fixed string — a second
-/// enqueue on this stream is a no-op rather than a second row. The stream key
-/// is the durable backstop; the manifest flag is the fast in-process guard.
+/// The QueueKit stream for reindex marker jobs. Fixed string scoping all
+/// reindex marker jobs to a single well-known stream. Dedupe is performed via
+/// the manifest flag check in `reindexRequired` — the stream key alone does
+/// NOT prevent duplicate jobs because the queue backend deduplicates only by
+/// job ID (primary key), not by stream.
 ///
 /// Rust twin: the string literal `"reindex"` in `reindex_latch.rs`.
 internal let reindexStreamID = StreamID(rawValue: "reindex")
@@ -68,10 +79,17 @@ private let reindexJobPriority = 80
 
 /// Mark that a corpus reindex is owed.
 ///
-/// Enqueues a marker job on the fixed `"reindex"` stream, reads back once to
-/// confirm durability, and sets an estate-manifest flag only when the job
-/// exists. No argument, no retry loop — one attempt, one verification, then
-/// out. N calls from N migration steps produce exactly one queued rebuild.
+/// Checks the durable manifest flag first: if a rebuild is already owed,
+/// returns immediately without touching the queue. Otherwise enqueues a
+/// marker job on the fixed `"reindex"` stream, reads back once to confirm
+/// durability, and sets the estate-manifest flag only when the job exists.
+/// No argument, no retry loop — one attempt, one verification, then out.
+/// N calls from N migration steps produce exactly one queued rebuild.
+///
+/// Dedupe is performed via the manifest flag rather than the stream job count
+/// because `pendingCount(stream:)` counts only `status = 'new'` rows: once
+/// the drainer claims the job ('new' → 'cur') or the job completes ('done'),
+/// the count returns 0 and a stream-count guard would fire a second enqueue.
 ///
 /// When the enqueue does not take, prints the deferral line to stdout and
 /// returns without error. The daily maintenance duty heals the miss within
@@ -79,12 +97,45 @@ private let reindexJobPriority = 80
 ///
 /// - Parameters:
 ///   - queue: The estate's shared `queue.sqlite`-backed `QueueKit`.
-///   - storage: The estate storage; `rowStore` is used to write the manifest
-///     flag. The caller must ensure `storage` is open and writable.
+///   - storage: The estate storage; `rowStore` is used to read and write the
+///     manifest flag. The caller must ensure `storage` is open and writable.
 ///   - now: The caller's timestamp — this function never calls `Date()`.
 public func reindexRequired(queue: QueueKit, storage: any Storage, now: Date) async throws {
-    // Step 1: check whether the stream already carries a pending job from a
-    // prior latch call on this upgrade run. If so, skip straight to the
+    // Step 0: if the manifest flag is already set, a rebuild is already owed.
+    // Return immediately without touching the queue. This is the primary dedupe
+    // guard — it closes both the claim-window (job is 'cur', pendingCount == 0)
+    // and the completion-window (job is 'done', pendingCount == 0) that a
+    // stream-count-only guard cannot see.
+    //
+    // The flag is read by VALUE, not by row presence. Step 4 writes "1"; a
+    // rebuild that clears the latch by updating the row's value to "0" rather
+    // than deleting the row would otherwise leave a row that reads as "set"
+    // forever, and this function would never enqueue another rebuild for the
+    // life of the estate. Comparing against "1" makes both clearing styles —
+    // delete-the-row and zero-the-value — behave identically. Integer 0/1 is
+    // accepted alongside text because the manifest column is untyped in SQLite
+    // and a writer may bind either representation.
+    let existingFlag = try await storage.rowStore.query(
+        table: "manifest",
+        where: .eq(Column(table: "manifest", name: "key"), .text(reindexManifestKey)),
+        orderBy: [], limit: 1, offset: nil)
+    let latchIsSet: Bool = {
+        guard let row = existingFlag.first else { return false }
+        switch row["value"] {
+        case .text(let s): return s == "1"
+        case .int(let i): return i != 0
+        default: return false
+        }
+    }()
+    if latchIsSet {
+        latchLog.info(
+            "CorpusReindexLatch: latch already set — rebuild already owed, skipping enqueue"
+        )
+        return
+    }
+
+    // Step 1: check whether the stream already carries a pending ('new') job
+    // from a prior latch call on this upgrade run. If so, skip straight to the
     // bit-set step — the job acts as the durable backstop.
     var existingCount = try await queue.pendingCount(stream: reindexStreamID)
 
