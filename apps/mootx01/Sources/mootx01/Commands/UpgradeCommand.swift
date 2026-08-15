@@ -5,9 +5,11 @@
 // (rust/src/commands/upgrade.rs):
 //
 //   Remote (default): fetch the latest GitHub release via ReleaseDownloader
-//   (SHA-256 + minisign on Linux/POSIX + tarball-member validation), confirm
-//   unless --yes, place, and run the convergence steps (plugin rematerialization,
-//   permission-tier migration, service restart).
+//   (SHA-256 + minisign signature verification on every platform +
+//   tarball-member validation — all inside download(), before anything is
+//   extracted, placed, or executed), confirm unless --yes, place, and run the
+//   convergence steps (plugin rematerialization, permission-tier migration,
+//   service restart).
 //
 //   Local (--from <path>): the developer workflow — copies a freshly built
 //   binary from an explicit path (e.g. --from .build/release/mootx01).
@@ -31,9 +33,10 @@ struct UpgradeCommand: AsyncParsableCommand {
         abstract: "Upgrade mootx01 to the latest release (or from a local build).",
         discussion: """
             Without flags, upgrade downloads the latest release (SHA-256
-            verified, with checksums.txt authenticated by minisign on
-            Linux/POSIX), installs it, converges plugin packages and tool
-            permissions, and restarts the background services.
+            verified, with checksums.txt authenticated by minisign before
+            anything is installed or executed), installs it, converges plugin
+            packages and tool permissions, and restarts the background
+            services.
 
             Use --from to install a local build instead of downloading:
               mootx01 upgrade --from .build/release/mootx01
@@ -155,10 +158,12 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // Source resolution, mirroring the Rust vertical: --from is the
-        // local developer path; the default is the verified remote download
-        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + independent
-        // checksums.txt authentication + tarball member validation, the
-        // machinery ReleaseDownloaderTests covers).
+        // local developer path (an explicit operator choice, exempt from the
+        // release-signature gate); the default is the verified remote download
+        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + minisign
+        // authentication of checksums.txt on every platform + tarball member
+        // validation, all gating inside download() itself, the machinery
+        // ReleaseDownloaderTests covers).
         let sourcePath: String
         var downloadTmpDir: URL?
         let isRemoteDownload: Bool
@@ -311,12 +316,16 @@ struct UpgradeCommand: AsyncParsableCommand {
         // otherwise every step below would run the version being replaced (see
         // the --converge-only flag comment).
         //
-        // This happens BEFORE the Gatekeeper quarantine tag is applied on
-        // purpose: executing a freshly quarantined binary makes the kernel hold
-        // it pre-`main` for assessment, which on an interactive machine surfaces
-        // an "app downloaded from the Internet" dialog and blocks until someone
-        // clicks. Tagging after the child exits keeps the assessment where it
-        // belongs — the operator's next run — and keeps the upgrade unattended.
+        // Security ordering (UP-01): the binary executed here has already passed
+        // the minisign Ed25519 verification gate inside download() — no remote
+        // artifact reaches this line unverified. The Gatekeeper quarantine tag
+        // is still applied only AFTER this re-exec, on purpose: executing a
+        // freshly quarantined binary makes the kernel hold it pre-`main` for
+        // assessment, which on an interactive machine surfaces an "app
+        // downloaded from the Internet" dialog and blocks until someone clicks.
+        // Tagging after the child exits keeps the upgrade unattended; the tag is
+        // defense-in-depth for the operator's next run, not the verification
+        // gate — the minisign check is the gate.
         let converged = await runConvergenceInNewBinary(
             binaryPath: binaryPath, home: home)
         if !converged {
@@ -687,11 +696,12 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     #if os(macOS)
     /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
-    /// which does not mark files as internet downloads. Restore the shell
-    /// installer's trust split by setting com.apple.quarantine on remotely
-    /// installed binaries so Gatekeeper assesses Developer ID/notarization on
-    /// first launch. This is best-effort, matching install.sh's non-fatal xattr
-    /// behavior.
+    /// which does not mark files as internet downloads. Setting
+    /// com.apple.quarantine on remotely installed binaries lets Gatekeeper
+    /// assess them on the operator's next launch. This is best-effort
+    /// defense-in-depth, not the verification gate: artifact authentication is
+    /// the fail-closed minisign check inside ReleaseDownloader.download(),
+    /// which has already succeeded before any placed binary reaches this tag.
     /// The post-install convergence sequence, in order.
     ///
     /// Extracted so it has exactly one definition shared by two callers: the
