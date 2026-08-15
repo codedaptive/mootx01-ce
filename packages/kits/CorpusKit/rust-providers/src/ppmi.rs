@@ -702,6 +702,31 @@ impl TrainableEmbeddingBasis for PpmiProvider {
     fn counts_contains_term(&self, term: &str) -> bool {
         self.co_count.contains_key(term)
     }
+
+    /// Derive the serving PPMI basis from restored co-occurrence counts.
+    ///
+    /// PPMI maintained counts hold the full raw co-occurrence state (`co_count`,
+    /// `term_count`, `total_pairs`, `total_terms`) — exactly what `finalize()`
+    /// consumes to derive `ppmi_vectors`. `finalize()` is a pure function of the
+    /// accumulated counts state. An empty `co_count` finalizes to an empty
+    /// `ppmi_vectors` map, matching `train_on_corpus` over an empty corpus, so
+    /// returning `true` unconditionally is honest.
+    fn finalize_from_counts(&mut self) -> bool {
+        self.finalize();
+        true
+    }
+
+    /// PPMI accumulation uses integer co-occurrence count maps. Integer addition
+    /// is commutative: the accumulated `co_count` / `term_count` / `total_pairs` /
+    /// `total_terms` are identical regardless of document fold order. `finalize()`
+    /// sorts all keys by raw UTF-8 bytes before iterating, making the derived PPMI
+    /// vectors fully order-independent. Delta-fold after restore is therefore safe:
+    /// folding additional texts into restored counts and calling `finalize_from_counts`
+    /// produces byte-identical `serialize_basis` output to a from-scratch fold over
+    /// the same corpus in canonical order.
+    fn counts_delta_fold_safe(&self) -> bool {
+        true
+    }
 }
 
 // MARK: - Unit tests

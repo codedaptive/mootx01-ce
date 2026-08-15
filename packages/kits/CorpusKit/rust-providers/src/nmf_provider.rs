@@ -727,6 +727,17 @@ impl TrainableEmbeddingBasis for NmfProvider {
     fn counts_contains_term(&self, term: &str) -> bool {
         self.counts.vocab.contains_key(term)
     }
+
+    /// NMF maintained counts hold only the vocabulary (term set) and document-count
+    /// trigger anchors — NOT the per-document TF rows that drive the NMF matrix
+    /// factorization. Those rows are deliberately not persisted; they are re-tokenized
+    /// from corpus text at refactor time (open decision 1: TF rows re-tokenized at
+    /// refactor). Without the TF rows, no counts-only basis derivation is possible.
+    /// This explicit `false` override is deliberate documentation-at-site: it makes
+    /// the insufficiency visible to readers of the impl, not just the trait default.
+    fn finalize_from_counts(&mut self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

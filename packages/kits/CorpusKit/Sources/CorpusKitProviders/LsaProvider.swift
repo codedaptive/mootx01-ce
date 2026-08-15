@@ -719,6 +719,18 @@ extension LsaProvider: TrainableEmbeddingBasis {
         counts.addDocumentForCountsAnchor(text)
     }
 
+    /// LSA's counts blob holds only vocabulary and documentCount trigger anchors —
+    /// NOT the per-document TF rows the TF-IDF matrix and Jacobi SVD require.
+    /// `finalize()` needs the full per-document term-frequency input, which is
+    /// re-derived by re-tokenizing the corpus at refactor time (open design
+    /// decision: re-tokenize at refactor). No counts-only basis derivation is
+    /// possible; this method makes no state change and returns `false`.
+    ///
+    /// This explicit override documents at-site why LSA cannot support
+    /// counts-only refactoring, rather than relying silently on the protocol
+    /// default. The caller must keep the corpus re-tokenization path.
+    public func finalizeFromCounts() -> Bool { false }
+
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { counts.vocabularySize }
 

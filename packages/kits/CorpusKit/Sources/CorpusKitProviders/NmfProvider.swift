@@ -675,6 +675,18 @@ extension NmfProvider: TrainableEmbeddingBasis {
         counts.addDocumentForCountsAnchor(text)
     }
 
+    /// NMF's counts blob holds only vocabulary and documentCount trigger anchors —
+    /// NOT the per-document TF rows the NMF factorization requires. `finalize()`
+    /// needs the full per-document TF matrix, which is re-derived by re-tokenizing
+    /// the corpus at refactor time (open design decision: re-tokenize at refactor).
+    /// No counts-only basis derivation is possible; this method makes no state
+    /// change and returns `false`.
+    ///
+    /// This explicit override documents at-site why NMF cannot support
+    /// counts-only refactoring, rather than relying silently on the protocol
+    /// default. The caller must keep the corpus re-tokenization path.
+    public func finalizeFromCounts() -> Bool { false }
+
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { counts.vocabularySize }
 

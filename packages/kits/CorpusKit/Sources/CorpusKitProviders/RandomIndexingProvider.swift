@@ -555,4 +555,28 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
     public func countsContainsTerm(_ term: String) -> Bool {
         vocab[term] != nil
     }
+
+    /// The restored RI vocabulary IS the finalized basis. The RICT counts blob
+    /// carries the same `vocab` payload as the basis blob (term → context vector);
+    /// `restoreCounts(from:)` or `restoreCounts(header:terms:)` populates `vocab`
+    /// directly. `serializeBasis()` then serializes that vocab under the RIB1
+    /// basis magic, reproducing the published bytes exactly — no separate finalization
+    /// step is needed. Returns `true` immediately; the body is a no-op.
+    public func finalizeFromCounts() -> Bool {
+        // RI's context vectors are their own basis. Restoration via restoreCounts
+        // is the complete "finalization": the vocab is already in place.
+        return true
+    }
+
+    /// RI's float in-place accumulation is order-sensitive (reviewer finding F-3):
+    /// float addition is not associative, so folding additional texts into a
+    /// restored vocab can produce context vectors that differ by a floating-point
+    /// rounding step from a from-scratch fold in canonical document order. For RI
+    /// the correct retrain path is restore-only — the RICT blob holds the complete
+    /// accumulated state, so no delta is applied after restore.
+    ///
+    /// This explicit `false` is documentation at-site of the F-3 constraint; the
+    /// protocol default is also `false`, but the override records the WHY so the
+    /// next reader does not assume RI is commutative.
+    public var countsDeltaFoldSafe: Bool { false }
 }

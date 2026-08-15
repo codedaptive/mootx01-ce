@@ -247,6 +247,30 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// MUST NOT be silently eligible.
     func finalizeFromCounts() -> Bool
 
+    /// Whether folding ADDITIONAL texts into RESTORED maintained counts produces
+    /// bytes identical to a from-scratch fold over the same corpus in canonical
+    /// order.
+    ///
+    /// `true` only for providers whose accumulation is commutative — PPMI uses
+    /// integer count maps (coCount, termCount, totalPairs, totalTerms) whose fold
+    /// order is irrelevant to the derived basis. The finalize pass is a pure
+    /// function of those counts, so restore + delta + finalize == from-scratch.
+    ///
+    /// `false` for float in-place accumulation (RandomIndexing): float addition
+    /// is not associative, so folding additional texts after restore can produce
+    /// context vectors that differ by a floating-point rounding step from a
+    /// from-scratch fold in canonical order (reviewer finding F-3). For RI the
+    /// counts path is restore-only with an EMPTY delta — no further accumulation.
+    ///
+    /// `false` is also correct for providers whose counts blob is insufficient to
+    /// derive the basis at all (LSA, NMF), though that property is governed by
+    /// `finalizeFromCounts()` returning `false`. The retrain wiring (Part 3)
+    /// reads `countsDeltaFoldSafe` only after `finalizeFromCounts() == true`.
+    ///
+    /// **Default `false`:** delta-fold eligibility is an explicit, audited opt-in.
+    /// A conformer that has not proved commutativity MUST keep the default.
+    var countsDeltaFoldSafe: Bool { get }
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
@@ -290,4 +314,10 @@ public extension TrainableEmbeddingBasis {
     /// after the finalize pass completes; LSA and NMF keep the default because
     /// their per-document TF input is not persisted in the counts blob.
     func finalizeFromCounts() -> Bool { false }
+
+    /// Default: delta-fold after restore is not safe. Providers whose accumulation
+    /// is order-sensitive (float in-place, e.g. RandomIndexing) or whose counts
+    /// blob does not fully determine the basis (LSA, NMF) keep this default.
+    /// PPMI overrides to `true` because its integer count maps are commutative.
+    var countsDeltaFoldSafe: Bool { false }
 }

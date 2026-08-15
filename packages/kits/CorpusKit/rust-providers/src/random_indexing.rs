@@ -649,6 +649,29 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
     fn counts_contains_term(&self, term: &str) -> bool {
         self.vocab.contains_key(term)
     }
+
+    /// Derive the serving basis from restored counts — a no-op for RI.
+    ///
+    /// RI's maintained counts payload IS the basis vocabulary (term → context
+    /// vectors). Restoring via `restore_counts` or `restore_counts_from_parts`
+    /// already populates `vocab`. There is no separate finalize pass (RI
+    /// accumulation is finalization-free). `serialize_basis` over the restored
+    /// vocab reproduces the published bytes exactly.
+    fn finalize_from_counts(&mut self) -> bool {
+        // No-op: restored vocab IS the basis; serialize_basis can be called directly.
+        true
+    }
+
+    /// RI float accumulation is NOT commutative (Finding F-3): context vectors
+    /// are running f32 sums, and IEEE 754 f32 addition is not associative.
+    /// Folding additional texts into restored counts in a different order from the
+    /// original corpus changes the byte output of `serialize_basis`. Therefore
+    /// delta-fold after restore is unsupported for RI; the counts path is
+    /// restore-only with an EMPTY delta. Use `train_on_corpus` from scratch for
+    /// any fold that changes document order.
+    fn counts_delta_fold_safe(&self) -> bool {
+        false
+    }
 }
 
 // MARK: - Unit tests

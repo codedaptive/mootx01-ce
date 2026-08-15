@@ -665,6 +665,29 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         self.totalTerms = totalTerms
     }
 
+    /// PPMI's `finalize()` is a pure function of the restored co-occurrence state
+    /// (coCount, termCount, totalPairs, totalTerms) — exactly the four fields the
+    /// PPMC counts blob holds. Running `finalize()` after `restoreCounts` derives
+    /// `ppmiVectors` byte-identically to a from-scratch `trainOnCorpus` over the
+    /// same accumulated corpus. That byte-identity through the digest gate is the
+    /// acceptance contract.
+    ///
+    /// An empty restored state (zero counts) finalizes to an empty `ppmiVectors`,
+    /// which matches `trainOnCorpus` over an empty corpus — so returning `true`
+    /// is honest for both the populated and the empty-corpus edge cases.
+    public func finalizeFromCounts() -> Bool {
+        finalize()
+        return true
+    }
+
+    /// PPMI's accumulation is over integer maps (coCount, termCount, totalPairs,
+    /// totalTerms). Integer addition is commutative and associative: the four
+    /// count maps are identical regardless of the order in which documents are
+    /// folded. `finalize()` is a pure function of those maps, so a delta fold
+    /// after restore in any order yields byte-identical ppmiVectors to a
+    /// from-scratch fold in canonical document order.
+    public var countsDeltaFoldSafe: Bool { true }
+
     /// Maintained vocabulary size for the growth trigger: the count of unique
     /// target terms seen during accumulation (before PPMI filtering), which is
     /// the vocabulary the next finalize will derive from.

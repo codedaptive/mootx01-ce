@@ -271,6 +271,36 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         false
     }
 
+    /// Whether folding additional texts into RESTORED maintained counts produces
+    /// bytes identical to a from-scratch fold over the same corpus in canonical order.
+    ///
+    /// ## Contract
+    ///
+    /// `true` only for providers whose raw accumulation is commutative — i.e.,
+    /// fold order does not affect the byte output of `finalize_from_counts` →
+    /// `serialize_basis`. This is the provider-side discriminator the retrain
+    /// wiring (Part 3) reads to decide whether a delta-fold after restore is safe.
+    ///
+    /// - **PPMI** (`true`): accumulation is integer co-occurrence count maps.
+    ///   Integer addition is commutative; the `finalize` pass sorts keys by raw
+    ///   UTF-8 bytes before iterating, so the derived PPMI vectors are independent
+    ///   of the fold order.
+    ///
+    /// - **RandomIndexing** (`false` — Finding F-3): context vectors are running
+    ///   f32 sums. f32 addition is NOT associative; folding additional texts into
+    ///   restored counts in a different order than the original corpus changes the
+    ///   byte output of `serialize_basis`. The counts path for RI is therefore
+    ///   restore-only with an EMPTY delta.
+    ///
+    /// ## Default
+    ///
+    /// `false`. Delta-fold eligibility after restore is an explicit, audited
+    /// opt-in. A conformer that has not audited its accumulation semantics MUST NOT
+    /// be silently eligible; the conservative default ensures it isn't.
+    fn counts_delta_fold_safe(&self) -> bool {
+        false
+    }
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.

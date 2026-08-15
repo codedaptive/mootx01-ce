@@ -686,3 +686,350 @@ struct BasisPersistenceTests {
         }
     }
 }
+
+// MARK: - CountsRefactorDigestGates
+
+/// Byte-identity digest gates for the maintained-counts seam.
+///
+/// Pure provider-level tests — no storage, no Corpus. Each gate verifies a
+/// property that the retrain wiring (Part 3) depends on:
+///
+///   T1–T4  RandomIndexing: restore→finalize byte-identity; term-row round-trip;
+///          permuted fold order (F-3 pin); corrupted term row.
+///   T5–T8  PPMI: restore→finalize byte-identity; delta-fold extend;
+///          permuted fold order (commutativity); corrupted blob.
+///   T9–T10 LSA / NMF: counts-only unsupported, state unchanged.
+///
+/// Providers are constructed with their default inits so scratch / counts-side
+/// / restored instances share identity, matching the existing serialization
+/// test pattern in PpmiBasisSerializationTests.swift.
+@Suite("CountsRefactorDigestGates")
+struct CountsRefactorDigestGates {
+
+    // MARK: Fixture corpus
+    //
+    // Eight short docs with deliberately shared terms across docs so fold ORDER
+    // changes the sequence in which float values accumulate in RI context vectors
+    // (verifying F-3 sensitivity or the lack thereof for small corpora — T3 pins
+    // whichever outcome is observed). Unique-per-doc terms keep vocab non-trivial.
+    private let corpus: [String] = [
+        "car engine drive road vehicle",
+        "road leads city transport route",
+        "city cars traffic congestion roads",
+        "drive car work commute daily",
+        "engine powers car fuel combustion",
+        "road work ahead slow lane merge",
+        "city traffic slow delay signal",
+        "engine runs road speed distance route"
+    ]
+
+    // MARK: - T1: RI restore → finalize byte-identity
+
+    /// Scratch `trainOnCorpus` and counts-side `addToCounts` + `restoreCounts` +
+    /// `finalizeFromCounts` must produce byte-identical `serializeBasis()` output.
+    /// This is the core acceptance contract for the RI counts path.
+    @Test("T1: RI restore→finalize byte-identity")
+    func riRestoreFinalizeBytesMatch() throws {
+        // Scratch: canonical training path.
+        let scratch = RandomIndexingProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        // Counts side: fold via addToCounts in the same document order.
+        let countsSide = RandomIndexingProvider()
+        for doc in corpus { countsSide.addToCounts(text: doc) }
+        let countsBlob = countsSide.serializeCounts()
+
+        // Restore into a fresh provider and finalize.
+        let restored = RandomIndexingProvider()
+        try restored.restoreCounts(from: countsBlob)
+        #expect(restored.finalizeFromCounts() == true,
+                "RI finalizeFromCounts must return true: restored vocab IS the basis")
+        let b = restored.serializeBasis()
+
+        #expect(a == b,
+                "T1: RI serializeBasis after restore must be byte-identical to scratch")
+    }
+
+    // MARK: - T2: RI v4 term-row round-trip
+
+    /// decomposeCounts → restoreCounts(header:terms:) → finalizeFromCounts →
+    /// serializeBasis must reproduce the scratch bytes. Promotes the term-row
+    /// codec through the finalizeFromCounts seam.
+    @Test("T2: RI term-row round-trip via decomposeCounts")
+    func riTermRowRoundTrip() throws {
+        let scratch = RandomIndexingProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let countsSide = RandomIndexingProvider()
+        for doc in corpus { countsSide.addToCounts(text: doc) }
+        guard let decomposed = countsSide.decomposeCounts() else {
+            Issue.record("T2: decomposeCounts returned nil for RI — expected non-nil")
+            return
+        }
+
+        let fresh = RandomIndexingProvider()
+        try fresh.restoreCounts(header: decomposed.header, terms: decomposed.terms)
+        #expect(fresh.finalizeFromCounts() == true,
+                "T2: RI finalizeFromCounts must return true after term-row restore")
+        let c = fresh.serializeBasis()
+
+        #expect(c == a,
+                "T2: RI serializeBasis after term-row restore must be byte-identical to scratch")
+    }
+
+    // MARK: - T3: RI permuted fold order (F-3 gate)
+
+    /// Fold addToCounts over the REVERSED corpus, serialize, restore, finalize,
+    /// and compare bytes to scratch. This pins the observed order-sensitivity of
+    /// RI's float accumulation (reviewer finding F-3).
+    ///
+    /// For small corpora (each dimension sum bounded by a few dozen ±1 additions)
+    /// float32 represents the partial sums exactly and no rounding divergence
+    /// occurs — the bytes come out EQUAL. This is the expected outcome for this
+    /// fixture corpus and is documented here so the test gates the behaviour
+    /// rather than assuming inequality. A larger corpus with sums exceeding the
+    /// float32 exact-integer range (2^24) would diverge; that regime is the F-3
+    /// concern in production.
+    @Test("T3: RI permuted fold order pins F-3 observed behaviour")
+    func riPermutedFoldOrderObserved() throws {
+        let scratch = RandomIndexingProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let reversed = RandomIndexingProvider()
+        for doc in corpus.reversed() { reversed.addToCounts(text: doc) }
+        let reversedBlob = reversed.serializeCounts()
+
+        let restoredReversed = RandomIndexingProvider()
+        try restoredReversed.restoreCounts(from: reversedBlob)
+        _ = restoredReversed.finalizeFromCounts()
+        let d = restoredReversed.serializeBasis()
+
+        // OBSERVED OUTCOME (run first, assertion updated to match):
+        // For this 8-doc corpus each per-dimension sum is bounded by
+        // ±(window * docs) ≈ ±32, well within float32's exact-integer range
+        // (2^24 ≈ 16.7M). All additions are exact regardless of order, so the
+        // bytes are EQUAL. This is the correct assertion for this fixture;
+        // a corpus with much larger per-dimension sums would produce UNEQUAL
+        // bytes, exposing the F-3 rounding sensitivity.
+        #expect(a == d,
+                "T3: small corpus RI — reversed fold order yields same bytes (sums fit exact float32)")
+    }
+
+    // MARK: - T4: RI corrupted term row
+
+    /// Flipping one byte in the middle of a term's vector Data must cause
+    /// either a decoding failure OR a finalized basis whose bytes differ from
+    /// the scratch basis. The disjunction guards against silent bit-flip
+    /// acceptance that could produce a subtly wrong basis.
+    @Test("T4: RI corrupted term row causes decode failure or basis divergence")
+    func riCorruptedTermRow() throws {
+        let scratch = RandomIndexingProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let countsSide = RandomIndexingProvider()
+        for doc in corpus { countsSide.addToCounts(text: doc) }
+        guard var decomposed = countsSide.decomposeCounts() else {
+            Issue.record("T4: decomposeCounts returned nil — cannot test corruption path")
+            return
+        }
+
+        // Flip one byte in the middle of the first term's vector payload. The
+        // vector bytes are raw float32 data; flipping a bit mid-payload corrupts
+        // one float component without triggering a length mismatch.
+        guard !decomposed.terms.isEmpty else {
+            Issue.record("T4: decomposed term list is empty — no term to corrupt")
+            return
+        }
+        var entry = decomposed.terms[0]
+        // Guard: vector must have at least 5 bytes (4-byte u32 length + payload).
+        guard entry.vector.count > 4 else {
+            Issue.record("T4: term vector too short to corrupt mid-payload")
+            return
+        }
+        let mid = entry.vector.count / 2
+        entry.vector[mid] ^= 0xFF
+        decomposed.terms[0] = entry
+
+        let corruptedProvider = RandomIndexingProvider()
+        do {
+            try corruptedProvider.restoreCounts(header: decomposed.header,
+                                                terms: decomposed.terms)
+            _ = corruptedProvider.finalizeFromCounts()
+            let e = corruptedProvider.serializeBasis()
+            // Decode succeeded; the corrupted float must change the basis bytes.
+            #expect(e != a,
+                    "T4: corrupted term row must produce different basis bytes than scratch")
+        } catch {
+            // A decoding failure is also an acceptable guard — the disjunction passes.
+        }
+    }
+
+    // MARK: - T5: PPMI restore → finalize byte-identity
+
+    /// Same shape as T1 but for PPMI. Counts blob holds integer co-occurrence
+    /// state; finalize() on the restored state must derive byte-identical
+    /// ppmiVectors to a from-scratch trainOnCorpus run.
+    @Test("T5: PPMI restore→finalize byte-identity")
+    func ppmiRestoreFinalizeBytesMatch() throws {
+        let scratch = PpmiProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let countsSide = PpmiProvider()
+        for doc in corpus { countsSide.addToCounts(text: doc) }
+        let countsBlob = countsSide.serializeCounts()
+
+        let restored = PpmiProvider()
+        try restored.restoreCounts(from: countsBlob)
+        #expect(restored.finalizeFromCounts() == true,
+                "T5: PPMI finalizeFromCounts must return true after restore")
+        let b = restored.serializeBasis()
+
+        #expect(a == b,
+                "T5: PPMI serializeBasis after restore+finalize must be byte-identical to scratch")
+    }
+
+    // MARK: - T6: PPMI delta-fold extend
+
+    /// Counts over the first 5 docs → serialize → restore into fresh →
+    /// addToCounts the remaining 3 docs → finalizeFromCounts → serializeBasis
+    /// must equal scratch trainOnCorpus over all 8.
+    ///
+    /// Promotes the P2 codec commutative property through the new seam; pattern
+    /// precedent: PpmiBasisSerializationTests.swift countsIncrementalExtendEqualsFromScratch.
+    @Test("T6: PPMI delta-fold after restore equals from-scratch over full corpus")
+    func ppmiDeltaFoldExtendsCorrectly() throws {
+        // Head: first 5 docs.
+        let head = PpmiProvider()
+        for doc in corpus.prefix(5) { head.addToCounts(text: doc) }
+        let headBlob = head.serializeCounts()
+
+        // Restore and extend with the remaining 3 docs.
+        let extended = PpmiProvider()
+        try extended.restoreCounts(from: headBlob)
+        for doc in corpus.dropFirst(5) { extended.addToCounts(text: doc) }
+        #expect(extended.finalizeFromCounts() == true,
+                "T6: PPMI finalizeFromCounts must return true after delta extend")
+        let f = extended.serializeBasis()
+
+        // From-scratch over all 8 docs.
+        let fullScratch = PpmiProvider()
+        fullScratch.trainOnCorpus(texts: corpus)
+        let g = fullScratch.serializeBasis()
+
+        #expect(f == g,
+                "T6: PPMI delta-fold extend must produce byte-identical basis to full scratch")
+    }
+
+    // MARK: - T7: PPMI permuted fold order
+
+    /// Fold addToCounts over REVERSED corpus → restore → finalize → bytes EQUAL
+    /// to scratch. Asserts the integer-map commutativity that countsDeltaFoldSafe
+    /// declares: any fold order yields the same counts, the same finalize, the
+    /// same bytes.
+    @Test("T7: PPMI permuted fold order yields identical basis (commutativity)")
+    func ppmiPermutedFoldOrderIsCommutative() throws {
+        let scratch = PpmiProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let reversed = PpmiProvider()
+        for doc in corpus.reversed() { reversed.addToCounts(text: doc) }
+        let reversedBlob = reversed.serializeCounts()
+
+        let restoredReversed = PpmiProvider()
+        try restoredReversed.restoreCounts(from: reversedBlob)
+        #expect(restoredReversed.finalizeFromCounts() == true,
+                "T7: PPMI finalizeFromCounts must return true after reversed-fold restore")
+        let h = restoredReversed.serializeBasis()
+
+        #expect(h == a,
+                "T7: PPMI reversed fold order must yield byte-identical basis (integer-map commutativity)")
+    }
+
+    // MARK: - T8: PPMI corrupted blob
+
+    /// Flip one byte at roughly 3/4 of the blob length (inside the map payload
+    /// region, past magic/version/ids). Restore must throw OR the finalized bytes
+    /// must differ from scratch. Guards against silent corruption acceptance.
+    @Test("T8: PPMI corrupted blob causes decode failure or basis divergence")
+    func ppmiCorruptedBlobGuardsAgainstSilentAcceptance() throws {
+        let scratch = PpmiProvider()
+        scratch.trainOnCorpus(texts: corpus)
+        let a = scratch.serializeBasis()
+
+        let countsSide = PpmiProvider()
+        for doc in corpus { countsSide.addToCounts(text: doc) }
+        var blobBytes = [UInt8](countsSide.serializeCounts())
+
+        // Flip one byte at 3/4 through the blob — past magic (4) + version (1) +
+        // string headers, well into the map payload region.
+        guard blobBytes.count > 20 else {
+            Issue.record("T8: PPMI counts blob too small to corrupt at 3/4 position")
+            return
+        }
+        let target = blobBytes.count * 3 / 4
+        blobBytes[target] ^= 0xFF
+
+        let corruptedProvider = PpmiProvider()
+        do {
+            try corruptedProvider.restoreCounts(from: Data(blobBytes))
+            _ = corruptedProvider.finalizeFromCounts()
+            let corrupted = corruptedProvider.serializeBasis()
+            // Restore succeeded; the corrupted counts must change the basis bytes.
+            #expect(corrupted != a,
+                    "T8: corrupted PPMI blob must produce different basis bytes than scratch")
+        } catch {
+            // A decoding failure is also acceptable — the disjunction passes.
+        }
+    }
+
+    // MARK: - T9: LSA counts-only unsupported
+
+    /// Build counts via addToCounts, serialize, restore into a fresh provider,
+    /// capture serializeBasis() before finalizeFromCounts(). Assert the method
+    /// returns false and that serializeBasis() is unchanged (state must not be
+    /// mutated by a false-returning finalizeFromCounts call).
+    @Test("T9: LSA finalizeFromCounts returns false and leaves state unchanged")
+    func lsaCountsOnlyUnsupported() throws {
+        let lsaP = LsaProvider()
+        for doc in corpus { lsaP.addToCounts(text: doc) }
+        let lsaBlob = lsaP.serializeCounts()
+
+        let lsaRestored = LsaProvider()
+        try lsaRestored.restoreCounts(from: lsaBlob)
+        // Capture serializeBasis before calling finalizeFromCounts — the call
+        // must not alter the provider's state.
+        let pre = lsaRestored.serializeBasis()
+
+        #expect(lsaRestored.finalizeFromCounts() == false,
+                "T9: LSA finalizeFromCounts must return false (TF rows not persisted)")
+        #expect(lsaRestored.serializeBasis() == pre,
+                "T9: LSA state must be unchanged after finalizeFromCounts() == false")
+    }
+
+    // MARK: - T10: NMF counts-only unsupported
+
+    /// Same as T9 for NMF. The counts blob holds only vocab + documentCount
+    /// anchors; per-document TF rows required by NMF factorization are not
+    /// persisted, so finalizeFromCounts must return false without mutating state.
+    @Test("T10: NMF finalizeFromCounts returns false and leaves state unchanged")
+    func nmfCountsOnlyUnsupported() throws {
+        let nmfP = NmfProvider()
+        for doc in corpus { nmfP.addToCounts(text: doc) }
+        let nmfBlob = nmfP.serializeCounts()
+
+        let nmfRestored = NmfProvider()
+        try nmfRestored.restoreCounts(from: nmfBlob)
+        let pre = nmfRestored.serializeBasis()
+
+        #expect(nmfRestored.finalizeFromCounts() == false,
+                "T10: NMF finalizeFromCounts must return false (TF rows not persisted)")
+        #expect(nmfRestored.serializeBasis() == pre,
+                "T10: NMF state must be unchanged after finalizeFromCounts() == false")
+    }
+}
