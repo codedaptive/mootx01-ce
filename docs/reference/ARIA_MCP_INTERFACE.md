@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.43.0
+version: 1.44.0
 status: accepted-1.1-target
-date: 2026-08-14
+date: 2026-08-15
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1270,6 +1270,35 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.44.0 -- 2026-08-15
+
+- `moot_timing_report` window is bounded at the call level (AT-01,
+  Codex Finding A): each call collects at most 262,144 audit events
+  (64 full pages of 4,096; ~1.6× the largest real estate's audit log,
+  measured 2026-08-15 at 162,860 events / 33 MB / ~216 B per row). A
+  clamped call derives over what it collected and appends a final line
+  `window: truncated at 262144 events — pass watermark_ms back as
+  since_ms to continue`; untruncated reports keep the previous shape
+  byte-identical. Clamp, not reject — the existing `watermark_ms`
+  paging contract continues the scan. Both ports; tool descriptions
+  updated to drop the unbounded "full-history scan" promise. The Rust
+  port additionally seeds its paging cursor from `since_ms` (it
+  previously re-paged the whole log from epoch on every call —
+  same-symbol parity fix; the A6 exactly-once derivation contract is
+  unchanged).
+- Hint appenders preserve multi-block results (AT-01, Codex Finding B,
+  Swift only): `appendUnknownArgsHint` and `applyHint` previously
+  collapsed any result to its first content block, destroying
+  `moot_json_import`'s `id_map` block whenever a hint fired. Both now
+  append the hint to the first block's text and carry all trailing
+  blocks through unchanged, matching the Rust `inject_hint` /
+  `inject_unknown_args_hint` in-place behavior (Rust never had the
+  defect). Error results remain untouched by the hint path.
+- New tests: Swift `MultiBlockHintAndTimingWindowTests` (4); Rust
+  `interface_tools::timing_window_tests` (2) plus `dispatch_tests`
+  `timing_report_small_estate_has_watermark_and_no_truncation_line` and
+  `json_import_id_map_block_survives_unknown_arg_hint`.
 
 ### 1.43.0 -- 2026-08-14
 

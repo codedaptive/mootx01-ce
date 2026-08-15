@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.37.3
+version: 1.38.0
 status: accepted-1.1-target
-date: 2026-08-14
+date: 2026-08-15
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1059,6 +1059,21 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.38.0 -- 2026-08-15
+
+- `moot_timing_report` gains a call-level collection bound (AT-01):
+  at most 262,144 audit events per call, clamp-not-reject, with the
+  clamp reported in the result text and the `watermark_ms` paging
+  contract continuing the scan. Removes a caller-triggerable resource
+  exhaustion (any connected client could force the entire audit log
+  into daemon memory with `since_ms: 0`). Both ports; the Rust port's
+  paging cursor is now seeded from `since_ms` like Swift's.
+- Hint injection contract sharpened (AT-01): hints append to the FIRST
+  content block's text and never drop trailing blocks, so multi-block
+  results (`moot_json_import` with `return_id_map`) survive coaching
+  and unrecognized-argument hints intact. This was already the Rust
+  behavior; Swift previously collapsed to a single block.
 
 ### 1.37.3 -- 2026-08-14
 
