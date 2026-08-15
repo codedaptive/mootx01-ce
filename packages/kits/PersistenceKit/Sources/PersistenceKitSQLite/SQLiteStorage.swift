@@ -1766,7 +1766,19 @@ extension SQLiteBackend {
         let tempURL = connection.url
             .deletingLastPathComponent()
             .appendingPathComponent(".vacuum-\(UUID().uuidString).sqlite")
-        defer { try? FileManager.default.removeItem(at: tempURL) }
+        defer {
+            // Remove the compacted copy AND any journal siblings SQLite may
+            // have left next to it on a failure path (a successful run leaves
+            // none: the swap consumes the main file and the internal DETACH
+            // cleans up the journal).
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: tempURL.path + suffix)
+            }
+        }
+        // SQ-01: pre-create the destination as an empty owner-only file so the
+        // compacted copy is never observable at SQLite's default creation mode
+        // (0644 — world-readable, and plaintext on unencrypted estates).
+        try Self.createOwnerOnlyVacuumDestination(at: tempURL)
         do {
             // Single-quote-escape the path: estate directory names may legally
             // contain apostrophes (e.g. "alice's files"). The UUID segment is
@@ -1776,6 +1788,17 @@ extension SQLiteBackend {
         } catch {
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM failed: \(error)")
+        }
+        // Defence-in-depth: re-assert owner-only on the destination family.
+        // The pre-created 0600 mode survives SQLite's open (POSIX open(2)
+        // applies its mode argument only at creation) and journal/WAL siblings
+        // are created by SQLite with the main database file's mode, so these
+        // calls are expected no-ops — they exist to hold the owner-only
+        // posture even if a future SQLite revision changes sibling-mode
+        // inheritance. Best-effort: a missing sibling is the normal case.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: tempURL.path + suffix)
         }
         connection.close()
         do {
@@ -1825,6 +1848,39 @@ extension SQLiteBackend {
     }
 
     // MARK: maintenance helpers
+
+    /// SQ-01: create the `VACUUM INTO` destination as an EMPTY owner-only
+    /// (0600) file before SQLite opens it.
+    ///
+    /// SQLite creates a `VACUUM INTO` destination with its default creation
+    /// mode — 0644, world-readable. On an unencrypted estate the compacted
+    /// copy is plaintext, so for the whole write window any local user could
+    /// read it; a chmod after creation would leave that race open. Instead
+    /// the destination is pre-created empty with `posixPermissions: 0o600`:
+    /// POSIX `open(2)` applies its mode argument only when it CREATES a file,
+    /// so SQLite's subsequent open preserves the 0600 mode — the copy is
+    /// owner-only at every instant of its existence. `VACUUM INTO` accepts an
+    /// existing destination as long as it is empty (the vendored sqlite3.c
+    /// rejects only `sz>0` in `sqlite3RunVacuum`), and journal/WAL siblings
+    /// SQLite creates next to a database inherit the main file's mode
+    /// (os_unix.c), so the whole temp family is owner-only too. The atomic
+    /// swap (`.usingNewMetadataOnly`) then carries this 0600 mode onto the
+    /// estate path, and `reopen()` re-asserts 0600 as defence-in-depth.
+    ///
+    /// `static` (not instance) so the mechanism is directly testable without
+    /// entering the actor: `StorageMaintenanceTests` pins both the mode and
+    /// the empty-destination acceptance.
+    static func createOwnerOnlyVacuumDestination(at url: URL) throws {
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600])
+        else {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "could not pre-create owner-only VACUUM destination "
+                    + "at \(url.lastPathComponent)")
+        }
+    }
 
     private func pragmaInt64(_ name: String) throws -> Int64 {
         let stmt = try connection.prepare("PRAGMA \(name)")
