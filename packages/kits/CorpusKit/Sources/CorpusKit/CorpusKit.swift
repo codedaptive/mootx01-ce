@@ -2082,19 +2082,52 @@ public actor Corpus {
         }
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
-        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped:
+        // provider. Non-trainable providers (FDC, deterministic, NL) skip re-embedding:
         // their vectors are item-local and invariant to basis retraining — the same
         // embedding function applied to the same text always produces the same vector
         // regardless of which distributional basis the trainable slots carry. Serial
         // per slot: each re-embed already fans its embed compute across all cores and
         // funnels one bulk single-writer transaction.
+        //
+        // NON-TRAINABLE CLEANUP: although non-trainable slots skip re-embedding,
+        // they MUST still prune vector rows that belong to removed sources. The
+        // estate's deleted-content contract (no removed content is retrievable through
+        // any derived structure) applies to every slot regardless of trainability.
+        // Trainable slots satisfy this contract through replaceModelVectors, which
+        // rebuilds the vector set from activeChunks() only. Non-trainable slots have
+        // no such replacement step, so explicit cleanup is required here.
+        //
+        // The chunk ID inventory is computed ONCE outside the slot loop — it is a
+        // storage scan and there may be several non-trainable slots. The scan is
+        // skipped entirely when all slots are trainable (common case pays nothing).
+        let hasNonTrainableSlot = slots.contains { $0.freshBasisBlob == nil }
+        let removedSourceChunkIDs: [String]
+        if hasNonTrainableSlot {
+            let removedIDs = try await removedSourceStore.removedIDs()
+            var chunkIDs: [String] = []
+            for sourceID in removedIDs {
+                let sourceChunks = try await bundleStore.chunksForSource(sourceID)
+                chunkIDs.append(contentsOf: sourceChunks.map { $0.id.uuidString })
+            }
+            removedSourceChunkIDs = chunkIDs
+        } else {
+            removedSourceChunkIDs = []
+        }
+
         for index in slots.indices {
-            // Skip non-trainable providers: their output is item-local and basis-invariant;
-            // re-embedding them on every reindex is wasted work (~20% of per-chunk embed
-            // cost in the 5-provider default ensemble).
+            // Non-trainable providers: vectors are item-local and basis-invariant;
+            // re-embedding is wasted work (~20% of per-chunk embed cost in the
+            // 5-provider default ensemble). However, stale vectors for removed
+            // sources must be pruned to satisfy the deleted-content contract.
             guard slots[index].freshBasisBlob != nil else {
+                let modelID = slots[index].provider.modelID
+                var pruned = 0
+                for chunkID in removedSourceChunkIDs {
+                    try await vectorStore.deleteAllVectors(itemID: chunkID, modelID: modelID)
+                    pruned += 1
+                }
                 corpusLog.info(
-                    "reindex: skipping non-trainable slot \(self.slots[index].provider.modelID, privacy: .public) — vectors are basis-invariant")
+                    "reindex: slot \(modelID, privacy: .public) — basis-invariant, no re-embed needed; pruned \(pruned, privacy: .public) stale vector candidate(s) from removed sources")
                 continue
             }
             corpusLog.info(

@@ -2565,20 +2565,61 @@ impl Corpus {
         eprintln!("[corpus] reindex: training complete — bases persisted");
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
-        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped:
-        // their vectors are item-local and invariant to basis retraining — the same
-        // embedding function applied to the same text always produces the same vector
-        // regardless of which distributional basis the trainable slots carry. Serial
-        // per slot: each re-embed already fans its embed compute across all cores and
-        // funnels one bulk single-writer transaction (replace_model_vectors).
+        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped for
+        // re-embedding: their vectors are item-local and invariant to basis retraining
+        // — the same embedding function applied to the same text always produces the
+        // same vector regardless of which distributional basis the trainable slots
+        // carry. Serial per slot: each re-embed already fans its embed compute across
+        // all cores and funnels one bulk single-writer transaction (replace_model_vectors).
+        //
+        // STALE-VECTOR CLEANUP FOR NON-TRAINABLE SLOTS: Because non-trainable slots
+        // never reach reembed_chunks (which calls replace_model_vectors and thus clears
+        // the model's whole vector set before re-inserting), their rows for REMOVED
+        // sources must be pruned here, before the loop. Without this step, vectors for
+        // sources removed while the non-trainable slot was not held (or removed via a
+        // corpus opened without this slot) survive indefinitely — the hard-delete
+        // contract would be broken. Trainable slots self-clean via replace_model_vectors
+        // (which inserts only active chunks), so this cleanup is non-trainable-only.
+        let non_trainable_model_ids: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|s| s.fresh_basis_blob.is_none())
+            .map(|s| s.model_id.clone())
+            .collect();
+        if !non_trainable_model_ids.is_empty() {
+            let removed_ids = self.removed_source_store.removed_ids()?;
+            for source_id in &removed_ids {
+                let removed_chunks = self.bundle_store.chunks_for_source(source_id, None)?;
+                for chunk in &removed_chunks {
+                    for model_id in &non_trainable_model_ids {
+                        self.vector_store
+                            .delete_all_vectors(&chunk.id.to_string(), model_id)
+                            .map_err(|e| CorpusKitError::StoreUnavailable(format!(
+                                "reindex: non-trainable stale-vector cleanup failed \
+                                 for chunk {} model {}: {:?}",
+                                chunk.id, model_id, e
+                            )))?;
+                    }
+                }
+            }
+            eprintln!(
+                "[corpus] reindex: pruned stale vectors for {} removed sources \
+                 across {} non-trainable slot(s)",
+                removed_ids.len(),
+                non_trainable_model_ids.len(),
+            );
+        }
+
         for slot_index in 0..self.slots.len() {
             // Skip non-trainable providers: fresh_basis_blob.is_none() means no
             // factory blob → item-local deterministic output → basis-invariant vectors.
             // Re-embedding them on every reindex is wasted work (~20% of per-chunk
-            // embed cost in the 5-provider default ensemble).
+            // embed cost in the 5-provider default ensemble). Stale-vector cleanup for
+            // removed sources was already handled above, before this loop.
             if self.slots[slot_index].fresh_basis_blob.is_none() {
                 eprintln!(
-                    "[corpus] reindex: skipping non-trainable slot {} — vectors are basis-invariant",
+                    "[corpus] reindex: skipping re-embed for non-trainable slot {} \
+                     (vectors are basis-invariant; stale rows already pruned above)",
                     self.slots[slot_index].model_id,
                 );
                 continue;
