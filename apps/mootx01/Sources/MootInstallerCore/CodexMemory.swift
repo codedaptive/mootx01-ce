@@ -8,6 +8,11 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 public enum CodexMemoryMode: String, Codable, Sendable {
     case augment
@@ -154,9 +159,7 @@ public enum CodexMemoryStore {
 /// leaves for a plain-text payload:
 ///
 ///  - a file written for the first time is created at mode 0600 from the
-///    moment it exists on disk — never written at the platform's default
-///    (umask-derived) mode and narrowed afterward by a separate `chmod`,
-///    which would leave a briefly-world-readable file under its final name;
+///    moment it exists on disk;
 ///  - a rewrite of an EXISTING file never *widens* whatever mode the file
 ///    already had. `config.toml` can carry endpoints, tokens, or MCP server
 ///    definitions; a rewrite that loosens permissions the user (or an
@@ -166,16 +169,32 @@ public enum CodexMemoryStore {
 ///    0600, so it can only stay the same or get tighter. This also means a
 ///    file left world-readable by the pre-fix code path is silently
 ///    tightened to 0600 the next time it is rewritten.
-///  - the temporary file used for the atomic rename is created WITH the
-///    target mode already applied, via `createFile(atPath:contents:attributes:)`
-///    in one call rather than write-then-chmod — there is no window, however
-///    brief, where a world- or group-readable copy of the config (under
-///    either its temporary or final name) exists on disk.
+///  - the temporary file used for the atomic rename is created via the raw
+///    POSIX `open(2)` with `O_CREAT | O_EXCL` and the target mode passed
+///    directly as the syscall's `mode` argument — NOT
+///    `FileManager.createFile(atPath:contents:attributes:)`, which was
+///    proven empirically (Perkins security review, CF-01) to create the
+///    file and apply the requested `.posixPermissions` attribute as two
+///    separate steps: a spin-stat probe racing 20,000 creations caught the
+///    file at 0644/0755 in 300,000+ observations before it settled at the
+///    requested 0600. `open(2)`'s mode argument has no such window — the
+///    kernel applies the mode as part of creating the directory entry, in
+///    one atomic operation, and umask can only CLEAR bits from the
+///    requested mode (0600 has none group/other to clear). There is no
+///    window, however brief, where a world- or group-readable copy of the
+///    config (under either its temporary or final name) exists on disk.
+///  - the temp file is moved into place via the raw POSIX `rename(2)`,
+///    which atomically replaces an existing destination in one syscall —
+///    NOT `FileManager.moveItem` (which refuses to replace an existing
+///    file, forcing a separate `removeItem` first and leaving a window,
+///    however brief, with no `config.toml` on disk at all if the process
+///    is killed between the two Foundation calls).
 public enum CodexConfigWriter {
-    /// Thrown when the temporary file used for the atomic write cannot be
-    /// created (disk full, permission denied on the parent directory, etc).
+    /// Thrown when a POSIX syscall in the write path fails. `errno` is the
+    /// C `errno` value captured immediately after the failing call.
     public struct WriteError: Error, Equatable {
         public let path: String
+        public let errno: Int32
     }
 
     /// Write `text` to `url`, creating parent directories as needed.
@@ -187,35 +206,66 @@ public enum CodexConfigWriter {
         // Never widen: a fresh file gets 0600 outright; an existing file's
         // mode is intersected with 0600 so group/other bits are always
         // dropped and no owner bit a narrower existing mode lacked is added
-        // back.
+        // back. Masked against 0o7777 before the mode_t conversion so an
+        // unexpected value in the attribute dictionary can never trap this
+        // narrowing conversion (house style: no unguarded narrowing).
         let existingMode = (try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions] as? NSNumber
-        let targetMode: Int = existingMode.map { $0.intValue & 0o600 } ?? 0o600
+        let targetMode: mode_t = existingMode
+            .map { mode_t($0.intValue & 0o7777) & 0o600 } ?? 0o600
 
         let dir = url.deletingLastPathComponent()
         let tempURL = dir.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-        let data = Data(text.utf8)
-        guard fm.createFile(atPath: tempURL.path, contents: data, attributes: [.posixPermissions: targetMode]) else {
-            throw WriteError(path: tempURL.path)
+
+        let fd = tempURL.path.withCString { cPath in
+            open(cPath, O_WRONLY | O_CREAT | O_EXCL, targetMode)
+        }
+        guard fd >= 0 else {
+            throw WriteError(path: tempURL.path, errno: errno)
         }
 
         do {
-            // moveItem fails if the destination already exists, so a rewrite
-            // removes the prior file first. The brief window where `url`
-            // does not exist at all is not a permission concern — a missing
-            // file cannot be world-readable.
-            if fm.fileExists(atPath: url.path) {
-                try fm.removeItem(at: url)
-            }
-            try fm.moveItem(at: tempURL, to: url)
+            try writeAll(Data(text.utf8), toFD: fd)
         } catch {
-            try? fm.removeItem(at: tempURL)
+            close(fd)
+            unlink(tempURL.path)
             throw error
         }
+        close(fd)
 
-        // Defensive re-assert: removeItem/moveItem should not alter the mode
-        // set at creation, but re-apply it explicitly so a Foundation
-        // behavior change can never silently widen the file on disk.
-        try? fm.setAttributes([.posixPermissions: targetMode], ofItemAtPath: url.path)
+        let renameResult = tempURL.path.withCString { fromPath in
+            url.path.withCString { toPath in
+                rename(fromPath, toPath)
+            }
+        }
+        guard renameResult == 0 else {
+            let savedErrno = errno
+            unlink(tempURL.path)
+            throw WriteError(path: url.path, errno: savedErrno)
+        }
+    }
+
+    /// Write every byte of `data` to `fd`, looping over `write(2)` to
+    /// handle short writes and retrying on `EINTR`.
+    private static func writeAll(_ data: Data, toFD fd: Int32) throws {
+        var totalWritten = 0
+        try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress, buffer.count > 0 else { return }
+            while totalWritten < buffer.count {
+                // Module-qualified: an unqualified `write` here resolves to
+                // an ambient instance method rather than the POSIX free
+                // function pulled in by `import Darwin`/`import Glibc`.
+                #if canImport(Darwin)
+                let n = Darwin.write(fd, base.advanced(by: totalWritten), buffer.count - totalWritten)
+                #elseif canImport(Glibc)
+                let n = Glibc.write(fd, base.advanced(by: totalWritten), buffer.count - totalWritten)
+                #endif
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw WriteError(path: "<fd \(fd)>", errno: errno)
+                }
+                totalWritten += n
+            }
+        }
     }
 }
 
