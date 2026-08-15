@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.17.0
+version: 1.18.0
 status: accepted-1.1-target
-date: 2026-08-13
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.16.0: MXE-BB — chunked BasisStore persistence; SQLITE_LIMIT_LENGTH defense-in-depth in PersistenceKit."
+date: 2026-08-15
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.18.0: CORPUS-INCREMENTAL-01 — retrain counts-path behavioral contract (B-22) and test-seam conformance requirement (C-15)."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -421,6 +421,66 @@ indexed ID resolves directly to a GLK Drawer ID and no chunk-keyed CorpusKit row
 remain. Direct Drawer-keyed vectors outside CorpusKit provider partitions are
 not deleted or recalculated.
 
+**B-22 (retrain counts path):** when a force retrain fires on an attached
+`CorpusContentEngine` slot whose provider has a persisted basis, the engine
+attempts the **counts path** before falling back to full corpus re-tokenization.
+The guard chain runs in order; the first failing guard records its reason and
+routes to the corpus path:
+
+1. *firstTrain* — no persisted basis row exists; the counts path does not apply.
+   This includes the first training of any slot, forced or not.
+2. *noCountsRow* — no persisted counts row found for the provider key; counts
+   cannot be restored.
+3. *notCountsCapable* — `finalizeFromCounts()` returned `false`; LSA and NMF
+   always fall back here because their per-document TF rows are not persisted in
+   the counts blob.
+4. *deltaNotFoldSafe* — the pending-reference delta is non-empty and
+   `countsDeltaFoldSafe` is `false`; RandomIndexing is restore-only because float
+   context-vector accumulation is order-sensitive (reviewer finding F-3, see
+   INTERFACE § 2 `TrainableEmbeddingBasis`).
+5. *populationMismatch* — `PersistedBasis.trainedChunkCount` (frozen base document
+   count written at the last corpus-path publication) plus the non-subsumed pending
+   reference count does not equal the current active-content-ID count from the
+   source. A revision or removal drives a mismatch and forces a full retrain.
+   `PersistedCounts.documentCount` is the live monotonic anchor and is NEVER used
+   for this comparison.
+6. *pendingUnresolvable* — a non-subsumed pending reference's `contentID` resolved
+   to `nil` from the source; the corpus path heals by deleting all references and
+   republishing from surviving active IDs.
+
+When all guards pass, the provider is reconstructed from the empty-basis blob and
+counts are restored. Per-provider behavior is fixed:
+
+- *PPMI:* the non-subsumed pending references are delta-folded into the restored
+  counts in `contentID` ascending order (one body paged per reference). The
+  integer count maps are commutative so fold order is irrelevant to the derived
+  basis. `finalizeFromCounts()` then derives the serving basis without touching
+  corpus text. The decision is `.countsDeltaFold(folded: N)` where N is the
+  pending count; `.countsRestore` when the pending set is empty.
+- *RandomIndexing:* restore-only — `countsDeltaFoldSafe` is `false` so any
+  non-empty pending delta forces the corpus path. When the pending set IS empty
+  (counts reflect the full corpus), the guard-4 check passes and the decision is
+  `.countsRestore`. Zero bodies are paged in either case.
+- *LSA / NMF:* always take the corpus path because `finalizeFromCounts()` returns
+  `false` (guard 3).
+
+**Publication** for the counts path occurs in a single serializable transaction:
+basis row upsert (`PersistedBasis` with `trainedChunkCount` = frozen base +
+pending count), counts row persist via `persistCounts`, and per-reference delete
+for every folded pending row. *Per-reference delete* — not `deleteReferences` —
+is required to preserve subsumed markers written by earlier corpus-path
+publications. Those markers are consumed by delayed-admission logic that may still
+hold a training-snapshot reference; `deleteReferences` would erase them. The
+serving provider and counts accumulator are installed into the slot immediately
+after the transaction commits, without corpus re-embedding — the finalized basis
+already reflects the full corpus population.
+
+Skipped IDs during a corpus-path publication (content IDs that resolved to `nil`
+from the source) become non-subsumed sentinel reference rows. On the next
+force-retrain pass they appear in the pending delta; if they still resolve to
+`nil`, guard 6 (*pendingUnresolvable*) routes to the corpus path, which deletes
+all references and republishes from surviving active IDs.
+
 ## § 6 — Error model (conceptual)
 
 CorpusKit raises `CorpusKitError` (Swift) / `CorpusKitError` (Rust).
@@ -516,6 +576,18 @@ anchor increments once per canonical identity, the vocabulary anchor never
 decreases, the frozen base blob is unchanged until provider publication, and a
 fixed governor threshold produces the same decision immediately before and
 after reopen.
+
+**C-15 (training-path decision seam):** the `TrainingPathDecision` /
+`CorpusPathReason` enums (both ports, INTERFACE § 2) and the
+`_trainingPathDecision(for:)` / `_training_path_decision` accessor on
+`CorpusContentEngine` are a **test seam** that exposes which path
+`trainTrainableSlots` took for each modelID in the most recent call. Both types
+conform to `Equatable` so suites can assert on structure directly. Conformance
+suites MUST assert the expected decision for each guard-chain scenario: counts
+restore (all guards pass, empty pending), counts delta-fold (all guards pass,
+non-empty PPMI pending), and each of the six corpus-path reasons (B-22).
+Non-forced calls that skip already-trained slots return `nil` for those slots —
+the accessor is not populated for skipped slots.
 
 ## § 8 — Self-report telemetry
 
@@ -815,6 +887,23 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.18.0 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 (retrain counts path): added **B-22** specifying the
+guard chain that governs when a force retrain uses restored counts instead of
+full corpus re-tokenization. The six fallback reasons (firstTrain, noCountsRow,
+notCountsCapable, deltaNotFoldSafe, populationMismatch, pendingUnresolvable) and
+their semantics are now normative. Per-provider behavior is locked: PPMI
+delta-folds non-subsumed pending references (pages only that delta), RI is
+restore-only (pages zero when pending is empty; corpus path otherwise), LSA/NMF
+always take the corpus path. Publication side-effects (basis + counts in one
+serializable transaction, per-reference delete preserving subsumed markers,
+generation bump without corpus re-embedding) are normative. The population guard
+uses `PersistedBasis.trainedChunkCount` (frozen base) + pending-reference count
+vs active-content-ID count. Added **C-15** documenting the
+`TrainingPathDecision` / `CorpusPathReason` test seam and its conformance
+obligations.
 
 ### 1.17.0 -- 2026-08-13
 

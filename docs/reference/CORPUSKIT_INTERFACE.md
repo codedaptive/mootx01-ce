@@ -2,10 +2,10 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-13
+date: 2026-08-15
 spec_type: kit
-version: 1.20.0
-description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.19.0: MXE-BB — chunked BasisStore persistence (multi-row, 256 MiB parts) on both ports.
+version: 1.21.0
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.21.0: CORPUS-INCREMENTAL-01 — finalizeFromCounts, countsDeltaFoldSafe, TrainingPathDecision / CorpusPathReason retrain counts-path surface.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -1155,6 +1155,28 @@ type-erased provider instead of rebuilding them merely to measure growth:
 - `countsVocabularySize` / `counts_vocabulary_size()` — the cheap vocabulary
   anchor the autonomic governor's vocab-growth retrain trigger reads.
 
+The seam also exposes two **counts-path retrain** members used by
+`CorpusContentEngine.trainTrainableSlots` to determine whether a force retrain
+can skip full corpus re-tokenization (SPEC B-22):
+- `finalizeFromCounts()` / `finalize_from_counts(&mut self)` — derives the
+  serving basis from restored maintained counts, reading no corpus text. Returns
+  `true` for RI (restoration of the term-to-context-vector vocabulary IS the
+  basis; finalization is a no-op) and PPMI (the full raw co-occurrence state is
+  in the counts blob; one finalize pass yields a byte-identical basis to a
+  from-scratch `trainOnCorpus` over the same accumulated corpus). Returns `false`
+  for LSA and NMF (per-document TF rows are not persisted; corpus re-tokenization
+  is required). Returning `false` leaves the provider state unchanged. Default:
+  `false` — counts-only finalization is an explicit per-provider opt-in.
+- `countsDeltaFoldSafe` / `counts_delta_fold_safe()` — `true` only for providers
+  whose incremental fold is commutative: PPMI uses integer count maps (coCount,
+  termCount, totalPairs, totalTerms) whose fold order is irrelevant to the derived
+  basis. `false` for float in-place accumulators (RI: float addition is not
+  associative — folding after restore can differ by a rounding step from a
+  from-scratch fold in canonical order; reviewer finding F-3) and for providers
+  whose counts blob does not fully determine the basis (LSA, NMF). The retrain
+  wiring reads `countsDeltaFoldSafe` only after `finalizeFromCounts()` returns
+  `true`. Default: `false`.
+
 **Swift:**
 
 ```swift
@@ -1167,6 +1189,9 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     func serializeCounts() -> Data
     func restoreCounts(from data: Data) throws
     var countsVocabularySize: Int { get }
+    // Counts-path retrain (SPEC B-22); both default to false:
+    func finalizeFromCounts() -> Bool
+    var countsDeltaFoldSafe: Bool { get }
 }
 
 // On EmbeddingModel:
@@ -1195,6 +1220,9 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     fn serialize_counts(&self) -> Vec<u8>;
     fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError>;
     fn counts_vocabulary_size(&self) -> usize;
+    // Counts-path retrain (SPEC B-22); both default to false:
+    fn finalize_from_counts(&mut self) -> bool;
+    fn counts_delta_fold_safe(&self) -> bool;
 }
 
 // On EmbeddingModelConfig:
@@ -1344,6 +1372,53 @@ impl CorpusProviderCountsStore {
 // On Corpus:
 pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize>;
 ```
+
+### `TrainingPathDecision` / `CorpusPathReason` — retrain counts-path decision seam (both ports)
+
+Declared at module level in `CorpusKit` core alongside `CorpusContentEngine`.
+Records the outcome of each trainable-slot training attempt during the most
+recent `trainTrainableSlots` pass. Surfaced through the
+`_trainingPathDecision(for:)` accessor on `CorpusContentEngine` — a **test
+seam**, not for production use. Non-forced calls that skip already-trained slots
+return `nil` for those slots. Both types conform to `Equatable` so conformance
+suites can assert on the decision value directly without inspecting derived
+outputs (SPEC C-15).
+
+**Swift:**
+
+```swift
+public enum TrainingPathDecision: Equatable, Sendable {
+    /// Counts path: full restore with an empty pending delta — zero bodies paged.
+    case countsRestore
+    /// Counts path: `folded` non-subsumed pending references were delta-folded
+    /// into the restored counts; `folded` bodies were paged from the source.
+    case countsDeltaFold(folded: Int)
+    /// Corpus path taken; `reason` names the guard-chain step that failed.
+    case corpus(CorpusPathReason)
+}
+
+public enum CorpusPathReason: Equatable, Sendable {
+    /// No persisted basis row exists — genuine first training, forced or not.
+    case firstTrain
+    /// No persisted counts row found for this provider key.
+    case noCountsRow
+    /// `finalizeFromCounts()` returned false (LSA, NMF).
+    case notCountsCapable
+    /// Non-empty pending delta and `countsDeltaFoldSafe == false` (RI).
+    case deltaNotFoldSafe
+    /// `PersistedBasis.trainedChunkCount` + pending-ref count ≠ active-ID count.
+    case populationMismatch
+    /// A non-subsumed pending reference's `contentID` resolved to nil from source.
+    case pendingUnresolvable
+}
+
+// On CorpusContentEngine — test seam, not for production use:
+public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision?
+```
+
+**Rust:** equivalent `TrainingPathDecision` and `CorpusPathReason` enums in
+`corpus_kit` core; `_training_path_decision(&self, model_id: &str) ->
+Option<TrainingPathDecision>` on `CorpusContentEngine`.
 
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
 
@@ -2156,6 +2231,17 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.21.0 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 (retrain counts path): added `finalizeFromCounts()` /
+`finalize_from_counts()` and `countsDeltaFoldSafe` / `counts_delta_fold_safe()`
+to the `TrainableEmbeddingBasis` protocol/trait on both ports (SPEC B-22). Added
+a new `TrainingPathDecision` / `CorpusPathReason` subsection documenting the six
+guard-chain corpus-path reasons and the `.countsRestore` / `.countsDeltaFold`
+counts-path outcomes, plus the `_trainingPathDecision(for:)` test seam accessor
+on `CorpusContentEngine` (SPEC C-15). ADDITIVE — no existing signature removed
+or changed.
 
 ### 1.20.0 -- 2026-08-13
 
