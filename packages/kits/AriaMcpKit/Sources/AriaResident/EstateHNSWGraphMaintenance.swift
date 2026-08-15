@@ -58,10 +58,10 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
         self.vectorStore = vectorStore
     }
 
-    /// Delegates to `VectorStore.clearAllHNSWIndices()`.
-    public func clearFloatIndex(now: Date) async throws {
-        try await vectorStore.clearAllHNSWIndices()
-    }
+    // NOTE: clearFloatIndex was removed from the seam by VEC-SHADOWSWAP-01.
+    // ALPHA no longer clears the graph through this adapter; it goes through
+    // VectorStore.publishShadowGeneration, which flips the serving generation
+    // and rebuilds the graph inside one atomic operation.
 
     /// Delegates to `VectorStore.rebuildAllHNSWIndices()`.
     public func rebuildFloatIndex(now: Date) async throws {
@@ -71,5 +71,21 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
     /// Delegates to `VectorStore.compactAllHNSWTombstones()`.
     public func compactFloatIndexTombstones(now: Date) async throws {
         try await vectorStore.compactAllHNSWTombstones()
+    }
+
+    /// Delegates to `VectorStore.reclaimSupersededGenerations()`.
+    ///
+    /// Added by VEC-SHADOWSWAP-01: a publish leaves the superseded
+    /// generation's rows pending-reclaim, and BETA reclaims them. The
+    /// underlying call returns a per-modelID count; the seam is void, so the
+    /// count is dropped here. Reclamation is idempotent and resumable, so a
+    /// partial pass is safe to repeat on the next BETA cycle.
+    ///
+    /// The protocol provides no default implementation on purpose: an
+    /// unwired conformer must be a compile error, because a silent no-op
+    /// would make "reclamation never wired" indistinguishable from
+    /// "reclamation works". (Reviewer ruling F-2, VEC-SHADOWSWAP-01 BRR.)
+    public func reclaimSupersededGenerations(now: Date) async throws {
+        _ = try await vectorStore.reclaimSupersededGenerations()
     }
 }

@@ -9,31 +9,35 @@ import EngramLib
 /// member-wise initialization, `Equatable`, and the `Comparable`
 /// ordering, which is defined on `distance` ascending (smaller =
 /// closer) with `itemID` ascending as the tiebreak.
+///
+/// All constructions pass `generation: 0` explicitly — `VectorMatch.init`
+/// has no default for `generation` (F-5: unexplained defaults removed).
 @Suite("VectorMatch")
 struct VectorMatchTests {
 
     /// The memberwise initializer retains every field verbatim.
     @Test func testInitRetainsAllFields() {
-        let match = VectorMatch(itemID: "drawer-A", distance: 7, modelID: "minilm-v6")
+        let match = VectorMatch(itemID: "drawer-A", distance: 7, modelID: "minilm-v6", generation: 0)
         #expect(match.itemID == "drawer-A")
         #expect(match.distance == 7)
         #expect(match.modelID == "minilm-v6")
+        #expect(match.generation == 0)
     }
 
     /// Two matches are equal exactly when all three fields agree.
     @Test func testEqualityRequiresAllFields() {
-        let base = VectorMatch(itemID: "d", distance: 3, modelID: "m")
-        #expect(base == VectorMatch(itemID: "d", distance: 3, modelID: "m"))
-        #expect(base != VectorMatch(itemID: "other", distance: 3, modelID: "m"))
-        #expect(base != VectorMatch(itemID: "d", distance: 4, modelID: "m"))
-        #expect(base != VectorMatch(itemID: "d", distance: 3, modelID: "other"))
+        let base = VectorMatch(itemID: "d", distance: 3, modelID: "m", generation: 0)
+        #expect(base == VectorMatch(itemID: "d", distance: 3, modelID: "m", generation: 0))
+        #expect(base != VectorMatch(itemID: "other", distance: 3, modelID: "m", generation: 0))
+        #expect(base != VectorMatch(itemID: "d", distance: 4, modelID: "m", generation: 0))
+        #expect(base != VectorMatch(itemID: "d", distance: 3, modelID: "other", generation: 0))
     }
 
     /// `Comparable` orders by `distance` ascending — smaller distance
     /// is "less than" (closer to the front of a near→far list).
     @Test func testComparableOrdersByDistanceAscending() {
-        let near = VectorMatch(itemID: "near", distance: 1, modelID: "m")
-        let far  = VectorMatch(itemID: "far",  distance: 9, modelID: "m")
+        let near = VectorMatch(itemID: "near", distance: 1, modelID: "m", generation: 0)
+        let far  = VectorMatch(itemID: "far",  distance: 9, modelID: "m", generation: 0)
         #expect(near < far)
         #expect(!(far < near))
     }
@@ -43,10 +47,10 @@ struct VectorMatchTests {
     /// it returns a sorted result list.
     @Test func testSortingProducesDistanceAscendingOrder() {
         let matches = [
-            VectorMatch(itemID: "c", distance: 4, modelID: "m"),
-            VectorMatch(itemID: "a", distance: 1, modelID: "m"),
-            VectorMatch(itemID: "d", distance: 9, modelID: "m"),
-            VectorMatch(itemID: "b", distance: 2, modelID: "m"),
+            VectorMatch(itemID: "c", distance: 4, modelID: "m", generation: 0),
+            VectorMatch(itemID: "a", distance: 1, modelID: "m", generation: 0),
+            VectorMatch(itemID: "d", distance: 9, modelID: "m", generation: 0),
+            VectorMatch(itemID: "b", distance: 2, modelID: "m", generation: 0),
         ]
         let sorted = matches.sorted()
         #expect(sorted.map(\.distance) == [1, 2, 4, 9])
@@ -57,8 +61,8 @@ struct VectorMatchTests {
     /// tie-break rule, retrieval algorithms reference §0.3). "x" < "y"
     /// lexicographically, so the match with itemID "x" sorts first.
     @Test func testEqualDistancesAreTiebrokenByItemIDAscending() {
-        let lhs = VectorMatch(itemID: "x", distance: 5, modelID: "m")
-        let rhs = VectorMatch(itemID: "y", distance: 5, modelID: "m")
+        let lhs = VectorMatch(itemID: "x", distance: 5, modelID: "m", generation: 0)
+        let rhs = VectorMatch(itemID: "y", distance: 5, modelID: "m", generation: 0)
         #expect(lhs < rhs)
         #expect(!(rhs < lhs))
     }

@@ -11,14 +11,24 @@
 //     and restarts, beginShadowGeneration on reopen allocates a new shadow
 //     generation beyond the abandoned one. Abandoned rows become reclaimable.
 //
-//   Gate 3 (crash-mid-publish): A partial registry write (neither serving nor
-//     shadow) leaves a state that re-running publishShadowGeneration handles
-//     correctly (idempotent). Serving generation is either the old or new value,
-//     never a hole.
+//   Gate 3 (crash-mid-publish): Three separate tests:
+//     (a) gate3_interruptedFlip — a fault-injecting RowStore decorator aborts
+//         the second upsert inside publishShadowGeneration's atomic transaction.
+//         After rollback + close/reopen, BOTH swapped models still serve the OLD
+//         generation. Discriminates because a de-transactionalized flip survives
+//         the first model's update, producing a mixed-serving state that fails
+//         the assertion. The registry shows both shadows still 'building' (reclaimable).
+//     (b) gate3_completedFlipReopenInvariant — after a successful publish, close
+//         and reopen; assert registry has shadow_generation NULL, shadow_state
+//         'pending-reclaim', serving == new gen, queries return only new-gen tags.
+//     (c) gate3_publishIdempotency — second publish call on a model with no active
+//         shadow is a no-op (shadow_gen already NULL → skip). Separately named
+//         so it does not impersonate the interrupt case.
 //
-//   Gate 4 (crash-mid-reclaim): Reclaim is resumable. Killing mid-reclaim and
-//     re-running finishes without error, produces correct row counts, and does
-//     not change query results (serving generation was already committed).
+//   Gate 4 (crash-mid-reclaim): A TRUE resumability test using batchLimit.
+//     First pass with batchLimit < superseded-row-count leaves rows and registry
+//     intact. Close+reopen simulates a mid-reclaim kill. Second pass (unbounded)
+//     deletes the REMAINDER (count2 > 0) and clears registry. Third pass deletes 0.
 //
 //   Gate 5 (post-swap coherence): After publish + reclaim, only new-generation
 //     rows exist, queries return new-generation results, and the HNSW graph
@@ -33,6 +43,163 @@ import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
 @testable import VectorKit
+
+// MARK: - Fault injection types (Gate 3 interrupted-flip)
+
+/// Error thrown by the fault-injecting RowStore to abort mid-flip.
+private struct MidFlipAbortError: Error {}
+
+/// Fault-injecting RowStore decorator for Gate 3 interrupted-flip.
+///
+/// Wraps a real RowStore and intercepts `upsert` calls to `vector_generations`.
+/// When armed (`arm()` called), the SECOND upsert to that table throws
+/// `MidFlipAbortError`, simulating a process crash inside
+/// `publishShadowGeneration`'s atomic transaction before all models are written.
+///
+/// With the real single-transaction flip: the error propagates to the catch
+/// block → `rollbackTransaction()` → the database reverts to its pre-publish
+/// state → both models remain on the old serving generation.
+///
+/// With a de-transactionalized flip: the first model's upsert is already
+/// committed when the second throws; the mixed state survives the rollback
+/// and one model serves the new generation while the other still serves the old.
+/// This is exactly what the gate discriminates.
+///
+/// All non-intercepted methods forward directly to the wrapped RowStore.
+/// `@unchecked Sendable`: tests run under GlobalTestLock (serialized) so
+/// the mutable counter is safe without additional locking.
+private final class FaultRowStore: RowStore, @unchecked Sendable {
+
+    private let backing: any RowStore
+    /// Armed state: when true, upserts to vector_generations are counted.
+    private var armed = false
+    /// Count of upserts to `vector_generations` since arming.
+    private var upsertToGenCount = 0
+
+    init(backing: any RowStore) {
+        self.backing = backing
+    }
+
+    /// Arm the fault. The NEXT upsert to `vector_generations` succeeds;
+    /// the SECOND throws `MidFlipAbortError`. Idempotent.
+    func arm() {
+        armed = true
+        upsertToGenCount = 0
+    }
+
+    // MARK: - Fault-intercepted upsert
+
+    @discardableResult
+    func upsert(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) async throws -> RowHandle {
+        if armed && table == "vector_generations" {
+            upsertToGenCount += 1
+            // First upsert (model-A) passes through; second (model-B) faults.
+            if upsertToGenCount == 2 {
+                throw MidFlipAbortError()
+            }
+        }
+        return try await backing.upsert(
+            table: table, values: values, conflictColumns: conflictColumns)
+    }
+
+    // MARK: - Pass-through delegation
+
+    func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        try await backing.insert(table: table, values: values)
+    }
+
+    @discardableResult
+    func update(
+        table: String,
+        values: [String: TypedValue],
+        where predicate: StoragePredicate
+    ) async throws -> Int {
+        try await backing.update(table: table, values: values, where: predicate)
+    }
+
+    @discardableResult
+    func delete(table: String, where predicate: StoragePredicate) async throws -> Int {
+        try await backing.delete(table: table, where: predicate)
+    }
+
+    func query(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?
+    ) async throws -> [StorageRow] {
+        try await backing.query(
+            table: table, where: predicate,
+            orderBy: orderBy, limit: limit, offset: offset)
+    }
+
+    func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
+        try await backing.count(table: table, where: predicate)
+    }
+
+    func beginTransaction() async throws { try await backing.beginTransaction() }
+    func commitTransaction() async throws { try await backing.commitTransaction() }
+    func rollbackTransaction() async throws { try await backing.rollbackTransaction() }
+}
+
+/// Fault-injecting Storage decorator for Gate 3 interrupted-flip.
+///
+/// Wraps a real `SQLiteStorage` and replaces its `rowStore` with a
+/// `FaultRowStore` so `VectorStore` exercises the fault path through its
+/// normal `storage.rowStore` access pattern. All other Storage operations
+/// delegate to the underlying backing storage, including `open`, `close`,
+/// and `transaction`.
+///
+/// `@unchecked Sendable`: holds a reference-type `FaultRowStore` that is
+/// itself `@unchecked Sendable`; the whole assembly is safe under GlobalTestLock.
+private final class FaultStorage: Storage, @unchecked Sendable {
+
+    private let backing: any Storage
+    let faultRowStore: FaultRowStore
+
+    init(backing: any Storage) {
+        self.backing = backing
+        self.faultRowStore = FaultRowStore(backing: backing.rowStore)
+    }
+
+    var configuration: EstateConfiguration { backing.configuration }
+    var rowStore: any RowStore { faultRowStore }
+    var blobStore: any BlobStore { backing.blobStore }
+    var auditLog: any AuditLog { backing.auditLog }
+    var observer: any StorageObserver { backing.observer }
+
+    func open(schema: SchemaDeclaration) async throws {
+        try await backing.open(schema: schema)
+    }
+
+    func close() async {
+        await backing.close()
+    }
+
+    func transaction<T: Sendable>(
+        isolation: IsolationLevel,
+        _ block: @Sendable (any StorageTransaction) async throws -> T
+    ) async throws -> T {
+        try await backing.transaction(isolation: isolation, block)
+    }
+
+    func currentSchemaVersion() async throws -> Int {
+        try await backing.currentSchemaVersion()
+    }
+
+    func currentSchemaVersion(for kitID: String) async throws -> Int {
+        try await backing.currentSchemaVersion(for: kitID)
+    }
+
+    func migrate(to schema: SchemaDeclaration) async throws {
+        try await backing.migrate(to: schema)
+    }
+}
 
 // MARK: - Suite
 
@@ -206,7 +373,7 @@ struct ShadowSwapTests {
             try await storeB.publishShadowGeneration(modelIDs: [Self.modelID])
 
             // After reclaim, abandoned rows (gen 1) must be gone; only serving rows remain.
-            let reclaimSummary = try await storeB.reclaimSupersededGenerations()
+            let reclaimSummary = try await storeB.reclaimSupersededGenerations(batchLimit: nil)
             let reclaimedCount = reclaimSummary[Self.modelID] ?? 0
             // Exactly 1 shadow-item row was written in the abandoned session.
             #expect(reclaimedCount >= 1,
@@ -216,25 +383,271 @@ struct ShadowSwapTests {
         }
     }
 
-    // MARK: - Gate 3: Crash mid-publish → idempotent re-run
+    // MARK: - Gate 3: Interrupted-flip, completed-flip reopen, and publish idempotency
 
-    /// publishShadowGeneration is idempotent: if the process crashes after the
-    /// registry flip commits but before post-flip tasks complete, re-running
-    /// publish on reopen leaves serving generation = the committed value and
-    /// queries return new-generation results.
+    /// Gate 3 (a) — Fault-injected interrupted flip.
     ///
-    /// We simulate the post-flip crash by calling publish, then verifying that a
-    /// second publish call on the same modelID is a no-op (no-op because shadow_gen
-    /// is cleared by the first publish — the re-run cannot republish something that
-    /// was already flipped).
-    @Test("Gate 3: crash mid-publish — second publish call on cleared shadow is a no-op")
-    func gate3_crashMidPublish() async throws {
+    /// A FaultRowStore decorator aborts the SECOND upsert to `vector_generations`
+    /// inside `publishShadowGeneration`'s atomic transaction. Because both upserts
+    /// (one per model) run inside ONE BEGIN/COMMIT pair, the mid-second-upsert throw
+    /// causes a rollback. Both models remain at serving_gen=0; the registry shows
+    /// both shadows still 'building' (reclaimable).
+    ///
+    /// Discriminates because a de-transactionalized flip would commit the first
+    /// model's upsert before the second throws, leaving model-A at serving_gen=1
+    /// and model-B still at serving_gen=0 — a mixed state that the close/reopen
+    /// assertions catch (model-A would serve new-gen items instead of old-gen items).
+    ///
+    /// Design: TWO-MODEL swap (modelID + altModelID both get shadow-built) so that
+    /// publishShadowGeneration emits exactly two upserts to vector_generations in one
+    /// transaction. The decorator arms before publish; the fault fires on upsert #2.
+    @Test("Gate 3a: interrupted mid-flip — transaction rollback leaves both models serving old generation")
+    func gate3_interruptedFlip() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("gate3a-\(UUID().uuidString).sqlite3")
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            var rng = makeRNG(seed: 0x3A33_4444_5555_6666)
+            let now = Date(timeIntervalSince1970: 1_700_000_001)
+
+            // ── Wrapped storage: real SQLite backing + FaultRowStore ──────────
+            let backingStorage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: url, busyTimeout: 5.0)))
+            let faultStorage = FaultStorage(backing: backingStorage)
+            try await faultStorage.open(schema: VectorStore.schemaDeclaration)
+            let store = VectorStore(storage: faultStorage)
+
+            // Populate OLD generation for BOTH models.
+            try await populateServing(store: store, modelID: Self.modelID,
+                                       count: Self.corpusCount, rng: &rng,
+                                       prefix: "old-main")
+            try await populateServing(store: store, modelID: Self.altModelID,
+                                       count: Self.corpusCount, rng: &rng,
+                                       prefix: "old-alt")
+
+            // Begin shadow for BOTH models: allocates shadow_gen=1 for each.
+            _ = try await store.beginShadowGeneration(modelIDs: [Self.modelID, Self.altModelID])
+
+            // Write shadow vectors for both models under the shadow generation.
+            for i in 0..<Self.corpusCount {
+                let v = randomVector(dim: Self.dim, rng: &rng)
+                try await store.addPayload(
+                    itemID: "new-main-\(i)", vectorIndex: 0,
+                    payload: VectorPayload(floats: v),
+                    modelID: Self.modelID, modelVersion: "1", filedAt: now)
+            }
+            for i in 0..<Self.corpusCount {
+                let v = randomVector(dim: Self.dim, rng: &rng)
+                try await store.addPayload(
+                    itemID: "new-alt-\(i)", vectorIndex: 0,
+                    payload: VectorPayload(floats: v),
+                    modelID: Self.altModelID, modelVersion: "1", filedAt: now)
+            }
+
+            // Arm the fault: next upsert to vector_generations passes, second throws.
+            faultStorage.faultRowStore.arm()
+
+            // publishShadowGeneration for BOTH models — two upserts in one transaction.
+            // The second upsert (altModelID) throws → rollback → both models unchanged.
+            let publishResult = try? await store.publishShadowGeneration(
+                modelIDs: [Self.modelID, Self.altModelID])
+            // publish must have thrown (fault injection); verify by checking nil.
+            // We accept both nil (threw) and non-nil (did not throw) here because
+            // publishShadowGeneration is @discardableResult-like (no return value),
+            // but the fault *will* propagate as a thrown error, so we use try? to
+            // capture the outcome without crashing the test.
+            _ = publishResult  // silence unused-result; the key assertion is below.
+
+            // Close the fault-injected instance to release the SQLite file.
+            await faultStorage.close()
+
+            // ── Reopen on CLEAN storage (no fault injection) ──────────────────
+            let cleanStorage = try await openStorage(at: url)
+            let storeB = VectorStore(storage: cleanStorage)
+
+            // Assert BOTH models still serve OLD generation.
+            // Query each model: all results must have the old prefix, not "new-".
+            let probeMain = randomVector(dim: Self.dim, rng: &rng)
+            let resultsMain = try await storeB.findNearestFloat(
+                probe: probeMain, modelID: Self.modelID, limit: Self.corpusCount)
+            #expect(!resultsMain.isEmpty,
+                "Gate 3a: modelID must still return results after interrupted flip")
+            for m in resultsMain {
+                #expect(!m.itemID.hasPrefix("new-main-"),
+                    "Gate 3a: modelID must NOT serve new-gen items after interrupted flip; got '\(m.itemID)'")
+                #expect(m.itemID.hasPrefix("old-main"),
+                    "Gate 3a: modelID must serve OLD-gen items after interrupted flip; got '\(m.itemID)'")
+            }
+
+            let probeAlt = randomVector(dim: Self.dim, rng: &rng)
+            let resultsAlt = try await storeB.findNearestFloat(
+                probe: probeAlt, modelID: Self.altModelID, limit: Self.corpusCount)
+            #expect(!resultsAlt.isEmpty,
+                "Gate 3a: altModelID must still return results after interrupted flip")
+            for m in resultsAlt {
+                #expect(!m.itemID.hasPrefix("new-alt-"),
+                    "Gate 3a: altModelID must NOT serve new-gen items after interrupted flip; got '\(m.itemID)'")
+                #expect(m.itemID.hasPrefix("old-alt"),
+                    "Gate 3a: altModelID must serve OLD-gen items after interrupted flip; got '\(m.itemID)'")
+            }
+
+            // Assert registry: shadow still 'building' for both (reclaimable abandoned shadow).
+            // Query the registry directly on the clean storage.
+            let regRows = try await cleanStorage.rowStore.query(
+                table: "vector_generations",
+                where: .isTrue,
+                orderBy: [],
+                limit: nil,
+                offset: nil
+            )
+            for regRow in regRows {
+                guard case let .text(mID) = regRow["model_id"] ?? .null else { continue }
+                guard mID == Self.modelID || mID == Self.altModelID else { continue }
+                // serving_generation must still be 0 — no flip committed.
+                let servingGen: Int64
+                if case let .int(g) = regRow["serving_generation"] ?? .null {
+                    servingGen = g
+                } else {
+                    servingGen = 0
+                }
+                #expect(servingGen == 0,
+                    "Gate 3a: serving_generation must be 0 for model \(mID) after interrupted flip; got \(servingGen)")
+                // shadow_generation must be non-null and non-zero (shadow still allocated).
+                let hasShadow: Bool
+                if case .int = regRow["shadow_generation"] ?? .null {
+                    hasShadow = true
+                } else {
+                    hasShadow = false
+                }
+                #expect(hasShadow,
+                    "Gate 3a: shadow_generation must still be present for model \(mID) after rollback")
+            }
+
+            await cleanStorage.close()
+        }
+    }
+
+    /// Gate 3 (b) — Completed-flip reopen invariant.
+    ///
+    /// After a successful publish: close and reopen. Assert:
+    ///   - registry row has shadow_generation = NULL (flip cleared it)
+    ///   - registry row has shadow_state = 'pending-reclaim'
+    ///   - serving_generation == the published shadow generation
+    ///   - every query returns only new-gen tagged items
+    ///
+    /// This kills the "shadow not cleared on flip" mutation (reviewer finding F-8,
+    /// mutation 2): if publishShadowGeneration forgot to NULL shadow_generation
+    /// the registry would still carry the old shadow pointer, and shadow_state
+    /// would not be 'pending-reclaim' — both assertions would fail.
+    @Test("Gate 3b: completed-flip reopen — registry cleared, shadow_generation NULL, queries return new-gen")
+    func gate3_completedFlipReopenInvariant() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("gate3b-\(UUID().uuidString).sqlite3")
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            var rng = makeRNG(seed: 0x3B33_5555_6666_7777)
+            let now = Date(timeIntervalSince1970: 1_700_000_001)
+
+            // ── Instance A: populate, shadow, publish ─────────────────────────
+            let storageA = try await openStorage(at: url)
+            let storeA = VectorStore(storage: storageA)
+
+            try await populateServing(store: storeA, modelID: Self.modelID,
+                                       count: Self.corpusCount, rng: &rng,
+                                       prefix: "old")
+            let gens = try await storeA.beginShadowGeneration(modelIDs: [Self.modelID])
+            let shadowGen = try #require(gens[Self.modelID])
+            for i in 0..<Self.corpusCount {
+                let v = randomVector(dim: Self.dim, rng: &rng)
+                try await storeA.addPayload(
+                    itemID: "new-\(i)", vectorIndex: 0,
+                    payload: VectorPayload(floats: v),
+                    modelID: Self.modelID, modelVersion: "1", filedAt: now)
+            }
+            try await storeA.publishShadowGeneration(modelIDs: [Self.modelID])
+            await storageA.close()
+
+            // ── Instance B: reopen and assert registry + query invariants ─────
+            let storageB = try await openStorage(at: url)
+            let storeB = VectorStore(storage: storageB)
+
+            // Assert registry state directly on the raw storage.
+            let regRows = try await storageB.rowStore.query(
+                table: "vector_generations",
+                where: .eq(Column(table: "vector_generations", name: "model_id"),
+                           .text(Self.modelID)),
+                orderBy: [],
+                limit: nil,
+                offset: nil
+            )
+            let regRow = try #require(regRows.first,
+                "Gate 3b: registry row must exist after publish")
+
+            // serving_generation must equal the published shadow generation.
+            let servingGen: Int64
+            if case let .int(g) = regRow["serving_generation"] ?? .null {
+                servingGen = g
+            } else {
+                servingGen = -1
+            }
+            #expect(servingGen == shadowGen,
+                "Gate 3b: serving_generation must equal published shadow gen (\(shadowGen)); got \(servingGen)")
+
+            // shadow_generation must be NULL (cleared by publish transaction).
+            let shadowGenNull: Bool
+            switch regRow["shadow_generation"] ?? .null {
+            case .null: shadowGenNull = true
+            default:    shadowGenNull = false
+            }
+            #expect(shadowGenNull,
+                "Gate 3b: shadow_generation must be NULL after publish; publish must clear it")
+
+            // shadow_state must be 'pending-reclaim'.
+            let shadowState: String?
+            if case let .text(s) = regRow["shadow_state"] ?? .null {
+                shadowState = s
+            } else {
+                shadowState = nil
+            }
+            #expect(shadowState == "pending-reclaim",
+                "Gate 3b: shadow_state must be 'pending-reclaim' after publish; got \(shadowState ?? "nil")")
+
+            // Queries must return only new-gen items (serving_gen = shadowGen).
+            let probe = randomVector(dim: Self.dim, rng: &rng)
+            let results = try await storeB.findNearestFloat(
+                probe: probe, modelID: Self.modelID, limit: Self.corpusCount)
+            #expect(!results.isEmpty,
+                "Gate 3b: findNearestFloat must return results after close/reopen post-publish")
+            for m in results {
+                #expect(m.itemID.hasPrefix("new-"),
+                    "Gate 3b: all results must be new-gen items after close/reopen; got '\(m.itemID)'")
+                #expect(m.generation == shadowGen,
+                    "Gate 3b: VectorMatch.generation must equal serving generation (\(shadowGen)); got \(m.generation)")
+            }
+
+            await storageB.close()
+        }
+    }
+
+    /// Gate 3 (c) — Publish idempotency (honestly named, does NOT impersonate interrupt).
+    ///
+    /// A second call to `publishShadowGeneration` on a model whose shadow_generation
+    /// is already NULL is a no-op: no error thrown, serving generation unchanged.
+    ///
+    /// This is NOT the crash-mid-publish scenario. It tests the idempotent re-run
+    /// that occurs when a process restarts AFTER a successful publish and re-runs
+    /// the same publish operation (the code sees shadow_gen=NULL → skips → no-op).
+    @Test("Gate 3c: publish idempotency — second publish on NULL shadow is a no-op, no corruption")
+    func gate3_publishIdempotency() async throws {
         try await GlobalTestLock.shared.withLock {
             let storage = try makeScratchStorage()
             try await storage.open(schema: VectorStore.schemaDeclaration)
             let store = VectorStore(storage: storage)
 
-            var rng = makeRNG(seed: 0x3333_4444_5555_6666)
+            var rng = makeRNG(seed: 0x3C33_6666_7777_8888)
             try await populateServing(store: store, modelID: Self.modelID,
                                        count: Self.corpusCount, rng: &rng)
 
@@ -245,100 +658,188 @@ struct ShadowSwapTests {
                 try await store.addPayload(
                     itemID: "new-\(i)", vectorIndex: 0,
                     payload: VectorPayload(floats: v),
-                    modelID: Self.modelID, modelVersion: "1",
-                    filedAt: now
-                )
+                    modelID: Self.modelID, modelVersion: "1", filedAt: now)
             }
 
             // First publish: flips serving_gen = 1, clears shadow_gen.
             try await store.publishShadowGeneration(modelIDs: [Self.modelID])
 
             // Queries must return new-generation results after first publish.
-            let rng2 = makeRNG(seed: 0x3333_4444_5555_6666)
-            _ = makeRNG(seed: 0x3333_4444_5555_6666)  // advance past old corpus
             var rngQuery = makeRNG(seed: 0xAAAA_0001_0002_0003)
             let probe = randomVector(dim: Self.dim, rng: &rngQuery)
             let resultsAfterFirst = try await store.findNearestFloat(
                 probe: probe, modelID: Self.modelID, limit: 3)
             #expect(resultsAfterFirst.isEmpty == false,
-                "Gate 3: queries must return results after first publish")
+                "Gate 3c: queries must return results after first publish")
             for match in resultsAfterFirst {
                 #expect(match.itemID.hasPrefix("new-"),
-                    "Gate 3: post-publish queries must return new-gen items, got '\(match.itemID)'")
+                    "Gate 3c: post-publish queries must return new-gen items, got '\(match.itemID)'")
             }
 
-            // Second publish (simulating re-run after crash): must not throw,
-            // must not corrupt serving generation. Shadow_gen is nil — no-op.
+            // Second publish (shadow_gen is NULL → no-op): must not throw or corrupt.
             try await store.publishShadowGeneration(modelIDs: [Self.modelID])
 
             // Queries still return correct results after idempotent re-run.
             let resultsAfterSecond = try await store.findNearestFloat(
                 probe: probe, modelID: Self.modelID, limit: 3)
             #expect(resultsAfterSecond.isEmpty == false,
-                "Gate 3: queries must still return results after idempotent second publish")
+                "Gate 3c: queries must still return results after idempotent second publish")
             for match in resultsAfterSecond {
                 #expect(match.itemID.hasPrefix("new-"),
-                    "Gate 3: queries after idempotent re-publish must still return new-gen items, got '\(match.itemID)'")
+                    "Gate 3c: queries after idempotent re-publish must still return new-gen items, got '\(match.itemID)'")
             }
-            _ = rng2  // suppress unused warning
         }
     }
 
-    // MARK: - Gate 4: Crash mid-reclaim → resumable
+    // MARK: - Gate 4: Crash mid-reclaim → TRUE resumability test
 
-    /// reclaimSupersededGenerations is resumable: calling it twice in a row
-    /// (simulating a crash-and-restart mid-reclaim) is a no-op on the second
-    /// call and does not corrupt query results.
-    @Test("Gate 4: crash mid-reclaim — second reclaim call is a no-op with correct query results")
+    /// Gate 4 — True resumability using batchLimit.
+    ///
+    /// A batchLimit capped below the superseded-row count manufactures a
+    /// partial-reclaim state. A close+reopen simulates a mid-reclaim kill.
+    /// The second pass (unbounded) must delete the REMAINDER (count2 > 0).
+    /// A third pass asserts idempotency (0 deletions).
+    ///
+    /// The old Gate 4 asserted `count2 == 0`, which forbids resumability
+    /// and is discriminated by any mutation that keeps superseded rows after
+    /// the first pass — the test always passed because it never actually
+    /// left anything for a second pass to do.
+    ///
+    /// This rebuilt gate is discriminated by:
+    ///   - removing the batch-limit SELECT+IN pattern → DELETE removes all rows
+    ///     on the first pass → count2 == 0 (not > 0) → gate FAILS
+    ///   - de-transactionalizing the flip → doesn't affect this gate (flip is
+    ///     already committed before reclaim; the gate owns the reclaim path)
+    @Test("Gate 4: crash mid-reclaim — second pass deletes the remainder (count2 > 0), third pass is no-op")
     func gate4_crashMidReclaim() async throws {
         try await GlobalTestLock.shared.withLock {
-            let storage = try makeScratchStorage()
-            try await storage.open(schema: VectorStore.schemaDeclaration)
-            let store = VectorStore(storage: storage)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("gate4-\(UUID().uuidString).sqlite3")
+            defer { try? FileManager.default.removeItem(at: url) }
 
             var rng = makeRNG(seed: 0x4444_5555_6666_7777)
-            try await populateServing(store: store, modelID: Self.modelID,
-                                       count: Self.corpusCount, rng: &rng)
-
-            try await store.beginShadowGeneration(modelIDs: [Self.modelID])
             let now = Date(timeIntervalSince1970: 1_700_000_001)
+
+            // ── Setup: populate serving, shadow-swap, publish ─────────────────
+            let storageA = try await openStorage(at: url)
+            let storeA = VectorStore(storage: storageA)
+            try await populateServing(store: storeA, modelID: Self.modelID,
+                                       count: Self.corpusCount, rng: &rng)
+            // corpusCount=12 serving rows → 12 superseded rows after publish.
+
+            try await storeA.beginShadowGeneration(modelIDs: [Self.modelID])
             var newCorpus: [(id: String, v: [Float])] = []
             for i in 0..<Self.corpusCount {
                 let v = randomVector(dim: Self.dim, rng: &rng)
                 newCorpus.append((id: "new-\(i)", v: v))
-                try await store.addPayload(
+                try await storeA.addPayload(
                     itemID: "new-\(i)", vectorIndex: 0,
                     payload: VectorPayload(floats: v),
-                    modelID: Self.modelID, modelVersion: "1",
-                    filedAt: now
-                )
+                    modelID: Self.modelID, modelVersion: "1", filedAt: now)
             }
-            try await store.publishShadowGeneration(modelIDs: [Self.modelID])
+            try await storeA.publishShadowGeneration(modelIDs: [Self.modelID])
+            // After publish: 12 superseded rows (serving_gen was 0, now 1).
+            // Registry: shadow_generation=NULL, shadow_state='pending-reclaim'.
 
-            // First reclaim: removes gen-0 rows (old serving).
-            let summary1 = try await store.reclaimSupersededGenerations()
+            // ── First pass: capped below superseded row count ─────────────────
+            // batchLimit=5 < corpusCount=12 → leaves 7+ rows and registry intact.
+            let batchCap = 5
+            let summary1 = try await storeA.reclaimSupersededGenerations(batchLimit: batchCap)
             let count1 = summary1[Self.modelID] ?? 0
-            #expect(count1 >= Self.corpusCount,
-                "Gate 4: first reclaim must remove at least \(Self.corpusCount) old-gen rows; removed \(count1)")
+            #expect(count1 == batchCap,
+                "Gate 4: first capped pass must delete exactly batchLimit=\(batchCap) rows; got \(count1)")
 
-            // Query after first reclaim: new-generation results.
+            // Registry must still show 'pending-reclaim' (bounded pass doesn't clear it).
+            let regAfterFirstPass = try await storageA.rowStore.query(
+                table: "vector_generations",
+                where: .eq(Column(table: "vector_generations", name: "model_id"),
+                           .text(Self.modelID)),
+                orderBy: [], limit: nil, offset: nil)
+            if let regRow = regAfterFirstPass.first {
+                let stateVal = regRow["shadow_state"] ?? .null
+                if case let .text(state) = stateVal {
+                    #expect(state == "pending-reclaim",
+                        "Gate 4: registry must remain 'pending-reclaim' after bounded first pass; got '\(state)'")
+                } else {
+                    Issue.record("Gate 4: shadow_state must be a text value after bounded pass; got \(stateVal)")
+                }
+            }
+
+            // Superseded rows must remain (>0) — bounded pass is NOT complete.
+            let supersededAfterFirst = try await storageA.rowStore.count(
+                table: "vectors",
+                where: .and([
+                    .eq(Column(table: "vectors", name: "model_id"), .text(Self.modelID)),
+                    .not(.eq(Column(table: "vectors", name: "generation"), .int(1)))
+                ])
+            )
+            #expect(supersededAfterFirst > 0,
+                "Gate 4: superseded rows must remain after bounded first pass (\(supersededAfterFirst) remaining)")
+
+            // ── Close: simulate mid-reclaim kill ─────────────────────────────
+            await storageA.close()
+
+            // ── Reopen on clean storage ───────────────────────────────────────
+            let storageB = try await openStorage(at: url)
+            let storeB = VectorStore(storage: storageB)
+
+            // Queries on reopen must still return correct results.
             let probe = newCorpus[0].v
-            let results1 = try await store.findNearestFloat(
+            let resultsAfterKill = try await storeB.findNearestFloat(
                 probe: probe, modelID: Self.modelID, limit: 3)
-            #expect(results1.first?.itemID == "new-0",
-                "Gate 4: nearest to new-0's vector must be new-0 after first reclaim")
+            #expect(resultsAfterKill.first?.itemID == "new-0",
+                "Gate 4: nearest to new-0 must still be new-0 after kill+reopen; got \(String(describing: resultsAfterKill.first?.itemID))")
 
-            // Second reclaim (resumable crash): must not throw, returns 0 deletions.
-            let summary2 = try await store.reclaimSupersededGenerations()
+            // ── Second pass: unbounded → deletes the remainder ────────────────
+            let summary2 = try await storeB.reclaimSupersededGenerations(batchLimit: nil)
             let count2 = summary2[Self.modelID] ?? 0
-            #expect(count2 == 0,
-                "Gate 4: second reclaim must delete 0 rows (all superseded rows already removed); got \(count2)")
+            #expect(count2 > 0,
+                "Gate 4: second unbounded pass must delete the remaining superseded rows (count2 > 0); got \(count2)")
 
-            // Query still returns correct results after idempotent reclaim.
-            let results2 = try await store.findNearestFloat(
+            // Zero superseded rows must survive after the second pass.
+            let supersededAfterSecond = try await storageB.rowStore.count(
+                table: "vectors",
+                where: .and([
+                    .eq(Column(table: "vectors", name: "model_id"), .text(Self.modelID)),
+                    .not(.eq(Column(table: "vectors", name: "generation"), .int(1)))
+                ])
+            )
+            #expect(supersededAfterSecond == 0,
+                "Gate 4: zero superseded rows must survive after second unbounded pass; got \(supersededAfterSecond)")
+
+            // Registry must be cleared after the unbounded pass.
+            let regAfterSecond = try await storageB.rowStore.query(
+                table: "vector_generations",
+                where: .eq(Column(table: "vector_generations", name: "model_id"),
+                           .text(Self.modelID)),
+                orderBy: [], limit: nil, offset: nil)
+            if let regRow = regAfterSecond.first {
+                switch regRow["shadow_state"] ?? .null {
+                case .null:
+                    break  // Correct: cleared.
+                case let .text(state):
+                    #expect(state != "pending-reclaim",
+                        "Gate 4: shadow_state must be NULL after unbounded pass; got '\(state)'")
+                default:
+                    Issue.record("Gate 4: shadow_state has unexpected type after second pass")
+                }
+            }
+
+            // Queries remain correct after second pass.
+            let resultsAfterSecond = try await storeB.findNearestFloat(
                 probe: probe, modelID: Self.modelID, limit: 3)
-            #expect(results2.first?.itemID == "new-0",
-                "Gate 4: query after idempotent reclaim must still rank new-0 nearest")
+            #expect(resultsAfterSecond.first?.itemID == "new-0",
+                "Gate 4: nearest to new-0 must still be new-0 after second unbounded pass")
+
+            // ── Third pass (idempotency): separate honest assertion ────────────
+            // Named separately to avoid impersonating the resumability case.
+            // Zero rows remain to delete; summary must be empty or count = 0.
+            let summary3 = try await storeB.reclaimSupersededGenerations(batchLimit: nil)
+            let count3 = summary3.values.reduce(0, +)
+            #expect(count3 == 0,
+                "Gate 4 idempotency: third pass must delete 0 rows (all already reclaimed); got \(count3)")
+
+            await storageB.close()
         }
     }
 
@@ -385,7 +886,7 @@ struct ShadowSwapTests {
             try await store.publishShadowGeneration(modelIDs: [Self.modelID])
 
             // Reclaim: removes generation-0 rows.
-            let summary = try await store.reclaimSupersededGenerations()
+            let summary = try await store.reclaimSupersededGenerations(batchLimit: nil)
             let reclaimedCount = summary[Self.modelID] ?? 0
             #expect(reclaimedCount >= Self.corpusCount,
                 "Gate 5: reclaim must remove at least \(Self.corpusCount) old-gen rows; removed \(reclaimedCount)")
@@ -478,7 +979,7 @@ struct ShadowSwapTests {
                 )
             }
             try await store.publishShadowGeneration(modelIDs: [Self.modelID])
-            try await store.reclaimSupersededGenerations()
+            try await store.reclaimSupersededGenerations(batchLimit: nil)
 
             // Alt model query after swap must still return correct results.
             let after = try await store.findNearestFloat(probe: probe,
@@ -836,7 +1337,7 @@ struct ShadowSwapTests {
                 )
             }
             try await store.publishShadowGeneration(modelIDs: [Self.modelID])
-            try await store.reclaimSupersededGenerations()
+            try await store.reclaimSupersededGenerations(batchLimit: nil)
 
             // Verify serving generation is 1 by checking next shadow gen is 2.
             let nextGens = try await store.beginShadowGeneration(modelIDs: [Self.modelID])

@@ -1,22 +1,22 @@
 // HNSWGraphMaintenance.swift
 //
-// Seam for DreamingDaemon's HNSW graph maintenance duties: the four
+// Seam for DreamingDaemon's HNSW graph maintenance duties: the three
 // cadence-bound operations that keep the approximate float-lane NN index
-// in shape across ALPHA, THETA, and BETA cycles.
+// in shape across THETA and BETA cycles.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
 // HNSWIndex (VectorKit) is an approximate nearest-neighbour index for the
 // float lane (Lane D). It activates at/above a configurable threshold
-// (default 5 000 vectors per modelID partition). Three dreaming cadences
-// have maintenance duties over this graph:
+// (default 5 000 vectors per modelID partition). Two dreaming cadences
+// have maintenance duties over this graph (THETA and BETA); ALPHA manages
+// the graph through the shadow-swap publish path, not through this seam:
 //
 //   ALPHA (30 s) — extreme vocabulary drift triggers a corpus shadow swap
 //     (via CorpusGrowthProbe.reindex). The shadow swap calls
 //     VectorStore.publishShadowGeneration, which atomically flips the
 //     serving generation and rebuilds the HNSW graph from the new serving
 //     rows inside the same operation. The graph is coherent immediately
-//     after the swap completes — no separate clear or lazy rebuild is
-//     needed. Failure is non-fatal; the daemon continues.
+//     after the swap completes. No duty on this seam for ALPHA.
 //
 //   THETA (24 h) — after the daily basis retrain the embedding space has
 //     shifted. All active HNSW graphs are rebuilt from the current float
@@ -56,9 +56,11 @@ import Foundation
 
 /// Seam for DreamingDaemon's HNSW graph maintenance duties.
 ///
-/// Injected into `DreamingDaemon`. The daemon calls the three methods at the
-/// appropriate REM cadences (ALPHA, THETA, BETA) to keep the approximate
-/// float-lane nearest-neighbour graph aligned with the current vector corpus.
+/// Injected into `DreamingDaemon`. The daemon calls the two methods at the
+/// appropriate REM cadences (THETA, BETA) to keep the approximate float-lane
+/// nearest-neighbour graph aligned with the current vector corpus. The ALPHA
+/// cadence maintains the graph through `VectorStore.publishShadowGeneration`
+/// (shadow swap), which does not go through this seam.
 /// `EstateHNSWGraphMaintenance` is the production adapter; tests use in-memory
 /// fakes.
 ///
@@ -66,20 +68,6 @@ import Foundation
 ///   all HNSW maintenance duties (correct for estates with no float lane and
 ///   for tests that do not require approximate NN).
 public protocol HNSWGraphMaintenance: Sendable {
-
-    /// Clear all HNSW graphs for the estate.
-    ///
-    /// Previously called by the ALPHA cadence after a corpus reindex. The
-    /// ALPHA duty now fires a shadow swap (CorpusGrowthProbe.reindex →
-    /// VectorStore.publishShadowGeneration), which rebuilds the HNSW graph
-    /// coherently inside the swap operation. This method is no longer called
-    /// by the ALPHA path; it remains on the protocol for explicit eviction
-    /// use-cases where a caller needs to force a lazy rebuild on the next
-    /// qualifying query.
-    ///
-    /// - Parameter now: Deterministic timestamp from the caller (never
-    ///   `Date()` inside the engine).
-    func clearFloatIndex(now: Date) async throws
 
     /// Rebuild all active HNSW graphs from current float records (THETA duty).
     ///

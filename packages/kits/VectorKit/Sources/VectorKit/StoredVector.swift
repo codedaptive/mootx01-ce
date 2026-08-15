@@ -69,7 +69,7 @@ public struct StoredVector: Sendable, Equatable {
                 modelVersion: String,
                 engram: Engram,
                 filedAt: Date,
-                generation: Int64 = 0) {
+                generation: Int64) {
         self.id = id
         self.itemID = itemID
         self.vectorIndex = vectorIndex

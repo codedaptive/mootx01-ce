@@ -6,7 +6,8 @@
 //
 //   HM-1: ALPHA — vocabulary drift triggers a corpus shadow swap (probe.reindex).
 //          The swap publishes a coherent new-generation HNSW graph atomically
-//          inside publishShadowGeneration; clearFloatIndex is NOT called.
+//          inside publishShadowGeneration. The no-clear guarantee is compile-time
+//          since D-7 removed clearFloatIndex from HNSWGraphMaintenance.
 //          Requires two pump() calls: the first establishes the vocab baseline;
 //          the second crosses the growth trigger and fires the shadow swap.
 //
@@ -34,11 +35,12 @@ import GeniusLocusKit
 
 // MARK: - Fake HNSWGraphMaintenance
 
-/// Recording fake. Tracks calls to all four maintenance methods.
+/// Recording fake. Tracks calls to the three maintenance methods.
+///
+/// `clearFloatIndex` is absent: the method was removed from `HNSWGraphMaintenance`
+/// in D-7 (VEC-SHADOWSWAP-01). The no-clear guarantee for the ALPHA cadence is
+/// compile-time — the seam has no clear method, so nothing can call it.
 private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
-
-    /// Timestamps passed to `clearFloatIndex(now:)`, in call order.
-    private(set) var clearCalls: [Date] = []
 
     /// Timestamps passed to `rebuildFloatIndex(now:)`, in call order.
     private(set) var rebuildCalls: [Date] = []
@@ -56,11 +58,6 @@ private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
         self.shouldThrow = shouldThrow
     }
 
-    func clearFloatIndex(now: Date) async throws {
-        if shouldThrow { throw FakeMaintenanceError() }
-        clearCalls.append(now)
-    }
-
     func rebuildFloatIndex(now: Date) async throws {
         if shouldThrow { throw FakeMaintenanceError() }
         rebuildCalls.append(now)
@@ -76,7 +73,6 @@ private actor FakeHNSWMaintenance: HNSWGraphMaintenance {
         reclaimCalls.append(now)
     }
 
-    var clearCount:   Int { clearCalls.count }
     var rebuildCount: Int { rebuildCalls.count }
     var compactCount: Int { compactCalls.count }
     var reclaimCount: Int { reclaimCalls.count }
@@ -199,7 +195,7 @@ private func twoUsedTraces() -> [RecallTraceItem] {
 @Suite("HNSWGraphMaintenance — dreaming cadence integration")
 struct HNSWDreamingTests {
 
-    // ── HM-1: ALPHA shadow swap fires; clearFloatIndex is NOT called ──────
+    // ── HM-1: ALPHA shadow swap fires ─────────────────────────────────────
 
     /// Two pump() calls are needed:
     ///   • First: lastReindexVocab is –1 (sentinel) → baseline set to firstVocab=100.
@@ -208,11 +204,11 @@ struct HNSWDreamingTests {
     ///     Default trigger = max(25, floor(100 × 0.10)) = 25.
     ///     100 ≥ 25 → probe.reindex fires (shadow swap).
     ///
-    /// clearFloatIndex must NOT fire: publishShadowGeneration ships the coherent
-    /// new-generation HNSW graph atomically inside the swap. Clearing would destroy
-    /// the freshly-published graph and reopen the serving gap. (F-3, BRR §6.)
-    @Test("HM-1: ALPHA shadow swap fires; clearFloatIndex is NOT called (swap publishes coherent graph)")
-    func hm1_alphaShadowSwapFiresNoHNSWClear() async throws {
+    /// The no-clear guarantee is compile-time since D-7 removed clearFloatIndex
+    /// from HNSWGraphMaintenance (VEC-SHADOWSWAP-01 BRR). publishShadowGeneration
+    /// ships the coherent new-generation HNSW graph atomically inside the swap.
+    @Test("HM-1: ALPHA shadow swap fires (no-clear guarantee is compile-time since D-7)")
+    func hm1_alphaShadowSwapFires() async throws {
         let hnsw = FakeHNSWMaintenance()
         let probe = FakeGrowthProbe(first: 100, later: 200)
         let daemon = makeAlphaDaemon(hnsw: hnsw, probe: probe)
@@ -221,20 +217,17 @@ struct HNSWDreamingTests {
 
         // First pump: sets vocab baseline (100). No reindex gate fires.
         _ = try await daemon.pump(now: t0)
-        let clearAfterFirst = await hnsw.clearCount
-        #expect(clearAfterFirst == 0,
-            "no clear on the first pump (baseline-only cycle)")
+        let reindexAfterFirst = await probe.reindexCount
+        #expect(reindexAfterFirst == 0, "no reindex on the first pump (baseline-only cycle)")
 
         // Second pump: 2 seconds later. delta=100 ≥ trigger=25 → shadow swap fires
-        // via probe.reindex. clearFloatIndex must NOT be called — the swap publishes
-        // a coherent graph; clearing it would destroy fresh state.
+        // via probe.reindex.
         _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
-        let clearAfterSecond = await hnsw.clearCount
-        #expect(clearAfterSecond == 0,
-            "clearFloatIndex must NOT fire after shadow swap (publish ships the graph)")
         let reindexAfterSecond = await probe.reindexCount
         #expect(reindexAfterSecond == 1,
             "probe.reindex (shadow swap) must fire exactly once after vocab drift crosses trigger")
+        // The no-clear guarantee is compile-time: clearFloatIndex no longer exists
+        // on HNSWGraphMaintenance (D-7). No assertion needed; the seam cannot clear.
     }
 
     // ── HM-2: THETA consolidation path → rebuild fires ─────────────────────
@@ -344,7 +337,8 @@ struct HNSWDreamingTests {
     // ── HM-9: OMEGA has no HNSW duty ─────────────────────────────────────────
 
     /// OMEGA retires dreamed tunnels. No HNSW graph maintenance fires.
-    /// Verify that none of the four maintenance methods are invoked.
+    /// Verify that none of the three seam methods are invoked.
+    /// (clearFloatIndex was removed from HNSWGraphMaintenance in D-7.)
     @Test("HM-9: OMEGA cycle does not invoke any HNSWGraphMaintenance method")
     func hm9_omegaHasNoHNSWDuty() async throws {
         let hnsw = FakeHNSWMaintenance()
@@ -353,11 +347,9 @@ struct HNSWDreamingTests {
 
         _ = try await daemon.runOmegaCycle(now: now)
 
-        let clears   = await hnsw.clearCount
         let rebuilds = await hnsw.rebuildCount
         let compacts = await hnsw.compactCount
         let reclaims = await hnsw.reclaimCount
-        #expect(clears   == 0, "OMEGA must not call clearFloatIndex")
         #expect(rebuilds == 0, "OMEGA must not call rebuildFloatIndex")
         #expect(compacts == 0, "OMEGA must not call compactFloatIndexTombstones")
         #expect(reclaims == 0, "OMEGA must not call reclaimSupersededGenerations")
@@ -383,9 +375,8 @@ struct HNSWDreamingTests {
 
         let reindexCount = await probe.reindexCount
         #expect(reindexCount == 0, "probe.reindex must NOT fire when delta is below the trigger")
-
-        let clearCount = await hnsw.clearCount
-        #expect(clearCount == 0, "clearFloatIndex must not be called on a skipped-gate cycle")
+        // No clearFloatIndex assertion: the method no longer exists on HNSWGraphMaintenance
+        // (D-7). The no-clear guarantee is compile-time.
     }
 
     // ── n2: Crossing threshold fires exactly once; second cycle with no growth skips ──
@@ -439,13 +430,13 @@ struct HNSWDreamingTests {
         #expect(reclaimCount == 1, "reclaimSupersededGenerations must fire exactly once per BETA")
     }
 
-    // ── n6: ALPHA-clear-removal regression guard ──────────────────────────
+    // ── n6: ALPHA drift-gate regression guard ─────────────────────────────
 
     /// After the drift gate fires and the shadow swap completes (probe.reindex),
-    /// clearFloatIndex must NOT be called. The swap publishes a coherent
-    /// new-generation HNSW graph inside publishShadowGeneration; clearing it
-    /// would destroy the fresh graph and reopen the serving gap the swap closes.
-    @Test("n6: ALPHA drift-gate fires shadow swap without calling clearFloatIndex")
+    /// probe.reindex must have fired exactly once. The no-clear guarantee is now
+    /// compile-time since D-7 removed clearFloatIndex from HNSWGraphMaintenance
+    /// (VEC-SHADOWSWAP-01 BRR). The seam has no clear method; nothing can call it.
+    @Test("n6: ALPHA drift-gate fires shadow swap; no-clear guarantee is compile-time (D-7)")
     func n6_alphaSwapDoesNotCallClear() async throws {
         let hnsw = FakeHNSWMaintenance()
         let probe = FakeGrowthProbe(first: 100, later: 200)
@@ -462,10 +453,8 @@ struct HNSWDreamingTests {
         _ = try await daemon.pump(now: t0.addingTimeInterval(2.0))
 
         let reindexCount = await probe.reindexCount
-        #expect(reindexCount == 1, "shadow swap must fire (n6 precondition: gate did cross)")
-
-        let clearCount = await hnsw.clearCount
-        #expect(clearCount == 0,
-            "clearFloatIndex must NOT be called after shadow swap — clearing the newly-published graph would reopen the serving gap")
+        #expect(reindexCount == 1, "shadow swap must fire exactly once when threshold crossed (n6 gate)")
+        // The no-clear guarantee is compile-time: clearFloatIndex no longer exists
+        // on HNSWGraphMaintenance (D-7). No assertion needed.
     }
 }

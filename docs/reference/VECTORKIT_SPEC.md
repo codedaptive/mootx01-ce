@@ -1,6 +1,6 @@
 ---
 title: VectorKit Specification
-version: 1.6.0
+version: 1.7.0
 status: accepted-1.1-target
 date: 2026-08-15
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
@@ -613,6 +613,20 @@ item/lane/model deletion or a CorpusKit-owned scope delete instead.
 
 ## Changelog
 
+### 1.7.0 -- 2026-08-15
+
+Gate hardening (VEC-SHADOWSWAP-01, Unit A2):
+- Updated B-16: `reclaimSupersededGenerations` now accepts `batchLimit` (Swift) /
+  `batch_limit` (Rust). `nil`/`None` = unbounded production path (unchanged behavior).
+  `Some(n)` = bounded pass that leaves registry 'pending-reclaim' for resumability.
+  Adds explicit crash-safe resumability guarantee: a second unbounded pass after a
+  mid-reclaim kill finishes without error and produces correct query results.
+- Updated B-16 public API reference: `reclaimSupersededGenerations(batchLimit:)`.
+- D-7: Swift `HNSWGraphMaintenance.clearFloatIndex(now:)` removed from the protocol
+  and `EstateHNSWGraphMaintenance`; ALPHA cadence manages the float index through
+  `publishShadowGeneration`. Rust `HNSWGraphMaintenance.clear_float_index` retained
+  (called at `dreaming_cycle.rs:1847`).
+
 ### 1.6.0 -- 2026-08-15
 
 Added shadow-generation vector swap (VEC-SHADOWSWAP-01, TASK-MXE-2026-0332):
@@ -637,9 +651,13 @@ structure (binary array, float index, HNSW graph). The serving lane continues to
 queries from the current serving generation. `publishShadowGeneration` atomically flips
 `serving_generation` to `shadow_generation` in a single storage transaction and then
 rebuilds resident structures from the new serving rows. After publish, queries answer from
-the new generation. `reclaimSupersededGenerations` idempotently deletes vectors rows and
-hnsw_graph rows whose generation is neither the current serving generation nor an active
-shadow build.
+the new generation. `reclaimSupersededGenerations(batchLimit:)` idempotently deletes
+vectors rows and hnsw_graph rows whose generation is neither the current serving generation
+nor an active shadow build. `batchLimit: nil` (unbounded, production path) deletes all
+superseded rows in one pass and clears the registry state. `batchLimit: Int` (bounded,
+incremental path) deletes at most `n` rows per model and leaves the registry
+'pending-reclaim' so a subsequent unbounded pass can finish — enabling crash-safe
+resumability across mid-reclaim kills.
 
 **B-16a (no-serving-gap guarantee):** During a shadow build, all read paths (binary lane,
 float/HNSW lane, findByKeyword, recentItemIDs, vectors(forItemID:)) filter to the current
@@ -661,8 +679,8 @@ it. `lastServedGraphGeneration(for:)` returns the generation of the graph instan
 last answered a float nearest-neighbour query.
 
 **New public API:** `beginShadowGeneration(modelIDs:)`, `publishShadowGeneration(modelIDs:)`,
-`reclaimSupersededGenerations()`, `peakShadowStorageBytes(for:)`,
-`lastServedGraphGeneration(for:)`. See VECTORKIT_INTERFACE.md for signatures.
+`reclaimSupersededGenerations(batchLimit:)`, `peakShadowStorageBytes(for:)`,
+`lastServedGraphGeneration(for:)`. See VECTORKIT_INTERFACE.md §1.9.0 for signatures.
 
 **Swift-only (Unit A):** The Rust port (Unit B) is a sequenced follow-up mission.
 

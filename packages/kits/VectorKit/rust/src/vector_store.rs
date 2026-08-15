@@ -3924,9 +3924,20 @@ impl VectorStore {
     /// query result (serving_generation is already the committed value before
     /// this call). Returns a per-model count of deleted `vectors` rows.
     ///
-    /// Mirror of Swift `VectorStore.reclaimSupersededGenerations()`.
+    /// Mirror of Swift `VectorStore.reclaimSupersededGenerations(batchLimit:)`.
+    ///
+    /// `batch_limit: None` — unbounded pass; deletes all superseded rows for each
+    /// model and clears the 'pending-reclaim' registry state. Production BETA path.
+    ///
+    /// `batch_limit: Some(n)` — bounded pass; deletes at most `n` superseded rows
+    /// per model using a SELECT-then-DELETE WHERE IN pattern (SQLite's
+    /// DELETE…LIMIT requires `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, which is absent
+    /// in PersistenceKit-bundled SQLite). When bounded, the registry state is NOT
+    /// cleared — the operation is explicitly partial so a second unbounded pass
+    /// can finish the job (Gate 4 resumability test).
     pub fn reclaim_superseded_generations(
         &self,
+        batch_limit: Option<usize>,
     ) -> Result<std::collections::HashMap<String, usize>, VectorKitError> {
         let row_store = self.storage.row_store();
         // Fetch all registry rows.
@@ -3966,7 +3977,7 @@ impl VectorStore {
                 _ => None,
             };
 
-            // Build the delete predicate: model_id = X AND generation ≠ serving
+            // Build the superseded-row predicate: model_id = X AND generation ≠ serving
             // AND (if active shadow) generation ≠ active shadow.
             let mut pred_parts = vec![
                 StoragePredicate::Eq(
@@ -3985,11 +3996,54 @@ impl VectorStore {
                 ))));
             }
             let pred = StoragePredicate::all(pred_parts);
-            let deleted = row_store
-                .delete("vectors", &pred)
-                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
-            // Delete mismatched hnsw_graph rows (any generation ≠ serving).
+            let deleted = if let Some(cap) = batch_limit {
+                // Bounded path: SELECT ids LIMIT cap → DELETE WHERE IN (ids).
+                // Cannot use DELETE…LIMIT directly: SQLITE_ENABLE_UPDATE_DELETE_LIMIT
+                // is absent in PersistenceKit-bundled SQLite.
+                let id_rows = row_store
+                    .query("vectors", Some(&pred), &[], Some(cap), None)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                if id_rows.is_empty() {
+                    // No superseded rows remain — bounded pass is a no-op.
+                    0
+                } else {
+                    let ids: Vec<TypedValue> = id_rows
+                        .iter()
+                        .filter_map(|r| r.get("id").cloned())
+                        .collect();
+                    let del_pred = StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new("vectors", "model_id"),
+                            TypedValue::Text(model_id.clone()),
+                        ),
+                        StoragePredicate::In(
+                            Column::new("vectors", "id"),
+                            ids,
+                        ),
+                    ]);
+                    row_store
+                        .delete("vectors", &del_pred)
+                        .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?
+                }
+            } else {
+                // Unbounded path: delete all superseded rows for this model.
+                row_store
+                    .delete("vectors", &pred)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?
+            };
+
+            if batch_limit.is_some() {
+                // Bounded pass: do NOT clear registry state. The operation is
+                // explicitly partial; leave 'pending-reclaim' so the next unbounded
+                // pass can finish and clear it.
+                if deleted > 0 {
+                    summary.insert(model_id, deleted);
+                }
+                continue;
+            }
+
+            // Unbounded path: delete mismatched hnsw_graph rows (any generation ≠ serving).
             row_store
                 .delete(
                     "hnsw_graph",

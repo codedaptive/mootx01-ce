@@ -1,7 +1,7 @@
 ---
 title: VectorKit Interface
 status: accepted-1.1-target
-version: 1.8.0
+version: 1.9.0
 date: 2026-08-15
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
@@ -930,22 +930,41 @@ public func publishShadowGeneration(modelIDs: [String]) async throws
 
 ---
 
-### `VectorStore.reclaimSupersededGenerations()` (Swift only — Unit A)
+### `VectorStore.reclaimSupersededGenerations(batchLimit:)` (Swift) / `reclaim_superseded_generations(batch_limit)` (Rust)
 
 Idempotent, resumable reclaim of superseded generation rows. Deletes `vectors` rows
 whose generation is neither the model's current `serving_generation` nor an active
-`building` shadow. Also deletes mismatched `hnsw_graph` rows and clears
-`shadow_state = "pending-reclaim"` from the registry. Calling twice in a row is a
-no-op on the second call (zero deletions) and does not corrupt query results.
+`building` shadow.
+
+**`batchLimit: nil` (Swift) / `batch_limit: None` (Rust) — unbounded pass (production BETA path):**
+Deletes all superseded rows for each model, then deletes mismatched `hnsw_graph` rows
+and clears `shadow_state = "pending-reclaim"` from the registry. Calling twice in a row
+after a full pass is a no-op on the second call (zero deletions) and does not corrupt
+query results.
+
+**`batchLimit: Int` (Swift) / `batch_limit: Some(n)` (Rust) — bounded pass (Gate 4 / incremental path):**
+Deletes at most `n` superseded rows per model using a SELECT-then-DELETE WHERE IN
+pattern (SQLite's `DELETE…LIMIT` requires `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, absent in
+PersistenceKit-bundled SQLite). When bounded, the registry state is NOT cleared — the
+operation is explicitly partial so a subsequent unbounded pass can finish the job.
 
 **Swift:**
 
 ```swift
 @discardableResult
-public func reclaimSupersededGenerations() async throws -> [String: Int]
+public func reclaimSupersededGenerations(batchLimit: Int? = nil) async throws -> [String: Int]
 ```
 
-The return value is a map from modelID to the number of `vectors` rows deleted.
+**Rust:**
+
+```rust
+pub fn reclaim_superseded_generations(
+    &self,
+    batch_limit: Option<usize>,
+) -> Result<HashMap<String, usize>, VectorKitError>
+```
+
+The return value is a map from modelID to the number of `vectors` rows deleted in this pass.
 
 ---
 
@@ -1144,6 +1163,24 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-08-15
+
+Gate hardening (VEC-SHADOWSWAP-01, Unit A2):
+- Updated `reclaimSupersededGenerations()` → `reclaimSupersededGenerations(batchLimit: Int? = nil)`
+  (Swift) and `reclaim_superseded_generations(batch_limit: Option<usize>)` (Rust).
+  `nil`/`None` = unbounded production path (unchanged behavior). `Some(n)` = bounded
+  incremental path: deletes at most `n` superseded rows per model, leaves registry
+  'pending-reclaim' intact so a second unbounded pass completes the job.
+- Removed `clearFloatIndex(now:)` from Swift `HNSWGraphMaintenance` protocol and
+  `EstateHNSWGraphMaintenance` adapter (D-7). The ALPHA cadence manages the float
+  index through `publishShadowGeneration` (which rebuilds HNSW coherently inside
+  the swap operation) — no separate clear duty exists on this seam. Rust
+  `HNSWGraphMaintenance.clear_float_index` is retained; it is called at
+  `dreaming_cycle.rs:1847` and is not an orphan.
+- Removed unexplained defaults from `HNSWIndex.loadFromGraphRows(expectedGeneration:)`,
+  `VectorMatch.init(generation:)`, `StoredVector.init(generation:)` (F-5).
+  All callers now pass `generation:` explicitly.
 
 ### 1.8.0 -- 2026-08-15
 

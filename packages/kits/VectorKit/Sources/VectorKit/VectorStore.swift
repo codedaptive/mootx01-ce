@@ -2594,18 +2594,32 @@ public actor VectorStore {
 
     /// Idempotent, resumable, batched reclaim of superseded generation rows.
     ///
-    /// Deletes vectors rows whose generation ≠ the model's serving_generation AND
-    /// that are NOT the model's active 'building' shadow (reclaimable = no active
-    /// shadow OR shadow_state is 'pending-reclaim'). Also deletes mismatched
-    /// hnsw_graph rows, then clears shadow_state 'pending-reclaim'. Reclaims
-    /// abandoned 'building' shadows (generation != serving AND != active shadow).
+    /// Deletes `vectors` rows whose generation ≠ the model's `serving_generation`
+    /// AND that are NOT the model's active 'building' shadow (reclaimable = no
+    /// active shadow OR `shadow_state` is 'pending-reclaim'). Also deletes
+    /// mismatched `hnsw_graph` rows, then clears `shadow_state = 'pending-reclaim'`
+    /// from the registry. Reclaims abandoned 'building' shadows (generation !=
+    /// serving AND != active shadow).
     ///
     /// Killing mid-reclaim and re-running finishes without error and changes
     /// no query result (serving generation is already the committed value).
     ///
+    /// - Parameter batchLimit: When non-nil, delete AT MOST this many superseded
+    ///   `vectors` rows per model in this pass and leave 'pending-reclaim' registry
+    ///   state intact so a subsequent call resumes. When nil (the default, used by
+    ///   the production BETA path), the pass is unbounded: all superseded rows are
+    ///   deleted and registry state is fully cleared. The cap exists for incremental
+    ///   reclamation in resource-constrained environments and for Gate 4's
+    ///   resumability test, which manufactures a partial-reclaim state by capping
+    ///   the first pass below the superseded row count.
+    ///
+    /// Implementation: bounded passes use SELECT id … LIMIT n + DELETE WHERE id IN
+    /// (those ids), never DELETE … LIMIT, which requires SQLITE_ENABLE_UPDATE_DELETE_LIMIT
+    /// and is not available in all SQLite builds.
+    ///
     /// - Returns: A summary of rows deleted per model for metrics.
     @discardableResult
-    public func reclaimSupersededGenerations() async throws -> [String: Int] {
+    public func reclaimSupersededGenerations(batchLimit: Int? = nil) async throws -> [String: Int] {
         // Fetch all registry rows to find models with pending-reclaim state.
         let regRows = try await storage.rowStore.query(
             table: "vector_generations",
@@ -2631,11 +2645,11 @@ public actor VectorStore {
                 activeShadow = nil
             }
 
-            // Delete vectors rows for this model that are not the serving generation
-            // and not the active shadow generation (which is still being built).
-            // The delete is idempotent: re-running finds zero matching rows and
-            // returns 0 (correct). The resumable contract is satisfied because
-            // serving_generation is already the committed value before this call.
+            // Build the predicate that identifies superseded vectors rows:
+            // model_id = X AND generation ≠ servingGen AND (if active shadow) generation ≠ activeShadow.
+            // The delete is idempotent: re-running finds zero matching rows and returns 0.
+            // serving_generation is committed before this call, so correctness is unaffected
+            // whether this pass completes fully or is killed mid-way.
             var predParts: [StoragePredicate] = [
                 .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
                 .not(.eq(Column(table: "vectors", name: "generation"), .int(servingGen)))
@@ -2644,10 +2658,48 @@ public actor VectorStore {
                 predParts.append(.not(.eq(Column(table: "vectors", name: "generation"), .int(active))))
             }
             let pred: StoragePredicate = .and(predParts)
-            let totalDeleted = try await storage.rowStore.delete(
-                table: "vectors",
-                where: pred
-            )
+
+            // Bounded pass: SELECT ids LIMIT batchLimit → DELETE WHERE id IN (...).
+            // Never uses DELETE…LIMIT because SQLITE_ENABLE_UPDATE_DELETE_LIMIT is
+            // absent in many SQLite builds (including the PersistenceKit-bundled one).
+            let totalDeleted: Int
+            if let cap = batchLimit {
+                // Fetch at most `cap` row IDs matching the superseded predicate.
+                let idRows = try await storage.rowStore.query(
+                    table: "vectors",
+                    where: pred,
+                    orderBy: [],
+                    limit: cap,
+                    offset: nil,
+                    columns: ["id"]
+                )
+                if idRows.isEmpty {
+                    totalDeleted = 0
+                } else {
+                    // Build an IN predicate over the fetched IDs and delete exactly those rows.
+                    let ids = idRows.compactMap { $0["id"] }
+                    totalDeleted = try await storage.rowStore.delete(
+                        table: "vectors",
+                        where: .and([
+                            .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                            .in(Column(table: "vectors", name: "id"), ids)
+                        ])
+                    )
+                }
+                // Bounded pass: leave registry state intact so the next pass can resume.
+                // hnsw_graph cleanup and registry clear happen only on the unbounded pass.
+                if totalDeleted > 0 {
+                    summary[modelID] = totalDeleted
+                }
+                continue
+            } else {
+                totalDeleted = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: pred
+                )
+            }
+
+            // Unbounded pass: also delete mismatched hnsw_graph rows and clear registry.
 
             // Delete mismatched hnsw_graph rows (any generation != serving).
             _ = try await storage.rowStore.delete(

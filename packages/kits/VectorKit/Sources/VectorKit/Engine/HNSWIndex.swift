@@ -652,7 +652,7 @@ public actor HNSWIndex {
         _ rows: [GraphRow],
         nodeBytes: [Int32: (itemID: String, bytes: [UInt8])],
         modelID: String,
-        expectedGeneration: Int64 = 0
+        expectedGeneration: Int64
     ) {
         // Reject rows that belong to a retired generation. Any mismatch leaves
         // this instance empty so the query path falls back to exact scan rather

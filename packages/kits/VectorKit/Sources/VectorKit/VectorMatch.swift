@@ -39,7 +39,7 @@ public struct VectorMatch: Sendable, Comparable, Equatable {
     /// verify this matches the expected generation after a swap completes.
     public let generation: Int64
 
-    public init(itemID: String, distance: Int, modelID: String, generation: Int64 = 0) {
+    public init(itemID: String, distance: Int, modelID: String, generation: Int64) {
         self.itemID = itemID
         self.distance = distance
         self.modelID = modelID

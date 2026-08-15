@@ -1803,17 +1803,19 @@ impl DreamingDaemon {
     // Pass `hnsw: None::<&mut InMemoryHNSWGraphMaintenance>` to disable HNSW
     // maintenance in tests that do not require a float index.
 
-    /// ALPHA vocabulary-growth check with HNSW graph clear (VEC-HNSW-01 seam).
+    /// ALPHA vocabulary-growth check with HNSW seam parameter (VEC-HNSW-01 seam).
     ///
-    /// Extends `check_corpus_growth` with an optional HNSW clear step: when the
-    /// vocabulary growth gate fires and `probe.reindex()` succeeds, calls
-    /// `hnsw.clear_float_index(now_epoch_secs)` so the next qualifying
-    /// `find_nearest_float` lazily rebuilds the graph from the fresh vectors.
+    /// Extends `check_corpus_growth` with an optional HNSW maintenance parameter.
+    /// When the vocabulary growth gate fires and `probe.reindex()` succeeds, no
+    /// separate HNSW clear fires here. `probe.reindex()` shadow-swaps the corpus
+    /// internally — `VectorStore.publishShadowGeneration` rebuilds the HNSW graph
+    /// from the new serving rows inside the same atomic operation. The graph is
+    /// coherent immediately after the swap; clearing it would destroy the
+    /// newly-published graph and reopen the serving gap the swap was designed to
+    /// close. (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
     ///
-    /// Failure of the HNSW clear is non-fatal: the clear result (`bool`) is not
-    /// propagated — a stale graph degrades approximate NN performance but does
-    /// not break correctness. Mirrors Swift `DreamingDaemon.checkCorpusGrowth`
-    /// after the VEC-HNSW-01 wiring.
+    /// The `hnsw` parameter is accepted for signature symmetry with the THETA and
+    /// BETA `_with_hnsw` variants. The ALPHA cadence has no HNSW duty on this seam.
     ///
     /// `now_epoch_secs` is the injected cycle timestamp; neither the probe nor the
     /// maintenance seam may read the system clock internally.
@@ -1821,7 +1823,7 @@ impl DreamingDaemon {
         &mut self,
         now_epoch_secs: f64,
         probe: &mut P,
-        hnsw: Option<&mut M>,
+        _hnsw: Option<&mut M>,
     ) where
         P: CorpusGrowthProbe,
         M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
@@ -1840,12 +1842,14 @@ impl DreamingDaemon {
         {
             // Advance only on success so a failed retrain re-fires next cycle.
             self.last_reindex_vocab = live_vocab;
-            // Clear stale HNSW graphs: the new embedding geometry makes old
-            // graph topology incorrect. Non-fatal on failure — a stale graph
-            // falls back to exact scan on the next query.
-            if let Some(m) = hnsw {
-                let _ = m.clear_float_index(now_epoch_secs);
-            }
+            // ALPHA HNSW note: no separate HNSW clear fires here.
+            // probe.reindex() shadow-swaps the corpus internally —
+            // VectorStore.publishShadowGeneration rebuilds the HNSW graph
+            // from the new serving rows inside the same atomic operation.
+            // The graph is coherent immediately after the swap; clearing it
+            // would destroy the newly-published graph and reopen the serving
+            // gap the swap was designed to close.
+            // (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
         }
     }
 

@@ -20,9 +20,11 @@ struct StoredVectorTests {
                         engram: Engram = Engram(blocks: 0xAA, 0xBB, 0xCC, 0xDD),
                         filedAt: Date = Date(timeIntervalSince1970: 1_700_000_000))
     -> StoredVector {
+        // Pass generation: 0 explicitly — StoredVector.init has no default for generation
+        // (F-5: unexplained defaults removed so callers must be deliberate).
         StoredVector(id: id, itemID: itemID, vectorIndex: vectorIndex,
                      modelID: modelID, modelVersion: modelVersion,
-                     engram: engram, filedAt: filedAt)
+                     engram: engram, filedAt: filedAt, generation: 0)
     }
 
     /// The memberwise initializer retains every field verbatim.
@@ -35,7 +37,8 @@ struct StoredVectorTests {
                                modelID: "minilm-v6",
                                modelVersion: "1.0.0-alpha.3",
                                engram: engram,
-                               filedAt: when)
+                               filedAt: when,
+                               generation: 0)
         #expect(row.id == "uuid-xyz")
         #expect(row.itemID == "drawer-V")
         #expect(row.vectorIndex == 0)

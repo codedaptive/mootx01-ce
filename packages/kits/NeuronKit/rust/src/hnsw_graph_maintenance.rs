@@ -1,20 +1,23 @@
 // hnsw_graph_maintenance.rs
 //
-// Seam for DreamingDaemon's HNSW graph maintenance duties: the three
+// Seam for DreamingDaemon's HNSW graph maintenance duties: the two
 // cadence-bound operations that keep the approximate float-lane NN index
-// aligned with the current vector corpus across ALPHA, THETA, and BETA cycles.
+// aligned with the current vector corpus across THETA and BETA cycles.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
 // HNSWIndex (VectorKit) is an approximate nearest-neighbour index for the
 // float lane (Lane D). It activates at/above a configurable threshold
-// (default 5 000 vectors per modelID partition). Three dreaming cadences
-// have maintenance duties over this graph:
+// (default 5 000 vectors per modelID partition). Two dreaming cadences
+// have maintenance duties over this graph (THETA and BETA); ALPHA manages
+// the graph through the shadow-swap publish path, not through this seam:
 //
-//   ALPHA (30 s) — extreme vocabulary drift triggers a corpus reindex.
-//     The new embedding geometry makes the old graph topology incorrect;
-//     all HNSW graphs are cleared so the next qualifying query rebuilds
-//     from the fresh vectors. A lazy rebuild is cheaper than a synchronous
-//     full rebuild inside a 30-second cycle.
+//   ALPHA (30 s) — extreme vocabulary drift triggers a corpus shadow swap
+//     (via CorpusGrowthProbe.reindex). The shadow swap calls
+//     VectorStore.publishShadowGeneration, which atomically flips the
+//     serving generation and rebuilds the HNSW graph from the new serving
+//     rows inside the same operation. The graph is coherent immediately
+//     after the swap; no separate clear or lazy rebuild is needed through
+//     this seam. (D-7 + F-3, VEC-SHADOWSWAP-01 BRR.)
 //
 //   THETA (24 h) — after the daily basis retrain the embedding space has
 //     shifted. All active HNSW graphs are rebuilt from the current float
@@ -49,9 +52,11 @@
 /// Seam for `DreamingDaemon`'s HNSW graph maintenance duties.
 ///
 /// Injected into `DreamingDaemon`'s `_with_hnsw` method variants. The daemon
-/// calls the three methods at the appropriate REM cadences (ALPHA, THETA, BETA)
-/// to keep the approximate float-lane nearest-neighbour graph aligned with the
-/// current vector corpus. Tests supply `InMemoryHNSWGraphMaintenance`.
+/// calls the two methods at the appropriate REM cadences (THETA, BETA) to keep
+/// the approximate float-lane nearest-neighbour graph aligned with the current
+/// vector corpus. The ALPHA cadence maintains the graph through
+/// `VectorStore.publishShadowGeneration` (shadow swap), which does not go
+/// through this seam. Tests supply `InMemoryHNSWGraphMaintenance`.
 ///
 /// All methods are synchronous: the Rust daemon has no async runtime.
 ///
@@ -60,17 +65,10 @@
 /// an Intellectus counter for operator visibility.
 ///
 /// Mirrors Swift `HNSWGraphMaintenance` protocol (NeuronKit).
+/// `clearFloatIndex` was removed from both ports in D-7 (VEC-SHADOWSWAP-01):
+/// the ALPHA clear duty is now handled atomically inside
+/// `publishShadowGeneration`. Zero production callers remain on this seam.
 pub trait HNSWGraphMaintenance {
-    /// Clear all HNSW graphs for the estate (ALPHA extreme-drift duty).
-    ///
-    /// Called when vocabulary drift crosses the auto-reindex threshold and a
-    /// full corpus reindex fires. The next `find_nearest_float` call at/above
-    /// the threshold lazily rebuilds the graph from the fresh vectors.
-    ///
-    /// `now_epoch_secs` is the caller-injected cycle timestamp (deterministic;
-    /// the implementor must NOT read the system clock).
-    fn clear_float_index(&mut self, now_epoch_secs: f64) -> bool;
-
     /// Rebuild all active HNSW graphs from current float records (THETA duty).
     ///
     /// Called after the daily basis retrain fires. Fetches current float32 rows
@@ -111,10 +109,11 @@ pub trait HNSWGraphMaintenance {
 
 /// In-memory `HNSWGraphMaintenance` for tests. Records calls without touching a
 /// live VectorStore. Mirrors Swift's `FakeHNSWMaintenance` test double pattern.
+///
+/// `clear_calls` is absent: `clearFloatIndex` was removed from the protocol in
+/// D-7 (VEC-SHADOWSWAP-01). The no-clear guarantee for ALPHA is compile-time.
 #[derive(Debug, Default)]
 pub struct InMemoryHNSWGraphMaintenance {
-    /// Timestamps of successful `clear_float_index` calls, in call order.
-    pub clear_calls: Vec<f64>,
     /// Timestamps of successful `rebuild_float_index` calls, in call order.
     pub rebuild_calls: Vec<f64>,
     /// Timestamps of successful `compact_float_index_tombstones` calls, in call order.
@@ -138,14 +137,6 @@ impl InMemoryHNSWGraphMaintenance {
 }
 
 impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
-    fn clear_float_index(&mut self, now_epoch_secs: f64) -> bool {
-        if self.fail_all {
-            return false;
-        }
-        self.clear_calls.push(now_epoch_secs);
-        true
-    }
-
     fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool {
         if self.fail_all {
             return false;

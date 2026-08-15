@@ -5,10 +5,10 @@
 //! cadences. Mirrors the NeuronKit Swift tests for `HNSWGraphMaintenance`.
 //!
 //! Covered:
-//!   ALPHA seam — `check_corpus_growth_with_hnsw` calls `clear_float_index`
-//!     exactly once when vocabulary growth fires and reindex succeeds.
-//!   ALPHA seam — no clear when reindex does not fire (baseline not exceeded).
-//!   ALPHA seam — no clear when reindex fails (fail_all), no panic.
+//!   ALPHA seam — `check_corpus_growth_with_hnsw` fires `probe.reindex` when
+//!     vocabulary growth crosses the threshold; no `clear_float_index` fires
+//!     (removed in D-7 — the no-clear guarantee is compile-time).
+//!   ALPHA seam — reindex does not fire when growth is below threshold.
 //!   ALPHA seam — None path is safe (hnsw=None behaves like base method).
 //!   THETA seam — `run_theta_cycle_with_hook_and_hnsw` calls `rebuild_float_index`
 //!     once per invocation regardless of retrain hook success.
@@ -64,34 +64,37 @@ fn low_threshold_daemon() -> DreamingDaemon {
 
 // ─── ALPHA seam ──────────────────────────────────────────────────────────────
 
-/// `check_corpus_growth_with_hnsw` calls `clear_float_index` when vocabulary
-/// growth fires and reindex succeeds.
+/// `check_corpus_growth_with_hnsw` fires `probe.reindex` when vocabulary growth
+/// crosses the threshold. No `clear_float_index` fires — the method was removed
+/// from `HNSWGraphMaintenance` in D-7 (VEC-SHADOWSWAP-01): the ALPHA clear duty
+/// is now handled atomically inside `VectorStore.publishShadowGeneration`.
+/// The no-clear guarantee is compile-time (the seam has no clear method).
 ///
-/// Mirrors Swift: ALPHA clears the HNSW graph after a successful corpus reindex
-/// so the next `find_nearest_float` call lazily rebuilds from the fresh vectors.
+/// Mirrors Swift n6: probe.reindex fires exactly once; clear is absent by
+/// construction. (F-3 + D-7, VEC-SHADOWSWAP-01 BRR.)
 #[test]
-fn alpha_hnsw_clear_fires_when_reindex_succeeds() {
+fn alpha_hnsw_reindex_fires_no_clear_compile_time() {
     let mut daemon = low_threshold_daemon();
     let mut hnsw = InMemoryHNSWGraphMaintenance::new();
 
-    // First call establishes baseline (vocab=10). No reindex, no clear.
+    // First call establishes baseline (vocab=10). No reindex fires.
     let mut probe = InMemoryCorpusGrowthProbe::new(10);
     daemon.check_corpus_growth_with_hnsw(T0, &mut probe, Some(&mut hnsw));
-    assert!(hnsw.clear_calls.is_empty(), "no clear on baseline establishment");
+    assert!(probe.reindex_calls.is_empty(), "no reindex on baseline establishment");
 
-    // Second call: vocab grows above threshold (floor=5).
+    // Second call: vocab grows above threshold (floor=5). Reindex fires.
     probe.vocab = 16;
     daemon.check_corpus_growth_with_hnsw(T0 + 30.0, &mut probe, Some(&mut hnsw));
 
-    assert_eq!(probe.reindex_calls.len(), 1, "reindex must fire once");
-    assert_eq!(hnsw.clear_calls, vec![T0 + 30.0],
-        "clear_float_index must fire with the cycle timestamp after successful reindex");
+    assert_eq!(probe.reindex_calls.len(), 1, "reindex must fire exactly once when threshold crossed");
+    // clear_float_index is absent from the trait: no assertion needed.
+    // The no-clear guarantee for ALPHA is compile-time since D-7.
 }
 
-/// `check_corpus_growth_with_hnsw` does not call `clear_float_index` when the
-/// growth gate does not fire (vocabulary is below the trigger threshold).
+/// `check_corpus_growth_with_hnsw` does not fire reindex when vocabulary growth
+/// is below the trigger threshold.
 #[test]
-fn alpha_hnsw_clear_does_not_fire_below_threshold() {
+fn alpha_hnsw_reindex_does_not_fire_below_threshold() {
     let mut daemon = low_threshold_daemon();
     let mut hnsw = InMemoryHNSWGraphMaintenance::new();
 
@@ -104,29 +107,6 @@ fn alpha_hnsw_clear_does_not_fire_below_threshold() {
     daemon.check_corpus_growth_with_hnsw(T0 + 30.0, &mut probe, Some(&mut hnsw));
 
     assert!(probe.reindex_calls.is_empty(), "reindex must not fire below threshold");
-    assert!(hnsw.clear_calls.is_empty(), "clear must not fire when reindex is skipped");
-}
-
-/// HNSW clear failure (`fail_all: true`) is non-fatal: no panic, reindex still
-/// advances the baseline.
-#[test]
-fn alpha_hnsw_clear_failure_is_non_fatal() {
-    let mut daemon = low_threshold_daemon();
-    let mut hnsw = InMemoryHNSWGraphMaintenance::failing();
-
-    let mut probe = InMemoryCorpusGrowthProbe::new(10);
-    // Establish baseline.
-    daemon.check_corpus_growth_with_hnsw(T0, &mut probe, Some(&mut hnsw));
-
-    // Growth fires.
-    probe.vocab = 16;
-    daemon.check_corpus_growth_with_hnsw(T0 + 30.0, &mut probe, Some(&mut hnsw));
-
-    // Reindex fired (baseline was advanced).
-    assert_eq!(probe.reindex_calls.len(), 1, "reindex must fire");
-    // Clear was attempted but failed silently — no panic, no clear_calls recorded.
-    assert!(hnsw.clear_calls.is_empty(),
-        "failing HNSW clear must not record a call (non-fatal)");
 }
 
 /// `check_corpus_growth_with_hnsw` with `hnsw: None` behaves identically to
