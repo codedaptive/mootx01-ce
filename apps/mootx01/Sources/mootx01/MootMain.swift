@@ -15,12 +15,17 @@
 // an MCP client whose config schema can only express a bare `command`
 // string (no `args` array) reach ProxyCommand without an args array —
 // see ArgvDispatch.swift (MootInstallerCore) for the full rationale.
-// Proxy symlink placement (wave 7.6): `Installer.placeBinary()` writes a
-// relative symlink `mootx01-proxy → mootx01` in the same directory as the
-// installed binary. MCP client configs that specify `"command": "mootx01-proxy"`
-// invoke the proxy subcommand via argv0 dispatch above. Uninstall removes
-// the symlink. No separate PATH entry is needed — same-dir placement means
-// both names are equally reachable via the single PATH-visible directory.
+// BL-1 adds the `mootx01-botLink` argv0 route: it PREPENDS `botlink`, so
+// `mootx01-botLink ping` reaches `botlink ping` — the cloud agent's
+// one-shot data path (see BotLinkCommand.swift).
+// Symlink placement (wave 7.6, BL-1): `Installer.placeBinary()` writes
+// relative symlinks `mootx01-proxy → mootx01` and `mootx01-botLink →
+// mootx01` in the same directory as the installed binary. MCP client
+// configs that specify `"command": "mootx01-proxy"` invoke the proxy
+// subcommand via argv0 dispatch above; cloud agents exec `mootx01-botLink`.
+// Uninstall removes both when it removes the install root. No separate
+// PATH entry is needed — same-dir placement means all names are equally
+// reachable via the single PATH-visible directory.
 //
 // On macOS: full subcommand surface including `serve`/`proxy`.
 // On Linux: install, uninstall, db, status, query (serve/proxy require macOS).
@@ -86,6 +91,9 @@ struct Mootx01: AsyncParsableCommand {
                 DbCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                // BL-1: one-shot MCP transport for cloud agents (also the
+                // mootx01-botLink argv0 symlink target).
+                BotLinkCommand.self,
                 // — out-of-band sensitivity unlock / lock.
                 UnlockCommand.self,
                 LockCommand.self,
@@ -110,6 +118,11 @@ struct Mootx01: AsyncParsableCommand {
                 DbCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                // BL-1: one-shot MCP transport for cloud agents. Registered
+                // like QueryCommand on both platforms — the HTTP path is
+                // Foundation-only, and the subprocess path shares query's
+                // serve-availability caveat on Linux.
+                BotLinkCommand.self,
                 EnableCommand.self,
                 DisableCommand.self,
                 CodexMemoryCommand.self,
