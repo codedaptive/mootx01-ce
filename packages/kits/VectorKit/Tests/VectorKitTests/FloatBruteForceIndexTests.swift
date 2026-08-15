@@ -496,4 +496,62 @@ struct FloatBruteForceIndexTests {
             _ = try await idx.searchFarthest(probe: binaryProbe, metric: .cosine, k: 1, filter: nil)
         }
     }
+
+    // MARK: - Regression: header/storage mismatch must not trap
+
+    /// A resident array whose header claims more bytes than `storage` holds
+    /// must be REFUSED, not scanned.
+    ///
+    /// This is the 2026-07-07 SIGTRAP (`16a323770`, "emergency vectorBytes
+    /// SIGTRAP hotfix") returning by a second route. That fix added
+    /// `guard end <= storage.endIndex` to the public `vectorBytes(at:)`; the
+    /// unchecked fast path added later for the hot loop kept its slice
+    /// arithmetic and dropped the guard. The crash was dormant only because
+    /// `residencyHint` defaulted to `.diskBacked` and this scan was
+    /// unreachable — VEC-RESIDENCY-01 made `.ramResident` the default and a
+    /// `moot_memory_search` killed the daemon mid-benchmark:
+    ///
+    ///   Data.subscript.getter  <-  vector_bytesUnchecked  <-  scan
+    ///     <-  _findNearestFloatCached  <-  runMemorySearch
+    ///
+    /// The scan now bounds `count * stride` against `storage.count` ONCE and
+    /// throws. If a future fast path deletes that check, this test traps
+    /// instead of failing — which is exactly the signal wanted.
+    @Test("scan refuses an array whose header overruns its storage")
+    func scanRefusesHeaderStorageMismatch() async throws {
+        let good = buildArray(vectors: [(key("a"), [1.0, 0.0, 0.0, 0.0])])
+
+        // Same storage, header claims four slots. Slots 1..3 have no bytes.
+        let lying = ResidentVectorArray(
+            kind: .float32,
+            stride: good.stride,
+            count: 4,
+            storage: good.storage,
+            keys: [key("a"), key("b"), key("c"), key("d")],
+            modelPartitions: good.modelPartitions,
+            tombstones: []
+        )
+
+        let idx = FloatBruteForceIndex()
+        await idx.build(from: lying)
+        await #expect(throws: VectorKitError.self) {
+            _ = try await idx.search(
+                probe: payload([1.0, 0.0, 0.0, 0.0]), metric: .cosine, k: 1, filter: nil)
+        }
+    }
+
+    /// The honest array still scans — the guard must not reject valid input.
+    @Test("scan accepts an array whose header matches its storage")
+    func scanAcceptsMatchingHeader() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0, 0.0, 0.0]),
+            (key("b"), [0.0, 1.0, 0.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let hits = try await idx.search(
+            probe: payload([1.0, 0.0, 0.0, 0.0]), metric: .cosine, k: 2, filter: nil)
+        #expect(hits.isEmpty == false)
+    }
+
 }

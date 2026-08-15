@@ -129,6 +129,33 @@ impl FloatBruteForceIndex {
             )));
         }
 
+        // Bounds the whole scan ONCE, so the per-slot accessor below cannot
+        // slice past the end of `storage`.
+        //
+        // `vector_bytes` indexes `storage[start..start + stride]` with no
+        // bounds check, and the loop's own guards cover tombstones and the
+        // KEYS vector — not the storage buffer. When an array's header
+        // (`count`, `stride`) claims more bytes than `storage` holds, every
+        // slot past the real end slices out of range and Rust panics, taking
+        // the daemon with it.
+        //
+        // Swift trapped on exactly this (SIGTRAP through
+        // `vector_bytesUnchecked`) once VEC-RESIDENCY-01 made `.ramResident`
+        // the default and the scan became reachable in production. Same shape,
+        // same fix, both ports: one comparison per scan rather than one per
+        // row. Twin of Swift `FloatBruteForceIndex.scan`.
+        let required_bytes = arr.count.saturating_mul(arr.stride);
+        if required_bytes > arr.storage.len() {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "resident float array header claims {} slots x {} bytes = {}, \
+                 but storage holds {} bytes — refusing to scan out of range",
+                arr.count,
+                arr.stride,
+                required_bytes,
+                arr.storage.len()
+            )));
+        }
+
         let probe_floats = decode_f32_le(&probe.bytes);
 
         // Collect scored candidates (shared scan — same cosine for both directions).
@@ -852,4 +879,52 @@ mod tests {
         let raw_second: Vec<_> = second.iter().map(|h| h.raw_distance).collect();
         assert_eq!(raw_first, raw_second);
     }
+
+    // MARK: - Regression: header/storage mismatch must not panic
+
+    /// A resident array whose header claims more bytes than `storage` holds
+    /// must be REFUSED, not scanned.
+    ///
+    /// Twin of Swift `scanRefusesHeaderStorageMismatch`. `vector_bytes`
+    /// slices `storage[start..start + stride]` with no bounds check, so a
+    /// header that overruns the buffer panics and takes the daemon down.
+    /// Swift trapped on exactly this shape (SIGTRAP via
+    /// `vector_bytesUnchecked`) once VEC-RESIDENCY-01 made `.ramResident` the
+    /// default and the scan became reachable in production; the Rust path had
+    /// the same defect and no crash yet only because the Swift port serves
+    /// macOS. Without the guard in `search`, this test panics instead of
+    /// failing — which is the signal wanted.
+    #[test]
+    fn scan_refuses_header_storage_mismatch() {
+        let mut idx = FloatBruteForceIndex::new();
+        idx.build(&[fp(&[1.0_f32, 0.0])], &[key("a")]).unwrap();
+
+        // Same storage, header now claims four slots. Slots 1..3 have no bytes.
+        if let Some(arr) = idx.array.as_mut() {
+            arr.count = 4;
+            arr.keys = vec![key("a"), key("b"), key("c"), key("d")];
+        }
+
+        let probe = fp(&[1.0_f32, 0.0]);
+        let result = idx.search(&probe, DenseMetric::COSINE, 1, None);
+        assert!(
+            matches!(result, Err(VectorKitError::InvalidPayload(_))),
+            "a header claiming more slots than storage holds must be refused, not scanned"
+        );
+    }
+
+    /// The honest array still scans — the guard must not reject valid input.
+    #[test]
+    fn scan_accepts_matching_header() {
+        let mut idx = FloatBruteForceIndex::new();
+        idx.build(
+            &[fp(&[1.0_f32, 0.0]), fp(&[0.0_f32, 1.0])],
+            &[key("a"), key("b")],
+        )
+        .unwrap();
+        let probe = fp(&[1.0_f32, 0.0]);
+        let hits = idx.search(&probe, DenseMetric::COSINE, 2, None).unwrap();
+        assert!(!hits.is_empty());
+    }
+
 }

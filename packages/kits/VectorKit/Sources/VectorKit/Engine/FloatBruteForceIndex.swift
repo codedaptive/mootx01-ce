@@ -213,6 +213,34 @@ public actor FloatBruteForceIndex: DenseIndex {
         var scored: [(distance: Float, key: VectorRecordKey, vecHash: UInt64)] = []
         scored.reserveCapacity(Int(arr.count))
 
+        // Bounds the whole scan ONCE, so the hot loop below can use the
+        // unchecked slot accessor without walking off the end of `storage`.
+        //
+        // Why this is here and not per row: `vector_bytesUnchecked` has no
+        // bounds check, and the loop's own guards cover tombstones and the
+        // KEYS array — not the storage buffer. When an array's header
+        // (`count`, `stride`) claims more bytes than `storage` holds, every
+        // slot past the real end slices out of range and Swift traps.
+        //
+        // That is not hypothetical: it is the SIGTRAP fixed on 2026-07-07
+        // (`16a323770`, "emergency vectorBytes SIGTRAP hotfix"), which added
+        // `guard end <= storage.endIndex` to the public `vectorBytes(at:)`.
+        // The unchecked fast path added later kept that fix's slice
+        // arithmetic and dropped its guard, and the crash returned the moment
+        // VEC-RESIDENCY-01 made `.ramResident` the default and this scan
+        // became reachable in production.
+        //
+        // One comparison per scan instead of one per row: the fast path stays
+        // fast, and the safety is structural rather than a rule the next
+        // caller has to remember.
+        let requiredBytes = Int(arr.count) * Int(arr.stride)
+        guard requiredBytes <= arr.storage.count else {
+            throw VectorKitError.invalidPayload(
+                "resident float array header claims \(arr.count) slots x "
+                + "\(arr.stride) bytes = \(requiredBytes), but storage holds "
+                + "\(arr.storage.count) bytes — refusing to scan out of range")
+        }
+
         for i in 0..<Int(arr.count) {
             guard !arr.isTombstoned(i) else { continue }
             guard let key = arr.keys.indices.contains(i) ? Optional(arr.keys[i]) : nil else { continue }
@@ -503,8 +531,10 @@ extension ResidentVectorArray {
     /// This avoids the Optional-returning public vectorBytes(at:) and the
     /// copy it implies when we know the index is in range and live.
     ///
-    /// Only FloatBruteForceIndex calls this; it guards tombstone and range
-    /// before the call.
+    /// Only FloatBruteForceIndex calls this, and only after `scan` has
+    /// verified ONCE that `count * stride <= storage.count`. That whole-array
+    /// check is what makes the missing per-slot bound safe; without it this
+    /// slices past `storage.endIndex` and traps (see the note in `scan`).
     fileprivate func vector_bytesUnchecked(at i: Int, stride: Int) -> Data {
         let base = storage.startIndex
         let start = base + i * stride
