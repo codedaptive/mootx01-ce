@@ -627,16 +627,16 @@ fn parse_botlink(it: &mut Args) -> Result<Command, UsageError> {
 
     match sub_str {
         "ping" => {
-            match parse_botlink_simple_options(it, "botlink ping")? {
-                BotLinkSimpleOptions::Help => Ok(Command::HelpFor("botlink")),
+            match parse_botlink_simple_options(it, "botlink ping", "botlink ping")? {
+                BotLinkSimpleOptions::Help(page) => Ok(Command::HelpFor(page)),
                 BotLinkSimpleOptions::Options { http, db } => {
                     Ok(Command::BotLink { sub: BotLinkSub::Ping, http, db })
                 }
             }
         }
         "list" => {
-            match parse_botlink_simple_options(it, "botlink list")? {
-                BotLinkSimpleOptions::Help => Ok(Command::HelpFor("botlink")),
+            match parse_botlink_simple_options(it, "botlink list", "botlink list")? {
+                BotLinkSimpleOptions::Help(page) => Ok(Command::HelpFor(page)),
                 BotLinkSimpleOptions::Options { http, db } => {
                     Ok(Command::BotLink { sub: BotLinkSub::List, http, db })
                 }
@@ -644,34 +644,47 @@ fn parse_botlink(it: &mut Args) -> Result<Command, UsageError> {
         }
         "call" => parse_botlink_call(it),
         "rpc" => parse_botlink_rpc(it),
-        other => Err(UsageError(format!(
-            "Error: unknown 'botlink' subcommand '{other}'. Use: ping | list | call | rpc"
-        ))),
+        other => {
+            // Mirrors Swift ArgumentParser: honour --help ahead of unknown-subcommand
+            // validation. Consume remaining tokens; if any is --help or -h, return the
+            // generic botlink help page rather than erroring (reviewer finding F-1,
+            // measured cross-port: `mootx01 botlink install --help` must exit 0).
+            let remaining: Vec<&String> = it.collect();
+            if remaining.iter().any(|t| *t == "--help" || *t == "-h") {
+                return Ok(Command::HelpFor("botlink"));
+            }
+            Err(UsageError(format!(
+                "Error: unknown 'botlink' subcommand '{other}'. Use: ping | list | call | rpc"
+            )))
+        }
     }
 }
 
 /// Result of parsing `--http` / `--db` / `--help` for the `ping` and `list`
-/// subcommands. `Help` is returned when the caller passed `--help` or `-h`;
+/// subcommands. `Help` carries the HelpFor page key for the specific subcommand
+/// (e.g. "botlink ping") so per-subcommand help is returned (reviewer F-3).
 /// `Options` carries the parsed flags otherwise.
 enum BotLinkSimpleOptions {
     Options { http: Option<String>, db: Option<String> },
-    Help,
+    Help(&'static str),
 }
 
 /// Parse --http / --db / --help for ping and list. Returns
-/// Ok(BotLinkSimpleOptions::Help) on --help. Any unrecognized token →
+/// Ok(BotLinkSimpleOptions::Help(help_page)) on --help, where help_page is the
+/// per-subcommand HelpFor key (e.g. "botlink ping"). Any unrecognized token →
 /// UsageError (mirrors Swift ArgumentParser strictness for commands with no
 /// @Argument(parsing: .allUnrecognized)).
 fn parse_botlink_simple_options(
     it: &mut Args,
     cmd: &'static str,
+    help_page: &'static str,
 ) -> Result<BotLinkSimpleOptions, UsageError> {
     let (mut http, mut db) = (None, None);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--http" => http = Some(take_value(it, "--http")?),
             "--db" => db = Some(take_value(it, "--db")?),
-            "--help" | "-h" => return Ok(BotLinkSimpleOptions::Help),
+            "--help" | "-h" => return Ok(BotLinkSimpleOptions::Help(help_page)),
             other => return Err(UsageError(format!(
                 "Error: unexpected argument '{other}' for '{cmd}'."
             ))),
@@ -686,7 +699,7 @@ fn parse_botlink_call(it: &mut Args) -> Result<Command, UsageError> {
         None => return Err(UsageError(
             "Error: 'botlink call' requires a verb, e.g. 'mootx01 botlink call memory_search'.".into()
         )),
-        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("botlink")),
+        Some(v) if v == "--help" || v == "-h" => return Ok(Command::HelpFor("botlink call")),
         Some(v) if v.starts_with("--") => return Err(UsageError(format!(
             "Error: 'botlink call' requires a verb before flags, got '{v}'."
         ))),
@@ -701,7 +714,7 @@ fn parse_botlink_call(it: &mut Args) -> Result<Command, UsageError> {
             "--http" => http = Some(take_value(it, "--http")?),
             "--db" => db = Some(take_value(it, "--db")?),
             "--args" => args_json = Some(take_value(it, "--args")?),
-            "--help" | "-h" => return Ok(Command::HelpFor("botlink")),
+            "--help" | "-h" => return Ok(Command::HelpFor("botlink call")),
             other => {
                 // Unrecognized flag or positional: collect verbatim into kv.
                 kv.push(other.to_string());
@@ -727,7 +740,7 @@ fn parse_botlink_rpc(it: &mut Args) -> Result<Command, UsageError> {
         match a.as_str() {
             "--http" => http = Some(take_value(it, "--http")?),
             "--db" => db = Some(take_value(it, "--db")?),
-            "--help" | "-h" => return Ok(Command::HelpFor("botlink")),
+            "--help" | "-h" => return Ok(Command::HelpFor("botlink rpc")),
             other if other.starts_with("--") => return Err(UsageError(format!(
                 "Error: unexpected argument '{other}' for 'botlink rpc'."
             ))),
@@ -885,6 +898,10 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "status" => Ok("status"),
         "query" => Ok("query"),
         "botlink" => Ok("botlink"),
+        "botlink ping" => Ok("botlink ping"),
+        "botlink list" => Ok("botlink list"),
+        "botlink call" => Ok("botlink call"),
+        "botlink rpc" => Ok("botlink rpc"),
         "proxy" => Ok("proxy"),
         "drain" => Ok("drain"),
         "dream" => Ok("dream"),
@@ -1013,6 +1030,42 @@ pub fn subcommand_usage(cmd: &str) -> String {
             0 success, 2 tool error (isError true), 1 transport failure, 64 usage /\n\
             non-loopback --http. The estate never leaves this Mac: botLink talks to\n\
             the loopback daemon or spawns a local serve subprocess, nothing else.".into(),
+        "botlink ping" => "Liveness + identity: moot_estate_ping plus transport attribution.\n\
+            \n\
+            USAGE: mootx01 botlink ping [--http <url>] [--db <name>]\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --http <url>            Resident daemon base URL override (loopback required, e.g. http://127.0.0.1:4242). Dev only.\n\
+            \x20 --db <name>             Named estate; forces the serve-subprocess path.".into(),
+        "botlink list" => "Emit the MCP tools/list result object; cursors are followed internally.\n\
+            \n\
+            USAGE: mootx01 botlink list [--http <url>] [--db <name>]\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --http <url>            Resident daemon base URL override (loopback required, e.g. http://127.0.0.1:4242). Dev only.\n\
+            \x20 --db <name>             Named estate; forces the serve-subprocess path.".into(),
+        "botlink call" => "Issue one ARIA tool call; stdout is the raw MCP result object.\n\
+            \n\
+            USAGE: mootx01 botlink call <verb> [--args <json>] [--http <url>] [--db <name>] [--key value ...]\n\
+            \n\
+            ARGUMENTS:\n\
+            \x20 <verb>                  ARIA verb name without moot_ prefix, e.g. 'memory_search'.\n\
+            \x20 [--key value ...]       Additional tool arguments as --key value pairs.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --args <json>           Base argument object as JSON (--key value pairs override on collision).\n\
+            \x20 --http <url>            Resident daemon base URL override (loopback required, e.g. http://127.0.0.1:4242). Dev only.\n\
+            \x20 --db <name>             Named estate; forces the serve-subprocess path.".into(),
+        "botlink rpc" => "Forward one raw JSON-RPC frame (argument or stdin) and print the response frame.\n\
+            \n\
+            USAGE: mootx01 botlink rpc [<frame>] [--http <url>] [--db <name>]\n\
+            \n\
+            ARGUMENTS:\n\
+            \x20 [<frame>]               JSON-RPC 2.0 frame as a string. Omit to read from stdin to EOF.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --http <url>            Resident daemon base URL override (loopback required, e.g. http://127.0.0.1:4242). Dev only.\n\
+            \x20 --db <name>             Named estate; forces the serve-subprocess path.".into(),
         "proxy" => "Proxy stdin JSON-RPC frames to the resident daemon over loopback HTTP (for Claude Desktop).\n\
             \n\
             USAGE: mootx01 proxy [--daemon-url <url>]\n\
@@ -1592,7 +1645,53 @@ mod tests {
 
     #[test]
     fn botlink_help_flag_returns_help_for() {
+        // Bare "botlink --help" returns the top-level botlink page (unchanged).
         assert_eq!(p(&["botlink", "--help"]).unwrap(), Command::HelpFor("botlink"));
+    }
+
+    // MARK: - F-1: unknown subcommand with --help returns HelpFor("botlink")
+
+    #[test]
+    fn botlink_unknown_sub_with_help_returns_help_for_botlink() {
+        // Mirrors Swift ArgumentParser: --help is honoured ahead of unknown-subcommand
+        // validation (reviewer finding F-1, measured cross-port).
+        assert_eq!(p(&["botlink", "install", "--help"]).unwrap(), Command::HelpFor("botlink"));
+        assert_eq!(p(&["botlink", "install", "-h"]).unwrap(), Command::HelpFor("botlink"));
+        // --help anywhere in the remaining tokens triggers help.
+        assert_eq!(p(&["botlink", "frobnicate", "--db", "x", "--help"]).unwrap(), Command::HelpFor("botlink"));
+    }
+
+    #[test]
+    fn botlink_unknown_sub_without_help_is_usage_error() {
+        // Unknown subcommand with no --help still errors (exit 64).
+        let err = p(&["botlink", "install"]).unwrap_err();
+        assert!(err.0.contains("install"), "error must name the bad subcommand");
+    }
+
+    // MARK: - F-3: per-subcommand --help returns scoped HelpFor
+
+    #[test]
+    fn botlink_ping_help_returns_scoped_help_for() {
+        assert_eq!(p(&["botlink", "ping", "--help"]).unwrap(), Command::HelpFor("botlink ping"));
+        assert_eq!(p(&["botlink", "ping", "-h"]).unwrap(), Command::HelpFor("botlink ping"));
+    }
+
+    #[test]
+    fn botlink_list_help_returns_scoped_help_for() {
+        assert_eq!(p(&["botlink", "list", "--help"]).unwrap(), Command::HelpFor("botlink list"));
+    }
+
+    #[test]
+    fn botlink_call_help_returns_scoped_help_for() {
+        // --help before the verb (first token position).
+        assert_eq!(p(&["botlink", "call", "--help"]).unwrap(), Command::HelpFor("botlink call"));
+        // --help after the verb (inside the kv loop).
+        assert_eq!(p(&["botlink", "call", "my_verb", "--help"]).unwrap(), Command::HelpFor("botlink call"));
+    }
+
+    #[test]
+    fn botlink_rpc_help_returns_scoped_help_for() {
+        assert_eq!(p(&["botlink", "rpc", "--help"]).unwrap(), Command::HelpFor("botlink rpc"));
     }
 
     #[test]

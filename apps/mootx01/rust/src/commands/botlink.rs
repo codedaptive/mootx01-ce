@@ -122,13 +122,30 @@ fn sort_keys_recursive(value: &Value) -> Value {
 // ── Loopback guard ────────────────────────────────────────────────────────────
 
 /// A `--http` override that passed the loopback guard.
+///
+/// Stores the parsed URL pieces separately so the endpoint string can be
+/// rebuilt with the port that is ACTUALLY used by the transport (reviewer
+/// finding F-2: attribution reports the hop used, never the literal flag
+/// value).
 pub struct ValidatedLoopbackUrl {
-    /// The URL string with any trailing slash stripped, for endpoint attribution.
-    pub endpoint: String,
-    /// Explicit port extracted from the URL, or None when the URL has no port.
-    /// Callers that need a port fall back to `daemon_client::resolved_port()`
-    /// when this is None (see transport_select comments).
-    pub port: Option<u16>,
+    /// The host as written in the URL, including brackets for IPv6.
+    /// E.g. "localhost", "127.0.0.1", "[::1]".
+    pub host_bracketed: String,
+    /// Explicit port extracted from the URL, or None when the URL carries no port.
+    /// When None, callers resolve the port via `daemon_client::resolved_port()`.
+    pub explicit_port: Option<u16>,
+    /// Path portion of the URL (everything after the authority), with any
+    /// trailing slash stripped. "" for "http://localhost/"; "/x" for "http://[::1]/x/".
+    pub path_suffix: String,
+}
+
+impl ValidatedLoopbackUrl {
+    /// Build the endpoint string inserting `port`. Call with `explicit_port.unwrap()`
+    /// for URLs that carried an explicit port; call with the resolved daemon port for
+    /// portless URLs. Attribution then reports the hop actually used (reviewer F-2).
+    pub fn endpoint_with_port(&self, port: u16) -> String {
+        format!("http://{}:{}{}", self.host_bracketed, port, self.path_suffix)
+    }
 }
 
 /// Validate a `--http` override as a loopback-only HTTP URL.
@@ -147,8 +164,10 @@ pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
     let rest = s.strip_prefix("http://")?;
     // Authority = everything before the first '/' (or end of string).
     let authority = rest.split('/').next().unwrap_or("");
-    // Extract host, handling IPv6 bracket notation [::1].
-    let (host, port) = if authority.starts_with('[') {
+    // Extract host and port, handling IPv6 bracket notation [::1].
+    // host_bracketed includes brackets for IPv6 so it can be used verbatim
+    // when reassembling the URL in endpoint_with_port.
+    let (host, host_bracketed, explicit_port) = if authority.starts_with('[') {
         // IPv6 bracketed form: "[::1]" or "[::1]:port"
         let close = authority.find(']')?;
         let host = &authority[1..close];
@@ -158,12 +177,12 @@ pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
         } else {
             None
         };
-        (host, port)
+        (host, format!("[{host}]"), port)
     } else {
         // IPv4 / hostname: "host" or "host:port"
         match authority.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().ok()),
-            None => (authority, None),
+            Some((h, p)) => (h, h.to_string(), p.parse::<u16>().ok()),
+            None => (authority, authority.to_string(), None),
         }
     };
     // Enforce loopback: only 127.0.0.1, localhost, and ::1 are permitted.
@@ -172,12 +191,18 @@ pub fn validate_loopback_http(s: &str) -> Option<ValidatedLoopbackUrl> {
         "127.0.0.1" | "localhost" | "::1" => {}
         _ => return None,
     }
-    let endpoint = if s.ends_with('/') {
-        s[..s.len() - 1].to_string()
+    // Path: everything after "http://{authority}", trailing slash stripped.
+    // A bare "/" becomes "" (no path component); "/x/" becomes "/x".
+    let authority_end = "http://".len() + authority.len();
+    let path_raw = &s[authority_end..];
+    let path_suffix = if path_raw == "/" {
+        String::new()
+    } else if path_raw.ends_with('/') {
+        path_raw[..path_raw.len() - 1].to_string()
     } else {
-        s.to_string()
+        path_raw.to_string()
     };
-    Some(ValidatedLoopbackUrl { endpoint, port })
+    Some(ValidatedLoopbackUrl { host_bracketed, explicit_port, path_suffix })
 }
 
 // ── Transport resolution ──────────────────────────────────────────────────────
@@ -215,17 +240,18 @@ pub fn resolve_transport(
     if db.is_none() {
         let port = validated_url
             .as_ref()
-            .and_then(|v| v.port)
+            .and_then(|v| v.explicit_port)
             .unwrap_or_else(daemon_client::resolved_port);
-        // Portless --http override: the guard accepted the URL (security
-        // boundary is the host, not the port), but we POST to the resolved
-        // default port (4242). This is a deliberate simplification: Swift's
-        // portless behaviour would POST to port 80 (URL default); the Rust
-        // vertical maps portless to the daemon's resolved port instead, which
-        // is the only meaningful local target.
+        // Portless --http override: the guard accepted the URL (security boundary
+        // is the host, not the port). For portless URLs we POST to the daemon's
+        // resolved port and the endpoint string carries that same resolved port —
+        // attribution reports the hop actually used, never the literal flag value
+        // (reviewer finding F-2). Swift's portless behaviour would POST to port 80
+        // (the HTTP default); the Rust vertical maps portless to the resolved daemon
+        // port instead, which is the only meaningful local target.
         if daemon_client::alive(port) {
             let endpoint = validated_url
-                .map(|v| v.endpoint)
+                .map(|v| v.endpoint_with_port(port))
                 .unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
             return Ok(http_transport(port, endpoint));
         }
@@ -900,10 +926,10 @@ mod tests {
         assert!(validate_loopback_http("http://127.0.0.1:9").is_some());
         assert!(validate_loopback_http("http://localhost:4242/x").is_some());
         assert!(validate_loopback_http("http://[::1]:4242").is_some());
-        // Portless — accepted by the guard (port = None in result).
+        // Portless — accepted by the guard (explicit_port = None in result).
         assert!(validate_loopback_http("http://localhost").is_some());
         let portless = validate_loopback_http("http://localhost").unwrap();
-        assert!(portless.port.is_none());
+        assert!(portless.explicit_port.is_none());
     }
 
     #[test]
@@ -917,15 +943,39 @@ mod tests {
 
     #[test]
     fn loopback_guard_trailing_slash_stripped() {
+        // Trailing slash on an explicit-port URL: path_suffix is "", endpoint
+        // built with endpoint_with_port matches the slash-stripped form.
         let v = validate_loopback_http("http://127.0.0.1:4242/").unwrap();
-        assert_eq!(v.endpoint, "http://127.0.0.1:4242");
+        assert_eq!(v.endpoint_with_port(v.explicit_port.unwrap()), "http://127.0.0.1:4242");
     }
 
     #[test]
     fn loopback_guard_ipv6_bracketed() {
         let v = validate_loopback_http("http://[::1]:4242").unwrap();
-        assert_eq!(v.port, Some(4242));
-        assert_eq!(v.endpoint, "http://[::1]:4242");
+        assert_eq!(v.explicit_port, Some(4242));
+        assert_eq!(v.endpoint_with_port(4242), "http://[::1]:4242");
+    }
+
+    // ── F-2: portless --http endpoint attribution ─────────────────────────────
+
+    /// Pure helper — does not touch the live daemon; exercises endpoint
+    /// construction with an injected resolved port (reviewer finding F-2).
+    fn portless_endpoint_attr(url: &str, resolved: u16) -> String {
+        let v = validate_loopback_http(url).expect("valid loopback url");
+        let port = v.explicit_port.unwrap_or(resolved);
+        v.endpoint_with_port(port)
+    }
+
+    #[test]
+    fn f2_portless_endpoint_attribution() {
+        // Portless URLs carry the resolved port in the endpoint (reviewer F-2).
+        assert_eq!(portless_endpoint_attr("http://localhost/", 4242), "http://localhost:4242");
+        assert_eq!(portless_endpoint_attr("http://[::1]/", 4242), "http://[::1]:4242");
+        // Portless with a non-root path: resolved port inserted, trailing slash stripped.
+        assert_eq!(portless_endpoint_attr("http://[::1]/x/", 4242), "http://[::1]:4242/x");
+        // Explicit-port URL: endpoint is the URL as given minus trailing slash,
+        // regardless of the injected resolved port (explicit port wins).
+        assert_eq!(portless_endpoint_attr("http://127.0.0.1:9/", 9999), "http://127.0.0.1:9");
     }
 
     // ── G-2: KV argument capture — string/int/bool semantics ──────────────────
