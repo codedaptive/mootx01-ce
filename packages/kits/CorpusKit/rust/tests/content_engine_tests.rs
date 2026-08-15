@@ -1926,10 +1926,12 @@ fn g5a_entry_attached_reindex_records_counts_delta_fold() {
 /// This is the SAME lock that `batch_commit` (the admission path) acquires
 /// before writing reference rows. Therefore NO admission can interleave with
 /// the counts-path publication: the two operations are strictly serialized by
-/// `counts_commit_lock`. We cannot block mid-fetch to interleave because the
-/// counts path makes NO `source.record()` calls during CountsDeltaFold — it
-/// reads only from storage (the persisted counts snapshot and the pending refs'
-/// stored text, which was already folded by admit time).
+/// `counts_commit_lock`. The counts path DOES call `source.record()` once per
+/// pending reference during a CountsDeltaFold (the measured bodies-paged gate in
+/// g5a asserts exactly that count) — but those fetches happen INSIDE
+/// `counts_commit_lock`, so no admission can interleave with them, and this
+/// harness's source has no blocking hook to suspend a fetch mid-flight. Hence
+/// the sequential proof below rather than an interleaved one.
 ///
 /// We prove the property sequentially: publication completes, then we insert a
 /// new reference row (simulating a post-publication admission), and assert that

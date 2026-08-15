@@ -2140,14 +2140,15 @@ extension CorpusContentEngineTests {
     ///
     /// Why interleaving cannot corrupt the counts path: `trainTrainableSlots`
     /// acquires `acquireCountsAdmission()` at its entry point
-    /// (CorpusContentEngine.swift line 2484–2485, `defer { releaseCountsAdmission() }`),
+    /// (CorpusContentEngine.swift line 2489–2490, `defer { releaseCountsAdmission() }`),
     /// which is held for the entire duration of the counts-path fold and
     /// publication transaction. Any concurrent `applyChange` that tries to write
     /// a reference row will block at the `acquireCountsAdmission()` call inside
-    /// `commitIndexBatch` (CorpusContentEngine.swift line 1626–1627) until the
+    /// `commitQueueBatch` (CorpusContentEngine.swift line 1631–1632) until the
     /// counts-path transaction commits and admission is released. Therefore:
-    ///   - The set of pending refs deleted by the counts-path transaction is fixed
-    ///     at the snapshot captured before acquisition (line 2582–2584).
+    ///   - The set of pending refs deleted by the counts-path transaction is
+    ///     captured AFTER acquisition, inside the admission lock (line 2586–2588),
+    ///     so no admission can slip a reference row in between snapshot and lock.
     ///   - Any reference row written by an admission that runs after the
     ///     transaction commits is NOT in that set and is NOT deleted.
     ///
