@@ -301,9 +301,14 @@ public struct ReleaseDownloader: Sendable {
         do {
             try process.run()
         } catch {
+            // Same condition and remedy list as install.sh's verify_minisign
+            // guard — keep the two messages aligned when editing either.
             throw UpgradeError.signatureVerificationFailed(
                 "minisign is required for release signature verification but was not found. "
-                + "Install minisign and retry; do not bypass this check."
+                + "Install it and retry — Homebrew: `brew install minisign`; "
+                + "Debian/Ubuntu: `apt-get install minisign`; "
+                + "from source: https://github.com/jedisct1/minisign. "
+                + "Do not bypass this check."
             )
         }
         let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
