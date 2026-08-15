@@ -149,4 +149,60 @@ struct PluginPackageShapeTests {
     func pluginAndDirectServerKeysAreIdentical() {
         #expect(MCPClients.pluginServerName == MCPClients.serverName)
     }
+
+    /// Recursively collects every `type: "command"` hook's `command` string
+    /// from a decoded hooks-wiring JSON object. Mirrors the packager-side
+    /// walk in tools/moot-packager GeneratorTests — keep the two in sync.
+    private static func hookCommandStrings(in value: Any) -> [String] {
+        if let dict = value as? [String: Any] {
+            var found: [String] = []
+            if dict["type"] as? String == "command", let command = dict["command"] as? String {
+                found.append(command)
+            }
+            found += dict.values.flatMap(hookCommandStrings)
+            return found
+        }
+        if let arr = value as? [Any] {
+            return arr.flatMap(hookCommandStrings)
+        }
+        return []
+    }
+
+    /// Every token of `command` that names `mootx01` bare — no `/` in the
+    /// token. Tokens are maximal runs between whitespace, shell separators,
+    /// and quote characters, so `exec mootx01 …`, `env mootx01 …`, and
+    /// `sh -c 'mootx01 …'` are all caught, not just a bare head token.
+    /// Mirrors bareMootx01Tokens in tools/moot-packager GeneratorTests.
+    private static func bareMootx01Tokens(in command: String) -> [String] {
+        command
+            .components(separatedBy: CharacterSet(charactersIn: " \t;&|()'\""))
+            .filter { $0 == "mootx01" }
+    }
+
+    /// No Codex lifecycle hook command shipped by the INSTALLER may resolve
+    /// `mootx01` via bare PATH order. The packager's GeneratorTests guard
+    /// the generated trees and the committed Rust embed; this test guards
+    /// the compiled Swift embed — `mootx01 install` materializes
+    /// `InstallBundle.embedded.packages`, so this is the artifact users
+    /// actually receive. Asserted against the decoded bundle (never a
+    /// substring scan of the EmbeddedArtifacts literal), at the same
+    /// generation boundary as the rest of this suite. A stale or hand-edited
+    /// embed that reintroduces a bare invocation fails here even when every
+    /// checked-in wiring file is clean — this repo has shipped stale embeds
+    /// before (v1.0.31, per tools/moot-packager/regen.sh's header).
+    @Test("no embedded Codex hook command resolves mootx01 via bare PATH")
+    func codexEmbeddedHookCommandsNeverResolveViaBarePATH() throws {
+        let wiring = InstallBundle.embedded.packageFiles(forHostID: "codex")[".codex/hooks.json"]
+        let unwrapped = try #require(
+            wiring, "embedded codex package carries no .codex/hooks.json — bundle shape changed?")
+
+        let root = try JSONSerialization.jsonObject(with: Data(unwrapped.utf8))
+        let commands = Self.hookCommandStrings(in: root)
+        #expect(!commands.isEmpty,
+                "embedded codex hooks wiring carries no commands — wiring shape changed?")
+        for command in commands {
+            #expect(Self.bareMootx01Tokens(in: command).isEmpty,
+                    "embedded codex hooks wiring resolves mootx01 via bare PATH: \(command)")
+        }
+    }
 }
