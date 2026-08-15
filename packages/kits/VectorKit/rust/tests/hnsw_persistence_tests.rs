@@ -261,6 +261,15 @@ fn hp3_delete_resurrection_proof() {
             victim_id,
             results
         );
+
+        // Pin the PATH: the exclusion must come from the LOADED graph, not the
+        // exact-scan fallback quietly covering for an absent one. A build count
+        // of 0 proves the HNSW branch loaded rows rather than rebuilding.
+        assert_eq!(
+            store_b.hnsw_build_count_for(MODEL_ID),
+            0,
+            "HP-3 path pin: gate C must be served from the loaded graph, never a rebuild"
+        );
     }
 
     let _ = std::fs::remove_file(&db_path);

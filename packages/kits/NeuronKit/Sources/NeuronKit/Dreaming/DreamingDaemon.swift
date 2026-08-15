@@ -895,13 +895,12 @@ public actor DreamingDaemon {
                         // Advance baseline to the vocabulary at retrain time so the
                         // next window measures growth from this retrain.
                         lastReindexVocab = liveVocab
-                        // ALPHA HNSW duty: clear all HNSW graphs so the next
-                        // findNearestFloat call lazily rebuilds from the fresh
-                        // re-embedded vectors. A full synchronous rebuild inside
-                        // the 30-second ALPHA cycle is too expensive; lazy rebuild
-                        // on next qualifying query is the correct trade-off here.
-                        // Failure is non-fatal — the float lane falls back to exact
-                        // scan (FloatBruteForceIndex) until the graph is rebuilt.
+                        // ALPHA HNSW duty: clear all HNSW graphs and hnsw_graph
+                        // table rows so subsequent queries fall back to exact scan
+                        // (FloatBruteForceIndex) until the THETA cadence fires a
+                        // full rebuild via fireThetaHNSWRebuild. No rebuild ever
+                        // happens on the query path. Failure is non-fatal — exact
+                        // scan remains available throughout.
                         if let m = hnswMaintenance {
                             do {
                                 try await m.clearFloatIndex(now: now)
