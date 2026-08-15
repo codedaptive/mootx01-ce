@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.42.2
+version: 1.43.0
 status: accepted-1.1-target
-date: 2026-08-13
+date: 2026-08-14
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -106,6 +106,19 @@ Bridge input limits (security findings 012/036, pc stream): the bridge enforces 
 This is the external access surface above the substrate; it is not
 imported by any other package, so it is documented single-tier (its full
 public API) rather than consumed-vs-broader tiers.
+
+**Cloud-agent access (BL-1).** `mootx01-botLink` (also `mootx01 botlink`)
+is the explicit one-shot data path for cloud agents: `ping` / `list` /
+`call` / `rpc`, machine-JSON stdout, loopback-only HTTP with a serve-
+subprocess fallback, exit codes 0 (success) / 2 (tool `isError`) / 1
+(transport failure) / 64 (usage or non-loopback `--http`). The adapter
+policy for such agents is:
+
+> If you are a cloud agent that cannot reach `127.0.0.1` on the user's
+> machine and MCP `moot_*` tools are absent, use `mootx01-botLink` on the
+> user's computer. Do not use `mootx01 query`. Do not open a remote MCP
+> URL. If `moot_*` MCP tools exist (Cursor on the Mac), use those and
+> stop.
 
 ## § 2 — Public types
 
@@ -1257,6 +1270,17 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.43.0 -- 2026-08-14
+
+- Additive (mission BL-1 — botLink one-shot CLI transport, Swift port;
+  Rust twin lands in BL-2): documented the cloud-agent access path in
+  §1 — `mootx01-botLink` / `mootx01 botlink` (`ping`/`list`/`call`/
+  `rpc`, machine-JSON stdout, loopback-only `--http` guard, exit codes
+  0/1/2/64) — with the verbatim adapter-policy paragraph redirecting
+  cloud agents away from `mootx01 query`. No wire-surface change; no
+  client wiring change (`mcp.json` stays `http://127.0.0.1:4242`,
+  `mootx01-proxy` stays the Desktop stdio face).
 
 ### 1.42.2 -- 2026-08-13
 

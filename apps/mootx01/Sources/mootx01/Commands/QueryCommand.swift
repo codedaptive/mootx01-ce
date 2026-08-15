@@ -30,7 +30,14 @@ import MootInstallerCore
 struct QueryCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "query",
-        abstract: "Issue a single ARIA tool call (resident HTTP when available, stdio subprocess otherwise)."
+        abstract: "Issue a single ARIA tool call (resident HTTP when available, stdio subprocess otherwise).",
+        discussion: """
+        If you are a cloud agent that cannot reach `127.0.0.1` on the user's
+        machine and MCP `moot_*` tools are absent, use `mootx01-botLink` on the
+        user's computer. Do not use `mootx01 query`. Do not open a remote MCP
+        URL. If `moot_*` MCP tools exist (Cursor on the Mac), use those and
+        stop.
+        """
     )
 
     @Argument(help: "ARIA verb name without moot_ prefix, e.g. 'drawer_recall'.")
