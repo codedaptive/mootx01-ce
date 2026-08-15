@@ -261,6 +261,82 @@ struct PerfHealthPayloadTests {
         #expect(abs(bP50 - 99.0) < 0.01, "estate-B trend value should be 99.0")
     }
 
+    @Test("perfHealthPayload caps the trend at the newest 366 points (PH-01)")
+    func trendCappedAtNewest366() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+
+        let store = try await manager.statsStore()
+        let estateID = UUID().uuidString
+
+        // Seed MORE ingest_p50 rows than the trend cap (366). Sequential ts:
+        // row i is older than row i+1.
+        let total = 400
+        for i in 0..<total {
+            try await store.insertMetric(
+                name: "neuronkit.perf_health.ingest_p50_ms",
+                value: Double(i),
+                tags: ["estate": estateID],
+                ts: 100_000.0 + Double(i),
+                dropboxID: "cap-test"
+            )
+        }
+
+        let payload = try await manager.perfHealthPayload(estate: estateID)
+
+        // 366 = perfHealthMaxTrendPoints (one year of daily duty runs).
+        // Deliberately hardcoded: the bound is contractual — if the constant
+        // drifts, this test must fail and force a deliberate decision.
+        #expect(payload.trend.count == 366,
+                "trend must be capped at 366 points; got \(payload.trend.count)")
+        // The cap keeps the NEWEST points and drops the oldest: the last
+        // point is the newest seeded row, the first is (total - 366).
+        let first = try #require(payload.trend.first)
+        let last = try #require(payload.trend.last)
+        #expect(abs(last.ingestP50Ms - Double(total - 1)) < 0.01,
+                "last trend point must be the newest sample")
+        #expect(abs(first.ingestP50Ms - Double(total - 366)) < 0.01,
+                "first trend point must be the oldest RETAINED sample (newest 366 kept)")
+        // Oldest-first ordering must survive the bounded DESC fetch + re-sort.
+        #expect(first.ts < last.ts, "trend must remain oldest-first")
+
+        // latestSample still reflects the newest row despite the bound.
+        let sample = try #require(payload.latestSample)
+        let p50 = try #require(sample.ingestP50Ms)
+        #expect(abs(p50 - Double(total - 1)) < 0.01,
+                "latestSample must be the newest row, not a truncated older one")
+    }
+
+    @Test("perfHealthPayload below the caps is unchanged by the bounds (PH-01)")
+    func normalVolumeUnchangedByBounds() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+
+        let store = try await manager.statsStore()
+        let estateID = UUID().uuidString
+
+        // A realistic volume (three daily duty runs) — far below both the
+        // row-query cap (8192) and the trend cap (366).
+        for i in 0..<3 {
+            try await store.insertMetric(
+                name: "neuronkit.perf_health.ingest_p50_ms",
+                value: Double(10 + i),
+                tags: ["estate": estateID],
+                ts: 500_000.0 + Double(i) * 86_400.0,
+                dropboxID: "normal-test"
+            )
+        }
+
+        let payload = try await manager.perfHealthPayload(estate: estateID)
+        #expect(payload.trend.count == 3, "all points must survive below the cap")
+        let values = payload.trend.map(\.ingestP50Ms)
+        #expect(values == [10.0, 11.0, 12.0],
+                "trend must be complete and oldest-first, exactly as seeded")
+        let sample = try #require(payload.latestSample)
+        let p50 = try #require(sample.ingestP50Ms)
+        #expect(abs(p50 - 12.0) < 0.01)
+    }
+
     @Test("perfHealthPayload trend is ordered oldest first")
     func trendOldestFirst() async throws {
         let manager = try await makeStartedManager()
