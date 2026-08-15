@@ -1249,14 +1249,28 @@ public actor VectorStore {
         let servingGen = try await _servingGeneration(for: modelID)
 
         // Decode rows to HNSWIndex.GraphRow values and build itemID → nodeIdx.
+        // Persisted graph rows are UNTRUSTED input (VH-01 Finding C): every
+        // INTEGER is converted with a checked cast and bounds-tested BEFORE it
+        // can size an allocation downstream. `Int32(exactly:)` rejects negative
+        // and out-of-i32-range Int64 values without trapping (a plain `Int32(v)`
+        // traps on overflow — house-style rule: no unguarded narrowing). Rows
+        // that fail any check are skipped; `loadFromGraphRows` re-validates the
+        // full set and rejects the whole graph if an invalid row reaches it.
         var graphRows: [HNSWIndex.GraphRow] = []
         var itemIDToNodeIdx: [String: Int32] = [:]
         for dbRow in dbRows {
-            guard case let .int(nodeIdx)            = dbRow["node_idx"]   ?? .null,
-                  case let .text(nodeID)            = dbRow["node_id"]    ?? .null,
-                  case let .int(layer)              = dbRow["layer"]      ?? .null,
-                  case let .blob(neighboursBlob)    = dbRow["neighbours"] ?? .null
+            guard case let .int(rawNodeIdx) = dbRow["node_idx"] ?? .null,
+                  case let .text(nodeID)    = dbRow["node_id"]  ?? .null,
+                  case let .int(rawLayer)   = dbRow["layer"]    ?? .null,
+                  case let .blob(nb)        = dbRow["neighbours"] ?? .null
             else { continue }
+            // Checked narrowing: node_idx must be ≥ 0 and fit Int32.
+            guard let nodeIdx = Int32(exactly: rawNodeIdx), nodeIdx >= 0 else { continue }
+            // layer must be ≥ 0 and within the level-generation cap.
+            guard rawLayer >= 0, rawLayer <= Int64(hnswMaxPersistedLayer) else { continue }
+            let layer = Int(rawLayer)
+            // neighbours: packed LE i32 — must be whole i32s within the fan-out cap.
+            guard nb.count % 4 == 0, nb.count <= hnswM0 * 4 else { continue }
             // Decode generation (v6+). Default 0 for v5 estates.
             let rowGen: Int64
             switch dbRow["generation"] ?? .null {
@@ -1264,16 +1278,16 @@ public actor VectorStore {
             default:          rowGen = 0
             }
             graphRows.append(HNSWIndex.GraphRow(
-                nodeIdx:        Int32(nodeIdx),
+                nodeIdx:        nodeIdx,
                 nodeID:         nodeID,
-                layer:          Int(layer),
-                neighboursBlob: neighboursBlob,
+                layer:          layer,
+                neighboursBlob: nb,
                 generation:     rowGen
             ))
             // Only the first row for each node establishes the idx mapping;
             // subsequent layers for the same node reuse the same nodeIdx.
             if itemIDToNodeIdx[nodeID] == nil {
-                itemIDToNodeIdx[nodeID] = Int32(nodeIdx)
+                itemIDToNodeIdx[nodeID] = nodeIdx
             }
         }
         guard !graphRows.isEmpty else { return }

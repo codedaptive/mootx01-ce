@@ -82,6 +82,15 @@ public let hnswEfSearch: Int = 50
 /// Below this threshold FloatBruteForceIndex is faster (see file header §Crossover).
 public let hnswDefaultThreshold: UInt32 = 5_000
 
+/// Upper bound accepted for a persisted `hnsw_graph.layer` value (VH-01
+/// Finding C). Persisted graph rows are UNTRUSTED input; `layer` sizes the
+/// per-node neighbour-layer allocation, so it must be capped consistently
+/// with the index's own level generation: `assignLevel` draws
+/// `floor(-ln(u) × mL)` with mL = 1/ln(16) ≈ 0.3607, so
+/// P(level ≥ 32) = exp(-32/mL) ≈ 3e-39 — an honest graph can never persist
+/// a layer this high. Any row above the cap is structurally invalid.
+public let hnswMaxPersistedLayer: Int = 32
+
 // MARK: - HNSWIndex
 
 /// Approximate nearest-neighbour index for the float32 dense lane (Lane D).
@@ -338,9 +347,14 @@ public actor HNSWIndex {
     ///   - vector: float32 values. Must have the same dimensionality as all
     ///     previously inserted vectors. Mismatched dim logs a warning and no-ops.
     public func insert(itemID: String, modelID: String, vector: [Float]) {
-        // Upsert: tombstone any existing node for this itemID.
+        // Upsert: tombstone any existing node for this itemID. If that node
+        // was the graph entry point, repair immediately — a tombstoned seed
+        // is skipped by searchLayer and would produce zero neighbours for the
+        // replacement, AND the dim-mismatch early-return path below also
+        // leaves the tombstone without a repair (VH-01 Finding B mirror).
         if let existingIdx = nodeIndex[itemID] {
             nodes[Int(existingIdx)].tombstoned = true
+            repairEntryPoint()
         }
 
         let byteCount = vector.count * 4
@@ -506,6 +520,41 @@ public actor HNSWIndex {
     public func tombstone(itemID: String) {
         guard let idx = nodeIndex[itemID] else { return }
         nodes[Int(idx)].tombstoned = true
+        // Entry-point invariant (VH-01 Finding B): tombstoning the entry node
+        // must re-seed the entry point, or search goes dark for the whole
+        // partition while live nodes remain.
+        repairEntryPoint()
+    }
+
+    /// Re-seed `entryPoint` if it refers to a tombstoned node.
+    ///
+    /// Invariant established (VH-01 Finding B): whenever `liveCount > 0`,
+    /// `entryPoint` refers to a live, non-tombstoned node. Called after any
+    /// tombstoning mutation (insert upsert path, tombstone). Picks the live
+    /// node with the most neighbour layers (highest top layer = `maxLayer`);
+    /// ties resolve to the lowest array index for determinism. O(n) scan,
+    /// but only runs when the entry node was actually tombstoned.
+    private func repairEntryPoint() {
+        if let ep = entryPoint, !nodes[Int(ep)].tombstoned {
+            return // entry point is live — nothing to repair
+        }
+        var bestIdx: Int32? = nil
+        var bestLayer = -1
+        for (i, node) in nodes.enumerated() {
+            guard !node.tombstoned else { continue }
+            let topLayer = node.neighbours.count - 1
+            if topLayer > bestLayer {
+                bestLayer = topLayer
+                bestIdx = Int32(i)
+            }
+        }
+        if let b = bestIdx {
+            entryPoint = b
+            maxLayer = bestLayer
+        } else {
+            entryPoint = nil
+            maxLayer = 0
+        }
     }
 
     /// Rebuild the graph from live nodes, dropping all tombstones (BETA duty).
@@ -564,10 +613,17 @@ public actor HNSWIndex {
         public let generation:     Int64
 
         /// Decode `neighboursBlob` back to an [Int32] array.
+        ///
+        /// The BLOB is UNTRUSTED persisted input (VH-01 Finding C): the
+        /// decoded count is capped at `hnswM0` — the maximum fan-out any
+        /// layer can legitimately persist — so a crafted oversized BLOB
+        /// cannot drive the allocation size. The BLOB must be a whole number
+        /// of Int32s; trailing bytes beyond the last whole 4-byte word are
+        /// ignored (guarded by the `/4` integer division).
         public func decodeNeighbours() -> [Int32] {
             guard !neighboursBlob.isEmpty else { return [] }
             return neighboursBlob.withUnsafeBytes { ptr in
-                let count = ptr.count / 4
+                let count = min(ptr.count / 4, hnswM0)
                 var result = [Int32](repeating: 0, count: count)
                 for i in 0..<count {
                     var v: Int32 = 0
@@ -660,6 +716,24 @@ public actor HNSWIndex {
         let matchingRows = rows.filter { $0.generation == expectedGeneration }
         guard !matchingRows.isEmpty else { return }
         let rows = matchingRows
+
+        // Phase 0: validate every row BEFORE any allocation is sized from row
+        // data. Persisted graph rows are UNTRUSTED input (VH-01 Finding C):
+        // `layer` drives `count: maxLayer + 1` allocations and `neighboursBlob`
+        // drives the decoded array size, so both must be bounded before reaching
+        // the allocation phases. One invalid row rejects the WHOLE persisted
+        // graph — the index stays empty (hasGraph → false) and the caller
+        // falls back to exact scan until the next THETA rebuild — rather than
+        // reconstructing a partial topology from corrupt state.
+        for row in rows {
+            let blobLen = row.neighboursBlob.count
+            guard row.nodeIdx >= 0,
+                  row.layer <= hnswMaxPersistedLayer,
+                  blobLen % 4 == 0,
+                  blobLen <= hnswM0 * 4 else {
+                return
+            }
+        }
 
         // Sort rows by nodeIdx then layer so we can rebuild in order.
         let sorted = rows.sorted {
