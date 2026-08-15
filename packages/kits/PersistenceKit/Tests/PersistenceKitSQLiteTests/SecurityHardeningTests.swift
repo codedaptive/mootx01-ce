@@ -17,7 +17,9 @@ import Testing
 import Foundation
 import SubstrateTypes
 import PersistenceKit
-import PersistenceKitSQLite
+// @testable: the CAND-052 reopen tests (SQ-01) drive the internal
+// SQLiteConnection directly — its reopen() path has no public wrapper.
+@testable import PersistenceKitSQLite
 
 // MARK: - Shared helpers
 
@@ -810,5 +812,48 @@ struct CAND052SymlinkRefusalTests {
             table: "items", where: nil, orderBy: [], limit: nil, offset: nil
         )
         #expect(rows.count == 1)
+    }
+
+    /// SQ-01: the symlink refusal must hold on the REOPEN path too. reopen()
+    /// runs after VACUUM INTO + atomic swap (and after a failed swap, via the
+    /// VI-01 recovery path); an attacker who plants a symlink at the DB path
+    /// between close and reopen must be refused, not followed.
+    @Test func refusesSymlinkOnReopen() throws {
+        let (dir, dbURL) = try tempDBURL(tag: "reopen-symlink")
+        let conn = try SQLiteConnection(url: dbURL, busyTimeout: 5.0)
+        try conn.exec("CREATE TABLE t (x TEXT);") // materialize the DB file
+        conn.close()
+
+        // Swap a symlink in at the DB path while the connection is closed.
+        let decoy = dir.appendingPathComponent("decoy.txt")
+        let decoyBytes = Data("decoy".utf8)
+        FileManager.default.createFile(atPath: decoy.path, contents: decoyBytes)
+        try FileManager.default.removeItem(at: dbURL)
+        try FileManager.default.createSymbolicLink(at: dbURL, withDestinationURL: decoy)
+
+        var threw = false
+        do {
+            try conn.reopen()
+        } catch StorageError.backendError(let underlying) where underlying.contains("symbolic link") {
+            threw = true
+        }
+        #expect(threw, "reopen() must refuse a symlink at the DB path with the CAND-052 backendError")
+        // The symlink target must be untouched — the refusal fired before
+        // sqlite3_open_v2 could write through the link.
+        #expect(try Data(contentsOf: decoy) == decoyBytes)
+    }
+
+    /// SQ-01 regression guard: reopen() on a regular (non-symlink) file must
+    /// still succeed — the shared guard must not break the normal
+    /// close-then-reopen cycle the VACUUM swap path depends on.
+    @Test func reopenSucceedsOnRegularFile() throws {
+        let (_, dbURL) = try tempDBURL(tag: "reopen-regular")
+        let conn = try SQLiteConnection(url: dbURL, busyTimeout: 5.0)
+        try conn.exec("CREATE TABLE t (x TEXT);")
+        conn.close()
+
+        try conn.reopen()
+        try conn.exec("INSERT INTO t VALUES ('ok');")
+        conn.close()
     }
 }
