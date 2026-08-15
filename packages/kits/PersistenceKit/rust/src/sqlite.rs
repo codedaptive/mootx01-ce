@@ -786,6 +786,23 @@ impl Inner {
 // bracket depth returns to zero, then takes ownership itself — this is
 // what actually serializes unrelated concurrent callers instead of
 // letting them silently share one bracket's fate.
+//
+// Panic-safety note (Adams SV-01 post-flight finding #3): `acquire`/
+// `release_if_closed` are plain function calls, not an RAII guard — if
+// the owning thread panics after `acquire()` returns but before the
+// matching `release_if_closed()` runs (e.g. a poisoned `Inner` mutex
+// propagating through `self.inner.lock().unwrap()`), `owner` is left
+// set and every other thread blocks on `closed` forever instead of
+// observing a `PoisonError` the way the old `tx_lock: Mutex<()>` would
+// have. This mirrors the pre-existing panic posture of the rest of this
+// file (every `Inner` access is `.lock().unwrap()`; a poisoned `Inner`
+// mutex already means the connection is in an unknown state and the
+// process is expected to go down), so it does not introduce a new class
+// of failure — but it does convert that failure's signature from a loud
+// panic into a silent hang for OTHER threads waiting on the bracket.
+// Deliberately left as-is rather than adding a Drop-based guard: doing
+// so would restructure all four bracket-opening call sites for a
+// panic-recovery path this codebase does not otherwise support.
 struct TxCoordinator {
     owner: Mutex<Option<ThreadId>>,
     closed: Condvar,
