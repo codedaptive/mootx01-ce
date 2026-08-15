@@ -49,6 +49,8 @@ pub use engine::{
     BruteForceIndex, ResidentArrayStore,
     // Lane C float implementations.
     FloatBruteForceIndex,
+    // Lane D HNSW approximate float-lane NN index.
+    GraphRow,
     // Lane E1 binary ColBERT MaxSim scorer (Exact-A exhaustive).
     MaxSimHit, MaxSimScorer,
 };

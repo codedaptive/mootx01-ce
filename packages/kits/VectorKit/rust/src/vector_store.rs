@@ -67,7 +67,7 @@
 
 use crate::engine::brute_force::BruteForceIndex;
 use crate::engine::float_brute_force::FloatBruteForceIndex;
-use crate::engine::hnsw_index::{HNSWIndex, HNSW_DEFAULT_THRESHOLD};
+use crate::engine::hnsw_index::{GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD};
 use crate::engine::key::VectorRecordKey;
 use crate::engine::metric::DenseMetric;
 use crate::engine::mih::{MIHBandCount, MIHIndex};
@@ -321,8 +321,9 @@ struct HotState {
     /// Per-modelID approximate nearest-neighbour graphs (Lane D HNSW).
     ///
     /// Activates at/above `VectorStore.hnsw_threshold` live vectors per modelID.
-    /// Built lazily on the first qualifying `find_nearest_float` call. Mirrors
-    /// Swift `VectorStore.hnswIndices`.
+    /// Loaded from the `hnsw_graph` SQLite table on first qualifying
+    /// `find_nearest_float` call (persisted by THETA rebuild and BETA compact).
+    /// Mirrors Swift `VectorStore.hnswIndices`.
     hnsw_indices: std::collections::HashMap<String, HNSWIndex>,
 
     /// Live float32 vector count per modelID. Used to decide when to activate
@@ -331,6 +332,23 @@ struct HotState {
     /// Set when `ensure_float_index_built_locked` builds the per-model float index,
     /// and incremented by `add_payload` when mirroring a float32 write.
     live_float_counts: std::collections::HashMap<String, u32>,
+
+    /// Number of times the HNSW graph was REBUILT (not loaded) per modelID.
+    ///
+    /// Incremented by `rebuild_hnsw_index` after a full corpus re-insert.
+    /// A LOAD from the `hnsw_graph` table does NOT increment this counter.
+    /// Exposed for test assertions so tests can distinguish process-restart
+    /// load paths (build_count == 0) from inline builds (build_count > 0).
+    /// Mirrors Swift `VectorStore.hnswBuildCount`.
+    pub(crate) hnsw_build_count: std::collections::HashMap<String, u32>,
+
+    /// ModelID partitions modified by encode-path inserts since the last `flush()`.
+    ///
+    /// `add_payload` sets this when it mirrors a float32 insert into an active
+    /// HNSW graph. `flush()` drains the set and calls `persist_hnsw_graph` for
+    /// each dirty partition before flushing the binary sidecar.
+    /// Mirrors Swift `VectorStore.hnswGraphDirty`.
+    hnsw_graph_dirty: std::collections::HashSet<String>,
 
     /// Number of times the sidecar was detected as stale and rebuilt from
     /// the `vectors` table in the lifetime of this `VectorStore` instance.
@@ -608,10 +626,12 @@ impl VectorStore {
                 // Float indices are built lazily per modelID on first
                 // find_nearest_float; the map starts empty.
                 float_indices: std::collections::HashMap::new(),
-                // HNSW indices and live counts start empty; built lazily when
-                // live_float_counts[model_id] first reaches hnsw_threshold.
+                // HNSW indices and live counts start empty; loaded from the
+                // hnsw_graph table on first qualifying find_nearest_float call.
                 hnsw_indices: std::collections::HashMap::new(),
                 live_float_counts: std::collections::HashMap::new(),
+                hnsw_build_count: std::collections::HashMap::new(),
+                hnsw_graph_dirty: std::collections::HashSet::new(),
                 sidecar_rebuild_count: 0,
             }),
         }
@@ -849,10 +869,12 @@ impl VectorStore {
                 // overcount is acceptable — threshold is 5,000 and HNSW
                 // activation is idempotent). Mirrors Swift liveFloatCounts update.
                 *state.live_float_counts.entry(model_id.to_string()).or_insert(0) += 1;
-                // Mirror into the HNSW index if it is already active for this model.
+                // Mirror into the HNSW index if it is already active for this model,
+                // and mark the partition dirty so flush() persists the change.
                 if let Some(hnsw_idx) = state.hnsw_indices.get_mut(model_id) {
                     if let Ok(floats) = payload.as_f32_vec() {
                         hnsw_idx.insert(item_id.to_string(), model_id.to_string(), floats);
+                        state.hnsw_graph_dirty.insert(model_id.to_string());
                     }
                 }
             }
@@ -1276,6 +1298,19 @@ impl VectorStore {
     /// does not depend on flush: the `vectors` table is the durable source and
     /// the sidecar is rebuilt on the next open if it is stale.
     pub fn flush(&self) -> Result<(), VectorKitError> {
+        // Persist encode-path dirty HNSW partitions before flushing the binary sidecar.
+        // Drain the dirty set with the lock held, then release it before I/O so we
+        // do not hold the mutex across SQLite writes.
+        let dirty: std::collections::HashSet<String> = {
+            let mut state = self.state.lock().map_err(|_| {
+                VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+            })?;
+            std::mem::take(&mut state.hnsw_graph_dirty)
+        };
+        for model_id in &dirty {
+            self.persist_hnsw_graph(model_id)?;
+        }
+
         let mut state = self.state.lock().map_err(|_| {
             VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
@@ -1653,28 +1688,24 @@ impl VectorStore {
             if built {
                 let live_count = state.live_float_counts.get(model_id).copied().unwrap_or(0);
                 if live_count >= self.hnsw_threshold {
-                    // HNSW path: activate the approximate NN index for this model if
-                    // not yet built, then route through it. Farthest queries always
-                    // use FloatBruteForceIndex (anti-similarity with HNSW requires a
-                    // full-graph scan and provides no speed benefit).
+                    // HNSW path: route through the approximate NN index for this model.
+                    // Farthest queries always use FloatBruteForceIndex (anti-similarity
+                    // with HNSW requires a full-graph scan and provides no speed benefit).
                     if !state.hnsw_indices.contains_key(model_id) {
-                        // Lazy HNSW build: fetch float records and insert into a fresh graph.
-                        let records = self.fetch_float_records(model_id)?;
-                        let mut hnsw = HNSWIndex::new_default();
-                        for (key, payload) in &records {
-                            if let Ok(floats) = payload.as_f32_vec() {
-                                hnsw.insert(
-                                    key.item_id.clone(),
-                                    model_id.to_string(),
-                                    floats,
-                                );
-                            }
-                        }
-                        state.hnsw_indices.insert(model_id.to_string(), hnsw);
+                        // Load from the hnsw_graph table (written by THETA rebuild, BETA
+                        // compact, and encode-path inserts via flush). If no rows exist,
+                        // load_hnsw_graph_if_present is a no-op and the exact scan below
+                        // handles the query — no inline build on the query path (defect fix).
+                        // Drop the mutex before I/O to avoid holding it across table access.
+                        drop(state);
+                        self.load_hnsw_graph_if_present(model_id)?;
+                        state = self.state.lock()
+                            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
                     }
                     if let Some(hnsw_index) = state.hnsw_indices.get(model_id) {
                         return hnsw_index.search(probe, model_id, k);
                     }
+                    // No graph on disk yet: fall through to exact scan (defect D — fallback).
                 }
                 // Below threshold: use FloatBruteForceIndex (exact scan).
                 let probe_payload = VectorPayload::from_f32(probe);
@@ -2624,49 +2655,73 @@ impl VectorStore {
 
     /// Clear all HNSW graphs for every modelID partition (ALPHA duty).
     ///
-    /// Drops every in-process `HNSWIndex` entry and live count. The next
-    /// `find_nearest_float` call at/above `hnsw_threshold` lazily rebuilds
-    /// the graph from the current float records. `FloatBruteForceIndex` entries
-    /// are RETAINED — farthest queries and below-threshold nearest queries
-    /// continue uninterrupted.
+    /// Drops every in-process `HNSWIndex` entry and live count, and deletes all
+    /// rows from the `hnsw_graph` table. The next `find_nearest_float` call at/above
+    /// `hnsw_threshold` loads the (now-empty) table and falls back to exact scan
+    /// until THETA rebuild writes fresh rows. `FloatBruteForceIndex` entries are
+    /// RETAINED — farthest queries and below-threshold nearest queries continue
+    /// uninterrupted.
     ///
     /// Called by the ALPHA cadence adapter when extreme vocabulary drift renders
-    /// the existing graph topology incorrect. A lazy rebuild on the next qualifying
-    /// query is cheaper than a synchronous full rebuild on a 30-second cadence.
-    pub fn clear_all_hnsw_indices(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.hnsw_indices.clear();
-            state.live_float_counts.clear();
-        }
+    /// the existing graph topology incorrect. THETA rebuild fires shortly after and
+    /// repopulates the table.
+    pub fn clear_all_hnsw_indices(&self) -> Result<(), VectorKitError> {
+        // Delete all persisted rows outside the mutex (I/O first, then clear in-memory).
+        self.storage.row_store()
+            .delete("hnsw_graph", &StoragePredicate::IsTrue)
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut state = self.state.lock()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        state.hnsw_indices.clear();
+        state.live_float_counts.clear();
+        state.hnsw_graph_dirty.clear();
+        Ok(())
     }
 
     /// Rebuild the HNSW graph for one modelID partition from current float records.
     ///
     /// Fetches all float32 rows for `model_id` from the `vectors` table and
-    /// re-inserts them into a fresh `HNSWIndex`. Called by the THETA cadence
-    /// adapter after a daily basis retrain, so the graph topology stays aligned
-    /// with re-embedded vectors.
+    /// re-inserts them into a fresh `HNSWIndex`. Persists the rebuilt graph to
+    /// the `hnsw_graph` table so the next process open loads it rather than
+    /// falling back to exact scan. Increments `hnsw_build_count` — a LOAD
+    /// (via `load_hnsw_graph_if_present`) does NOT increment this counter.
+    ///
+    /// Called by the THETA cadence adapter after a daily basis retrain, so the
+    /// graph topology stays aligned with re-embedded vectors.
     ///
     /// If the table has no float rows for `model_id`, any existing graph entry
-    /// is removed (keeping the map consistent with the table state).
+    /// is removed and the `hnsw_graph` rows for this partition are deleted.
     pub fn rebuild_hnsw_index(&self, model_id: &str) -> Result<(), VectorKitError> {
         let records = self.fetch_float_records(model_id)?;
-        let mut state = self.state.lock()
-            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
-        if records.is_empty() {
-            state.hnsw_indices.remove(model_id);
-            state.live_float_counts.remove(model_id);
-            return Ok(());
-        }
-        let record_count = records.len() as u32;
-        let mut hnsw = HNSWIndex::new_default();
-        for (key, payload) in &records {
-            if let Ok(floats) = payload.as_f32_vec() {
-                hnsw.insert(key.item_id.clone(), model_id.to_string(), floats);
+        {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            if records.is_empty() {
+                state.hnsw_indices.remove(model_id);
+                state.live_float_counts.remove(model_id);
+                // Delete any stale rows for this partition.
+                drop(state);
+                self.storage.row_store()
+                    .delete("hnsw_graph", &StoragePredicate::Eq(
+                        Column::new("hnsw_graph", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    ))
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+                return Ok(());
             }
-        }
-        state.hnsw_indices.insert(model_id.to_string(), hnsw);
-        state.live_float_counts.insert(model_id.to_string(), record_count);
+            let record_count = records.len() as u32;
+            let mut hnsw = HNSWIndex::new_default();
+            for (key, payload) in &records {
+                if let Ok(floats) = payload.as_f32_vec() {
+                    hnsw.insert(key.item_id.clone(), model_id.to_string(), floats);
+                }
+            }
+            state.hnsw_indices.insert(model_id.to_string(), hnsw);
+            state.live_float_counts.insert(model_id.to_string(), record_count);
+            *state.hnsw_build_count.entry(model_id.to_string()).or_insert(0) += 1;
+        } // Release mutex before I/O.
+        self.persist_hnsw_graph(model_id)?;
         Ok(())
     }
 
@@ -2693,31 +2748,225 @@ impl VectorStore {
     /// Compact HNSW tombstones for one modelID partition (BETA duty).
     ///
     /// Calls `HNSWIndex::compact()` which rebuilds the live-node graph discarding
-    /// tombstoned entries and dead edges. Safe to call when no graph exists for
-    /// `model_id` (no-op).
-    pub fn compact_hnsw_tombstones(&self, model_id: &str) {
-        if let Ok(mut state) = self.state.lock() {
+    /// tombstoned entries and dead edges, then persists the compacted graph to
+    /// the `hnsw_graph` table. Safe to call when no graph exists for `model_id`
+    /// (compact is a no-op; persist writes zero rows then returns).
+    pub fn compact_hnsw_tombstones(&self, model_id: &str) -> Result<(), VectorKitError> {
+        {
+            let mut state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             if let Some(hnsw_idx) = state.hnsw_indices.get_mut(model_id) {
                 hnsw_idx.compact();
             }
-        }
+        } // Release mutex before I/O.
+        self.persist_hnsw_graph(model_id)?;
+        Ok(())
     }
 
     /// Compact HNSW tombstones for all active modelID partitions (BETA duty).
     ///
-    /// Iterates over all active HNSW graphs and calls `compact()` on each.
-    /// Called by the BETA cadence adapter.
-    pub fn compact_all_hnsw_tombstones(&self) {
+    /// Iterates over all active HNSW graphs and calls `compact_hnsw_tombstones`
+    /// for each. Each partition's compacted graph is persisted to the `hnsw_graph`
+    /// table. Called by the BETA cadence adapter.
+    pub fn compact_all_hnsw_tombstones(&self) -> Result<(), VectorKitError> {
         // Snapshot model IDs before iterating to avoid borrow conflicts.
         let model_ids: Vec<String> = {
             match self.state.lock() {
                 Ok(state) => state.hnsw_indices.keys().cloned().collect(),
-                Err(_) => return,
+                Err(_) => return Ok(()),
             }
         };
         for model_id in &model_ids {
-            self.compact_hnsw_tombstones(model_id);
+            self.compact_hnsw_tombstones(model_id)?;
         }
+        Ok(())
+    }
+
+    // MARK: - HNSW persistence (hnsw_graph table)
+
+    /// Persist the HNSW graph for one modelID partition to the `hnsw_graph` table.
+    ///
+    /// Serialises the in-memory `HNSWIndex` via `graph_rows()`, then executes a
+    /// delete-then-insert transaction for this partition's rows. The delete removes
+    /// any previously persisted rows; the insert writes the current compact graph.
+    /// If no graph is active for `model_id`, this is a no-op.
+    ///
+    /// Called by THETA rebuild, BETA compact, and `flush()` for encode-path inserts.
+    /// Must NOT be called with the state mutex held (I/O outside the lock).
+    fn persist_hnsw_graph(&self, model_id: &str) -> Result<(), VectorKitError> {
+        // 1. Serialise the graph rows with the mutex held; release before I/O.
+        let rows: Vec<GraphRow> = {
+            let state = self.state.lock()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            match state.hnsw_indices.get(model_id) {
+                Some(hnsw) => hnsw.graph_rows(),
+                None => return Ok(()), // nothing to persist
+            }
+        };
+
+        // 2. Delete existing rows for this partition, then insert the fresh set.
+        let row_store = self.storage.row_store();
+        row_store.begin_transaction()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let result: Result<(), VectorKitError> = (|| {
+            row_store.delete(
+                "hnsw_graph",
+                &StoragePredicate::Eq(
+                    Column::new("hnsw_graph", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                ),
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            for row in &rows {
+                let mut values = BTreeMap::new();
+                values.insert("model_id".to_string(), TypedValue::Text(model_id.to_string()));
+                values.insert("node_idx".to_string(), TypedValue::Int(row.node_idx as i64));
+                values.insert("node_id".to_string(), TypedValue::Text(row.node_id.clone()));
+                values.insert("layer".to_string(), TypedValue::Int(row.layer as i64));
+                values.insert("neighbours".to_string(), TypedValue::Blob(row.neighbours_blob.clone()));
+                row_store.insert("hnsw_graph", values)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => row_store.commit_transaction()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string())),
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                Err(e)
+            }
+        }
+    }
+
+    /// Query the `hnsw_graph` table for one modelID partition's rows.
+    ///
+    /// Returns a Vec of `GraphRow` in storage order (no sort guarantee). Returns
+    /// an empty Vec if the table has no rows for `model_id`.
+    fn query_hnsw_graph_rows(&self, model_id: &str) -> Result<Vec<GraphRow>, VectorKitError> {
+        let rows = self.storage.row_store()
+            .query(
+                "hnsw_graph",
+                Some(&StoragePredicate::Eq(
+                    Column::new("hnsw_graph", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut graph_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let node_idx = match row.get("node_idx") {
+                Some(TypedValue::Int(v)) => *v as i32,
+                _ => continue,
+            };
+            let node_id = match row.get("node_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let layer = match row.get("layer") {
+                Some(TypedValue::Int(v)) => *v as usize,
+                _ => continue,
+            };
+            let neighbours_blob = match row.get("neighbours") {
+                Some(TypedValue::Blob(b)) => b.clone(),
+                _ => continue,
+            };
+            graph_rows.push(GraphRow { node_idx, node_id, layer, neighbours_blob });
+        }
+        Ok(graph_rows)
+    }
+
+    /// Load the HNSW graph for one modelID from the `hnsw_graph` table.
+    ///
+    /// Queries `hnsw_graph` for rows matching `model_id`, builds the
+    /// `node_idx → (item_id, bytes)` map from the float records in `vectors`,
+    /// reconstructs the `HNSWIndex` via `load_from_graph_rows`, and stores the
+    /// result in `hnsw_indices`. Nodes whose float vector is missing from the
+    /// `vectors` table (deleted since last persist) are silently excluded —
+    /// they cannot surface as search results.
+    ///
+    /// If no rows exist in the table (graph never built for this partition), this
+    /// is a no-op: `hnsw_indices` is not modified, and `find_nearest_float` falls
+    /// back to exact scan. Does NOT increment `hnsw_build_count` — a load is not
+    /// a rebuild.
+    ///
+    /// Must NOT be called with the state mutex held (I/O outside the lock).
+    fn load_hnsw_graph_if_present(&self, model_id: &str) -> Result<(), VectorKitError> {
+        // 1. Query hnsw_graph rows for this partition.
+        let graph_rows = self.query_hnsw_graph_rows(model_id)?;
+        if graph_rows.is_empty() {
+            return Ok(());
+        }
+
+        // 2. Fetch float records to build the node_idx → (item_id, bytes) map.
+        let float_records = self.fetch_float_records(model_id)?;
+        // Build item_id → bytes lookup from the float lane.
+        let mut item_bytes: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::with_capacity(float_records.len());
+        for (key, payload) in &float_records {
+            item_bytes.insert(key.item_id.clone(), payload.bytes.clone());
+        }
+
+        // Build node_idx → (item_id, bytes) map. Each node_idx maps to the
+        // node_id (item_id) in the graph row, looked up against float records.
+        // Nodes absent from item_bytes (deleted vectors) are excluded — they are
+        // silently skipped by load_from_graph_rows.
+        let mut node_bytes: std::collections::HashMap<i32, (String, Vec<u8>)> =
+            std::collections::HashMap::new();
+        // Track node_idx already seen (graph rows may have multiple layers per node).
+        let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for row in &graph_rows {
+            if !seen.insert(row.node_idx) {
+                continue;
+            }
+            if let Some(bytes) = item_bytes.get(&row.node_id) {
+                node_bytes.insert(row.node_idx, (row.node_id.clone(), bytes.clone()));
+            }
+            // Absent from item_bytes → deleted vector. Not added to node_bytes;
+            // load_from_graph_rows allocates a tombstone placeholder.
+        }
+
+        // 3. Reconstruct the HNSWIndex from the persisted rows.
+        let mut hnsw = HNSWIndex::new_default();
+        hnsw.load_from_graph_rows(&graph_rows, &node_bytes, model_id);
+
+        if !hnsw.has_graph() {
+            // All nodes were deleted: nothing to load.
+            return Ok(());
+        }
+
+        // 4. Store the loaded graph. Use entry().or_insert so a concurrent load
+        // (if two threads raced here) is idempotent.
+        let mut state = self.state.lock()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        state.hnsw_indices.entry(model_id.to_string()).or_insert(hnsw);
+        Ok(())
+    }
+
+    /// Count persisted rows in the `hnsw_graph` table for one modelID (test helper).
+    ///
+    /// Exit gate A: assert row count > 0 after rebuild. Not part of the stable
+    /// production API — exposed for integration tests in `tests/`.
+    pub fn hnsw_graph_row_count(&self, model_id: &str) -> Result<usize, VectorKitError> {
+        let rows = self.query_hnsw_graph_rows(model_id)?;
+        Ok(rows.len())
+    }
+
+    /// Return the number of times the HNSW graph was rebuilt (not loaded) for
+    /// one modelID (test helper).
+    ///
+    /// Exit gate B: assert hnsw_build_count == 0 after a process-restart open
+    /// (load path, not build path). Not part of the stable production API —
+    /// exposed for integration tests in `tests/`.
+    pub fn hnsw_build_count_for(&self, model_id: &str) -> u32 {
+        self.state.lock()
+            .map(|s| *s.hnsw_build_count.get(model_id).unwrap_or(&0))
+            .unwrap_or(0)
     }
 
     fn ensure_float_index_built_locked(

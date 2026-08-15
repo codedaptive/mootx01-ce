@@ -55,6 +55,48 @@
 use crate::error::VectorKitError;
 use crate::vector_store::VectorMatch;
 
+// MARK: - Persistence row type
+
+/// Row-oriented view of one node at one layer for `hnsw_graph` SQLite persistence.
+///
+/// Used by `HNSWIndex::graph_rows()` to serialise the in-memory graph and by
+/// `HNSWIndex::load_from_graph_rows()` to deserialise rows back. One row covers
+/// exactly one (node, layer) pair. The schema is PK=(model_id, node_idx, layer);
+/// `model_id` is provided by the caller at the VectorStore layer (it is the
+/// partition key, not stored per-row inside HNSWIndex).
+///
+/// `neighbours_blob`: packed little-endian i32 array — 4 bytes per neighbour,
+/// length = `neighbours_blob.len() / 4`. Compact (tombstone-free) indices.
+pub struct GraphRow {
+    /// Compact ordinal index of this node within the persisted graph (0-based).
+    /// Assigned at serialisation time; contiguous over live nodes only.
+    pub node_idx: i32,
+    /// item_id of the vector stored at this node; matches `vectors.item_id`.
+    pub node_id: String,
+    /// Which HNSW layer this row covers. Layer 0 is the base (densest) layer.
+    pub layer: usize,
+    /// Packed little-endian i32 neighbour node indices at this layer.
+    pub neighbours_blob: Vec<u8>,
+}
+
+impl GraphRow {
+    /// Decode `neighbours_blob` to a `Vec<i32>` of compact node indices.
+    pub fn decode_neighbours(&self) -> Vec<i32> {
+        let count = self.neighbours_blob.len() / 4;
+        (0..count)
+            .map(|i| {
+                let base = i * 4;
+                i32::from_le_bytes([
+                    self.neighbours_blob[base],
+                    self.neighbours_blob[base + 1],
+                    self.neighbours_blob[base + 2],
+                    self.neighbours_blob[base + 3],
+                ])
+            })
+            .collect()
+    }
+}
+
 // MARK: - HNSW tuning constants
 
 /// Max connections per node per layer (layers 1+). Layer 0 uses `HNSW_M0 = 2 × M`.
@@ -596,6 +638,191 @@ impl HNSWIndex {
         self.entry_point = None;
         self.max_layer = 0;
         self.vector_stride = None;
+    }
+
+    // MARK: - Persistence (hnsw_graph table)
+
+    /// True when the graph has at least one live node (entry_point is set).
+    ///
+    /// Used by `VectorStore.load_hnsw_graph_if_present` to detect an empty
+    /// reconstruction (all nodes had deleted vectors).
+    pub fn has_graph(&self) -> bool {
+        self.entry_point.is_some()
+    }
+
+    /// Serialise the current HNSW graph to row form for SQLite persistence.
+    ///
+    /// Tombstoned nodes are excluded (compact layout). Neighbour indices are
+    /// remapped from the internal (possibly fragmented) address space to
+    /// compact sequential indices so the persisted rows form a self-consistent
+    /// graph. One `GraphRow` is emitted per (live node, layer) pair.
+    ///
+    /// Returns an empty Vec when the graph is empty.
+    pub fn graph_rows(&self) -> Vec<GraphRow> {
+        // Build a compact index over live nodes only.
+        let live: Vec<usize> = self.nodes.iter()
+            .enumerate()
+            .filter(|(_, n)| !n.tombstoned)
+            .map(|(i, _)| i)
+            .collect();
+
+        if live.is_empty() {
+            return Vec::new();
+        }
+
+        // old internal index → compact index mapping.
+        let mut old_to_new: std::collections::HashMap<i32, i32> =
+            std::collections::HashMap::with_capacity(live.len());
+        for (new_idx, &old_idx) in live.iter().enumerate() {
+            old_to_new.insert(old_idx as i32, new_idx as i32);
+        }
+
+        let mut rows = Vec::new();
+        for (new_idx, &old_idx) in live.iter().enumerate() {
+            let node = &self.nodes[old_idx];
+            for (layer, neighbours) in node.neighbours.iter().enumerate() {
+                // Remap neighbour indices: skip tombstoned neighbours (absent from map).
+                let remapped: Vec<i32> = neighbours.iter()
+                    .filter_map(|&n| old_to_new.get(&n).copied())
+                    .collect();
+
+                // Pack as little-endian i32 BLOB.
+                let mut blob = Vec::with_capacity(remapped.len() * 4);
+                for n in &remapped {
+                    blob.extend_from_slice(&n.to_le_bytes());
+                }
+
+                rows.push(GraphRow {
+                    node_idx: new_idx as i32,
+                    node_id: node.item_id.clone(),
+                    layer,
+                    neighbours_blob: blob,
+                });
+            }
+        }
+        rows
+    }
+
+    /// Reconstruct the HNSW graph from persisted rows.
+    ///
+    /// `node_bytes` maps compact `node_idx → (item_id, float bytes)`. Nodes
+    /// whose compact index is absent from `node_bytes` (their vector was
+    /// deleted from the `vectors` table since the last persist) are silently
+    /// skipped. `model_id` is set on every reconstructed node so `search`'s
+    /// model-id filter returns results correctly.
+    ///
+    /// Clears any existing graph before loading. If `rows` is empty or every
+    /// node's vector is absent, the graph remains empty (has_graph() → false).
+    pub fn load_from_graph_rows(
+        &mut self,
+        rows: &[GraphRow],
+        node_bytes: &std::collections::HashMap<i32, (String, Vec<u8>)>,
+        model_id: &str,
+    ) {
+        self.clear();
+        if rows.is_empty() {
+            return;
+        }
+
+        // Phase 1: discover distinct compact node indices and per-node layer counts.
+        // node_idx → number of layers to allocate for that node.
+        let mut node_layer_counts: std::collections::BTreeMap<i32, usize> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let entry = node_layer_counts.entry(row.node_idx).or_insert(0);
+            if row.layer + 1 > *entry {
+                *entry = row.layer + 1;
+            }
+        }
+
+        if node_layer_counts.is_empty() {
+            return;
+        }
+
+        // Phase 2: infer vector stride from first available node bytes.
+        let stride = match node_bytes.values().next() {
+            Some((_, b)) => b.len(),
+            None => return,  // no bytes at all — nothing to load
+        };
+        self.vector_stride = Some(stride);
+
+        // Phase 3: allocate nodes in compact node_idx order. Nodes missing from
+        // node_bytes are inserted as placeholder tombstones so neighbour index
+        // references remain valid during reconstruction.
+        let sorted_idxs: Vec<i32> = node_layer_counts.keys().copied().collect();
+
+        // compact_idx → position in self.nodes (equal when nodes are contiguous).
+        let mut compact_to_pos: std::collections::HashMap<i32, usize> =
+            std::collections::HashMap::with_capacity(sorted_idxs.len());
+
+        for &cidx in &sorted_idxs {
+            let pos = self.nodes.len();
+            compact_to_pos.insert(cidx, pos);
+
+            let layer_count = *node_layer_counts.get(&cidx).unwrap_or(&1);
+            let empty_layers: Vec<Vec<i32>> = vec![Vec::new(); layer_count];
+
+            if let Some((item_id, bytes)) = node_bytes.get(&cidx) {
+                self.nodes.push(Node {
+                    item_id: item_id.clone(),
+                    model_id: model_id.to_string(),
+                    vector_bytes: bytes.clone(),
+                    neighbours: empty_layers,
+                    tombstoned: false,
+                });
+                self.node_index.insert(item_id.clone(), pos as i32);
+            } else {
+                // Deleted vector: placeholder tombstone preserves compact addressing.
+                self.nodes.push(Node {
+                    item_id: String::new(),
+                    model_id: model_id.to_string(),
+                    vector_bytes: Vec::new(),
+                    neighbours: empty_layers,
+                    tombstoned: true,
+                });
+            }
+        }
+
+        // Phase 4: fill neighbour lists from the persisted rows.
+        // Neighbour indices in the rows are compact indices; remap via compact_to_pos.
+        for row in rows {
+            let pos = match compact_to_pos.get(&row.node_idx) {
+                Some(&p) => p,
+                None => continue,
+            };
+            if self.nodes[pos].tombstoned {
+                continue;
+            }
+            if row.layer < self.nodes[pos].neighbours.len() {
+                self.nodes[pos].neighbours[row.layer] = row.decode_neighbours()
+                    .into_iter()
+                    .filter_map(|cidx| compact_to_pos.get(&cidx).copied().map(|p| p as i32))
+                    .collect();
+            }
+        }
+
+        // Phase 5: elect entry point — the live node with the most layers
+        // (ties: lowest position in nodes, i.e. lowest compact index).
+        let mut best_pos: Option<usize> = None;
+        let mut best_layers = 0usize;
+        for &pos in compact_to_pos.values() {
+            let node = &self.nodes[pos];
+            if node.tombstoned {
+                continue;
+            }
+            let layers = node.neighbours.len();
+            if layers > best_layers {
+                best_layers = layers;
+                best_pos = Some(pos);
+            } else if layers == best_layers && best_pos.map_or(true, |bp| pos < bp) {
+                best_pos = Some(pos);
+            }
+        }
+
+        if let Some(pos) = best_pos {
+            self.entry_point = Some(pos as i32);
+            self.max_layer = best_layers.saturating_sub(1);
+        }
     }
 
     // MARK: - Observability

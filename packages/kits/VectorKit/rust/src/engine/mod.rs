@@ -59,6 +59,6 @@ pub use mih::{MIHBandCount, MIHIndex};
 // Lane C re-exports
 pub use float_brute_force::FloatBruteForceIndex;
 // Lane D re-exports
-pub use hnsw_index::{HNSWIndex, HNSW_DEFAULT_THRESHOLD};
+pub use hnsw_index::{GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD};
 // Lane E1 re-exports
 pub use max_sim::{MaxSimHit, MaxSimScorer};
