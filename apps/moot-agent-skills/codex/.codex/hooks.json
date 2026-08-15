@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook SessionStart",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook SessionStart; done; exit 0",
             "timeout": 3,
             "statusMessage": "MOOTx01 session orientation"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook UserPromptSubmit",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook UserPromptSubmit; done; exit 0",
             "timeout": 3,
             "statusMessage": "MOOTx01 bounded recall"
           }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook PostToolUse",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook PostToolUse; done; exit 0",
             "timeout": 2
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook PreCompact",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook PreCompact; done; exit 0",
             "timeout": 2
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook PostCompact",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook PostCompact; done; exit 0",
             "timeout": 2
           }
         ]
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook Stop",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook Stop; done; exit 0",
             "timeout": 2,
             "statusMessage": "MOOTx01 writeback gate"
           }
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mootx01 codex-hook SessionEnd",
+            "command": "for p in \"${MOOTX01_BIN:-}\" \"$HOME/.mootx01/bin/mootx01\" \"$HOME/.local/bin/mootx01\" /opt/homebrew/bin/mootx01 /usr/local/bin/mootx01 /home/linuxbrew/.linuxbrew/bin/mootx01 /usr/bin/mootx01; do [ -x \"$p\" ] && exec \"$p\" codex-hook SessionEnd; done; exit 0",
             "timeout": 2
           }
         ]
