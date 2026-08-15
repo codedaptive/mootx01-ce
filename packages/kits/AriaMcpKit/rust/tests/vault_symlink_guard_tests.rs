@@ -121,6 +121,58 @@ fn write_manifest_refuses_symlinked_moot_parent_dir() {
 }
 
 /// Helper: generate a unique string without pulling in the uuid crate.
+/// Perkins VR-01 findings 1+2: the manifest stamp read must not follow a
+/// symlink (a TOCTOU swap between the export's write and the hash read would
+/// stamp — and thereby disclose the hash of — any file this process can
+/// read), and must refuse a traversal path by construction rather than
+/// relying on `from_ir` having errored first. A skipped symlink is simply
+/// not stamped, so the path surfaces as changed / needs review on the next
+/// reconcile. Mirrors Swift `VaultToolsTests.buildManifestSkipsSymlinksAndRefusesTraversal`.
+#[test]
+fn build_manifest_skips_symlinks_and_refuses_traversal() {
+    use aria_mcp::vault_tools::build_manifest;
+
+    let vault_dir = std::env::temp_dir().join(format!(
+        "stamp-guard-rust-{}",
+        uuid_string()
+    ));
+    std::fs::create_dir_all(&vault_dir).expect("create vault dir");
+
+    std::fs::write(vault_dir.join("Real.md"), "# Real note").expect("write real note");
+
+    // A "note" swapped for a symlink pointing outside the vault — the
+    // attacker's hash-oracle setup.
+    let oracle_target = std::env::temp_dir().join(format!(
+        "stamp-oracle-rust-{}.md",
+        uuid_string()
+    ));
+    std::fs::write(&oracle_target, "outside-the-vault content").expect("write oracle target");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&oracle_target, vault_dir.join("Swapped.md"))
+        .expect("create symlink at swapped note path");
+
+    let manifest = build_manifest(
+        &vault_dir,
+        &["Real.md".to_string(), "Swapped.md".to_string()],
+        1_765_000_000_000,
+    )
+    .expect("build_manifest must succeed, skipping the symlinked path");
+    let keys: Vec<&String> = manifest.files.keys().collect();
+    assert_eq!(
+        keys,
+        vec![&"Real.md".to_string()],
+        "the symlinked path must not be stamped"
+    );
+
+    // Traversal components are refused outright, independent of from_ir's
+    // own guard.
+    let err = build_manifest(&vault_dir, &["../escape.md".to_string()], 1_765_000_000_000);
+    assert!(err.is_err(), "traversal path must be refused, got {err:?}");
+
+    let _ = std::fs::remove_dir_all(&vault_dir);
+    let _ = std::fs::remove_file(&oracle_target);
+}
+
 fn uuid_string() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

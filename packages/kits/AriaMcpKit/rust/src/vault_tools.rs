@@ -1133,10 +1133,39 @@ pub fn build_manifest(
 ) -> Result<ExportManifest, std::io::Error> {
     let mut files: BTreeMap<String, ManifestEntry> = BTreeMap::new();
     for rel in written_paths {
-        // The export just wrote each of these paths through the adapter's
-        // containment guards; a direct read here hashes the actual disk bytes
-        // so the stamp certifies exactly what landed.
-        let content = std::fs::read(vault_path.join(rel))?;
+        // Containment guard (Perkins VR-01 finding 2): from_ir errors on
+        // traversal before this runs, but that is containment by call
+        // ordering, not by construction. Enforce it here too so a future
+        // caller with un-vetted paths cannot turn the stamp read into an
+        // arbitrary-file hash oracle. Same lexical rules as the from_ir
+        // write guard: no "..", no absolute prefix, no backslash, no empty
+        // components. Mirrors Swift `VaultTools.buildManifest`.
+        let escapes = rel.starts_with('/')
+            || rel.contains('\\')
+            || rel.split('/').any(|c| c.is_empty() || c == ".." || c == ".");
+        if escapes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manifest stamp path escapes the vault root; stamp refused",
+            ));
+        }
+        let path = vault_path.join(rel);
+        // Regular-file gate (Perkins VR-01 finding 1): `std::fs::read`
+        // follows symlinks, so a note swapped for a symlink between
+        // from_ir's write and this hash (TOCTOU) would stamp the hash of
+        // any file this process can read. `symlink_metadata` does NOT
+        // follow links, so it detects both live and broken symlinks. A
+        // non-regular entry is skipped, not stamped — no certification, so
+        // the path surfaces as changed / needs review on the next
+        // reconcile. Fail toward surfacing. Mirrors Swift.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        // The export just wrote this path through the adapter's containment
+        // guards; the direct read hashes the actual disk bytes so the stamp
+        // certifies exactly what landed.
+        let content = std::fs::read(&path)?;
         let sha256 = sha256_hex(&content);
         files.insert(rel.clone(), ManifestEntry { sha256 });
     }

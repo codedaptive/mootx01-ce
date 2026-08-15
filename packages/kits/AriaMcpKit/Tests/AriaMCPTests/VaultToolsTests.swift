@@ -887,6 +887,44 @@ struct VaultToolsTests {
                 "Import set must be empty after apply; got: \(second)")
     }
 
+    /// Perkins VR-01 findings 1+2: the manifest stamp read must not follow a
+    /// symlink (TOCTOU swap between the export's write and the hash read
+    /// would stamp — and thereby disclose the hash of — any file this
+    /// process can read), and must refuse a traversal path by construction
+    /// rather than relying on fromIR having thrown first. A skipped symlink
+    /// is simply not stamped, so the path surfaces as changed / needs review
+    /// on the next reconcile.
+    @Test func buildManifestSkipsSymlinksAndRefusesTraversal() throws {
+        let fm = FileManager.default
+        let vault = makeTempVault()
+        try fm.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: vault) }
+
+        try "# Real note".write(
+            to: vault.appendingPathComponent("Real.md"), atomically: true, encoding: .utf8)
+
+        // A "note" swapped for a symlink pointing outside the vault — the
+        // attacker's hash-oracle setup.
+        let target = fm.temporaryDirectory
+            .appendingPathComponent("stamp-oracle-\(UUID().uuidString).md")
+        try "outside-the-vault content".write(to: target, atomically: true, encoding: .utf8)
+        defer { try? fm.removeItem(at: target) }
+        try fm.createSymbolicLink(
+            at: vault.appendingPathComponent("Swapped.md"), withDestinationURL: target)
+
+        let manifest = try VaultTools.buildManifest(
+            vaultURL: vault, writtenPaths: ["Real.md", "Swapped.md"], now: Date())
+        #expect(manifest.files.keys.sorted() == ["Real.md"],
+                "the symlinked path must not be stamped; got \(manifest.files.keys.sorted())")
+
+        // Traversal components are refused outright, independent of fromIR's
+        // own guard.
+        #expect(throws: (any Error).self) {
+            _ = try VaultTools.buildManifest(
+                vaultURL: vault, writtenPaths: ["../escape.md"], now: Date())
+        }
+    }
+
     // MARK: - Async job helpers
 
     /// Scan the plain-text result body for a `job_id: <UUID>` line and

@@ -760,10 +760,35 @@ enum VaultTools {
     ) throws -> ExportManifest {
         var files: [String: ManifestEntry] = [:]
         for rel in Set(writtenPaths) {
-            // The export just wrote each of these paths through fromIR's
-            // containment guards; a direct read here hashes the actual disk
-            // bytes so the stamp certifies exactly what landed.
-            let data = try Data(contentsOf: vaultURL.appendingPathComponent(rel))
+            // Containment guard (Perkins VR-01 finding 2): fromIR throws on
+            // traversal before this runs, but that is containment by call
+            // ordering, not by construction. Enforce it here too so a future
+            // caller with un-vetted paths cannot turn the stamp read into an
+            // arbitrary-file hash oracle. Same lexical rules as the fromIR
+            // write guard: no "..", no absolute prefix, no backslash, no
+            // empty components.
+            let components = rel.split(separator: "/", omittingEmptySubsequences: false)
+            guard !rel.hasPrefix("/"), !rel.contains("\\"),
+                  components.allSatisfy({ !$0.isEmpty && $0 != ".." && $0 != "." }) else {
+                throw VaultKitError.adapterError(
+                    "manifest stamp path escapes the vault root; stamp refused")
+            }
+            let url = vaultURL.appendingPathComponent(rel)
+            // Regular-file gate (Perkins VR-01 finding 1): the read follows
+            // symlinks, so a note swapped for a symlink between fromIR's
+            // write and this hash (TOCTOU) would stamp the hash of any file
+            // this process can read. Reading .isSymbolicLinkKey detects both
+            // live and broken symlinks (same rationale as writeManifest's
+            // leaf guard). A non-regular entry is skipped, not stamped —
+            // no certification, so the path surfaces as changed / needs
+            // review on the next reconcile. Fail toward surfacing.
+            guard let rv = try? url.resourceValues(
+                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  rv.isSymbolicLink != true, rv.isRegularFile == true else { continue }
+            // The export just wrote this path through fromIR's containment
+            // guards; the direct read hashes the actual disk bytes so the
+            // stamp certifies exactly what landed.
+            let data = try Data(contentsOf: url)
             files[rel] = ManifestEntry(sha256: sha256Hex(data))
         }
         // Fresh formatter per call: ISO8601DateFormatter is not Sendable,
