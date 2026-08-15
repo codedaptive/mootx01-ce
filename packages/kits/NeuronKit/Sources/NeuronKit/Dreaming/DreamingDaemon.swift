@@ -1358,8 +1358,8 @@ public actor DreamingDaemon {
         // rather than the stale pre-retrain one — which on an estate where only
         // THETA has ever retrained is still the -1 sentinel, and the sentinel
         // makes fireTheta retrain unconditionally on every restart.
-        // fireTheta catches all errors internally,
-        // so this point is always reachable. Using try await for consistency
+        // fireTheta catches all errors internally, so this point is always
+        // reachable. Using try await for consistency
         // with the pre-retrain save; the default store implementation is a
         // no-op, and the manifest-backed store is a cheap write — no dirty-flag
         // guard is needed.
