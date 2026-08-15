@@ -227,6 +227,11 @@ public actor AutonomicGovernor {
         // (CognitionKit depends on NeuronKit, so importing it here would invert
         // the layer stack).
         graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)? = nil,
+        // HNSW maintenance seam: the host (AriaMcpKit) injects an
+        // EstateHNSWGraphMaintenance wrapping the estate's VectorStore. Nil = no
+        // HNSW graph maintenance (ALPHA clear / THETA rebuild / BETA compact are
+        // silently skipped). Production governor always passes a live instance.
+        hnswMaintenance: (any HNSWGraphMaintenance)? = nil,
         // Pool paths default to the LatticeLib-resolved convention. Tests pass
         // explicit temp paths (or nil to skip the reduce path entirely).
         poolDirectory: URL? = NovelPoolSubmitter.poolDirectory(),
@@ -280,12 +285,8 @@ public actor AutonomicGovernor {
             rewardSource: RecallTraceRewardSource(),
             policyStore: EstateManifestDreamingPolicyStore(handle: handle, kit: kit),
             growthProbe: EstateCorpusGrowthProbe(handle: handle, kit: kit),
-            thetaRetrainHook: EstateThetaBasisRetrainHook(handle: handle, kit: kit)
-            // HNSW-MAINT: hnswMaintenance is deliberately nil here. Production
-            // estates get HNSW search without graph maintenance (ALPHA clear /
-            // THETA rebuild / BETA compact) until the serve layer exposes the
-            // estate's VectorStore at this construction site — wire an
-            // EstateHNSWGraphMaintenance(vectorStore:) then (VEC-HNSW-02).
+            thetaRetrainHook: EstateThetaBasisRetrainHook(handle: handle, kit: kit),
+            hnswMaintenance: hnswMaintenance
         )
         self.maintenance = MaintenanceDaemon(
             reader: EstateMaintenanceReader(handle: handle, kit: kit),

@@ -312,15 +312,30 @@ public actor VectorStore {
     /// HNSW approximate nearest-neighbour index per modelID (Lane D, float lane).
     ///
     /// One HNSWIndex per modelID partition, activated when the live float count
-    /// for that model reaches `hnswThreshold`. Built lazily on the first
-    /// `findNearestFloat` call that crosses the threshold; cleared by
-    /// `evictFloatIndices` and `clearAllHNSWIndices`.
+    /// for that model reaches `hnswThreshold`. Loaded from the `hnsw_graph` table
+    /// on the first qualifying query (via `_loadHNSWGraphIfPresent`); built via
+    /// `rebuildHNSWIndex` (THETA cadence); cleared by `clearAllHNSWIndices`.
+    /// Updated incrementally on the encode path when a graph is already in memory.
     ///
     /// Search through this index is APPROXIMATE; `FloatBruteForceIndex` is the
     /// exact oracle and is always kept for farthest queries and recall validation.
     /// Above the threshold, nearest queries route through HNSW (sub-linear);
     /// below it, nearest queries use `FloatBruteForceIndex` (exact, O(N)).
     private var hnswIndices: [String: HNSWIndex] = [:]
+
+    /// Number of times an HNSW graph was rebuilt from float vector records (not loaded from rows).
+    ///
+    /// Incremented by `rebuildHNSWIndex(for:)`. NOT incremented when the graph is
+    /// loaded from `hnsw_graph` rows via `_loadHNSWGraphIfPresent`. Used by
+    /// persistence tests (HP-1/HP-2) to assert that a reopen serves from stored
+    /// rows without triggering a rebuild. Exposed at `internal` visibility so tests
+    /// can read it via `@testable import`.
+    internal private(set) var hnswBuildCount: [String: Int] = [:]
+
+    /// modelID partitions whose in-memory HNSW graph has been modified since the
+    /// last `flush()`. Encode-path inserts mark the partition dirty; `flush()`
+    /// persists dirty partitions to the `hnsw_graph` table and clears the set.
+    private var hnswGraphDirty: Set<String> = []
 
     /// Live float vector count per modelID partition.
     ///
@@ -400,12 +415,14 @@ public actor VectorStore {
     ///
     /// Table additions v4 → v5:
     ///   - Added: `hnsw_graph` table (see file header for column list).
-    ///     Schema declaration for the float-lane (Lane D) HNSW graph. The
-    ///     graph is currently MEMORY-ONLY — no rows are written in either
-    ///     port; the table exists so the v4→v5 migration path is in place
-    ///     for existing estates before persistence lands. NEVER included in
+    ///     Schema declaration for the float-lane (Lane D) HNSW graph.
+    ///     Rows are written by THETA rebuild, BETA compaction, and incremental
+    ///     encode-path inserts (flushed in `flush()`). NEVER included in
     ///     ConvergenceKit sync manifests; the graph is a rebuildable derived
-    ///     accelerator — device-local only.
+    ///     accelerator — device-local only. Primary key is
+    ///     (model_id, node_idx, layer): one row per node-per-layer neighbour
+    ///     list. `neighbours` is a packed little-endian Int32 array of
+    ///     node_idx values.
     ///     issued a full scan (10k-row probe_limit = O(N) on 109k chunks).
     ///     Combined with `columns:` projection, this also enables an
     ///     index-only covering scan — payload blobs never read from disk.
@@ -436,14 +453,13 @@ public actor VectorStore {
                 primaryKey: ["id"],
                 uniqueConstraints: [["item_id", "vector_index", "model_id"]]
             ),
-            // v5: schema declaration for the HNSW graph (memory-only today —
-            // no rows are written; the declaration reserves the migration
-            // path for when persistence lands). Device-local only — never
-            // in ConvergenceKit sync manifests (the graph is a rebuildable
-            // derived accelerator, not source-of-truth data). Primary key
-            // is (model_id, node_idx, layer): one row per node-per-layer
+            // v5: hnsw_graph — float-lane HNSW graph store. Device-local;
+            // never in ConvergenceKit sync manifests (rebuildable derived
+            // accelerator, not source-of-truth data). Primary key is
+            // (model_id, node_idx, layer): one row per node-per-layer
             // neighbour list. `neighbours` is a packed little-endian Int32
-            // array of node_idx values.
+            // array of node_idx values. Written by THETA rebuild, BETA
+            // compaction, and incremental encode-path inserts.
             TableDeclaration(
                 name: "hnsw_graph",
                 columns: [
@@ -502,9 +518,11 @@ public actor VectorStore {
             // v4 → v5: add hnsw_graph table to existing estates.
             // Idempotent: the .createTable operation emits CREATE TABLE IF NOT
             // EXISTS, so it is safe to replay on fresh databases (which also
-            // apply this migration from the initial open). The table starts
-            // empty; the HNSW graph is populated lazily when the active float
-            // corpus first crosses the hnswThreshold.
+            // apply this migration from the initial open). Rows are written by
+            // THETA rebuild, BETA compaction, and incremental encode-path inserts
+            // (flushed in flush()). The table starts empty on new estates until
+            // the first THETA cadence fires or flush() is called after the corpus
+            // exceeds hnswThreshold.
             Migration(
                 fromVersion: 4,
                 toVersion: 5,
@@ -639,20 +657,27 @@ public actor VectorStore {
 
     /// Clear all HNSW graphs for every modelID partition (ALPHA duty).
     ///
-    /// Drops every in-process HNSWIndex entry. The next `findNearestFloat`
-    /// call at/above `hnswThreshold` lazily rebuilds the graph from the current
-    /// float records. FloatBruteForceIndex entries are RETAINED — farthest
-    /// queries and below-threshold nearest queries continue uninterrupted.
+    /// Drops every in-process HNSWIndex entry AND deletes all persisted
+    /// `hnsw_graph` rows. The next `findNearestFloat` call at/above
+    /// `hnswThreshold` falls back to exact scan until DreamingDaemon's THETA
+    /// cadence fires a fresh rebuild. FloatBruteForceIndex entries are RETAINED
+    /// — farthest queries and below-threshold nearest queries continue
+    /// uninterrupted.
     ///
     /// Called by DreamingDaemon on extreme vocabulary drift (ALPHA auto-reindex
     /// path) when the embedding basis changes enough to render the existing
-    /// graph topology incorrect. A lazy rebuild on the next qualifying query
-    /// is cheaper than a synchronous full rebuild on a 30-second cadence.
-    public func clearAllHNSWIndices() async {
+    /// graph topology incorrect.
+    public func clearAllHNSWIndices() async throws {
+        // Delete all persisted hnsw_graph rows so the query path falls back to
+        // exact scan until DreamingDaemon's THETA cadence fires a rebuild. The
+        // embedding basis has shifted; the old graph topology is incorrect and
+        // must not be served or loaded from the table.
+        _ = try await storage.rowStore.delete(table: "hnsw_graph", where: .isTrue)
         for idx in hnswIndices.values {
             await idx.clear()
         }
         hnswIndices.removeAll(keepingCapacity: false)
+        hnswGraphDirty.removeAll(keepingCapacity: false)
         log.info("VectorStore: all HNSW graphs cleared (ALPHA extreme-drift duty)")
     }
 
@@ -670,6 +695,11 @@ public actor VectorStore {
         let records = try await _fetchFloatRecords(modelID: modelID)
         guard !records.isEmpty else {
             hnswIndices.removeValue(forKey: modelID)
+            // Remove any stale persisted rows for an empty partition.
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID))
+            )
             return
         }
         let hnsw = HNSWIndex()
@@ -680,6 +710,11 @@ public actor VectorStore {
         }
         hnswIndices[modelID] = hnsw
         liveFloatCounts[modelID] = UInt32(records.count)
+        // Persist the freshly built graph to hnsw_graph so subsequent process
+        // launches load the topology from disk rather than rebuilding. Track
+        // rebuild count (distinguishes disk-load from rebuild in tests).
+        try await _persistHNSWGraph(for: modelID)
+        hnswBuildCount[modelID, default: 0] += 1
         log.info("VectorStore: HNSW graph rebuilt for modelID=\(modelID, privacy: .public), nodes=\(records.count)")
     }
 
@@ -687,9 +722,9 @@ public actor VectorStore {
     ///
     /// Iterates over `hnswIndices.keys` and calls `rebuildHNSWIndex(for:)` for
     /// each. ModelIDs below the threshold (no entry in `hnswIndices`) are skipped
-    /// — they have no graph to rebuild and will build lazily when they next cross
-    /// the threshold. Called by DreamingDaemon's THETA cycle after a full corpus
-    /// basis retrain.
+    /// — they have no graph to rebuild; the next qualifying `findNearestFloat`
+    /// call loads from the `hnsw_graph` table if rows exist. Called by
+    /// DreamingDaemon's THETA cycle after a full corpus basis retrain.
     public func rebuildAllHNSWIndices() async throws {
         // Snapshot the keys before mutation to avoid dict-during-iteration.
         let modelIDs = Array(hnswIndices.keys)
@@ -705,9 +740,12 @@ public actor VectorStore {
     /// tombstones accumulate over time as items are updated or deleted; BETA
     /// compaction reclaims their memory and restores graph quality. Safe to call
     /// when no graph exists for `modelID` (no-op).
-    public func compactHNSWTombstones(for modelID: String) async {
+    public func compactHNSWTombstones(for modelID: String) async throws {
         guard let idx = hnswIndices[modelID] else { return }
         await idx.compact()
+        // Persist the compacted graph: tombstones have been removed, so the
+        // persisted topology must be updated to match the live-node-only graph.
+        try await _persistHNSWGraph(for: modelID)
         log.info("VectorStore: HNSW compact completed for modelID=\(modelID, privacy: .public)")
     }
 
@@ -715,11 +753,152 @@ public actor VectorStore {
     ///
     /// Iterates over all active HNSW graphs and calls `compact()` on each.
     /// Called by DreamingDaemon's BETA cycle.
-    public func compactAllHNSWTombstones() async {
+    public func compactAllHNSWTombstones() async throws {
         let modelIDs = Array(hnswIndices.keys)
         for modelID in modelIDs {
-            await compactHNSWTombstones(for: modelID)
+            try await compactHNSWTombstones(for: modelID)
         }
+    }
+
+    // MARK: - HNSW graph persistence (private and internal test helpers)
+
+    /// Count persisted rows in the `hnsw_graph` table for one modelID partition.
+    ///
+    /// Internal — exposed for persistence exit-gate tests via `@testable import VectorKit`
+    /// (exit gate A: "SELECT count(*) FROM hnsw_graph > 0"). Not for production use;
+    /// production code reads graphs via `_loadHNSWGraphIfPresent`.
+    internal func hnswGraphRowCount(for modelID: String) async throws -> Int {
+        try await storage.rowStore.count(
+            table: "hnsw_graph",
+            where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID))
+        )
+    }
+
+    /// Persist the in-memory HNSW graph for one modelID partition to the
+    /// `hnsw_graph` SQLite table.
+    ///
+    /// Replaces all existing rows for `modelID` with the current graph topology
+    /// in a single transaction (delete-then-insert). Tombstoned nodes are
+    /// excluded by `HNSWIndex.graphRows()` — the persisted graph is always
+    /// live-node-only. If no graph is loaded for `modelID`, any stale rows are
+    /// deleted.
+    ///
+    /// Called by: `rebuildHNSWIndex(for:)` (THETA), `compactHNSWTombstones(for:)`
+    /// (BETA), and `flush()` for partitions marked dirty by encode-path inserts.
+    private func _persistHNSWGraph(for modelID: String) async throws {
+        guard let hnsw = hnswIndices[modelID] else {
+            // No in-memory graph — delete any stale persisted rows.
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID))
+            )
+            return
+        }
+        let hasGraph = await hnsw.hasGraph
+        guard hasGraph else {
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID))
+            )
+            return
+        }
+        let rows = await hnsw.graphRows()
+
+        // Replace all rows for this modelID atomically: delete then insert.
+        // A single transaction keeps the table consistent across the two
+        // operations (no window where reads would see a partial graph).
+        try await storage.rowStore.beginTransaction()
+        do {
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID))
+            )
+            for row in rows {
+                let values: [String: TypedValue] = [
+                    "model_id":  .text(modelID),
+                    "node_idx":  .int(Int64(row.nodeIdx)),
+                    "node_id":   .text(row.nodeID),
+                    "layer":     .int(Int64(row.layer)),
+                    "neighbours":.blob(row.neighboursBlob)
+                ]
+                _ = try await storage.rowStore.insert(table: "hnsw_graph", values: values)
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+        log.info("VectorStore: HNSW graph persisted for modelID=\(modelID, privacy: .public), rows=\(rows.count)")
+    }
+
+    /// Load the HNSW graph for one modelID partition from the `hnsw_graph`
+    /// table, if rows exist.
+    ///
+    /// Queries `hnsw_graph` for all rows matching `modelID`. If none exist,
+    /// returns without mutating `hnswIndices` (caller falls back to exact scan).
+    /// If rows exist, fetches the corresponding float vectors from `vectors`,
+    /// reconstructs the `HNSWIndex` from the persisted topology + float bytes,
+    /// and stores it in `hnswIndices[modelID]`.
+    ///
+    /// This is the only graph-load path on the query side. The query path NEVER
+    /// triggers an inline rebuild — if no rows exist, the fallback is exact scan
+    /// until DreamingDaemon's THETA cadence fires a rebuild.
+    private func _loadHNSWGraphIfPresent(for modelID: String) async throws {
+        // Query all hnsw_graph rows for this modelID.
+        let dbRows = try await storage.rowStore.query(
+            table: "hnsw_graph",
+            where: .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        guard !dbRows.isEmpty else { return }
+
+        // Decode rows to HNSWIndex.GraphRow values and build itemID → nodeIdx.
+        var graphRows: [HNSWIndex.GraphRow] = []
+        var itemIDToNodeIdx: [String: Int32] = [:]
+        for dbRow in dbRows {
+            guard case let .int(nodeIdx)            = dbRow["node_idx"]   ?? .null,
+                  case let .text(nodeID)            = dbRow["node_id"]    ?? .null,
+                  case let .int(layer)              = dbRow["layer"]      ?? .null,
+                  case let .blob(neighboursBlob)    = dbRow["neighbours"] ?? .null
+            else { continue }
+            graphRows.append(HNSWIndex.GraphRow(
+                nodeIdx:        Int32(nodeIdx),
+                nodeID:         nodeID,
+                layer:          Int(layer),
+                neighboursBlob: neighboursBlob
+            ))
+            // Only the first row for each node establishes the idx mapping;
+            // subsequent layers for the same node reuse the same nodeIdx.
+            if itemIDToNodeIdx[nodeID] == nil {
+                itemIDToNodeIdx[nodeID] = Int32(nodeIdx)
+            }
+        }
+        guard !graphRows.isEmpty else { return }
+
+        // Fetch float records and build nodeBytes keyed by nodeIdx.
+        // Nodes whose float vector was deleted between persist and load are
+        // silently skipped by loadFromGraphRows (topology remains valid until
+        // the next THETA rebuild corrects it).
+        let floatRecords = try await _fetchFloatRecords(modelID: modelID)
+        var nodeBytes: [Int32: (itemID: String, bytes: [UInt8])] = [:]
+        nodeBytes.reserveCapacity(floatRecords.count)
+        for rec in floatRecords {
+            if let nodeIdx = itemIDToNodeIdx[rec.key.itemID] {
+                nodeBytes[nodeIdx] = (itemID: rec.key.itemID, bytes: rec.payload.bytes)
+            }
+        }
+
+        // Reconstruct the HNSW graph from persisted topology + float bytes.
+        // modelID is passed so loaded nodes carry the correct partition tag;
+        // HNSWIndex.search filters by node.modelID == modelID and returns empty
+        // for nodes with the default empty string modelID.
+        let hnsw = HNSWIndex()
+        await hnsw.loadFromGraphRows(graphRows, nodeBytes: nodeBytes, modelID: modelID)
+        guard await hnsw.hasGraph else { return }
+        hnswIndices[modelID] = hnsw
+        log.info("VectorStore: HNSW graph loaded from table for modelID=\(modelID, privacy: .public), rows=\(graphRows.count)")
     }
 
     // MARK: - Write
@@ -920,16 +1099,16 @@ public actor VectorStore {
                 // resolved when the index is first built (records.count) and
                 // HNSW activation is idempotent.
                 liveFloatCounts[modelID, default: 0] += 1
-                // Mirror into the HNSW graph if the graph is already built for
-                // this modelID. HNSWIndex.insert handles upsert (tombstones any
-                // prior node for this itemID, inserts the new vector). If the
-                // HNSW index is not yet built, this insert is a no-op — the
-                // graph will be built lazily on the first findNearestFloat call
-                // that crosses the threshold, at which point all existing float
-                // records are fetched from the table and inserted at once.
+                // Mirror into the HNSW graph if one is loaded for this modelID.
+                // HNSWIndex.insert handles upsert (tombstones any prior node for
+                // this itemID, inserts the new vector). If no graph is loaded,
+                // this is a no-op — the graph will be loaded from hnsw_graph rows
+                // on the first qualifying findNearestFloat call. Mark the
+                // partition dirty so flush() persists the updated topology.
                 if let hnswIdx = hnswIndices[modelID] {
                     if let floats = try? payload.asFloats() {
                         await hnswIdx.insert(itemID: itemID, modelID: modelID, vector: floats)
+                        hnswGraphDirty.insert(modelID)
                     }
                 }
             }
@@ -1345,17 +1524,37 @@ public actor VectorStore {
         return out
     }
 
-    /// Flush any pending write-behind sidecar mutation to disk.
+    /// Flush any pending write-behind mutations to disk.
     ///
-    /// The single `addPayload` binary path is write-behind: it mutates the
-    /// in-memory resident array and marks the sidecar dirty without writing
-    /// (TASK #24). Callers persist the sidecar by calling `flush()` at a
-    /// quiesce point (e.g. after an import loop, before process exit, on a
-    /// periodic checkpoint). No-op when there is no sidecar or nothing is
-    /// dirty. Crash safety does not depend on flush: the `vectors` table is
-    /// the durable source and the sidecar is rebuilt on the next open if it
-    /// is stale.
+    /// Two flush duties:
+    ///
+    /// 1. **Sidecar flush** — the `addPayload` binary path is write-behind: it
+    ///    mutates the in-memory resident array and marks the sidecar dirty
+    ///    without writing. The sidecar is persisted here (no-op when nothing is
+    ///    dirty or when there is no sidecar). Crash safety does not depend on
+    ///    flush: the `vectors` table is the durable source and the sidecar is
+    ///    rebuilt on the next open if it is stale.
+    ///
+    /// 2. **HNSW graph flush** — encode-path inserts (`addPayload` → HNSW
+    ///    mirror) mark affected modelID partitions in `hnswGraphDirty`. This
+    ///    call persists any dirty partition to the `hnsw_graph` table so the
+    ///    updated topology survives process restart. No-op when no partition is
+    ///    marked dirty.
+    ///
+    /// Call at a quiesce point (after an import loop, before process exit, or
+    /// on a periodic checkpoint).
     public func flush() async throws {
+        // Persist HNSW partitions dirtied by encode-path inserts.
+        if !hnswGraphDirty.isEmpty {
+            // Snapshot and clear before the async writes so concurrent inserts
+            // that arrive during the flush round-trip are captured in the NEXT
+            // flush call, not silently dropped.
+            let dirtyPartitions = hnswGraphDirty
+            hnswGraphDirty.removeAll(keepingCapacity: false)
+            for modelID in dirtyPartitions {
+                try await _persistHNSWGraph(for: modelID)
+            }
+        }
         try await arrayStore?.flush()
     }
 
@@ -1639,25 +1838,22 @@ public actor VectorStore {
         // HNSW graph construction + pointer-chasing overhead exceeds that.
         let liveCount = liveFloatCounts[modelID] ?? 0
         if liveCount >= hnswThreshold {
-            // Build the HNSW graph lazily on the first qualifying call.
+            // Serve from the in-memory graph if already loaded or built.
+            // If not, attempt to load from the persisted hnsw_graph table.
+            // The query path NEVER triggers an inline graph build — builds are
+            // scheduled through DreamingDaemon's THETA cadence. If no rows
+            // exist in the table (first run, or after ALPHA clear),
+            // _loadHNSWGraphIfPresent returns without mutating hnswIndices and
+            // the exact-scan fallback below handles the query.
             if hnswIndices[modelID] == nil {
-                let hnsw = HNSWIndex()
-                let records = try await _fetchFloatRecords(modelID: modelID)
-                for rec in records {
-                    // asFloats() is a safe decode of the float32 payload bytes;
-                    // failures indicate a corrupt row and are skipped (non-fatal).
-                    if let floats = try? rec.payload.asFloats() {
-                        await hnsw.insert(itemID: rec.key.itemID, modelID: modelID, vector: floats)
-                    }
-                }
-                hnswIndices[modelID] = hnsw
-                log.info("VectorStore: HNSW index built for modelID=\(modelID, privacy: .public), liveCount=\(liveCount)")
+                try await _loadHNSWGraphIfPresent(for: modelID)
             }
             if let hnswIndex = hnswIndices[modelID] {
                 // HNSWIndex.search is synchronous (actor-isolated, no async work);
                 // `await` crosses the actor boundary.
                 return try await hnswIndex.search(probe: probe, modelID: modelID, k: limit)
             }
+            // No persisted graph — fall through to exact scan.
         }
 
         // Below threshold (or HNSW build failed): exact scan via FloatBruteForceIndex.

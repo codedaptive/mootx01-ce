@@ -512,6 +512,196 @@ public actor HNSWIndex {
         hnswLog.info("HNSWIndex.clear: graph cleared")
     }
 
+    // MARK: - Persistence API
+
+    /// True when the graph contains at least one node (entry point is set).
+    ///
+    /// Used by VectorStore to decide whether `hnsw_graph` rows should be written
+    /// or loaded. An empty graph has no rows to persist.
+    public var hasGraph: Bool { entryPoint != nil }
+
+    /// One serialisable row for the `hnsw_graph` SQLite table.
+    ///
+    /// One `GraphRow` per (node, layer) combination. `nodeIdx` is the dense
+    /// array index; `nodeID` is the item_id. `neighboursBlob` is a packed
+    /// little-endian Int32 array of neighbour node_idx values — matching the
+    /// column definition in VectorStore.schemaDeclaration v5.
+    public struct GraphRow: Sendable {
+        public let nodeIdx:        Int32
+        public let nodeID:         String
+        public let layer:          Int
+        public let neighboursBlob: Data   // packed LE Int32 array
+
+        /// Decode `neighboursBlob` back to an [Int32] array.
+        public func decodeNeighbours() -> [Int32] {
+            guard !neighboursBlob.isEmpty else { return [] }
+            return neighboursBlob.withUnsafeBytes { ptr in
+                let count = ptr.count / 4
+                var result = [Int32](repeating: 0, count: count)
+                for i in 0..<count {
+                    var v: Int32 = 0
+                    withUnsafeMutableBytes(of: &v) { dst in
+                        dst.copyMemory(from:
+                            UnsafeRawBufferPointer(rebasing: ptr[(i*4)..<(i*4+4)]))
+                    }
+                    result[i] = v
+                }
+                return result
+            }
+        }
+    }
+
+    /// Serialise the current graph to rows for the `hnsw_graph` table.
+    ///
+    /// Returns one `GraphRow` per (node, layer) combination for every
+    /// non-tombstoned node in the graph. Tombstoned nodes are excluded so
+    /// the persisted graph contains only live topology; the next BETA
+    /// compaction rebuilds a clean graph without tombstones.
+    ///
+    /// Neighbours are packed as little-endian Int32 BLOBs matching the
+    /// `hnsw_graph.neighbours` column format. Call after `insert`, `compact`,
+    /// or `rebuildHNSWIndex` to persist the current graph state. VectorStore
+    /// owns the SQLite write; this method only produces the row payloads.
+    public func graphRows() -> [GraphRow] {
+        var rows: [GraphRow] = []
+        for (nodeIdx, node) in nodes.enumerated() {
+            // Skip tombstoned nodes — they are invisible to search and
+            // should not appear in the persisted graph. The next BETA
+            // compaction rebuilds a clean graph without tombstones.
+            guard !node.tombstoned else { continue }
+            for (layer, neighbours) in node.neighbours.enumerated() {
+                var blob = Data(capacity: neighbours.count * 4)
+                for n in neighbours {
+                    // Pack as 4 LE bytes (little-endian Int32).
+                    blob.append(UInt8( n        & 0xFF))
+                    blob.append(UInt8((n >>  8) & 0xFF))
+                    blob.append(UInt8((n >> 16) & 0xFF))
+                    blob.append(UInt8((n >> 24) & 0xFF))
+                }
+                rows.append(GraphRow(
+                    nodeIdx:        Int32(nodeIdx),
+                    nodeID:         node.itemID,
+                    layer:          layer,
+                    neighboursBlob: blob
+                ))
+            }
+        }
+        return rows
+    }
+
+    /// Restore the graph topology from persisted rows plus float vector bytes.
+    ///
+    /// Reconstructs `nodes`, `nodeIndex`, `entryPoint`, and `maxLayer` from
+    /// `rows` (the `hnsw_graph` table dump) and `nodeBytes` (float32 payloads
+    /// from the `vectors` table, keyed by nodeIdx). The RNG state is reset
+    /// to the default seed (42); the loaded graph is already built — no
+    /// level-assignment RNG is needed until the next incremental insert.
+    ///
+    /// Loading is O(n × L) where n = node count, L = average layer count —
+    /// far cheaper than the O(n × L × efConstruction) insert-rebuild path.
+    ///
+    /// - Parameters:
+    ///   - rows: All `GraphRow` values for one modelID partition, in any order.
+    ///     Rows for the same nodeIdx must share the same nodeID.
+    ///   - nodeBytes: Mapping from nodeIdx (Int32) to (itemID, vectorBytes).
+    ///     Nodes missing from this map are silently skipped — they have no
+    ///     float vector and cannot participate in search (the THETA rebuild
+    ///     will correct any stale topology on the next cadence).
+    ///   - modelID: The modelID partition this graph serves. Stored on each
+    ///     reconstructed node so `search(probe:modelID:k:)` can filter by
+    ///     partition membership — search performs `nodes[i].modelID == modelID`
+    ///     and silently returns [] if the modelID is empty (the pre-load default).
+    public func loadFromGraphRows(
+        _ rows: [GraphRow],
+        nodeBytes: [Int32: (itemID: String, bytes: [UInt8])],
+        modelID: String
+    ) {
+        guard !rows.isEmpty else { return }
+
+        // Sort rows by nodeIdx then layer so we can rebuild in order.
+        let sorted = rows.sorted {
+            $0.nodeIdx != $1.nodeIdx ? $0.nodeIdx < $1.nodeIdx : $0.layer < $1.layer
+        }
+
+        // Build a compact index: old nodeIdx → new array position.
+        // nodeIdx values may be non-contiguous if tombstones were excluded
+        // during the persist pass; map them to a fresh compact index. The
+        // graph topology depends on relative indices; absolute values are
+        // internal to each instance.
+        var oldToNew: [Int32: Int] = [:]
+        var newToOld: [Int] = []  // new position → original nodeIdx
+        for row in sorted {
+            if oldToNew[row.nodeIdx] == nil {
+                oldToNew[row.nodeIdx] = newToOld.count
+                newToOld.append(Int(row.nodeIdx))
+            }
+        }
+
+        let totalNodes = newToOld.count
+        var maxLayerSeen = 0
+        var layerNeighbours: [[Int: [Int32]]] = Array(repeating: [:], count: totalNodes)
+
+        for row in sorted {
+            guard let newIdx = oldToNew[row.nodeIdx] else { continue }
+            if row.layer > maxLayerSeen { maxLayerSeen = row.layer }
+            let rawNeighbours = row.decodeNeighbours()
+            // Remap neighbour indices from the old dense space to the new space.
+            let remapped = rawNeighbours.compactMap { oldN -> Int32? in
+                guard let newN = oldToNew[oldN] else { return nil }
+                return Int32(newN)
+            }
+            layerNeighbours[newIdx][row.layer] = remapped
+        }
+
+        // Reconstruct the node array in new-index order.
+        nodes.removeAll(keepingCapacity: false)
+        nodeIndex.removeAll(keepingCapacity: false)
+        nodes.reserveCapacity(totalNodes)
+
+        for newIdx in 0..<totalNodes {
+            let originalIdx = Int32(newToOld[newIdx])
+            guard let (itemID, bytes) = nodeBytes[originalIdx] else {
+                // No vector bytes for this node — the float vector was deleted
+                // between the persist and load calls. Skip to keep the array
+                // compact; topology may be slightly stale but remains valid
+                // (the THETA rebuild will correct it on the next cadence).
+                continue
+            }
+            let layerMap = layerNeighbours[newIdx]
+            let maxLayer = layerMap.keys.max() ?? 0
+            var nodeNeighbours = [[Int32]](repeating: [], count: maxLayer + 1)
+            for (l, nbrs) in layerMap {
+                nodeNeighbours[l] = nbrs
+            }
+            nodes.append(Node(
+                itemID: itemID,
+                modelID: modelID,  // partition-scoped; needed by search's per-node filter
+                vectorBytes: bytes,
+                neighbours: nodeNeighbours
+            ))
+            nodeIndex[itemID] = Int32(nodes.count - 1)
+        }
+
+        // Find entry point: the node with the highest layer.
+        if !nodes.isEmpty {
+            var best: (idx: Int32, layer: Int) = (0, 0)
+            for (i, node) in nodes.enumerated() {
+                let topLayer = node.neighbours.count - 1
+                if topLayer > best.layer {
+                    best = (Int32(i), topLayer)
+                }
+            }
+            entryPoint = best.idx
+            maxLayer = best.layer
+        }
+
+        vectorStride = nodes.first?.vectorBytes.count
+        // RNG state reset: the loaded graph is already built, so no level-
+        // assignment calls are needed until the next incremental insert.
+        // The default seed (42) is used for any subsequent insertions.
+        rngState = 42
+    }
+
     // MARK: - Private helpers
 
     /// Decode stored bytes of node `idx` to [Float] for distance computation.

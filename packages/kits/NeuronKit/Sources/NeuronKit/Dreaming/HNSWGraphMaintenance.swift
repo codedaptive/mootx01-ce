@@ -117,7 +117,7 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
 
     /// Delegates to `VectorStore.clearAllHNSWIndices()`.
     public func clearFloatIndex(now: Date) async throws {
-        await vectorStore.clearAllHNSWIndices()
+        try await vectorStore.clearAllHNSWIndices()
     }
 
     /// Delegates to `VectorStore.rebuildAllHNSWIndices()`.
@@ -127,6 +127,6 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
 
     /// Delegates to `VectorStore.compactAllHNSWTombstones()`.
     public func compactFloatIndexTombstones(now: Date) async throws {
-        await vectorStore.compactAllHNSWTombstones()
+        try await vectorStore.compactAllHNSWTombstones()
     }
 }

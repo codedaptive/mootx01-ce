@@ -396,6 +396,16 @@ public enum AriaResident {
             }
         }
 
+        // Read the estate's VectorStore before constructing the governor so the
+        // HNSW maintenance seam can be wired. The store is always registered in
+        // resident mode (set up by AriaMCPMain before this call); reading it here
+        // before governor construction avoids a two-phase init that would leave
+        // the governor with nil hnswMaintenance on the first tick.
+        let vectorStore = await kit.registeredVectorStore(for: handle)
+        let hnswMaint: (any HNSWGraphMaintenance)? = vectorStore.map {
+            EstateHNSWGraphMaintenance(vectorStore: $0)
+        }
+
         let governor = AutonomicGovernor(
             kit: kit,
             handle: handle,
@@ -404,7 +414,8 @@ public enum AriaResident {
             topologyFingerprintLoader: topologyFingerprintLoader,
             topologySnapshotLoader: topologySnapshotLoader,
             topologyGate: topologyGate,
-            graphAnalyticsHandler: graphAnalyticsHandler
+            graphAnalyticsHandler: graphAnalyticsHandler,
+            hnswMaintenance: hnswMaint
         )
 
         // Standing-signal bootstrap (the dormant-loop activation). The governor
@@ -416,13 +427,13 @@ public enum AriaResident {
         // scheduler and drives real emissions (vector-similarity → associate,
         // decay-sweep, etc.).
         //
-        // VectorStore: read back the store `AriaMCPMain` already registered for
-        // this estate. Resident HTTP mode always wires semantic recall, so the
-        // store is present here; the registration API needs it to build the
-        // `VectorSimilaritySignal`. If (defensively) no store is registered, we
-        // skip registration and the governor keeps benign-skipping `signalTick`
-        // exactly as before activation — no fallback store is fabricated (that
-        // would register a vector signal scanning an empty throwaway estate).
+        // VectorStore: already read above for HNSW maintenance wiring. Resident
+        // HTTP mode always wires semantic recall, so the store is present here;
+        // the registration API needs it to build the `VectorSimilaritySignal`.
+        // If (defensively) no store is registered, we skip registration and the
+        // governor keeps benign-skipping `signalTick` exactly as before
+        // activation — no fallback store is fabricated (that would register a
+        // vector signal scanning an empty throwaway estate).
         //
         // dreamingCycle: left as the DEFAULT no-op. The heavy dreaming cycle is
         // already driven by THIS governor's own `dreaming.pump` on its 30 s
@@ -439,7 +450,7 @@ public enum AriaResident {
         // cadences so a drawer filed between fires is never missed. The hunt
         // persists proposed contradicts tunnels itself; the closure returns
         // counts only (single-write invariant, same as dreamingCycle).
-        if let vectorStore = await kit.registeredVectorStore(for: handle) {
+        if let vectorStore = vectorStore {
             do {
                 _ = try await kit.registerDefaultStandingSignals(
                     in: handle,
