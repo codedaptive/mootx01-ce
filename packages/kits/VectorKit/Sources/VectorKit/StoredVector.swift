@@ -13,7 +13,9 @@ import Foundation
 ///
 /// Multi-vector: `vectorIndex` (0 for single-vector items; 0..N-1 for
 /// ColBERT token vectors). The UNIQUE constraint on the table is now
-/// (item_id, vector_index, model_id).
+/// (item_id, vector_index, model_id, generation) — generation is the
+/// shadow-swap generation tag; serving rows carry the model's
+/// serving_generation value.
 ///
 /// Per spec I-4, every stored vector is tagged with the model ID and
 /// version that produced it.
@@ -53,13 +55,21 @@ public struct StoredVector: Sendable, Equatable {
     /// precision is lost in the round trip.
     public let filedAt: Date
 
+    /// Shadow-swap generation tag. Serving rows carry the model's current
+    /// serving_generation value (0 for estates that have never run a swap).
+    /// Shadow rows carry shadow_generation > serving_generation while a
+    /// build is in flight. Callers outside VectorKit read this to confirm
+    /// which generation answered a query.
+    public let generation: Int64
+
     public init(id: String,
                 itemID: String,
                 vectorIndex: UInt32 = 0,
                 modelID: String,
                 modelVersion: String,
                 engram: Engram,
-                filedAt: Date) {
+                filedAt: Date,
+                generation: Int64 = 0) {
         self.id = id
         self.itemID = itemID
         self.vectorIndex = vectorIndex
@@ -67,5 +77,6 @@ public struct StoredVector: Sendable, Equatable {
         self.modelVersion = modelVersion
         self.engram = engram
         self.filedAt = filedAt
+        self.generation = generation
     }
 }

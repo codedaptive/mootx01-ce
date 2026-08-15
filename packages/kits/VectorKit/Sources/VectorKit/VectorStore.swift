@@ -346,6 +346,34 @@ public actor VectorStore {
     /// (not persisted; rebuilt from the table count at first-access time).
     private var liveFloatCounts: [String: UInt32] = [:]
 
+    // MARK: - Shadow-swap generation state
+
+    /// Per-model serving generation cached from the vector_generations table.
+    /// Loaded on demand; evicted on publishShadowGeneration so the next read
+    /// re-fetches. Absent key ⇒ serving generation 0 (no swap ever run).
+    private var servingGenerations: [String: Int64] = [:]
+
+    /// Per-model active shadow generation. Set by beginShadowGeneration;
+    /// cleared by publishShadowGeneration. Absent key ⇒ no shadow active.
+    private var shadowGenerations: [String: Int64] = [:]
+
+    /// Per-model shadow state text ('building' or 'pending-reclaim').
+    /// Mirrors the vector_generations.shadow_state column; kept in sync on
+    /// every begin/publish/reclaim call.
+    private var shadowStates: [String: String] = [:]
+
+    /// Per-model generation of the last graph instance that answered a float
+    /// nearest query. Written at query time from graph.generation; read via
+    /// lastServedGraphGeneration(for:). Used by Gate 5 to verify the swap
+    /// promoted the graph to the new serving generation before the query.
+    private var lastServedGraphGen: [String: Int64] = [:]
+
+    /// Running total of shadow-vector payload bytes written during the current
+    /// (or most recent completed) beginShadowGeneration window per model.
+    /// Reset on beginShadowGeneration; finalised on publishShadowGeneration.
+    /// Exposed via peakShadowStorageBytes for test and metrics use.
+    private var shadowPayloadBytes: [String: Int64] = [:]
+
     /// Live float vector count per modelID above which HNSWIndex activates.
     ///
     /// Default `hnswDefaultThreshold` (5 000) — see HNSWIndex.swift §Crossover
@@ -389,7 +417,7 @@ public actor VectorStore {
         get async { await arrayStore?.sidecarWriteCount ?? 0 }
     }
 
-    // MARK: - Schema declaration (version 5)
+    // MARK: - Schema declaration (version 6)
 
     /// Schema declaration consumed by Storage.open(schema:).
     ///
@@ -416,7 +444,15 @@ public actor VectorStore {
     /// Table additions v4 → v5:
     ///   - Added: `hnsw_graph` table (see file header for column list).
     ///     Schema declaration for the float-lane (Lane D) HNSW graph.
-    ///     Rows are written by THETA rebuild, BETA compaction, and incremental
+    ///
+    /// Schema v5 → v6 (shadow-swap generation support):
+    ///   - `vectors` gains `generation INTEGER NOT NULL DEFAULT 0`; UNIQUE
+    ///     constraint changes to (item_id, vector_index, model_id, generation).
+    ///   - New table `vector_generations` (model_id PK, serving_generation,
+    ///     shadow_generation nullable, shadow_state nullable TEXT).
+    ///   - `hnsw_graph` gains `generation INTEGER NOT NULL DEFAULT 0`.
+    ///   - New index `idx_vectors_model_generation`.
+    ///   Rows are written by THETA rebuild, BETA compaction, and incremental
     ///     encode-path inserts (flushed in `flush()`). NEVER included in
     ///     ConvergenceKit sync manifests; the graph is a rebuildable derived
     ///     accelerator — device-local only. Primary key is
@@ -428,8 +464,14 @@ public actor VectorStore {
     ///     index-only covering scan — payload blobs never read from disk.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "VectorKit",
-        version: 5,
+        version: 6,
         tables: [
+            // v6: `generation INTEGER NOT NULL DEFAULT 0` column added.
+            // UNIQUE constraint now includes generation so serving rows
+            // (generation = serving_gen) and shadow rows (generation =
+            // shadow_gen) for the same (item_id, vector_index, model_id)
+            // can coexist during a shadow build. SQLite migration below
+            // recreates the table to change the constraint.
             TableDeclaration(
                 name: "vectors",
                 columns: [
@@ -448,10 +490,16 @@ public actor VectorStore {
                     // metadata (quantisation provenance, embedding-run tags)
                     // serializes here migration-free. 1.0 writes NULL and never
                     // reads it.
-                    .json("ext", nullable: true)
+                    .json("ext", nullable: true),
+                    // v6: shadow-swap generation. Serving rows carry the model's
+                    // serving_generation (0 for estates with no prior swap).
+                    // Shadow rows carry shadow_generation while a build is in
+                    // flight. DEFAULT 0 ensures backward-compat reads from v5
+                    // estates return serving-generation rows automatically.
+                    ColumnDeclaration(name: "generation", type: .int, nullable: false, defaultValue: .int(0))
                 ],
                 primaryKey: ["id"],
-                uniqueConstraints: [["item_id", "vector_index", "model_id"]]
+                uniqueConstraints: [["item_id", "vector_index", "model_id", "generation"]]
             ),
             // v5: hnsw_graph — float-lane HNSW graph store. Device-local;
             // never in ConvergenceKit sync manifests (rebuildable derived
@@ -460,6 +508,8 @@ public actor VectorStore {
             // neighbour list. `neighbours` is a packed little-endian Int32
             // array of node_idx values. Written by THETA rebuild, BETA
             // compaction, and incremental encode-path inserts.
+            // v6: `generation` column added so VectorStore can load only the
+            // serving-generation graph and reclaim retired generations.
             TableDeclaration(
                 name: "hnsw_graph",
                 columns: [
@@ -467,9 +517,29 @@ public actor VectorStore {
                     .int("node_idx", nullable: false),
                     .text("node_id", nullable: false),
                     .int("layer", nullable: false),
-                    .blob("neighbours", nullable: false)
+                    .blob("neighbours", nullable: false),
+                    ColumnDeclaration(name: "generation", type: .int, nullable: false, defaultValue: .int(0))
                 ],
                 primaryKey: ["model_id", "node_idx", "layer"]
+            ),
+            // v6: vector_generations registry — one row per model_id that has
+            // ever participated in a shadow swap. Absent row ⇒ serving_generation
+            // = 0, no shadow active. `shadow_state` values:
+            //   'building'        — shadow in flight, incomplete, reclaimable.
+            //   'pending-reclaim' — flip committed, superseded rows not yet deleted.
+            // NO Bool columns per schema invariant — state is the TEXT enum plus
+            // nullable shadow_generation. Populated at beginShadowGeneration;
+            // updated at publishShadowGeneration; shadow_state cleared by
+            // reclaimSupersededGenerations.
+            TableDeclaration(
+                name: "vector_generations",
+                columns: [
+                    .text("model_id", nullable: false),
+                    ColumnDeclaration(name: "serving_generation", type: .int, nullable: false, defaultValue: .int(0)),
+                    .int("shadow_generation", nullable: true),
+                    .text("shadow_state", nullable: true)
+                ],
+                primaryKey: ["model_id"]
             )
         ],
         indices: [
@@ -495,6 +565,15 @@ public actor VectorStore {
                 name: "idx_vectors_filed_at_item",
                 table: "vectors",
                 columns: ["filed_at", "item_id"],
+                unique: false
+            ),
+            // v6: serves serving-generation filter (WHERE model_id=? AND
+            // generation=?) and batched reclamation scans. Migrated onto
+            // existing estates by Migration v5→v6.
+            IndexDeclaration(
+                name: "idx_vectors_model_generation",
+                table: "vectors",
+                columns: ["model_id", "generation"],
                 unique: false
             )
         ],
@@ -537,6 +616,92 @@ public actor VectorStore {
                             .blob("neighbours", nullable: false)
                         ],
                         primaryKey: ["model_id", "node_idx", "layer"]
+                    ))
+                ]
+            ),
+            // v5 → v6: shadow-swap generation support.
+            //
+            // Three changes on existing estates:
+            //   (a) vectors table: add `generation` column AND change the UNIQUE
+            //       constraint from (item_id, vector_index, model_id) to
+            //       (item_id, vector_index, model_id, generation). SQLite cannot
+            //       ALTER TABLE to change a UNIQUE constraint, so the table is
+            //       recreated via four .custom(sqlite:) ops. InMemory ignores
+            //       .custom ops (they are no-ops in InMemoryStorage); fresh
+            //       InMemory databases get the v6 table declaration directly.
+            //   (b) hnsw_graph: addColumn `generation` (idempotent on both SQLite
+            //       and InMemory because the column already exists in the v6 table
+            //       declaration for fresh databases).
+            //   (c) vector_generations registry: new table (idempotent via createTable
+            //       which emits CREATE TABLE IF NOT EXISTS on InMemory + SQLite).
+            //
+            // All four .custom ops run inside the migration's BEGIN IMMEDIATE
+            // transaction on SQLite. They are also correct when replayed on a
+            // fresh database: vectors_v6 is created, data copied from the
+            // just-created (empty) vectors table, vectors dropped, and vectors_v6
+            // renamed — net result is the same v6-schema table. Indices dropped
+            // with the old table are re-added at the end of this migration.
+            Migration(
+                fromVersion: 5,
+                toVersion: 6,
+                operations: [
+                    // (a) Recreate vectors with the new UNIQUE constraint.
+                    .custom(
+                        sqlite: "CREATE TABLE \"vectors_v6\" (\"id\" TEXT PRIMARY KEY NOT NULL, \"item_id\" TEXT NOT NULL, \"vector_index\" INTEGER NOT NULL DEFAULT 0, \"model_id\" TEXT NOT NULL, \"model_version\" TEXT NOT NULL, \"kind\" INTEGER NOT NULL DEFAULT 0, \"dim\" INTEGER NOT NULL DEFAULT 256, \"payload\" BLOB NOT NULL, \"scale\" REAL, \"filed_at\" TEXT NOT NULL, \"ext\" TEXT, \"generation\" INTEGER NOT NULL DEFAULT 0, UNIQUE(\"item_id\",\"vector_index\",\"model_id\",\"generation\"))",
+                        postgresql: nil
+                    ),
+                    .custom(
+                        sqlite: "INSERT INTO \"vectors_v6\" SELECT \"id\",\"item_id\",\"vector_index\",\"model_id\",\"model_version\",\"kind\",\"dim\",\"payload\",\"scale\",\"filed_at\",\"ext\",0 FROM \"vectors\"",
+                        postgresql: nil
+                    ),
+                    .custom(
+                        sqlite: "DROP TABLE \"vectors\"",
+                        postgresql: nil
+                    ),
+                    .custom(
+                        sqlite: "ALTER TABLE \"vectors_v6\" RENAME TO \"vectors\"",
+                        postgresql: nil
+                    ),
+                    // Re-create all vectors indices dropped with the old table.
+                    .addIndex(IndexDeclaration(
+                        name: "idx_vectors_item",
+                        table: "vectors",
+                        columns: ["item_id"],
+                        unique: false
+                    )),
+                    .addIndex(IndexDeclaration(
+                        name: "idx_vectors_model_item",
+                        table: "vectors",
+                        columns: ["model_id", "item_id"],
+                        unique: false
+                    )),
+                    .addIndex(IndexDeclaration(
+                        name: "idx_vectors_filed_at_item",
+                        table: "vectors",
+                        columns: ["filed_at", "item_id"],
+                        unique: false
+                    )),
+                    .addIndex(IndexDeclaration(
+                        name: "idx_vectors_model_generation",
+                        table: "vectors",
+                        columns: ["model_id", "generation"],
+                        unique: false
+                    )),
+                    // (b) Add generation column to hnsw_graph.
+                    .addColumn(
+                        table: "hnsw_graph",
+                        column: ColumnDeclaration(name: "generation", type: .int, nullable: false, defaultValue: .int(0))
+                    ),
+                    // (c) Create vector_generations registry.
+                    .createTable(TableDeclaration(
+                        name: "vector_generations",
+                        columns: [
+                            .text("model_id", nullable: false),
+                            ColumnDeclaration(name: "serving_generation", type: .int, nullable: false, defaultValue: .int(0)),
+                            .int("shadow_generation", nullable: true),
+                            .text("shadow_state", nullable: true)
+                        ],
+                        primaryKey: ["model_id"]
                     ))
                 ]
             )
@@ -710,12 +875,21 @@ public actor VectorStore {
         }
         hnswIndices[modelID] = hnsw
         liveFloatCounts[modelID] = UInt32(records.count)
+        // D6 fix: stamp the freshly built graph with the model's CURRENT serving
+        // generation BEFORE persisting. Without this, a THETA rebuild after a swap
+        // (serving gen N>0) writes gen-0 rows that _loadHNSWGraphIfPresent rejects
+        // forever (generation mismatch → graph permanently absent).
+        // publishShadowGeneration runs rebuildHNSWIndex AFTER the registry flip, so
+        // serving_generation is already the new value here; the redundant setGeneration
+        // + second _persistHNSWGraph in publishShadowGeneration were removed.
+        let currentServingGen = try await _servingGeneration(for: modelID)
+        await hnsw.setGeneration(currentServingGen)
         // Persist the freshly built graph to hnsw_graph so subsequent process
         // launches load the topology from disk rather than rebuilding. Track
         // rebuild count (distinguishes disk-load from rebuild in tests).
         try await _persistHNSWGraph(for: modelID)
         hnswBuildCount[modelID, default: 0] += 1
-        log.info("VectorStore: HNSW graph rebuilt for modelID=\(modelID, privacy: .public), nodes=\(records.count)")
+        log.info("VectorStore: HNSW graph rebuilt for modelID=\(modelID, privacy: .public), nodes=\(records.count), generation=\(currentServingGen)")
     }
 
     /// Rebuild HNSW graphs for all modelIDs that currently have an active graph (THETA duty).
@@ -826,11 +1000,14 @@ public actor VectorStore {
             )
             for row in rows {
                 let values: [String: TypedValue] = [
-                    "model_id":  .text(modelID),
-                    "node_idx":  .int(Int64(row.nodeIdx)),
-                    "node_id":   .text(row.nodeID),
-                    "layer":     .int(Int64(row.layer)),
-                    "neighbours":.blob(row.neighboursBlob)
+                    "model_id":   .text(modelID),
+                    "node_idx":   .int(Int64(row.nodeIdx)),
+                    "node_id":    .text(row.nodeID),
+                    "layer":      .int(Int64(row.layer)),
+                    "neighbours": .blob(row.neighboursBlob),
+                    // v6: tag with the graph's generation so load can filter to
+                    // the serving generation and reclaim can delete retired rows.
+                    "generation": .int(row.generation)
                 ]
                 _ = try await storage.rowStore.insert(table: "hnsw_graph", values: values)
             }
@@ -865,6 +1042,11 @@ public actor VectorStore {
         )
         guard !dbRows.isEmpty else { return }
 
+        // Fetch the current serving generation so we only load matching rows.
+        // A mismatch (stale graph from a prior generation) is treated as absent
+        // per §4 of the design contract — the query path falls back to exact scan.
+        let servingGen = try await _servingGeneration(for: modelID)
+
         // Decode rows to HNSWIndex.GraphRow values and build itemID → nodeIdx.
         var graphRows: [HNSWIndex.GraphRow] = []
         var itemIDToNodeIdx: [String: Int32] = [:]
@@ -874,11 +1056,18 @@ public actor VectorStore {
                   case let .int(layer)              = dbRow["layer"]      ?? .null,
                   case let .blob(neighboursBlob)    = dbRow["neighbours"] ?? .null
             else { continue }
+            // Decode generation (v6+). Default 0 for v5 estates.
+            let rowGen: Int64
+            switch dbRow["generation"] ?? .null {
+            case let .int(g): rowGen = g
+            default:          rowGen = 0
+            }
             graphRows.append(HNSWIndex.GraphRow(
                 nodeIdx:        Int32(nodeIdx),
                 nodeID:         nodeID,
                 layer:          Int(layer),
-                neighboursBlob: neighboursBlob
+                neighboursBlob: neighboursBlob,
+                generation:     rowGen
             ))
             // Only the first row for each node establishes the idx mapping;
             // subsequent layers for the same node reuse the same nodeIdx.
@@ -902,11 +1091,14 @@ public actor VectorStore {
         }
 
         // Reconstruct the HNSW graph from persisted topology + float bytes.
+        // Pass expectedGeneration so loadFromGraphRows rejects rows that belong
+        // to a retired generation (§4 of the design contract).
         // modelID is passed so loaded nodes carry the correct partition tag;
         // HNSWIndex.search filters by node.modelID == modelID and returns empty
         // for nodes with the default empty string modelID.
         let hnsw = HNSWIndex()
-        await hnsw.loadFromGraphRows(graphRows, nodeBytes: nodeBytes, modelID: modelID)
+        await hnsw.loadFromGraphRows(graphRows, nodeBytes: nodeBytes, modelID: modelID,
+                                     expectedGeneration: servingGen)
         guard await hnsw.hasGraph else { return }
         hnswIndices[modelID] = hnsw
         log.info("VectorStore: HNSW graph loaded from table for modelID=\(modelID, privacy: .public), rows=\(graphRows.count)")
@@ -990,6 +1182,25 @@ public actor VectorStore {
 
         let startTime = Date().timeIntervalSince1970
 
+        // Determine write generation. If the model has an active shadow ('building'),
+        // tag this row with shadow_gen and bypass all resident structures. If no
+        // shadow is active, tag with the serving generation and proceed normally.
+        let shadowGen = try await _shadowGeneration(for: modelID)
+        let writeGen: Int64
+        let isShadowWrite: Bool
+        if let sg = shadowGen {
+            writeGen = sg
+            isShadowWrite = true
+        } else {
+            writeGen = try await _servingGeneration(for: modelID)
+            isShadowWrite = false
+        }
+
+        // Accumulate peak shadow payload bytes (measured, not estimated).
+        if isShadowWrite {
+            shadowPayloadBytes[modelID, default: 0] += Int64(payload.bytes.count)
+        }
+
         let values: [String: TypedValue] = [
             "id":           .uuid(UUID()),
             "item_id":      .text(itemID),
@@ -1001,13 +1212,28 @@ public actor VectorStore {
             "payload":      .blob(Data(payload.bytes)),
             // Scale: .null for nil; PersistenceKit has no Optional TypedValue case.
             "scale":        payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
-            "filed_at":     .timestamp(filedAt)
+            "filed_at":     .timestamp(filedAt),
+            // Shadow-swap generation tag (§2 of the design contract).
+            "generation":   .int(writeGen)
         ]
         _ = try await storage.rowStore.upsert(
             table: "vectors",
             values: values,
-            conflictColumns: ["item_id", "vector_index", "model_id"]
+            conflictColumns: ["item_id", "vector_index", "model_id", "generation"]
         )
+
+        // Shadow writes: table-only. Resident structures serve the current
+        // serving generation and must not be contaminated by shadow rows.
+        guard !isShadowWrite else {
+            let endTime = Date().timeIntervalSince1970
+            Intellectus.report(.metric(
+                name: "vectorkit.index.insert_latency_ms",
+                value: (endTime - startTime) * 1000.0,
+                tags: ["kit": "VectorKit", "shadow": "true"],
+                ts: endTime
+            ))
+            return
+        }
 
         // Mirror binary payloads into the resident hot-path array.
         // Non-binary lanes remain table-only (I-7: Hamming is binary-only,
@@ -1180,7 +1406,27 @@ public actor VectorStore {
         let startTime = Date().timeIntervalSince1970
 
         // 1. Upsert every row to the table (durable source of truth).
+        // Partition batch into shadow writes (for models with an active 'building'
+        // shadow) and serving writes (all others). Shadow writes land in the table
+        // only — they must NOT enter the resident array or float indices. Serving
+        // writes follow the existing path unchanged.
+        var shadowInputs: [VectorPayloadInput] = []
+        var servingInputs: [VectorPayloadInput] = []
         for input in batch {
+            let shadowGen = try await _shadowGeneration(for: input.modelID)
+            let writeGen: Int64
+            let isShadow: Bool
+            if let sg = shadowGen {
+                writeGen = sg; isShadow = true
+            } else {
+                writeGen = try await _servingGeneration(for: input.modelID); isShadow = false
+            }
+            if isShadow {
+                shadowPayloadBytes[input.modelID, default: 0] += Int64(input.payload.bytes.count)
+                shadowInputs.append(input)
+            } else {
+                servingInputs.append(input)
+            }
             let values: [String: TypedValue] = [
                 "id":           .uuid(UUID()),
                 "item_id":      .text(input.itemID),
@@ -1191,17 +1437,22 @@ public actor VectorStore {
                 "dim":          .int(Int64(input.payload.dim)),
                 "payload":      .blob(Data(input.payload.bytes)),
                 "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
-                "filed_at":     .timestamp(input.filedAt)
+                "filed_at":     .timestamp(input.filedAt),
+                // Shadow-swap generation tag (§2 of the design contract).
+                "generation":   .int(writeGen)
             ]
             _ = try await storage.rowStore.upsert(
                 table: "vectors",
                 values: values,
-                conflictColumns: ["item_id", "vector_index", "model_id"]
+                conflictColumns: ["item_id", "vector_index", "model_id", "generation"]
             )
         }
 
+        // Shadow writes are table-only; skip all resident-structure updates for them.
+        let batch = servingInputs
+
         // 2. Mirror the binary rows into the resident array + both indexes
-        //    in one amortised pass.
+        //    in one amortised pass (serving writes only).
         let binaryRecords: [(key: VectorRecordKey, bytes: [UInt8])] = batch.compactMap { input in
             guard input.payload.kind == .binary else { return nil }
             let key = VectorRecordKey(
@@ -1643,10 +1894,13 @@ public actor VectorStore {
         vectorIndex: UInt32,
         modelID: String
     ) async throws -> VectorPayload? {
+        // Filter to serving generation so shadow rows are never surfaced.
+        let servingGen = try await _servingGeneration(for: modelID)
         let predicate = StoragePredicate.and([
             .eq(Column(table: "vectors", name: "item_id"), .text(itemID)),
             .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(vectorIndex))),
-            .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+            .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+            .eq(Column(table: "vectors", name: "generation"), .int(servingGen))
         ])
         let rows = try await storage.rowStore.query(
             table: "vectors",
@@ -1661,9 +1915,16 @@ public actor VectorStore {
 
     /// Return every row for itemID, ordered by filed_at ASC.
     public func vectors(forItemID itemID: String) async throws -> [StoredVector] {
+        // Use the table-wide serving-gen predicate so shadow rows are excluded.
+        // vectors(forItemID:) scans all models for this item, so we use _servingGenPredicate
+        // which handles every model's serving generation.
+        let genFilter = try await _servingGenPredicate()
         let rows = try await storage.rowStore.query(
             table: "vectors",
-            where: .eq(Column(table: "vectors", name: "item_id"), .text(itemID)),
+            where: .and([
+                .eq(Column(table: "vectors", name: "item_id"), .text(itemID)),
+                genFilter
+            ]),
             orderBy: [
                 OrderClause(
                     column: Column(table: "vectors", name: "filed_at"),
@@ -1740,11 +2001,17 @@ public actor VectorStore {
         // Both indexes apply (distance ASC, itemID ASC) sort per the oracle
         // contract (retrieval algorithms ref §0.3).
         // Map DenseHit → VectorMatch without re-sorting.
+        // D5: tag with serving generation. The binary resident array is built from
+        // serving-gen rows (_fetchAllBinaryRecords filters to servingGen), so all
+        // hits are serving-gen rows. MetadataFilter restricts to modelID, so all
+        // hits share the same modelID and one servingGen lookup covers all.
+        let servingGen = try await _servingGeneration(for: modelID)
         let result: [VectorMatch] = hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int(hit.rawDistance),
-                modelID: hit.key.modelID
+                modelID: hit.key.modelID,
+                generation: servingGen
             )
         }
 
@@ -1806,13 +2073,18 @@ public actor VectorStore {
         if storage.configuration.residencyHint == .ramResident {
             return try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit)
         }
+        // D5: fetch serving generation before the scan so VectorMatch can be tagged.
+        // _floatScanFromTable also fetches it internally (D1 fix) — the second call
+        // hits the in-memory servingGenerations cache and costs nothing.
+        let servingGen = try await _servingGeneration(for: modelID)
         let hits = try await _floatScanFromTable(
             modelID: modelID, probe: probe, k: limit, direction: .nearest)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int((hit.distance * 10_000).rounded()),
-                modelID: hit.key.modelID
+                modelID: hit.key.modelID,
+                generation: servingGen  // D5: rows are filtered to servingGen by _floatScanFromTable
             )
         }
     }
@@ -1829,6 +2101,12 @@ public actor VectorStore {
     /// Farthest queries always use FloatBruteForceIndex regardless of threshold —
     /// HNSW is a nearest-only structure. See `_findFarthestFloatCached`.
     private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+        // D4+D5 fix: resolve serving generation once at the top. Used for:
+        //   (a) generation check on the HNSW graph (D4)
+        //   (b) VectorMatch generation tag on exact-scan results (D5)
+        // _servingGeneration is cached in servingGenerations after first call — zero cost.
+        let servingGen = try await _servingGeneration(for: modelID)
+
         // Build FloatBruteForceIndex lazily on first access for this modelID.
         // The brute-force index is always built; farthest queries depend on it
         // even when HNSW is active for nearest queries.
@@ -1860,14 +2138,37 @@ public actor VectorStore {
                 try await _loadHNSWGraphIfPresent(for: modelID)
             }
             if let hnswIndex = hnswIndices[modelID] {
-                // HNSWIndex.search is synchronous (actor-isolated, no async work);
-                // `await` crosses the actor boundary.
-                return try await hnswIndex.search(probe: probe, modelID: modelID, k: limit)
+                // §4 of the design contract: check the graph's generation BEFORE
+                // use. A stale graph (generation ≠ serving_gen) is treated as
+                // absent and falls through to exact scan. This is the mechanism
+                // that makes the swap immune to the inherited stale-cache defect
+                // without repairing the invalidation path (BRR §4 INTENTIONALLY_LEFT).
+                let graphGen = await hnswIndex.generation
+                if graphGen == servingGen {
+                    // HNSWIndex.search is synchronous (actor-isolated, no async work);
+                    // `await` crosses the actor boundary.
+                    let results = try await hnswIndex.search(probe: probe, modelID: modelID, k: limit)
+                    // Record the generation of the graph instance that answered this query.
+                    lastServedGraphGen[modelID] = graphGen
+                    return results
+                }
+                // D4 fix: stale graph — discard and fall through to the SHARED
+                // exact-scan path below. Do NOT duplicate the fallback here.
+                // ONE seam: interrupt case 4 (crash between publish and HNSW rebuild)
+                // must serve real results from the exact lane, never return [].
+                // Removing the duplicated block ensures floatIndices[modelID] == nil
+                // falls through to the `guard let modelIndex` below which returns [],
+                // matching the behaviour the no-graph path already had — but the
+                // float index IS built above, so in practice this always serves.
+                hnswIndices.removeValue(forKey: modelID)
             }
-            // No persisted graph — fall through to exact scan.
+            // No resident graph (none persisted, or stale graph just discarded)
+            // — fall through to exact scan.
         }
 
-        // Below threshold (or HNSW build failed): exact scan via FloatBruteForceIndex.
+        // Below threshold or no HNSW graph available: exact scan via FloatBruteForceIndex.
+        // FloatBruteForceIndex was built from serving-gen rows (_fetchFloatRecords filters
+        // to servingGen). D5: tag matches with servingGen to satisfy the generation contract.
         guard let modelIndex = floatIndices[modelID] else { return [] }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
@@ -1876,7 +2177,8 @@ public actor VectorStore {
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int(((hit.floatDistance ?? 1.0) * 10_000).rounded()),
-                modelID: hit.key.modelID
+                modelID: hit.key.modelID,
+                generation: servingGen  // D5: FloatBruteForceIndex built from serving rows
             )
         }
     }
@@ -1919,13 +2221,17 @@ public actor VectorStore {
         if storage.configuration.residencyHint == .ramResident {
             return try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit)
         }
+        // D5: fetch serving generation for VectorMatch generation tag.
+        // _floatScanFromTable also fetches it (D1 fix) — second call hits cache.
+        let servingGen = try await _servingGeneration(for: modelID)
         let hits = try await _floatScanFromTable(
             modelID: modelID, probe: probe, k: limit, direction: .farthest)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int((hit.distance * 10_000).rounded()),
-                modelID: hit.key.modelID
+                modelID: hit.key.modelID,
+                generation: servingGen  // D5: rows filtered to servingGen by _floatScanFromTable (D1)
             )
         }
     }
@@ -1937,6 +2243,9 @@ public actor VectorStore {
     /// Builds the index lazily on first call for a given modelID and caches it
     /// for subsequent queries. Called when `residencyHint == .ramResident`.
     private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+        // D5: resolve serving generation for VectorMatch generation tag.
+        // FloatBruteForceIndex is built from serving rows (_fetchFloatRecords filters).
+        let servingGen = try await _servingGeneration(for: modelID)
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
             guard let arr = Self.buildFloatArray(from: records) else { return [] }
@@ -1952,7 +2261,8 @@ public actor VectorStore {
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int(((hit.floatDistance ?? 1.0) * 10_000).rounded()),
-                modelID: hit.key.modelID
+                modelID: hit.key.modelID,
+                generation: servingGen  // D5: FloatBruteForceIndex built from serving rows
             )
         }
     }
@@ -1982,6 +2292,11 @@ public actor VectorStore {
         var out: [String] = []
         let pageSize = 8192
         var offset = 0
+        // D2 fix: build the generation predicate ONCE outside the page loop —
+        // _servingGenPredicate hits the registry table and updates the in-memory cache;
+        // repeating it per page would be wasteful AND would give inconsistent results
+        // if a swap commits mid-iteration. The predicate is stable for this call's lifetime.
+        let genFilter = try await _servingGenPredicate()
         while out.count < limit {
             // Project only `item_id` — payload blobs are irrelevant here and
             // can be enormous on rich estates. A LIKE scan over item_id is
@@ -1992,9 +2307,15 @@ public actor VectorStore {
             // backend this delegates to the overriding `query(columns:)` that
             // emits a narrow SELECT; all other backends fall back to the full
             // read, which is still correct (they return a superset of columns).
+            // Note: `generation` and `model_id` are referenced in genFilter but NOT
+            // in the columns projection — SQLite evaluates WHERE before SELECT, so
+            // the predicate columns need not appear in the SELECT list.
             let rows = try await storage.rowStore.query(
                 table: "vectors",
-                where: .like(Column(table: "vectors", name: "item_id"), "%\(query)%"),
+                where: .and([
+                    .like(Column(table: "vectors", name: "item_id"), "%\(query)%"),
+                    genFilter  // D2: restrict to serving-generation rows only
+                ]),
                 orderBy: [
                     OrderClause(
                         column: Column(table: "vectors", name: "item_id"),
@@ -2047,20 +2368,25 @@ public actor VectorStore {
         var out: [String] = []
         let pageSize = 8192
         var offset = 0
+        // D3 fix: build generation predicate once before the page loop.
+        // Without this filter, shadow rows from all models pollute the recency
+        // window — e.g. a shadow-only item (written under beginShadowGeneration
+        // but not yet published) would appear as if it were live content.
+        let genFilter = try await _servingGenPredicate()
         while out.count < limit {
             // Project only `item_id` and `filed_at` — those are the only
             // columns this function needs. Combined with the composite index
             // `idx_vectors_filed_at_item` (v4, columns: [filed_at, item_id]),
-            // SQLite can satisfy this query as a covering index scan:
-            //   SELECT item_id, filed_at FROM vectors
-            //   ORDER BY filed_at DESC, item_id ASC
-            //   LIMIT N OFFSET M
-            // The index lets SQLite avoid the full-table read + filesort that
-            // this ORDER BY previously triggered on every call. Payload blobs
-            // are never loaded off disk.
+            // SQLite would satisfy this as a covering index scan when `where: nil`,
+            // but the generation predicate (D3) references `generation` and
+            // `model_id`, which are NOT in that index. SQLite must therefore
+            // consult the main table for each candidate row.
+            // TRADE-OFF: correctness (only serving rows) takes priority over the
+            // covering-index optimisation here. The query remains bounded (pageSize
+            // limit) and the payload blob is still excluded by the column projection.
             let rows = try await storage.rowStore.query(
                 table: "vectors",
-                where: nil,
+                where: genFilter,  // D3: restrict to serving-generation rows only
                 orderBy: [
                     OrderClause(
                         column: Column(table: "vectors", name: "filed_at"),
@@ -2086,6 +2412,272 @@ public actor VectorStore {
             offset += pageSize
         }
         return out
+    }
+
+    // MARK: - Shadow-swap API
+
+    /// Begin a shadow generation for the given model IDs.
+    ///
+    /// For each model: shadow_generation = serving_generation + 1, registry row
+    /// upserted with shadow_state = 'building'. While a model has an active shadow,
+    /// ALL vector writes land tagged with shadow_generation and bypass all resident
+    /// structures (resident array, float indices, HNSW). Models not listed are
+    /// unaffected. Re-entrant begin on a model with an existing 'building' shadow
+    /// abandons the stale shadow (its rows become reclaimable) and allocates the
+    /// next generation — this is the crash-mid-build recovery path.
+    ///
+    /// - Parameter modelIDs: Models to begin a shadow for.
+    /// - Returns: Map from modelID to the allocated shadow generation number.
+    @discardableResult
+    public func beginShadowGeneration(modelIDs: [String]) async throws -> [String: Int64] {
+        var result: [String: Int64] = [:]
+        for modelID in modelIDs {
+            let serving = try await _servingGeneration(for: modelID)
+            // If a 'building' shadow already exists, abandon it: the new shadow_gen
+            // skips the stale one so its rows become reclaimable (shadow_gen ≠ serving
+            // and ≠ new shadow → deleted by reclaimSupersededGenerations).
+            let existingMax: Int64
+            let rows = try await storage.rowStore.query(
+                table: "vector_generations",
+                where: .eq(Column(table: "vector_generations", name: "model_id"), .text(modelID)),
+                orderBy: [],
+                limit: nil,
+                offset: nil
+            )
+            if let row = rows.first, case let .int(sg) = row["shadow_generation"] ?? .null {
+                // Use max(existing shadow, serving) + 1 so we never re-issue a
+                // generation that might still have rows on disk.
+                existingMax = max(sg, serving)
+            } else {
+                existingMax = serving
+            }
+            let newShadow = existingMax + 1
+
+            // Upsert the registry row.
+            _ = try await storage.rowStore.upsert(
+                table: "vector_generations",
+                values: [
+                    "model_id":          .text(modelID),
+                    "serving_generation":.int(serving),
+                    "shadow_generation": .int(newShadow),
+                    "shadow_state":      .text("building")
+                ],
+                conflictColumns: ["model_id"]
+            )
+
+            // Update caches.
+            servingGenerations[modelID] = serving
+            shadowGenerations[modelID] = newShadow
+            shadowStates[modelID] = "building"
+            shadowPayloadBytes[modelID] = 0
+            result[modelID] = newShadow
+        }
+        return result
+    }
+
+    /// Atomically publish the shadow generation for the given model IDs.
+    ///
+    /// ONE storage transaction flips serving_generation = shadow_generation and
+    /// clears shadow_generation / sets shadow_state = 'pending-reclaim' for all
+    /// named models. A reader sees the old set or the new set, never a mixture.
+    /// If the transaction does not commit, the old generation continues to serve.
+    ///
+    /// After the flip commits (and before this method returns): drops resident
+    /// float/HNSW structures for the swapped models, rebuilds the HNSW graph from
+    /// the new serving rows, writes hnsw_graph rows tagged with the new serving
+    /// generation, deletes hnsw_graph rows of retired generations, and refreshes
+    /// the binary resident array/indices so the binary lane serves the new set.
+    ///
+    /// A crash between flip-commit and graph rebuild leaves a graph whose generation
+    /// mismatches serving → treated as absent (§4), exact lane serves correctly.
+    public func publishShadowGeneration(modelIDs: [String]) async throws {
+        guard !modelIDs.isEmpty else { return }
+
+        // Collect the shadow generation for each model before the flip.
+        var shadowByModel: [String: Int64] = [:]
+        for modelID in modelIDs {
+            let sg: Int64?
+            if let cached = shadowGenerations[modelID] {
+                sg = cached
+            } else {
+                sg = try await _shadowGeneration(for: modelID)
+            }
+            guard let sg else {
+                // No active shadow — skip this model.
+                continue
+            }
+            shadowByModel[modelID] = sg
+        }
+        guard !shadowByModel.isEmpty else { return }
+
+        // ONE atomic transaction: serving_gen = shadow_gen, shadow_gen = NULL,
+        // shadow_state = 'pending-reclaim'. A reader fetching the registry inside
+        // this transaction sees the old set; after commit it sees the new set.
+        try await storage.rowStore.beginTransaction()
+        do {
+            for (modelID, shadowGen) in shadowByModel {
+                _ = try await storage.rowStore.upsert(
+                    table: "vector_generations",
+                    values: [
+                        "model_id":          .text(modelID),
+                        "serving_generation":.int(shadowGen),
+                        "shadow_generation": .null,
+                        "shadow_state":      .text("pending-reclaim")
+                    ],
+                    conflictColumns: ["model_id"]
+                )
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // Flip committed. Update in-memory caches.
+        for (modelID, shadowGen) in shadowByModel {
+            servingGenerations[modelID] = shadowGen
+            shadowGenerations.removeValue(forKey: modelID)
+            shadowStates[modelID] = "pending-reclaim"
+        }
+
+        // Post-flip: rebuild resident structures from the new serving generation.
+        // Crash here leaves a generation-mismatched graph → treated as absent (§4).
+        let swappedModelIDs = Array(shadowByModel.keys)
+
+        // Drop stale float/HNSW indices for swapped models.
+        for modelID in swappedModelIDs {
+            floatIndices.removeValue(forKey: modelID)
+            hnswIndices.removeValue(forKey: modelID)
+        }
+
+        // Delete HNSW graph rows belonging to retired generations (all generations
+        // except the new serving generation for each swapped model).
+        for (modelID, newServingGen) in shadowByModel {
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .and([
+                    .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+                    .not(.eq(Column(table: "hnsw_graph", name: "generation"), .int(newServingGen)))
+                ])
+            )
+        }
+
+        // Rebuild binary resident array from the new serving rows (all models).
+        try await _rebuildBinaryIndexFromTable()
+
+        // Rebuild HNSW graph for each swapped model from the new serving float rows.
+        // D6 fix: rebuildHNSWIndex now stamps the graph with the current serving
+        // generation and persists it before returning. Because this call happens
+        // AFTER the registry flip above, serving_generation is already the new
+        // generation — no redundant setGeneration + second _persistHNSWGraph needed.
+        for modelID in swappedModelIDs {
+            try await rebuildHNSWIndex(for: modelID)
+        }
+    }
+
+    /// Measured peak shadow payload bytes for the most recent (or current)
+    /// shadow build for `modelID`. Returns 0 if no shadow has been started.
+    /// The value is the sum of `payload.bytes.count` of every shadow row written.
+    public func peakShadowStorageBytes(for modelID: String) -> Int64 {
+        shadowPayloadBytes[modelID] ?? 0
+    }
+
+    /// The generation of the HNSW graph instance that last answered a float
+    /// nearest-neighbour query for `modelID`. Returns nil if no float query has
+    /// been served since this VectorStore was opened.
+    ///
+    /// Gate 5 reads this after publish + query to assert the swap promoted the
+    /// graph to the new serving generation before the query was answered.
+    public func lastServedGraphGeneration(for modelID: String) -> Int64? {
+        lastServedGraphGen[modelID]
+    }
+
+    /// Idempotent, resumable, batched reclaim of superseded generation rows.
+    ///
+    /// Deletes vectors rows whose generation ≠ the model's serving_generation AND
+    /// that are NOT the model's active 'building' shadow (reclaimable = no active
+    /// shadow OR shadow_state is 'pending-reclaim'). Also deletes mismatched
+    /// hnsw_graph rows, then clears shadow_state 'pending-reclaim'. Reclaims
+    /// abandoned 'building' shadows (generation != serving AND != active shadow).
+    ///
+    /// Killing mid-reclaim and re-running finishes without error and changes
+    /// no query result (serving generation is already the committed value).
+    ///
+    /// - Returns: A summary of rows deleted per model for metrics.
+    @discardableResult
+    public func reclaimSupersededGenerations() async throws -> [String: Int] {
+        // Fetch all registry rows to find models with pending-reclaim state.
+        let regRows = try await storage.rowStore.query(
+            table: "vector_generations",
+            where: .isTrue,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+
+        var summary: [String: Int] = [:]
+
+        for row in regRows {
+            guard case let .text(modelID) = row["model_id"] ?? .null,
+                  case let .int(servingGen) = row["serving_generation"] ?? .null else { continue }
+
+            // Active shadow generation (if any).
+            let activeShadow: Int64?
+            if case let .int(sg) = row["shadow_generation"] ?? .null,
+               case let .text(state) = row["shadow_state"] ?? .null,
+               state == "building" {
+                activeShadow = sg
+            } else {
+                activeShadow = nil
+            }
+
+            // Delete vectors rows for this model that are not the serving generation
+            // and not the active shadow generation (which is still being built).
+            // The delete is idempotent: re-running finds zero matching rows and
+            // returns 0 (correct). The resumable contract is satisfied because
+            // serving_generation is already the committed value before this call.
+            var predParts: [StoragePredicate] = [
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .not(.eq(Column(table: "vectors", name: "generation"), .int(servingGen)))
+            ]
+            if let active = activeShadow {
+                predParts.append(.not(.eq(Column(table: "vectors", name: "generation"), .int(active))))
+            }
+            let pred: StoragePredicate = .and(predParts)
+            let totalDeleted = try await storage.rowStore.delete(
+                table: "vectors",
+                where: pred
+            )
+
+            // Delete mismatched hnsw_graph rows (any generation != serving).
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .and([
+                    .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+                    .not(.eq(Column(table: "hnsw_graph", name: "generation"), .int(servingGen)))
+                ])
+            )
+
+            // Clear 'pending-reclaim' state from registry.
+            if case let .text(state) = row["shadow_state"] ?? .null, state == "pending-reclaim" {
+                _ = try await storage.rowStore.upsert(
+                    table: "vector_generations",
+                    values: [
+                        "model_id":          .text(modelID),
+                        "serving_generation":.int(servingGen),
+                        "shadow_generation": .null,
+                        "shadow_state":      .null
+                    ],
+                    conflictColumns: ["model_id"]
+                )
+                shadowStates.removeValue(forKey: modelID)
+            }
+
+            if totalDeleted > 0 {
+                summary[modelID] = totalDeleted
+            }
+        }
+        return summary
     }
 
     // MARK: - Delete
@@ -2171,17 +2763,36 @@ public actor VectorStore {
         // truth before the resident index is rebuilt from it below.
         if deferredIndexDirty { try await publishResidentIndex() }
 
-        // 1. Durable table writes in ONE transaction: bulk-delete every row for the
-        //    model, then plain-INSERT the fresh batch. One begin/commit → a single
-        //    fsync for the whole re-embed; INSERT skips the per-row existence SELECT
-        //    (after the bulk delete nothing conflicts). NO resident-index mutation
-        //    here — it is rebuilt once in step 2.
+        // 1. Durable table writes in ONE transaction. If the model has an active
+        //    'building' shadow, replace only the shadow-generation rows (serving rows
+        //    remain intact to serve queries). If no shadow, replace all rows.
+        let shadowGen = try await _shadowGeneration(for: modelID)
+        let servingGen = try await _servingGeneration(for: modelID)
+        let writeGen = shadowGen ?? servingGen
+
+        if shadowGen != nil {
+            shadowPayloadBytes[modelID, default: 0] +=
+                batch.reduce(0) { $0 + Int64($1.payload.bytes.count) }
+        }
+
         try await storage.rowStore.beginTransaction()
         do {
-            _ = try await storage.rowStore.delete(
-                table: "vectors",
-                where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
-            )
+            if let sg = shadowGen {
+                // Shadow path: delete only shadow-generation rows for this model.
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                        .eq(Column(table: "vectors", name: "generation"), .int(sg))
+                    ])
+                )
+            } else {
+                // Serving path: replace all generations for this model.
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+                )
+            }
             for input in batch {
                 let values: [String: TypedValue] = [
                     "id":           .uuid(UUID()),
@@ -2193,7 +2804,8 @@ public actor VectorStore {
                     "dim":          .int(Int64(input.payload.dim)),
                     "payload":      .blob(Data(input.payload.bytes)),
                     "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
-                    "filed_at":     .timestamp(input.filedAt)
+                    "filed_at":     .timestamp(input.filedAt),
+                    "generation":   .int(writeGen)
                 ]
                 _ = try await storage.rowStore.insert(table: "vectors", values: values)
             }
@@ -2202,6 +2814,10 @@ public actor VectorStore {
             try? await storage.rowStore.rollbackTransaction()
             throw error
         }
+
+        // Shadow path: table-only write. Resident structures serve the current
+        // serving generation and must not be rebuilt from shadow rows.
+        guard shadowGen == nil else { return }
 
         // 2. Rebuild the resident binary index ONCE from the durable table (O(n)),
         //    and drop this model's Lane D float index so it lazily rebuilds too.
@@ -2390,7 +3006,7 @@ public actor VectorStore {
                 _ = try await storage.rowStore.upsert(
                     table: "vectors",
                     values: values,
-                    conflictColumns: ["item_id", "vector_index", "model_id"]
+                    conflictColumns: ["item_id", "vector_index", "model_id", "generation"]
                 )
             }
             try await storage.rowStore.commitTransaction()
@@ -2550,12 +3166,18 @@ public actor VectorStore {
         k: Int,
         direction: FloatSearchDirection
     ) async throws -> [(distance: Float, key: VectorRecordKey)] {
+        // D1 fix: filter to the serving generation so shadow rows are never mixed
+        // into results. This is the DEFAULT diskBacked float query path and the
+        // crash-window exact lane — without the filter it serves shadow + serving
+        // rows together, which is the crash-window data-corruption defect.
+        let servingGen = try await _servingGeneration(for: modelID)
         let rows = try await storage.rowStore.query(
             table: "vectors",
             where: .and([
                 .eq(Column(table: "vectors", name: "kind"),
                     .int(Int64(VectorKind.float32.rawValue))),
-                .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "vectors", name: "generation"), .int(servingGen))
             ]),
             orderBy: [],
             limit: nil,
@@ -2649,12 +3271,15 @@ public actor VectorStore {
     private func _fetchFloatRecords(
         modelID: String
     ) async throws -> [(key: VectorRecordKey, payload: VectorPayload)] {
+        // Filter to the serving generation: queries must never return shadow rows.
+        let servingGen = try await _servingGeneration(for: modelID)
         let rows = try await storage.rowStore.query(
             table: "vectors",
             where: .and([
                 .eq(Column(table: "vectors", name: "kind"),
                     .int(Int64(VectorKind.float32.rawValue))),
-                .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "vectors", name: "generation"), .int(servingGen))
             ]),
             orderBy: [],
             limit: nil,
@@ -2774,10 +3399,17 @@ public actor VectorStore {
     /// Called only when the sidecar is absent or stale (i.e. once per
     /// process lifetime in the normal path). Not called on every query.
     private func _fetchAllBinaryRecords() async throws -> [(key: VectorRecordKey, bytes: [UInt8])] {
+        // Build a per-model serving-generation predicate so shadow rows are
+        // excluded. The binary resident array must contain ONLY serving-generation
+        // rows (§3 of the design contract).
+        let genFilter = try await _servingGenPredicate()
         let rows = try await storage.rowStore.query(
             table: "vectors",
-            where: .eq(Column(table: "vectors", name: "kind"),
-                       .int(Int64(VectorKind.binary.rawValue))),
+            where: .and([
+                .eq(Column(table: "vectors", name: "kind"),
+                    .int(Int64(VectorKind.binary.rawValue))),
+                genFilter
+            ]),
             orderBy: [],
             limit: nil,
             offset: nil
@@ -2946,6 +3578,13 @@ public actor VectorStore {
               let engram = try? payload.asEngram() else {
             return nil
         }
+        // Decode generation (v6+). Absent column or NULL decodes to 0 so
+        // pre-migration rows (v5 estates) are treated as serving generation 0.
+        let generation: Int64
+        switch row["generation"] ?? .null {
+        case let .int(g): generation = g
+        default:          generation = 0
+        }
         return StoredVector(
             id: id.uuidString,
             itemID: itemID,
@@ -2953,7 +3592,99 @@ public actor VectorStore {
             modelID: modelID,
             modelVersion: modelVersion,
             engram: engram,
-            filedAt: filedAt
+            filedAt: filedAt,
+            generation: generation
         )
+    }
+
+    // MARK: - Shadow-swap helpers (private)
+
+    /// Return the serving generation for `modelID`, loading from the
+    /// vector_generations table if not cached. Returns 0 for models that
+    /// have no registry row (never swapped — all rows are serving gen 0).
+    private func _servingGeneration(for modelID: String) async throws -> Int64 {
+        if let cached = servingGenerations[modelID] { return cached }
+        let rows = try await storage.rowStore.query(
+            table: "vector_generations",
+            where: .eq(Column(table: "vector_generations", name: "model_id"), .text(modelID)),
+            orderBy: [],
+            limit: 1,
+            offset: nil
+        )
+        let gen: Int64
+        if let row = rows.first, case let .int(g) = row["serving_generation"] ?? .null {
+            gen = g
+        } else {
+            gen = 0
+        }
+        servingGenerations[modelID] = gen
+        return gen
+    }
+
+    /// Return the active shadow generation for `modelID` if one is in flight,
+    /// otherwise nil. Loads from the registry table if not cached.
+    private func _shadowGeneration(for modelID: String) async throws -> Int64? {
+        if let cached = shadowGenerations[modelID] { return cached }
+        let rows = try await storage.rowStore.query(
+            table: "vector_generations",
+            where: .eq(Column(table: "vector_generations", name: "model_id"), .text(modelID)),
+            orderBy: [],
+            limit: 1,
+            offset: nil
+        )
+        guard let row = rows.first,
+              case let .int(sg) = row["shadow_generation"] ?? .null,
+              case let .text(state) = row["shadow_state"] ?? .null,
+              state == "building" else {
+            shadowGenerations.removeValue(forKey: modelID)
+            return nil
+        }
+        shadowGenerations[modelID] = sg
+        shadowStates[modelID] = state
+        return sg
+    }
+
+    /// Build a generation predicate for a table-wide query that reads from
+    /// multiple model_ids (e.g. recentItemIDs, findByKeyword, _fetchAllBinaryRecords).
+    ///
+    /// Returns a predicate that accepts ONLY serving-generation rows for each
+    /// known model, plus generation = 0 for any model_id not in the registry
+    /// (default for pre-migration rows and never-swapped models).
+    ///
+    /// Loads serving generations for all registered models from the registry.
+    private func _servingGenPredicate() async throws -> StoragePredicate {
+        let regRows = try await storage.rowStore.query(
+            table: "vector_generations",
+            where: .isTrue,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        if regRows.isEmpty {
+            // No registry entries → all models are at generation 0.
+            return .eq(Column(table: "vectors", name: "generation"), .int(0))
+        }
+        // Build: (model_id NOT IN known_models AND generation = 0)
+        //   OR   (model_id = M1 AND generation = SG1)
+        //   OR   (model_id = M2 AND generation = SG2) ...
+        var knownModelIDs: [TypedValue] = []
+        var perModelClauses: [StoragePredicate] = []
+        for row in regRows {
+            guard case let .text(mid) = row["model_id"] ?? .null,
+                  case let .int(sg) = row["serving_generation"] ?? .null else { continue }
+            knownModelIDs.append(.text(mid))
+            servingGenerations[mid] = sg
+            perModelClauses.append(.and([
+                .eq(Column(table: "vectors", name: "model_id"), .text(mid)),
+                .eq(Column(table: "vectors", name: "generation"), .int(sg))
+            ]))
+        }
+        let unknownClause: StoragePredicate = .and([
+            .not(.in(Column(table: "vectors", name: "model_id"), knownModelIDs)),
+            .eq(Column(table: "vectors", name: "generation"), .int(0))
+        ])
+        let all = [unknownClause] + perModelClauses
+        // Fold all clauses into a single OR.
+        return .or(all)
     }
 }

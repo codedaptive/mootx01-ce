@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: accepted-1.1-target
-version: 1.7.0
-date: 2026-07-20
+version: 1.8.0
+date: 2026-08-15
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -887,6 +887,94 @@ public func destroyAllVectors() async throws
 pub fn destroy_all_vectors(&self) -> Result<(), VectorKitError>;
 ```
 
+### `VectorStore.beginShadowGeneration(modelIDs:)` (Swift only — Unit A)
+
+Opens a shadow generation for the given model IDs. Each model's shadow generation
+is strictly greater than its current serving generation and any prior abandoned
+shadow (so abandoned rows are always reclaimable). Returns a map from modelID to
+the allocated shadow generation number. Idempotent: calling again on a model that
+already has a `building` shadow allocates a new shadow beyond the abandoned one.
+
+Writes to a model after calling this method (via `addPayload`, `addPayloads`, or
+`replaceModelVectors`) are tagged with the shadow generation and do NOT update any
+resident structure. Serving queries continue from the old generation.
+
+**Swift:**
+
+```swift
+@discardableResult
+public func beginShadowGeneration(modelIDs: [String]) async throws -> [String: Int64]
+```
+
+---
+
+### `VectorStore.publishShadowGeneration(modelIDs:)` (Swift only — Unit A)
+
+Atomically publishes the shadow generation for the named model IDs. ONE storage
+transaction flips `serving_generation = shadow_generation` for all named models and
+sets `shadow_state = "pending-reclaim"`. A reader sees either the old set or the new
+set, never a partial flip.
+
+After the flip commits: drops stale HNSW graph rows for retired generations, rebuilds
+resident float/HNSW structures from the new serving rows, and stamps the new HNSW graph
+with the new serving generation.
+
+A crash between the flip commit and the resident rebuild leaves a generation-mismatched
+graph that is treated as absent (exact scan serves correctly until the graph is rebuilt).
+
+**Swift:**
+
+```swift
+public func publishShadowGeneration(modelIDs: [String]) async throws
+```
+
+---
+
+### `VectorStore.reclaimSupersededGenerations()` (Swift only — Unit A)
+
+Idempotent, resumable reclaim of superseded generation rows. Deletes `vectors` rows
+whose generation is neither the model's current `serving_generation` nor an active
+`building` shadow. Also deletes mismatched `hnsw_graph` rows and clears
+`shadow_state = "pending-reclaim"` from the registry. Calling twice in a row is a
+no-op on the second call (zero deletions) and does not corrupt query results.
+
+**Swift:**
+
+```swift
+@discardableResult
+public func reclaimSupersededGenerations() async throws -> [String: Int]
+```
+
+The return value is a map from modelID to the number of `vectors` rows deleted.
+
+---
+
+### `VectorStore.peakShadowStorageBytes(for:)` (Swift only — Unit A)
+
+Returns the cumulative payload byte count written to the shadow generation for
+`modelID` since `beginShadowGeneration` was last called. Returns 0 if no shadow has
+been started or after the shadow generation pointer is cleared by publish.
+
+```swift
+public func peakShadowStorageBytes(for modelID: String) -> Int64
+```
+
+---
+
+### `VectorStore.lastServedGraphGeneration(for:)` (Swift only — Unit A)
+
+Returns the generation of the HNSW graph instance that last answered a float
+nearest-neighbour query for `modelID`. Returns `nil` if no float query has been
+served by the HNSW path since this `VectorStore` was opened. After a successful
+`publishShadowGeneration`, this value equals the new serving generation once any
+float query is answered via the new graph.
+
+```swift
+public func lastServedGraphGeneration(for modelID: String) -> Int64?
+```
+
+---
+
 ## § 4 — Errors
 
 Cases match one-for-one across ports so cross-language conformance tests
@@ -1056,6 +1144,26 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.8.0 -- 2026-08-15
+
+Added shadow-generation swap API (VEC-SHADOWSWAP-01, Unit A — Swift only):
+- Added `beginShadowGeneration(modelIDs:)` — opens a shadow generation for the given
+  model IDs; returns a map of modelID → shadow generation number.
+- Added `publishShadowGeneration(modelIDs:)` — atomic flip: serving_generation = shadow_generation
+  in one transaction; rebuilds resident structures from new serving rows.
+- Added `reclaimSupersededGenerations()` — idempotent delete of superseded vectors and
+  hnsw_graph rows; returns map of modelID → rows deleted.
+- Added `peakShadowStorageBytes(for:)` — cumulative payload bytes written to the active
+  shadow build for a model; 0 before first shadow or after publish.
+- Added `lastServedGraphGeneration(for:)` — generation of the HNSW graph that last answered
+  a float query; nil until first HNSW-path float query.
+- Updated `StoredVector` and `VectorMatch` to carry `generation: Int64` (defaults to 0 for
+  pre-v6 rows and never-swapped estates).
+- Schema updated to v6: `vectors` UNIQUE constraint now includes `generation`;
+  `generation` column added to `vectors` and `hnsw_graph`; `vector_generations` registry
+  table and `idx_vectors_model_generation` index added. See VECTORKIT_SPEC.md §1.6.0.
+- Rust port (Unit B) is a sequenced follow-up mission.
 
 ### 1.7.0 -- 2026-07-20
 

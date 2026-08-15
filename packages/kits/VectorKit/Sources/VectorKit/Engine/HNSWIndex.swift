@@ -131,6 +131,27 @@ public actor HNSWIndex {
     /// Highest layer currently in use (0 = all nodes at layer 0 only).
     private var maxLayer: Int = 0
 
+    // MARK: - Generation identity (shadow-swap)
+
+    /// Shadow-swap generation this graph was built or loaded for. Fixed at
+    /// build time (insert path: stays 0 until VectorStore.publishShadowGeneration
+    /// calls setGeneration) or load time (loadFromGraphRows sets it from the
+    /// expectedGeneration parameter). A generation mismatch at query time means
+    /// this graph does not represent the current serving set — treat as absent
+    /// and fall back to exact scan (§4 of the design contract).
+    private var _generation: Int64 = 0
+
+    /// Read-only generation identity exposed to VectorStore for the query-site
+    /// mismatch check and the lastServedGraphGeneration probe.
+    public var generation: Int64 { _generation }
+
+    /// Stamp this graph instance with the given generation. Called by
+    /// VectorStore after a full HNSW rebuild completes (insert path) or
+    /// after publishShadowGeneration commits the serving-gen flip.
+    public func setGeneration(_ gen: Int64) {
+        _generation = gen
+    }
+
     // MARK: - RNG (SplitMix64 — same algorithm as GauntletRNG)
 
     /// SplitMix64 state. Seeded at init; same seed + insertion order → same graph.
@@ -459,13 +480,18 @@ public actor HNSWIndex {
         let cands = searchLayer(probe: probe, entryPts: [curEP], ef: hnswEfSearch, layer: 0)
 
         // Filter to modelID, take top k, convert distances.
+        // D5: carry the graph's own generation in every returned VectorMatch so
+        // callers (VectorStore._findNearestFloatCached) can verify generation parity.
+        // The graph's generation is fixed at build/load time via setGeneration and
+        // never changes while the graph is resident — reading it once here is correct.
+        let graphGeneration = _generation
         return cands
             .filter { nodes[Int($0.idx)].modelID == modelID }
             .prefix(k)
             .map { c in
                 let node = nodes[Int(c.idx)]
                 let dist = Int((c.dist * 10_000).rounded())
-                return VectorMatch(itemID: node.itemID, distance: dist, modelID: node.modelID)
+                return VectorMatch(itemID: node.itemID, distance: dist, modelID: node.modelID, generation: graphGeneration)
             }
     }
 
@@ -525,12 +551,17 @@ public actor HNSWIndex {
     /// One `GraphRow` per (node, layer) combination. `nodeIdx` is the dense
     /// array index; `nodeID` is the item_id. `neighboursBlob` is a packed
     /// little-endian Int32 array of neighbour node_idx values — matching the
-    /// column definition in VectorStore.schemaDeclaration v5.
+    /// column definition in VectorStore.schemaDeclaration v6. `generation`
+    /// ties each row to a specific shadow-swap generation so VectorStore can
+    /// filter to the serving generation on load and reclaim retired rows.
     public struct GraphRow: Sendable {
         public let nodeIdx:        Int32
         public let nodeID:         String
         public let layer:          Int
         public let neighboursBlob: Data   // packed LE Int32 array
+        /// Shadow-swap generation tag for this row. Matches the generation
+        /// of the HNSWIndex instance that produced it.
+        public let generation:     Int64
 
         /// Decode `neighboursBlob` back to an [Int32] array.
         public func decodeNeighbours() -> [Int32] {
@@ -582,7 +613,8 @@ public actor HNSWIndex {
                     nodeIdx:        Int32(nodeIdx),
                     nodeID:         node.itemID,
                     layer:          layer,
-                    neighboursBlob: blob
+                    neighboursBlob: blob,
+                    generation:     _generation
                 ))
             }
         }
@@ -611,12 +643,23 @@ public actor HNSWIndex {
     ///     reconstructed node so `search(probe:modelID:k:)` can filter by
     ///     partition membership — search performs `nodes[i].modelID == modelID`
     ///     and silently returns [] if the modelID is empty (the pre-load default).
+    ///   - expectedGeneration: The serving_generation value VectorStore fetched
+    ///     from the registry. Only rows whose `row.generation == expectedGeneration`
+    ///     are accepted; any mismatch causes the load to be treated as absent
+    ///     (returns without mutating state) so the query path falls back to exact
+    ///     scan. On a successful load, `self.generation` is set to this value.
     public func loadFromGraphRows(
         _ rows: [GraphRow],
         nodeBytes: [Int32: (itemID: String, bytes: [UInt8])],
-        modelID: String
+        modelID: String,
+        expectedGeneration: Int64 = 0
     ) {
-        guard !rows.isEmpty else { return }
+        // Reject rows that belong to a retired generation. Any mismatch leaves
+        // this instance empty so the query path falls back to exact scan rather
+        // than serving stale topology (§4 of the design contract).
+        let matchingRows = rows.filter { $0.generation == expectedGeneration }
+        guard !matchingRows.isEmpty else { return }
+        let rows = matchingRows
 
         // Sort rows by nodeIdx then layer so we can rebuild in order.
         let sorted = rows.sorted {
@@ -700,6 +743,9 @@ public actor HNSWIndex {
         // assignment calls are needed until the next incremental insert.
         // The default seed (42) is used for any subsequent insertions.
         rngState = 42
+        // Record the generation this graph was loaded for. The query site
+        // in VectorStore checks graph.generation == serving_gen before use.
+        _generation = expectedGeneration
     }
 
     // MARK: - Private helpers

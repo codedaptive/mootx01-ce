@@ -1,8 +1,8 @@
 ---
 title: VectorKit Specification
-version: 1.5.0
+version: 1.6.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-08-15
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -612,6 +612,59 @@ item/lane/model deletion or a CorpusKit-owned scope delete instead.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.6.0 -- 2026-08-15
+
+Added shadow-generation vector swap (VEC-SHADOWSWAP-01, TASK-MXE-2026-0332):
+
+**Schema v6:** The `vectors` table UNIQUE constraint changes from
+`(item_id, vector_index, model_id)` to `(item_id, vector_index, model_id, generation)`,
+allowing serving and shadow rows to coexist for the same item/model. A new
+`generation INTEGER NOT NULL DEFAULT 0` column is added to `vectors` and `hnsw_graph`.
+A new `vector_generations` registry table tracks `(model_id, serving_generation,
+shadow_generation, shadow_state)` per model. A new index `idx_vectors_model_generation`
+on `(model_id, generation)` supports generation-filtered scans. The v5→v6 migration
+recreates the `vectors` table via four `.custom(sqlite:)` operations (SQLite cannot
+ALTER TABLE to change UNIQUE constraints), copies all existing rows at generation 0,
+and adds the new columns, table, and index.
+
+**New behavioral contracts:**
+
+**B-16 (shadow-generation swap):** `VectorStore` supports write-under-shadow semantics.
+While a shadow generation is in flight for a model, `addPayload` and `addPayloads` writes
+for that model are tagged with the shadow generation and do NOT update any resident
+structure (binary array, float index, HNSW graph). The serving lane continues to answer
+queries from the current serving generation. `publishShadowGeneration` atomically flips
+`serving_generation` to `shadow_generation` in a single storage transaction and then
+rebuilds resident structures from the new serving rows. After publish, queries answer from
+the new generation. `reclaimSupersededGenerations` idempotently deletes vectors rows and
+hnsw_graph rows whose generation is neither the current serving generation nor an active
+shadow build.
+
+**B-16a (no-serving-gap guarantee):** During a shadow build, all read paths (binary lane,
+float/HNSW lane, findByKeyword, recentItemIDs, vectors(forItemID:)) filter to the current
+serving generation. Shadow rows are invisible to callers until `publishShadowGeneration`
+commits.
+
+**B-16b (crash safety):** A crash mid-build leaves the shadow in `building` state; calling
+`beginShadowGeneration` again allocates a new shadow generation strictly above the
+abandoned one, making the abandoned rows reclaimable. A crash mid-publish leaves the
+registry in a consistent state: either the old or the new `serving_generation` is
+authoritative, never a partial flip. A crash mid-reclaim is safe to re-run (`reclaimSupersededGenerations`
+is idempotent and resumes without error).
+
+**B-16c (HNSW generation coherence):** The HNSW graph carries a `generation` tag. A graph
+whose generation mismatches the model's `serving_generation` at query time is treated as
+absent (falls back to exact scan). `publishShadowGeneration` rebuilds the graph from the
+new serving rows and stamps it with the new `serving_generation` before any query can use
+it. `lastServedGraphGeneration(for:)` returns the generation of the graph instance that
+last answered a float nearest-neighbour query.
+
+**New public API:** `beginShadowGeneration(modelIDs:)`, `publishShadowGeneration(modelIDs:)`,
+`reclaimSupersededGenerations()`, `peakShadowStorageBytes(for:)`,
+`lastServedGraphGeneration(for:)`. See VECTORKIT_INTERFACE.md for signatures.
+
+**Swift-only (Unit A):** The Rust port (Unit B) is a sequenced follow-up mission.
 
 ### 1.5.0 -- 2026-07-20
 

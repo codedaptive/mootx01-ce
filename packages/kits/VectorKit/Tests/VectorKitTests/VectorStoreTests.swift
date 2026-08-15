@@ -814,9 +814,9 @@ struct VectorStoreTests {
     /// v4→v5 migration (hnsw_graph table) will not run and the HNSW
     /// approximate index cannot persist graph topology.
     /// Previous guard (v4 — idx_vectors_filed_at_item, VK-PERF-FIX-2026-07-13)
-    /// is subsumed by this v5 gate.
-    @Test func schemaDeclarationIsVersionFive() {
-        #expect(VectorStore.schemaDeclaration.version == 5)
+    /// is subsumed by this schema-version gate (v6 since VEC-SHADOWSWAP-01).
+    @Test func schemaDeclarationIsVersionSix() {
+        #expect(VectorStore.schemaDeclaration.version == 6)
     }
 
     /// The schema declaration includes idx_vectors_filed_at_item (v4).

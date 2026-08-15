@@ -34,10 +34,16 @@ public struct VectorMatch: Sendable, Comparable, Equatable {
     /// they got a match against the model they asked for.
     public let modelID: String
 
-    public init(itemID: String, distance: Int, modelID: String) {
+    /// Shadow-swap generation tag of the row that produced this match.
+    /// Equals the model's serving_generation at query time. Callers can
+    /// verify this matches the expected generation after a swap completes.
+    public let generation: Int64
+
+    public init(itemID: String, distance: Int, modelID: String, generation: Int64 = 0) {
         self.itemID = itemID
         self.distance = distance
         self.modelID = modelID
+        self.generation = generation
     }
 
     public static func < (lhs: VectorMatch, rhs: VectorMatch) -> Bool {
