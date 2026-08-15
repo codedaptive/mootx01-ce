@@ -66,18 +66,34 @@ enum VaultTools {
         let sha256: String
     }
 
+    /// Manifest schema version stamped by this build. Version 2 means every
+    /// entry is a CERTIFICATION: the note's disk content was known to agree
+    /// with the estate's record when stamped (written by the export, or
+    /// imported by a reconcile apply and re-stamped). A manifest without a
+    /// `version` key is legacy: it was built by hashing every `.md` on disk,
+    /// so its entries certify nothing and reconcile must not treat a hash
+    /// match as "unchanged" (VR-01 Finding A).
+    static let manifestSchemaVersion = 2
+
     /// The sidecar manifest `moot_vault_export` writes after a successful
-    /// bridge export. `reconcile` diffs current file hashes against
+    /// bridge export (and `moot_vault_reconcile` apply re-stamps for the
+    /// paths it imports). `reconcile` diffs current file hashes against
     /// `files`; `status` reports the header.
     struct ExportManifest: Codable, Sendable, Equatable {
+        /// Manifest schema version (see `manifestSchemaVersion`). `nil` on
+        /// legacy manifests, whose hashes are not certifications — reconcile
+        /// classifies every note under a legacy manifest as changed /
+        /// needs-review, failing toward surfacing rather than silence.
+        let version: Int?
         /// ISO8601 instant the export ran. Display / status only; not part
         /// of the drift compare.
         let exportedAt: String
-        /// Note count at export (`== files.count`). Carried for the status
-        /// summary so it needs no re-enumeration.
+        /// Note count at stamp time (`== files.count`). Carried for the
+        /// status summary so it needs no re-enumeration.
         let noteCount: Int
         /// Vault-relative path (forward slashes, e.g. `Chem/Aromatics.md`)
-        /// → content stamp.
+        /// → content stamp. Version 2: ONLY paths the export wrote (or a
+        /// reconcile apply imported) — never a whole-disk enumeration.
         let files: [String: ManifestEntry]
     }
 
@@ -283,13 +299,18 @@ enum VaultTools {
                 // surface via the receipt in the estate diary.
                 let capturedJobID = jobID
                 let capturedRegistry = jobRegistry
-                _ = try await bridge.export(
+                let exportReport = try await bridge.export(
                     estate: handle, to: vaultURL, scope: capturedScope, now: Date(),
                     progress: { processed, total in
                         Task { await capturedRegistry.updateProgress(
                             jobID: capturedJobID, processed: processed, total: total) }
                     })
-                let manifest = try VaultTools.buildManifest(vaultURL: vaultURL, now: Date())
+                // Stamp ONLY the paths the export wrote (its certification
+                // receipt) — never a whole-disk enumeration, which would
+                // certify unexported notes and hide their edits from every
+                // future reconcile (VR-01 Finding A).
+                let manifest = try VaultTools.buildManifest(
+                    vaultURL: vaultURL, writtenPaths: exportReport.notePaths, now: Date())
                 try VaultTools.writeManifest(manifest, to: vaultURL)
                 // Export companion CSVs for dataset handles (MX-TAB-7b §6).
                 // Non-fatal — CSV export failures are silently collected so a broken
@@ -498,6 +519,14 @@ enum VaultTools {
         }
         let current = try hashAllNotes(vaultURL: vaultURL)
 
+        // A manifest entry is only trustworthy as a certification of
+        // vault↔estate agreement on schema v2+ (stamped from the export's
+        // written-paths receipt, or re-stamped by a reconcile apply). A
+        // legacy manifest was built by hashing every `.md` on disk — after
+        // such a "manifest reset" its prior hashes are unavailable and a
+        // hash match proves nothing about the estate's record.
+        let manifestCertifies = (manifest.version ?? 0) >= manifestSchemaVersion
+
         // Drift = exact hash compare of the current note set against the
         // export stamp. A path present now but absent from the manifest is
         // added; a path whose SHA-256 differs is modified; a path in the
@@ -515,16 +544,26 @@ enum VaultTools {
         added.sort(); modified.sort()
         let deletedSorted = deleted.sorted()
 
-        // Candidate paths: the added and modified notes whose content has drifted
-        // from the export stamp — what the manifest diff can establish. Listed
-        // as-is in dry-run mode; in apply mode they are the base of the import
-        // set, which also picks up the notes the estate does not hold.
-        let candidatePaths = Set(added + modified)
+        // Candidate paths: the notes classified changed / needs-review.
+        // Certified (v2) manifest: the added and modified notes — what the
+        // manifest diff can establish. Legacy manifest: EVERY note currently
+        // on disk. A note whose content differs from the estate's record must
+        // be reported as changed, and with prior hashes unavailable the safe
+        // classification is "changed / needs review", never "unchanged" —
+        // fail toward surfacing, not toward silence. The import's
+        // content-idempotent check absorbs the over-selection without a
+        // write, and the apply-mode re-stamp converges the manifest to v2 so
+        // the full surface happens once, not forever.
+        let candidatePaths = manifestCertifies ? Set(added + modified) : Set(current.keys)
         let candidatePathsSorted = candidatePaths.sorted()
 
         var lines = [
             "vault_reconcile: \(added.count) added, \(modified.count) modified, \(deletedSorted.count) deleted",
         ]
+        if !manifestCertifies {
+            lines.append(
+                "manifest: legacy (pre-certification) — prior hashes unavailable; all \(current.count) note(s) classified changed / needs review")
+        }
         lines.append("added:")
         lines += added.map { "  + \($0)" }
         lines.append("modified:")
@@ -654,13 +693,33 @@ enum VaultTools {
 
     // MARK: - Manifest IO + hashing
 
-    /// SHA-256 every `.md` note under `vaultURL` and assemble the manifest.
-    static func buildManifest(vaultURL: URL, now: Date) throws -> ExportManifest {
-        let files = try hashAllNotes(vaultURL: vaultURL)
+    /// SHA-256 the export-written notes and assemble the manifest.
+    ///
+    /// `writtenPaths` is the export's receipt (`ExportReport.notePaths`) —
+    /// the only notes whose disk content is known to agree with the estate's
+    /// record at this instant. Hashing is restricted to that set: stamping a
+    /// note the export did not write (foreign, scope-excluded, or user-edited
+    /// and not re-exported) would certify agreement nobody verified, and a
+    /// note so mis-certified matches the manifest on the next reconcile and
+    /// is never surfaced again (VR-01 Finding A). Un-stamped notes fall into
+    /// reconcile's "added" bucket — changed/needs-review, fail toward
+    /// surfacing.
+    static func buildManifest(
+        vaultURL: URL, writtenPaths: [String], now: Date
+    ) throws -> ExportManifest {
+        var files: [String: ManifestEntry] = [:]
+        for rel in Set(writtenPaths) {
+            // The export just wrote each of these paths through fromIR's
+            // containment guards; a direct read here hashes the actual disk
+            // bytes so the stamp certifies exactly what landed.
+            let data = try Data(contentsOf: vaultURL.appendingPathComponent(rel))
+            files[rel] = ManifestEntry(sha256: sha256Hex(data))
+        }
         // Fresh formatter per call: ISO8601DateFormatter is not Sendable,
         // so it cannot be a shared static under Swift 6 strict concurrency
         // (same per-call construction LensTools uses).
         return ExportManifest(
+            version: manifestSchemaVersion,
             exportedAt: ISO8601DateFormatter().string(from: now),
             noteCount: files.count,
             files: files)

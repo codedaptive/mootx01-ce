@@ -611,32 +611,29 @@ struct VaultToolsTests {
 
     // MARK: - V1 regression (reconcile apply on fresh export ingests foreign vault notes)
 
-    /// V1 regression test for commit 0136baf12 (VAULT-FIX-01 V1).
+    /// V1 regression test for commit 0136baf12 (VAULT-FIX-01 V1), updated for
+    /// the VR-01 manifest-certification fix.
     ///
-    /// Root cause: vault_reconcile --apply true passed only candidate_paths
-    /// (notes added/modified vs the manifest) to importVault. After vault_export
-    /// stamps the manifest by hashing all .md files currently in the vault
-    /// directory (including notes that predated the export), a reconcile that
-    /// immediately follows sees zero drift — candidate_paths = {} → importVault
-    /// never called → success reported, estate unchanged (silent data loss).
+    /// Original root cause: vault_reconcile --apply true passed only candidate
+    /// paths to importVault, so a foreign note stamped by the export's
+    /// whole-disk manifest was never imported (silent data loss).
     ///
-    /// Fix: apply mode calls importVault on ALL vault notes. Import is idempotent
-    /// per stableSourceKey: drawers already in the estate with byte-identical
-    /// content are skipped. The drift report (added/modified/deleted counts) is
-    /// unchanged and still accurately describes manifest drift.
+    /// Under VR-01 the manifest stamps ONLY the paths the export wrote
+    /// (its certification receipt). A foreign note therefore carries no
+    /// stamp, is classified "added" (changed / needs review), and is
+    /// surfaced as a candidate — visible in the drift report rather than
+    /// silently swept in by a hidden missing-set.
     ///
     /// Scenario mirrors the Rust twin (dispatch_tests.rs:
     /// vault_reconcile_apply_after_fresh_export_ingests_foreign_note):
     ///   1. Fresh bare estate (no captured notes).
     ///   2. A "foreign" note is written manually to the vault directory —
     ///      simulating a pre-existing Obsidian note that predates the estate.
-    ///   3. vault_export: the bridge exports zero estate notes (estate is bare)
-    ///      but buildManifest hashes all .md files in the vault directory and
-    ///      fingerprints ForeignNote.md into the manifest.
-    ///   4. vault_reconcile apply=true: vault matches manifest exactly →
-    ///      zero drift (0 added, 0 modified, 0 deleted). The estate holds no
-    ///      drawer answering to ForeignNote.md, so the missing-set computation
-    ///      adds it to the import set and it is ingested despite zero candidates.
+    ///   3. vault_export: the bridge exports zero estate notes (estate is
+    ///      bare); the manifest stamps zero paths (nothing was written, so
+    ///      nothing can be certified as agreeing with the estate).
+    ///   4. vault_reconcile apply=true: ForeignNote.md has no stamp →
+    ///      1 added → surfaced as a candidate and imported.
     ///
     /// Assertion is RETRIEVABILITY (kit.recall returns 1 drawer), not just
     /// the receipt text. Retrievability proves the drawer landed in the estate;
@@ -660,10 +657,9 @@ struct VaultToolsTests {
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Export on the bare estate. The bridge writes zero notes from the estate
-        // (no captures). buildManifest then hashes all .md files in the vault
-        // directory — which includes ForeignNote.md — and writes the manifest.
-        // After this call the manifest records ForeignNote.md with its SHA-256.
+        // Export on the bare estate. The bridge writes zero notes from the
+        // estate (no captures), so the manifest stamps zero paths —
+        // ForeignNote.md is NOT certified and must surface on reconcile.
         try await runExportAndAwait(vault: vault, via: dispatcher)
 
         // Pre-condition: estate is still empty. Export reads from the estate and
@@ -673,10 +669,9 @@ struct VaultToolsTests {
             handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
         #expect(before.count == 0)
 
-        // Reconcile apply=true. The manifest was just stamped from ForeignNote.md
-        // so the file's hash matches — zero drift detected (0 added, 0 modified,
-        // 0 deleted). The estate holds no drawer under ForeignNote.md's lineage or
-        // export path, so it joins the import set despite the empty diff.
+        // Reconcile apply=true. ForeignNote.md carries no stamp (the export
+        // wrote nothing), so it is classified "added" — surfaced in the
+        // drift report as a candidate and imported by apply.
         let applyResult = try text(try await dispatcher.dispatch(
             name: "moot_vault_reconcile",
             arguments: reconcileArgs(vaultPath: vault.path, apply: true)))
@@ -688,8 +683,10 @@ struct VaultToolsTests {
             handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
         #expect(after.count == 1, "ForeignNote.md must be retrievable from the estate after reconcile apply; got \(after.count) drawers. Receipt: \(applyResult)")
 
-        // Secondary assertions on the receipt.
-        #expect(applyResult.contains("0 added, 0 modified, 0 deleted"), "Zero drift expected — manifest was stamped immediately before reconcile; got: \(applyResult)")
+        // Secondary assertions on the receipt: the foreign note is SURFACED
+        // (1 added), not silently swept in — the review gate sees it.
+        #expect(applyResult.contains("1 added, 0 modified, 0 deleted"), "ForeignNote.md must surface as added — it carries no certification stamp; got: \(applyResult)")
+        #expect(applyResult.contains("+ ForeignNote.md"), "The added listing must name the foreign note; got: \(applyResult)")
         #expect(applyResult.contains("apply: true"), "Receipt must confirm apply mode; got: \(applyResult)")
     }
 
@@ -1246,6 +1243,7 @@ struct VaultToolsTests {
 
         // A minimal manifest — content doesn't matter, the guard fires before encode.
         let manifest = VaultTools.ExportManifest(
+            version: VaultTools.manifestSchemaVersion,
             exportedAt: "2026-01-01T00:00:00Z", noteCount: 0, files: [:])
 
         // writeManifest must throw, not follow the symlink.
@@ -1291,6 +1289,7 @@ struct VaultToolsTests {
 
         // A minimal manifest — content doesn't matter, the guard fires at dir creation.
         let manifest = VaultTools.ExportManifest(
+            version: VaultTools.manifestSchemaVersion,
             exportedAt: "2026-01-01T00:00:00Z", noteCount: 0, files: [:])
 
         // writeManifest must throw — the symlinked .moot parent is foreign to the vault.

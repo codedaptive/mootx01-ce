@@ -125,6 +125,18 @@ pub struct ExportReport {
 
     /// The scope the export ran under.
     pub scope: VaultExportScope,
+
+    /// Vault-relative paths of the notes this export wrote
+    /// (`"Wing/Room/Slug.md"` form — `stable_source_key + ".md"`, the exact
+    /// path `ObsidianAdapter::from_ir` writes each note at). This is the
+    /// export's certification receipt: the only notes whose disk content is
+    /// known to agree with the estate's record at export time. The tool layer
+    /// stamps its drift manifest from THIS list rather than re-enumerating
+    /// the vault — stamping a note the export did not write would certify
+    /// vault↔estate agreement nobody verified, which is how changed notes
+    /// went silent after a manifest reset (VR-01 Finding A). Mirrors Swift
+    /// `ExportReport.notePaths`.
+    pub note_paths: Vec<String>,
 }
 
 /// The existing-drawer snapshot every import entry point needs: active lineage
@@ -211,6 +223,11 @@ impl<'a> VaultBridge<'a> {
             excluded_secret_tier: projection.excluded_secret_tier,
             excluded_private_tier: projection.excluded_private_tier,
             scope,
+            // `stable_source_key + ".md"` is the exact write path from_ir used
+            // above (ObsidianAdapter writes each note at that vault-relative
+            // path; index.md/log.md nav files are emitted separately and are
+            // never notes, so they are correctly absent from this receipt).
+            note_paths: projection.notes.iter().map(|n| format!("{}.md", n.stable_source_key)).collect(),
         };
         let entry = format!(
             "{{\"operation\":\"vault-export\",\"scope\":\"{}\",\"destination\":{},\"notesExported\":{},\"excludedSecretTier\":{},\"excludedPrivateTier\":{},\"occurredAt\":\"{}\"}}",

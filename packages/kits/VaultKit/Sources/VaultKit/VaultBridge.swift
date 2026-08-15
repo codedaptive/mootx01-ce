@@ -122,16 +122,29 @@ public struct ExportReport: Sendable, Equatable {
     /// The scope the export ran under.
     public var scope: VaultExportScope
 
+    /// Vault-relative paths of the notes this export wrote
+    /// (`"Wing/Room/Slug.md"` form — `stableSourceKey + ".md"`, the exact
+    /// path `ObsidianAdapter.fromIR` writes each note at). This is the
+    /// export's receipt: the only notes whose disk content is known to agree
+    /// with the estate's record at export time. The tool layer stamps its
+    /// drift manifest from THIS list rather than re-enumerating the vault —
+    /// stamping a note the export did not write would certify vault↔estate
+    /// agreement nobody verified, which is how changed notes went silent
+    /// after a manifest reset (VR-01 Finding A).
+    public var notePaths: [String]
+
     public init(
         notesExported: Int = 0,
         excludedSecretTier: Int = 0,
         excludedPrivateTier: Int = 0,
-        scope: VaultExportScope = .exportable
+        scope: VaultExportScope = .exportable,
+        notePaths: [String] = []
     ) {
         self.notesExported = notesExported
         self.excludedSecretTier = excludedSecretTier
         self.excludedPrivateTier = excludedPrivateTier
         self.scope = scope
+        self.notePaths = notePaths
     }
 }
 
@@ -210,7 +223,12 @@ public struct VaultBridge: Sendable {
             notesExported: projection.notes.count,
             excludedSecretTier: projection.excludedSecretTier,
             excludedPrivateTier: projection.excludedPrivateTier,
-            scope: scope
+            scope: scope,
+            // `stableSourceKey + ".md"` is the exact write path fromIR used
+            // above (ObsidianAdapter writes each note at that vault-relative
+            // path; index.md/log.md nav files are emitted separately and are
+            // never notes, so they are correctly absent from this receipt).
+            notePaths: projection.notes.map { $0.stableSourceKey + ".md" }
         )
         try await writeExportReceipt(report, destination: vaultURL.path, handle: handle, now: now)
         Self.log.info("exported \(report.notesExported, privacy: .public) notes to vault (scope: \(scope.rawValue, privacy: .public), excluded secret: \(report.excludedSecretTier, privacy: .public), excluded private: \(report.excludedPrivateTier, privacy: .public))")

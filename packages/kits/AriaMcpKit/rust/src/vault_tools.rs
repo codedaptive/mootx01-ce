@@ -9,8 +9,12 @@
 //!
 //! VaultKit's bridge writes no per-note content hash. The ARIA layer (this
 //! module) owns the drift stamp. After a successful `VaultBridge::export`,
-//! `moot_vault_export` hashes every `.md` file under the vault root with
-//! SHA-256 and writes a manifest JSON to `.moot/export-manifest.json`.
+//! `moot_vault_export` SHA-256 hashes ONLY the paths the export wrote
+//! (the written-paths certification receipt from `ExportReport::note_paths`)
+//! and writes a manifest JSON to `.moot/export-manifest.json` (schema v2).
+//! Hashing only the export's written paths certifies exactly the notes whose
+//! disk content agreed with the estate at export time — stamping unwritten
+//! notes would certify agreement nobody verified (VR-01 Finding A).
 //!
 //! `.moot/` is hidden (leading `.`), so `ObsidianAdapter::to_ir` (which
 //! skips hidden files) never reads the manifest as a note on re-import.
@@ -65,11 +69,19 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use vault_kit::{DrawerMapping, ImportReport, ObsidianAdapter, VaultBridge, VaultExportScope};
+use vault_kit::{DrawerMapping, ExportReport, ImportReport, ObsidianAdapter, VaultBridge, VaultExportScope};
 
 // ---------------------------------------------------------------------------
 // Manifest data structures
 // ---------------------------------------------------------------------------
+
+/// Manifest schema version stamped by this build. Version 2 means every entry
+/// is a CERTIFICATION: the note's disk content was known to agree with the
+/// estate's record when stamped (written by the export). A manifest without a
+/// `version` key is legacy: it was built by hashing every `.md` on disk, so
+/// its entries certify nothing — reconcile must not treat a hash match as
+/// "unchanged" (VR-01 Finding A). Mirrors Swift `VaultTools.manifestSchemaVersion`.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// One note's SHA-256 stamp at export time. Mirrors Swift `ManifestEntry`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -79,17 +91,28 @@ pub struct ManifestEntry {
 
 /// The sidecar manifest `moot_vault_export` writes. Mirrors Swift `ExportManifest`.
 ///
+/// - `version`:     schema version (`MANIFEST_SCHEMA_VERSION`). `None` on legacy
+///   manifests (no `version` key in JSON) whose hashes certify nothing —
+///   reconcile classifies every note under a legacy manifest as changed /
+///   needs-review, failing toward surfacing rather than silence.
 /// - `exported_at`: ISO8601 instant the export ran (display only, not used in diff).
 ///   Serializes as `exportedAt` (camelCase) to match Swift's manifest.json key.
 /// - `note_count`:  number of notes at export time — NOT written to manifest.json
 ///   (`skip_serializing`) so diffs against Swift-written manifests stay clean.
 ///   Read from `files.len()` on the deserialized struct instead.
-/// - `files`:       vault-relative path → SHA-256 stamp.
+/// - `files`:       vault-relative path → SHA-256 stamp. Version 2: ONLY paths
+///   the export wrote — never a whole-disk enumeration.
 ///
 /// `files` is keyed by forward-slash vault-relative path matching the keys
 /// `ObsidianAdapter::to_ir` produces, so re-hashing after a re-read aligns.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ExportManifest {
+    /// Manifest schema version (see `MANIFEST_SCHEMA_VERSION`). `None` on
+    /// legacy manifests, whose hashes are not certifications — reconcile
+    /// classifies every note under a legacy manifest as changed /
+    /// needs-review, failing toward surfacing rather than silence.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<u32>,
     // Serializes as "exportedAt" (camelCase) to match Swift's manifest.json key.
     // The alias accepts "exported_at" (snake_case) so old Rust-written manifests
     // still deserialize correctly on vault_status / reconcile reads.
@@ -368,15 +391,20 @@ fn run_export(
     let now_ms = wall_now_ms();
     // VaultKitError implements Display with clean English messages — use it
     // so no internal Rust enum variant names leak to the agent boundary.
-    bridge.export(&open.handle, vault_path, now_ms, scope, None).map_err(|e| {
+    // Capture the report to extract the certification receipt (note_paths) for
+    // the manifest — stamping only written paths, not the whole vault (VR-01 Finding A).
+    let export_report: ExportReport = bridge.export(&open.handle, vault_path, now_ms, scope, None).map_err(|e| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             format!("vault_export: bridge export failed: {e}"),
         )
     })?;
 
-    // Build and write the SHA-256 sidecar manifest.
-    let manifest = build_manifest(vault_path, now_ms).map_err(|e| {
+    // Build and write the SHA-256 sidecar manifest. Stamp ONLY the paths the
+    // export wrote (its certification receipt) — never a whole-disk enumeration,
+    // which would certify unexported notes and hide their edits from every future
+    // reconcile (VR-01 Finding A).
+    let manifest = build_manifest(vault_path, &export_report.note_paths, now_ms).map_err(|e| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             format!("vault_export: manifest build failed: {e}"),
@@ -772,6 +800,13 @@ fn run_reconcile(
         Ok(c) => c,
     };
 
+    // A manifest entry is only trustworthy as a certification of vault↔estate
+    // agreement on schema v2+ (stamped from the export's written-paths receipt).
+    // A legacy manifest (no version key) was built by hashing every `.md` on
+    // disk — after such a "manifest reset" its prior hashes are unavailable and
+    // a hash match proves nothing about the estate's record (VR-01 Finding A).
+    let manifest_certifies = manifest.version.unwrap_or(0) >= MANIFEST_SCHEMA_VERSION;
+
     // Diff: added = in current but not in manifest; modified = SHA differs;
     // deleted = in manifest but not in current.
     let mut added: Vec<String> = Vec::new();
@@ -793,11 +828,20 @@ fn run_reconcile(
     modified.sort();
     deleted.sort();
 
-    // Candidate paths: added + modified — what the manifest diff can establish.
-    // Listed as-is in dry-run mode; in apply mode they are the base of the
-    // import set, which also picks up the notes the estate does not hold.
-    let candidate_paths: std::collections::HashSet<String> =
-        added.iter().chain(modified.iter()).cloned().collect();
+    // Candidate paths: the notes classified changed / needs-review.
+    // Certified (v2) manifest: the added and modified notes — what the manifest
+    // diff can establish. Legacy manifest: EVERY note currently on disk. A note
+    // whose content differs from the estate's record must be reported as changed,
+    // and with prior hashes unavailable the safe classification is "changed /
+    // needs review", never "unchanged" — fail toward surfacing, not toward
+    // silence. The import's content-idempotent check absorbs the over-selection
+    // without a write, and the apply-mode re-stamp converges the manifest to v2
+    // so the full surface happens once, not forever.
+    let candidate_paths: std::collections::HashSet<String> = if manifest_certifies {
+        added.iter().chain(modified.iter()).cloned().collect()
+    } else {
+        current.keys().cloned().collect()
+    };
 
     let mut lines = vec![format!(
         "vault_reconcile: {} added, {} modified, {} deleted",
@@ -805,6 +849,12 @@ fn run_reconcile(
         modified.len(),
         deleted.len(),
     )];
+    if !manifest_certifies {
+        lines.push(format!(
+            "manifest: legacy (pre-certification) — prior hashes unavailable; all {} note(s) classified changed / needs review",
+            current.len()
+        ));
+    }
     lines.push("added:".to_owned());
     for p in &added {
         lines.push(format!("  + {p}"));
@@ -986,8 +1036,17 @@ fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
 // Manifest I/O + hashing
 // ---------------------------------------------------------------------------
 
-/// SHA-256 every `.md` note under `vault_path` (skipping hidden files and
-/// directories) and assemble the export manifest.
+/// SHA-256 exactly the paths the export wrote and assemble the export manifest.
+///
+/// `written_paths` is the certification receipt from `VaultBridge::export` —
+/// only the vault-relative paths the export actually wrote. Hashing is
+/// restricted to that set: stamping a note the export did not write (foreign,
+/// scope-excluded, or user-edited and not re-exported) would certify
+/// vault↔estate agreement nobody verified, and a note so mis-certified matches
+/// the manifest on the next reconcile and is never surfaced again (VR-01
+/// Finding A). Un-stamped notes fall into reconcile's "added" bucket —
+/// changed/needs-review, fail toward surfacing. Mirrors Swift
+/// `VaultTools.buildManifest(vaultURL:writtenPaths:now:)`.
 ///
 /// `now_ms` is milliseconds-since-epoch, supplied by the caller. The
 /// `exported_at` ISO8601 timestamp is derived from it. Using milliseconds
@@ -995,16 +1054,25 @@ fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
 /// consistent in the same handler invocation.
 pub fn build_manifest(
     vault_path: &Path,
+    written_paths: &[String],
     now_ms: i64,
 ) -> Result<ExportManifest, std::io::Error> {
-    let files = hash_all_notes(vault_path)?;
+    let mut files: BTreeMap<String, ManifestEntry> = BTreeMap::new();
+    for rel in written_paths {
+        // The export just wrote each of these paths through the adapter's
+        // containment guards; a direct read here hashes the actual disk bytes
+        // so the stamp certifies exactly what landed.
+        let content = std::fs::read(vault_path.join(rel))?;
+        let sha256 = sha256_hex(&content);
+        files.insert(rel.clone(), ManifestEntry { sha256 });
+    }
     let note_count = files.len();
     // Derive the ISO8601 timestamp from now_ms (milliseconds since epoch).
     // Round to seconds for the display-only field — matches Swift's
     // `ISO8601DateFormatter().string(from: now)` which is second-resolution.
     let secs = (now_ms / 1000) as u64;
     let exported_at = format_iso8601(secs);
-    Ok(ExportManifest { exported_at, note_count, files })
+    Ok(ExportManifest { version: Some(MANIFEST_SCHEMA_VERSION), exported_at, note_count, files })
 }
 
 /// Write the manifest to `.moot/export-manifest.json` inside the vault.

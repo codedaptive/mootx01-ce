@@ -1,8 +1,8 @@
 ---
 title: VaultKit Specification
-version: v0.3
+version: v0.4
 status: active
-date: 2026-08-03
+date: 2026-08-15
 description: "Behavioral specification for VaultKit: invariants, behavioral contracts, and the guarantees the bridge makes to callers and the substrate."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -309,9 +309,16 @@ value of 0 on a bulk import means every drawer was already indexed
 `.moot/export-manifest.json` inside the vault (a hidden directory,
 invisible to `ObsidianAdapter.toIR`'s `.skipsHiddenFiles` enumerator).
 `VaultBridge.export` itself does not stamp per-note hashes — drift
-detection is the tool layer's responsibility. `moot_vault_reconcile`
-recomputes SHA-256 hashes and classifies notes as added, modified, or
-deleted; deleted notes are reported only, never actioned.
+detection is the tool layer's responsibility; the bridge contributes only
+its written-paths receipt (`ExportReport.notePaths`). A manifest entry is
+a certification that the note's disk content agreed with the estate's
+record at stamp time, so schema-v2 manifests stamp ONLY the paths the
+export wrote — never a whole-disk enumeration. `moot_vault_reconcile`
+recomputes SHA-256 hashes and classifies notes as added (unstamped —
+changed / needs review), modified, or deleted; under a legacy manifest
+(no `version` key) prior hashes are unavailable and every current note
+classifies changed / needs review. Deleted notes are reported only,
+never actioned.
 
 **B-8 (candidate seam is return-only):** `moot_vault_reconcile` produces
 a candidate list (added + modified notes) but writes no Proposal noun and
@@ -463,6 +470,15 @@ fixture and the golden OKF round-trip fixture are asserted byte-identically
 in both ports.
 
 ## Changelog
+
+### v0.4 — 2026-08-15
+
+B-7 tightened for VR-01 (Codex Finding A — reconcile skipped changed notes
+after a manifest reset): a manifest entry is now defined as a certification
+of vault↔estate agreement at stamp time. Schema-v2 manifests stamp only the
+export's written-paths receipt (`ExportReport.notePaths`); legacy manifests
+(no `version` key) certify nothing and every current note classifies
+changed / needs review. Fail toward surfacing, never silence.
 
 ### v0.3 — 2026-08-03
 

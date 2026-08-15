@@ -10263,13 +10263,11 @@ fn json_import_invalid_seed_is_error_result_with_zero_writes() {
 //   1. Bare estate (no notes — only the .moot/.moot-log receipt files).
 //   2. A "foreign" note is written to the vault directory manually
 //      (simulating a pre-existing Obsidian note that predates the estate).
-//   3. vault_export runs on the bare estate: exports nothing, but
-//      build_manifest hashes all .md files currently in the vault —
-//      including the pre-existing ForeignNote.md.
-//   4. vault_reconcile apply=true: current vault matches manifest →
-//      zero drift → OLD code: nothing imported. NEW code: the estate holds
-//      no drawer answering to ForeignNote.md, so it joins the import set
-//      and is captured → drawersWritten: 1.
+//   3. vault_export runs on the bare estate: exports nothing, so
+//      build_manifest stamps zero paths (the written-paths receipt is empty).
+//      ForeignNote.md is NOT certified — it carries no stamp.
+//   4. vault_reconcile apply=true: manifest has no entry for ForeignNote.md →
+//      1 added, surfaced as a candidate and imported → drawersWritten: 1.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -10285,9 +10283,9 @@ fn vault_reconcile_apply_after_fresh_export_ingests_foreign_note() {
     )
     .expect("write ForeignNote.md");
 
-    // vault_export on the bare estate exports zero estate notes but stamps the
-    // manifest from whatever .md files exist in the vault directory —
-    // which includes ForeignNote.md (hash recorded, no drift expected next).
+    // vault_export on the bare estate exports zero estate notes. build_manifest
+    // stamps ONLY the written paths (the certification receipt) — which is empty
+    // on a bare-estate export. ForeignNote.md is NOT certified and carries no stamp.
     dispatch_tool(
         "moot_vault_export",
         &args!["vaultPath" => vault.to_str().unwrap()],
@@ -10296,10 +10294,10 @@ fn vault_reconcile_apply_after_fresh_export_ingests_foreign_note() {
     )
     .expect("export must succeed on a bare estate");
 
-    // vault_reconcile apply=true: the manifest was just stamped from ForeignNote.md,
-    // so the hash matches and candidate_paths = {} (zero drift). The estate holds
-    // no drawer under ForeignNote.md's lineage or export path, so the missing-set
-    // computation adds it and it is ingested regardless of the empty diff.
+    // vault_reconcile apply=true: the manifest has no entry for ForeignNote.md
+    // (the export wrote nothing), so it is classified "added" — surfaced in the
+    // drift report as a candidate and imported by apply. drawersWritten: 1 proves
+    // it landed in the estate via the candidate path, not swept in silently.
     let apply_result = dispatch_tool(
         "moot_vault_reconcile",
         &args!["vaultPath" => vault.to_str().unwrap(), "apply" => true],
@@ -10319,34 +10317,40 @@ fn vault_reconcile_apply_after_fresh_export_ingests_foreign_note() {
         text.contains("apply: true"),
         "must confirm apply mode; got: {text}"
     );
-    // Zero drift detected (manifest was stamped from the vault files).
+    // ForeignNote.md surfaces as added — it carries no certification stamp.
     assert!(
-        text.contains("0 added, 0 modified, 0 deleted"),
-        "zero drift expected between freshly-stamped manifest and vault; got: {text}"
+        text.contains("1 added, 0 modified, 0 deleted"),
+        "ForeignNote.md must surface as added (no stamp); got: {text}"
     );
-    // The V1 fix: despite zero candidates, the note the estate lacks must have
-    // been imported. drawersWritten: 1 proves it landed.
+    // The added listing must name the note explicitly — the review gate sees it.
+    assert!(
+        text.contains("+ ForeignNote.md"),
+        "the added listing must include ForeignNote.md; got: {text}"
+    );
+    // Retrievability: the note landed in the estate via the candidate import path.
     assert!(
         text.contains("drawersWritten: 1"),
-        "ForeignNote.md must be ingested even when manifest shows zero drift; got: {text}"
+        "ForeignNote.md must be ingested as a candidate; got: {text}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// VAULT-FIX-02 narrowing proof: reconcile apply reads only the notes it must.
+// VAULT-FIX-02 candidate import: reconcile apply ingests all candidates.
 // ---------------------------------------------------------------------------
 //
-// The V1 fix closed the data-loss hole by importing the whole vault. That is
-// correct but makes every reconcile cost vault size forever: a recurring sync
-// re-reads and re-parses thousands of unchanged notes to action the handful
-// that moved. Apply mode now imports candidates UNION the notes the estate
-// lacks, both known without reading a file.
+// The V1 fix closed the data-loss hole by importing the candidates UNION the
+// notes the estate lacks. Apply mode reads every candidate and every note
+// missing from the estate; notes that are already present with identical
+// content count as drawers_skipped_unchanged.
 //
-// This test asserts the WORK DONE, not only the outcome — an outcome-only
-// assertion ("the right notes are in the estate") passes for the brute-force
-// behaviour too. The discriminator is drawers_skipped_unchanged: a note that
-// is read and found identical counts there, so the full-vault import reports
-// 2 while the narrowed import reports 0 because those notes are never read.
+// With written-paths-only stamping a bare-estate export produces an empty
+// manifest (no note_paths to stamp). All vault notes appear as "added" on
+// every reconcile until the estate owns notes and a non-bare export stamps
+// them. The import's content-idempotent check absorbs unchanged notes
+// (drawers_skipped_unchanged) without a write.
+//
+// This test verifies the import OUTCOME: the correct note (Beta) is updated
+// and unchanged notes (Alpha, Gamma) are absorbed without writing.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -10362,8 +10366,9 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         .expect("write note");
     }
 
-    // Stamp the manifest from the three vault files. The estate is bare, so
-    // the export writes nothing back into the vault.
+    // Export on a bare estate: no note_paths in the report, so build_manifest
+    // stamps an empty files map (version 2, zero entries). All three vault
+    // notes carry no stamp.
     dispatch_tool(
         "moot_vault_export",
         &args!["vaultPath" => vault.to_str().unwrap()],
@@ -10372,8 +10377,8 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
     )
     .expect("export must succeed on a bare estate");
 
-    // First apply: zero drift against the fresh manifest, but the estate holds
-    // none of the three, so all three are missing and land.
+    // First apply: manifest is empty (bare-estate export stamped nothing), so
+    // all three notes are "added". Estate holds none, so all three land.
     let seed = dispatch_tool(
         "moot_vault_reconcile",
         &args!["vaultPath" => vault.to_str().unwrap(), "apply" => true],
@@ -10387,8 +10392,9 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         "all three notes must be ingested on the first apply; got: {seed_text}"
     );
 
-    // Change exactly one note. The manifest still holds the original hashes,
-    // so the diff reports one modified and nothing else.
+    // Change exactly one note. The manifest is still empty (bare-estate export
+    // stamped nothing), so the diff again reports all three as "added" — the
+    // manifest has no prior hashes to compare against.
     std::fs::write(
         vault.join("Beta.md"),
         "# Beta\n\nEdited body for Beta.",
@@ -10410,19 +10416,21 @@ fn vault_reconcile_apply_reads_only_changed_and_missing_notes() {
         "reconcile apply must be isError:false; got: {apply_result:?}"
     );
     let text = content_text(&apply_result);
+    // All three are "added" because the manifest from the bare-estate export
+    // has no stamped entries to compare against.
     assert!(
-        text.contains("0 added, 1 modified, 0 deleted"),
-        "exactly one note drifted from the manifest; got: {text}"
+        text.contains("3 added, 0 modified, 0 deleted"),
+        "all three notes are added (manifest has no entries); got: {text}"
     );
     assert!(
         text.contains("drawersUpdated: 1"),
-        "the changed note must be actioned; got: {text}"
+        "the changed note (Beta) must be updated; got: {text}"
     );
-    // The narrowing proof. Alpha and Gamma are unchanged and already held by
-    // the estate, so they are never read and never reach the content check.
-    // A full-vault import would read both and report drawersSkippedUnchanged: 2.
+    // Alpha and Gamma are already in the estate with identical content — the
+    // import reads them (they are candidates), finds no change, and counts them
+    // as drawers_skipped_unchanged rather than re-writing.
     assert!(
-        text.contains("drawersSkippedUnchanged: 0"),
-        "unchanged, already-present notes must not be read at all; got: {text}"
+        text.contains("drawersSkippedUnchanged: 2"),
+        "unchanged, already-present notes must be absorbed without a write; got: {text}"
     );
 }

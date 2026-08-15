@@ -31,6 +31,7 @@ fn write_manifest_refuses_pre_existing_symlink_at_manifest_path() {
 
     // A minimal manifest — content doesn't matter, the guard fires before serialization.
     let manifest = ExportManifest {
+        version: None,
         exported_at: "2026-01-01T00:00:00Z".to_string(),
         note_count: 0,
         files: BTreeMap::new(),
@@ -93,6 +94,7 @@ fn write_manifest_refuses_symlinked_moot_parent_dir() {
 
     // A minimal manifest — content doesn't matter, the guard fires at dir check.
     let manifest = ExportManifest {
+        version: None,
         exported_at: "2026-01-01T00:00:00Z".to_string(),
         note_count: 0,
         files: BTreeMap::new(),
