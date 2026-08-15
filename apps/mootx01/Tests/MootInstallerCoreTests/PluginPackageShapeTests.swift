@@ -181,10 +181,12 @@ struct PluginPackageShapeTests {
 
     /// No Codex lifecycle hook command shipped by the INSTALLER may resolve
     /// `mootx01` via bare PATH order. The packager's GeneratorTests guard
-    /// the generated trees and the committed Rust embed; this test guards
-    /// the compiled Swift embed — `mootx01 install` materializes
-    /// `InstallBundle.embedded.packages`, so this is the artifact users
-    /// actually receive. Asserted against the decoded bundle (never a
+    /// the generated trees and checked-in wiring files; each PORT guards the
+    /// embedded carrier it compiles — this test covers the Swift embed
+    /// (`InstallBundle.embedded`, the packages map `mootx01 install`
+    /// materializes), and the Rust twin in core/depth.rs
+    /// (`embedded_codex_hook_commands_never_resolve_via_bare_path`) covers
+    /// the include_str! bundle. Asserted against the decoded bundle (never a
     /// substring scan of the EmbeddedArtifacts literal), at the same
     /// generation boundary as the rest of this suite. A stale or hand-edited
     /// embed that reintroduces a bare invocation fails here even when every

@@ -627,6 +627,68 @@ mod tests {
         assert_eq!(InstallDepth::DEFAULT, InstallDepth::Plugin);
     }
 
+    /// No embedded Codex lifecycle hook command may resolve `mootx01` via
+    /// bare PATH order (CH-01 security finding: hooks fire automatically on
+    /// Codex lifecycle events, so a bare name hands code execution to any
+    /// attacker-controlled directory earlier in PATH). `mootx01 install`
+    /// materializes the packages map compiled in above (INSTALL_BUNDLE_JSON,
+    /// include_str!) — this guards the carrier the Rust port actually ships,
+    /// parsed via serde_json, never substring-matched. A bare token is any
+    /// token delimited by whitespace, shell separators (`;&|()`), or quote
+    /// characters that equals `mootx01` with no `/` — so `exec mootx01 …`,
+    /// `env mootx01 …`, and `sh -c 'mootx01 …'` are all caught, not just a
+    /// bare head token. Mirrors the Swift twin in MootInstallerCoreTests
+    /// PluginPackageShapeTests and the packager guard in moot-packager
+    /// GeneratorTests; keep the three token rules in sync.
+    #[test]
+    fn embedded_codex_hook_commands_never_resolve_via_bare_path() {
+        fn hook_commands(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(|t| t.as_str()) == Some("command") {
+                        if let Some(cmd) = map.get("command").and_then(|c| c.as_str()) {
+                            out.push(cmd.to_string());
+                        }
+                    }
+                    for val in map.values() {
+                        hook_commands(val, out);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for val in arr {
+                        hook_commands(val, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let bundle = InstallBundle::embedded();
+        let wiring = bundle
+            .packages
+            .get("codex/.codex/hooks.json")
+            .expect("embedded codex package carries no .codex/hooks.json — bundle shape changed?");
+        let root: serde_json::Value = serde_json::from_str(wiring)
+            .expect("embedded codex hooks wiring is not valid JSON");
+
+        let mut commands = Vec::new();
+        hook_commands(&root, &mut commands);
+        assert!(
+            !commands.is_empty(),
+            "embedded codex hooks wiring carries no commands — wiring shape changed?"
+        );
+
+        for cmd in &commands {
+            let bare = cmd
+                .split(|c: char| c.is_whitespace() || ";&|()'\"".contains(c))
+                .any(|token| token == "mootx01");
+            assert!(
+                !bare,
+                "embedded codex hooks wiring resolves mootx01 via bare PATH: {cmd}"
+            );
+        }
+    }
+
     #[test]
     fn embedded_bundle_decodes() {
         let b = InstallBundle::embedded();
