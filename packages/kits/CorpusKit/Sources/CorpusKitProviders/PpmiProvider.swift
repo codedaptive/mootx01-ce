@@ -280,12 +280,21 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// terms with weight 0 (below-chance or zero-count pairs) contribute
     /// nothing.  Normalisation happens at embed time.
     public func finalize() {
+        // Clear unconditionally BEFORE the emptiness guard. If the counts table
+        // is empty (zero totalPairs/totalTerms) — which is the state after all
+        // content has been deleted or after `restoreCounts` restored an empty
+        // blob — the guard would return early and `ppmiVectors` would keep
+        // whatever it held from the previous finalization. That would let
+        // deleted content keep answering embed calls, violating the hard-delete
+        // contract. The fix: clear first, guard second. Idempotence on non-empty
+        // counts is preserved because the computation below is a pure function
+        // of the count maps — two finalizations on identical counts produce
+        // identical vectors.
+        ppmiVectors = [:]
         guard totalPairs > 0, totalTerms > 0 else { return }
 
         let fTotalPairs = Float(totalPairs)
         let fTotalTerms = Float(totalTerms)
-
-        ppmiVectors = [:]
 
         // Hash-map iteration order is not a numeric contract. Sort both levels
         // by UTF-8 bytes so floating accumulation order is byte-identical in

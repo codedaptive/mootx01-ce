@@ -246,14 +246,19 @@ impl PpmiProvider {
     /// Only terms with at least one nonzero-weight context pair get a
     /// ppmi_vector entry.
     pub fn finalize(&mut self) {
+        // Clear unconditionally first. If counts were emptied (all content deleted, or
+        // restore_counts loaded an empty blob), returning early without clearing would
+        // leave ppmi_vectors populated with vectors derived from content that no longer
+        // exists — deleted content would keep answering embed calls, breaking the
+        // hard-delete contract. The clear must precede the guard.
+        self.ppmi_vectors.clear();
+
         if self.total_pairs == 0 || self.total_terms == 0 {
             return;
         }
 
         let f_total_pairs = self.total_pairs as f32;
         let f_total_terms = self.total_terms as f32;
-
-        self.ppmi_vectors.clear();
 
         // Iterate over all (target, context_counts) pairs.
         // We need to read term_count for both target and context terms during
