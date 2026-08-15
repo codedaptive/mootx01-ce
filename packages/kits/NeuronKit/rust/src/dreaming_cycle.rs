@@ -1895,16 +1895,23 @@ impl DreamingDaemon {
         result
     }
 
-    /// BETA weekly prune/GC with HNSW tombstone compaction (VEC-HNSW-01 seam).
+    /// BETA weekly prune/GC with HNSW tombstone compaction and vector-generation
+    /// reclamation (VEC-SHADOWSWAP-01 seam).
     ///
-    /// Extends `run_beta_cycle` with an optional HNSW compaction step: after the
-    /// `consolidated` and `co_recall_counts` prune completes, calls
-    /// `hnsw.compact_float_index_tombstones(now_epoch_secs)`. Compaction discards
-    /// tombstoned entries and dead edges accumulated since the last compaction,
-    /// improving cache locality and reclaiming memory for stale node slots.
+    /// Extends `run_beta_cycle` with two weekly storage-GC duties:
     ///
-    /// Failure of the HNSW compaction is non-fatal. Mirrors Swift
-    /// `DreamingDaemon.runBetaCycle` after the VEC-HNSW-01 wiring.
+    /// 1. `hnsw.compact_float_index_tombstones` — discards tombstoned HNSW
+    ///    entries and dead edges accumulated since the last compaction, improving
+    ///    cache locality and reclaiming memory for stale node slots.
+    ///
+    /// 2. `hnsw.reclaim_superseded_generations` — deletes vector rows whose
+    ///    generation is neither the current serving generation nor an active
+    ///    `'building'` shadow (rows left `'pending-reclaim'` after a shadow-swap
+    ///    publish). Both operations share the same weekly cadence; running them
+    ///    together avoids a separate GC pass.
+    ///
+    /// Both steps are non-fatal on failure — correctness is unaffected.
+    /// Mirrors Swift `DreamingDaemon.runBetaCycle` (VEC-SHADOWSWAP-01 wiring).
     pub fn run_beta_cycle_with_hnsw<M>(
         &mut self,
         now_epoch_secs: f64,
@@ -1921,8 +1928,18 @@ impl DreamingDaemon {
         // Compact HNSW tombstones: weekly GC mirrors the consolidated prune
         // cadence. Non-fatal on failure — a non-compacted graph is correct but
         // carries wasted memory from deleted-node slots.
+        //
+        // Reclaim superseded vector generations alongside compaction: both are
+        // weekly storage-GC duties. reclaim_superseded_generations deletes
+        // vector rows whose generation is neither the current serving generation
+        // nor an active 'building' shadow (rows left 'pending-reclaim' after a
+        // shadow-swap publish). Non-fatal on failure — reclaimable rows are
+        // invisible to queries; correctness is unaffected until the next cycle.
+        // Mirrors Swift DreamingDaemon REM-BETA (reclaimSupersededGenerations
+        // called alongside compactFloatIndexTombstones).
         if let Some(m) = hnsw {
             let _ = m.compact_float_index_tombstones(now_epoch_secs);
+            let _ = m.reclaim_superseded_generations(now_epoch_secs);
         }
 
         result
@@ -3056,5 +3073,58 @@ mod tests {
             daemon.theta_retrain_warranted(1_100),
             "growth of 100 (== fraction-trigger 100) must warrant retrain"
         );
+    }
+
+    // ── n4-rust: REM-BETA compact + reclaim ─────────────────────────────────
+    //
+    // Mirrors Swift n4 (REM-BETA compact + reclaim). Verifies that:
+    //   a) run_beta_cycle_with_hnsw calls compact_float_index_tombstones.
+    //   b) run_beta_cycle_with_hnsw calls reclaim_superseded_generations
+    //      (F-2 — an unwired reclaim is invisible without this assertion).
+    //   c) Both calls receive the injected now_epoch_secs timestamp.
+    //   d) Passing None for hnsw skips both steps (base BETA still runs).
+    //
+    // Uses InMemoryHNSWGraphMaintenance — no live VectorStore required.
+
+    #[test]
+    fn n4_beta_compact_and_reclaim_both_fire() {
+        use crate::hnsw_graph_maintenance::InMemoryHNSWGraphMaintenance;
+
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hnsw = InMemoryHNSWGraphMaintenance::new();
+        let ts = 1_755_000_000.0_f64;
+
+        // Pre-condition: no calls yet.
+        assert!(hnsw.compact_calls.is_empty(), "compact_calls must be empty before BETA");
+        assert!(hnsw.reclaim_calls.is_empty(), "reclaim_calls must be empty before BETA");
+
+        // Fire REM-BETA with the HNSW seam wired.
+        let _report = daemon.run_beta_cycle_with_hnsw(ts, Some(&mut hnsw));
+
+        // Both compact and reclaim must fire exactly once with the injected ts.
+        assert_eq!(hnsw.compact_calls.len(), 1, "compact must fire once per BETA cycle");
+        assert_eq!(
+            hnsw.compact_calls[0], ts,
+            "compact_float_index_tombstones must receive the injected timestamp"
+        );
+        assert_eq!(hnsw.reclaim_calls.len(), 1, "reclaim must fire once per BETA cycle");
+        assert_eq!(
+            hnsw.reclaim_calls[0], ts,
+            "reclaim_superseded_generations must receive the injected timestamp"
+        );
+    }
+
+    #[test]
+    fn n4_beta_none_hnsw_skips_both_steps() {
+        use crate::hnsw_graph_maintenance::InMemoryHNSWGraphMaintenance;
+
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Passing None: HNSW seam absent — compact and reclaim are skipped.
+        let _report = daemon.run_beta_cycle_with_hnsw::<InMemoryHNSWGraphMaintenance>(
+            1_755_000_001.0,
+            None,
+        );
+        // No assertions on an absent HNSWGraphMaintenance — just confirm the
+        // call completes without panic (the base BETA prune still runs).
     }
 }

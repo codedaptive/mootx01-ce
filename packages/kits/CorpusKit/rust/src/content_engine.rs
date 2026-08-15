@@ -3713,15 +3713,56 @@ impl CorpusContentEngine {
     }
 
     /// Retrain every trainable slot from scratch and re-index every active
-    /// content row (forced — a retrain changes the basis). Training is
-    /// streamed (bounded); each provider's basis+counts commit is atomic.
+    /// content row without a serving gap.
+    ///
+    /// The operation is a shadow swap: trainable slots (RandomIndexing, PPMI,
+    /// LSA, NMF — identified by having a `fresh_basis_blob`) write new vectors
+    /// into a shadow generation that is invisible to queries until the atomic
+    /// publish at the end. The serving generation remains readable throughout
+    /// the build. On publish, VectorStore flips the serving generation in one
+    /// transaction and rebuilds the HNSW graph from the new serving rows.
+    /// Non-trainable slots (FDC binary, stateless / Deterministic) write
+    /// directly to the serving generation; the deferred-index bracket batches
+    /// their resident-index updates.
+    ///
+    /// On failure mid-way (any error after `begin_shadow_generation`), the
+    /// shadow remains `'building'` and is reclaimable by the next REM-BETA
+    /// cycle. Reclamation is NOT called here — that is BETA's duty. The old
+    /// serving generation remains intact and keeps serving.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
+        // Identify trainable model IDs: slots whose fresh_basis_blob is Some
+        // (RandomIndexing, PPMI, LSA, NMF). Their new vectors will be written
+        // into a shadow generation and published atomically. Non-trainable
+        // (FDC, Deterministic/stateless) slots are not swapped.
+        let trainable_model_ids: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.fresh_basis_blob.is_some())
+            .map(|slot| slot.model_id.clone())
+            .collect();
+
+        // Open a shadow generation for each trainable model BEFORE training begins.
+        // The VectorStore routes all subsequent add_payloads calls for these models
+        // to the shadow generation automatically — index_whole_content_batch does
+        // not need to know which models are shadow-active. Non-trainable model
+        // writes land on the serving generation unchanged (their resident structures
+        // continue serving throughout the build).
+        if !trainable_model_ids.is_empty() {
+            let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+            self.vector_store
+                .begin_shadow_generation(&refs)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+
+        // Retrain all trainable slots from scratch — produces the new basis blobs
+        // that the subsequent re-embed pass will use. No vector rows are written here.
         self.train_trainable_slots(now_millis, true)?;
-        // Bulk-write bracket (same idiom as reconcile_configured_providers
-        // and the drain worker): defer the resident dense index for the
-        // whole O(corpus) rewrite and publish ONCE. Without it every
-        // per-record vector write rebuilt the resident MIH index — an
-        // estate-scale retrain span measured in hours instead of minutes.
+
+        // Bulk-write bracket for non-trainable model writes (stateless/FDC slots):
+        // defers resident dense-index updates for the O(corpus) pass and publishes
+        // once at the end. Trainable-model writes bypass resident structures by
+        // VectorStore shadow-write contract (shadow rows never enter the binary
+        // lane, float indices, or HNSW structures during the build phase).
         self.vector_store
             .begin_deferred_index()
             .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
@@ -3757,9 +3798,28 @@ impl CorpusContentEngine {
                 }
             }
         }
+
+        // Atomic publish for trainable models: one storage transaction flips
+        // serving_generation to shadow_generation, sets shadow_state
+        // 'pending-reclaim' on the old generation's rows, and rebuilds the
+        // HNSW graph from the new serving rows before returning. A reader sees
+        // the old set or the new set, never a mixture. Old-generation rows are
+        // left 'pending-reclaim'; deletion is REM-BETA's duty (idempotent,
+        // resumable, not called here).
+        if !trainable_model_ids.is_empty() {
+            let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+            self.vector_store
+                .publish_shadow_generation(&refs)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+
+        // Publish deferred resident index for non-trainable model writes — the
+        // binary lane (MIH + brute-force) gets its one bulk rebuild here,
+        // same as before.
         self.vector_store
             .publish_resident_index()
             .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+
         self.provider_configuration_store
             .mark_current(&self.provider_generation_token(), now_millis)?;
         Ok(())

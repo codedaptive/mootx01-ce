@@ -88,12 +88,29 @@ pub trait HNSWGraphMaintenance {
     ///
     /// `now_epoch_secs` is the caller-injected cycle timestamp.
     fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool;
+
+    /// Delete vector rows whose generation is neither the serving generation
+    /// nor an active 'building' shadow, for all models (BETA duty).
+    ///
+    /// Called weekly alongside `compact_float_index_tombstones`. Idempotent
+    /// and resumable: killing mid-reclaim and re-running finishes without error
+    /// and changes no query result. Returns `true` on success, `false` on a
+    /// captured failure (non-fatal — correctness is unaffected; the rows stay
+    /// reclaimable by the next BETA cycle).
+    ///
+    /// NO default implementation — an unwired conformer is invisible to the test
+    /// suite. Both production and test conformers must implement this explicitly
+    /// (F-2 reviewer ruling; mirrors the Swift `HNSWGraphMaintenance` protocol).
+    ///
+    /// `now_epoch_secs` is the caller-injected cycle timestamp (unused by most
+    /// implementations today but kept for future telemetry).
+    fn reclaim_superseded_generations(&mut self, now_epoch_secs: f64) -> bool;
 }
 
 // ── In-memory test double ──────────────────────────────────────────────────
 
 /// In-memory `HNSWGraphMaintenance` for tests. Records calls without touching a
-/// live VectorStore. Mirrors Swift's test double pattern for `ThetaBasisRetrainHook`.
+/// live VectorStore. Mirrors Swift's `FakeHNSWMaintenance` test double pattern.
 #[derive(Debug, Default)]
 pub struct InMemoryHNSWGraphMaintenance {
     /// Timestamps of successful `clear_float_index` calls, in call order.
@@ -102,7 +119,9 @@ pub struct InMemoryHNSWGraphMaintenance {
     pub rebuild_calls: Vec<f64>,
     /// Timestamps of successful `compact_float_index_tombstones` calls, in call order.
     pub compact_calls: Vec<f64>,
-    /// When true, all three methods return `false` (simulates captured failures).
+    /// Timestamps of successful `reclaim_superseded_generations` calls, in call order.
+    pub reclaim_calls: Vec<f64>,
+    /// When true, all methods return `false` (simulates captured failures).
     pub fail_all: bool,
 }
 
@@ -140,6 +159,14 @@ impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
             return false;
         }
         self.compact_calls.push(now_epoch_secs);
+        true
+    }
+
+    fn reclaim_superseded_generations(&mut self, now_epoch_secs: f64) -> bool {
+        if self.fail_all {
+            return false;
+        }
+        self.reclaim_calls.push(now_epoch_secs);
         true
     }
 }
