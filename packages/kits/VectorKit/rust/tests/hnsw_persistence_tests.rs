@@ -97,6 +97,359 @@ fn insert_random_float_vectors(store: &VectorStore, count: usize, seed: u64) {
     }
 }
 
+// ── HC regression tests (VH-01 Findings A, B, C) ─────────────────────────────
+//
+// These tests are designed to FAIL against the pre-fix code and PASS after.
+// See MISSION_VH_01.md Part 6 for the regression coverage specification.
+
+// ── HC-A-1: cache coherence — deleted vector not returned after rebuild ────────
+
+/// HC-A-1 (VH-01 Finding A REGRESSION): after rebuilding the HNSW graph and
+/// then deleting a vector, `find_nearest_float` must NOT return the deleted item.
+///
+/// Without the fix, `delete_vector` cleared `float_indices[model_id]` but left
+/// `hnsw_indices[model_id]` resident. The next `find_nearest_float` routed through
+/// the stale HNSW graph, which still owned item-1's raw vector bytes, and returned
+/// it as a live result.
+///
+/// With the fix, `_invalidate_hnsw_lane` evicts `hnsw_indices[model_id]` alongside
+/// `float_indices[model_id]`. The next query reloads from `hnsw_graph`; item-1's
+/// placeholder tombstone is excluded because its float bytes are gone from `vectors`.
+#[test]
+fn hca1_deleted_vector_not_returned_after_rebuild() {
+    let db_path = std::env::temp_dir()
+        .join(format!("vk_hca1_{}.db", Uuid::new_v4()))
+        .to_string_lossy()
+        .to_string();
+
+    let victim_id = "item-1";
+
+    // Build the HNSW graph so it is resident in memory.
+    let store = open_store(&db_path);
+    insert_random_float_vectors(&store, N, 0xCAFE_BABE_1234_5678);
+
+    // THETA rebuild: builds graph in memory AND persists to hnsw_graph.
+    store.rebuild_hnsw_index(MODEL_ID).expect("rebuild");
+
+    // Verify HNSW is resident (baseline).
+    assert!(
+        store.hnsw_index_resident(MODEL_ID),
+        "HC-A-1 setup: HNSW must be resident after rebuild"
+    );
+
+    // Delete item-1 from the estate. The fix: this must evict hnsw_indices[MODEL_ID].
+    store
+        .delete_vector(victim_id, MODEL_ID)
+        .expect("delete vector");
+
+    // Probe near item-1's direction to maximise chance it would appear if
+    // the stale HNSW graph is still resident.
+    let mut rng = SplitMix64HP::new(0xCAFE_BABE_1234_5678);
+    // Skip item-0's 4 floats.
+    for _ in 0..4 { rng.next_f32(); }
+    let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+
+    let results: Vec<String> = store
+        .find_nearest_float(&probe, MODEL_ID, N)
+        .expect("find nearest")
+        .into_iter()
+        .map(|m| m.item_id)
+        .collect();
+
+    assert!(
+        !results.contains(&victim_id.to_string()),
+        "HC-A-1 (VH-01 Finding A REGRESSION): deleted '{}' must NOT appear in find_nearest_float; \
+         the HNSW graph must be evicted on delete_vector. Got: {:?}",
+        victim_id, results
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ── HC-A-2: destroy_all_vectors leaves no HNSW graph resident ────────────────
+
+/// HC-A-2 (VH-01 Finding A REGRESSION): after `destroy_all_vectors`, a subsequent
+/// `find_nearest_float` must return empty results.
+///
+/// Without the fix, `destroy_all_vectors` cleared `float_indices` but not
+/// `hnsw_indices`. The HNSW graph remained resident and could serve items from
+/// a logically-empty estate.
+///
+/// With the fix, `destroy_all_vectors` clears `hnsw_indices`, `live_float_counts`,
+/// `hnsw_graph_dirty`, AND deletes every persisted `hnsw_graph` row.
+#[test]
+fn hca2_destroy_all_vectors_leaves_no_graph() {
+    let db_path = std::env::temp_dir()
+        .join(format!("vk_hca2_{}.db", Uuid::new_v4()))
+        .to_string_lossy()
+        .to_string();
+
+    let store = open_store(&db_path);
+    insert_random_float_vectors(&store, N, 0xDEAD_BEEF_CAFE_BABE);
+    store.rebuild_hnsw_index(MODEL_ID).expect("rebuild");
+
+    assert!(
+        store.hnsw_index_resident(MODEL_ID),
+        "HC-A-2 setup: HNSW must be resident after rebuild"
+    );
+
+    // Full teardown.
+    store.destroy_all_vectors().expect("destroy all vectors");
+
+    let mut rng = SplitMix64HP::new(111);
+    let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+    let results = store
+        .find_nearest_float(&probe, MODEL_ID, N)
+        .expect("find nearest after destroy");
+
+    assert!(
+        results.is_empty(),
+        "HC-A-2 (VH-01 Finding A REGRESSION): find_nearest_float must return empty after destroy_all_vectors; \
+         the HNSW graph must be fully torn down. Got {} results.",
+        results.len()
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ── HC-B-1: entry-point repair — tombstone sequence never suppresses recall ────
+
+/// HC-B-1 (VH-01 Finding B REGRESSION): tombstoning each node in sequence must
+/// never suppress recall of remaining live nodes.
+///
+/// Without the fix, tombstoning the entry-point node left `entry_point` pointing
+/// at the tombstoned node. `search_layer` entered at the dead seed, found no valid
+/// greedy hops, and returned zero results — while `live_count > 0`.
+///
+/// With the fix, `repair_entry_point()` is called immediately after tombstoning.
+/// It scans for the best remaining live node and promotes it, so search always
+/// starts from a valid seed.
+#[test]
+fn hcb1_tombstone_sequence_never_suppresses_recall() {
+    use vectorkit::engine::HNSWIndex;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcb1-model";
+
+    idx.insert("a".to_string(), model_id.to_string(), vec![1.0, 0.0, 0.0]);
+    idx.insert("b".to_string(), model_id.to_string(), vec![0.0, 1.0, 0.0]);
+    idx.insert("c".to_string(), model_id.to_string(), vec![0.0, 0.0, 1.0]);
+
+    let baseline = idx.search(&[1.0, 0.0, 0.0], model_id, 3).expect("baseline");
+    assert!(!baseline.is_empty(), "HC-B-1 baseline: search must return results before any tombstone");
+
+    // Tombstone "a" — "b" and "c" must remain reachable.
+    idx.tombstone("a");
+    let r1 = idx.search(&[0.0, 1.0, 0.0], model_id, 3).expect("search after tomb a");
+    assert!(
+        !r1.is_empty(),
+        "HC-B-1 (VH-01 Finding B REGRESSION): after tombstoning 'a', live nodes must be reachable; \
+         entry-point repair must have promoted a live seed. Got empty."
+    );
+    assert!(
+        !r1.iter().any(|m| m.item_id == "a"),
+        "HC-B-1: tombstoned 'a' must not appear in results"
+    );
+
+    // Tombstone "b" — only "c" remains.
+    idx.tombstone("b");
+    let r2 = idx.search(&[0.0, 0.0, 1.0], model_id, 3).expect("search after tomb b");
+    assert!(
+        !r2.is_empty(),
+        "HC-B-1 (VH-01 Finding B REGRESSION): after tombstoning 'a' and 'b', 'c' must be reachable. Got empty."
+    );
+    assert_eq!(
+        r2.iter().map(|m| m.item_id.as_str()).collect::<Vec<_>>(),
+        vec!["c"],
+        "HC-B-1: 'c' must be the sole result after 'a' and 'b' are tombstoned"
+    );
+
+    // All tombstoned — search must return empty.
+    idx.tombstone("c");
+    let r3 = idx.search(&[0.0, 0.0, 1.0], model_id, 3).expect("search after all tombstoned");
+    assert!(
+        r3.is_empty(),
+        "HC-B-1: all nodes tombstoned — search must return empty. Got {:?}.",
+        r3.iter().map(|m| &m.item_id).collect::<Vec<_>>()
+    );
+}
+
+// ── HC-B-2: upsert does not suppress recall ───────────────────────────────────
+
+/// HC-B-2 (VH-01 Finding B REGRESSION): calling `insert` on an existing item ID
+/// (upsert) tombstones the old node. At least one upsert in a sequence will
+/// tombstone the current entry point. Post-fix, search must stay non-empty after
+/// every upsert because `repair_entry_point()` maintains a live seed.
+#[test]
+fn hcb2_upsert_does_not_suppress_recall() {
+    use vectorkit::engine::HNSWIndex;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcb2-model";
+
+    idx.insert("a".to_string(), model_id.to_string(), vec![1.0, 0.0, 0.0]);
+    idx.insert("b".to_string(), model_id.to_string(), vec![0.0, 1.0, 0.0]);
+    idx.insert("c".to_string(), model_id.to_string(), vec![0.0, 0.0, 1.0]);
+
+    let upserts: &[(&str, Vec<f32>)] = &[
+        ("a", vec![-1.0,  0.0,  0.0]),
+        ("b", vec![ 0.0, -1.0,  0.0]),
+        ("c", vec![ 0.0,  0.0, -1.0]),
+    ];
+
+    for (id, vec) in upserts {
+        idx.insert(id.to_string(), model_id.to_string(), vec.clone());
+
+        let live = idx.live_count();
+        assert!(live >= 1, "HC-B-2 invariant: live_count must be >= 1 after upserting {}", id);
+
+        let results = idx.search(&[1.0, 0.0, 0.0], model_id, 3).expect("search after upsert");
+        assert!(
+            !results.is_empty(),
+            "HC-B-2 (VH-01 Finding B REGRESSION): after upserting '{}', search must return non-empty; \
+             live_count={}, got empty — entry-point repair must maintain a live seed.",
+            id, live
+        );
+    }
+}
+
+// ── HC-C-1: layer > HNSW_MAX_PERSISTED_LAYER rejects whole graph ──────────────
+
+/// HC-C-1 (VH-01 Finding C REGRESSION): a row with `layer = HNSW_MAX_PERSISTED_LAYER + 1`
+/// must cause the whole graph to be rejected. `has_graph()` must be false.
+///
+/// Without the fix, the row was processed; `has_graph()` would be true (wrong).
+/// With the fix, Phase-0 rejects → `has_graph()` false.
+#[test]
+fn hcc1_huge_layer_rejected() {
+    use vectorkit::engine::HNSWIndex;
+    use vectorkit::engine::hnsw_index::HNSW_MAX_PERSISTED_LAYER;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcc1-model";
+
+    let bad_row = vectorkit::GraphRow {
+        node_idx:        0,
+        node_id:         "x".to_string(),
+        layer:           HNSW_MAX_PERSISTED_LAYER + 1,  // 33 — one above the cap
+        neighbours_blob: Vec::new(),
+    };
+
+    let mut node_bytes = std::collections::HashMap::new();
+    node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
+
+    let rows = vec![bad_row];
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+
+    assert!(
+        !idx.has_graph(),
+        "HC-C-1 (VH-01 Finding C REGRESSION): row with layer={} (> max {}) must reject whole graph; \
+         has_graph() must be false.",
+        HNSW_MAX_PERSISTED_LAYER + 1, HNSW_MAX_PERSISTED_LAYER
+    );
+}
+
+// ── HC-C-2: negative node_idx rejects whole graph ────────────────────────────
+
+/// HC-C-2 (VH-01 Finding C REGRESSION): a row with `node_idx = -1` must reject
+/// the whole graph. `has_graph()` must be false.
+///
+/// Without the fix, a negative i32 was used in downstream array lookups.
+/// With the fix, Phase-0 checks `node_idx < 0` → rejects whole graph.
+#[test]
+fn hcc2_negative_node_idx_rejected() {
+    use vectorkit::engine::HNSWIndex;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcc2-model";
+
+    let bad_row = vectorkit::GraphRow {
+        node_idx:        -1,
+        node_id:         "x".to_string(),
+        layer:           0,
+        neighbours_blob: Vec::new(),
+    };
+
+    let node_bytes = std::collections::HashMap::new();
+    let rows = vec![bad_row];
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+
+    assert!(
+        !idx.has_graph(),
+        "HC-C-2 (VH-01 Finding C REGRESSION): row with node_idx=-1 must reject whole graph; has_graph() must be false."
+    );
+}
+
+// ── HC-C-3: misaligned blob rejects whole graph ───────────────────────────────
+
+/// HC-C-3 (VH-01 Finding C REGRESSION): a row whose `neighbours_blob` length is
+/// not divisible by 4 must reject the whole graph.
+///
+/// Without the fix, `decode_neighbours` read as many 4-byte chunks as fit,
+/// discarding the tail byte. No graph-level guard existed. `has_graph()` true.
+/// With the fix, Phase-0 checks `blob_len % 4 != 0` → rejects.
+#[test]
+fn hcc3_misaligned_blob_rejected() {
+    use vectorkit::engine::HNSWIndex;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcc3-model";
+
+    let bad_row = vectorkit::GraphRow {
+        node_idx:        0,
+        node_id:         "x".to_string(),
+        layer:           0,
+        neighbours_blob: vec![0, 0, 0, 0, 0xFF],  // 5 bytes — not divisible by 4
+    };
+
+    let mut node_bytes = std::collections::HashMap::new();
+    node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
+    let rows = vec![bad_row];
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+
+    assert!(
+        !idx.has_graph(),
+        "HC-C-3 (VH-01 Finding C REGRESSION): 5-byte blob (misaligned) must reject whole graph; has_graph() must be false."
+    );
+}
+
+// ── HC-C-4: oversized blob rejects whole graph ────────────────────────────────
+
+/// HC-C-4 (VH-01 Finding C REGRESSION): a row whose `neighbours_blob` encodes more
+/// than `HNSW_M0` neighbours must reject the whole graph.
+///
+/// Without the fix, `decode_neighbours` decoded `blob_len / 4` with no cap.
+/// `has_graph()` would be true (wrong).
+/// With the fix, Phase-0 checks `blob_len > HNSW_M0 * 4` → rejects.
+#[test]
+fn hcc4_oversized_blob_rejected() {
+    use vectorkit::engine::HNSWIndex;
+    use vectorkit::engine::hnsw_index::HNSW_M0;
+
+    let mut idx = HNSWIndex::new(42);
+    let model_id = "hcc4-model";
+
+    // HNSW_M0 = 32 → max blob = 128 bytes. Use 132 bytes (33 Int32 entries).
+    let oversized_blob = vec![0u8; (HNSW_M0 + 1) * 4];
+    let bad_row = vectorkit::GraphRow {
+        node_idx:        0,
+        node_id:         "x".to_string(),
+        layer:           0,
+        neighbours_blob: oversized_blob,
+    };
+
+    let mut node_bytes = std::collections::HashMap::new();
+    node_bytes.insert(0i32, ("x".to_string(), vec![0u8, 0, 0x80, 0x3f]));
+    let rows = vec![bad_row];
+    idx.load_from_graph_rows(&rows, &node_bytes, model_id);
+
+    assert!(
+        !idx.has_graph(),
+        "HC-C-4 (VH-01 Finding C REGRESSION): {}-byte blob (> {} max) must reject whole graph; has_graph() must be false.",
+        (HNSW_M0 + 1) * 4, HNSW_M0 * 4
+    );
+}
+
 // ── HP-1: exit gates A and B ──────────────────────────────────────────────────
 
 /// HP-1: After THETA rebuild, `hnsw_graph` has rows (gate A). A fresh store
