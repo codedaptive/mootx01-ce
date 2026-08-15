@@ -120,7 +120,6 @@ fn write_manifest_refuses_symlinked_moot_parent_dir() {
     let _ = std::fs::remove_dir_all(&foreign_dir);
 }
 
-/// Helper: generate a unique string without pulling in the uuid crate.
 /// Perkins VR-01 findings 1+2: the manifest stamp read must not follow a
 /// symlink (a TOCTOU swap between the export's write and the hash read would
 /// stamp — and thereby disclose the hash of — any file this process can
@@ -173,6 +172,7 @@ fn build_manifest_skips_symlinks_and_refuses_traversal() {
     let _ = std::fs::remove_file(&oracle_target);
 }
 
+/// Helper: generate a unique string without pulling in the uuid crate.
 fn uuid_string() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
