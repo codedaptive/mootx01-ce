@@ -2969,6 +2969,19 @@ impl VectorStore {
             .unwrap_or(0)
     }
 
+    /// True when an HNSW graph is resident in memory for `model_id`.
+    ///
+    /// The positive residency probe for the exit gates: build-count
+    /// instruments prove no REBUILD happened, but both the loaded-graph path
+    /// and the exact-scan fallback leave it at zero — only this probe
+    /// distinguishes "served from the loaded graph" from "fallback quietly
+    /// covered it". Twin of Swift `hnswIndexResident(for:)`.
+    pub fn hnsw_index_resident(&self, model_id: &str) -> bool {
+        self.state.lock()
+            .map(|s| s.hnsw_indices.contains_key(model_id))
+            .unwrap_or(false)
+    }
+
     fn ensure_float_index_built_locked(
         &self,
         state: &mut HotState,

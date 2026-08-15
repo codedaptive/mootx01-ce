@@ -740,6 +740,17 @@ public actor VectorStore {
     /// tombstones accumulate over time as items are updated or deleted; BETA
     /// compaction reclaims their memory and restores graph quality. Safe to call
     /// when no graph exists for `modelID` (no-op).
+    /// True when an HNSW graph is resident in memory for `modelID`.
+    ///
+    /// Internal (not private) as the positive residency probe for the exit
+    /// gates: build-count instruments prove no REBUILD happened, but both the
+    /// loaded-graph path and the exact-scan fallback leave it at zero — only
+    /// this probe distinguishes "served from the loaded graph" from "fallback
+    /// quietly covered it". Twin of Rust `hnsw_index_resident`.
+    func hnswIndexResident(for modelID: String) -> Bool {
+        hnswIndices[modelID] != nil
+    }
+
     public func compactHNSWTombstones(for modelID: String) async throws {
         guard let idx = hnswIndices[modelID] else { return }
         await idx.compact()

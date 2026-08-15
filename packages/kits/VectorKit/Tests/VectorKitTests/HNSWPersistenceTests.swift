@@ -299,14 +299,17 @@ struct HNSWPersistenceTests {
             #expect(!results.isEmpty,
                 "HP-3: findNearestFloat must return results even after one item is deleted")
 
-            // Pin the PATH: the exclusion above must have come from the LOADED
-            // graph, not from the exact-scan fallback quietly covering for an
-            // absent one. buildCount == 0 proves the HNSW branch loaded rows
-            // rather than rebuilding (and the live count seeds >= threshold,
-            // so the branch was taken).
+            // Pin the PATH, positively: a graph must be RESIDENT after the
+            // query — buildCount == 0 alone is satisfied by the fallback scan
+            // too (HP-2's premise), so it cannot distinguish the loaded-graph
+            // path from the fallback quietly excluding the tombstoned item.
+            let loaded = await storeB.hnswIndexResident(for: Self.modelID)
+            #expect(loaded,
+                "HP-3 path pin: an HNSW graph must be resident after the query — otherwise the exclusion came from the fallback scan")
+            // And no rebuild produced it: resident + buildCount 0 = loaded.
             let buildCountB = await storeB.hnswBuildCount[Self.modelID] ?? 0
             #expect(buildCountB == 0,
-                "HP-3 path pin: the reopened store must serve gate C from the loaded graph (buildCount 0), never a rebuild")
+                "HP-3 path pin: the resident graph must come from loaded rows (buildCount 0), never a rebuild")
 
             await storageB.close()
         }

@@ -262,13 +262,18 @@ fn hp3_delete_resurrection_proof() {
             results
         );
 
-        // Pin the PATH: the exclusion must come from the LOADED graph, not the
-        // exact-scan fallback quietly covering for an absent one. A build count
-        // of 0 proves the HNSW branch loaded rows rather than rebuilding.
+        // Pin the PATH, positively: a graph must be RESIDENT after the query —
+        // build count 0 alone is satisfied by the fallback scan too (HP-2's
+        // premise), so it cannot distinguish loaded-graph from fallback.
+        assert!(
+            store_b.hnsw_index_resident(MODEL_ID),
+            "HP-3 path pin: an HNSW graph must be resident after the query — otherwise the exclusion came from the fallback scan"
+        );
+        // And no rebuild produced it: resident + build count 0 = loaded.
         assert_eq!(
             store_b.hnsw_build_count_for(MODEL_ID),
             0,
-            "HP-3 path pin: gate C must be served from the loaded graph, never a rebuild"
+            "HP-3 path pin: the resident graph must come from loaded rows, never a rebuild"
         );
     }
 
