@@ -153,8 +153,7 @@ struct EnableCommand: AsyncParsableCommand {
     }
 
     private func writeCodexConfig(_ text: String, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        try CodexConfigWriter.write(text, to: url)
     }
 
     // MARK: - harness-memory enable
@@ -345,8 +344,7 @@ struct DisableCommand: AsyncParsableCommand {
             let configURL = CodexMemoryPaths.codexConfig(homeDirectory: home, environment: env)
             let current = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
             let restored = CodexNativeMemorySettings.restore(snapshot, in: current)
-            try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try restored.write(to: configURL, atomically: true, encoding: .utf8)
+            try CodexConfigWriter.write(restored, to: configURL)
             print("  ✓ restored only the Codex native-memory keys changed by moot-only mode")
         }
         feature.enabled = false

@@ -149,6 +149,76 @@ public enum CodexMemoryStore {
     }
 }
 
+/// Writes a user config file (currently: Codex's `~/.codex/config.toml`)
+/// with owner-only POSIX permissions, closing the gap `secureWrite` above
+/// leaves for a plain-text payload:
+///
+///  - a file written for the first time is created at mode 0600 from the
+///    moment it exists on disk — never written at the platform's default
+///    (umask-derived) mode and narrowed afterward by a separate `chmod`,
+///    which would leave a briefly-world-readable file under its final name;
+///  - a rewrite of an EXISTING file never *widens* whatever mode the file
+///    already had. `config.toml` can carry endpoints, tokens, or MCP server
+///    definitions; a rewrite that loosens permissions the user (or an
+///    earlier, buggy version of this tool) left in place would be worse
+///    than leaving the file alone. The new mode is always
+///    `existingMode & 0o600` — a strict subset of both the prior mode and
+///    0600, so it can only stay the same or get tighter. This also means a
+///    file left world-readable by the pre-fix code path is silently
+///    tightened to 0600 the next time it is rewritten.
+///  - the temporary file used for the atomic rename is created WITH the
+///    target mode already applied, via `createFile(atPath:contents:attributes:)`
+///    in one call rather than write-then-chmod — there is no window, however
+///    brief, where a world- or group-readable copy of the config (under
+///    either its temporary or final name) exists on disk.
+public enum CodexConfigWriter {
+    /// Thrown when the temporary file used for the atomic write cannot be
+    /// created (disk full, permission denied on the parent directory, etc).
+    public struct WriteError: Error, Equatable {
+        public let path: String
+    }
+
+    /// Write `text` to `url`, creating parent directories as needed.
+    /// See the type-level documentation for the permission semantics.
+    public static func write(_ text: String, to url: URL) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        // Never widen: a fresh file gets 0600 outright; an existing file's
+        // mode is intersected with 0600 so group/other bits are always
+        // dropped and no owner bit a narrower existing mode lacked is added
+        // back.
+        let existingMode = (try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions] as? NSNumber
+        let targetMode: Int = existingMode.map { $0.intValue & 0o600 } ?? 0o600
+
+        let dir = url.deletingLastPathComponent()
+        let tempURL = dir.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let data = Data(text.utf8)
+        guard fm.createFile(atPath: tempURL.path, contents: data, attributes: [.posixPermissions: targetMode]) else {
+            throw WriteError(path: tempURL.path)
+        }
+
+        do {
+            // moveItem fails if the destination already exists, so a rewrite
+            // removes the prior file first. The brief window where `url`
+            // does not exist at all is not a permission concern — a missing
+            // file cannot be world-readable.
+            if fm.fileExists(atPath: url.path) {
+                try fm.removeItem(at: url)
+            }
+            try fm.moveItem(at: tempURL, to: url)
+        } catch {
+            try? fm.removeItem(at: tempURL)
+            throw error
+        }
+
+        // Defensive re-assert: removeItem/moveItem should not alter the mode
+        // set at creation, but re-apply it explicitly so a Foundation
+        // behavior change can never silently widen the file on disk.
+        try? fm.setAttributes([.posixPermissions: targetMode], ofItemAtPath: url.path)
+    }
+}
+
 /// Narrow TOML editor for the three documented Codex memory settings. It
 /// preserves comments, ordering, unrelated keys, and unrelated tables.
 public enum CodexNativeMemorySettings {
