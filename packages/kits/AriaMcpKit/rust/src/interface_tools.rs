@@ -4345,3 +4345,94 @@ mod lifecycle_tag_tests {
         assert_eq!(lifecycle_tag_for_adjective_bitmap(adj_b), "retired(B)");
     }
 }
+
+#[cfg(test)]
+mod timing_window_tests {
+    use super::*;
+    use crate::estate_registry::EstateRegistry;
+
+    /// Seed `n` audit events by filing `n` memories through the real
+    /// file-memory runner (every filed memory writes at least one audit row).
+    fn seed_memories(registry: &EstateRegistry, n: usize) {
+        for i in 0..n {
+            let mut args: BTreeMap<String, JsonValue> = BTreeMap::new();
+            args.insert(
+                "content".to_string(),
+                JsonValue::from(serde_json::json!(format!("timing window seed {i}"))),
+            );
+            args.insert(
+                "subject".to_string(),
+                JsonValue::from(serde_json::json!(format!("timing window seed {i}"))),
+            );
+            args.insert(
+                "location".to_string(),
+                JsonValue::from(serde_json::json!("timing/window")),
+            );
+            args.insert("impatient".to_string(), JsonValue::from(serde_json::json!(true)));
+            let r = run_file_memory(&args, registry).expect("seed file_memory dispatches");
+            assert_eq!(
+                r["isError"],
+                serde_json::Value::Bool(false),
+                "seed write {i} must succeed: {r:?}"
+            );
+        }
+    }
+
+    /// MISSION_AT_01 Part 3: collection stops exactly at `max_events` and
+    /// reports truncation; an uncapped window and an exact-boundary window
+    /// (short final page) do not.
+    #[test]
+    fn window_truncates_at_cap() {
+        let registry = EstateRegistry::new_inmemory();
+        seed_memories(&registry, 5);
+        let coord = registry.coord.lock().unwrap();
+
+        let (all, all_truncated) =
+            collect_timing_window(&coord, &registry.default.handle, 0, 1_000_000)
+                .expect("uncapped collect");
+        assert!(!all_truncated, "a window smaller than the cap must not report truncation");
+        assert!(all.len() >= 5, "five writes must produce at least five audit events");
+        let total = all.len();
+
+        let (exact, exact_truncated) =
+            collect_timing_window(&coord, &registry.default.handle, 0, total)
+                .expect("exact-boundary collect");
+        assert_eq!(exact.len(), total);
+        assert!(
+            !exact_truncated,
+            "cap == window size with a short final page is not a truncation"
+        );
+
+        let cap = total - 2;
+        let (capped, capped_truncated) =
+            collect_timing_window(&coord, &registry.default.handle, 0, cap)
+                .expect("capped collect");
+        assert_eq!(capped.len(), cap, "collection must stop exactly at max_events");
+        assert!(capped_truncated, "a clamped window must report truncation");
+    }
+
+    /// MISSION_AT_01 Part 3 parity fix: the paging cursor is seeded from
+    /// `since_ms`, so a far-future watermark pages NOTHING. Before the fix
+    /// the cursor started at `None` unconditionally and this returned the
+    /// entire log on every incremental scan.
+    #[test]
+    fn cursor_is_seeded_from_since_ms() {
+        let registry = EstateRegistry::new_inmemory();
+        seed_memories(&registry, 3);
+        let coord = registry.coord.lock().unwrap();
+
+        let (skipped, truncated) = collect_timing_window(
+            &coord,
+            &registry.default.handle,
+            i64::MAX - 10,
+            1_000_000,
+        )
+        .expect("seeded-cursor collect");
+        assert!(
+            skipped.is_empty(),
+            "a far-future since_ms must page zero events server-side; got {}",
+            skipped.len()
+        );
+        assert!(!truncated);
+    }
+}

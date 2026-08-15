@@ -10819,3 +10819,91 @@ fn vr01_apply_imports_only_the_surfaced_set_cross_estate() {
         "import set must be empty after apply; got: {second_text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MISSION_AT_01 — bounded timing window + multi-block hint preservation
+// ---------------------------------------------------------------------------
+
+/// The timing report on an under-cap estate keeps the pre-cap shape: a usable
+/// `watermark_ms` line and NO truncation line. Twin of Swift
+/// `timingReportSmallEstateShapeUnchanged`.
+#[test]
+fn timing_report_small_estate_has_watermark_and_no_truncation_line() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "timing report shape seed", "timing/shape");
+
+    let result = dispatch_tool(
+        "moot_timing_report",
+        &args!["since_ms" => 0],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("timing report must dispatch");
+
+    assert!(is_success(&result), "timing report must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("watermark_ms:"), "paging watermark line must be present: {text}");
+    assert!(
+        !text.contains("window: truncated"),
+        "an under-cap window must keep the pre-cap report shape: {text}"
+    );
+}
+
+/// Pins the Rust hint appenders' block preservation: an import with
+/// `return_id_map: true` that also trips the unrecognized-arg hint keeps BOTH
+/// blocks, the hint lands on the prose block, and the id_map block still
+/// parses as one whole JSON object. Rust never had the Swift collapse defect
+/// (inject_unknown_args_hint mutates content[0]["text"] in place); this test
+/// keeps it that way. Twin of Swift `multiBlockResultSurvivesHint`.
+#[test]
+fn json_import_id_map_block_survives_unknown_arg_hint() {
+    let registry = EstateRegistry::new_inmemory();
+    let path = std::env::temp_dir().join(format!(
+        "mcp-json-import-hint-survival-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        r#"{"format_version": 1, "name": "hint-survival", "records": [
+             {"id": "h1", "content": "hint survival sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/hint"},
+             {"id": "h2", "content": "hint survival sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/hint"}]}"#,
+    )
+    .expect("temp seed writable");
+
+    let result = dispatch_tool_with_vault_flag(
+        "moot_json_import",
+        &args!["path" => path.to_str().unwrap(), "return_id_map" => true,
+               "totally_fake_arg" => "should be flagged, not fatal"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+        true,
+    )
+    .expect("json import must dispatch");
+    std::fs::remove_file(&path).ok();
+
+    assert!(is_success(&result), "import with a bogus arg must still succeed; got: {result:?}");
+    let blocks = result["content"].as_array().expect("content array");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "receipt block AND id_map block must both survive the hint"
+    );
+
+    let receipt = blocks[0]["text"].as_str().expect("receipt text");
+    assert!(receipt.contains("json import complete"));
+    assert!(
+        receipt.contains("hint: unrecognized argument(s) ignored: totally_fake_arg"),
+        "the hint lands on the prose block: {receipt}"
+    );
+
+    let map_text = blocks[1]["text"].as_str().expect("map text");
+    assert!(
+        !map_text.contains("hint:"),
+        "no hint line may leak into the JSON block: {map_text}"
+    );
+    let map_json: serde_json::Value =
+        serde_json::from_str(map_text).expect("id map block is one whole JSON object");
+    let map = map_json["id_map"].as_object().expect("id_map object");
+    assert_eq!(map.len(), 2, "one id_map entry per seeded record");
+    assert!(map.contains_key("h1") && map.contains_key("h2"));
+}
