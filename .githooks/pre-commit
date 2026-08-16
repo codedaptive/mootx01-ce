@@ -14,11 +14,12 @@
 #   Activate once per checkout:  git config core.hooksPath .githooks
 #
 # GATE 2: Pattern-regression selftest.
-#   When the staged set touches the guard script, its fixture file, or its
-#   selftest runner — scripts/check-docs-internal-paths.sh,
-#   scripts/path-leak-fixtures.txt, or
-#   scripts/check-docs-internal-paths-selftest.sh — this hook runs the selftest
-#   and blocks the commit if the selftest exits non-zero.
+#   When the staged set touches the guard script, its fixture file, its
+#   selftest runner, or this hook — scripts/check-docs-internal-paths.sh,
+#   scripts/path-leak-fixtures.txt,
+#   scripts/check-docs-internal-paths-selftest.sh, or .githooks/pre-commit —
+#   this hook runs the selftest and blocks the commit if the selftest exits
+#   non-zero.
 #
 #   Why this gate exists: three pattern revisions were made in mission GI-01,
 #   and each was bypassed in review. None of the bypasses was found by reading
@@ -29,9 +30,9 @@
 #   is the "existed but ran in no workflow, so it sat red unnoticed" failure the
 #   guard's own header names. This gate makes a pattern change unable to land
 #   with a reopened bypass: the selftest fires on every commit that modifies the
-#   guard, the fixture, or the runner itself.
+#   guard, the fixture, the runner, or this hook.
 #
-#   The selftest is NOT run on commits that do not touch those three files —
+#   The selftest is NOT run on commits that do not touch those four files —
 #   ordinary commits pay nothing.
 
 repo_root="$(git rev-parse --show-toplevel)" || exit 0
