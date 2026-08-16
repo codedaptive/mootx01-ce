@@ -133,6 +133,12 @@ public enum EstateEncryptionMigrator {
         /// The swap could not complete. The plaintext original is back at
         /// (or never left) the canonical path.
         case swapFailed(detail: String)
+        /// An install key file exists but is not the required length. Treated
+        /// as tampered rather than regenerated: regenerating would orphan
+        /// every database already encrypted under the real key.
+        case installKeyMalformed(path: String, count: Int)
+        /// The install key file could not be created or read.
+        case installKeyUnavailable(path: String, detail: String)
 
         public var description: String {
             switch self {
@@ -148,9 +154,105 @@ public enum EstateEncryptionMigrator {
                     """
             case let .swapFailed(detail):
                 return "estate swap failed — the original plaintext estate is still in place: \(detail)"
+            case let .installKeyMalformed(path, count):
+                return "install key at \(path) is \(count) bytes, expected \(installKeyByteCount)"
+            case let .installKeyUnavailable(path, detail):
+                return "install key at \(path) is unavailable: \(detail)"
             }
         }
     }
+
+    // MARK: - Install key file (harness only)
+
+    // WHY THIS IS FENCED
+    // The Rust port resolves a database key from a `db.key` file beside the
+    // databases (PersistenceKit/rust/src/encryption.rs). The Swift product
+    // resolves its key from the Keychain instead, and that difference is
+    // deliberate on the product side. A benchmark harness needs neither: it
+    // serves a database it converted moments earlier and deletes minutes
+    // later, and a Keychain item per database is both an approval prompt and
+    // durable residue.
+    //
+    // So the file-based key lives here, behind MOOTX01_HARNESS_KEYFILE, and is
+    // absent from every production build. The condition is set only by the
+    // harness's own build of the product binary; nothing in the shipping
+    // product defines it. What the harness measures is retrieval over
+    // encrypted pages, which does not depend on where the key came from.
+
+    /// Length of an install key, matching the Rust port's `INSTALL_KEY_LEN`.
+    public static let installKeyByteCount = 32
+
+    /// Filename of the install key beside the databases it opens. Matches the
+    /// Rust port's `INSTALL_KEY_FILE`.
+    public static let installKeyFileName = "db.key"
+
+    /// URL of the install key file for databases held in `directory`.
+    public static func installKeyURL(inDirectory directory: URL) -> URL {
+        directory.appendingPathComponent(installKeyFileName)
+    }
+
+    #if MOOTX01_HARNESS_KEYFILE
+    /// Read the install key for `directory`, creating it if absent.
+    ///
+    /// Semantics mirror the Rust port's `load_or_create_install_key`: a file of
+    /// the wrong length fails loud rather than being regenerated, and creation
+    /// is atomic with owner-only permissions — `O_CREAT | O_EXCL` sets the mode
+    /// in the inode before the directory entry is visible, so there is no
+    /// window where the key is group- or world-readable, and a pre-planted
+    /// symlink at the path is refused rather than followed.
+    public static func loadOrCreateInstallKey(inDirectory directory: URL) throws -> Data {
+        let url = installKeyURL(inDirectory: directory)
+
+        if let existing = try? Data(contentsOf: url) {
+            guard existing.count == installKeyByteCount else {
+                throw MigrationError.installKeyMalformed(
+                    path: url.path, count: existing.count)
+            }
+            return existing
+        }
+
+        // SystemRandomNumberGenerator is the platform CSPRNG, which is what
+        // this needs; the key never leaves the harness's own scratch directory.
+        let key = Data((0..<installKeyByteCount).map { _ in
+            UInt8.random(in: UInt8.min...UInt8.max)
+        })
+        try writeInstallKey(key, inDirectory: directory)
+        return key
+    }
+
+    /// Write `key` as the install key for `directory`, replacing any existing
+    /// one.
+    ///
+    /// Replacing is required, not incidental: the harness converts a database
+    /// with a key it chose and then hands that same key to the server, so a
+    /// file left by an earlier cell must not win. Creation is still atomic and
+    /// owner-only — the old file is unlinked first so `O_EXCL` holds.
+    public static func writeInstallKey(_ key: Data, inDirectory directory: URL) throws {
+        let url = installKeyURL(inDirectory: directory)
+        guard key.count == installKeyByteCount else {
+            throw MigrationError.installKeyMalformed(path: url.path, count: key.count)
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw MigrationError.installKeyUnavailable(path: url.path, detail: "\(error)")
+        }
+        try? FileManager.default.removeItem(at: url)
+
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            throw MigrationError.installKeyUnavailable(
+                path: url.path, detail: "open: \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+        let written = key.withUnsafeBytes { write(fd, $0.baseAddress, key.count) }
+        guard written == key.count else {
+            throw MigrationError.installKeyUnavailable(
+                path: url.path, detail: "short write (\(written) bytes)")
+        }
+    }
+    #endif
 
     // MARK: - Raw-connection helpers
 

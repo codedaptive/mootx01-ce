@@ -177,6 +177,32 @@ extension EstateKeyProvider {
     public static func resolveOpenPosture(
         for estateURL: URL
     ) throws -> (encryption: EstateEncryptionConfig, posture: OpenPosture) {
+        #if MOOTX01_HARNESS_KEYFILE
+        // HARNESS BUILDS ONLY — absent from every shipping binary.
+        //
+        // The benchmark harness serves databases it converted moments earlier
+        // and deletes minutes later. Keychain custody would cost an approval
+        // prompt per spawned server and leave one durable item per database.
+        // A key file beside the databases is the Rust port's own mechanism
+        // (PersistenceKit/rust/src/encryption.rs), reused here so the Swift
+        // leg can serve a prebuilt encrypted database at all. Retrieval over
+        // encrypted pages is what the harness measures, and that does not
+        // depend on where the key came from.
+        //
+        // The file is consulted BEFORE the Keychain, so a harness run never
+        // reaches Keychain custody on any branch.
+        if let key = try harnessInstallKey(for: estateURL) {
+            switch detectEstateFileState(at: estateURL) {
+            case .plaintext:
+                return (.plaintext, .existingPlaintext)
+            case .ciphertext:
+                return (.fullDatabase(key: key), .existingEncrypted)
+            case .absent:
+                return (.fullDatabase(key: key), .newEncrypted)
+            }
+        }
+        #endif
+
         switch detectEstateFileState(at: estateURL) {
         case .absent:
             // Explicit opt-out recorded at install or `db create` time. The user
@@ -206,6 +232,30 @@ extension EstateKeyProvider {
             // macOS install working across the upgrade.
             return (.plaintext, .existingPlaintext)
         }
+    }
+    #endif
+
+    #if MOOTX01_HARNESS_KEYFILE
+    /// The install key beside the estate, or nil when there is no key file.
+    ///
+    /// HARNESS BUILDS ONLY — absent from every shipping binary.
+    ///
+    /// Reading a key is not migrating an estate: `mootx01 upgrade` remains the
+    /// only vehicle that converts a plaintext estate, and nothing here writes,
+    /// converts, or swaps anything. This exists so the benchmark harness can
+    /// serve a database it converted moments earlier without Keychain custody,
+    /// which would cost an approval prompt per spawned server and leave one
+    /// durable item per database behind.
+    ///
+    /// Callers get the key through this accessor rather than reaching for the
+    /// migration library directly, so the commands that open an estate keep
+    /// naming only key custody.
+    public static func harnessInstallKey(for estateURL: URL) throws -> Data? {
+        let directory = estateURL.deletingLastPathComponent()
+        guard FileManager.default.fileExists(
+            atPath: EstateEncryptionMigrator.installKeyURL(inDirectory: directory).path)
+        else { return nil }
+        return try EstateEncryptionMigrator.loadOrCreateInstallKey(inDirectory: directory)
     }
     #endif
 

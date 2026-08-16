@@ -190,14 +190,33 @@ struct ServeCommand: AsyncParsableCommand {
                 Logging.stderr.log(
                     "mootx01 serve: EPHEMERAL lifetime + no-encrypt marker — plaintext throwaway estate, keys in-memory only, no Keychain writes.")
             } else {
-                var keyBytes = [UInt8](repeating: 0, count: 32)
-                guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
-                    Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
-                    throw ExitCode.failure
+                // HARNESS BUILDS ONLY — absent from every shipping binary.
+                // A generated key can only open an estate this process just
+                // created, so the benchmark harness cannot serve a database it
+                // prepared earlier. Under MOOTX01_HARNESS_KEYFILE the key comes
+                // from a `db.key` file beside the estate — the Rust port's own
+                // mechanism — while lifetime still governs residence, so the
+                // identity store stays in memory and the Keychain is untouched
+                // on this path too.
+                var installKey: Data?
+                #if MOOTX01_HARNESS_KEYFILE
+                installKey = try EstateKeyProvider.harnessInstallKey(for: estateURL)
+                #endif
+
+                if let installKey {
+                    encryption = .fullDatabase(key: installKey)
+                    Logging.stderr.log(
+                        "mootx01 serve: EPHEMERAL lifetime + install key file — db key read from a key file beside the estate, identity keys in-memory only, no Keychain writes.")
+                } else {
+                    var keyBytes = [UInt8](repeating: 0, count: 32)
+                    guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
+                        Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
+                        throw ExitCode.failure
+                    }
+                    encryption = .fullDatabase(key: Data(keyBytes))
+                    Logging.stderr.log(
+                        "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
                 }
-                encryption = .fullDatabase(key: Data(keyBytes))
-                Logging.stderr.log(
-                    "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
             }
         } else {
         do {

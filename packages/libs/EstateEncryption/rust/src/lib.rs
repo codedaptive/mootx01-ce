@@ -58,6 +58,12 @@ pub enum MigrationError {
     /// The swap could not complete. The plaintext original is back at (or
     /// never left) the canonical path.
     SwapFailed { detail: String },
+    /// An install key file exists but is not the required length. Treated as
+    /// tampered rather than regenerated: regenerating would orphan every
+    /// database already encrypted under the real key.
+    InstallKeyMalformed { path: String, count: usize },
+    /// The install key file could not be created or read.
+    InstallKeyUnavailable { path: String, detail: String },
 }
 
 impl fmt::Display for MigrationError {
@@ -79,6 +85,13 @@ impl fmt::Display for MigrationError {
                 f,
                 "estate swap failed — the original plaintext estate is still in place: {detail}"
             ),
+            MigrationError::InstallKeyMalformed { path, count } => write!(
+                f,
+                "install key at {path} is {count} bytes, expected {INSTALL_KEY_BYTE_COUNT}"
+            ),
+            MigrationError::InstallKeyUnavailable { path, detail } => {
+                write!(f, "install key at {path} is unavailable: {detail}")
+            }
         }
     }
 }
@@ -745,3 +758,120 @@ pub fn migrate(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Install key file — HARNESS ONLY (mirrors Swift `MOOTX01_HARNESS_KEYFILE`)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WHY THIS IS FENCED
+// The product resolves a database key its own way on each platform: a `db.key`
+// file beside the databases on the Rust side, the Keychain on the Swift side.
+// A benchmark harness needs neither — it serves a database it converted moments
+// earlier and deletes minutes later, and durable key custody costs an approval
+// prompt per spawned server and leaves residue behind.
+//
+// So the file-based key lives here, behind the `harness-keyfile` feature, and
+// is absent from every production build. What the harness measures is retrieval
+// over encrypted pages, which does not depend on where the key came from.
+
+/// Length of an install key. Matches PersistenceKit's `INSTALL_KEY_LEN` and the
+/// Swift port's `installKeyByteCount`.
+pub const INSTALL_KEY_BYTE_COUNT: usize = 32;
+
+/// Filename of the install key beside the databases it opens. Matches
+/// PersistenceKit's `INSTALL_KEY_FILE` and the Swift port's
+/// `installKeyFileName`.
+pub const INSTALL_KEY_FILE_NAME: &str = "db.key";
+
+/// Path of the install key file for databases held in `directory`.
+pub fn install_key_path(directory: &Path) -> PathBuf {
+    directory.join(INSTALL_KEY_FILE_NAME)
+}
+
+/// Read the install key for `directory`, creating it if absent.
+///
+/// A file of the wrong length fails loud rather than being regenerated:
+/// regeneration would render every database already encrypted under the real
+/// key permanently undecryptable.
+#[cfg(feature = "harness-keyfile")]
+pub fn load_or_create_install_key(directory: &Path) -> MigrationResult<Vec<u8>> {
+    let path = install_key_path(directory);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if bytes.len() != INSTALL_KEY_BYTE_COUNT {
+            return Err(MigrationError::InstallKeyMalformed {
+                path: path.display().to_string(),
+                count: bytes.len(),
+            });
+        }
+        return Ok(bytes);
+    }
+
+    // Key bytes come from the OS CSPRNG the same way the rest of the crate's
+    // SQLCipher material does; the key never leaves the harness scratch dir.
+    let mut key = vec![0u8; INSTALL_KEY_BYTE_COUNT];
+    getrandom_bytes(&mut key).map_err(|detail| MigrationError::InstallKeyUnavailable {
+        path: path.display().to_string(),
+        detail,
+    })?;
+    write_install_key(&key, directory)?;
+    Ok(key)
+}
+
+/// Write `key` as the install key for `directory`, replacing any existing one.
+///
+/// Replacing is required, not incidental: the harness converts a database with
+/// a key it chose and then hands that same key to the server, so a file left by
+/// an earlier cell must not win. Creation is atomic and owner-only —
+/// `O_CREAT | O_EXCL` with mode 0600 sets the mode in the inode before the
+/// directory entry is visible, so there is no window where the key is group- or
+/// world-readable, and a pre-planted symlink at the path is refused rather than
+/// followed.
+#[cfg(feature = "harness-keyfile")]
+pub fn write_install_key(key: &[u8], directory: &Path) -> MigrationResult<()> {
+    use std::io::Write as _;
+
+    let path = install_key_path(directory);
+    if key.len() != INSTALL_KEY_BYTE_COUNT {
+        return Err(MigrationError::InstallKeyMalformed {
+            path: path.display().to_string(),
+            count: key.len(),
+        });
+    }
+    std::fs::create_dir_all(directory).map_err(|e| MigrationError::InstallKeyUnavailable {
+        path: path.display().to_string(),
+        detail: format!("create dir: {e}"),
+    })?;
+    let _ = std::fs::remove_file(&path);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|e| MigrationError::InstallKeyUnavailable {
+            path: path.display().to_string(),
+            detail: format!("open: {e}"),
+        })?;
+    file.write_all(key)
+        .map_err(|e| MigrationError::InstallKeyUnavailable {
+            path: path.display().to_string(),
+            detail: format!("write: {e}"),
+        })
+}
+
+/// Fill `buffer` from the OS CSPRNG. Reads `/dev/urandom` rather than taking a
+/// dependency: the crate has one, and the C-1 zero-external-dependency rule is
+/// not relaxed for harness-only code.
+#[cfg(feature = "harness-keyfile")]
+fn getrandom_bytes(buffer: &mut [u8]) -> Result<(), String> {
+    use std::io::Read as _;
+    let mut source = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("open /dev/urandom: {e}"))?;
+    source
+        .read_exact(buffer)
+        .map_err(|e| format!("read /dev/urandom: {e}"))
+}
