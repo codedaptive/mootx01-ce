@@ -46,12 +46,12 @@ sublicense, and distribute Your Contribution and such derivative works.
 You expressly acknowledge and agree that this license permits Codedaptive
 to:
 
-1. include Your Contribution in the MOOTx01 community edition under the
-   **Functional Source License (FSL-1.1-ALv2)** (see `LICENSE` and
-   `LICENSING.md`);
-2. relicense Your Contribution under the **Apache License, Version 2.0**,
-   on the schedule the Functional Source License sets; and
-3. include Your Contribution in the **commercial edition** of MOOTx01
+1. include Your Contribution in the open source MOOTx01 repository under
+   the **Apache License, Version 2.0** (see `LICENSE` and `LICENSING.md`);
+2. relicense Your Contribution under other license terms where the
+   project's licensing model requires it; and
+3. include Your Contribution in the **commercial products** of MOOTx01
+   (MOOTx01 Pro, MOOTx01 Enterprise, and Enterprise Edition offerings)
    built from the same substrate.
 
 This grant is what allows the community edition, its scheduled conversion

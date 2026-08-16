@@ -7,9 +7,11 @@ clients. This file routes humans and AI agents to the maintained sources.
 
 - Product overview: README.md
 - Public product roadmap: ROADMAP.md
-- Binding product-core license: LICENSE
-- Plain-language licensing and commercial tiers: LICENSING.md
-- Community and Enterprise Edition boundaries: EDITIONS.md
+- Binding license (Apache-2.0): LICENSE
+- Retroactive relicense notice: RELICENSE.md
+- Plain-language licensing model: LICENSING.md
+- Editions and commercial assurance lane: EDITIONS.md
+- Trademark policy: TRADEMARKS.md
 - AI-assisted explanation and install: AI_START_HERE.md
 - Documentation index: docs/README.md
 - Install guide: docs/start-here/INSTALLING_MOOTX01.md
