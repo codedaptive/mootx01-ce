@@ -66,6 +66,60 @@ repo_root="$(git rev-parse --show-toplevel)" || exit 0
 # --- GATE 1: developer-path leak guard ---
 "$repo_root/scripts/check-docs-internal-paths.sh" diff || exit 1
 
+
+# --- Staged-content materialisation (shared by GATE 2 and GATE 3) ---
+#
+# Both gates below validate the commit that is ABOUT TO LAND, which is the
+# INDEX — not the working tree. Git lets the two differ, and before this helper
+# existed both gates read the worktree: a contributor could stage a weakened
+# guard pattern, restore the good copy in the worktree, and the hook would
+# happily validate the good copy while committing the weakened one. The gate
+# reported success about a file that was not being committed.
+#
+# So every input a gate reads is extracted from the index into a scratch tree,
+# and the gate runs there. The selftest and the generator both resolve their
+# siblings relative to their own location, so materialising the whole set into
+# one mirrored directory makes them read staged content throughout without
+# either script needing to know about the index.
+#
+# A path staged for DELETION cannot be extracted. That is not a reason to skip
+# the gate: removing the guard, its fixture, or its runner is exactly the
+# regression these gates exist to stop, so it blocks.
+_staged_root=""
+materialise_staged() {
+  _staged_root="$(mktemp -d)"
+  for _rel in "$@"; do
+    if ! git cat-file -e ":$_rel" 2>/dev/null; then
+      echo ""
+      echo "BLOCKED: $_rel is staged for deletion or is absent from the index."
+      echo "The path-leak guard, its fixture, and its runner are load-bearing;"
+      echo "removing one disables the gate that protects the rest."
+      rm -rf "$_staged_root"
+      exit 1
+    fi
+    mkdir -p "$_staged_root/$(dirname "$_rel")"
+    git show ":$_rel" > "$_staged_root/$_rel"
+  done
+  chmod +x "$_staged_root"/scripts/*.sh 2>/dev/null || true
+}
+
+# The hook cannot validate a staged copy of ITSELF: git invokes the worktree
+# hook, so a staged-but-different hook is not the code running this check. The
+# correct response is to refuse rather than to report on the wrong file.
+if printf '%s\n' "$staged_files" | grep -qE '^\.githooks/pre-commit$'; then
+  if ! git show ":.githooks/pre-commit" | diff -q - "$repo_root/.githooks/pre-commit" > /dev/null 2>&1; then
+    echo ""
+    echo "BLOCKED: .githooks/pre-commit is staged with content that differs from"
+    echo "the working-tree copy git just executed. The gates below would report on"
+    echo "the hook running now, not the hook being committed."
+    echo ""
+    echo "To fix: make the worktree copy identical to what you intend to commit"
+    echo "(git checkout-index -f .githooks/pre-commit), then re-run the commit so"
+    echo "the hook that validates is the hook that lands."
+    exit 1
+  fi
+fi
+
 # --- GATE 2: pattern-regression selftest ---
 # Collect staged file paths once; grep against exact paths with anchors.
 #   This hook's own path is in the trigger set below. That is deliberate: the
@@ -79,7 +133,12 @@ if printf '%s\n' "$staged_files" | grep -qE \
 then
   echo "pre-commit: guard pattern or fixtures staged — running regression selftest"
   echo "  fixture: scripts/path-leak-fixtures.txt"
-  if ! "$repo_root/scripts/check-docs-internal-paths-selftest.sh"; then
+  materialise_staged \
+    scripts/check-docs-internal-paths.sh \
+    scripts/path-leak-fixtures.txt \
+    scripts/check-docs-internal-paths-selftest.sh
+  if ! "$_staged_root/scripts/check-docs-internal-paths-selftest.sh"; then
+    rm -rf "$_staged_root"
     echo ""
     echo "BLOCKED: selftest failed. The pattern change reopens a previously closed"
     echo "bypass. Fix the pattern in scripts/check-docs-internal-paths.sh so every"
@@ -87,6 +146,7 @@ then
     echo "Cases live in scripts/path-leak-fixtures.txt."
     exit 1
   fi
+  rm -rf "$_staged_root"
 fi
 
 # --- GATE 3: transcript-currency check ---
@@ -100,6 +160,15 @@ if printf '%s\n' "$staged_files" | grep -qE \
     '^(scripts/dg01-guard-evidence-gen\.sh|scripts/dg01-guard-evidence-transcript\.txt|docs_internal/analysis/DG-01_GUARD_EVIDENCE\.md|scripts/check-docs-internal-paths\.sh)$'
 then
   echo "pre-commit: transcript inputs staged — checking transcript currency"
+  # Same index-versus-worktree hazard as GATE 2: regenerate from the STAGED
+  # generator, guard and evidence file, and diff against the STAGED transcript.
+  # Reading any of these from the worktree would let a stale transcript land
+  # beside a good worktree copy that git never commits.
+  materialise_staged \
+    scripts/dg01-guard-evidence-gen.sh \
+    scripts/dg01-guard-evidence-transcript.txt \
+    scripts/check-docs-internal-paths.sh \
+    docs_internal/analysis/DG-01_GUARD_EVIDENCE.md
   _generated="$(mktemp)"
   _committed_body="$(mktemp)"
   # Defence in depth: clear every git plumbing variable before invoking the
@@ -115,11 +184,11 @@ then
           GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
           GIT_COMMON_DIR GIT_NAMESPACE GIT_SUPER_PREFIX \
           GIT_INTERNAL_SUPER_PREFIX
-    bash "$repo_root/scripts/dg01-guard-evidence-gen.sh" ) > "$_generated" 2>&1
+    bash "$_staged_root/scripts/dg01-guard-evidence-gen.sh" ) > "$_generated" 2>&1
   # Extract the scenario body from the committed transcript: skip header lines
   # (all lines before the first scenario delimiter) so both sides are comparable.
   awk '/^----- /{found=1} found{print}' \
-    "$repo_root/scripts/dg01-guard-evidence-transcript.txt" > "$_committed_body"
+    "$_staged_root/scripts/dg01-guard-evidence-transcript.txt" > "$_committed_body"
   if ! diff -q "$_generated" "$_committed_body" > /dev/null 2>&1; then
     echo ""
     echo "BLOCKED: the committed transcript is stale. The generator would produce"
@@ -131,6 +200,7 @@ then
     echo "Why this gate exists: the transcript is evidence of the guard's"
     echo "behaviour; a stale transcript is false evidence."
     rm -f "$_generated" "$_committed_body"
+    rm -rf "$_staged_root"
     exit 1
   fi
   rm -f "$_generated" "$_committed_body"
