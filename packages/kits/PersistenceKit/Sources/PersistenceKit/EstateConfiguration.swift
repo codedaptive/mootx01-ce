@@ -120,7 +120,15 @@ public enum ResidentIndexBudget: Sendable, Equatable {
         case let .bytes(n):
             // Absolute ceiling: independent of host memory, honoured even when
             // detection failed. Twin of Rust `Bytes(n) => Some(n)`.
-            return n
+            //
+            // Floored at 0 because the Rust twin stores this as a u64 and cannot
+            // represent a negative ceiling at all. Without the floor the two ports
+            // would diverge on a negative input: Swift would return it unchanged,
+            // and since `residentTotal + projection > cap` is then always true,
+            // every index would be silently refused for the process's lifetime.
+            // Zero is the nearest value Rust can hold and carries the same meaning
+            // (admit nothing), so both ports now behave identically.
+            return max(0, n)
         case let .systemFraction(f):
             guard physicalMemoryBytes > 0 else {
                 // Physical memory is undetectable, so there is no quantity to take

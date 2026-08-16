@@ -2098,9 +2098,13 @@ impl VectorStore {
                     generation: serving_gen,
                 }).collect());
             }
-            // No float rows for this model — fall through to the table scan.
+            // ensure_float_index_built_locked returned false. That means EITHER no
+            // float rows exist for this model OR admission was refused because the
+            // projected resident set would exceed the estate's ceiling. Both fall
+            // through to the table scan below, which answers the query correctly.
         }
-        // diskBacked path, or ramResident with no rows yet: scan the table.
+        // Reached for a diskBacked estate, for a ramResident estate with no rows yet,
+        // and for a ramResident estate whose float index was refused admission.
         // Table scan filters to serving generation, so generation = serving gen (0 pre-swap).
         let scored = self.float_scan_from_table(probe, model_id, k, true)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
@@ -2159,9 +2163,13 @@ impl VectorStore {
                     generation: serving_gen,
                 }).collect());
             }
-            // No float rows for this model — fall through to the table scan.
+            // ensure_float_index_built_locked returned false. That means EITHER no
+            // float rows exist for this model OR admission was refused because the
+            // projected resident set would exceed the estate's ceiling. Both fall
+            // through to the table scan below, which answers the query correctly.
         }
-        // diskBacked path, or ramResident with no rows yet: scan the table.
+        // Reached for a diskBacked estate, for a ramResident estate with no rows yet,
+        // and for a ramResident estate whose float index was refused admission.
         let scored = self.float_scan_from_table(probe, model_id, k, false)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
