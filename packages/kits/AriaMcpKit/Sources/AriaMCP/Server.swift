@@ -82,33 +82,51 @@ public struct ARIA_MCPDispatcher: Sendable {
     /// The authenticated first-party identity this dispatcher reports, or `nil`
     /// on the ordinary third-party lane.
     ///
-    /// Defaulted to `nil`, which is load-bearing rather than convenient: every
-    /// existing construction site — the resident daemon, the CLI, the app, and
-    /// every test — inherits it and therefore produces byte-identical
-    /// `initialize` output. The extra `serverInfo` fields and the
-    /// `authenticated-first-party` capability appear ONLY when a first-party
-    /// server has supplied a verified identity, so the dispatcher can never
-    /// claim a capability the lane has not actually configured.
-    public let firstPartyIdentity: FirstPartyServerIdentity?
+    /// **This is NOT a configuration knob and must never be set by a caller.**
+    /// It is `internal(set)` and is populated in exactly one place —
+    /// `HTTPServer.routeFirstParty`, from the live `FirstPartyAuthServer`'s own
+    /// identity, for the duration of one authenticated dispatch.
+    ///
+    /// It was previously a public initializer parameter, which was a defect:
+    /// the identity and the authenticator were two independent knobs that had to
+    /// agree, and `HTTPServer` handed the SAME dispatcher to both lanes. Setting
+    /// the identity therefore made the UNAUTHENTICATED public lane advertise
+    /// `authenticated-first-party` and publish the daemon's instance and estate
+    /// identifiers; leaving it unset made the authenticated lane fail to report
+    /// them. Deriving it from the authenticator removes the second knob, so the
+    /// two can no longer diverge.
+    public internal(set) var firstPartyIdentity: FirstPartyServerIdentity?
 
-    public init(
-        info: ServerInfo,
-        tooling: ToolDispatcher,
-        firstPartyIdentity: FirstPartyServerIdentity? = nil
-    ) {
+    public init(info: ServerInfo, tooling: ToolDispatcher) {
         self.info = info
         self.tools = ToolProjection.tools()
         self.tooling = tooling
-        self.firstPartyIdentity = firstPartyIdentity
+        self.firstPartyIdentity = nil
     }
 
-    /// This dispatcher with a first-party identity attached.
+    /// This dispatcher, carrying a first-party identity, for one authenticated
+    /// dispatch.
     ///
-    /// `FirstPartyAuthServer` holds one of these so the authenticated lane can
-    /// answer truthfully while the third-party dispatcher it was derived from
-    /// keeps reporting exactly what it reported before.
-    public func withFirstPartyIdentity(_ identity: FirstPartyServerIdentity) -> ARIA_MCPDispatcher {
-        ARIA_MCPDispatcher(info: info, tooling: tooling, firstPartyIdentity: identity)
+    /// `internal` on purpose: only the first-party router may call it, and only
+    /// with an identity taken from the `FirstPartyAuthServer` that just
+    /// authenticated the request.
+    func withFirstPartyIdentity(_ identity: FirstPartyServerIdentity) -> ARIA_MCPDispatcher {
+        var copy = self
+        copy.firstPartyIdentity = identity
+        return copy
+    }
+
+    /// This dispatcher with any first-party identity removed.
+    ///
+    /// Applied to every request on the public lane, unconditionally, so that a
+    /// caller who somehow obtained an identity-bearing dispatcher still cannot
+    /// cause the public lane to advertise or leak one. Cheap: `ARIA_MCPDispatcher`
+    /// is a value type.
+    var publicLane: ARIA_MCPDispatcher {
+        guard firstPartyIdentity != nil else { return self }
+        var copy = self
+        copy.firstPartyIdentity = nil
+        return copy
     }
 
     /// Handle one parsed inbound request. Returns the response or `nil`

@@ -1239,32 +1239,75 @@ struct FirstPartyAuthServerTests {
         }
     }
 
-    @Test("A credential rotation revokes live sessions")
+    @Test("A credential rotation revokes live sessions on the SAME server")
     func rotationRevokesSessions() async throws {
+        // Root Adams test-quality finding. The earlier version of this case
+        // built a SECOND server and asserted its (empty) session table rejected
+        // the session — which it would have done for any input, generation
+        // checking or not. It passed without exercising the thing it named.
+        //
+        // This version rotates the credential generation underneath ONE server
+        // that already holds a live session, so the only thing that can revoke
+        // it is the generation comparison in `authenticate`.
         let descriptor = Self.signedDescriptor()
-        // The provider reports a NEWER generation than the session was minted
-        // under, which is what a rotation looks like to the middleware.
-        let rotating = FixedFirstPartyRootProvider(root: Vectors.fixedRoot, credentialGeneration: 2)
+        let provider = MutableRootProvider(root: Vectors.fixedRoot, credentialGeneration: 1)
         let clock = ManualClock()
+        let counter = RandomCounter()
         let server = FirstPartyAuthServer(
-            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot, credentialGeneration: 1),
-            descriptor: descriptor, serverName: Self.serverName,
-            now: { clock.seconds }, randomBytes: { RandomCounter().next($0) }
+            rootProvider: provider, descriptor: descriptor, serverName: Self.serverName,
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
         )
+
         let session = try await Self.handshake(server, descriptor: descriptor)
+        // Baseline: the session works before the rotation. Without this the
+        // test could pass because the session never worked at all.
+        let before = try await server.authenticate(Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier,
+            sessionKey: session.sessionKey, sequence: 1
+        ))
+        #expect(before.sequence == 1)
         #expect(await server.liveSessionCount == 1)
 
-        let rotated = FirstPartyAuthServer(
-            rootProvider: rotating, descriptor: descriptor, serverName: Self.serverName,
-            now: { clock.seconds }, randomBytes: { RandomCounter().next($0) }
-        )
-        // A session minted under generation 1 is not valid against generation 2.
-        await #expect(throws: (any Error).self) {
-            try await rotated.authenticate(Self.signedRequest(
+        // Rotate. The session was minted under generation 1.
+        provider.rotate(to: 2)
+
+        await #expect(throws: FirstPartyAuthError.sessionExpired) {
+            try await server.authenticate(Self.signedRequest(
                 sessionIdentifier: session.sessionIdentifier,
-                sessionKey: session.sessionKey, sequence: 1
+                sessionKey: session.sessionKey, sequence: 2
             ))
         }
+        // Revoked, not merely refused once — the entry is gone.
+        #expect(await server.liveSessionCount == 0)
+    }
+
+    @Test("A descriptor republication revokes live sessions lazily")
+    func descriptorRepublicationRevokesSessions() async throws {
+        // The other half of the generation pair. Republication does not clear
+        // the session table; the per-request generation check is what revokes,
+        // which is exactly the branch this exercises.
+        let descriptor = Self.signedDescriptor(descriptorGeneration: 1)
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        // Baseline: the session works against the descriptor it was minted for.
+        let before = try await server.authenticate(Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier,
+            sessionKey: session.sessionKey, sequence: 1
+        ))
+        #expect(before.sequence == 1)
+
+        await server.republish(descriptor: Self.signedDescriptor(descriptorGeneration: 2))
+
+        await #expect(throws: FirstPartyAuthError.sessionExpired) {
+            try await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 2
+            ))
+        }
+        #expect(await server.liveSessionCount == 0)
+        // Outstanding challenges are bound to the old digest and are dropped.
+        #expect(await server.liveChallengeCount == 0)
     }
 
     @Test("Revocation clears every session and challenge")
@@ -1412,6 +1455,35 @@ final class ManualClock: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         value += delta
     }
+}
+
+/// A root provider whose credential generation can be rotated at runtime.
+///
+/// Needed because `FixedFirstPartyRootProvider`'s generation is a `let`: with it,
+/// `session.credentialGeneration == rootProvider.credentialGeneration` is always
+/// true and the revocation branch is unreachable — a check that cannot be made
+/// to fail cannot be said to have been tested.
+final class MutableRootProvider: FirstPartyRootProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private let root: [UInt8]
+    private var generation: UInt64
+
+    init(root: [UInt8], credentialGeneration: UInt64) {
+        self.root = root
+        self.generation = credentialGeneration
+    }
+
+    var credentialGeneration: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return generation
+    }
+
+    func rotate(to value: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        generation = value
+    }
+
+    func installationRoot() async throws -> [UInt8] { root }
 }
 
 /// Deterministic stand-in for `SecRandomCopyBytes`. Counter-driven so nonces and

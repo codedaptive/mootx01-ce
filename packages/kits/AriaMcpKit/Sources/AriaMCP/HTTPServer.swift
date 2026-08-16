@@ -687,14 +687,29 @@ public struct HTTPServer: Sendable {
         // dedicated-thread-per-connection model. The 30s SO_RCVTIMEO below still
         // bounds a slow-header attacker exactly as before.
         //
-        // TWO READERS, ONE FLOW. With no first-party server configured — every
-        // production caller and every pre-existing test — the original
-        // `HTTPRequest.read` path runs verbatim. With one configured, the bytes
-        // are read raw and parsed by the strict parser so duplicate header lines
-        // and exact field values survive for the MAC check; the collapsed view
-        // handed to `route()` reproduces `HTTPRequest`'s own last-wins
-        // semantics, so a third-party request behaves identically either way.
-        var strictRequest: StrictHTTPRequest?
+        // TWO VIEWS OF ONE BYTE STRING.
+        //
+        // With no first-party server configured — every production caller and
+        // every pre-existing test — `HTTPRequest.read` runs verbatim and this
+        // method is byte-for-byte what it was before the lane existed.
+        //
+        // With one configured, the bytes are read once and then interpreted
+        // TWICE, by two different parsers, for two different purposes:
+        //
+        //   - the PUBLIC lane gets `legacyCollapsedRequest`, a faithful
+        //     reproduction of `LoopbackHTTP.HTTPRequest.parse` including every
+        //     laxity it has. The public lane must behave identically whether or
+        //     not the first-party lane happens to be configured.
+        //   - the FIRST-PARTY subtree gets `StrictHTTPParser`, which refuses
+        //     duplicates, obsolete folding, framing mismatches, and everything
+        //     else the legacy parser tolerates.
+        //
+        // Routing everything through the strict parser — which is what this did
+        // before — turned previously-working third-party requests into 400s the
+        // moment a first-party authenticator was supplied. The routing decision
+        // is therefore taken from the LEGACY view, so which lane a request
+        // reaches never depends on the strict grammar.
+        var firstPartyRaw: Data?
         let request: HTTPRequest?
         if firstPartyAuth != nil {
             let raw: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
@@ -704,20 +719,11 @@ public struct HTTPServer: Sendable {
                     cont.resume(returning: Self.readRawRequest(fd: fd, maxBodyBytes: maxBodyBytes))
                 }
             }
-            guard let raw, let strict = StrictHTTPParser.parse(raw, maxBodyBytes: maxBodyBytes) else {
-                // Unparseable under the strict grammar. Refused, never guessed
-                // at: an ambiguous request on an authenticated lane is a refused
-                // request.
-                _ = global4xxCounter.add(1, ordering: .relaxed)
-                HTTPResponse(
-                    status: 400,
-                    headers: ["Content-Type": "application/json"],
-                    body: Data(#"{"error":"bad_request"}"#.utf8)
-                ).send(fd: fd)
-                return
-            }
-            strictRequest = strict
-            request = Self.collapsed(strict)
+            guard let raw else { return }
+            firstPartyRaw = raw
+            // Unparseable even by the lenient parser: close without answering,
+            // exactly as `HTTPRequest.read` returning nil does today.
+            request = Self.legacyCollapsedRequest(raw, maxBodyBytes: maxBodyBytes)
         } else {
             request = await withCheckedContinuation { (cont: CheckedContinuation<HTTPRequest?, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -729,13 +735,20 @@ public struct HTTPServer: Sendable {
         }
         guard let request else { return }
 
-        // The authenticated subtree. Handled here, before the origin guard, the
-        // GET host guard, the SSE branch, and `route()` — so no side channel
-        // under `/mcp/first-party` can be reached by any path that does not go
-        // through the MAC middleware first.
-        if let firstPartyAuth, let strict = strictRequest,
-           Self.isFirstPartyTarget(strict.requestTarget) {
-            let response = await Self.routeFirstParty(strict, dispatcher: dispatcher, auth: firstPartyAuth)
+        // The authenticated subtree. Handled before the origin guard, the GET
+        // host guard, the SSE branch, and `route()`, so no side channel under
+        // `/mcp/first-party` can be reached by any path that does not go through
+        // the MAC middleware first.
+        if let firstPartyAuth, let raw = firstPartyRaw, Self.isFirstPartyTarget(request.path) {
+            // Strict judgment applies from here on. A first-party request that
+            // the strict grammar refuses is a 400 — on this lane an ambiguous
+            // request is a refused request.
+            let response: HTTPResponse
+            if let strict = StrictHTTPParser.parse(raw, maxBodyBytes: maxBodyBytes) {
+                response = await Self.routeFirstParty(strict, dispatcher: dispatcher, auth: firstPartyAuth)
+            } else {
+                response = Self.firstPartyError(status: 400, code: "bad_request")
+            }
             switch response.status {
             case 400..<500: _ = global4xxCounter.add(1, ordering: .relaxed)
             case 500..<600: _ = global5xxCounter.add(1, ordering: .relaxed)
@@ -815,7 +828,13 @@ public struct HTTPServer: Sendable {
             return
         }
 
-        let response = await route(request, dispatcher: dispatcher, topologyReader: topologyReader)
+        // `publicLane` strips any first-party identity unconditionally, so the
+        // unauthenticated lane cannot advertise `authenticated-first-party` or
+        // publish the daemon's instance and estate identifiers even if a caller
+        // handed in an identity-bearing dispatcher.
+        let response = await route(
+            request, dispatcher: dispatcher.publicLane, topologyReader: topologyReader
+        )
 
         // Count by status class.
         switch response.status {
@@ -1042,29 +1061,101 @@ public struct HTTPServer: Sendable {
         }
         guard let headerEnd else { return nil }
 
-        // Parse only enough of the header block to learn Content-Length; the
-        // strict parser re-reads and judges the whole thing afterwards.
+        // How many body bytes to read is decided with EXACTLY the rule
+        // `LoopbackHTTP.HTTPRequest.parse` uses, because this reader stands in
+        // for its socket reads and must consume the same bytes from the wire.
+        // In particular: names are whitespace-trimmed before lookup, duplicates
+        // collapse last-wins, a non-numeric or non-positive value means "no
+        // body", and an oversize length is TRUNCATED at the cap rather than
+        // refused. Getting any of these wrong changes what the public lane
+        // reads, which is a third-party regression regardless of what the
+        // strict parser later decides.
         let headerData = buffer[buffer.startIndex..<headerEnd.lowerBound]
         guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
-        var declared = 0
+        var collapsed: [String: String] = [:]
         for line in headerText.components(separatedBy: "\r\n").dropFirst() {
+            if line.isEmpty { break }
             guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[line.startIndex..<colon].lowercased()
-            guard name == "content-length" else { continue }
-            let raw = line[line.index(after: colon)...].trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
-            guard let value = Int(raw), value >= 0, value <= maxBodyBytes else { return nil }
-            declared = value
+            let name = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            collapsed[name] = value
         }
 
         var body = Data(buffer[headerEnd.upperBound...])
-        while body.count < declared {
-            guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { break }
-            body.append(chunk)
+        if let raw = collapsed["content-length"], let declared = Int(raw), declared > 0 {
+            let want = min(declared, maxBodyBytes)
+            while body.count < want {
+                guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { break }
+                body.append(chunk)
+            }
+            if body.count > want { body = body.prefix(want) }
         }
-        // Hand back exactly the header block, the terminator, and the declared
-        // body. A body longer than Content-Length is a framing error the strict
-        // parser will refuse rather than silently keep.
+        // With no usable Content-Length nothing further is read, matching the
+        // legacy reader. Whatever already sat in the buffer is handed on: the
+        // legacy view discards it exactly as before, and the strict view refuses
+        // it, which is the correct answer on the authenticated lane.
         return Data(buffer[buffer.startIndex..<headerEnd.upperBound]) + body
+    }
+
+    /// Parse raw bytes with the FROZEN semantics of
+    /// `LoopbackHTTP.HTTPRequest.parse`, for the public lane.
+    ///
+    /// This is a faithful reproduction, not an improvement, and every apparent
+    /// laxity below is deliberate. The public lane must behave byte-identically
+    /// whether or not a first-party authenticator happens to be configured, so
+    /// this reproduces the legacy parser's acceptances as well as its rejections:
+    ///
+    /// - field names are whitespace-trimmed before use, so `Name : v` is `name`;
+    /// - duplicate fields collapse last-wins, including `Content-Length`;
+    /// - a `Content-Length` above the cap TRUNCATES the body, it does not refuse;
+    /// - a non-numeric or non-positive `Content-Length`, or none at all, DISCARDS
+    ///   the body entirely;
+    /// - `Transfer-Encoding` is ignored;
+    /// - the request line is split on runs of spaces, so extra spaces are
+    ///   tolerated and only the first two tokens are required.
+    ///
+    /// Routing the public lane through `StrictHTTPParser` instead — which refuses
+    /// every one of those — silently turned previously-working third-party
+    /// requests into 400s the moment the first-party lane was configured. That
+    /// was a third-party regression, and this function exists to make it
+    /// impossible.
+    static func legacyCollapsedRequest(_ raw: Data, maxBodyBytes: Int) -> HTTPRequest? {
+        let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        guard let headerEnd = raw.range(of: terminator) else { return nil }
+        // The legacy parser includes the terminator in the header text and then
+        // stops at the first empty line; reproduced exactly.
+        let headerData = raw[raw.startIndex..<headerEnd.upperBound]
+        guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
+        let lines = headerText.split(separator: "\r\n", omittingEmptySubsequences: false)
+        guard let requestLine = lines.first else { return nil }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        let method = String(parts[0])
+        let target = String(parts[1])
+        let (path, query): (String, String) = {
+            if let mark = target.firstIndex(of: "?") {
+                return (String(target[target.startIndex..<mark]), String(target[target.index(after: mark)...]))
+            }
+            return (target, "")
+        }()
+
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if line.isEmpty { break }
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            headers[name] = value
+        }
+
+        var body = Data(raw[headerEnd.upperBound...])
+        if let lenStr = headers["content-length"], let len = Int(lenStr), len > 0 {
+            let want = min(len, maxBodyBytes)
+            if body.count > want { body = body.prefix(want) }
+        } else {
+            body = Data()
+        }
+        return HTTPRequest(method: method, path: path, query: query, headers: headers, body: body)
     }
 
     /// Collapse a strictly-parsed request into the `HTTPRequest` shape the
@@ -1224,7 +1315,13 @@ public struct HTTPServer: Sendable {
             return firstPartyError(status: 401, code: "unauthorized")
         }
 
-        // Authenticated. Only now is the body parsed.
+        // Authenticated. The identity reported by `initialize` on this lane is
+        // taken from the authenticator that just verified the request — never
+        // from the dispatcher the caller supplied — so the advertised capability
+        // and the enforced authentication cannot disagree.
+        let identified = dispatcher.withFirstPartyIdentity(auth.identity)
+
+        // Only now is the body parsed.
         let parsed: JSONValue
         do {
             parsed = try JSONValue.parse(authenticated.body)
@@ -1243,7 +1340,7 @@ public struct HTTPServer: Sendable {
                 )
             )
         }
-        guard let response = await dispatcher.handle(rpc) else {
+        guard let response = await identified.handle(rpc) else {
             // Notification. It receives a MACed empty 204 rather than the
             // third-party lane's bare 202: an unauthenticated "nothing happened"
             // is as useful to an attacker as a forged result.

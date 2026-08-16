@@ -796,7 +796,7 @@ struct FirstPartyHTTPLaneTests {
         )
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(
-            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+            dispatcher, firstPartyAuth: auth
         )
         defer { stop() }
 
@@ -848,7 +848,7 @@ struct FirstPartyHTTPLaneTests {
         )
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(
-            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+            dispatcher, firstPartyAuth: auth
         )
         defer { stop() }
 
@@ -877,7 +877,7 @@ struct FirstPartyHTTPLaneTests {
         )
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(
-            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+            dispatcher, firstPartyAuth: auth
         )
         defer { stop() }
         let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
@@ -918,7 +918,7 @@ struct FirstPartyHTTPLaneTests {
         )
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(
-            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+            dispatcher, firstPartyAuth: auth
         )
         defer { stop() }
         let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
@@ -961,7 +961,7 @@ struct FirstPartyHTTPLaneTests {
         )
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(
-            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+            dispatcher, firstPartyAuth: auth
         )
         defer { stop() }
 
@@ -1024,5 +1024,268 @@ struct FirstPartyHTTPLaneTests {
             body: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
         ))
         #expect(initialize?.contains("authenticated-first-party") == false)
+    }
+}
+
+// MARK: - Lane identity separation, and public-parser equivalence
+//
+// Root Adams findings 1 and 2. Both were defects where the AUTHENTICATED lane's
+// machinery leaked into the UNAUTHENTICATED one — first the identity, then the
+// grammar. These tests exist to make either regression impossible to reintroduce
+// silently.
+
+@Suite("HTTP transport — lane separation under an armed first-party lane", .serialized)
+struct FirstPartyLaneSeparationTests {
+
+    typealias Vectors = FirstPartyAuthProtocolTests
+    typealias ServerFixtures = FirstPartyAuthServerTests
+    typealias Lane = FirstPartyHTTPLaneTests
+
+    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-lane-separation-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        return ARIA_MCPDispatcher(
+            info: ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "1.1.0"),
+            tooling: ToolDispatcher(kit: kit, handle: handle)
+        )
+    }
+
+    private func makeAuth(_ descriptor: FirstPartyDescriptor) -> FirstPartyAuthServer {
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        return FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+    }
+
+    private func serve(
+        _ dispatcher: ARIA_MCPDispatcher, auth: FirstPartyAuthServer?
+    ) throws -> (port: UInt16, stop: () -> Void) {
+        let server = HTTPServer(dispatcher: dispatcher, port: 0, firstPartyAuth: auth)
+        let (listenFD, port) = try server.bind()
+        let captured = auth
+        let thread = Thread {
+            while let cfd = POSIXSocket.acceptOne(listenFD) {
+                Task {
+                    await HTTPServer.serve(
+                        cfd, dispatcher: dispatcher, maxBodyBytes: 4 * 1024 * 1024,
+                        sseGate: globalSSEConcurrencyGate, firstPartyAuth: captured
+                    )
+                }
+            }
+        }
+        thread.name = "aria-mcp.http.lane-separation.test.accept"
+        thread.start()
+        return (port, { close(listenFD) })
+    }
+
+    private func send(port: UInt16, raw: String) -> String? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard POSIXSocket.sendAll(fd, Data(raw.utf8)) else { return nil }
+        var out = Data()
+        while let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty { out.append(chunk) }
+        return String(data: out, encoding: .utf8)
+    }
+
+    // MARK: Finding 1 — identity must not cross lanes
+
+    @Test("With the lane armed, the PUBLIC initialize still advertises nothing")
+    func publicInitializeNeverAdvertisesWhileArmed() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let auth = makeAuth(descriptor)
+        let (port, stop) = try serve(try await makeDispatcher(), auth: auth)
+        defer { stop() }
+
+        let response = send(port: port, raw:
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            + "Content-Length: 88\r\n\r\n"
+            + #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        )
+        #expect(response?.contains("200") == true)
+        // The identity is the daemon's private routing state. None of it may
+        // appear to an unauthenticated caller.
+        #expect(response?.contains("authenticated-first-party") == false)
+        #expect(response?.contains("instanceIdentifier") == false)
+        #expect(response?.contains("estateIdentifier") == false)
+        #expect(response?.contains("descriptorGeneration") == false)
+        #expect(response?.contains("credentialGeneration") == false)
+        #expect(response?.contains(descriptor.instanceIdentifier.uuidString) == false)
+        #expect(response?.contains(descriptor.estateIdentifier.uuidString) == false)
+    }
+
+    @Test("An identity-bearing dispatcher cannot make the public lane advertise")
+    func publicLaneStripsAnInjectedIdentity() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let auth = makeAuth(descriptor)
+        // Deliberately hand in the mistake root Adams described: a dispatcher
+        // already carrying an identity. The public lane must strip it anyway.
+        let poisoned = try await makeDispatcher().withFirstPartyIdentity(auth.identity)
+        let (port, stop) = try serve(poisoned, auth: auth)
+        defer { stop() }
+
+        let response = send(port: port, raw:
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            + "Content-Length: 88\r\n\r\n"
+            + #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        )
+        #expect(response?.contains("authenticated-first-party") == false)
+        #expect(response?.contains(descriptor.instanceIdentifier.uuidString) == false)
+    }
+
+    @Test("The FIRST-PARTY initialize reports the identity even from a dark dispatcher")
+    func firstPartyInitializeAlwaysCarriesIdentity() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let auth = makeAuth(descriptor)
+        // A plain, dark dispatcher — exactly what production passes. The lane
+        // must still answer truthfully, because it takes the identity from the
+        // authenticator rather than from the caller.
+        let (port, stop) = try serve(try await makeDispatcher(), auth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, method: "POST", path: "/mcp/first-party",
+            contentType: "application/json", body: Data(body.utf8)
+        )
+        let response = send(port: port, raw:
+            "POST /mcp/first-party HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            + "Authorization: Mootx01Session "
+            + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier) + "\r\n"
+            + "Mootx01-Sequence: 1\r\n"
+            + "Mootx01-Request-MAC: " + FirstPartyAuthProtocol.base64URLEncode(mac) + "\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n\r\n" + body
+        )
+        #expect(response?.contains("authenticated-first-party") == true)
+        #expect(response?.contains(descriptor.instanceIdentifier.uuidString) == true)
+        #expect(response?.contains(descriptor.estateIdentifier.uuidString) == true)
+    }
+
+    // MARK: Finding 2 — the public grammar must not change when the lane is armed
+
+    /// Every case the legacy parser ACCEPTS and the strict parser refuses.
+    /// Routing the public lane through the strict parser turned each of these
+    /// into a 400 the moment a first-party authenticator was configured.
+    static let legacyAcceptedRequests: [(name: String, raw: String)] = [
+        ("whitespace before the colon in a field name",
+         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type : application/json\r\n"
+         + "Content-Length: 40\r\n\r\n" + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        ("duplicate Content-Length, last wins",
+         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+         + "Content-Length: 999\r\nContent-Length: 40\r\n\r\n"
+         + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        ("Transfer-Encoding present and ignored",
+         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+         + "Transfer-Encoding: chunked\r\nContent-Length: 40\r\n\r\n"
+         + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        ("extra spaces in the request line",
+         "POST  /  HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+         + "Content-Length: 40\r\n\r\n" + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        ("unknown HTTP version token",
+         "POST / HTTP/1.9\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+         + "Content-Length: 40\r\n\r\n" + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+    ]
+
+    @Test(
+        "A public request the legacy parser accepts behaves identically whether or not the lane is armed",
+        arguments: legacyAcceptedRequests
+    )
+    func publicGrammarUnchangedWhenArmed(testCase: (name: String, raw: String)) async throws {
+        // Dark.
+        let (darkPort, stopDark) = try serve(try await makeDispatcher(), auth: nil)
+        let dark = send(port: darkPort, raw: testCase.raw)
+        stopDark()
+
+        // Armed with a first-party authenticator.
+        let auth = makeAuth(ServerFixtures.signedDescriptor())
+        let (armedPort, stopArmed) = try serve(try await makeDispatcher(), auth: auth)
+        let armed = send(port: armedPort, raw: testCase.raw)
+        stopArmed()
+
+        let darkStatus = dark?.components(separatedBy: "\r\n").first ?? "<none>"
+        let armedStatus = armed?.components(separatedBy: "\r\n").first ?? "<none>"
+        #expect(darkStatus == armedStatus, "\(testCase.name): status diverged when the lane was armed")
+        // And the dark baseline must actually have been served, or the
+        // comparison would be two identical failures agreeing with each other.
+        #expect(darkStatus.contains("200"), "\(testCase.name): legacy parser must accept this")
+        #expect(armed?.contains("\"result\"") == true, "\(testCase.name): must still dispatch")
+    }
+
+    @Test("A body sent without Content-Length is discarded on the public lane, armed or not")
+    func bodyWithoutContentLengthDiscardedEitherWay() async throws {
+        // The legacy parser drops the body entirely, so this is a JSON parse
+        // error at the JSON-RPC layer — HTTP 200 with a JSON-RPC error — not a
+        // transport-level 400.
+        let raw = "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n"
+            + #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+
+        let (darkPort, stopDark) = try serve(try await makeDispatcher(), auth: nil)
+        let dark = send(port: darkPort, raw: raw)
+        stopDark()
+
+        let auth = makeAuth(ServerFixtures.signedDescriptor())
+        let (armedPort, stopArmed) = try serve(try await makeDispatcher(), auth: auth)
+        let armed = send(port: armedPort, raw: raw)
+        stopArmed()
+
+        #expect(dark?.components(separatedBy: "\r\n").first == armed?.components(separatedBy: "\r\n").first)
+        #expect(dark?.contains("Parse error") == armed?.contains("Parse error"))
+    }
+
+    @Test("An oversize Content-Length truncates rather than refusing, armed or not")
+    func oversizeContentLengthTruncatesEitherWay() {
+        // Exercised at the parser directly: driving a 4 MiB cap over a socket
+        // would make this a throughput test rather than a semantics one.
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        let raw = Data(("POST / HTTP/1.1\r\nContent-Type: application/json\r\n"
+                        + "Content-Length: 9999\r\n\r\n" + body).utf8)
+        let legacy = HTTPServer.legacyCollapsedRequest(raw, maxBodyBytes: 16)
+        // Legacy truncates at the cap and still yields a request.
+        #expect(legacy != nil)
+        #expect(legacy?.body.count == 16)
+        // Strict refuses the same bytes, which is correct for the authenticated
+        // lane and exactly why the two parsers cannot be shared.
+        #expect(StrictHTTPParser.parse(raw, maxBodyBytes: 16) == nil)
+    }
+
+    @Test("The legacy view reproduces LoopbackHTTP's field handling")
+    func legacyViewReproducesFieldHandling() {
+        let raw = Data(("POST /x?y=1 HTTP/1.1\r\n"
+                        + "Content-Type :   application/json  \r\n"
+                        + "X-Dup: first\r\nX-Dup: second\r\n"
+                        + "Content-Length: 2\r\n\r\n{}").utf8)
+        let legacy = try? #require(HTTPServer.legacyCollapsedRequest(raw, maxBodyBytes: 4096))
+        #expect(legacy?.method == "POST")
+        #expect(legacy?.path == "/x")
+        #expect(legacy?.query == "y=1")
+        // Name trimmed then lowercased; value trimmed.
+        #expect(legacy?.headers["content-type"] == "application/json")
+        // Duplicates collapse last-wins.
+        #expect(legacy?.headers["x-dup"] == "second")
+        #expect(legacy?.body == Data("{}".utf8))
     }
 }

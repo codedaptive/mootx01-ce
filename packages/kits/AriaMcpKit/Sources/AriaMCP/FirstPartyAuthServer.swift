@@ -502,8 +502,8 @@ public actor FirstPartyAuthServer {
 
     private let rootProvider: any FirstPartyRootProviding
     /// The active, MAC-verified descriptor this server authenticates against.
-    private let descriptor: FirstPartyDescriptor
-    private let descriptorDigest: [UInt8]
+    private var descriptor: FirstPartyDescriptor
+    private var descriptorDigest: [UInt8]
 
     /// Seconds since the Unix epoch. Injected.
     private let now: @Sendable () -> UInt64
@@ -795,10 +795,31 @@ public actor FirstPartyAuthServer {
 
     // MARK: Lifecycle
 
-    /// Drop every session. Called on restart, estate close, provider handover,
-    /// credential rotation, or descriptor republication.
+    /// Drop every session. Called on restart, estate close, or provider handover.
     public func revokeAllSessions() {
         sessions.removeAll()
+        challenges.removeAll()
+    }
+
+    /// Replace the active descriptor.
+    ///
+    /// Outstanding CHALLENGES are dropped immediately: each one's transcript is
+    /// bound to the previous descriptor digest, so none of them could ever be
+    /// completed against the new one.
+    ///
+    /// Live SESSIONS are deliberately NOT cleared here. They are revoked lazily,
+    /// by the generation comparison in `authenticate`, on their next request.
+    /// One mechanism rather than two: if republication eagerly cleared the table,
+    /// the per-request check would be unreachable in practice and would rot into
+    /// a branch nothing exercises — while still being the only thing standing
+    /// between a session and a descriptor it was never minted against, on any
+    /// path that changes generations without coming through here.
+    ///
+    /// - Parameter descriptor: The new active descriptor. The caller must
+    ///   already have verified its MAC.
+    public func republish(descriptor: FirstPartyDescriptor) {
+        self.descriptor = descriptor
+        self.descriptorDigest = descriptor.digest()
         challenges.removeAll()
     }
 
