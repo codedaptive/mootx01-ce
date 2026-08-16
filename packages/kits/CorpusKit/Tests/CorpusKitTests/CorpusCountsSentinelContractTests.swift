@@ -374,26 +374,31 @@ struct CorpusCountsSentinelContractTests {
         await storage.close()
     }
 
-    // MARK: - T7: flush guard does not suppress legitimate writes
+    // MARK: - T7: a non-retrain flush never clears the sentinel
 
-    /// T7 -- the flush guard does not suppress a flush when the provider has
-    /// accumulated vocabulary.
+    /// T7 -- an accumulator with vocabulary is NOT enough to clear the sentinel.
+    ///
+    /// INVERTED when the write-path guard replaced the vocabulary-size guard.
+    /// This test previously required a flush with any accumulated term to
+    /// overwrite the sentinel, which pinned the defect as intended behaviour:
+    /// between the migration and the queued reindex, a single ingest puts a term
+    /// in the fresh accumulator, so the flush wrote a PARTIAL counts blob over
+    /// the invalidation signal. With the old doc_count anchor preserved, the
+    /// population guard could then accept those partial counts as complete and
+    /// publish a basis trained only on post-migration content.
+    ///
+    /// The discriminator is the WRITE PATH: only a full-corpus retrain
+    /// (clearsInvalidation: true) may replace the sentinel.
     ///
     /// The guard fires only when countsVocabularySize == 0. A provider that has
     /// accumulated even one term must produce a write regardless of what is stored
     /// on disk. This test pins that the guard cannot accidentally suppress real counts.
     ///
-    /// PpmiProvider is used (same as T6) so the two tests together cover the guard's
-    /// narrowness: fires on empty provider, does not fire on trained provider.
-    ///
-    /// Structural gate: passes both pre-fix and post-fix (once the file compiles).
-    /// Pre-fix: no guard exists, write always happens -- assertion holds.
-    /// Post-fix: countsVocabularySize > 0, guard does not fire -- same result.
-    ///
-    /// !storedCounts.isEmpty is used directly (symmetric with T6's isEmpty check)
-    /// so this gate also compiles against pre-fix source. T5 proves the equivalence.
-    @Test("T7: flush guard does not suppress a write when provider has vocabulary (structural gate)")
-    func t7FlushGuardDoesNotSuppressLegitimateWrites() async throws {
+    /// PpmiProvider is used (same as T6) so the two tests together show the guard
+    /// no longer turns on the accumulator at all: sentinel preserved whether the
+    /// provider is empty (T6) or trained (T7).
+    @Test("T7: a non-retrain flush never clears the sentinel, even with vocabulary")
+    func t7NonRetrainFlushNeverClearsSentinel() async throws {
         let storage = try await makeSentinelTestStorage()
         let store = CorpusProviderCountsStore(storage: storage)
         // Start with the sentinel so T7 and T6 share the same pre-condition.
@@ -426,11 +431,13 @@ struct CorpusCountsSentinelContractTests {
         let storedCounts = try #require(
             stored?.counts,
             "counts row must exist after persistCounts with a trained provider")
-        // !storedCounts.isEmpty is used directly instead of !isInvalidatedCounts(_:)
-        // so this gate compiles against pre-fix source. T5 proves the two are equivalent.
         #expect(
-            !storedCounts.isEmpty,
-            "persistCounts must replace sentinel with real counts when provider has vocabulary; guard is narrow")
+            CorpusProviderCountsStore.isInvalidatedCounts(storedCounts),
+            """
+            A trained accumulator is not a licence to clear the sentinel. Only the \
+            full-corpus retrain may replace it; every other path leaves the \
+            invalidation signal standing so the queued reindex still fires.
+            """)
         await storage.close()
     }
 

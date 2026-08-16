@@ -2816,7 +2816,12 @@ public actor CorpusContentEngine {
                         documentCount: result.countsRow.documentCount,
                         vocabSize: result.countsRow.vocabSize,
                         updatedAt: result.countsRow.updatedAt,
-                        into: txn.rowStore)
+                        into: txn.rowStore,
+                        // The training commit is the full-corpus retrain the
+                        // migration queues, so this is the one write path
+                        // entitled to replace the invalidation sentinel. Every
+                        // other path leaves it standing.
+                        clearsInvalidation: true)
                     try await countsStore.deleteReferences(
                         modelID: result.job.modelID,
                         modelVersion: result.job.modelVersion,

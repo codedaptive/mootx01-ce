@@ -2854,6 +2854,9 @@ impl CorpusContentEngine {
                         vocab_size,
                         now_secs,
                         &rows,
+                        // Counts-path publish: not the full retrain, so the
+                        // invalidation sentinel stands.
+                        false,
                     )
                     .map_err(|e| persistence_kit::StorageError::BackendError {
                         underlying: format!("{e:?}"),
@@ -3273,6 +3276,10 @@ impl CorpusContentEngine {
                                 result.counts_row.vocab_size,
                                 result.counts_row.updated_at_secs,
                                 &rows,
+                                // The training commit is the full-corpus retrain
+                                // the migration queues — the one write path
+                                // entitled to replace the sentinel.
+                                true,
                             )
                             .map_err(|e| persistence_kit::StorageError::BackendError {
                                 underlying: format!("{e:?}"),
@@ -4053,6 +4060,8 @@ impl CorpusContentEngine {
                 // Unix seconds per the store's field contract.
                 now_millis / 1000,
                 &self.storage.row_store(),
+                // Incremental maintenance persist: never clears the sentinel.
+                false,
             )?;
         }
         Ok(())

@@ -443,7 +443,8 @@ public actor CorpusProviderCountsStore {
         documentCount: Int,
         vocabSize: Int,
         updatedAt: Date,
-        into rowStore: any RowStore
+        into rowStore: any RowStore,
+        clearsInvalidation: Bool = false
     ) async throws {
         // Sentinel-preserving flush guard.
         //
@@ -465,11 +466,33 @@ public actor CorpusProviderCountsStore {
         // Test the in-memory vocabulary size FIRST (free, no I/O). Only if it is zero
         // do we pay the storage read to check the sentinel. An accumulator with even
         // one term is a genuine flush that must proceed regardless of what is on disk.
-        if provider.countsVocabularySize == 0,
+        // Only a FULL-CORPUS retrain may clear the sentinel. Everything else
+        // leaves it alone, whatever the accumulator holds.
+        //
+        // The earlier version of this guard also required
+        // `provider.countsVocabularySize == 0`, on the reasoning that "an
+        // accumulator with even one term is a genuine flush". That reasoning is
+        // wrong in the window this sentinel exists to cover. Between the
+        // migration and the queued full reindex, ANY ingest — one MCP write is
+        // enough — gives the fresh accumulator a term. The flush then proceeds
+        // and replaces the sentinel with a valid PARTIAL blob. Because the
+        // migration preserves the old `doc_count` anchor, the population guard
+        // can later find document count equal to the active chunk count, accept
+        // the partial counts, and publish a basis trained only on
+        // post-migration content — silently dropping the preexisting corpus
+        // from the index until some later full rebuild.
+        //
+        // So the discriminator is the WRITE PATH, not the accumulator's size.
+        // `clearsInvalidation` defaults to false so a new call site fails safe:
+        // a path that forgets to declare itself preserves the sentinel, which
+        // costs a rebuild, rather than dropping it, which costs recall.
+        if !clearsInvalidation,
            let existing = try await load(modelID: modelID, modelVersion: modelVersion, from: rowStore),
            Self.isInvalidatedCounts(existing.counts) {
-            // Nothing meaningful to write: in-memory is empty AND the stored row
-            // already carries the invalidation sentinel. Leave the sentinel intact.
+            // The stored row still carries the invalidation sentinel and this is
+            // not the retrain that earns the right to replace it. Leave it: the
+            // next restore returns false and routes to the full corpus retrain
+            // the migration queued.
             return
         }
         if let decomposed = provider.decomposeCounts() {

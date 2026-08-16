@@ -412,10 +412,9 @@ impl CorpusProviderCountsStore {
     /// here would serialise a valid-but-empty accumulator blob over the sentinel,
     /// destroying the invalidation signal. The guard prevents that:
     ///
-    ///   1. Test `provider.counts_vocabulary_size() == 0` first (in-memory, free).
-    ///      This is the common case for a just-migrated estate and requires no I/O.
-    ///   2. Only if that holds, load the stored row and test `is_invalidated_counts`.
-    ///      This I/O is avoided for every ordinary flush (non-empty accumulator).
+    /// The discriminator is the WRITE PATH, not the accumulator's size: only a
+    /// full-corpus retrain (`clears_invalidation = true`) may replace the
+    /// sentinel. See the guard body for why size alone was not enough.
     ///
     /// With the sentinel preserved, the next call to `restore_counts_into` returns
     /// `Ok(false)`, and the reindex-path guard at the corpus layer fires, triggering
@@ -430,18 +429,29 @@ impl CorpusProviderCountsStore {
         vocab_size: usize,
         updated_at_secs: i64,
         row_store: &Arc<dyn persistence_kit::RowStore>,
+        clears_invalidation: bool,
     ) -> CorpusKitResult<()> {
-        // Sentinel-preserving flush: do not overwrite the migration-invalidation
-        // sentinel when the in-memory accumulator is still empty. Writing here
-        // in that state would serialise a valid-but-empty blob over the sentinel,
-        // erasing the "rebuild from zero" signal and causing the reindex path to
-        // publish a zero-vocabulary basis over the trained basis the migration
-        // deliberately preserved.
+        // Sentinel-preserving flush. Only a FULL-CORPUS retrain may replace the
+        // migration-invalidation sentinel; every other write path leaves it
+        // standing, whatever the accumulator holds.
         //
-        // The cheap membership test (vocabulary size) runs first; the storage read
-        // (load) runs only when that passes, so ordinary flushes with a non-empty
-        // accumulator pay no extra I/O cost.
-        if provider.counts_vocabulary_size() == 0 {
+        // An earlier version keyed this on `counts_vocabulary_size() == 0`,
+        // reasoning that an accumulator with any term is a genuine flush. That
+        // is wrong precisely in the window the sentinel covers. Between the
+        // migration and the queued full reindex, ANY ingest — one MCP write is
+        // enough — puts a term in the fresh accumulator, so the flush proceeded
+        // and wrote a valid PARTIAL blob over the sentinel. Because the
+        // migration preserves the old `doc_count` anchor, a later population
+        // guard could then see document count equal to the active chunk count,
+        // accept those partial counts as complete, and publish a basis trained
+        // only on post-migration content — dropping the preexisting corpus from
+        // the index until some later full rebuild.
+        //
+        // `clears_invalidation` is an explicit parameter rather than a default
+        // so a new call site cannot acquire the right to clear the sentinel by
+        // omission. Preserving it wrongly costs a rebuild; clearing it wrongly
+        // costs recall.
+        if !clears_invalidation {
             if let Some(stored) = Self::load_from(row_store, model_id, model_version)? {
                 if is_invalidated_counts(&stored.counts) {
                     return Ok(());

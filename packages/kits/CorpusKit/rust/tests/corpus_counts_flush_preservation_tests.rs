@@ -151,6 +151,8 @@ fn fp1_empty_accumulator_does_not_overwrite_sentinel() {
             0,        // vocab_size     (caller's value — must NOT land if guard fires)
             NOW_SECS,
             &row_store,
+            // Not the full-corpus retrain, so the sentinel must stand.
+            false,
         )
         .expect("persist_counts_into must not error");
 
@@ -185,10 +187,12 @@ fn fp1_empty_accumulator_does_not_overwrite_sentinel() {
 /// The accumulator now has vocabulary. The flush must land and overwrite the
 /// sentinel with real counts, so the restore path will decode the live state.
 #[test]
-fn fp2_non_empty_accumulator_overwrites_sentinel() {
+fn fp2_non_empty_accumulator_still_preserves_sentinel() {
     let st = open_in_memory();
-    // Seed the sentinel row. The guard will check this row, but the non-zero
-    // vocabulary size must prevent the early return.
+    // Seed the sentinel row. A non-zero vocabulary must NOT be enough to clear
+    // it: between the migration and the queued reindex, one ingest is all it
+    // takes to put a term in the fresh accumulator, and letting that flush
+    // through writes a partial blob over the sentinel.
     seed_sentinel_row(&st, 10, 5);
 
     let row_store = st.row_store();
@@ -214,6 +218,8 @@ fn fp2_non_empty_accumulator_overwrites_sentinel() {
             voc,      // vocab_size — matches the accumulator's current size
             NOW_SECS,
             &row_store,
+            // Not the full-corpus retrain, so the sentinel must stand.
+            false,
         )
         .expect("persist_counts_into must not error");
 
@@ -222,21 +228,27 @@ fn fp2_non_empty_accumulator_overwrites_sentinel() {
         .expect("load must succeed")
         .expect("row must be present");
 
-    // The flush must have landed: counts is non-empty and the sentinel is gone.
-    // Passes pre-fix (no guard, write always happens) and post-fix (guard's
-    // vocabulary-size branch is false, write proceeds).
+    // The flush must have been SUPPRESSED: the sentinel survives and the
+    // migration's preserved anchors are untouched.
+    //
+    // This assertion was inverted when the write-path guard replaced the
+    // vocabulary-size guard. It previously required a non-empty accumulator to
+    // overwrite the sentinel, which pinned the defect as intended behaviour: a
+    // single post-migration ingest could replace the invalidation signal with a
+    // partial counts blob, and the preserved doc_count anchor then let the
+    // population guard accept it as complete.
     assert!(
-        !loaded.counts.is_empty(),
-        "persist_counts_into with a non-empty accumulator must overwrite the sentinel; \
-         the guard must fire ONLY when vocabulary is empty, never when it carries state"
+        loaded.counts.is_empty(),
+        "a non-retrain flush must NOT clear the invalidation sentinel, whatever the \
+         accumulator holds; only the full-corpus retrain may replace it"
     );
     assert_eq!(
-        loaded.document_count, 1,
-        "document_count must be updated to the caller's value after a successful flush"
+        loaded.document_count, 10,
+        "the migration's preserved document_count anchor must survive a suppressed flush"
     );
     assert_eq!(
-        loaded.vocab_size, voc,
-        "vocab_size must be updated to the caller's value after a successful flush"
+        loaded.vocab_size, 5,
+        "the migration's preserved vocab_size anchor must survive a suppressed flush"
     );
 }
 
@@ -286,6 +298,8 @@ fn fp3_anchors_survive_suppressed_flush() {
             0,        // would destroy the anchor if written
             NOW_SECS,
             &row_store,
+            // Not the full-corpus retrain, so the sentinel must stand.
+            false,
         )
         .expect("persist_counts_into must not error");
 

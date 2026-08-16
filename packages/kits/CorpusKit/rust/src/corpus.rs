@@ -1524,6 +1524,8 @@ impl Corpus {
                 state.accumulator.counts_vocabulary_size(),
                 now_secs,
                 &self.storage.row_store(),
+                // Maintained-counts persist: never clears the sentinel.
+                false,
             )?;
         }
         Ok(())
@@ -2400,6 +2402,9 @@ impl Corpus {
                     state.accumulator.counts_vocabulary_size(),
                     filed_at_secs,
                     &self.storage.row_store(),
+                    // Reindex slot commit: leaves clearing the sentinel to the
+                    // full-corpus retrain path.
+                    false,
                 )?;
             }
 
