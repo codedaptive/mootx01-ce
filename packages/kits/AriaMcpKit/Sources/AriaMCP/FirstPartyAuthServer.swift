@@ -163,7 +163,10 @@ public struct FailingFirstPartyRootProvider: FirstPartyRootProviding {
 ///   found at this account; letting it name the account would let an attacker
 ///   point the reader at an item they control and verify their own forgery.
 ///
-/// The item is read, never created. `SecItemAdd` does not appear in this file.
+/// This provider only ever reads. It has no code path that adds, updates, or
+/// deletes a Keychain item: creating the installation root is MACD-2c's, behind
+/// the exclusive provider lock, because a root minted before an arbiter exists
+/// is a credential with no owner.
 public struct DataProtectionKeychainRootProvider: FirstPartyRootProviding {
 
     /// Performs the Keychain lookup. Injected so tests can drive every failure

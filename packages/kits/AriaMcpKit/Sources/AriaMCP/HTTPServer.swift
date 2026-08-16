@@ -384,8 +384,14 @@ public let globalSSEConcurrencyGate: ConcurrencyGate = {
 /// The Enterprise OAuth layer composes ABOVE this transport in v2, never inside it.
 ///
 /// SECURITY AUDIT DISPOSITION — fixed-port loopback impersonation (codex
-/// 7a245e3e, MEDIUM): the client configs the installer writes point at a fixed
-/// `http://127.0.0.1:4242`, and this transport does not authenticate endpoint
+/// 7a245e3e, MEDIUM). SCOPE: this disposition covers the THIRD-PARTY lane only.
+/// The first-party lane at `/mcp/first-party` authenticates endpoint ownership
+/// cryptographically — the client verifies a descriptor MAC before dialing and
+/// completes a mutual HKDF handshake — so a port squatter cannot impersonate the
+/// daemon to a first-party caller. It remains true of the third-party lane, and
+/// the reasoning below is why that is accepted there rather than fixed:
+/// the client configs the installer writes point at a fixed
+/// `http://127.0.0.1:4242`, and that lane does not authenticate endpoint
 /// ownership — so a same-user local process that binds the port before the
 /// daemon could impersonate it to MCP clients. ACCEPTED for CE, by design, not
 /// unmitigated: (1) the daemon owns the port continuously via launchd
@@ -398,10 +404,12 @@ public let globalSSEConcurrencyGate: ConcurrencyGate = {
 /// access. A real fix needs the CLIENT to verify the SERVER's identity, which
 /// third-party MCP clients (Cursor, Claude Code, …) do not support and we do not
 /// control; a client→server token does NOT help (the client would hand the
-/// secret to whoever holds the port). This is addressed in EE v1.1, which adds
-/// an authentication scheme compatible with the auths the system supports AND
-/// off-localhost MCP hosting — the context where endpoint authentication becomes
-/// both necessary and enforceable. Do not "fix" by reverting HTTP clients to
+/// secret to whoever holds the port). For callers we DO control, this is now
+/// solved: the first-party lane's mutual authentication is exactly the
+/// client-verifies-server binding this paragraph says third-party clients cannot
+/// perform. Extending it to off-localhost MCP hosting remains future work, and
+/// is the context in which endpoint authentication becomes enforceable for
+/// third-party clients too. Do not "fix" by reverting HTTP clients to
 /// stdio: that is the unauthorized flip already reverted in commit 5c035e6, and
 /// it undoes the shared-resident-daemon architecture mandate.
 ///
