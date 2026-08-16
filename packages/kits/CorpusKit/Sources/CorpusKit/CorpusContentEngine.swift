@@ -2641,12 +2641,23 @@ public actor CorpusContentEngine {
             // integer-keyed term rows and falls back to the legacy single blob — the
             // same decision point as the on-open restore path, kept in the store so the
             // two paths cannot diverge.
-            try await countsStore.restoreCounts(
+            //
+            // Both restores must be attempted before checking the results. A false from
+            // either restore means: no counts row (deleted between the deferred-job
+            // scheduling and now), or the row carries the migration invalidation sentinel
+            // (an empty blob written by `mootx01 upgrade`). Either cause means the counts
+            // path cannot proceed for this job — fall back to the corpus path.
+            let restoredServing = try await countsStore.restoreCounts(
                 into: servingTrainable,
                 modelID: job.modelID, modelVersion: job.modelVersion)
-            try await countsStore.restoreCounts(
+            let restoredAccum = try await countsStore.restoreCounts(
                 into: newAccumTrainable,
                 modelID: job.modelID, modelVersion: job.modelVersion)
+            guard restoredServing && restoredAccum else {
+                _trainingPathDecisions[job.modelID] = .corpus(.noCountsRow)
+                remainingJobs.append(job)
+                continue
+            }
 
             // For each pending ref sorted by contentID ascending: resolve the record
             // from the source and fold into BOTH instances. Count every record() call

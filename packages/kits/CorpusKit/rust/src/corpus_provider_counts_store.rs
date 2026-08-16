@@ -405,6 +405,22 @@ impl CorpusProviderCountsStore {
     /// provider term-split by one path and blob-written by another would leave
     /// the two representations disagreeing for the same key, and the read side
     /// prefers term rows, so the blob write would silently lose.
+    ///
+    /// **Sentinel-preserving flush guard** — when the migration has invalidated
+    /// the stored counts (empty-blob sentinel) and the in-memory accumulator is
+    /// still empty (nothing has been accumulated since the migration), writing
+    /// here would serialise a valid-but-empty accumulator blob over the sentinel,
+    /// destroying the invalidation signal. The guard prevents that:
+    ///
+    ///   1. Test `provider.counts_vocabulary_size() == 0` first (in-memory, free).
+    ///      This is the common case for a just-migrated estate and requires no I/O.
+    ///   2. Only if that holds, load the stored row and test `is_invalidated_counts`.
+    ///      This I/O is avoided for every ordinary flush (non-empty accumulator).
+    ///
+    /// With the sentinel preserved, the next call to `restore_counts_into` returns
+    /// `Ok(false)`, and the reindex-path guard at the corpus layer fires, triggering
+    /// the full retrain the migration intends. A zero-vocabulary basis is never
+    /// published over a trained basis.
     pub fn persist_counts_into(
         &self,
         provider: &dyn crate::TrainableEmbeddingBasis,
@@ -415,6 +431,24 @@ impl CorpusProviderCountsStore {
         updated_at_secs: i64,
         row_store: &Arc<dyn persistence_kit::RowStore>,
     ) -> CorpusKitResult<()> {
+        // Sentinel-preserving flush: do not overwrite the migration-invalidation
+        // sentinel when the in-memory accumulator is still empty. Writing here
+        // in that state would serialise a valid-but-empty blob over the sentinel,
+        // erasing the "rebuild from zero" signal and causing the reindex path to
+        // publish a zero-vocabulary basis over the trained basis the migration
+        // deliberately preserved.
+        //
+        // The cheap membership test (vocabulary size) runs first; the storage read
+        // (load) runs only when that passes, so ordinary flushes with a non-empty
+        // accumulator pay no extra I/O cost.
+        if provider.counts_vocabulary_size() == 0 {
+            if let Some(stored) = Self::load_from(row_store, model_id, model_version)? {
+                if is_invalidated_counts(&stored.counts) {
+                    return Ok(());
+                }
+            }
+        }
+
         match provider.decompose_counts() {
             Some((header, terms)) => {
                 // `header` is a complete, decodable counts blob with an empty
@@ -814,8 +848,7 @@ impl CorpusProviderCountsStore {
         model_id: &str,
         model_version: &str,
     ) -> CorpusKitResult<Option<PersistedCounts>> {
-        let rows = self.query_key(model_id, model_version)?;
-        Ok(rows.first().and_then(decode_counts))
+        Self::load_from(&self.storage.row_store(), model_id, model_version)
     }
 
     /// Read only the growth anchors (doc/vocab counts) for a provider key,
@@ -1168,6 +1201,21 @@ impl CorpusProviderCountsStore {
     }
 
     fn query_key(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Vec<StorageRow>> {
+        Self::query_key_from(&self.storage.row_store(), model_id, model_version)
+    }
+
+    /// Query `corpus_provider_counts` through a caller-supplied row store and
+    /// return the raw storage rows for this provider key.
+    ///
+    /// Both `query_key` and the flush guard's `load_from` path share this single
+    /// predicate definition. `query_key` passes the store's own handle for
+    /// standalone reads. `load_from` passes the caller's transaction handle so the
+    /// precondition check reads the same transactional view the write will land in.
+    fn query_key_from(
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+        model_id: &str,
+        model_version: &str,
+    ) -> CorpusKitResult<Vec<StorageRow>> {
         let predicate = StoragePredicate::And(vec![
             StoragePredicate::Eq(
                 Column::new("corpus_provider_counts", "model_id"),
@@ -1178,8 +1226,7 @@ impl CorpusProviderCountsStore {
                 TypedValue::Text(model_version.to_string()),
             ),
         ]);
-        self.storage
-            .row_store()
+        row_store
             .query(
                 "corpus_provider_counts",
                 Some(&predicate),
@@ -1188,6 +1235,22 @@ impl CorpusProviderCountsStore {
                 None,
             )
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))
+    }
+
+    /// Load the persisted counts for a provider key through a caller-supplied
+    /// row store, or `None` when no row exists for this key.
+    ///
+    /// `load` delegates here using the store's own handle for standalone reads.
+    /// The flush guard in `persist_counts_into` calls this with the caller's
+    /// transaction handle so the precondition check sees writes already made
+    /// in that same transaction.
+    fn load_from(
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+        model_id: &str,
+        model_version: &str,
+    ) -> CorpusKitResult<Option<PersistedCounts>> {
+        let rows = Self::query_key_from(row_store, model_id, model_version)?;
+        Ok(rows.first().and_then(decode_counts))
     }
 }
 

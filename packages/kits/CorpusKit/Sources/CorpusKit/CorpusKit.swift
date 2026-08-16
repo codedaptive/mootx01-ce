@@ -1999,8 +1999,18 @@ public actor Corpus {
                 trainInputs.append((index, blob, fresh))
                 continue
             }
-            try await countsStore.restoreCounts(
+            let restoredFromCounts = try await countsStore.restoreCounts(
                 into: countsTrainable, modelID: modelID, modelVersion: modelVersion)
+            guard restoredFromCounts else {
+                // false means either the counts row was deleted between the flush above
+                // and this restore, or the row carries the migration invalidation sentinel
+                // (an empty blob written by `mootx01 upgrade` to signal "rebuild from zero").
+                // Either way the counts path cannot proceed — fall back to the corpus path
+                // so the provider retrains from scratch on the full corpus.
+                _trainingPathDecisions[modelID] = .corpus(.noCountsRow)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
 
             guard countsTrainable.finalizeFromCounts() else {
                 // Defensive: guaranteed by the probe above; treat false as

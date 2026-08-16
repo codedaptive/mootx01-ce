@@ -349,6 +349,33 @@ public actor CorpusProviderCountsStore {
         return id
     }
 
+    // MARK: - Migration invalidation sentinel
+
+    /// An empty `Data` blob written into `corpus_provider_counts.counts` by the
+    /// upgrade step to signal "this provider's counts have been invalidated and
+    /// must be rebuilt from the full corpus".
+    ///
+    /// The upgrade step cannot synthesise a per-provider counts header from scratch
+    /// (it would need to know the exact provider format and current vocabulary),
+    /// and it cannot delete the row because the companion `doc_count` / `vocab_size`
+    /// columns are the durable growth-trigger anchors that the governor reads
+    /// without deserialising the blob. Leaving those anchors in place lets the
+    /// governor continue to observe estate size even during the rebuild window.
+    ///
+    /// An empty blob is the right signal because no valid serialised counts blob is
+    /// ever empty — every format starts with a magic header. That makes the
+    /// empty-blob sentinel unambiguous and keeps the scope narrow: a non-empty but
+    /// undecodable blob must still throw (real corruption, not a sentinel), so the
+    /// predicate cannot widen to "any undecodable blob". Writer and reader share
+    /// the same predicate through `isInvalidatedCounts` so they cannot drift.
+    public static let invalidatedCountsSentinel: Data = Data()
+
+    /// Returns true when `bytes` carries the migration invalidation sentinel.
+    ///
+    /// Call this — never inline the `isEmpty` check — so writer and reader share
+    /// one definition and cannot drift apart independently.
+    public static func isInvalidatedCounts(_ bytes: Data) -> Bool { bytes.isEmpty }
+
     /// The term-keyed vocabulary table, shared by the declaration and its
     /// v2→v3 migration so the two can never drift apart.
     static let vocabTable = TableDeclaration(
@@ -418,6 +445,33 @@ public actor CorpusProviderCountsStore {
         updatedAt: Date,
         into rowStore: any RowStore
     ) async throws {
+        // Sentinel-preserving flush guard.
+        //
+        // After a `mootx01 upgrade` step the migration writes the invalidation sentinel
+        // (an empty blob) into `corpus_provider_counts.counts` to mean "counts
+        // invalidated, rebuild from zero". The live accumulator at that moment is empty
+        // — the upgrade runs before any new ingest has contributed counts. If we flush
+        // now we serialise a VALID empty-state blob over the sentinel: the reader then
+        // decodes it as a real (zero-vocabulary) basis and publishes that zero basis
+        // over the trained basis the migration left intact, silently erasing prior
+        // training. The restore path returns true and the caller guard that was supposed
+        // to route to the full-corpus retrain cannot fire.
+        //
+        // The fix: if the provider has accumulated nothing AND the stored row still
+        // carries the sentinel, skip the flush entirely. The sentinel stays on disk,
+        // the next restore returns false, and the caller routes to the full corpus
+        // retrain as the migration intended.
+        //
+        // Test the in-memory vocabulary size FIRST (free, no I/O). Only if it is zero
+        // do we pay the storage read to check the sentinel. An accumulator with even
+        // one term is a genuine flush that must proceed regardless of what is on disk.
+        if provider.countsVocabularySize == 0,
+           let existing = try await load(modelID: modelID, modelVersion: modelVersion, from: rowStore),
+           Self.isInvalidatedCounts(existing.counts) {
+            // Nothing meaningful to write: in-memory is empty AND the stored row
+            // already carries the invalidation sentinel. Leave the sentinel intact.
+            return
+        }
         if let decomposed = provider.decomposeCounts() {
             // `header` is a complete, decodable counts blob carrying an empty
             // map, so the column stays NOT NULL and a reader that ignores term
@@ -460,12 +514,23 @@ public actor CorpusProviderCountsStore {
     /// Restore `provider`'s maintained counts, preferring term rows and
     /// falling back to the legacy single blob.
     ///
-    /// The fallback is what lets an upgraded estate keep working untouched:
+    /// The preference order is, in sequence:
+    ///   1. Migration invalidation sentinel — returns false immediately.
+    ///   2. v4 integer-keyed term rows — the current layout for new writes.
+    ///   3. v3 term rows — upgraded estates not yet re-persisted in v4.
+    ///   4. Legacy single blob — estates predating the term table.
+    ///
+    /// The fallback chain is what lets an upgraded estate keep working untouched:
     /// no bulk migration runs, the blob is read exactly as before, and the
     /// provider converts to term rows on its next persist.
     ///
-    /// - Returns: false when nothing is stored for this provider key, which
-    ///   callers already treat as "start from zero".
+    /// A non-empty but undecodable blob still throws — real corruption must
+    /// fail loudly rather than converting to a silent sentinel.
+    ///
+    /// - Returns: `false` when no row exists for this provider key (start from
+    ///   zero), or when the stored row carries the migration invalidation sentinel
+    ///   (rebuild from scratch is required). Returns `true` when counts were
+    ///   successfully restored into `provider`.
     @discardableResult
     public func restoreCounts(
         into provider: any TrainableEmbeddingBasis,
@@ -473,6 +538,15 @@ public actor CorpusProviderCountsStore {
         modelVersion: String
     ) async throws -> Bool {
         guard let persisted = try await load(modelID: modelID, modelVersion: modelVersion) else {
+            return false
+        }
+        // Sentinel intercept: placed before the v4 branch because the upgrade step
+        // does NOT delete the v4 term-dictionary or term-payload rows — they can
+        // outlive the invalidated blob. Without this check the v4 branch would
+        // attempt to pass an empty header to the provider's `expectMagic`, which
+        // throws "truncated blob reading magic". Returning false here lets the
+        // caller route to a full corpus retrain as the migration intended.
+        if Self.isInvalidatedCounts(persisted.counts) {
             return false
         }
         // Preference order: v4 integer-keyed pair → v3 term rows → legacy
@@ -788,7 +862,23 @@ public actor CorpusProviderCountsStore {
 
     /// Load the full persisted counts for a provider key, or nil if none.
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts? {
-        let rows = try await storage.rowStore.query(
+        try await load(modelID: modelID, modelVersion: modelVersion, from: storage.rowStore)
+    }
+
+    /// Query `corpus_provider_counts` through a caller-supplied row store and
+    /// return the decoded row, or nil when no row exists for this key.
+    ///
+    /// Both the public `load` and the flush guard in `persistCounts` share this
+    /// single query definition. `load` passes `storage.rowStore` for standalone
+    /// reads. The flush guard passes the caller's transaction row store so the
+    /// precondition check reads the same transactional view the write will land
+    /// in — writes made earlier in that transaction are visible to the check.
+    private func load(
+        modelID: String,
+        modelVersion: String,
+        from rowStore: any RowStore
+    ) async throws -> PersistedCounts? {
+        let rows = try await rowStore.query(
             table: "corpus_provider_counts",
             where: .and([
                 .eq(Column(table: "corpus_provider_counts", name: "model_id"), .text(modelID)),
