@@ -87,6 +87,44 @@ func updateInflightHighWater(_ current: Int) {
     }
 }
 
+/// Lets cancellation unblock the first-party lane's blocking raw request read.
+///
+/// The GCD worker is the only code that unregisters the descriptor; `serve`
+/// remains the only closer. A cancellation handler only calls `shutdown`, so it
+/// cannot close an fd that the kernel has already reused. Cancellation is
+/// latched to cover the interval before the worker registers.
+final class HTTPReadSocketOwner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var descriptor: Int32 = -1
+    private var cancelled = false
+
+    func register(_ fd: Int32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !cancelled else { return false }
+        descriptor = fd
+        return true
+    }
+
+    /// Atomically publish a completed read only if cancellation did not win.
+    ///
+    /// Cancellation can arrive after the final byte but before the worker
+    /// resumes its continuation. Clearing the descriptor and judging the latch
+    /// under one lock prevents that cancelled request from reaching dispatch.
+    func complete(_ fd: Int32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard descriptor == fd else { return false }
+        descriptor = -1
+        return !cancelled
+    }
+
+    func shutdownNow() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = true
+        guard descriptor >= 0 else { return }
+        shutdown(descriptor, SHUT_RDWR)
+    }
+}
+
 // ============================================================
 // MARK: - AsyncSemaphore
 //
@@ -712,13 +750,7 @@ public struct HTTPServer: Sendable {
         var firstPartyRaw: Data?
         let request: HTTPRequest?
         if firstPartyAuth != nil {
-            let raw: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    var tv = timeval(tv_sec: 30, tv_usec: 0)
-                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-                    cont.resume(returning: Self.readRawRequest(fd: fd, maxBodyBytes: maxBodyBytes))
-                }
-            }
+            let raw = await Self.readRawRequestOffPool(fd: fd, maxBodyBytes: maxBodyBytes)
             guard let raw else { return }
             firstPartyRaw = raw
             // Unparseable even by the lenient parser: close without answering,
@@ -1049,14 +1081,28 @@ public struct HTTPServer: Sendable {
     /// Read a complete request as raw bytes, mirroring `HTTPRequest.read`'s
     /// framing: accumulate until CRLFCRLF, then read exactly `Content-Length`
     /// more. Returns the full byte string for the strict parser to judge.
-    static func readRawRequest(fd: Int32, maxBodyBytes: Int, maxHeaderBytes: Int = 64 * 1024) -> Data? {
+    static func readRawRequest(
+        fd: Int32,
+        maxBodyBytes: Int,
+        maxHeaderBytes: Int = 64 * 1024,
+        timeoutNanoseconds: UInt64 = 30_000_000_000
+    ) -> Data? {
         let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        let started = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        let (deadline, overflow) = started.addingReportingOverflow(timeoutNanoseconds)
+        guard !overflow else { return nil }
         var buffer = Data()
         var headerEnd: Range<Data.Index>?
         while headerEnd == nil {
             if let found = buffer.range(of: terminator) { headerEnd = found; break }
-            if buffer.count > maxHeaderBytes { return nil }
-            guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { return nil }
+            if buffer.count >= maxHeaderBytes { return nil }
+            // Read the head one byte at a time. Until CRLFCRLF arrives we do not
+            // know whether the request is an unauthenticated handshake, whose
+            // body cap is 8 KiB, or a regular authenticated RPC. A wide recv can
+            // pull body bytes into memory before that decision and silently
+            // defeat the smaller cap.
+            guard let chunk = receiveBeforeDeadline(fd: fd, max: 1, deadline: deadline),
+                  !chunk.isEmpty else { return nil }
             buffer.append(chunk)
         }
         guard let headerEnd else { return nil }
@@ -1072,6 +1118,8 @@ public struct HTTPServer: Sendable {
         // strict parser later decides.
         let headerData = buffer[buffer.startIndex..<headerEnd.lowerBound]
         guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
+        let requestTarget = headerText.components(separatedBy: "\r\n").first?
+            .split(separator: " ").dropFirst().first.map(String.init)
         var collapsed: [String: String] = [:]
         for line in headerText.components(separatedBy: "\r\n").dropFirst() {
             if line.isEmpty { break }
@@ -1083,9 +1131,21 @@ public struct HTTPServer: Sendable {
 
         var body = Data(buffer[headerEnd.upperBound...])
         if let raw = collapsed["content-length"], let declared = Int(raw), declared > 0 {
-            let want = min(declared, maxBodyBytes)
+            // Challenge and establishment are unauthenticated inputs. Their
+            // 8-KiB protocol cap is applied to the socket read itself, not only
+            // later by strictJSONObject after a larger allocation has happened.
+            let routeCap: Int
+            if requestTarget == FirstPartyAuthProtocol.challengePath
+                || requestTarget == FirstPartyAuthProtocol.establishPath {
+                routeCap = min(maxBodyBytes, FirstPartyAuthProtocol.handshakeMaxBodyBytes)
+            } else {
+                routeCap = maxBodyBytes
+            }
+            let want = min(declared, routeCap)
             while body.count < want {
-                guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { break }
+                guard let chunk = receiveBeforeDeadline(
+                    fd: fd, max: min(16 * 1024, want - body.count), deadline: deadline
+                ), !chunk.isEmpty else { break }
                 body.append(chunk)
             }
             if body.count > want { body = body.prefix(want) }
@@ -1095,6 +1155,62 @@ public struct HTTPServer: Sendable {
         // legacy view discards it exactly as before, and the strict view refuses
         // it, which is the correct answer on the authenticated lane.
         return Data(buffer[buffer.startIndex..<headerEnd.upperBound]) + body
+    }
+
+    /// Run the blocking first-party raw read off the cooperative executor while
+    /// preserving Swift task cancellation. The cancellation handler shuts down
+    /// the registered socket; the worker unregisters before returning, and the
+    /// caller remains the sole closer.
+    static func readRawRequestOffPool(
+        fd: Int32,
+        maxBodyBytes: Int,
+        timeoutNanoseconds: UInt64 = 30_000_000_000,
+        afterRegistration: (@Sendable () -> Void)? = nil
+    ) async -> Data? {
+        let owner = HTTPReadSocketOwner()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard owner.register(fd) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    afterRegistration?()
+                    let raw = Self.readRawRequest(
+                        fd: fd,
+                        maxBodyBytes: maxBodyBytes,
+                        timeoutNanoseconds: timeoutNanoseconds
+                    )
+                    continuation.resume(returning: owner.complete(fd) ? raw : nil)
+                }
+            }
+        } onCancel: {
+            owner.shutdownNow()
+        }
+    }
+
+    /// Receive one chunk without letting a peer renew the request deadline by
+    /// periodically sending a byte. SO_RCVTIMEO is reset to the time REMAINING
+    /// on one absolute monotonic deadline before every blocking recv.
+    private static func receiveBeforeDeadline(
+        fd: Int32, max maximumBytes: Int, deadline: UInt64
+    ) -> Data? {
+        let now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        guard now < deadline, maximumBytes > 0 else { return nil }
+        let remaining = deadline - now
+        var tv = timeval(
+            tv_sec: Int(remaining / 1_000_000_000),
+            tv_usec: Int32(max(1, (remaining % 1_000_000_000) / 1_000))
+        )
+        guard setsockopt(
+            fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size)
+        ) == 0 else { return nil }
+        guard let chunk = POSIXSocket.recv(fd, max: maximumBytes), !chunk.isEmpty else { return nil }
+        // A byte may arrive just after the absolute deadline even though the
+        // kernel timeout was armed just before it. Never admit that byte into
+        // the request buffer.
+        guard clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) <= deadline else { return nil }
+        return chunk
     }
 
     /// Parse raw bytes with the FROZEN semantics of

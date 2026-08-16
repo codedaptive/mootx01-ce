@@ -975,6 +975,111 @@ struct FirstPartyHTTPLaneTests {
         #expect(await auth.liveChallengeCount == 0)
     }
 
+    @Test("The raw reader caps an unauthenticated handshake body at 8 KiB")
+    func handshakeBodyIsBoundedAtTheSocketRead() throws {
+        var pair: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        defer {
+            close(pair[0])
+            close(pair[1])
+        }
+        let declared = FirstPartyAuthProtocol.handshakeMaxBodyBytes + 1
+        let head = "POST \(FirstPartyAuthProtocol.challengePath) HTTP/1.1\r\n"
+            + "Content-Type: application/json\r\nContent-Length: \(declared)\r\n\r\n"
+        var request = Data(head.utf8)
+        request.append(Data(repeating: 0x41, count: declared))
+        // Some Darwin socketpair configurations have a send buffer below this
+        // request size. Send concurrently so the test exercises the reader's
+        // cap instead of deadlocking before the reader starts.
+        let writerFD = pair[0]
+        let requestBytes = request
+        let writer = Thread { _ = POSIXSocket.sendAll(writerFD, requestBytes) }
+        writer.start()
+
+        let raw = try #require(HTTPServer.readRawRequest(
+            fd: pair[1], maxBodyBytes: 4 * 1024 * 1024, timeoutNanoseconds: 500_000_000
+        ))
+        let terminator = try #require(raw.range(of: Data("\r\n\r\n".utf8)))
+        #expect(raw[terminator.upperBound...].count == FirstPartyAuthProtocol.handshakeMaxBodyBytes)
+        // The partial body cannot accidentally pass the later strict grammar.
+        #expect(StrictHTTPParser.parse(raw, maxBodyBytes: 4 * 1024 * 1024) == nil)
+    }
+
+    @Test("The armed raw reader uses one absolute deadline across slow bytes")
+    func rawReaderDeadlineDoesNotRenewPerReceive() {
+        var pair: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        defer {
+            close(pair[0])
+            close(pair[1])
+        }
+        let writerFD = pair[0]
+        let writer = Thread {
+            for byte in Data("POS".utf8) {
+                Thread.sleep(forTimeInterval: 0.02)
+                var value = byte
+                _ = write(writerFD, &value, 1)
+            }
+        }
+        writer.start()
+
+        let start = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        let result = HTTPServer.readRawRequest(
+            fd: pair[1], maxBodyBytes: 4 * 1024 * 1024, timeoutNanoseconds: 80_000_000
+        )
+        let elapsed = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - start
+        #expect(result == nil)
+        #expect(elapsed < 300_000_000,
+                "periodic bytes must not renew the 80 ms absolute deadline")
+    }
+
+    @Test("Cancelling the off-pool raw reader shuts down its registered fd")
+    func rawReaderCancellationUnblocksDeterministically() async throws {
+        var pair: [Int32] = [-1, -1]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        let peerFD = pair[0]
+        let readerFD = pair[1]
+        defer {
+            close(peerFD)
+            close(readerFD)
+        }
+        let registration = RawReadRegistration()
+        let task = Task {
+            await HTTPServer.readRawRequestOffPool(
+                fd: readerFD,
+                maxBodyBytes: 4 * 1024 * 1024,
+                timeoutNanoseconds: 5_000_000_000,
+                afterRegistration: { registration.mark() }
+            )
+        }
+        let waitDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+        while !registration.value, DispatchTime.now().uptimeNanoseconds < waitDeadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try #require(registration.value, "raw reader never registered its descriptor")
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        task.cancel()
+        let result = await task.value
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        #expect(result == nil)
+        #expect(elapsed < 1_000_000_000,
+                "cancellation must unblock recv, not wait for the five-second deadline")
+
+        // The peer observes shutdown even though the test remains the sole
+        // closer. This distinguishes handler-driven interruption from a short
+        // timeout or a worker that never entered recv.
+        var byte: UInt8 = 0
+        #expect(read(peerFD, &byte, 1) == 0)
+    }
+
+    @Test("The raw-reader owner latches cancellation before registration")
+    func rawReaderOwnerFailsClosedBeforeRegistration() {
+        let owner = HTTPReadSocketOwner()
+        owner.shutdownNow()
+        #expect(owner.register(123) == false)
+    }
+
     @Test("A prefix-sharing path is not treated as first-party")
     func prefixSharingPathIsNotFirstParty() {
         #expect(HTTPServer.isFirstPartyTarget("/mcp/first-party"))
@@ -1024,6 +1129,21 @@ struct FirstPartyHTTPLaneTests {
             body: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
         ))
         #expect(initialize?.contains("authenticated-first-party") == false)
+    }
+}
+
+/// Lock-protected registration observation for the cancellation regression.
+private final class RawReadRegistration: @unchecked Sendable {
+    private let lock = NSLock()
+    private var registered = false
+
+    var value: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return registered
+    }
+
+    func mark() {
+        lock.lock(); registered = true; lock.unlock()
     }
 }
 

@@ -400,6 +400,27 @@ struct FirstPartyAuthProtocolTests {
         #expect(FirstPartyAuthProtocol.base64URLDecode(" QUJD") == nil)
     }
 
+    @Test("Base64url decoding rejects aliases with non-zero pad bits")
+    func base64urlRejectsNonCanonicalPadBits() {
+        for bytes in [
+            [UInt8](repeating: 0, count: FirstPartyAuthProtocol.sessionIdentifierByteCount),
+            [UInt8](repeating: 0, count: FirstPartyAuthProtocol.macByteCount),
+        ] {
+            let canonical = FirstPartyAuthProtocol.base64URLEncode(bytes)
+            let last = canonical.index(before: canonical.endIndex)
+            // Both protocol widths leave unused bits in the final base64
+            // character. Changing only those bits preserves the decoded bytes
+            // under permissive decoders, but must not preserve the wire value.
+            var alias = canonical
+            alias.replaceSubrange(last...last, with: "B")
+            #expect(alias != canonical)
+            #expect(Data(base64Encoded: alias.replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+                + String(repeating: "=", count: (4 - alias.count % 4) % 4)) == Data(bytes))
+            #expect(FirstPartyAuthProtocol.base64URLDecode(alias) == nil)
+        }
+    }
+
     @Test("The sequence header is canonical unsigned decimal only")
     func sequenceHeaderIsCanonical() {
         #expect(FirstPartyAuthProtocol.parseSequenceHeader("1") == 1)

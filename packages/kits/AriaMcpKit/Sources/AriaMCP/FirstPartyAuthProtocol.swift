@@ -553,7 +553,14 @@ public enum FirstPartyAuthProtocol {
             standard += String(repeating: "=", count: 4 - remainder)
         }
         guard let data = Data(base64Encoded: standard) else { return nil }
-        return Array(data)
+        let decoded = Array(data)
+        // Foundation accepts non-zero pad bits in the final quantum. Those
+        // bits do not contribute to the decoded bytes, so accepting them gives
+        // the same session id or MAC several wire spellings. Re-encoding is the
+        // simplest complete canonicality check: only the unique no-padding
+        // spelling can round-trip byte-for-byte.
+        guard base64URLEncode(decoded) == string else { return nil }
+        return decoded
     }
 
     /// Parse the sequence header as canonical unsigned decimal.
