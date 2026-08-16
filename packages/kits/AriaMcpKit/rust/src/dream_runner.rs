@@ -80,6 +80,36 @@ impl HNSWGraphMaintenance for VectorStoreHNSWAdapter {
     }
 }
 
+/// Wire the HNSW maintenance handle into the governor from the live estate registry.
+///
+/// This is the SINGLE named point of wiring between the resident governor and the
+/// estate's live `VectorStore`. It encapsulates the sequence:
+///   lock `coord` → `vector_store_for(handle)` → if `Some(vs)` →
+///   `governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)))`
+///
+/// Returns `true` when a handle was installed (estate has a registered VectorStore),
+/// `false` when the estate is LocusOnly (no VectorStore). Either way BETA still
+/// runs the base EWC prune; reclamation fires only when a handle is present.
+///
+/// Called once from `runtime.rs` after governor construction. Integration tests
+/// in AriaMcpKit drive the SAME function to verify the production wiring sequence
+/// end-to-end (VEC-SHADOWSWAP-01, finding 13b8e1a Adams Critical #2). Deleting
+/// or neutering this function causes the production-wiring test to go red.
+pub fn configure_hnsw_from_registry(
+    governor: &mut neuron_kit::autonomic_governor::AutonomicGovernor,
+    coord: &std::sync::Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: &genius_locus_kit::EstateHandle,
+) -> bool {
+    let vs = coord.lock().ok().and_then(|c| c.vector_store_for(handle));
+    match vs {
+        Some(vs) => {
+            governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)));
+            true
+        }
+        None => false,
+    }
+}
+
 /// Result of a `run_one_dreaming_cycle` call.
 #[derive(Debug)]
 pub struct DreamRunResult {

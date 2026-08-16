@@ -30,6 +30,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use neuron_kit::autonomic_governor::AutonomicGovernor;
 use neuron_kit::hnsw_graph_maintenance::HNSWGraphMaintenance;
 use neuron_kit::dreaming_cycle::{DreamingDaemon, DreamingPolicy};
+use aria_mcp::dream_runner::configure_hnsw_from_registry;
 use aria_mcp::estate_registry::EstateRegistry;
 
 // ── Shared pool-isolation helper ────────────────────────────────────────────
@@ -216,38 +217,30 @@ fn alpha_cycle_does_not_call_reclaim() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Discriminating test for the production WIRING gap (VEC-SHADOWSWAP-01, finding
-/// 13b8e1a — Unit D, SS-01 stream).
+/// 13b8e1a — Unit D, SS-01 stream, Adams Critical #2).
 ///
 /// The existing test `beta_via_governor_calls_reclaim_exactly_once` calls
-/// `set_hnsw_maintenance` itself, which makes it non-discriminating for the
-/// production path: it proves the mechanism works once wired, not that the wiring
-/// exists in production.
+/// `set_hnsw_maintenance` itself. That proves the mechanism works once wired; it
+/// does NOT prove the production wiring exists, because it bypasses the production
+/// code path entirely.
 ///
-/// This test replicates the full production construction sequence from runtime.rs —
-/// including the VectorStoreHNSWAdapter injection added by the fix — so the same
-/// code path the resident daemon runs is exercised here. The `hnsw_reclaim_fired`
-/// field in `GovernorReport` is the observable: it is true only when BETA fired
-/// AND a maintenance handle was present at tick time.
+/// This test drives `configure_hnsw_from_registry` — the single named wiring
+/// function that `runtime.rs` also calls. Deleting or neutering
+/// `configure_hnsw_from_registry` causes THIS test to go red (either a compile
+/// error if the function is removed, or an assertion failure if the function body
+/// is made a no-op). The `hnsw_reclaim_fired` field in `GovernorReport` is the
+/// observable: it is true only when BETA fired AND a maintenance handle was present
+/// at tick time.
 ///
-/// PRE-FIX (before runtime.rs and VectorStoreHNSWAdapter are changed): the
-/// governor's `hnsw_maintenance` field is `None` because runtime.rs never calls
-/// `set_hnsw_maintenance`. Ticking BETA yields `hnsw_reclaim_fired == false`.
-///
-/// VERBATIM PRE-FIX FAILURE (captured before fix was applied):
-///   thread 'production_wiring_path_delivers_hnsw_reclaim_on_beta' panicked at
-///   'Production construction path must deliver HNSW reclaim on BETA (finding
-///   13b8e1a): hnsw_reclaim_fired is false — runtime.rs never calls
-///   set_hnsw_maintenance so hnsw_maintenance is None and reclaim is skipped.',
-///   packages/kits/AriaMcpKit/rust/tests/shadow_reclaim_duty_tests.rs:NN
-///
-/// POST-FIX: runtime.rs is updated to call `set_hnsw_maintenance` with a
-/// `VectorStoreHNSWAdapter` wrapping the estate's live `Arc<VectorStore>`.
-/// This test mirrors that exact sequence: BETA fires with a Some handle,
-/// `hnsw_reclaim_fired` is true, assertion PASSES.
+/// Note on the pre-fix failure mode: this test was written as part of the SS-01
+/// fix. Before SS-01, `VectorStoreHNSWAdapter`, `set_hnsw_maintenance`, and
+/// `hnsw_reclaim_fired` did not exist in the codebase. The pre-fix failure for
+/// this test was therefore a COMPILE ERROR, not a runtime assertion. A future
+/// reader should not infer that this test observed a runtime assertion on pre-fix
+/// code. The test compiles only with the SS-01 fix applied; it covers the
+/// production wiring mechanism introduced by that fix.
 #[test]
 fn production_wiring_path_delivers_hnsw_reclaim_on_beta() {
-    use aria_mcp::dream_runner::VectorStoreHNSWAdapter;
-
     // Step 1: build the registry — same as runtime.rs (new_inmemory / new_sqlite).
     // new_inmemory registers a VectorStore on the estate, which the adapter needs.
     let registry = EstateRegistry::new_inmemory();
@@ -264,14 +257,15 @@ fn production_wiring_path_delivers_hnsw_reclaim_on_beta() {
         300_000, None, 0, pool_dir, artifact,
     );
 
-    // Step 3: inject the VectorStoreHNSWAdapter — mirrors the line added to
-    // runtime.rs by the fix. The coordinator is locked momentarily to read the
-    // registered VectorStore for this estate (same pattern as production).
-    // new_inmemory registers a VectorStore unconditionally, so `vs` is always Some.
-    let vs = coord.lock().unwrap().vector_store_for(&handle);
-    if let Some(vs) = vs {
-        governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)));
-    }
+    // Step 3: wire the HNSW maintenance handle through `configure_hnsw_from_registry`
+    // — the SAME function runtime.rs calls. This is the production wiring sequence.
+    // new_inmemory registers a VectorStore unconditionally, so `installed` is always
+    // true here; the assertion below guards against a broken test fixture.
+    let installed = configure_hnsw_from_registry(&mut governor, &coord, &handle);
+    assert!(
+        installed,
+        "new_inmemory registry must have a VectorStore registered; fixture is broken if false"
+    );
 
     // Tick at a time well past the BETA cadence (7 d from epoch zero = due immediately).
     let t_beta = UNIX_EPOCH + Duration::from_secs_f64(BASE_EPOCH + BETA_CADENCE_SECS + 1.0);
@@ -279,9 +273,8 @@ fn production_wiring_path_delivers_hnsw_reclaim_on_beta() {
 
     assert!(
         report.hnsw_reclaim_fired,
-        "Production construction path must deliver HNSW reclaim on BETA (finding 13b8e1a): \
-         hnsw_reclaim_fired is false — runtime.rs never calls set_hnsw_maintenance so \
-         hnsw_maintenance is None and reclaim is skipped."
+        "Production wiring path must deliver HNSW reclaim on BETA (finding 13b8e1a): \
+         hnsw_reclaim_fired is false — configure_hnsw_from_registry did not install a handle."
     );
 }
 

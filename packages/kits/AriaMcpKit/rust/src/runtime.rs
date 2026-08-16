@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use neuron_kit::autonomic_governor::AutonomicGovernor;
-use crate::dream_runner::VectorStoreHNSWAdapter;
+use crate::dream_runner::configure_hnsw_from_registry;
 use crate::governor_topology_adapter::StatsStoreTopologySink;
 use crate::http_server::{
     run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER, GLOBAL_INFLIGHT_COUNTER,
@@ -200,29 +200,23 @@ pub fn run(
             let mut governor = AutonomicGovernor::new_with_topology_sink(
                 gov_coord, gov_handle, gov_store, topology_sink,
             );
-            // Wire the HNSW maintenance handle (VEC-SHADOWSWAP-01, finding 13b8e1a).
+            // Wire the HNSW maintenance handle via the single named wiring point
+            // (VEC-SHADOWSWAP-01, finding 13b8e1a). `configure_hnsw_from_registry`
+            // locks the coordinator, reads the registered VectorStore for this estate,
+            // and if present installs a `VectorStoreHNSWAdapter` via
+            // `set_hnsw_maintenance`. A LocusOnly estate (no VectorStore) returns
+            // false; BETA still runs the base EWC prune, which is correct.
             //
-            // The resident governor's REM-BETA duty compacts HNSW tombstones and
-            // reclaims superseded vector generations only when a maintenance handle
-            // is present. Without this call, `hnsw_maintenance` is `None` and BETA
-            // runs only the base EWC prune — reclamation is silently skipped and
-            // stale generations accumulate without bound.
-            //
-            // Pattern mirrors the `topology_sink` injection above: AriaMcpKit injects
-            // the host-coupled VectorStoreHNSWAdapter so NeuronKit stays free of
-            // VectorKit and AriaMcpKit. The coordinator is locked momentarily to read
-            // the registered VectorStore; the lock is released before the governor
-            // loop starts. A LocusOnly estate has no VectorStore registered (None);
-            // BETA still runs the base EWC prune, which is correct.
-            {
-                let vs = coord_for_hnsw
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.vector_store_for(&handle_for_hnsw));
-                if let Some(vs) = vs {
-                    governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)));
-                }
-            }
+            // Coverage, stated precisely so nobody over-reads it: the
+            // integration tests in AriaMcpKit drive
+            // `configure_hnsw_from_registry` directly, so they discriminate
+            // that the wiring FUNCTION works. They do not prove that THIS
+            // line calls it. Deleting this line leaves the suite green.
+            // Closing that last gap would need a construct-without-run seam
+            // in this function, which today ends in a blocking `run_loop()`
+            // inside a spawned thread. Keeping the wiring as one named call
+            // is what makes the remaining risk a single reviewable line.
+            configure_hnsw_from_registry(&mut governor, &coord_for_hnsw, &handle_for_hnsw);
             // Bootstrap the architecture-spec §11.2 default standing signals
             // before the loop starts, mirroring the Swift resident's
             // `kit.registerDefaultStandingSignals(...)` step. Best-effort: a
