@@ -1,9 +1,9 @@
 ---
 title: CorpusKit Specification
-version: 1.19.0
+version: 1.20.0
 status: accepted-1.1-target
 date: 2026-08-15
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.19.0: MG-01, counts-invalidation sentinel contract added to B-14. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
+description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.20.0: MG-02, counts-invalidation sentinel and sentinel-preserving flush now documented for both ports; reindex-latch description corrected. 1.19.0: MG-01, counts-invalidation sentinel contract added to B-14. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -792,7 +792,11 @@ are restored before serving, that same-digest replay is idempotent, that
 revision/remove/re-add paths do not double-count a canonical identity, and that
 queued and direct-feed revisions use the same admission authority.
 
-**Counts invalidation on migration (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` is a defined empty byte slice in `corpus_provider_counts_store`. It means "counts invalidated, rebuild from zero." The upgrade migration writes this sentinel into `corpus_provider_counts.counts` for every row. Writing the sentinel preserves the `doc_count` and `vocab_size` monotone anchors, which the migration is required to retain. `restore_counts_into` checks for the sentinel before any provider decode. An empty blob causes it to return `Ok(false)`, and the reindex latch the migration has already set rebuilds counts from scratch. A non-empty but undecodable blob still propagates `DecodingFailure`. That propagation is deliberate. The Swift port does not yet carry this contract and shares the identical defect. A follow-up mission must port the sentinel check to the Swift surface. Until it does, the Rust fix does not protect Swift readers.
+**Counts invalidation on migration.** `INVALIDATED_COUNTS_SENTINEL` / `invalidatedCountsSentinel` is a defined empty byte slice (Rust) / empty `Data` (Swift) on `CorpusProviderCountsStore` in both ports. It means "counts invalidated, rebuild from zero." The upgrade migration writes this sentinel into `corpus_provider_counts.counts` for every row. Writing the sentinel preserves the `doc_count` and `vocab_size` monotone anchors, which the migration is required to retain. `restore_counts_into` / `restoreCounts(into:)` checks for the sentinel before any provider decode, before the v4 term-row branch, so that surviving term rows from a prior schema generation cannot cause the provider decoder to receive an empty header. An empty blob causes the method to return `Ok(false)` / `false`. A non-empty but undecodable blob propagates `DecodingFailure` / throws — real corruption must fail loudly and is not silenced by this path. Both ports share the predicate through `is_invalidated_counts` / `isInvalidatedCounts(_:)` so the writer and reader cannot drift independently.
+
+**Sentinel-preserving flush.** `persist_counts_into` / `persistCounts(provider:into:)` skips writing when the provider's maintained vocabulary is empty AND the stored row for that key carries the sentinel. Without this guard, a flush on a just-migrated estate — whose live accumulator is empty — would serialise a valid empty-state blob over the sentinel, erasing the "rebuild from zero" signal. The restore path would then return `true`, the caller guard would not fire, and a zero-vocabulary basis would be published over the trained basis the migration preserved. The guard tests `counts_vocabulary_size` / `countsVocabularySize` first (in-memory, no I/O); the storage read occurs only when that size is zero.
+
+**Reindex latch.** The upgrade migration calls `CorpusReindexLatch.reindexRequired` / the Rust equivalent. That call writes the key `corpus_reindex_required` into the estate manifest and enqueues a `{"kind":"full_reindex"}` marker job on the `"reindex"` stream (`CorpusReindexLatch.swift:103`, `reindex_latch.rs:REINDEX_MANIFEST_KEY`). Neither `Corpus` nor `CorpusContentEngine` reads that manifest key directly. The rebuild occurs when `restoreCounts` / `restore_counts_into` returns false and the caller's counts-path guard routes to the full corpus retrain — the outcome the sentinel and the sentinel-preserving flush together guarantee on the first retrain cycle after migration.
 
 ### 9.4 Conformance
 
@@ -903,6 +907,10 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.20.0 -- 2026-08-15
+
+Extended the B-14 counts-invalidation sentinel contract to both ports (TASK-MXE-2026-0358). `invalidatedCountsSentinel` / `isInvalidatedCounts` are now public statics on `CorpusProviderCountsStore` in Swift, matching the Rust module-level `INVALIDATED_COUNTS_SENTINEL` / `is_invalidated_counts`. `restoreCounts(into:)` intercepts the sentinel before the v4 term-row branch and before any provider decode, returning `false` for a sentinel blob. A non-empty but undecodable blob still throws. `persistCounts` / `persist_counts_into` gain a sentinel-preserving flush guard: if the provider's maintained vocabulary is empty and the stored row carries the sentinel, the flush is skipped so the sentinel stays on disk and the caller's reindex-path guard can fire. Corrected the reindex-latch description: the latch writes `corpus_reindex_required` into the manifest and enqueues a marker job; the rebuild itself occurs when the counts path declines and the corpus path retrains.
 
 ### 1.19.0 -- 2026-08-15
 

@@ -4,8 +4,8 @@ status: accepted-1.1-target
 authors: MOOTx01 maintainers
 date: 2026-08-15
 spec_type: kit
-version: 1.22.0
-description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.22.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
+version: 1.23.0
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.23.0: TASK-MXE-2026-0358, Swift sentinel API added to CorpusProviderCountsStore; persistCounts/restoreCounts documented in both ports; sentinel-preserving flush described. 1.22.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -1321,6 +1321,12 @@ public struct PersistedCountsReference: Sendable, Equatable {
 }
 public actor CorpusProviderCountsStore {
     public static let schemaDeclaration: SchemaDeclaration
+    // Counts-invalidation sentinel and predicate (both ports).
+    // The upgrade migration writes invalidatedCountsSentinel to invalidate stale
+    // provider counts while preserving the doc_count / vocab_size growth anchors.
+    // restoreCounts(into:) checks isInvalidatedCounts before any provider decode.
+    public static let invalidatedCountsSentinel: Data
+    public static func isInvalidatedCounts(_ bytes: Data) -> Bool
     public init(storage: any Storage)
     public func upsert(_ row: PersistedCounts) async throws
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
@@ -1330,6 +1336,24 @@ public actor CorpusProviderCountsStore {
     public func references(modelID: String, modelVersion: String) async throws -> [PersistedCountsReference]
     public func deleteReferences(modelID: String, modelVersion: String, into rowStore: any RowStore) async throws
     public func deleteAll() async throws
+    // Provider-aware persist and restore. These are the write and read paths
+    // that route through the sentinel-preserving flush guard and the sentinel
+    // intercept respectively.
+    public func persistCounts(
+        provider: any TrainableEmbeddingBasis,
+        modelID: String,
+        modelVersion: String,
+        documentCount: Int,
+        vocabSize: Int,
+        updatedAt: Date,
+        into rowStore: any RowStore
+    ) async throws
+    @discardableResult
+    public func restoreCounts(
+        into provider: any TrainableEmbeddingBasis,
+        modelID: String,
+        modelVersion: String
+    ) async throws -> Bool
 }
 
 // On Corpus:
@@ -1369,18 +1393,38 @@ impl CorpusProviderCountsStore {
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 
-// Module-level: counts-invalidation sentinel and predicate.
+// Module-level: counts-invalidation sentinel and predicate (both ports).
 // The upgrade migration writes INVALIDATED_COUNTS_SENTINEL to invalidate stale
 // provider counts while preserving the doc_count / vocab_size growth anchors.
 // restore_counts_into checks is_invalidated_counts before any provider decode.
 pub const INVALIDATED_COUNTS_SENTINEL: &[u8] = &[];
 pub fn is_invalidated_counts(bytes: &[u8]) -> bool;
 
+// Provider-aware persist and restore. persist_counts_into includes the
+// sentinel-preserving flush guard; restore_counts_into includes the sentinel
+// intercept before the v4 term-row branch.
+pub fn persist_counts_into(
+    &self,
+    provider: &dyn TrainableEmbeddingBasis,
+    model_id: &str,
+    model_version: &str,
+    document_count: usize,
+    vocab_size: usize,
+    updated_at_secs: i64,
+    row_store: &Arc<dyn RowStore>,
+) -> CorpusKitResult<()>;
+pub fn restore_counts_into(
+    &self,
+    provider: &mut dyn TrainableEmbeddingBasis,
+    model_id: &str,
+    model_version: &str,
+) -> CorpusKitResult<bool>;
+
 // On Corpus:
 pub fn maintained_vocab_anchor(&self) -> CorpusKitResult<usize>;
 ```
 
-**Counts-invalidation sentinel (Rust port only).** `INVALIDATED_COUNTS_SENTINEL` and `is_invalidated_counts` are defined at module level in `corpus_provider_counts_store`. The sentinel is an empty byte slice. Callers must test it before passing bytes to any provider decoder. `restore_counts_into` performs this test internally and returns `Ok(false)` for a sentinel blob. A non-empty but undecodable blob still propagates `DecodingFailure`. The Swift port does not yet carry this contract. A follow-up mission must port the sentinel check to the Swift surface.
+**Counts-invalidation sentinel.** `INVALIDATED_COUNTS_SENTINEL` / `invalidatedCountsSentinel` and `is_invalidated_counts` / `isInvalidatedCounts(_:)` are defined at module level in `corpus_provider_counts_store` (Rust) and as public statics on `CorpusProviderCountsStore` (Swift). The sentinel is an empty byte slice / empty `Data`. `restore_counts_into` / `restoreCounts(into:)` checks the predicate before the v4 term-row branch and before any provider decode, returning `Ok(false)` / `false` for a sentinel blob. A non-empty but undecodable blob propagates `DecodingFailure` / throws. `persist_counts_into` / `persistCounts(provider:into:)` includes a sentinel-preserving flush guard: when the provider's maintained vocabulary is empty and the stored row carries the sentinel, the flush is skipped so the sentinel stays on disk and the caller's reindex-path guard can fire.
 
 ### `TrainingPathDecision` / `CorpusPathReason` — retrain counts-path decision seam (both ports)
 
@@ -2254,6 +2298,10 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.23.0 -- 2026-08-15
+
+Extended the `CorpusProviderCountsStore` sentinel contract to both ports (TASK-MXE-2026-0358). Added Swift statics `invalidatedCountsSentinel: Data` and `isInvalidatedCounts(_:) -> Bool` to the actor, matching the existing Rust module-level items. Documented the already-shipping `persistCounts(provider:modelID:modelVersion:documentCount:vocabSize:updatedAt:into:)` / `persist_counts_into` and `restoreCounts(into:modelID:modelVersion:) -> Bool` / `restore_counts_into` in both port blocks; the methods are not new, their sentinel behaviour is. The restore methods intercept the sentinel before the v4 term-row branch. The persist methods include a sentinel-preserving flush guard that skips writing when the provider's maintained vocabulary is empty and the stored row already carries the sentinel. Updated the sentinel-description paragraph to cover both ports and removed the Rust-only framing.
 
 ### 1.22.0 -- 2026-08-15
 
