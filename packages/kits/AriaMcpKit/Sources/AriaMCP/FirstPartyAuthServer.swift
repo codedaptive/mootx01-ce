@@ -513,8 +513,20 @@ public actor FirstPartyAuthServer {
     private var challenges: [[UInt8]: FirstPartyChallenge] = [:]
     private var sessions: [[UInt8]: FirstPartySession] = [:]
 
-    /// What `initialize` reports on this lane.
-    public nonisolated let identity: FirstPartyServerIdentity
+    /// The dispatcher identity reported at `initialize` on this lane.
+    ///
+    /// COMPUTED from the descriptor currently in force, not captured at init.
+    /// It was a `nonisolated let`, which meant `republish(descriptor:)` moved the
+    /// descriptor and the generations underneath it while `initialize` went on
+    /// advertising the old ones — the lane telling an authenticated client a
+    /// generation pair that no longer authenticated anything. Being actor-
+    /// isolated is what makes staleness impossible rather than merely unlikely.
+    public var identity: FirstPartyServerIdentity {
+        FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: serverName)
+    }
+
+    /// The dispatcher name reported at `initialize`.
+    private let serverName: String
 
     /// Build a first-party authenticator.
     ///
@@ -537,7 +549,7 @@ public actor FirstPartyAuthServer {
         self.descriptorDigest = descriptor.digest()
         self.now = now
         self.randomBytes = randomBytes
-        self.identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: serverName)
+        self.serverName = serverName
     }
 
     // MARK: Handshake

@@ -686,8 +686,11 @@ struct ServerFirstPartyIdentityTests {
         #expect(serverInfo["instanceIdentifier"]?.stringValue == descriptor.instanceIdentifier.uuidString)
         #expect(serverInfo["estateIdentifier"]?.stringValue == descriptor.estateIdentifier.uuidString)
         #expect(serverInfo["contractRevision"] == .integer(Int64(descriptor.contractRevision)))
-        #expect(serverInfo["descriptorGeneration"] == .integer(Int64(descriptor.descriptorGeneration)))
-        #expect(serverInfo["credentialGeneration"] == .integer(Int64(descriptor.credentialGeneration)))
+        // Generations are decimal STRINGS: they are UInt64, and both Int64 and
+        // JSON's safe-integer range are too small to carry them without either
+        // trapping or losing exactness.
+        #expect(serverInfo["descriptorGeneration"] == .string(String(descriptor.descriptorGeneration)))
+        #expect(serverInfo["credentialGeneration"] == .string(String(descriptor.credentialGeneration)))
         #expect(serverInfo["mcpProtocolVersion"]?.stringValue == descriptor.mcpProtocolVersion)
 
         let capabilities = try #require(result["capabilities"]?.objectValue)
@@ -714,5 +717,25 @@ struct ServerFirstPartyIdentityTests {
         #expect(base.firstPartyIdentity == nil)
         let serverInfo = try #require(try await initialize(base)["serverInfo"]?.objectValue)
         #expect(serverInfo.count == 2)
+    }
+
+    @Test("Generations above Int64.max are reported exactly, not trapped")
+    func generationsAboveInt64MaxAreExact() async throws {
+        // `Int64(someUInt64)` traps above Int64.max, and a monotonic counter has
+        // no business being capped by a JSON encoder's signed range.
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.credentialGeneration = UInt64.max
+        descriptor.descriptorGeneration = UInt64(Int64.max) + 1
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        let result = try await initialize(try await makeDispatcher().withFirstPartyIdentity(identity))
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        #expect(serverInfo["credentialGeneration"] == .string("18446744073709551615"))
+        #expect(serverInfo["descriptorGeneration"] == .string("9223372036854775808"))
+        // And the whole response still encodes.
+        #expect((try? JSONValue.object(result).encoded()) != nil)
     }
 }

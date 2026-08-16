@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.45.0
+version: 1.46.0
 status: accepted-1.1-target
 date: 2026-08-16
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1271,6 +1271,38 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 
 ## Changelog
 
+### 1.46.0 -- 2026-08-16
+
+- **`ARIA_MCPDispatcher.firstPartyIdentity` is not an initializer
+  parameter.** It is `public internal(set)` and is set only by the
+  authenticated router, from the live `FirstPartyAuthServer`'s identity.
+  Correcting 1.45.0, which documented an `init` parameter that would
+  have let the unauthenticated lane advertise the capability.
+
+- **`serverInfo.descriptorGeneration` and `serverInfo.credentialGeneration`
+  are DECIMAL STRINGS, not JSON numbers.** They are `UInt64`; `Int64` and
+  JSON's safe-integer range are both too small to carry the full range
+  without trapping or losing exactness.
+
+- **`FirstPartyAuthServer.identity` is actor-isolated and computed** from
+  the descriptor currently in force, so `republish(descriptor:)` cannot
+  leave a stale generation advertised. New
+  `FirstPartyAuthServer.republish(descriptor:)`.
+
+- **New on `FirstPartyAuthProtocol`:** `handshakeMaxBodyBytes`,
+  `isExactContentType(_:)`, `strictJSONObject(_:expected:maxBytes:)`,
+  `topLevelJSONKeys(_:)`, `exactUInt64(_:)`. New on
+  `FirstPartyDescriptor`: `hasEncodableFieldWidths`.
+
+- **`HTTPServer.legacyCollapsedRequest(_:maxBodyBytes:)`** reproduces
+  `LoopbackHTTP.HTTPRequest.parse` for the public lane; the strict parser
+  applies only under `/mcp/first-party`.
+
+- **`MootGateway`:** `FirstPartyDaemonAuthenticator`'s handshake-exchange
+  seam is now `internal`. The module's public surface offers exactly one
+  initializer, which always uses the pinned, no-redirect, size-capped
+  loopback exchange.
+
 ### 1.45.0 -- 2026-08-16
 
 - **First-party authenticated wire surface (MACD-2b), dark.** New
@@ -1303,9 +1335,12 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
   request-reading path is unchanged. Existing call sites are source-
   and behaviour-compatible.
 
-- **`ARIA_MCPDispatcher.init` gains `firstPartyIdentity:`, defaulted
-  `nil`,** plus `withFirstPartyIdentity(_:)` which returns a copy. With
-  `nil`, `initialize` output is byte-identical to revision 1.44.0.
+- **`ARIA_MCPDispatcher` gains `firstPartyIdentity`, `public internal(set)`.**
+  It is NOT an initializer parameter and cannot be set by a caller: the
+  authenticated router populates it from the live authenticator's own
+  identity for the duration of one dispatch. With it `nil` — which is
+  every third-party dispatcher — `initialize` output is byte-identical
+  to revision 1.44.0.
 
 - **`MootGateway` (macOS app) additions:** `DaemonDescriptor` gains the
   six schema-2 fields; `DaemonDescriptorDefect` gains

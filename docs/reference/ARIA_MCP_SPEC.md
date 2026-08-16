@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.39.0
+version: 1.40.0
 status: accepted-1.1-target
 date: 2026-08-16
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -1059,6 +1059,54 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.40.0 -- 2026-08-16
+
+Corrections to 1.39.0, from independent review. Each fixes a statement the
+implementation did not honour.
+
+- **`serverInfo` generations are DECIMAL STRINGS.**
+  `descriptorGeneration` and `credentialGeneration` are `UInt64`; a JSON
+  number cannot carry that range (the encoder's integer is `Int64`, and
+  double-typed numbers lose exactness above 2^53). A decimal string is
+  exact for every value and cannot trap.
+
+- **The identity reported on the first-party lane is derived from the
+  live authenticator**, never configured alongside it. Two independent
+  settings that had to agree could disagree — and did, in both
+  directions: an unauthenticated `initialize` advertising the capability
+  and publishing daemon identifiers, or an authenticated one omitting
+  them. It also tracks descriptor republication, so a stale generation
+  cannot be advertised after the descriptor moves.
+
+- **The public lane's grammar is frozen and independent of the
+  first-party lane.** Public requests are parsed with the legacy
+  loopback grammar whether or not the authenticated lane is configured;
+  the strict grammar applies only under `/mcp/first-party`, and the
+  routing decision is taken from the legacy parse so lane selection never
+  depends on strictness.
+
+- **`Content-Type` is compared for EXACT equality**, after trimming and
+  lowercasing, on the request lane and both handshake steps. A prefix
+  comparison accepted `application/json-evil` and parameterized forms
+  the specification already forbade.
+
+- **Both peers apply the same strict JSON object shape** to handshake
+  payloads before authentication: exact key set, no unknown keys, no
+  duplicate keys, and a hard size cap. Duplicate keys matter because
+  permissive parsers silently keep the last occurrence, so two
+  implementations can disagree about a value while both believing they
+  parsed the same document.
+
+- **Handshake bodies are size-capped at 8 KiB, enforced at the read.**
+  Previously the client buffered whatever a peer sent before any proof or
+  parsing, which an unauthenticated port squatter could exploit.
+
+- **Every integer conversion on the untrusted path is total.** Descriptor
+  version fields are signed on the decoded record and unsigned on the
+  wire, and canonicalization runs before the MAC verifies; a negative
+  value previously trapped. Such descriptors now have no canonical
+  encoding and are refused.
 
 ### 1.39.0 -- 2026-08-16
 

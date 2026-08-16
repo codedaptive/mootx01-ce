@@ -252,8 +252,19 @@ public struct ARIA_MCPDispatcher: Sendable {
             serverInfoFields["version"] = .string(identity.binaryVersion)
             serverInfoFields["instanceIdentifier"] = .string(identity.instanceIdentifier.uuidString)
             serverInfoFields["estateIdentifier"] = .string(identity.estateIdentifier.uuidString)
-            serverInfoFields["descriptorGeneration"] = .integer(Int64(identity.descriptorGeneration))
-            serverInfoFields["credentialGeneration"] = .integer(Int64(identity.credentialGeneration))
+            // Generations are UInt64 and are emitted as DECIMAL STRINGS.
+            //
+            // `Int64(someUInt64)` traps above `Int64.max`, and those are legal
+            // generation values — a monotonic counter has no business being
+            // capped by the signed range of a JSON encoder. JSON numbers cannot
+            // carry them either: `.integer` is `Int64`, and even a double-typed
+            // JSON number loses exactness above 2^53, so any numeric encoding is
+            // lossy or trapping at the top of the range. A decimal string is
+            // exact for every `UInt64` and never traps.
+            serverInfoFields["descriptorGeneration"] = .string(String(identity.descriptorGeneration))
+            serverInfoFields["credentialGeneration"] = .string(String(identity.credentialGeneration))
+            // `contractRevision` is an `Int` and small by contract, so it stays
+            // a JSON number; `Int64(_:)` from `Int` is total on 64-bit.
             serverInfoFields["contractRevision"] = .integer(Int64(identity.contractRevision))
             serverInfoFields["mcpProtocolVersion"] = .string(identity.mcpProtocolVersion)
             // Advertised only here, and only because reaching this branch means

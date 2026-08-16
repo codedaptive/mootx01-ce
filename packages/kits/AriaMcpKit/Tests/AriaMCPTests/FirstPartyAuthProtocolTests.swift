@@ -436,6 +436,120 @@ struct FirstPartyAuthProtocolTests {
         #expect(!FirstPartyAuthProtocol.constantTimeEquals(a, lastDiffers))
     }
 
+    // MARK: Untrusted integer widths (root finding A)
+
+    @Test("A descriptor with a negative version field has no canonical encoding")
+    func negativeVersionFieldsAreUnencodable() {
+        // These are `Int` on a decoded record but unsigned on the wire, and
+        // canonicalization runs BEFORE the MAC verifies — so a negative value
+        // reaches an integer conversion while still fully attacker-controlled.
+        var negativeSchema = Self.vectorDescriptor()
+        negativeSchema.schemaVersion = -1
+        #expect(!negativeSchema.hasEncodableFieldWidths)
+
+        var negativeRevision = Self.vectorDescriptor()
+        negativeRevision.contractRevision = -1
+        #expect(!negativeRevision.hasEncodableFieldWidths)
+
+        #expect(Self.vectorDescriptor().hasEncodableFieldWidths)
+    }
+
+    @Test("Canonicalizing a negative version field does not trap")
+    func negativeVersionFieldsDoNotTrap() {
+        // Totality, not merely rejection: a canonicalizer that can crash on its
+        // input turns a parse bug into a remote denial of service. Reaching the
+        // assertion at all is the result being tested.
+        var descriptor = Self.vectorDescriptor()
+        descriptor.schemaVersion = Int.min
+        descriptor.contractRevision = -1
+        let bytes = descriptor.macInput()
+        #expect(!bytes.isEmpty)
+        #expect(!descriptor.digest().isEmpty)
+        // And it refuses to verify regardless of what MAC is presented.
+        #expect(!descriptor.verifyMAC(installationRoot: Self.fixedRoot))
+
+        let transcript = FirstPartyAuthProtocol.sessionTranscript(
+            descriptorDigest: [UInt8](repeating: 0, count: 32),
+            providerIdentifier: "p", serviceIdentifier: "s", endpoint: "e",
+            instanceIdentifier: Self.instanceUUID, estateIdentifier: Self.estateUUID,
+            binaryVersion: "1.0.0",
+            descriptorSchemaVersion: Int.min, contractRevision: -1,
+            mcpProtocolVersion: "v", credentialGeneration: 0, descriptorGeneration: 0,
+            clientNonce: [], serverNonce: [], sessionIdentifier: [],
+            issuedAt: 0, idleExpiry: 0, absoluteExpiry: 0
+        )
+        #expect(!transcript.isEmpty)
+    }
+
+    @Test("Valid non-negative fields encode identically to before the totality fix")
+    func validFieldsEncodeUnchanged() {
+        // The vectors are frozen; the totality change must be byte-neutral for
+        // every legal value, which is why `UInt64(bitPattern:)` was chosen over
+        // clamping or saturation.
+        var encoder = CanonicalEncoder()
+        encoder.appendUInt64(UInt64(bitPattern: Int64(2)))
+        var reference = CanonicalEncoder()
+        reference.appendUInt64(2)
+        #expect(encoder.bytes == reference.bytes)
+    }
+
+    // MARK: Exact media type (root finding B)
+
+    @Test("Only the exact contracted media type is accepted", arguments: [
+        ("application/json", true),
+        ("Application/JSON", true),          // case-insensitive per RFC
+        ("  application/json  ", true),      // surrounding OWS is strippable
+        ("application/json-evil", false),    // a prefix test would accept this
+        ("application/jsonx", false),
+        ("application/json; charset=utf-8", false),   // parameters are forbidden
+        ("application/json;charset=utf-8", false),
+        ("text/json", false),
+        ("", false),
+    ])
+    func exactContentType(value: String, accepted: Bool) {
+        #expect(FirstPartyAuthProtocol.isExactContentType(value) == accepted)
+    }
+
+    // MARK: Strict JSON shape (root finding F)
+
+    @Test("Strict JSON object reading refuses malformed shapes")
+    func strictJSONObjectRefusesMalformed() {
+        let expected: Set<String> = ["a", "b"]
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data(#"{"a":1,"b":2}"#.utf8), expected: expected) != nil)
+        // Unknown key.
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data(#"{"a":1,"b":2,"c":3}"#.utf8), expected: expected) == nil)
+        // Missing key.
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data(#"{"a":1}"#.utf8), expected: expected) == nil)
+        // Duplicate key — JSONSerialization silently keeps the last.
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data(#"{"a":1,"b":2,"a":3}"#.utf8), expected: expected) == nil)
+        // Not an object.
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data("[1,2]".utf8), expected: expected) == nil)
+        #expect(FirstPartyAuthProtocol.strictJSONObject(Data("not json".utf8), expected: expected) == nil)
+        // Over the size cap, refused before parsing.
+        let huge = Data(("{\"a\":\"" + String(repeating: "x", count: 9000) + "\",\"b\":1}").utf8)
+        #expect(FirstPartyAuthProtocol.strictJSONObject(huge, expected: expected) == nil)
+    }
+
+    @Test("The top-level key scanner sees duplicates and ignores nesting")
+    func topLevelKeyScanner() {
+        #expect(FirstPartyAuthProtocol.topLevelJSONKeys(Data(#"{"a":1,"b":{"a":2},"a":3}"#.utf8)) == ["a", "b", "a"])
+        #expect(FirstPartyAuthProtocol.topLevelJSONKeys(Data(#"{"x":{"y":1}}"#.utf8)) == ["x"])
+        #expect(FirstPartyAuthProtocol.topLevelJSONKeys(Data(#"{"a\"b":1}"#.utf8))?.count == 1)
+        #expect(FirstPartyAuthProtocol.topLevelJSONKeys(Data("{".utf8)) == nil)
+    }
+
+    @Test("The exact UInt64 decoder is total")
+    func exactUInt64IsTotal() {
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: 0)) == 0)
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: UInt64.max)) == UInt64.max)
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: -1)) == nil)
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: Int.min)) == nil)
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: 1.5)) == nil)
+        #expect(FirstPartyAuthProtocol.exactUInt64(NSNumber(value: true)) == nil)
+        #expect(FirstPartyAuthProtocol.exactUInt64("1") == nil)
+        #expect(FirstPartyAuthProtocol.exactUInt64(nil) == nil)
+    }
+
     // MARK: Golden vectors
     //
     // The JSON file is the single language-neutral source of truth. Swift emits

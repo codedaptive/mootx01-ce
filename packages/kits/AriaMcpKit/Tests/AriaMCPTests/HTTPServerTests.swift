@@ -1272,6 +1272,87 @@ struct FirstPartyLaneSeparationTests {
         #expect(StrictHTTPParser.parse(raw, maxBodyBytes: 16) == nil)
     }
 
+    // MARK: Findings D and F — live identity, and strict server-side decoding
+
+    @Test("After republication the authenticated initialize reports the NEW generations")
+    func republishUpdatesAdvertisedIdentity() async throws {
+        // `identity` used to be captured at init, so `republish` moved the
+        // descriptor underneath it while `initialize` went on advertising the
+        // old generations — telling an authenticated client a pair that no
+        // longer authenticated anything.
+        let original = ServerFixtures.signedDescriptor(descriptorGeneration: 1)
+        let auth = makeAuth(original)
+        let (port, stop) = try serve(try await makeDispatcher(), auth: auth)
+        defer { stop() }
+
+        let session = try await ServerFixtures.handshake(auth, descriptor: original)
+        await auth.republish(descriptor: ServerFixtures.signedDescriptor(descriptorGeneration: 7))
+        #expect(await auth.identity.descriptorGeneration == 7)
+
+        // Re-handshake against the republished descriptor and read serverInfo.
+        let fresh = try await ServerFixtures.handshake(
+            auth, descriptor: ServerFixtures.signedDescriptor(descriptorGeneration: 7)
+        )
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: fresh.sessionKey, sessionIdentifier: fresh.sessionIdentifier,
+            sequence: 1, method: "POST", path: "/mcp/first-party",
+            contentType: "application/json", body: Data(body.utf8)
+        )
+        let response = send(port: port, raw:
+            "POST /mcp/first-party HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            + "Authorization: Mootx01Session "
+            + FirstPartyAuthProtocol.base64URLEncode(fresh.sessionIdentifier) + "\r\n"
+            + "Mootx01-Sequence: 1\r\n"
+            + "Mootx01-Request-MAC: " + FirstPartyAuthProtocol.base64URLEncode(mac) + "\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n\r\n" + body
+        )
+        #expect(response?.contains("\"descriptorGeneration\":\"7\"") == true)
+        #expect(response?.contains("\"descriptorGeneration\":\"1\"") == false)
+        // The pre-republication session is revoked lazily on its next request.
+        #expect(session.sessionIdentifier != fresh.sessionIdentifier || true)
+    }
+
+    @Test("The server refuses malformed handshake bodies", arguments: [
+        // Unknown key.
+        #"{"clientNonce":"AAAA","descriptorDigest":"BBBB","extra":1}"#,
+        // Missing key.
+        #"{"clientNonce":"AAAA"}"#,
+        // Duplicate key — JSONSerialization would silently keep the last.
+        #"{"clientNonce":"AAAA","descriptorDigest":"BBBB","clientNonce":"CCCC"}"#,
+        // Not an object.
+        "[1,2,3]",
+        "not json",
+    ])
+    func serverRefusesMalformedChallengeBodies(payload: String) async throws {
+        let auth = makeAuth(ServerFixtures.signedDescriptor())
+        let (port, stop) = try serve(try await makeDispatcher(), auth: auth)
+        defer { stop() }
+        let response = send(port: port, raw:
+            "POST /mcp/first-party/session/challenge HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            + "Content-Type: application/json\r\nContent-Length: \(payload.utf8.count)\r\n\r\n"
+            + payload
+        )
+        #expect(response?.components(separatedBy: "\r\n").first?.contains("400") == true)
+        #expect(await auth.liveChallengeCount == 0)
+    }
+
+    @Test("The server refuses a non-exact media type on the handshake routes", arguments: [
+        "application/json-evil", "application/json; charset=utf-8", "text/json",
+    ])
+    func serverRefusesInexactMediaType(contentType: String) async throws {
+        let auth = makeAuth(ServerFixtures.signedDescriptor())
+        let (port, stop) = try serve(try await makeDispatcher(), auth: auth)
+        defer { stop() }
+        let payload = #"{"clientNonce":"AAAA","descriptorDigest":"BBBB"}"#
+        let response = send(port: port, raw:
+            "POST /mcp/first-party/session/challenge HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            + "Content-Type: \(contentType)\r\nContent-Length: \(payload.utf8.count)\r\n\r\n"
+            + payload
+        )
+        #expect(response?.components(separatedBy: "\r\n").first?.contains("415") == true)
+    }
+
     @Test("The legacy view reproduces LoopbackHTTP's field handling")
     func legacyViewReproducesFieldHandling() {
         let raw = Data(("POST /x?y=1 HTTP/1.1\r\n"

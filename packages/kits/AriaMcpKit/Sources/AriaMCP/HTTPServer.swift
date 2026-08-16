@@ -1226,14 +1226,21 @@ public struct HTTPServer: Sendable {
         _ request: StrictHTTPRequest, auth: FirstPartyAuthServer
     ) async -> HTTPResponse {
         guard let contentType = request.singleValue(for: "content-type"),
-              contentType.lowercased() == FirstPartyAuthProtocol.contentType else {
+              FirstPartyAuthProtocol.isExactContentType(contentType) else {
             return firstPartyError(status: 415, code: "unsupported_media_type")
         }
-        guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+        // The server reads this BEFORE any proof exists, so it is the most
+        // exposed decode on the daemon side. Same strict shape the client
+        // applies to responses: exact key set, no duplicates, size-capped.
+        guard let object = FirstPartyAuthProtocol.strictJSONObject(
+                  request.body, expected: ["clientNonce", "descriptorDigest"]
+              ),
               let nonceRaw = object["clientNonce"] as? String,
               let digestRaw = object["descriptorDigest"] as? String,
               let clientNonce = FirstPartyAuthProtocol.base64URLDecode(nonceRaw),
-              let digest = FirstPartyAuthProtocol.base64URLDecode(digestRaw) else {
+              let digest = FirstPartyAuthProtocol.base64URLDecode(digestRaw),
+              clientNonce.count == FirstPartyAuthProtocol.nonceByteCount,
+              digest.count == FirstPartyAuthProtocol.macByteCount else {
             return firstPartyError(status: 400, code: "bad_request")
         }
         do {
@@ -1260,14 +1267,18 @@ public struct HTTPServer: Sendable {
         _ request: StrictHTTPRequest, auth: FirstPartyAuthServer
     ) async -> HTTPResponse {
         guard let contentType = request.singleValue(for: "content-type"),
-              contentType.lowercased() == FirstPartyAuthProtocol.contentType else {
+              FirstPartyAuthProtocol.isExactContentType(contentType) else {
             return firstPartyError(status: 415, code: "unsupported_media_type")
         }
-        guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+        guard let object = FirstPartyAuthProtocol.strictJSONObject(
+                  request.body, expected: ["sessionIdentifier", "clientProof"]
+              ),
               let sessionRaw = object["sessionIdentifier"] as? String,
               let proofRaw = object["clientProof"] as? String,
               let sessionIdentifier = FirstPartyAuthProtocol.base64URLDecode(sessionRaw),
-              let clientProof = FirstPartyAuthProtocol.base64URLDecode(proofRaw) else {
+              let clientProof = FirstPartyAuthProtocol.base64URLDecode(proofRaw),
+              sessionIdentifier.count == FirstPartyAuthProtocol.sessionIdentifierByteCount,
+              clientProof.count == FirstPartyAuthProtocol.macByteCount else {
             return firstPartyError(status: 400, code: "bad_request")
         }
         do {
@@ -1319,7 +1330,7 @@ public struct HTTPServer: Sendable {
         // taken from the authenticator that just verified the request — never
         // from the dispatcher the caller supplied — so the advertised capability
         // and the enforced authentication cannot disagree.
-        let identified = dispatcher.withFirstPartyIdentity(auth.identity)
+        let identified = dispatcher.withFirstPartyIdentity(await auth.identity)
 
         // Only now is the body parsed.
         let parsed: JSONValue

@@ -73,6 +73,20 @@ public enum FirstPartyAuthProtocol {
     /// The only method the lane accepts, compared after uppercasing.
     public static let requestMethod = "POST"
 
+    /// Whether a `Content-Type` header value is EXACTLY the contracted media
+    /// type.
+    ///
+    /// Exact equality after trimming ASCII whitespace and lowercasing — never a
+    /// prefix test. `hasPrefix("application/json")` accepts
+    /// `application/json-evil`, which is a different media type entirely, and
+    /// `application/json; charset=utf-8`, which the protocol forbids because a
+    /// value with two spellings is a value two peers can disagree about while
+    /// both believing they agree. Parameters are refused rather than stripped
+    /// for the same reason.
+    public static func isExactContentType(_ raw: String) -> Bool {
+        raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t")).lowercased() == contentType
+    }
+
     // MARK: - Identity constants
 
     /// The installer-owned provider permitted to publish a descriptor.
@@ -159,6 +173,16 @@ public enum FirstPartyAuthProtocol {
 
     /// Width of the replay bitmap, in sequences below the highest seen.
     public static let replayWindowWidth: UInt64 = 128
+
+    /// Hard cap on a handshake request or response body, in bytes.
+    ///
+    /// A real handshake payload is a few hundred bytes: three base64url values,
+    /// three decimal timestamps, and their keys. 8 KiB is generous by an order
+    /// of magnitude and still small enough that an unauthenticated peer cannot
+    /// make either side buffer or scan anything meaningful. It is ENFORCED, at
+    /// the point bytes are read, rather than assumed — an assumption about a
+    /// peer-controlled length is not a bound.
+    public static let handshakeMaxBodyBytes = 8 * 1024
 
     // MARK: - Header names and the authorization scheme
 
@@ -410,8 +434,15 @@ public enum FirstPartyAuthProtocol {
         encoder.appendUUID(instanceIdentifier)                    // 6
         encoder.appendUUID(estateIdentifier)                      // 7
         encoder.appendString(binaryVersion)                       // 8
-        encoder.appendUInt64(UInt64(descriptorSchemaVersion))     // 9
-        encoder.appendUInt64(UInt64(contractRevision))            // 10
+        // `UInt64(bitPattern: Int64(_:))` rather than `UInt64(_:)`: the latter
+        // TRAPS on a negative, and these values arrive as `Int` decoded from an
+        // untrusted descriptor. Callers refuse out-of-range descriptors before
+        // reaching here (`FirstPartyDescriptor.hasEncodableFieldWidths`), but a
+        // canonicalizer that can crash on its input is a canonicalizer that
+        // turns a parse bug into a remote denial of service. Identical bytes to
+        // the trapping form for every non-negative value, so no vector moves.
+        encoder.appendUInt64(UInt64(bitPattern: Int64(descriptorSchemaVersion))) // 9
+        encoder.appendUInt64(UInt64(bitPattern: Int64(contractRevision)))        // 10
         encoder.appendString(mcpProtocolVersion)                  // 11
         encoder.appendUInt64(credentialGeneration)                // 12
         encoder.appendUInt64(descriptorGeneration)                // 13
@@ -737,7 +768,8 @@ public struct FirstPartyDescriptor: Sendable, Equatable {
     public func macInput() -> [UInt8] {
         var encoder = CanonicalEncoder()
         encoder.appendString(FirstPartyAuthProtocol.descriptorDomain)
-        encoder.appendUInt64(UInt64(schemaVersion))
+        // Total conversion — see `sessionTranscript`. A negative would trap.
+        encoder.appendUInt64(UInt64(bitPattern: Int64(schemaVersion)))
         encoder.appendString(providerIdentifier)
         encoder.appendString(serviceIdentifier)
         encoder.appendString(endpoint)
@@ -747,7 +779,7 @@ public struct FirstPartyDescriptor: Sendable, Equatable {
         encoder.appendUUID(instanceIdentifier)
         encoder.appendUUID(estateIdentifier)
         encoder.appendString(binaryVersion)
-        encoder.appendUInt64(UInt64(contractRevision))
+        encoder.appendUInt64(UInt64(bitPattern: Int64(contractRevision)))
         encoder.appendString(mcpProtocolVersion)
         encoder.appendCapabilities(capabilities)
         encoder.appendUInt64(credentialGeneration)
@@ -774,11 +806,30 @@ public struct FirstPartyDescriptor: Sendable, Equatable {
         FirstPartyAuthProtocol.sha256(canonicalBytes())
     }
 
+    /// Whether every field can be canonically encoded at all.
+    ///
+    /// `schemaVersion` and `contractRevision` are `Int` on the decoded record but
+    /// unsigned on the wire, so a descriptor carrying a negative one has no
+    /// canonical encoding. It must be refused BEFORE canonicalization rather
+    /// than after: the canonicalizer runs before the MAC verifies, which is
+    /// before anything about the descriptor is trusted, so it is the most
+    /// exposed code in the client.
+    ///
+    /// Byte-array widths are checked here too — a MAC of the wrong length cannot
+    /// be a MAC, and its length is a `UInt32` on the wire.
+    public var hasEncodableFieldWidths: Bool {
+        schemaVersion >= 0
+            && contractRevision >= 0
+            && descriptorMAC.count <= Int(UInt32.max)
+            && capabilities.count <= Int(UInt32.max)
+    }
+
     /// Recompute the MAC under `installationRoot` and compare it in constant
     /// time against the published one.
     ///
     /// - Returns: `true` only when the descriptor is authentic.
     public func verifyMAC(installationRoot: [UInt8]) -> Bool {
+        guard hasEncodableFieldWidths else { return false }
         guard descriptorMAC.count == FirstPartyAuthProtocol.macByteCount else { return false }
         let expected = FirstPartyAuthProtocol.hmacSHA256(
             key: FirstPartyAuthProtocol.descriptorKey(installationRoot: installationRoot),
@@ -857,5 +908,115 @@ public struct ReplayWindow: Sendable, Equatable {
         guard bitmap & mask == 0 else { return false }
         bitmap |= mask
         return true
+    }
+}
+
+// MARK: - Strict JSON object reading
+//
+// Both halves of the handshake decode JSON that is UNAUTHENTICATED at the moment
+// they read it: the client reads the challenge response before it can compute
+// the server proof, and the server reads the challenge and establish requests
+// before any proof exists at all. Neither may use a permissive reader.
+//
+// This lives beside the protocol rather than in either peer so the two cannot
+// drift into accepting different things — a client and a server that disagree
+// about which payloads are well-formed disagree about the protocol.
+
+extension FirstPartyAuthProtocol {
+
+    /// Parse `data` as a JSON object with EXACTLY the expected keys.
+    ///
+    /// Three checks, each catching something the others do not:
+    ///
+    /// 1. it is a JSON object at all;
+    /// 2. its key set is exactly `expected` — no missing key, and no unknown key
+    ///    a hostile or future peer could use to smuggle state past a reader that
+    ///    ignores what it does not recognise;
+    /// 3. no key appears twice. `JSONSerialization` silently keeps the last
+    ///    occurrence, so two peers using different libraries could disagree
+    ///    about a value while both believing they parsed the same document —
+    ///    the same ambiguity the strict HTTP parser exists to remove.
+    ///
+    /// - Parameter maxBytes: hard cap on the payload. Handshake payloads are a
+    ///   few hundred bytes; anything larger is refused before it is parsed, so a
+    ///   peer cannot make the reader do unbounded work.
+    public static func strictJSONObject(
+        _ data: Data, expected: Set<String>, maxBytes: Int = handshakeMaxBodyBytes
+    ) -> [String: Any]? {
+        guard data.count <= maxBytes else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        guard Set(object.keys) == expected else { return nil }
+        guard let keys = topLevelJSONKeys(data) else { return nil }
+        guard keys.count == expected.count, Set(keys) == expected else { return nil }
+        return object
+    }
+
+    /// The top-level object keys of `data`, in wire order, including repeats.
+    ///
+    /// A minimal depth-tracking scan rather than a second JSON parser: it only
+    /// has to see which strings sit at depth 1 immediately before a colon.
+    /// Bounded by the caller's size cap, not by assumption.
+    ///
+    /// - Returns: `nil` when the bytes are not a well-formed top-level object.
+    public static func topLevelJSONKeys(_ data: Data) -> [String]? {
+        var keys: [String] = []
+        var depth = 0
+        var pendingKey: String?
+        var inString = false
+        var escaped = false
+        var current = [UInt8]()
+
+        for byte in data {
+            if inString {
+                if escaped {
+                    escaped = false
+                    current.append(byte)
+                } else if byte == 0x5C {            // backslash
+                    escaped = true
+                    current.append(byte)
+                } else if byte == 0x22 {            // closing quote
+                    inString = false
+                    if depth == 1 { pendingKey = String(decoding: current, as: UTF8.self) }
+                    current.removeAll()
+                } else {
+                    current.append(byte)
+                }
+            } else {
+                switch byte {
+                case 0x22: inString = true                       // opening quote
+                case 0x7B, 0x5B: depth += 1; pendingKey = nil    // { [
+                case 0x7D, 0x5D:                                 // } ]
+                    depth -= 1
+                    pendingKey = nil
+                    if depth < 0 { return nil }
+                case 0x3A:                                       // :
+                    if depth == 1, let key = pendingKey { keys.append(key) }
+                    pendingKey = nil
+                case 0x2C: pendingKey = nil                      // ,
+                default: break
+                }
+            }
+        }
+        guard depth == 0, !inString else { return nil }
+        return keys
+    }
+
+    /// Decode a JSON value as an exact `UInt64`, without ever trapping.
+    ///
+    /// `UInt64(someInt)` traps on a negative. Reading an unauthenticated value
+    /// that way is a remote denial of service reachable before any proof is
+    /// checked. Decimal-string round-tripping is used rather than a `Double`
+    /// comparison because `Double` cannot represent every `UInt64` exactly above
+    /// 2^53, so a range check through it would misjudge near the top of range.
+    ///
+    /// Rejects negatives, fractions, overflow, booleans, strings, null, and
+    /// anything that is not a JSON number.
+    public static func exactUInt64(_ value: Any?) -> UInt64? {
+        guard let number = value as? NSNumber else { return nil }
+        // `true`/`false` bridge to NSNumber and would round-trip as "1"/"0".
+        if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+        return UInt64(number.stringValue)
     }
 }
