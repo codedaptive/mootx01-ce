@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.44.0
+version: 1.45.0
 status: accepted-1.1-target
-date: 2026-08-15
+date: 2026-08-16
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1270,6 +1270,64 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.45.0 -- 2026-08-16
+
+- **First-party authenticated wire surface (MACD-2b), dark.** New
+  public types in `AriaMCP`:
+
+  - `FirstPartyAuthProtocol` — the frozen constants, canonical
+    encodings, HKDF/HMAC derivations, proofs, request/response MAC
+    builders, base64url codec, canonical sequence parsing, and
+    constant-time comparison.
+  - `CanonicalEncoder` — length-prefixed, big-endian, fixed-order.
+    `appendString`, `appendBytes`, `appendUInt16/32/64`, `appendUUID`,
+    `appendCapabilities`.
+  - `FirstPartyDescriptor` — descriptor schema 2, with `macInput()`,
+    `canonicalBytes()`, `digest()`, and `verifyMAC(installationRoot:)`.
+  - `ReplayWindow` — highest-seen plus a 128-bit history; `admit(_:)`,
+    `isExhausted`.
+  - `FirstPartyRootProviding`, `FixedFirstPartyRootProvider`,
+    `FailingFirstPartyRootProvider`,
+    `DataProtectionKeychainRootProvider` — the read-only root contract.
+    No production root is minted in this revision.
+  - `StrictHTTPRequest`, `StrictHeaderField`, `StrictHTTPParser` — a
+    lossless, duplicate-preserving request parser for the
+    authenticated lane only.
+  - `FirstPartyServerIdentity`, `FirstPartyAuthServer`,
+    `FirstPartyAuthenticatedRequest`, `FirstPartyAuthError`.
+
+- **`HTTPServer.init` gains `firstPartyAuth:`, defaulted `nil`.**
+  `HTTPServer.serve` gains the same parameter, likewise defaulted.
+  With `nil` the entire `/mcp/first-party` subtree returns 404 and the
+  request-reading path is unchanged. Existing call sites are source-
+  and behaviour-compatible.
+
+- **`ARIA_MCPDispatcher.init` gains `firstPartyIdentity:`, defaulted
+  `nil`,** plus `withFirstPartyIdentity(_:)` which returns a copy. With
+  `nil`, `initialize` output is byte-identical to revision 1.44.0.
+
+- **`MootGateway` (macOS app) additions:** `DaemonDescriptor` gains the
+  six schema-2 fields; `DaemonDescriptorDefect` gains
+  `unsupportedAuthProtocol`, `unknownAuthKeyIdentifier`,
+  `wrongEndpoint`, `unparseableBinaryVersion`,
+  `malformedDescriptorMAC`, and `staleGeneration`;
+  `DaemonCompatibility` gains `updateDaemonRequired` and
+  `updateAppRequired`; `DaemonReadinessState` gains the matching two
+  cases; new `SemanticVersion`, `FirstPartyDaemonAuthenticator`,
+  `FirstPartyInstallationRootProviding`, and
+  `FirstPartyAuthenticationError`.
+
+- **`HTTPTransport.init` gains `verifyResponse:` and
+  `redirectPolicy:`, both defaulted** to the pre-existing behaviour
+  (`nil` and `.follow`). New `GatewayResponseVerification` typealias
+  and `GatewayRedirectPolicy` enum; new
+  `GatewayTransportError.responseVerificationFailed` and
+  `.redirectRefused`.
+
+- **Rust:** no interface change. The port gains a golden-vector test
+  only and must not advertise `authenticated-first-party` until a
+  separate parity mission implements the full wire.
 
 ### 1.44.0 -- 2026-08-15
 

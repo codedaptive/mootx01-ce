@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.38.0
+version: 1.39.0
 status: accepted-1.1-target
-date: 2026-08-15
+date: 2026-08-16
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1059,6 +1059,98 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.39.0 -- 2026-08-16
+
+- **Authenticated first-party wire (MACD-2b), dark.** Adds a second HTTP
+  lane on the resident server at the exact endpoint
+  `http://127.0.0.1:4242/mcp/first-party`, alongside the existing
+  third-party lane, whose behaviour is unchanged. The lane is
+  UNAVAILABLE unless a first-party authenticator is explicitly
+  configured; no shipping build configures one. MACD-2c supplies the
+  signed provider, the provider lock, and descriptor publication;
+  MACD-3 performs production routing.
+
+- **Descriptor schema 2, contract revision 2.** The descriptor gains
+  `authProtocol` (`hmac-sha256-hkdf-v1`), `authKeyIdentifier`
+  (`installation-root-v1`), `publishedAt`, `credentialGeneration`,
+  `descriptorGeneration`, and `descriptorMAC`. It still carries no
+  estate path, estate key, authentication root, session key, nonce,
+  bearer token, install path, or PID. Schema 1 records are refused
+  rather than upgraded: a schema-1 descriptor carries no MAC, so
+  nothing can verify it.
+
+- **Canonical bytes.** All MAC and digest inputs use a fixed-order,
+  length-prefixed binary encoding: UTF-8 strings preceded by a UInt32
+  big-endian byte length, UInt64/UInt32/UInt16 big-endian, UUIDs as
+  their 16 RFC 4122 bytes, byte arrays length-prefixed, capability
+  sets sorted by wire spelling then counted. Delimiter concatenation,
+  JSON key order, locale-dependent formatting, and platform-native
+  integer encoding are all prohibited — `"a" || "bc"` and
+  `"ab" || "c"` concatenate identically, so a MAC over a delimited
+  concatenation authenticates neither field.
+
+- **Derivation ladder.** `K_install` is 32 random bytes in the macOS
+  data-protection Keychain (service
+  `com.codedaptive.mootx01.daemon-auth`, account
+  `installation-root-v1`, `kSecUseDataProtectionKeychain` true,
+  non-synchronizable, fully expanded access group). It is never used
+  directly as a request key. Three derivations, each with a distinct
+  HKDF-SHA256 `info` domain:
+  `K_descriptor` (salt = 32 zero octets, the RFC 5869 omitted-salt
+  value), `K_auth` (salt = descriptor digest), and `K_session`
+  (salt = SHA-256 of the session transcript).
+
+- **Mutual handshake.** `POST /mcp/first-party/session/challenge` and
+  `POST /mcp/first-party/session/establish`. A 19-field canonical
+  transcript binds the descriptor digest, both identities, the exact
+  endpoint, both generations, both nonces, the session identifier,
+  and all three timestamps. Server and client proofs use distinct
+  domains so a reflected server proof cannot satisfy the client
+  check; the establishment proof is taken under `K_session`.
+
+- **Request and response authentication.** Every request carries
+  `Authorization: Mootx01Session <base64url>`, `Mootx01-Sequence`
+  (canonical unsigned decimal, no leading zero, never 0), and
+  `Mootx01-Request-MAC`. The request MAC covers the protocol domain,
+  session identifier, sequence, uppercase method, exact path, exact
+  content type, and SHA-256 of the exact body — not the body alone.
+  Every response carries `Mootx01-Response-MAC` over the domain,
+  session identifier, request sequence, HTTP status, content type,
+  and SHA-256 of the body, including the empty 204 a notification
+  receives.
+
+- **Bounded state.** At most 128 outstanding challenges (single-use,
+  30-second lifetime) and 64 live sessions (15-minute idle, 8-hour
+  absolute). Expired entries are removed before capacity is judged,
+  and at capacity the server refuses rather than evicting a live
+  entry. Replay protection is a highest-seen sequence plus a 128-bit
+  bitmap, so genuine out-of-order arrivals are admitted while
+  duplicates and too-old sequences are refused. Replay state is
+  committed only after the request MAC verifies.
+
+- **Fail-closed compatibility.** Schema, auth protocol, contract
+  revision, and MCP version must match exactly and are never
+  negotiated down. The daemon binary version must lie in
+  `[1.0.0, 2.0.0)` and must equal the authenticated
+  `serverInfo.version`; below the range yields Update Daemon, at or
+  above yields Update App. Descriptor and credential generations are
+  monotonic.
+
+- **Truthful capability.** `authenticated-first-party` is advertised,
+  and the extra `serverInfo` fields (`instanceIdentifier`,
+  `estateIdentifier`, `descriptorGeneration`, `credentialGeneration`,
+  `contractRevision`, `mcpProtocolVersion`) emitted, ONLY when a
+  validated root, an active descriptor, a bounded session store, and
+  the request/response MAC middleware are all present. With the lane
+  unconfigured the whole subtree 404s and `initialize` is
+  byte-identical to before this revision.
+
+- **Golden vectors.** `docs/reference/vectors/ARIA_MCP_FIRST_PARTY_AUTH_V1.json`
+  is the language-neutral source of truth, verified independently by
+  the Swift and Rust test suites. The Rust port implements the
+  verifier only; per the parity boundary it must not advertise or
+  partially implement the runtime protocol.
 
 ### 1.38.0 -- 2026-08-15
 

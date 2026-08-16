@@ -401,6 +401,32 @@ struct ServeCommand: AsyncParsableCommand {
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         if let port = residentPort {
+            // FIRST-PARTY LANE: DELIBERATELY DARK HERE.
+            //
+            // This command is the raw CLI/resident host. It is NOT an eligible
+            // first-party provider and must never present itself as one: a raw,
+            // unsigned, Homebrew-built, or self-built executable cannot claim the
+            // team Keychain access group, so it cannot hold the installation root
+            // that the authenticated lane's whole argument rests on.
+            //
+            // It therefore passes NO first-party root, NO provider, and NO
+            // descriptor. The lane stays closed structurally rather than by
+            // convention: `AriaResident.runResidentDaemon` builds its `HTTPServer`
+            // with `firstPartyAuth` defaulted to nil, and its dispatcher with
+            // `firstPartyIdentity` defaulted to nil. With those nil the entire
+            // `/mcp/first-party` subtree 404s and `initialize` never claims the
+            // `authenticated-first-party` capability — there is no flag to
+            // misconfigure and no branch to take by accident.
+            //
+            // This host remains fully eligible for the existing third-party MCP
+            // lane, whose behaviour is unchanged.
+            //
+            // MACD-2c supplies the signed, provisioned daemon bundle that IS an
+            // eligible provider, along with the provider lock and descriptor
+            // publication. MACD-3 performs the atomic production routing
+            // conversion. Neither is in scope here, and enabling this lane in the
+            // raw resident host is explicitly not authorized.
+            //
             // Resident daemon: HTTP transport + autonomic governor + telemetry/monitoring
             // gate via the shared AriaResident runner (identical wiring to
             // aria-mcp). The estate is the durable SQLite opened above, so dreaming
