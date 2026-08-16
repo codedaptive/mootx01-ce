@@ -78,6 +78,21 @@ private func distinctGenerations(
     return gens
 }
 
+/// Count all rows for a given modelID across every generation in the vectors
+/// table. Used by the generation-bound test to verify total row count does not
+/// accumulate across successive reindex cycles.
+private func totalVectorRowCount(
+    storage: any Storage,
+    modelID: String
+) async throws -> Int {
+    let rows = try await storage.rowStore.query(
+        table: "vectors",
+        where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+        orderBy: [], limit: nil, offset: nil
+    )
+    return rows.count
+}
+
 /// Check whether a specific (modelID, itemID, generation) combination exists.
 /// Used to assert item-level existence without relying on aggregate counts.
 private func vectorExistsForItem(
@@ -452,6 +467,85 @@ struct ShadowGenerationLifecycleTests {
                                                              itemID: "serving-item", generation: servingGen)
             #expect(existsAfter,
                     "reconcileModelVectors must not delete serving-item at serving gen \(servingGen)")
+        }
+    }
+
+    // MARK: BOUND — generation count stays bounded across successive reindex cycles
+
+    /// Drives 12 successive full shadow-swap cycles (begin → write → publish → reclaim)
+    /// against one model and asserts the governing invariant:
+    ///
+    ///   After a completed cycle-plus-reclaim, exactly ONE distinct generation
+    ///   exists in the vectors table and the total row count equals VECTORS_PER_CYCLE.
+    ///   Neither metric grows with the cycle number.
+    ///
+    /// Pre-fix failure: reclaimSupersededGenerations did not delete superseded
+    /// (old serving) generation rows. After N cycles without working reclaim:
+    ///   - N+1 distinct generations remained on disk (gens 0 through N)
+    ///   - Total row count grew to (N+1) × VECTORS_PER_CYCLE
+    /// The assertion `distinctGens.count == 1` would fail at cycle 1, where it
+    /// found 2 distinct generations instead of 1.
+    ///
+    /// Printed series (iteration, distinct generation count, total row count) is
+    /// captured in the test log so the exact measurements appear in the
+    /// completion report without requiring a manual log parse.
+    @Test("BOUND: generation count stays bounded across N successive reindex cycles")
+    func generationCountStaysBoundedAcrossReindexCycles() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try await openVectorStorage()
+            let store = VectorStore(storage: storage)
+            let modelID = "bound-measurement"
+            let cycleCount = 12
+            let vectorsPerCycle = 5
+
+            // Seed the initial serving generation (generation 0).
+            // Subsequent cycles will replace these rows via shadow swap.
+            for i in 0..<vectorsPerCycle {
+                try await writeBinaryVector(
+                    to: store, itemID: "item-\(i)", modelID: modelID,
+                    seed: UInt64(i + 1))
+            }
+
+            print("BOUND TEST — \(cycleCount) cycles, \(vectorsPerCycle) vectors/cycle")
+            print("Iteration | Distinct Generations | Total Rows")
+
+            for cycle in 1...cycleCount {
+                // Open a new shadow generation.
+                _ = try await store.beginShadowGeneration(modelIDs: [modelID])
+
+                // Write the same item set into the shadow. Using the same item IDs
+                // as the previous serving generation simulates a normal full reindex
+                // where all items are re-embedded into the new model generation.
+                for i in 0..<vectorsPerCycle {
+                    try await writeBinaryVector(
+                        to: store, itemID: "item-\(i)", modelID: modelID,
+                        seed: UInt64(cycle * 1000 + i))
+                }
+
+                // Promote the shadow to serving.
+                try await store.publishShadowGeneration(modelIDs: [modelID])
+
+                // Reclaim the old serving generation's rows.
+                _ = try await store.reclaimSupersededGenerations()
+
+                // Measure what is physically on disk after reclaim.
+                let distinctGens = try await distinctGenerations(storage: storage, modelID: modelID)
+                let totalRows    = try await totalVectorRowCount(storage: storage, modelID: modelID)
+
+                print("\(cycle) | \(distinctGens.count) | \(totalRows)")
+
+                // The bound: exactly one generation and exactly vectorsPerCycle rows
+                // survive a completed swap + reclaim. Pre-fix: both metrics grew
+                // linearly with the cycle number.
+                #expect(
+                    distinctGens.count == 1,
+                    "Cycle \(cycle): expected 1 distinct generation after reclaim; got \(distinctGens.count) — \(distinctGens)"
+                )
+                #expect(
+                    totalRows == vectorsPerCycle,
+                    "Cycle \(cycle): expected \(vectorsPerCycle) total rows after reclaim; got \(totalRows)"
+                )
+            }
         }
     }
 }

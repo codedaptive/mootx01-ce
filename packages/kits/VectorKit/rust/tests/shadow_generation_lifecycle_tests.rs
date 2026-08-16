@@ -10,7 +10,8 @@
 
 use std::sync::Arc;
 use persistence_kit::{
-    BackendConfiguration, EstateConfiguration, SqliteStorage, Storage,
+    BackendConfiguration, Column, EstateConfiguration, SqliteStorage, Storage,
+    StoragePredicate, TypedValue,
 };
 use uuid::Uuid;
 use engram_lib::Engram;
@@ -38,6 +39,49 @@ fn open_store(path: &str) -> VectorStore {
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg).expect("open SQLite"));
     // Low HNSW threshold so tests don't build a graph (binary lane only).
     VectorStore::open_with_hnsw_threshold(storage, 100_000).expect("open VectorStore")
+}
+
+/// Open a VectorStore AND retain a direct handle to the underlying storage.
+/// Used by the generation-bound test, which needs raw row-level queries to
+/// count distinct generations and total row counts independently of the
+/// VectorStore's serving-generation filter.
+fn open_store_with_storage(path: &str) -> (VectorStore, Arc<dyn Storage>) {
+    let cfg = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg).expect("open SQLite"));
+    let store = VectorStore::open_with_hnsw_threshold(Arc::clone(&storage), 100_000)
+        .expect("open VectorStore");
+    (store, storage)
+}
+
+/// Query the vectors table for one model and return:
+///   - the number of DISTINCT generation values present on disk
+///   - the total row count across all generations
+///
+/// Bypasses VectorStore's serving-generation filter so the counts reflect the
+/// physical table state, not what would be served to queries.
+fn raw_generation_stats(storage: &Arc<dyn Storage>, model_id: &str) -> (usize, usize) {
+    let predicate = StoragePredicate::Eq(
+        Column::new("vectors", "model_id"),
+        TypedValue::Text(model_id.to_string()),
+    );
+    let rows = storage
+        .row_store()
+        .query("vectors", Some(&predicate), &[], None, None)
+        .expect("query vectors table");
+    let total = rows.len();
+    let mut gens = std::collections::HashSet::new();
+    for row in &rows {
+        if let Some(TypedValue::Int(g)) = row.get("generation") {
+            gens.insert(*g);
+        }
+    }
+    (gens.len(), total)
 }
 
 /// Insert `count` binary vectors for `model_id` at serving generation.
@@ -477,4 +521,98 @@ fn reclaim_removes_abandoned_building_protects_open_shadow() {
     let _ = store
         .find_nearest(&Engram::new(0x5555_0000, 0, 0, 0), OPEN_MODEL, 5)
         .expect("find open model after reclaim");
+}
+
+// ── BOUND — generation count stays bounded across successive reindex cycles ──
+//
+// Drives CYCLE_COUNT successive full shadow-swap cycles (begin → write →
+// publish → reclaim) against one model and asserts the governing invariant:
+//
+//   After a completed cycle-plus-reclaim, exactly ONE distinct generation
+//   exists in the vectors table and the total row count equals VECTORS_PER_CYCLE.
+//   Neither metric grows with the cycle number.
+//
+// PRE-FIX FAILURE EVIDENCE:
+//   reclaim_superseded_generations did not delete superseded (old serving)
+//   generation rows. After N cycles without working reclaim:
+//     - N+1 distinct generations remained on disk (gens 0 through N)
+//     - Total row count grew to (N+1) × VECTORS_PER_CYCLE
+//   The assertion `distinct_gens == 1` would fail at cycle 1, where the test
+//   would find distinct_gens == 2 (gens 0 and 1) instead of 1.
+//
+//   To reproduce pre-fix: stub reclaim_superseded_generations to return Ok({})
+//   without deleting any rows. Both assertions fail starting at cycle 1.
+#[test]
+fn bound_generation_count_stays_bounded_across_reindex_cycles() {
+    const MODEL: &str = "bound-measurement";
+    const CYCLE_COUNT: usize = 12;
+    const VECTORS_PER_CYCLE: usize = 5;
+
+    let path = tmp_db();
+    let (store, storage) = open_store_with_storage(&path);
+
+    // Seed the initial serving generation (generation 0).
+    // Subsequent cycles replace these rows via shadow swap.
+    for i in 0..VECTORS_PER_CYCLE {
+        let e = Engram::new((i as u64 + 1) * 0x1111, 0, 0, 0);
+        store
+            .add_vector(&format!("item-{i}"), &e, MODEL, "v1", FILED_AT)
+            .expect("add initial vector");
+    }
+
+    eprintln!(
+        "BOUND TEST — {CYCLE_COUNT} cycles, {VECTORS_PER_CYCLE} vectors/cycle"
+    );
+    eprintln!("Iteration | Distinct Generations | Total Rows");
+
+    for cycle in 1..=CYCLE_COUNT {
+        // Open a new shadow generation.
+        store
+            .begin_shadow_generation(&[MODEL])
+            .expect("begin shadow");
+
+        // Write the full item set into the shadow. Using the same item IDs as
+        // the previous serving generation simulates a normal full reindex where
+        // all items are re-embedded into the new model generation.
+        for i in 0..VECTORS_PER_CYCLE {
+            let e = Engram::new((cycle as u64 * 1000 + i as u64) * 0x1111, 0, 0, 0);
+            store
+                .add_vector(
+                    &format!("item-{i}"),
+                    &e,
+                    MODEL,
+                    "v2",
+                    FILED_AT + cycle as i64,
+                )
+                .expect("add shadow vector");
+        }
+
+        // Promote the shadow to serving.
+        store
+            .publish_shadow_generation(&[MODEL])
+            .expect("publish shadow");
+
+        // Reclaim the old serving generation's rows.
+        store
+            .reclaim_superseded_generations(None)
+            .expect("reclaim");
+
+        // Measure what is physically on disk after reclaim.
+        let (distinct_gens, total_rows) = raw_generation_stats(&storage, MODEL);
+
+        eprintln!("{cycle} | {distinct_gens} | {total_rows}");
+
+        // The bound: exactly one generation and exactly VECTORS_PER_CYCLE rows
+        // survive a completed swap + reclaim. Pre-fix: both metrics grew
+        // linearly with the cycle number.
+        assert_eq!(
+            distinct_gens, 1,
+            "Cycle {cycle}: expected 1 distinct generation after reclaim; got {distinct_gens}"
+        );
+        assert_eq!(
+            total_rows, VECTORS_PER_CYCLE,
+            "Cycle {cycle}: expected {VECTORS_PER_CYCLE} total rows after reclaim; \
+             got {total_rows}"
+        );
+    }
 }
