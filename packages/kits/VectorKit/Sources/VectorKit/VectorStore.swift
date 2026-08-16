@@ -374,6 +374,20 @@ public actor VectorStore {
     /// Exposed via peakShadowStorageBytes for test and metrics use.
     private var shadowPayloadBytes: [String: Int64] = [:]
 
+    /// Set of model IDs for which this VectorStore instance has called
+    /// beginShadowGeneration and not yet resolved (via publishShadowGeneration
+    /// or abandonShadowGeneration). This is the ONLY signal reclaimSuperseded-
+    /// Generations uses to determine whether a 'building' shadow is genuinely
+    /// in flight or was abandoned by a prior process.
+    ///
+    /// Critical: do NOT use shadowGenerations for this purpose.
+    /// _shadowGeneration(for:) populates shadowGenerations as a side effect
+    /// of merely reading the registry, so a non-nil entry no longer means
+    /// "opened in this process instance". openShadows is populated ONLY by
+    /// beginShadowGeneration — it is not persisted and starts empty each time
+    /// the VectorStore is opened.
+    private var openShadows: Set<String> = []
+
     // MARK: - Float-index admission accounting
 
     /// Projected byte footprints for each currently-resident per-model float
@@ -2678,13 +2692,21 @@ public actor VectorStore {
 
     /// Begin a shadow generation for the given model IDs.
     ///
-    /// For each model: shadow_generation = serving_generation + 1, registry row
-    /// upserted with shadow_state = 'building'. While a model has an active shadow,
-    /// ALL vector writes land tagged with shadow_generation and bypass all resident
-    /// structures (resident array, float indices, HNSW). Models not listed are
-    /// unaffected. Re-entrant begin on a model with an existing 'building' shadow
-    /// abandons the stale shadow (its rows become reclaimable) and allocates the
-    /// next generation — this is the crash-mid-build recovery path.
+    /// For each model: shadow_generation = max(existing_shadow, serving) + 1,
+    /// registry row upserted with shadow_state = 'building'. While a model has
+    /// an active shadow, ALL vector writes land tagged with shadow_generation and
+    /// bypass all resident structures (resident array, float indices, HNSW).
+    /// Models not listed are unaffected.
+    ///
+    /// Re-entrant begin on a model with a pre-existing 'building' shadow (from
+    /// a prior crash or abandoned reindex) DELETES the stale shadow's vectors
+    /// and hnsw_graph rows before allocating a new generation. This ensures the
+    /// governing invariant — every row is at its serving generation or at the
+    /// currently active shadow — is restored immediately rather than waiting for
+    /// a later reclaim cycle. The new shadow_gen is still max(stale, serving) + 1
+    /// so no generation number is reissued.
+    ///
+    /// This is the crash-mid-build recovery path (Part 5).
     ///
     /// - Parameter modelIDs: Models to begin a shadow for.
     /// - Returns: Map from modelID to the allocated shadow generation number.
@@ -2693,9 +2715,6 @@ public actor VectorStore {
         var result: [String: Int64] = [:]
         for modelID in modelIDs {
             let serving = try await _servingGeneration(for: modelID)
-            // If a 'building' shadow already exists, abandon it: the new shadow_gen
-            // skips the stale one so its rows become reclaimable (shadow_gen ≠ serving
-            // and ≠ new shadow → deleted by reclaimSupersededGenerations).
             let existingMax: Int64
             let rows = try await storage.rowStore.query(
                 table: "vector_generations",
@@ -2705,8 +2724,23 @@ public actor VectorStore {
                 offset: nil
             )
             if let row = rows.first, case let .int(sg) = row["shadow_generation"] ?? .null {
-                // Use max(existing shadow, serving) + 1 so we never re-issue a
-                // generation that might still have rows on disk.
+                // Pre-existing shadow: delete its rows now (crash recovery).
+                // Use max(existing shadow, serving) + 1 so no generation number
+                // that might still have rows on disk is ever reissued.
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                        .eq(Column(table: "vectors", name: "generation"), .int(sg))
+                    ])
+                )
+                _ = try await storage.rowStore.delete(
+                    table: "hnsw_graph",
+                    where: .and([
+                        .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+                        .eq(Column(table: "hnsw_graph", name: "generation"), .int(sg))
+                    ])
+                )
                 existingMax = max(sg, serving)
             } else {
                 existingMax = serving
@@ -2725,11 +2759,13 @@ public actor VectorStore {
                 conflictColumns: ["model_id"]
             )
 
-            // Update caches.
+            // Update caches. Record this model in openShadows so reclaim knows
+            // this process instance holds the shadow lock.
             servingGenerations[modelID] = serving
             shadowGenerations[modelID] = newShadow
             shadowStates[modelID] = "building"
             shadowPayloadBytes[modelID] = 0
+            openShadows.insert(modelID)
             result[modelID] = newShadow
         }
         return result
@@ -2793,11 +2829,12 @@ public actor VectorStore {
             throw error
         }
 
-        // Flip committed. Update in-memory caches.
+        // Flip committed. Update in-memory caches and close the open-shadow set.
         for (modelID, shadowGen) in shadowByModel {
             servingGenerations[modelID] = shadowGen
             shadowGenerations.removeValue(forKey: modelID)
             shadowStates[modelID] = "pending-reclaim"
+            openShadows.remove(modelID)
         }
 
         // Post-flip: rebuild resident structures from the new serving generation.
@@ -2842,6 +2879,101 @@ public actor VectorStore {
         shadowPayloadBytes[modelID] ?? 0
     }
 
+    /// Abort an in-progress or abandoned shadow generation for the given model IDs.
+    ///
+    /// This is the abort half of the shadow lifecycle. Every shadow MUST end via
+    /// either `publishShadowGeneration` (success path) or `abandonShadowGeneration`
+    /// (failure path). There is no third outcome.
+    ///
+    /// For each model ID:
+    ///   - If shadow_state is not 'building', or shadow_generation is NULL, the
+    ///     model is a no-op. Skip it. This makes the call idempotent.
+    ///   - Delete every `vectors` row with that model_id AND generation equal to
+    ///     the shadow generation. Serving-generation rows are NEVER deleted.
+    ///   - Delete every `hnsw_graph` row with that model_id AND the same shadow
+    ///     generation.
+    ///   - Upsert the registry row leaving serving_generation unchanged and
+    ///     setting shadow_generation = NULL and shadow_state = NULL.
+    ///   - Clear the model's entries from shadowGenerations, shadowStates,
+    ///     shadowPayloadBytes, and openShadows.
+    ///
+    /// Calling this method twice is safe: the second call finds no 'building'
+    /// shadow and returns an empty map without deleting anything.
+    ///
+    /// - Parameter modelIDs: Models whose in-progress shadow should be aborted.
+    /// - Returns: Map from modelID to the count of vectors rows deleted.
+    @discardableResult
+    public func abandonShadowGeneration(modelIDs: [String]) async throws -> [String: Int] {
+        var result: [String: Int] = [:]
+        for modelID in modelIDs {
+            // Fetch the registry row directly (bypass the read-through cache so
+            // we see the actual persisted state, not a cached 'building' entry
+            // from a previous beginShadowGeneration call in this session).
+            let rows = try await storage.rowStore.query(
+                table: "vector_generations",
+                where: .eq(Column(table: "vector_generations", name: "model_id"), .text(modelID)),
+                orderBy: [],
+                limit: 1,
+                offset: nil
+            )
+            guard let row = rows.first,
+                  case let .int(shadowGen) = row["shadow_generation"] ?? .null,
+                  case let .text(state) = row["shadow_state"] ?? .null,
+                  state == "building" else {
+                // No 'building' shadow — nothing to abort.
+                continue
+            }
+            let serving: Int64
+            if case let .int(sg) = row["serving_generation"] ?? .null {
+                serving = sg
+            } else {
+                serving = 0
+            }
+
+            // Delete the shadow generation's vectors rows. Serving rows are safe:
+            // the predicate requires generation == shadowGen, which is > serving.
+            let deletedVectors = try await storage.rowStore.delete(
+                table: "vectors",
+                where: .and([
+                    .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                    .eq(Column(table: "vectors", name: "generation"), .int(shadowGen))
+                ])
+            )
+
+            // Delete the shadow generation's hnsw_graph rows.
+            _ = try await storage.rowStore.delete(
+                table: "hnsw_graph",
+                where: .and([
+                    .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+                    .eq(Column(table: "hnsw_graph", name: "generation"), .int(shadowGen))
+                ])
+            )
+
+            // Clear the registry entry: serving_generation unchanged, shadow gone.
+            _ = try await storage.rowStore.upsert(
+                table: "vector_generations",
+                values: [
+                    "model_id":          .text(modelID),
+                    "serving_generation":.int(serving),
+                    "shadow_generation": .null,
+                    "shadow_state":      .null
+                ],
+                conflictColumns: ["model_id"]
+            )
+
+            // Clear in-memory caches.
+            shadowGenerations.removeValue(forKey: modelID)
+            shadowStates.removeValue(forKey: modelID)
+            shadowPayloadBytes.removeValue(forKey: modelID)
+            openShadows.remove(modelID)
+
+            if deletedVectors > 0 {
+                result[modelID] = deletedVectors
+            }
+        }
+        return result
+    }
+
     /// The generation of the HNSW graph instance that last answered a float
     /// nearest-neighbour query for `modelID`. Returns nil if no float query has
     /// been served since this VectorStore was opened.
@@ -2854,12 +2986,17 @@ public actor VectorStore {
 
     /// Idempotent, resumable, batched reclaim of superseded generation rows.
     ///
-    /// Deletes `vectors` rows whose generation ≠ the model's `serving_generation`
-    /// AND that are NOT the model's active 'building' shadow (reclaimable = no
-    /// active shadow OR `shadow_state` is 'pending-reclaim'). Also deletes
-    /// mismatched `hnsw_graph` rows, then clears `shadow_state = 'pending-reclaim'`
-    /// from the registry. Reclaims abandoned 'building' shadows (generation !=
-    /// serving AND != active shadow).
+    /// Deletes `vectors` rows whose generation is neither the model's
+    /// serving_generation nor a shadow generation that is GENUINELY IN FLIGHT in
+    /// this process instance. A 'building' shadow is in flight only when its
+    /// modelID appears in the `openShadows` set — meaning this VectorStore called
+    /// `beginShadowGeneration` for that model without yet calling
+    /// `publishShadowGeneration` or `abandonShadowGeneration`. A 'building' shadow
+    /// whose modelID is NOT in `openShadows` was left by a prior crashed process and
+    /// is treated as abandoned: its rows are deleted and the registry entry is cleared.
+    ///
+    /// Also deletes mismatched `hnsw_graph` rows and clears `shadow_state =
+    /// 'pending-reclaim'` from the registry on unbounded passes.
     ///
     /// Killing mid-reclaim and re-running finishes without error and changes
     /// no query result (serving generation is already the committed value).
@@ -2895,12 +3032,52 @@ public actor VectorStore {
             guard case let .text(modelID) = row["model_id"] ?? .null,
                   case let .int(servingGen) = row["serving_generation"] ?? .null else { continue }
 
-            // Active shadow generation (if any).
+            // Determine whether a 'building' shadow is genuinely in flight:
+            // only if this process instance opened it (modelID is in openShadows).
+            // A 'building' shadow whose modelID is NOT in openShadows was left by
+            // a prior crashed process — its rows are abandoned and must be reclaimed.
             let activeShadow: Int64?
             if case let .int(sg) = row["shadow_generation"] ?? .null,
                case let .text(state) = row["shadow_state"] ?? .null,
-               state == "building" {
+               state == "building",
+               openShadows.contains(modelID) {
+                // Genuinely in flight — protect from deletion.
                 activeShadow = sg
+            } else if case let .int(sg) = row["shadow_generation"] ?? .null,
+                      case let .text(state) = row["shadow_state"] ?? .null,
+                      state == "building",
+                      !openShadows.contains(modelID) {
+                // Abandoned 'building' shadow from a prior process — reclaim it now.
+                // Delete its rows unconditionally before proceeding to the normal
+                // superseded-generation sweep.
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                        .eq(Column(table: "vectors", name: "generation"), .int(sg))
+                    ])
+                )
+                _ = try await storage.rowStore.delete(
+                    table: "hnsw_graph",
+                    where: .and([
+                        .eq(Column(table: "hnsw_graph", name: "model_id"), .text(modelID)),
+                        .eq(Column(table: "hnsw_graph", name: "generation"), .int(sg))
+                    ])
+                )
+                // Clear the abandoned shadow from the registry.
+                _ = try await storage.rowStore.upsert(
+                    table: "vector_generations",
+                    values: [
+                        "model_id":          .text(modelID),
+                        "serving_generation":.int(servingGen),
+                        "shadow_generation": .null,
+                        "shadow_state":      .null
+                    ],
+                    conflictColumns: ["model_id"]
+                )
+                shadowGenerations.removeValue(forKey: modelID)
+                shadowStates.removeValue(forKey: modelID)
+                activeShadow = nil
             } else {
                 activeShadow = nil
             }
@@ -3279,11 +3456,31 @@ public actor VectorStore {
         }
         if deferredIndexDirty { try await publishResidentIndex() }
 
-        // Enumerate the model's existing logical keys from the durable table
-        // (the authoritative source), then compute the stale set.
+        // Determine the write generation using the same logic as addPayload (1367-1376):
+        // route to the active shadow if one is in flight, otherwise to the serving
+        // generation. This fixes finding 98bb0fb: without a "generation" key in the
+        // upsert values, conflictColumns at 3269 resolves against generation = 0
+        // (the column default), making reconciled rows invisible to readers after
+        // any successful swap (serving_generation > 0).
+        let shadowGenForWrite = try await _shadowGeneration(for: modelID)
+        let writeGen: Int64
+        if let sg = shadowGenForWrite {
+            writeGen = sg
+        } else {
+            writeGen = try await _servingGeneration(for: modelID)
+        }
+
+        // Enumerate only the model's existing keys at writeGen (not across all
+        // generations). Scoping to writeGen prevents deletions of serving-
+        // generation rows during an open shadow build — without this scope,
+        // staleKeys is computed across all generations and can name serving-gen
+        // rows as stale relative to the shadow's expected set.
         let existingRows = try await storage.rowStore.query(
             table: "vectors",
-            where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+            where: .and([
+                .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "vectors", name: "generation"), .int(writeGen))
+            ]),
             orderBy: [], limit: nil, offset: nil)
         var existingKeys = Set<VectorExactKey>()
         for row in existingRows {
@@ -3298,7 +3495,8 @@ public actor VectorStore {
         let staleKeys = existingKeys.subtracting(expectedKeys)
 
         // One transaction: delete exactly the stale keys, upsert the expected
-        // rows. Other models' rows are never addressed.
+        // rows. Other models' rows are never addressed. Stale-key deletes include
+        // the generation predicate to stay within writeGen's slice.
         try await storage.rowStore.beginTransaction()
         do {
             for key in staleKeys {
@@ -3307,7 +3505,8 @@ public actor VectorStore {
                     where: .and([
                         .eq(Column(table: "vectors", name: "item_id"), .text(key.itemID)),
                         .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex))),
-                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID))
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID)),
+                        .eq(Column(table: "vectors", name: "generation"), .int(writeGen))
                     ])
                 )
             }
@@ -3322,7 +3521,12 @@ public actor VectorStore {
                     "dim":          .int(Int64(input.payload.dim)),
                     "payload":      .blob(Data(input.payload.bytes)),
                     "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
-                    "filed_at":     .timestamp(input.filedAt)
+                    "filed_at":     .timestamp(input.filedAt),
+                    // Tag every row with the write generation (98bb0fb fix).
+                    // Without this key the upsert's conflictColumns include "generation"
+                    // but values does not, so SQLite resolves against the column default
+                    // (0) — rows land invisible to readers once serving_generation > 0.
+                    "generation":   .int(writeGen)
                 ]
                 _ = try await storage.rowStore.upsert(
                     table: "vectors",
