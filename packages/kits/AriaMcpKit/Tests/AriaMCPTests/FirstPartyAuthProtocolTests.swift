@@ -1424,6 +1424,85 @@ struct FirstPartyAuthServerTests {
         #expect(await server.liveChallengeCount == 0)
     }
 
+    // MARK: Actor reentrancy (Perkins MACD2B-SEC-001)
+
+    @Test("A concurrent flood cannot push the challenge table past its bound")
+    func concurrentFloodRespectsChallengeBound() async throws {
+        // The bound used to be enforced on the WRONG SIDE of an await: every
+        // caller passed the capacity guard, suspended in the root provider, and
+        // then inserted on resume — so a table documented as hard-bounded at 128
+        // grew to however many callers arrived. The gate provider below makes
+        // that window deterministic rather than hoping for a race.
+        let descriptor = Self.signedDescriptor()
+        let gate = RootGate()
+        let provider = GatedRootProvider(root: Vectors.fixedRoot, gate: gate)
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let server = FirstPartyAuthServer(
+            rootProvider: provider, descriptor: descriptor, serverName: Self.serverName,
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+
+        let attempts = FirstPartyAuthProtocol.maxChallenges * 3
+        let digest = descriptor.digest()
+        let nonce = [UInt8](repeating: 0xC1, count: 32)
+
+        // Launch every caller and let them all pile up on the suspension.
+        async let outcomes: [Bool] = withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<attempts {
+                group.addTask {
+                    (try? await server.challenge(clientNonce: nonce, descriptorDigest: digest)) != nil
+                }
+            }
+            var results: [Bool] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+
+        // Release them together.
+        await gate.openWhenWaiting(atLeast: 1)
+        let results = await outcomes
+
+        let admitted = results.filter { $0 }.count
+        #expect(await server.liveChallengeCount <= FirstPartyAuthProtocol.maxChallenges)
+        #expect(admitted <= FirstPartyAuthProtocol.maxChallenges)
+        // The bound is a bound, not a suggestion: some callers must have been
+        // refused, or the test proved nothing.
+        #expect(admitted < attempts)
+    }
+
+    @Test("A republish during the suspension invalidates an in-flight challenge")
+    func republishDuringAwaitRejectsStaleDigest() async throws {
+        // `republish(descriptor:)` can land while a challenge is suspended in
+        // the root provider. A challenge minted against the old digest would
+        // produce a transcript no client could reproduce, and would outlive the
+        // descriptor that justified it.
+        let original = Self.signedDescriptor(descriptorGeneration: 1)
+        let gate = RootGate()
+        let provider = GatedRootProvider(root: Vectors.fixedRoot, gate: gate)
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let server = FirstPartyAuthServer(
+            rootProvider: provider, descriptor: original, serverName: Self.serverName,
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+
+        let staleDigest = original.digest()
+        let nonce = [UInt8](repeating: 0xC1, count: 32)
+        async let attempt: Bool = {
+            (try? await server.challenge(clientNonce: nonce, descriptorDigest: staleDigest)) != nil
+        }()
+
+        // Wait until the caller is parked inside the provider, then move the
+        // descriptor underneath it and release.
+        await gate.waitUntilWaiting(atLeast: 1)
+        await server.republish(descriptor: Self.signedDescriptor(descriptorGeneration: 2))
+        await gate.open()
+
+        #expect(await attempt == false, "a challenge minted against a stale digest must be refused")
+        #expect(await server.liveChallengeCount == 0)
+    }
+
     @Test("Revocation clears every session and challenge")
     func revokeAll() async throws {
         let descriptor = Self.signedDescriptor()
@@ -1568,6 +1647,54 @@ final class ManualClock: @unchecked Sendable {
     func advance(_ delta: UInt64) {
         lock.lock(); defer { lock.unlock() }
         value += delta
+    }
+}
+
+/// A releasable suspension point.
+///
+/// Real providers suspend for a Keychain read; `FixedFirstPartyRootProvider`
+/// returns immediately and may not suspend at all, which would make a
+/// reentrancy test depend on luck. This gate parks every caller until it is
+/// opened, so the window under test is deterministic.
+actor RootGate {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let parked = waiters
+        waiters.removeAll()
+        for waiter in parked { waiter.resume() }
+    }
+
+    var waitingCount: Int { waiters.count }
+
+    /// Spin until at least `count` callers are parked, then return.
+    func waitUntilWaiting(atLeast count: Int) async {
+        while waiters.count < count { await Task.yield() }
+    }
+
+    /// Wait for callers to park, then release them all together.
+    func openWhenWaiting(atLeast count: Int) async {
+        await waitUntilWaiting(atLeast: count)
+        open()
+    }
+}
+
+/// A root provider that parks on a shared gate before returning the root.
+struct GatedRootProvider: FirstPartyRootProviding {
+    let root: [UInt8]
+    let gate: RootGate
+    var credentialGeneration: UInt64 { 1 }
+
+    func installationRoot() async throws -> [UInt8] {
+        await gate.wait()
+        return root
     }
 }
 

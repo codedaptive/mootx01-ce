@@ -574,37 +574,65 @@ public actor FirstPartyAuthServer {
         guard clientNonce.count == FirstPartyAuthProtocol.nonceByteCount else {
             throw FirstPartyAuthError.malformedCredentials
         }
+        // FIRST gate, before any key work: a peer that cannot name the active
+        // descriptor must not be able to make this actor touch the Keychain.
         guard FirstPartyAuthProtocol.constantTimeEquals(presented, descriptorDigest) else {
             throw FirstPartyAuthError.descriptorMismatch
         }
-
-        let current = now()
-        expireChallenges(asOf: current)
-        // Expired entries are removed BEFORE capacity is judged, and at capacity
-        // the request is refused rather than a live challenge evicted.
+        expireChallenges(asOf: now())
         guard challenges.count < FirstPartyAuthProtocol.maxChallenges else {
             throw FirstPartyAuthError.capacityExhausted
         }
 
+        // SUSPENSION POINT. An actor is reentrant across `await`: other calls
+        // run here. Nothing checked above still holds on the other side.
         let root = try await rootProvider.installationRoot()
+
+        // SECOND gate, after the suspension, immediately before allocation.
+        // Everything from here to the insert is synchronous, so this block is
+        // atomic with respect to other calls on this actor.
+        //
+        // Re-checking capacity is not belt-and-braces: without it, N concurrent
+        // unauthenticated callers all pass the pre-await guard, all suspend, and
+        // all insert on resume — so a table documented as hard-bounded at 128
+        // grows to N. The bound was enforced at the wrong side of an await.
+        let current = now()
+        expireChallenges(asOf: current)
+        guard challenges.count < FirstPartyAuthProtocol.maxChallenges else {
+            throw FirstPartyAuthError.capacityExhausted
+        }
+        // Re-validate against the LIVE descriptor. `republish(descriptor:)` can
+        // land during the suspension, and a challenge minted against a digest
+        // that is no longer current would produce a transcript no client could
+        // ever reproduce — and would outlive the descriptor that justified it.
+        guard FirstPartyAuthProtocol.constantTimeEquals(presented, descriptorDigest) else {
+            throw FirstPartyAuthError.descriptorMismatch
+        }
+
+        // Snapshot the descriptor and its digest together, so the transcript is
+        // built from one coherent record rather than from fields read across
+        // several statements.
+        let activeDescriptor = descriptor
+        let activeDigest = descriptorDigest
+
         let serverNonce = randomBytes(FirstPartyAuthProtocol.nonceByteCount)
         let sessionIdentifier = randomBytes(FirstPartyAuthProtocol.sessionIdentifierByteCount)
         let idleExpiry = current + FirstPartyAuthProtocol.sessionIdleTimeout
         let absoluteExpiry = current + FirstPartyAuthProtocol.sessionAbsoluteTimeout
 
         let transcript = FirstPartyAuthProtocol.sessionTranscript(
-            descriptorDigest: descriptorDigest,
-            providerIdentifier: descriptor.providerIdentifier,
-            serviceIdentifier: descriptor.serviceIdentifier,
-            endpoint: descriptor.endpoint,
-            instanceIdentifier: descriptor.instanceIdentifier,
-            estateIdentifier: descriptor.estateIdentifier,
-            binaryVersion: descriptor.binaryVersion,
-            descriptorSchemaVersion: descriptor.schemaVersion,
-            contractRevision: descriptor.contractRevision,
-            mcpProtocolVersion: descriptor.mcpProtocolVersion,
-            credentialGeneration: descriptor.credentialGeneration,
-            descriptorGeneration: descriptor.descriptorGeneration,
+            descriptorDigest: activeDigest,
+            providerIdentifier: activeDescriptor.providerIdentifier,
+            serviceIdentifier: activeDescriptor.serviceIdentifier,
+            endpoint: activeDescriptor.endpoint,
+            instanceIdentifier: activeDescriptor.instanceIdentifier,
+            estateIdentifier: activeDescriptor.estateIdentifier,
+            binaryVersion: activeDescriptor.binaryVersion,
+            descriptorSchemaVersion: activeDescriptor.schemaVersion,
+            contractRevision: activeDescriptor.contractRevision,
+            mcpProtocolVersion: activeDescriptor.mcpProtocolVersion,
+            credentialGeneration: activeDescriptor.credentialGeneration,
+            descriptorGeneration: activeDescriptor.descriptorGeneration,
             clientNonce: clientNonce,
             serverNonce: serverNonce,
             sessionIdentifier: sessionIdentifier,
@@ -625,7 +653,7 @@ public actor FirstPartyAuthServer {
         )
 
         let authKey = FirstPartyAuthProtocol.authKey(
-            installationRoot: root, descriptorDigest: descriptorDigest
+            installationRoot: root, descriptorDigest: activeDigest
         )
         return (
             sessionIdentifier, serverNonce, current, idleExpiry, absoluteExpiry,
