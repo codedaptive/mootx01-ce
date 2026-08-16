@@ -654,3 +654,375 @@ struct HTTPServerTests {
                 "topologyReader must be called with nil (default estate), not \"\(arg ?? "non-nil")\"")
     }
 }
+
+// MARK: - First-party authenticated lane, end to end
+//
+// The protocol and server suites test the algebra and the middleware in
+// isolation. This one drives real sockets: the whole point is to prove that
+// what arrives on the wire is what gets authenticated, and that an
+// unauthenticated peer cannot reach the JSON parser or the dispatcher.
+
+@Suite("HTTP transport — first-party authenticated lane", .serialized)
+struct FirstPartyHTTPLaneTests {
+
+    typealias Vectors = FirstPartyAuthProtocolTests
+    typealias ServerFixtures = FirstPartyAuthServerTests
+
+    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-first-party-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "1.1.0")
+        return ARIA_MCPDispatcher(info: info, tooling: ToolDispatcher(kit: kit, handle: handle))
+    }
+
+    /// Serve on an OS-assigned port, optionally with the first-party lane armed.
+    private func startServing(
+        _ dispatcher: ARIA_MCPDispatcher,
+        firstPartyAuth: FirstPartyAuthServer?
+    ) throws -> (port: UInt16, stop: () -> Void) {
+        let server = HTTPServer(dispatcher: dispatcher, port: 0, firstPartyAuth: firstPartyAuth)
+        let (listenFD, port) = try server.bind()
+        let auth = firstPartyAuth
+        let thread = Thread {
+            while let cfd = POSIXSocket.acceptOne(listenFD) {
+                Task {
+                    await HTTPServer.serve(
+                        cfd, dispatcher: dispatcher, maxBodyBytes: 4 * 1024 * 1024,
+                        sseGate: globalSSEConcurrencyGate, firstPartyAuth: auth
+                    )
+                }
+            }
+        }
+        thread.name = "aria-mcp.http.first-party.test.accept"
+        thread.start()
+        return (port, { close(listenFD) })
+    }
+
+    /// Send raw bytes and read the whole response.
+    private func send(port: UInt16, raw: String) -> String? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        guard POSIXSocket.sendAll(fd, Data(raw.utf8)) else { return nil }
+        var out = Data()
+        while let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty {
+            out.append(chunk)
+        }
+        return String(data: out, encoding: .utf8)
+    }
+
+    /// Compose a raw HTTP/1.1 request.
+    private func rawRequest(target: String, headers: [(String, String)], body: String) -> String {
+        var text = "POST \(target) HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        for (name, value) in headers { text += "\(name): \(value)\r\n" }
+        text += "Content-Length: \(body.utf8.count)\r\n\r\n\(body)"
+        return text
+    }
+
+    private func statusLine(_ response: String?) -> String {
+        response?.components(separatedBy: "\r\n").first ?? ""
+    }
+
+    // MARK: Dark by default
+
+    @Test("With no first-party server the entire subtree is unavailable")
+    func subtreeUnavailableWhenDark() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher, firstPartyAuth: nil)
+        defer { stop() }
+
+        // A well-formed JSON-RPC body that WOULD dispatch on the public lane.
+        // It must not be parsed or dispatched here — 404, not 200.
+        for target in [
+            "/mcp/first-party",
+            "/mcp/first-party/session/challenge",
+            "/mcp/first-party/session/establish",
+        ] {
+            let response = send(port: port, raw: rawRequest(
+                target: target,
+                headers: [("Content-Type", "application/json")],
+                body: #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+            ))
+            #expect(statusLine(response).contains("404"), "\(target) must be unavailable while dark")
+            #expect(response?.contains("\"result\"") != true, "\(target) must never dispatch while dark")
+        }
+    }
+
+    @Test("A dark daemon never advertises the first-party capability")
+    func darkDaemonDoesNotAdvertise() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher, firstPartyAuth: nil)
+        defer { stop() }
+        let response = send(port: port, raw: rawRequest(
+            target: "/",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        ))
+        #expect(statusLine(response).contains("200"))
+        #expect(response?.contains("authenticated-first-party") == false)
+        #expect(response?.contains("instanceIdentifier") == false)
+    }
+
+    // MARK: Armed lane
+
+    @Test("A full handshake and an authenticated request succeed with a verifiable response MAC")
+    func authenticatedRoundTrip() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(
+            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+        )
+        defer { stop() }
+
+        // Handshake in-process; the wire form of the handshake is exercised by
+        // the challenge route below.
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, method: "POST", path: "/mcp/first-party",
+            contentType: "application/json", body: Data(body.utf8)
+        )
+        let response = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party",
+            headers: [
+                ("Content-Type", "application/json"),
+                ("Authorization", "Mootx01Session "
+                    + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+                ("Mootx01-Sequence", "1"),
+                ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(mac)),
+            ],
+            body: body
+        ))
+        #expect(statusLine(response).contains("200"))
+        #expect(response?.contains("Mootx01-Response-MAC") == true)
+
+        // The client's half: recompute the response MAC over the exact body.
+        let parts = try #require(response?.components(separatedBy: "\r\n\r\n"))
+        let responseBody = parts.count > 1 ? parts[1] : ""
+        let expected = FirstPartyAuthProtocol.responseMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, status: 200, contentType: "application/json",
+            body: Data(responseBody.utf8)
+        )
+        #expect(response?.contains(FirstPartyAuthProtocol.base64URLEncode(expected)) == true,
+                "the response MAC must verify over the exact transmitted body")
+    }
+
+    @Test("An unauthenticated request is refused without parsing or dispatching")
+    func unauthenticatedRefused() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(
+            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+        )
+        defer { stop() }
+
+        // A syntactically perfect JSON-RPC call with no credentials at all.
+        let response = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        ))
+        #expect(statusLine(response).contains("401"))
+        // The parse-before-MAC sentinel: a dispatched ping would have produced a
+        // result object. Its absence is the evidence that middleware ran first.
+        #expect(response?.contains("\"result\"") != true)
+        #expect(response?.contains("Mootx01-Response-MAC") != true)
+    }
+
+    @Test("A duplicated authentication header on the wire is refused")
+    func duplicateHeaderOnTheWireRefused() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(
+            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+        )
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, method: "POST", path: "/mcp/first-party",
+            contentType: "application/json", body: Data(body.utf8)
+        )
+        // Two Mootx01-Sequence lines. LoopbackHTTP would have collapsed these to
+        // "2" before anything could object; the strict parser keeps both.
+        let response = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party",
+            headers: [
+                ("Content-Type", "application/json"),
+                ("Authorization", "Mootx01Session "
+                    + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+                ("Mootx01-Sequence", "1"),
+                ("Mootx01-Sequence", "2"),
+                ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(mac)),
+            ],
+            body: body
+        ))
+        #expect(statusLine(response).contains("401"))
+        #expect(response?.contains("\"result\"") != true)
+    }
+
+    @Test("A notification receives a MACed empty 204")
+    func notificationReceivesMACed204() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(
+            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+        )
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        let body = #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, method: "POST", path: "/mcp/first-party",
+            contentType: "application/json", body: Data(body.utf8)
+        )
+        let response = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party",
+            headers: [
+                ("Content-Type", "application/json"),
+                ("Authorization", "Mootx01Session "
+                    + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+                ("Mootx01-Sequence", "1"),
+                ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(mac)),
+            ],
+            body: body
+        ))
+        // 204, not the third-party lane's bare 202 — and authenticated.
+        #expect(statusLine(response).contains("204"))
+        let expected = FirstPartyAuthProtocol.responseMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, status: 204, contentType: "", body: Data()
+        )
+        #expect(response?.contains(FirstPartyAuthProtocol.base64URLEncode(expected)) == true)
+    }
+
+    @Test("The challenge route rejects a wrong descriptor digest over the wire")
+    func challengeRouteRejectsWrongDigest() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(
+            dispatcher.withFirstPartyIdentity(auth.identity), firstPartyAuth: auth
+        )
+        defer { stop() }
+
+        let payload = #"{"clientNonce":"\#(FirstPartyAuthProtocol.base64URLEncode([UInt8](repeating: 0xC1, count: 32)))","descriptorDigest":"\#(FirstPartyAuthProtocol.base64URLEncode([UInt8](repeating: 0xEE, count: 32)))"}"#
+        let response = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party/session/challenge",
+            headers: [("Content-Type", "application/json")],
+            body: payload
+        ))
+        #expect(statusLine(response).contains("401"))
+        #expect(await auth.liveChallengeCount == 0)
+    }
+
+    @Test("A prefix-sharing path is not treated as first-party")
+    func prefixSharingPathIsNotFirstParty() {
+        #expect(HTTPServer.isFirstPartyTarget("/mcp/first-party"))
+        #expect(HTTPServer.isFirstPartyTarget("/mcp/first-party/session/challenge"))
+        #expect(HTTPServer.isFirstPartyTarget("/mcp/first-party?x=1"))
+        // Sharing a textual prefix must not be enough to enter the subtree.
+        #expect(!HTTPServer.isFirstPartyTarget("/mcp/first-partyX"))
+        #expect(!HTTPServer.isFirstPartyTarget("/mcp/first-party-public"))
+        #expect(!HTTPServer.isFirstPartyTarget("/"))
+    }
+
+    @Test("The third-party lane is unchanged while the first-party lane is armed")
+    func thirdPartyLaneUnaffected() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor, serverName: "ARIA_MCP",
+            now: { clock.seconds }, randomBytes: { counter.next($0) }
+        )
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher, firstPartyAuth: auth)
+        defer { stop() }
+
+        // The public lane keeps working, unauthenticated, exactly as before —
+        // and keeps its bare 202 for notifications.
+        let call = send(port: port, raw: rawRequest(
+            target: "/",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        ))
+        #expect(statusLine(call).contains("200"))
+        #expect(call?.contains("\"result\"") == true)
+
+        let notification = send(port: port, raw: rawRequest(
+            target: "/",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        ))
+        #expect(statusLine(notification).contains("202"))
+
+        // This dispatcher was never given an identity, so it must not advertise.
+        let initialize = send(port: port, raw: rawRequest(
+            target: "/",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#
+        ))
+        #expect(initialize?.contains("authenticated-first-party") == false)
+    }
+}

@@ -177,6 +177,20 @@ public enum FirstPartyAuthProtocol {
     /// base64url-no-padding 32-byte response MAC.
     public static let responseMACHeader = "mootx01-response-mac"
 
+    // Header names are case-insensitive, so lookup uses the lowercased spellings
+    // above while emission uses the canonical mixed-case ones below. Both name
+    // the same field; the split exists so a parser never has to case-fold and an
+    // emitted header still reads conventionally on the wire.
+
+    /// Canonical wire spelling used when emitting the sequence header.
+    public static let sequenceHeaderWireName = "Mootx01-Sequence"
+
+    /// Canonical wire spelling used when emitting the request MAC header.
+    public static let requestMACHeaderWireName = "Mootx01-Request-MAC"
+
+    /// Canonical wire spelling used when emitting the response MAC header.
+    public static let responseMACHeaderWireName = "Mootx01-Response-MAC"
+
     // MARK: - Domain separation strings
     //
     // Every keyed operation is prefixed by a distinct domain, and every derived

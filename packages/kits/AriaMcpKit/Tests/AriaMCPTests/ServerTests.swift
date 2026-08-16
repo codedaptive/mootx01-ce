@@ -609,3 +609,110 @@ struct ServerTests {
         }
     }
 }
+
+// MARK: - Truthful first-party serverInfo
+//
+// `DaemonReadiness.handshakeAgrees` requires five values to match the verified
+// descriptor, two of which — instance and estate identifiers — the dispatcher
+// did not emit before this mission. These cases pin both halves: that the
+// authenticated lane now reports them, and that the third-party lane's bytes
+// did not move.
+
+@Suite("Server dispatch — first-party identity", .serialized)
+struct ServerFirstPartyIdentityTests {
+
+    typealias Vectors = FirstPartyAuthProtocolTests
+
+    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-identity-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        return ARIA_MCPDispatcher(info: info, tooling: ToolDispatcher(kit: kit, handle: handle))
+    }
+
+    private func initialize(_ dispatcher: ARIA_MCPDispatcher) async throws -> [String: JSONValue] {
+        let request = JSONRPCRequest(
+            jsonrpc: "2.0", id: .integer(1), method: "initialize",
+            params: .object(["protocolVersion": .string("2025-11-25")])
+        )
+        let response = try #require(await dispatcher.handle(request))
+        guard case .result(let value) = response.payload, let object = value.objectValue else {
+            Issue.record("initialize did not return a result object")
+            return [:]
+        }
+        return object
+    }
+
+    @Test("Without an identity the response is exactly what it was before this lane existed")
+    func thirdPartyInitializeUnchanged() async throws {
+        let result = try await initialize(try await makeDispatcher())
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        // Exactly two keys — no first-party field leaks onto the public lane.
+        #expect(serverInfo.count == 2)
+        #expect(serverInfo["name"]?.stringValue == "ARIA_MCP")
+        #expect(serverInfo["version"]?.stringValue == "test")
+        let capabilities = try #require(result["capabilities"]?.objectValue)
+        #expect(capabilities["authenticated-first-party"] == nil)
+        #expect(capabilities["tools"] != nil)
+        #expect(capabilities["resources"] != nil)
+        #expect(capabilities["prompts"] != nil)
+        #expect(capabilities["logging"] != nil)
+    }
+
+    @Test("With a verified identity serverInfo reports every field readiness checks")
+    func firstPartyInitializeIsTruthful() async throws {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        let dispatcher = try await makeDispatcher().withFirstPartyIdentity(identity)
+        let result = try await initialize(dispatcher)
+
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        // Every value is drawn from the same verified descriptor the client
+        // checked, so a truthful serverInfo and a verified descriptor cannot
+        // disagree.
+        #expect(serverInfo["name"]?.stringValue == "ARIA_MCP")
+        #expect(serverInfo["version"]?.stringValue == descriptor.binaryVersion)
+        #expect(serverInfo["instanceIdentifier"]?.stringValue == descriptor.instanceIdentifier.uuidString)
+        #expect(serverInfo["estateIdentifier"]?.stringValue == descriptor.estateIdentifier.uuidString)
+        #expect(serverInfo["contractRevision"] == .integer(Int64(descriptor.contractRevision)))
+        #expect(serverInfo["descriptorGeneration"] == .integer(Int64(descriptor.descriptorGeneration)))
+        #expect(serverInfo["credentialGeneration"] == .integer(Int64(descriptor.credentialGeneration)))
+        #expect(serverInfo["mcpProtocolVersion"]?.stringValue == descriptor.mcpProtocolVersion)
+
+        let capabilities = try #require(result["capabilities"]?.objectValue)
+        #expect(capabilities["authenticated-first-party"] != nil)
+        // The existing capabilities are additive, never displaced.
+        #expect(capabilities["tools"] != nil)
+        #expect(capabilities["resources"] != nil)
+        #expect(capabilities["prompts"] != nil)
+        #expect(capabilities["logging"] != nil)
+    }
+
+    @Test("Attaching an identity does not mutate the dispatcher it came from")
+    func identityAttachmentIsNonMutating() async throws {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let base = try await makeDispatcher()
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        _ = base.withFirstPartyIdentity(identity)
+        // The original is a value type and must still be dark — otherwise
+        // arming one lane would silently arm the other.
+        #expect(base.firstPartyIdentity == nil)
+        let serverInfo = try #require(try await initialize(base)["serverInfo"]?.objectValue)
+        #expect(serverInfo.count == 2)
+    }
+}
