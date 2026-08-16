@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pre-commit hook — two gates, both blocking.
+# Pre-commit hook — three gates, all blocking.
 #
 # GATE 1: Developer-path leak guard.
 #   Blocks a commit that adds a reconstructable developer worktree path under
@@ -34,6 +34,32 @@
 #
 #   The selftest is NOT run on commits that do not touch those four files —
 #   ordinary commits pay nothing.
+#
+# GATE 3: Transcript-currency check.
+#   When the staged set touches the transcript generator, the committed
+#   transcript, the evidence file, or the guard script —
+#   scripts/dg01-guard-evidence-gen.sh,
+#   scripts/dg01-guard-evidence-transcript.txt,
+#   docs_internal/analysis/DG-01_GUARD_EVIDENCE.md, or
+#   scripts/check-docs-internal-paths.sh —
+#   this hook regenerates the transcript to a temporary file, diffs it
+#   against the committed copy, and blocks the commit if they differ.
+#
+#   Why this gate exists: the committed transcript is a function of three
+#   inputs — the generator, the guard, and the evidence file — but none of
+#   those three was previously watched. Editing the evidence file silently
+#   staled the transcript and nothing caught it, the same shape as the defect
+#   that produced GATE 2. This gate ensures the transcript cannot diverge from
+#   what the generator would produce right now.
+#
+#   The hook generates to a temp file and compares — it does NOT write to the
+#   working tree. A pre-commit hook that mutates tracked files changes the tree
+#   out from under the author mid-commit. To fix a stale transcript, run:
+#     bash scripts/dg01-guard-evidence-gen.sh --write-transcript
+#   then re-stage and retry.
+#
+#   This gate is NOT run on commits that do not touch those four files —
+#   ordinary commits pay nothing.
 
 repo_root="$(git rev-parse --show-toplevel)" || exit 0
 
@@ -61,4 +87,51 @@ then
     echo "Cases live in scripts/path-leak-fixtures.txt."
     exit 1
   fi
+fi
+
+# --- GATE 3: transcript-currency check ---
+# Regenerate the transcript to a temp file and diff against the committed copy.
+# Do NOT use --write-transcript here — that would mutate the working tree.
+# The generator's plain stdout mode emits scenario output only (no header).
+# The committed transcript prepends a generated-file header (lines starting
+# with #). Strip the header from the committed copy before diffing so both
+# sides contain only scenario output.
+if printf '%s\n' "$staged_files" | grep -qE \
+    '^(scripts/dg01-guard-evidence-gen\.sh|scripts/dg01-guard-evidence-transcript\.txt|docs_internal/analysis/DG-01_GUARD_EVIDENCE\.md|scripts/check-docs-internal-paths\.sh)$'
+then
+  echo "pre-commit: transcript inputs staged — checking transcript currency"
+  _generated="$(mktemp)"
+  _committed_body="$(mktemp)"
+  # Defence in depth: clear every git plumbing variable before invoking the
+  # generator. Git exports GIT_DIR, GIT_INDEX_FILE, and related variables into
+  # the hook environment. The generator creates throwaway repositories and
+  # stages files inside them; those variables, if inherited, would redirect
+  # those git operations to the REAL repository's index — a pre-commit hook
+  # mutating the very index it is validating. The generator also clears these
+  # variables at its own top (HALF 1 of the fix), but a defence-in-depth call
+  # site means a future edit to the generator cannot accidentally re-expose
+  # this hazard. POSIX subshell + unset requires no external utility.
+  ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
+          GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+          GIT_COMMON_DIR GIT_NAMESPACE GIT_SUPER_PREFIX \
+          GIT_INTERNAL_SUPER_PREFIX
+    bash "$repo_root/scripts/dg01-guard-evidence-gen.sh" ) > "$_generated" 2>&1
+  # Extract the scenario body from the committed transcript: skip header lines
+  # (all lines before the first scenario delimiter) so both sides are comparable.
+  awk '/^----- /{found=1} found{print}' \
+    "$repo_root/scripts/dg01-guard-evidence-transcript.txt" > "$_committed_body"
+  if ! diff -q "$_generated" "$_committed_body" > /dev/null 2>&1; then
+    echo ""
+    echo "BLOCKED: the committed transcript is stale. The generator would produce"
+    echo "different output against the current evidence file and guard."
+    echo ""
+    echo "To fix: bash scripts/dg01-guard-evidence-gen.sh --write-transcript"
+    echo "Then re-stage scripts/dg01-guard-evidence-transcript.txt and retry."
+    echo ""
+    echo "Why this gate exists: the transcript is evidence of the guard's"
+    echo "behaviour; a stale transcript is false evidence."
+    rm -f "$_generated" "$_committed_body"
+    exit 1
+  fi
+  rm -f "$_generated" "$_committed_body"
 fi
