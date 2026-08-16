@@ -3725,10 +3725,12 @@ impl CorpusContentEngine {
     /// directly to the serving generation; the deferred-index bracket batches
     /// their resident-index updates.
     ///
-    /// On failure mid-way (any error after `begin_shadow_generation`), the
-    /// shadow remains `'building'` and is reclaimable by the next REM-BETA
-    /// cycle. Reclamation is NOT called here — that is BETA's duty. The old
-    /// serving generation remains intact and keeps serving.
+    /// On failure mid-way (any error after `begin_shadow_generation` and before
+    /// `publish_shadow_generation` commits), `abandon_shadow_generation` is called
+    /// to remove shadow vectors and clear the registry entry (`shadow_state` → NULL,
+    /// `shadow_generation` → NULL). The original error is always returned — returning
+    /// the abandon error in its place would hide the real cause. The old serving
+    /// generation remains intact and keeps serving.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
         // Identify trainable model IDs: slots whose fresh_basis_blob is Some
         // (RandomIndexing, PPMI, LSA, NMF). Their new vectors will be written
@@ -3754,63 +3756,97 @@ impl CorpusContentEngine {
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         }
 
-        // Retrain all trainable slots from scratch — produces the new basis blobs
-        // that the subsequent re-embed pass will use. No vector rows are written here.
-        self.train_trainable_slots(now_millis, true)?;
+        // Guard: capture the result of the entire span between begin_shadow_generation
+        // and the commit point (publish_shadow_generation). Rust has no async defer;
+        // the immediately-invoked closure captures the result without `?` propagating
+        // past the boundary. On Err, abandon_shadow_generation is called before
+        // returning the original error — NOT the abandon call's error. This ensures
+        // no vectors are left at a shadow generation that will never become visible
+        // (the third state the governing invariant forbids).
+        //
+        // Abort / publish are structurally mutual-exclusive: publish is the last
+        // statement in the Ok branch; if it succeeds the closure returns Ok and the
+        // Err branch (with abandon) never executes.
+        //
+        // Deferred-index bracket: begin_deferred_index / publish_resident_index track
+        // in-memory resident index updates only; storage writes for non-trainable
+        // models are committed as they occur. A mid-reindex failure leaves the
+        // in-memory binary lane stale but storage consistent — the next successful
+        // reindex's publish_resident_index corrects it. No "cancel_deferred_index"
+        // call exists or is needed; the stale state is transient and self-correcting.
+        let span_result: CorpusKitResult<()> = (|| {
+            // Retrain all trainable slots from scratch — produces the new basis blobs
+            // that the subsequent re-embed pass will use. No vector rows are written here.
+            self.train_trainable_slots(now_millis, true)?;
 
-        // Bulk-write bracket for non-trainable model writes (stateless/FDC slots):
-        // defers resident dense-index updates for the O(corpus) pass and publishes
-        // once at the end. Trainable-model writes bypass resident structures by
-        // VectorStore shadow-write contract (shadow rows never enter the binary
-        // lane, float indices, or HNSW structures during the build phase).
-        self.vector_store
-            .begin_deferred_index()
-            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
-        let ids = self.source.active_content_ids()?;
-        if matches!(
-            self.configuration.index_unit(),
-            CorpusIndexUnitPolicy::WholeContent
-        ) {
-            // Bound both worker admission and prepared-result memory. Worker
-            // joins preserve slice/input order; all durable writes remain on
-            // this caller thread in BM25 -> vectors -> coverage -> checkpoint
-            // order.
-            for batch in ids.chunks(500) {
-                self.index_whole_content_batch(batch, now_millis, SlotScope::All, true)?;
-            }
-        } else {
-            // Standalone passage policies also replace durable range rows;
-            // keep that mutation path serialized and policy-bound.
-            for id in ids {
-                match self.source.record(&id)? {
-                    Some(record) => {
-                        if let Some(checkpoint) = self.prepare_index_record(
-                            &record,
-                            None,
-                            true,
-                            now_millis,
-                            SlotScope::All,
-                        )? {
-                            self.index_state.advance(&checkpoint)?;
+            // Bulk-write bracket for non-trainable model writes (stateless/FDC slots):
+            // defers resident dense-index updates for the O(corpus) pass and publishes
+            // once at the end. Trainable-model writes bypass resident structures by
+            // VectorStore shadow-write contract (shadow rows never enter the binary
+            // lane, float indices, or HNSW structures during the build phase).
+            self.vector_store
+                .begin_deferred_index()
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            let ids = self.source.active_content_ids()?;
+            if matches!(
+                self.configuration.index_unit(),
+                CorpusIndexUnitPolicy::WholeContent
+            ) {
+                // Bound both worker admission and prepared-result memory. Worker
+                // joins preserve slice/input order; all durable writes remain on
+                // this caller thread in BM25 -> vectors -> coverage -> checkpoint
+                // order.
+                for batch in ids.chunks(500) {
+                    self.index_whole_content_batch(batch, now_millis, SlotScope::All, true)?;
+                }
+            } else {
+                // Standalone passage policies also replace durable range rows;
+                // keep that mutation path serialized and policy-bound.
+                for id in ids {
+                    match self.source.record(&id)? {
+                        Some(record) => {
+                            if let Some(checkpoint) = self.prepare_index_record(
+                                &record,
+                                None,
+                                true,
+                                now_millis,
+                                SlotScope::All,
+                            )? {
+                                self.index_state.advance(&checkpoint)?;
+                            }
                         }
+                        None => self.clear_derived_state(&id, now_millis)?,
                     }
-                    None => self.clear_derived_state(&id, now_millis)?,
                 }
             }
-        }
 
-        // Atomic publish for trainable models: one storage transaction flips
-        // serving_generation to shadow_generation, sets shadow_state
-        // 'pending-reclaim' on the old generation's rows, and rebuilds the
-        // HNSW graph from the new serving rows before returning. A reader sees
-        // the old set or the new set, never a mixture. Old-generation rows are
-        // left 'pending-reclaim'; deletion is REM-BETA's duty (idempotent,
-        // resumable, not called here).
-        if !trainable_model_ids.is_empty() {
-            let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
-            self.vector_store
-                .publish_shadow_generation(&refs)
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            // Atomic publish for trainable models: one storage transaction flips
+            // serving_generation to shadow_generation, sets shadow_state
+            // 'pending-reclaim' on the old generation's rows, and rebuilds the
+            // HNSW graph from the new serving rows before returning. A reader sees
+            // the old set or the new set, never a mixture. Old-generation rows are
+            // left 'pending-reclaim'; deletion is REM-BETA's duty (idempotent,
+            // resumable, not called here).
+            if !trainable_model_ids.is_empty() {
+                let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+                self.vector_store
+                    .publish_shadow_generation(&refs)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            }
+            Ok(())
+        })();
+
+        if let Err(original_error) = span_result {
+            // Abort the shadow generation before returning: delete shadow vectors
+            // and clear shadow_generation / shadow_state in the registry.
+            // abandon_shadow_generation is idempotent — calling it when no shadow
+            // is open is a safe no-op. The abandon result is discarded; the caller
+            // must receive the ORIGINAL error, not an error from cleanup.
+            if !trainable_model_ids.is_empty() {
+                let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+                let _ = self.vector_store.abandon_shadow_generation(&refs);
+            }
+            return Err(original_error);
         }
 
         // Publish deferred resident index for non-trainable model writes — the

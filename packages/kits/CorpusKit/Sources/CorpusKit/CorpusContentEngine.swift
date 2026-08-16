@@ -2954,10 +2954,11 @@ public actor CorpusContentEngine {
     /// (FDC binary, stateless) write directly to the serving generation as
     /// today; the deferred-index bracket batches their resident-index updates.
     ///
-    /// On failure mid-way (any thrown error after beginShadowGeneration), the
-    /// shadow remains 'building' and is reclaimable by the next REM-BETA cycle.
-    /// Reclamation is NOT called here — that is BETA's duty. The old serving
-    /// generation remains intact and keeps serving.
+    /// On failure mid-way (any thrown error after beginShadowGeneration and before
+    /// publishShadowGeneration commits), abandonShadowGeneration is called to remove
+    /// shadow vectors and clear the registry entry (shadow_state → NULL, shadow_generation
+    /// → NULL). The original error is always rethrown — swallowing it would be worse
+    /// than the bug. The old serving generation remains intact and keeps serving.
     ///
     /// `rebuildAfterPhysicalRemoval` calls this method and rides the swap
     /// unchanged — its caller resets in-memory state before calling reindex,
@@ -2988,52 +2989,85 @@ public actor CorpusContentEngine {
             try await vectorStore.beginShadowGeneration(modelIDs: trainableModelIDs)
         }
 
-        // Retrain all trainable slots from scratch — produces the new basis blobs
-        // that the subsequent re-embed pass will use. No vector rows are written here.
-        _ = try await trainTrainableSlots(now: now, force: true)
+        // Guard: wrap the entire span between beginShadowGeneration and the commit
+        // point (publishShadowGeneration) in a do/catch. Any throw — during
+        // training, the write pass, or publish itself — triggers abandonShadowGeneration
+        // before the error is rethrown. This ensures no vectors are left at a shadow
+        // generation that will never become visible (the third state the governing
+        // invariant forbids).
+        //
+        // Abort / publish are structurally mutual-exclusive by the do/catch shape:
+        // publish is inside the do block; if it succeeds the catch does not run,
+        // so abandon is never called after a successful commit. The brief asked for
+        // deliberate ordering rather than relying on abandon being a no-op after
+        // publish — this structure provides it.
+        //
+        // Deferred-index bracket (beginDeferredIndex / publishResidentIndex): the
+        // deferred bracket tracks in-memory resident index updates only; underlying
+        // storage writes for non-trainable models are committed as they occur. If
+        // reindex fails after beginDeferredIndex, the in-memory binary resident index
+        // is stale but storage is consistent — no data is in a permanently invisible
+        // state. The next successful reindex's publishResidentIndex call corrects the
+        // in-memory state. No explicit "cancelDeferredIndex" operation is available
+        // or needed; the stale state is transient and self-correcting.
+        do {
+            // Retrain all trainable slots from scratch — produces the new basis blobs
+            // that the subsequent re-embed pass will use. No vector rows are written here.
+            _ = try await trainTrainableSlots(now: now, force: true)
 
-        // Bulk-write bracket for non-trainable model writes (FDC binary, stateless
-        // slots): defers resident dense-index updates for the O(corpus) pass and
-        // publishes once at the end. Trainable-model writes bypass resident structures
-        // by VectorStore shadow-write contract (shadow rows never enter the binary lane,
-        // float indices, or HNSW structures during the build phase).
-        try await vectorStore.beginDeferredIndex()
+            // Bulk-write bracket for non-trainable model writes (FDC binary, stateless
+            // slots): defers resident dense-index updates for the O(corpus) pass and
+            // publishes once at the end. Trainable-model writes bypass resident structures
+            // by VectorStore shadow-write contract (shadow rows never enter the binary lane,
+            // float indices, or HNSW structures during the build phase).
+            try await vectorStore.beginDeferredIndex()
 
-        let ids = try await source.activeContentIDs()
-        if case .wholeContent = configuration.indexUnit {
-            // Bound both task admission and prepared-result memory. The batch
-            // kernel preserves input order and advances each checkpoint only
-            // after BM25, vectors, and coverage are durable.
-            for batch in ids.chunked(into: 500) {
-                _ = try await indexWholeContentBatch(
-                    ids: batch, now: now, parallelism: nil,
-                    slotScope: .all, laneScope: laneScope, force: true)
-            }
-        } else {
-            // Standalone passage mode: always full-lane (LaneScope.all).
-            // Dense-only partial reindex is available on the wholeContent path only.
-            for id in ids {
-                guard let record = try await source.record(for: id) else {
-                    try await clearDerivedState(id: id, now: now)
-                    continue
+            let ids = try await source.activeContentIDs()
+            if case .wholeContent = configuration.indexUnit {
+                // Bound both task admission and prepared-result memory. The batch
+                // kernel preserves input order and advances each checkpoint only
+                // after BM25, vectors, and coverage are durable.
+                for batch in ids.chunked(into: 500) {
+                    _ = try await indexWholeContentBatch(
+                        ids: batch, now: now, parallelism: nil,
+                        slotScope: .all, laneScope: laneScope, force: true)
                 }
-                if let checkpoint = try await prepareIndex(
-                    record: record, appliedCursor: nil, force: true, now: now,
-                    slotScope: .all
-                ) {
-                    try await indexState.advance(checkpoint)
+            } else {
+                // Standalone passage mode: always full-lane (LaneScope.all).
+                // Dense-only partial reindex is available on the wholeContent path only.
+                for id in ids {
+                    guard let record = try await source.record(for: id) else {
+                        try await clearDerivedState(id: id, now: now)
+                        continue
+                    }
+                    if let checkpoint = try await prepareIndex(
+                        record: record, appliedCursor: nil, force: true, now: now,
+                        slotScope: .all
+                    ) {
+                        try await indexState.advance(checkpoint)
+                    }
                 }
             }
-        }
 
-        // Atomic publish for trainable models: one storage transaction flips
-        // serving_generation to shadow_generation, sets shadow_state 'pending-reclaim'
-        // on the old generation's rows, and rebuilds the HNSW graph from the new
-        // serving rows before returning. A reader sees the old set or the new set,
-        // never a mixture. Old-generation rows are left 'pending-reclaim'; deletion
-        // is REM-BETA's duty (idempotent, resumable, not called here).
-        if !trainableModelIDs.isEmpty {
-            try await vectorStore.publishShadowGeneration(modelIDs: trainableModelIDs)
+            // Atomic publish for trainable models: one storage transaction flips
+            // serving_generation to shadow_generation, sets shadow_state 'pending-reclaim'
+            // on the old generation's rows, and rebuilds the HNSW graph from the new
+            // serving rows before returning. A reader sees the old set or the new set,
+            // never a mixture. Old-generation rows are left 'pending-reclaim'; deletion
+            // is REM-BETA's duty (idempotent, resumable, not called here).
+            if !trainableModelIDs.isEmpty {
+                try await vectorStore.publishShadowGeneration(modelIDs: trainableModelIDs)
+            }
+        } catch {
+            // Abort the shadow generation before rethrowing: delete shadow vectors and
+            // clear shadow_generation / shadow_state in the registry. abandonShadowGeneration
+            // is idempotent — calling it when no shadow is open is a safe no-op.
+            // try? discards any error from the abort itself; the ORIGINAL error is what
+            // the caller needs to see.
+            if !trainableModelIDs.isEmpty {
+                try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
+            }
+            throw error
         }
 
         // Publish deferred resident index for non-trainable model writes — the binary
