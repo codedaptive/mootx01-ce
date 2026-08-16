@@ -3241,6 +3241,37 @@ fn run_reindex_responsive(
             corpus
                 .reindex(now)
                 .map_err(|e| format!("corpus basis retrain failed: {e:?}"))?;
+            // Reclaim superseded vector generations immediately after the shadow
+            // swap so pending-reclaim rows are cleared within the same user-
+            // visible operation rather than deferred to the weekly REM-BETA cycle
+            // (VEC-SHADOWSWAP-01, finding 13b8e1a).
+            //
+            // `corpus.reindex` calls publishShadowGeneration, which atomically
+            // flips the serving generation and marks the old one 'pending-reclaim'.
+            // Nothing else clears that state until the next REM-BETA run — which
+            // can be up to 7 days away. Running reclaim here closes the window.
+            //
+            // Non-fatal: a reclaim failure leaves the rows for the next BETA pass.
+            // The rows are invisible to all queries; correctness is unaffected.
+            let vs_opt = {
+                let c = coord_arc
+                    .lock()
+                    .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+                c.vector_store_for(handle)
+            };
+            if let Some(vs) = vs_opt {
+                match vs.reclaim_superseded_generations(None) {
+                    Ok(summary) => {
+                        let total_reclaimed: usize = summary.values().sum();
+                        if total_reclaimed > 0 {
+                            eprintln!("[reindex] reclaimed {total_reclaimed} superseded vector row(s) across {} model(s)", summary.len());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[reindex] reclaim_superseded_generations non-fatal: {e:?}");
+                    }
+                }
+            }
         }
     }
     // Brief re-lock for the deferred Merkle full-tree rollup, once, after coverage.

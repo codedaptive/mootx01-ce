@@ -161,3 +161,25 @@ impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
         true
     }
 }
+
+// ── Blanket impl for boxed trait objects ──────────────────────────────────────
+
+/// Allow `Box<dyn HNSWGraphMaintenance + Send>` to satisfy the `M:
+/// HNSWGraphMaintenance` bound in `DreamingDaemon`'s generic `_with_hnsw`
+/// methods. Production callers that store a `Box<dyn HNSWGraphMaintenance +
+/// Send>` (e.g. `AutonomicGovernor`'s host-injected maintenance handle) can
+/// then pass `Option<&mut Box<dyn HNSWGraphMaintenance + Send>>` without
+/// introducing a wrapper type or changing the generic signatures.
+impl HNSWGraphMaintenance for Box<dyn HNSWGraphMaintenance + Send> {
+    fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool {
+        (**self).rebuild_float_index(now_epoch_secs)
+    }
+
+    fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool {
+        (**self).compact_float_index_tombstones(now_epoch_secs)
+    }
+
+    fn reclaim_superseded_generations(&mut self, now_epoch_secs: f64) -> bool {
+        (**self).reclaim_superseded_generations(now_epoch_secs)
+    }
+}

@@ -441,6 +441,16 @@ pub struct GovernorReport {
     /// when the cadence has not yet elapsed (30 s default). Mirrors Swift
     /// `GovernorReport.gcSweepFired`.
     pub gc_sweep_fired: bool,
+    /// True when REM-BETA fired this tick AND an HNSW maintenance handle was
+    /// installed at tick time (VEC-SHADOWSWAP-01, finding 13b8e1a). When true,
+    /// both `compact_float_index_tombstones` and `reclaim_superseded_generations`
+    /// were dispatched to the handle. False when BETA did not fire this tick OR
+    /// when `hnsw_maintenance` was `None` (handle not yet injected).
+    ///
+    /// Discriminating field for the production-wiring test: allows tests to
+    /// assert that the governor as PRODUCTION CONSTRUCTS IT (via runtime.rs) has
+    /// the handle installed before the first BETA tick fires.
+    pub hnsw_reclaim_fired: bool,
 }
 
 /// The resident Autonomic Governor.
@@ -585,6 +595,16 @@ pub struct AutonomicGovernor {
     /// and write their outputs to GLK `recall::{GraphCache, PreferenceStore}`
     /// (already ported). Track 1 builds the seam only — no producer logic.
     scheduler: Option<SerialLaneScheduler<SchedulerCoordinatorDispatcher>>,
+    /// Host-injected HNSW maintenance handle used by the REM-BETA duty to
+    /// compact HNSW tombstones and reclaim superseded vector generations
+    /// (VEC-SHADOWSWAP-01, finding 13b8e1a). `None` until the host calls
+    /// `set_hnsw_maintenance`; when `None`, the BETA duty runs the base
+    /// EWC prune only and skips reclamation.
+    ///
+    /// The production adapter (`VectorStoreHNSWAdapter` in AriaMcpKit) wraps the
+    /// estate's live `Arc<VectorStore>`. Tests supply `InMemoryHNSWGraphMaintenance`.
+    /// Mirrors the `topology_sink` host-injection pattern.
+    hnsw_maintenance: Option<Box<dyn crate::hnsw_graph_maintenance::HNSWGraphMaintenance + Send>>,
 }
 
 impl AutonomicGovernor {
@@ -828,12 +848,35 @@ impl AutonomicGovernor {
             // `register_default_standing_signals` after construction; tests
             // call `register_standing_signal`. Until then the tick benign-skips.
             scheduler: None,
+            // No HNSW maintenance handle until the host injects one via
+            // `set_hnsw_maintenance`. The AriaMcpKit runtime injects a
+            // VectorStoreHNSWAdapter after construction; tests inject
+            // InMemoryHNSWGraphMaintenance. Until injected, BETA runs the
+            // base EWC prune only and reclamation is deferred to the next
+            // injection cycle.
+            hnsw_maintenance: None,
         }
     }
 
     /// Stop the loop. Safe to call from any thread; idempotent.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Inject the HNSW graph maintenance handle used by the REM-BETA duty to
+    /// compact HNSW tombstones and reclaim superseded vector generations.
+    ///
+    /// Must be called BEFORE the first `tick` that fires REM-BETA (cadence 7 d).
+    /// The AriaMcpKit runtime calls this after construction, passing a
+    /// `VectorStoreHNSWAdapter` wrapping the estate's live `Arc<VectorStore>`.
+    /// Tests pass `InMemoryHNSWGraphMaintenance` to record call timestamps.
+    ///
+    /// Mirrors the `topology_sink` host-injection pattern.
+    pub fn set_hnsw_maintenance(
+        &mut self,
+        handle: Box<dyn crate::hnsw_graph_maintenance::HNSWGraphMaintenance + Send>,
+    ) {
+        self.hnsw_maintenance = Some(handle);
     }
 
     /// Override the GC sweep cadence (milliseconds). Mirrors Swift `gcSweepIntervalMs`
@@ -1115,6 +1158,10 @@ impl AutonomicGovernor {
         // theta_retrain_pending carries the corpus Arc and vocab snapshot decided
         // inside the lock; the actual reindex runs after the lock block closes.
         let mut theta_retrain_pending = None;
+        // Declared outside the coordinator lock block so it survives into the
+        // GovernorReport construction below. Set to true inside the BETA arm
+        // when a maintenance handle is present and BETA fires this tick.
+        let mut hnsw_reclaim_fired = false;
         let (dreaming_fired, maintenance_fired) = {
             let coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
 
@@ -1282,9 +1329,32 @@ impl AutonomicGovernor {
                 }
             }
 
-            // REM-BETA: weekly prune/GC — T12 seam (inert; no reader needed).
+            // REM-BETA: weekly prune/GC — EWC prune + HNSW compaction +
+            // vector-generation reclamation (VEC-SHADOWSWAP-01, finding 13b8e1a).
+            //
+            // `run_beta_cycle_with_hnsw` extends the base EWC prune (which runs
+            // regardless of the handle) with two weekly storage-GC duties when a
+            // maintenance handle is present:
+            //   1. compact_float_index_tombstones — HNSW cache locality GC.
+            //   2. reclaim_superseded_generations — delete vector rows that were
+            //      left 'pending-reclaim' after a shadow-swap publish.
+            //
+            // Both are non-fatal on failure — the base prune still completes.
+            //
+            // The handle is temporarily taken from `self.hnsw_maintenance` to avoid
+            // a double-borrow of `self` (the BETA cycle call needs &mut self.dreaming
+            // while the handle lives in self.hnsw_maintenance). `take()` leaves the
+            // field `None` for the duration and it is restored immediately after.
+            //
+            // `hnsw_reclaim_fired` is set to true when BETA fires AND a maintenance
+            // handle is installed — the discriminating flag the production-wiring
+            // test (shadow_reclaim_duty_tests.rs) uses to verify the full duty path.
+            // Declared above the lock block so it survives into GovernorReport.
             if self.dreaming.beta_due(now_epoch_secs) {
-                self.dreaming.run_beta_cycle(now_epoch_secs);
+                let mut taken = self.hnsw_maintenance.take();
+                hnsw_reclaim_fired = taken.is_some();
+                self.dreaming.run_beta_cycle_with_hnsw(now_epoch_secs, taken.as_mut());
+                self.hnsw_maintenance = taken;
             }
 
             // REM-OMEGA: biweekly retire —  / recall-driven dreaming
@@ -1786,6 +1856,7 @@ impl AutonomicGovernor {
             table_swapped,
             table_version: lattice_lib::table_version(),
             gc_sweep_fired,
+            hnsw_reclaim_fired,
         }
     }
 }

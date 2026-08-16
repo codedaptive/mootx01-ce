@@ -22,13 +22,63 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use neuron_kit::{
-    DreamingDaemon, EstateDreamingReader, EstateDreamingSink, RecallTraceRewardSource,
+    DreamingDaemon, EstateDreamingReader, EstateDreamingSink, HNSWGraphMaintenance,
+    RecallTraceRewardSource,
 };
 use neuron_kit::estate_manifest_policy_store::EstateManifestDreamingPolicyStore;
 use neuron_kit::dreaming_cycle::DreamingPolicyStore;
 use neuron_kit::rem_cycle_table::{RemCycleKind, rem_cycle_table};
 
 use crate::estate_registry::EstateRegistry;
+
+// ── VectorStore HNSW maintenance adapter ─────────────────────────────────────
+
+/// Production implementation of `HNSWGraphMaintenance` backed by a live
+/// `VectorStore`. Injected into the resident `AutonomicGovernor` via
+/// `set_hnsw_maintenance` so the REM-BETA duty path compacts HNSW tombstones
+/// and reclaims superseded vector generations (VEC-SHADOWSWAP-01, finding 13b8e1a).
+///
+/// Implements all three maintenance methods by delegating to the VectorStore's
+/// public surface. All methods are non-fatal on failure (return `false`), so a
+/// single storage error does not abort the rest of the BETA cycle.
+///
+/// Constructed by `runtime.rs` after the governor is built, using the estate's
+/// live `Arc<VectorStore>` from the coordinator. The same adapter is used for
+/// the one-shot dream path below (direct BETA dispatch).
+///
+/// `pub` so integration tests in AriaMcpKit can verify the production wiring
+/// sequence without internal access to the governor's private field.
+pub struct VectorStoreHNSWAdapter(std::sync::Arc<vectorkit::VectorStore>);
+
+impl VectorStoreHNSWAdapter {
+    /// Wrap a live `Arc<VectorStore>` into the HNSW maintenance adapter.
+    pub fn new(vs: std::sync::Arc<vectorkit::VectorStore>) -> Self {
+        Self(vs)
+    }
+}
+
+impl HNSWGraphMaintenance for VectorStoreHNSWAdapter {
+    /// Rebuild all active HNSW graphs from current float records (THETA duty;
+    /// included here for protocol completeness — not called by the BETA path).
+    fn rebuild_float_index(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.rebuild_all_hnsw_indices().is_ok()
+    }
+
+    /// Compact HNSW tombstones across all active graph partitions (BETA duty).
+    fn compact_float_index_tombstones(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.compact_all_hnsw_tombstones().is_ok()
+    }
+
+    /// Delete vector rows whose generation is neither the serving generation
+    /// nor an active 'building' shadow for all models (BETA duty).
+    ///
+    /// `None` batch limit = unbounded pass; idempotent and safe to call
+    /// repeatedly. Non-fatal on failure — reclaimable rows are invisible to
+    /// queries; correctness is unaffected until the next BETA cycle.
+    fn reclaim_superseded_generations(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.reclaim_superseded_generations(None).is_ok()
+    }
+}
 
 /// Result of a `run_one_dreaming_cycle` call.
 #[derive(Debug)]
@@ -250,8 +300,19 @@ pub fn run_one_dreaming_cycle(
             }
             RemCycleKind::Beta => {
                 if dreaming.beta_due(now_epoch_secs) {
-                    dreaming.run_beta_cycle(now_epoch_secs);
-                    eprintln!("mootx01 dream: {} (T12) — advanced cadence timestamp", entry.name);
+                    // Wire the production reclaiming path (VEC-SHADOWSWAP-01,
+                    // finding 13b8e1a): build an adapter over the estate's live
+                    // VectorStore so run_beta_cycle_with_hnsw can reclaim
+                    // superseded vector generations alongside the EWC prune.
+                    //
+                    // `vector_store_for` returns None when no VectorStore is
+                    // registered (e.g. a LocusOnly estate). In that case the
+                    // adapter is absent and BETA runs the base EWC prune only —
+                    // correct, because there are no vector generations to reclaim.
+                    let vs = coord.vector_store_for(&handle);
+                    let mut adapter_opt = vs.map(VectorStoreHNSWAdapter);
+                    dreaming.run_beta_cycle_with_hnsw(now_epoch_secs, adapter_opt.as_mut());
+                    eprintln!("mootx01 dream: {} (T12) — EWC prune, HNSW compact, generation reclaim", entry.name);
                 }
             }
             RemCycleKind::Omega => {
