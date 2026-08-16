@@ -1,9 +1,63 @@
 #!/bin/sh
-# Pre-commit — blocks a commit that adds an absolute /Users/... developer
-# path under docs_internal/ (Codex findings #48/#49/#52/#39, mission DL-01).
-# Four separate waves leaked the same class of path into wave ledgers and
-# completion reports; this stops a fifth. Compares staged blobs against HEAD
-# base blobs — it does not gate the pre-existing tree.
-# Activate once per checkout:  git config core.hooksPath .githooks
+# Pre-commit hook — two gates, both blocking.
+#
+# GATE 1: Developer-path leak guard.
+#   Blocks a commit that adds a reconstructable developer worktree path under
+#   docs_internal/. Covered forms: absolute /Users/<name>/... paths,
+#   prefix-substituted forms where a username segment immediately precedes a
+#   known home subdirectory (devlop, dev_docs, Library/Application Support),
+#   and tilde-user forms such as ~<username>/devlop where the tilde is followed
+#   immediately by a username rather than acting as the home shorthand.
+#   The sanctioned spellings ~/..., $HOME/..., and ${HOME}/... all pass.
+#   This gate runs on staged blobs only (new content versus HEAD) — it does
+#   not retroactively flag paths already in the committed tree.
+#   Activate once per checkout:  git config core.hooksPath .githooks
+#
+# GATE 2: Pattern-regression selftest.
+#   When the staged set touches the guard script, its fixture file, or its
+#   selftest runner — scripts/check-docs-internal-paths.sh,
+#   scripts/path-leak-fixtures.txt, or
+#   scripts/check-docs-internal-paths-selftest.sh — this hook runs the selftest
+#   and blocks the commit if the selftest exits non-zero.
+#
+#   Why this gate exists: three pattern revisions were made in mission GI-01,
+#   and each was bypassed in review. None of the bypasses was found by reading
+#   the regex — all three were found only by running strings against the pattern.
+#   The selftest runner (scripts/check-docs-internal-paths-selftest.sh) and its
+#   30-case fixture (scripts/path-leak-fixtures.txt) commit those strings so the
+#   next author has something to run. But a regression test that nobody executes
+#   is the "existed but ran in no workflow, so it sat red unnoticed" failure the
+#   guard's own header names. This gate makes a pattern change unable to land
+#   with a reopened bypass: the selftest fires on every commit that modifies the
+#   guard, the fixture, or the runner itself.
+#
+#   The selftest is NOT run on commits that do not touch those three files —
+#   ordinary commits pay nothing.
+
 repo_root="$(git rev-parse --show-toplevel)" || exit 0
+
+# --- GATE 1: developer-path leak guard ---
 "$repo_root/scripts/check-docs-internal-paths.sh" diff || exit 1
+
+# --- GATE 2: pattern-regression selftest ---
+# Collect staged file paths once; grep against exact paths with anchors.
+#   This hook's own path is in the trigger set below. That is deliberate: the
+#   recurring failure this mission exists to close is that a guard's own
+#   artifacts get treated as exempt from the guard. A change to the wiring here
+#   can disable GATE 2 as surely as a change to the pattern can reopen a bypass,
+#   so the wiring is gated by the same selftest it invokes.
+staged_files="$(git diff --cached --name-only)"
+if printf '%s\n' "$staged_files" | grep -qE \
+    '^(scripts/check-docs-internal-paths\.sh|scripts/path-leak-fixtures\.txt|scripts/check-docs-internal-paths-selftest\.sh|\.githooks/pre-commit)$'
+then
+  echo "pre-commit: guard pattern or fixtures staged — running regression selftest"
+  echo "  fixture: scripts/path-leak-fixtures.txt"
+  if ! "$repo_root/scripts/check-docs-internal-paths-selftest.sh"; then
+    echo ""
+    echo "BLOCKED: selftest failed. The pattern change reopens a previously closed"
+    echo "bypass. Fix the pattern in scripts/check-docs-internal-paths.sh so every"
+    echo "FIRE case exits 1 and every CLEAN case exits 0, then re-stage and retry."
+    echo "Cases live in scripts/path-leak-fixtures.txt."
+    exit 1
+  fi
+fi
