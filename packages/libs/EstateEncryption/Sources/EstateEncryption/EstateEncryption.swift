@@ -1,11 +1,11 @@
-// EstateEncryptionMigrator.swift
+// EstateEncryption.swift
 //
-// CE-1.0.35-08: the machinery behind `mootx01 upgrade`'s offer to encrypt a
-// plaintext default estate. This is the highest-risk surface in the 1.0.35
-// set — a bug here costs someone their memories — so the design invariant is
-// stated once, here, and every function below serves it:
+// The plaintext-to-encrypted estate conversion. Standalone library, shared by
+// the product (`mootx01 upgrade`) and the benchmark harness.
 //
 //   EVERY FAILURE PATH LEAVES A WORKING ESTATE AT THE CANONICAL PATH.
+//
+// That invariant is the reason every function below is shaped as it is.
 //
 // The clone is PHYSICAL, via SQLCipher's sqlcipher_export() over an ATTACHed
 // encrypted database — never a logical re-import through the capture seam. A
@@ -21,13 +21,100 @@
 // conversion and permission stamping). The amalgamation registers
 // sqlcipher_export() as an auto-extension, so it is available on every
 // connection with no manual registration.
+//
+// PORT PARITY. `rust/src/lib.rs` is the twin. Same names, same types, same
+// field sets, same failure semantics, same order of operations. When one port
+// changes, the other changes in the same commit.
+//
+//
+// PORT MAPPING. Where the two ports spell one thing differently, it is a
+// language idiom and not a divergence:
+//
+//   Swift                         Rust
+//   EstateEncryptionMigrator      the crate module itself
+//   throws / Error                MigrationResult<T> / MigrationError
+//   init + static let none        DaemonControl::new + DaemonControl::none
+//   static var defaultTrash       fn default_trash()
+//   systemTrash (macOS only)      no equivalent; retainOriginal is the default
+//
+// Everything else is name-for-name and field-for-field.
+//
+// PLATFORM. Only the system Trash seam is macOS-only; everything else builds
+// everywhere. The previous version gated the entire file on macOS, which is
+// what left the Rust port carrying a separate implementation.
 
 import Foundation
 import SQLCipher
 
-#if os(macOS)
-
 public enum EstateEncryptionMigrator {
+
+    // MARK: - Plaintext vs ciphertext detection
+
+    /// What a file at a given path is.
+    public enum EstateFileState: Equatable, Sendable {
+        /// No file at that path. A first run: the caller provisions a key and
+        /// creates an encrypted estate.
+        case absent
+        /// A readable plaintext SQLite database. Must keep opening as plaintext;
+        /// migration is user-initiated through `mootx01 upgrade`.
+        case plaintext
+        /// Not a plaintext SQLite database. For an existing estate this means
+        /// SQLCipher, whose page 1 — including the header — is encrypted.
+        case ciphertext
+    }
+
+    /// The plaintext SQLite file magic: ASCII "SQLite format 3" plus the
+    /// terminating zero byte, 16 bytes total. A SQLCipher database encrypts page
+    /// 1 including this header, so its first 16 bytes are ciphertext and never
+    /// match. This is the authoritative check consumed by CE-1.0.35-06 and -08.
+    public static let plaintextSQLiteMagic: [UInt8] =
+        Array("SQLite format 3".utf8) + [0x00]
+
+    /// Classify the estate file at `url` by reading its first 16 bytes.
+    ///
+    /// Reads bytes DIRECTLY and never opens a SQLite connection. Two reasons:
+    /// a connection cannot classify a file whose key the caller does not have,
+    /// and opening one has side effects. Never guess by attempting an encrypted
+    /// open and catching the error.
+    ///
+    /// This also guards a real hazard: MootBridge calls `loadOrCreateKey`
+    /// unconditionally, so anything that points Mootx01-App at the CLI's
+    /// plaintext estate would mint a key and then fail with SQLITE_NOTADB.
+    /// Detection is what lets a caller notice the file is plaintext first.
+    public static func detectEstateFileState(at url: URL) -> EstateFileState {
+        // A directory at the estate path is not a plaintext database, and must
+        // not be reported as one.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else {
+            return .absent
+        }
+
+        guard let handle = FileHandle(forReadingAtPath: url.path) else {
+            // The file exists but cannot be opened for reading. It is certainly
+            // not a readable plaintext estate, and reporting .absent would tell
+            // a caller to create one over the top of it.
+            return .ciphertext
+        }
+        defer { try? handle.close() }
+
+        let head: Data
+        do {
+            head = try handle.read(upToCount: plaintextSQLiteMagic.count) ?? Data()
+        } catch {
+            return .ciphertext
+        }
+
+        // A file too short to hold the magic cannot be a valid plaintext SQLite
+        // database. Treated as ciphertext, never as absent, so a caller never
+        // overwrites a partial file it does not understand.
+        guard head.count == plaintextSQLiteMagic.count else {
+            return .ciphertext
+        }
+
+        return Array(head) == plaintextSQLiteMagic ? .plaintext : .ciphertext
+    }
 
     // MARK: - Errors
 
@@ -69,12 +156,12 @@ public enum EstateEncryptionMigrator {
 
     /// Lowercase hex of the raw 32-byte estate key, for `KEY "x'<hex>'"`.
     /// Never log or embed the result in errors.
-    static func keyHex(_ key: Data) -> String {
+    public static func keyHex(_ key: Data) -> String {
         key.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Escape a path for embedding in a single-quoted SQL string literal.
-    static func sqlQuoted(_ path: String) -> String {
+    public static func sqlQuoted(_ path: String) -> String {
         "'" + path.replacingOccurrences(of: "'", with: "''") + "'"
     }
 
@@ -87,7 +174,7 @@ public enum EstateEncryptionMigrator {
     /// is closed by the caller: every migration entry point classifies the
     /// source with `detectEstateFileState` first and refuses anything that
     /// is not an existing readable plaintext database.
-    static func openRaw(path: String, keyHex: String? = nil) throws -> OpaquePointer {
+    public static func openRaw(path: String, keyHex: String? = nil) throws -> OpaquePointer {
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(
             path, &handle,
@@ -112,7 +199,7 @@ public enum EstateEncryptionMigrator {
 
     /// Run one statement, mapping failure to `MigrationError`. `step` is the
     /// human name reported on failure; the SQL itself is never reported.
-    static func exec(_ db: OpaquePointer, sql: String, step: String) throws {
+    public static func exec(_ db: OpaquePointer, sql: String, step: String) throws {
         var errMsg: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
             let detail = errMsg.map { String(cString: $0) } ?? "unknown sqlite error"
@@ -122,7 +209,7 @@ public enum EstateEncryptionMigrator {
     }
 
     /// Remove a database file and its `-wal`/`-shm` siblings, best-effort.
-    static func removeDatabase(at url: URL) {
+    public static func removeDatabase(at url: URL) {
         let fm = FileManager.default
         try? fm.removeItem(at: url)
         for suffix in ["-wal", "-shm"] {
@@ -151,13 +238,8 @@ public enum EstateEncryptionMigrator {
             self.start = start
         }
 
-        /// The production seam: launchctl via LaunchAgent.
-        public static func launchd(homeDirectory: URL) -> DaemonControl {
-            DaemonControl(
-                isRunning: { LaunchAgent.isDaemonRunning() },
-                stop: { LaunchAgent.stopDaemon() },
-                start: { LaunchAgent.startDaemon(homeDirectory: homeDirectory) })
-        }
+        /// The launchd seam lives with the app, which owns LaunchAgent:
+        /// `MootInstallerCore` extends this type with `launchd(homeDirectory:)`.
 
         /// A no-daemon environment (also the test default).
         public static let none = DaemonControl(
@@ -168,14 +250,33 @@ public enum EstateEncryptionMigrator {
     /// recorder or a fault thrower. Returns the item's new URL in the Trash.
     public typealias TrashItem = @Sendable (URL) throws -> URL
 
-    /// The production trash seam.
-    public static func systemTrash(_ url: URL) throws -> URL {
-        var resulting: NSURL?
-        try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)
-        return (resulting as URL?) ?? url
+    /// The production trash seam. `FileManager.trashItem` is macOS-only, so
+    /// this is the single platform-gated member of the library.
+    #if os(macOS)
+        public static func systemTrash(_ url: URL) throws -> URL {
+            var resulting: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)
+            return (resulting as URL?) ?? url
+        }
+    #endif
+
+    /// Retains the original beside the estate instead of trashing it, and
+    /// reports where it stayed. This is the default where no system Trash
+    /// exists, and it is the behaviour the Rust port has always had.
+    public static func retainOriginal(_ url: URL) throws -> URL { url }
+
+    /// The trash seam used when a caller does not supply one: the system
+    /// Trash on macOS, retention elsewhere. `SwapOutcome` records which
+    /// happened, so a caller never has to infer it from the platform.
+    public static var defaultTrash: TrashItem {
+        #if os(macOS)
+            return systemTrash
+        #else
+            return retainOriginal
+        #endif
     }
 
-    /// What the swap did, for honest reporting. `untrashedOriginalPath` is
+    /// What the swap did, reported exactly. `untrashedOriginalPath` is
     /// non-nil when the plaintext original could NOT be moved to the Trash
     /// and is still sitting beside the estate — the caller MUST surface it.
     public struct SwapOutcome: Sendable {
@@ -213,7 +314,7 @@ public enum EstateEncryptionMigrator {
     public static func swapInEncryptedCopy(
         original: URL,
         encryptedCopy: URL,
-        trash: TrashItem = systemTrash
+        trash: TrashItem = defaultTrash
     ) throws -> (trashedOriginalURL: URL?, untrashedOriginalPath: String?) {
         let fm = FileManager.default
         let dir = original.deletingLastPathComponent()
@@ -303,7 +404,7 @@ public enum EstateEncryptionMigrator {
         estateURL: URL,
         key: Data,
         daemon: DaemonControl,
-        trash: TrashItem = systemTrash
+        trash: TrashItem = defaultTrash
     ) throws -> (counts: VerificationCounts, swap: SwapOutcome) {
         let copy = estateURL.deletingLastPathComponent()
             .appendingPathComponent(estateURL.lastPathComponent + ".encrypting")
@@ -381,7 +482,7 @@ public enum EstateEncryptionMigrator {
     /// on a fixed table list goes silently incomplete the day the schema
     /// grows a table (audit history, diary, erasure ledger…), and an
     /// unfaithful copy could then pass by preserving only the listed four.
-    static func allTableCounts(atPath path: String, keyHex: String? = nil) throws -> [String: Int] {
+    public static func allTableCounts(atPath path: String, keyHex: String? = nil) throws -> [String: Int] {
         let db = try openRaw(path: path, keyHex: keyHex)
         defer { sqlite3_close_v2(db) }
         var stmt: OpaquePointer?
@@ -410,7 +511,7 @@ public enum EstateEncryptionMigrator {
     /// result is exactly the single row "ok". Structural soundness is a
     /// precondition the row-count gate cannot see: counts read intact B-tree
     /// paths and say nothing about corruption elsewhere in a page.
-    static func assertIntegrity(atPath path: String, keyHex: String? = nil) throws {
+    public static func assertIntegrity(atPath path: String, keyHex: String? = nil) throws {
         let db = try openRaw(path: path, keyHex: keyHex)
         defer { sqlite3_close_v2(db) }
         var stmt: OpaquePointer?
@@ -437,7 +538,7 @@ public enum EstateEncryptionMigrator {
     /// which makes page 1 undecodable) surfaces as a thrown error, never
     /// as zero — a fabricated zero could make a truncated copy "match" an
     /// empty table.
-    static func countRows(_ db: OpaquePointer, table: String) throws -> Int {
+    public static func countRows(_ db: OpaquePointer, table: String) throws -> Int {
         var stmt: OpaquePointer?
         // Table names come from the fixed list above, never from input.
         guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \"\(table)\";", -1, &stmt, nil) == SQLITE_OK,
@@ -499,7 +600,7 @@ public enum EstateEncryptionMigrator {
     /// One side of a failed table-complete comparison, with the tables that
     /// differ from `other` singled out so the error names the divergence
     /// instead of dumping two full maps.
-    static func tableCountsDescription(
+    public static func tableCountsDescription(
         _ counts: [String: Int], versus other: [String: Int]
     ) -> String {
         let differing = counts
@@ -530,7 +631,7 @@ public enum EstateEncryptionMigrator {
         // Refuse anything that is not a readable plaintext database. The
         // caller already checked; check again here because this function is
         // public and the cost of migrating garbage is unbounded.
-        guard EstateKeyProvider.detectEstateFileState(at: source) == .plaintext else {
+        guard detectEstateFileState(at: source) == .plaintext else {
             throw MigrationError.sourceNotPlaintext(path: source.path)
         }
 
@@ -557,5 +658,3 @@ public enum EstateEncryptionMigrator {
         }
     }
 }
-
-#endif

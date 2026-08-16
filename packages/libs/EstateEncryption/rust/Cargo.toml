@@ -1,0 +1,12 @@
+[package]
+name = "estate-encryption"
+version = "0.1.0"
+edition = "2021"
+description = "Plaintext to SQLCipher estate conversion. Rust twin of the Swift EstateEncryption library; same names, same types, same failure semantics."
+
+[dependencies]
+# Same rusqlite configuration as PersistenceKit, which re-exports this crate.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }
