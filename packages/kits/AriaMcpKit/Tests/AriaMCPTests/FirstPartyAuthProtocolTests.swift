@@ -325,60 +325,58 @@ struct FirstPartyAuthProtocolTests {
 
     // MARK: Replay window
 
+    // `admit` is mutating, and `#expect` evaluates its argument inside an
+    // autoclosure over an immutable capture — so every admission is taken into
+    // a local first. Written as a helper rather than repeated inline so the
+    // sequence under test stays readable.
+    private func admissions(_ window: inout ReplayWindow, _ sequences: [UInt64]) -> [Bool] {
+        sequences.map { window.admit($0) }
+    }
+
     @Test("Sequence 0 is rejected outright")
     func sequenceZeroRejected() {
         var window = ReplayWindow()
-        #expect(window.admit(0) == false)
+        #expect(admissions(&window, [0]) == [false])
     }
 
     @Test("In-order sequences are admitted exactly once")
     func inOrderAdmission() {
         var window = ReplayWindow()
-        #expect(window.admit(1))
-        #expect(window.admit(2))
-        #expect(window.admit(3))
-        // Replays of each are refused.
-        #expect(window.admit(1) == false)
-        #expect(window.admit(2) == false)
-        #expect(window.admit(3) == false)
+        // Fresh, then every one of them replayed.
+        #expect(admissions(&window, [1, 2, 3, 1, 2, 3])
+                == [true, true, true, false, false, false])
     }
 
     @Test("Out-of-order arrivals inside the window are admitted, then refused")
     func outOfOrderAdmission() {
         var window = ReplayWindow()
-        #expect(window.admit(5))
-        #expect(window.admit(3))   // late but inside the window
-        #expect(window.admit(4))
-        #expect(window.admit(3) == false)  // duplicate of a late arrival
-        #expect(window.admit(5) == false)
+        // 3 and 4 arrive after 5 — genuine concurrency, not replay — then 3 and
+        // 5 are replayed and must be refused.
+        #expect(admissions(&window, [5, 3, 4, 3, 5])
+                == [true, true, true, false, false])
     }
 
     @Test("The window is exactly 128 wide at both edges")
     func windowEdges() {
         var window = ReplayWindow()
-        #expect(window.admit(200))
-        // delta 127 is the oldest still representable.
-        #expect(window.admit(200 - 127))
-        // delta 128 has fallen out of the window and must be refused.
-        #expect(window.admit(200 - 128) == false)
-        #expect(window.admit(1) == false)
+        // delta 127 is the oldest still representable; delta 128 has fallen out.
+        #expect(admissions(&window, [200, 200 - 127, 200 - 128, 1])
+                == [true, true, false, false])
     }
 
     @Test("A jump of 128 or more clears the window rather than shifting stale bits in")
     func largeJumpClearsWindow() {
         var window = ReplayWindow()
-        #expect(window.admit(1))
-        #expect(window.admit(1_000))
-        // Everything below the new window is gone, including the admitted 1.
-        #expect(window.admit(1) == false)
-        #expect(window.admit(999))
-        #expect(window.admit(1_000) == false)
+        // After the jump everything below the new window is gone — including the
+        // 1 that was admitted — while 999 is fresh and 1000 is a duplicate.
+        #expect(admissions(&window, [1, 1_000, 1, 999, 1_000])
+                == [true, true, false, true, false])
     }
 
     @Test("Sequence overflow is refused rather than wrapping")
     func overflowRefused() {
         var window = ReplayWindow()
-        #expect(window.admit(UInt64.max))
+        #expect(admissions(&window, [UInt64.max]) == [true])
         #expect(window.isExhausted)
     }
 
