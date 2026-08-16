@@ -842,14 +842,20 @@ fn hcf3_store_layer_corrupt_row_falls_back_to_exact_scan() {
 ///
 /// Fixture: nodeIdx=0 ("deleted-a") absent from node_bytes; nodeIdx=1 ("live-b")
 /// and nodeIdx=2 ("live-c") present. Row topology:
-///   nodeIdx=0 → neighbours [1, 2] (original compact space)
-///   nodeIdx=1 → neighbours [0]    (points at deleted-a's slot)
-///   nodeIdx=2 → neighbours [0]    (points at deleted-a's slot)
+///   nodeIdx=0 → neighbours [1, 2] (persisted node_idx space)
+///   nodeIdx=1 → neighbours [2]    (live-b names live-c)
+///   nodeIdx=2 → neighbours [1]    (live-c names live-b)
 ///
 /// Post-fix (Rust, always): compact_to_pos maps 0→tombstone, 1→live-b, 2→live-c.
-/// graph_rows() skips the tombstone, emitting live-b at nodeIdx=1 and live-c at
-/// nodeIdx=2. Neighbour [2] from live-b resolves to "live-c" (correct). Neighbour
-/// [1] from live-c resolves to "live-b" (correct). Endpoint identity holds.
+/// graph_rows() then re-compacts over LIVE nodes only, so it emits live-b at
+/// compact 0 and live-c at compact 1, remapping their neighbour indices into that
+/// same live-only space. Resolved through the emitted index→itemID map, live-b's
+/// neighbour names "live-c" and live-c's names "live-b". Endpoint identity holds.
+///
+/// Note the space shift: graph_rows()'s compact space is NOT the space the rows
+/// were loaded from, and it differs from the Swift twin, which emits raw internal
+/// array indices with gaps where tombstones sit. Assert through the map, never on
+/// raw index values.
 ///
 /// This test passes against pre-fix Rust because Rust never had F1. Its value is
 /// that it pins the same contract the Swift gate pins, catching a future Rust
