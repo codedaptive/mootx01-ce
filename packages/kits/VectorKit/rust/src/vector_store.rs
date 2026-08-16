@@ -86,7 +86,7 @@ use std::sync::Arc;
 use persistence_kit::{
     BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause,
     OrderDirection, ResidencyHint, SchemaDeclaration, SchemaOperation,
-    Storage, StoragePredicate, TableDeclaration, TypedValue, physical_memory_bytes,
+    Storage, StoragePredicate, StorageRow, TableDeclaration, TypedValue, physical_memory_bytes,
 };
 use uuid::Uuid;
 
@@ -407,6 +407,23 @@ struct HotState {
     /// Exposed via `last_served_graph_generation` for Gate 5 assertions.
     /// Mirrors Swift `VectorStore.lastServedGraphGen`.
     pub(crate) last_served_graph_gen: std::collections::HashMap<String, i64>,
+
+    /// Models whose shadow generation was opened in THIS process instance via
+    /// `begin_shadow_generation`. Removed by `publish_shadow_generation` (flip
+    /// committed) and `abandon_shadow_generation` (explicit abort).
+    ///
+    /// Purpose: distinguish a genuinely in-flight shadow from an abandoned
+    /// 'building' DB row written by a prior crashed process.
+    /// `reclaim_superseded_generations` exempts models in this set from reclaim;
+    /// models with shadow_state='building' in the DB but NOT in this set are
+    /// abandoned and their rows are reclaimed.
+    ///
+    /// CRITICAL: do NOT use `shadow_generations` for this purpose.
+    /// `shadow_generation()` populates that map as a side effect of merely
+    /// READING the registry, so after any read it no longer means "opened in
+    /// this process". This field is the sole reliable in-flight marker.
+    /// Mirrors Swift `VectorStore.openShadows`.
+    pub(crate) open_shadows: std::collections::HashSet<String>,
 
     // ── Admission accounting — self-reconciling map (BRR §5) ─────────────────
 
@@ -875,6 +892,10 @@ impl VectorStore {
                 shadow_states: std::collections::HashMap::new(),
                 shadow_payload_bytes: std::collections::HashMap::new(),
                 last_served_graph_gen: std::collections::HashMap::new(),
+                // open_shadows tracks models whose shadow was begun in this process
+                // instance. Empty on open: prior crashed processes' shadows are
+                // abandoned rows, not in-flight ones.
+                open_shadows: std::collections::HashSet::new(),
                 // Admission accounting starts empty; populated by
                 // ensure_float_index_built_locked on each admitted index.
                 float_index_footprints: std::collections::HashMap::new(),
@@ -2609,11 +2630,23 @@ impl VectorStore {
     /// live-count (a re-embed replaces every vector with the SAME row count, so a
     /// count check would wrongly keep the stale sidecar) — it always reads the
     /// table. Must be called with the state mutex held.
+    ///
+    /// Scoped to serving-generation rows only: a rebuild while a shadow build is
+    /// in flight must not load shadow-generation vectors into the resident index
+    /// (cf7de0c fix, B4). The generation predicate is derived from the durable
+    /// vector_generations registry (not the in-memory cache) so a fresh reopen
+    /// with an empty cache still uses the correct serving generation.
     fn rebuild_binary_index_from_table_locked(
         &self,
         state: &mut HotState,
     ) -> Result<(), VectorKitError> {
-        let records = self.fetch_all_binary_records()?;
+        let reg_rows = self
+            .storage
+            .row_store()
+            .query("vector_generations", Some(&StoragePredicate::IsTrue), &[], None, None)
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let gen_pred = Self::serving_gen_predicate_core(&reg_rows, state);
+        let records = self.fetch_all_binary_records(&gen_pred)?;
         state.live_binary_count = records.len() as u32;
         if let Some(ref mut store) = state.array_store {
             store.rebuild_from(&records)?;
@@ -2779,19 +2812,29 @@ impl VectorStore {
         }
         self.publish_if_deferred_dirty()?;
 
-        // Enumerate the model's existing logical keys from the durable table.
+        // Read serving_gen BEFORE enumerating existing rows so both the
+        // enumeration and the delete predicate are scoped to the same generation.
+        // This is the B5 fix: without this scope, reconcile_model_vectors could
+        // enumerate shadow-generation rows as "existing" and then delete them,
+        // silently destroying a shadow build in progress.
+        let serving_gen = self.serving_generation(model_id)?;
+
+        // Enumerate only the serving-generation keys for this model.
+        // Shadow-generation rows are excluded: they are owned by a concurrent
+        // shadow build and must not be treated as stale.
         let row_store = self.storage.row_store();
+        let enum_pred = StoragePredicate::all(vec![
+            StoragePredicate::Eq(
+                Column::new("vectors", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(serving_gen),
+            ),
+        ]);
         let existing_rows = row_store
-            .query(
-                "vectors",
-                Some(&StoragePredicate::Eq(
-                    Column::new("vectors", "model_id"),
-                    TypedValue::Text(model_id.to_string()),
-                )),
-                &[],
-                None,
-                None,
-            )
+            .query("vectors", Some(&enum_pred), &[], None, None)
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         let mut existing_keys: std::collections::BTreeSet<VectorExactKey> =
             std::collections::BTreeSet::new();
@@ -2821,13 +2864,16 @@ impl VectorStore {
         let stale_keys: Vec<&VectorExactKey> =
             existing_keys.difference(&expected_keys).collect();
 
-        // One transaction: delete exactly the stale keys, upsert the expected
-        // rows. Other models' rows are never addressed.
+        // One transaction: delete exactly the stale serving-gen keys, upsert the
+        // expected rows. Other models' rows and shadow-gen rows are never touched.
         row_store
             .begin_transaction()
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         let db_result = (|| -> Result<(), VectorKitError> {
             for key in &stale_keys {
+                // Delete predicate scoped to the serving generation so we never
+                // touch a shadow-generation row even if one shares the same
+                // (item_id, vector_index, model_id) key.
                 let predicate = StoragePredicate::all(vec![
                     StoragePredicate::Eq(
                         Column::new("vectors", "item_id"),
@@ -2841,22 +2887,16 @@ impl VectorStore {
                         Column::new("vectors", "model_id"),
                         TypedValue::Text(key.model_id.clone()),
                     ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "generation"),
+                        TypedValue::Int(serving_gen),
+                    ),
                 ]);
                 row_store
                     .delete("vectors", &predicate)
                     .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             }
-            // reconcile_model_vectors operates on the serving generation only —
-            // it is called on a non-shadow model (shared-content migration, V6).
-            // Reads serving_gen briefly outside the per-row loop.
-            let serving_gen = {
-                let state = self.state.lock()
-                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
-                state.serving_generations
-                    .get(expected.first().map(|i| i.model_id.as_str()).unwrap_or(""))
-                    .copied()
-                    .unwrap_or(0)
-            };
+            // serving_gen is already known (read above, before enumeration).
             for input in expected {
                 let mut values = BTreeMap::new();
                 values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
@@ -2958,12 +2998,28 @@ impl VectorStore {
             return Ok(());
         }
 
+        // Build the generation predicate from the durable vector_generations registry.
+        // We cannot call serving_gen_predicate() here because it acquires the state
+        // mutex, which is already held by our caller (deadlock). Instead we query the
+        // registry table directly (no mutex needed) and call serving_gen_predicate_core,
+        // which builds the predicate AND refreshes state.serving_generations from the
+        // authoritative DB values. This is correct on a fresh reopen where the cache is
+        // empty: the durable registry always holds the committed serving generation.
+        // Both binary_row_count and fetch_all_binary_records must use the SAME predicate
+        // so the sidecar-freshness comparison is consistent.
+        let reg_rows = self
+            .storage
+            .row_store()
+            .query("vector_generations", Some(&StoragePredicate::IsTrue), &[], None, None)
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let gen_pred = Self::serving_gen_predicate_core(&reg_rows, state);
+
         if let Some(ref mut store) = state.array_store {
             // Attempt to load from the on-disk sidecar.
             let _ = store.load(); // non-fatal: empty start on failure
 
             let snap = store.snapshot();
-            let table_count = self.binary_row_count()?;
+            let table_count = self.binary_row_count(&gen_pred)?;
 
             // Compare live-vs-live: snap.live_count() is the number of
             // non-tombstoned slots in the sidecar (written to the header
@@ -2979,9 +3035,9 @@ impl VectorStore {
                 state.brute_force_index.build(&payloads, &keys)?;
                 state.mih_index.build(&payloads, &keys)?;
             } else {
-                // Stale sidecar: rebuild from the table.
+                // Stale sidecar: rebuild from the table (serving generation only).
                 state.sidecar_rebuild_count += 1;
-                let records = self.fetch_all_binary_records()?;
+                let records = self.fetch_all_binary_records(&gen_pred)?;
                 state.live_binary_count = records.len() as u32;
                 let store_ref = state.array_store.as_mut().unwrap();
                 store_ref.rebuild_from(&records)?;
@@ -2991,8 +3047,8 @@ impl VectorStore {
                 state.mih_index.build(&payloads, &keys)?;
             }
         } else {
-            // No sidecar: build the array in memory from the table.
-            let records = self.fetch_all_binary_records()?;
+            // No sidecar: build the array in memory from the table (serving gen only).
+            let records = self.fetch_all_binary_records(&gen_pred)?;
             state.live_binary_count = records.len() as u32;
             let payloads: Vec<VectorPayload> = records
                 .iter()
@@ -3837,48 +3893,155 @@ impl VectorStore {
         Ok(records)
     }
 
-    /// Count binary rows in the `vectors` table.
+    /// Build a serving-generation predicate from already-fetched `vector_generations`
+    /// registry rows. Pure function: touches no mutex, no storage, no mutable state.
+    ///
+    /// This is the single authoritative predicate definition for the binary lane.
+    /// Called by `serving_gen_predicate_core` (locked context) and directly by
+    /// `serving_gen_predicate` (unlocked context, mutex-poisoned fallback).
+    ///
+    /// Predicate shape:
+    ///   (model_id NOT IN known AND generation = 0)
+    ///   OR (model_id = M1 AND generation = SG1)
+    ///   OR ...
+    fn build_serving_gen_predicate(reg_rows: &[StorageRow]) -> StoragePredicate {
+        if reg_rows.is_empty() {
+            // No registry entries: all models are at generation 0 (pre-swap baseline).
+            return StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(0),
+            );
+        }
+        let mut known_model_ids: Vec<TypedValue> = Vec::new();
+        let mut per_model_clauses: Vec<StoragePredicate> = Vec::new();
+        for row in reg_rows {
+            let mid = match row.get("model_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let sg = match row.get("serving_generation") {
+                Some(TypedValue::Int(v)) => *v,
+                _ => continue,
+            };
+            known_model_ids.push(TypedValue::Text(mid.clone()));
+            per_model_clauses.push(StoragePredicate::all(vec![
+                StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(mid),
+                ),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "generation"),
+                    TypedValue::Int(sg),
+                ),
+            ]));
+        }
+        if known_model_ids.is_empty() {
+            // Registry rows had no parseable model_id/serving_generation: fall back to gen 0.
+            return StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(0),
+            );
+        }
+        let unknown_clause = StoragePredicate::all(vec![
+            StoragePredicate::Not(Box::new(StoragePredicate::In(
+                Column::new("vectors", "model_id"),
+                known_model_ids,
+            ))),
+            StoragePredicate::Eq(
+                Column::new("vectors", "generation"),
+                TypedValue::Int(0),
+            ),
+        ]);
+        let mut all_clauses = vec![unknown_clause];
+        all_clauses.extend(per_model_clauses);
+        StoragePredicate::any(all_clauses)
+    }
+
+    /// Build a serving-generation predicate from already-fetched registry rows
+    /// and update the in-memory cache in one pass.
+    ///
+    /// Callable from locked contexts (state mutex already held): callers fetch
+    /// the registry rows themselves, pass their `&mut HotState`, and receive the
+    /// predicate without touching the mutex again. Also used by
+    /// `serving_gen_predicate()` after locking.
+    ///
+    /// Delegates predicate construction to `build_serving_gen_predicate` and then
+    /// reflects the fetched values into `state.serving_generations` so the cache
+    /// stays current with the durable registry after every index build.
+    fn serving_gen_predicate_core(
+        reg_rows: &[StorageRow],
+        state: &mut HotState,
+    ) -> StoragePredicate {
+        // Refresh the in-memory cache from the durable registry while we have
+        // the rows in hand. This keeps the cache current for subsequent write-path
+        // routing without a separate DB query.
+        for row in reg_rows {
+            if let (Some(TypedValue::Text(mid)), Some(TypedValue::Int(sg))) = (
+                row.get("model_id"),
+                row.get("serving_generation"),
+            ) {
+                state.serving_generations.insert(mid.clone(), *sg);
+            }
+        }
+        Self::build_serving_gen_predicate(reg_rows)
+    }
+
+    /// Count serving-generation binary rows in the `vectors` table.
+    ///
+    /// Constrains to `kind = Binary AND <gen_pred>` where `gen_pred` is the
+    /// serving-generation predicate built by `serving_gen_predicate_core`.
     ///
     /// Used by `ensure_index_built_locked` to detect a stale sidecar.
-    fn binary_row_count(&self) -> Result<usize, VectorKitError> {
+    /// Both this count and the rows from `fetch_all_binary_records` must use
+    /// the SAME predicate so the sidecar-freshness comparison is consistent.
+    fn binary_row_count(&self, gen_pred: &StoragePredicate) -> Result<usize, VectorKitError> {
+        let pred = StoragePredicate::all(vec![
+            StoragePredicate::Eq(
+                Column::new("vectors", "kind"),
+                TypedValue::Int(VectorKind::Binary.raw()),
+            ),
+            gen_pred.clone(),
+        ]);
         let rows = self
             .storage
             .row_store()
-            .query(
-                "vectors",
-                Some(&StoragePredicate::Eq(
-                    Column::new("vectors", "kind"),
-                    TypedValue::Int(VectorKind::Binary.raw()),
-                )),
-                &[],
-                None,
-                None,
-            )
+            .query("vectors", Some(&pred), &[], None, None)
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         Ok(rows.len())
     }
 
-    /// Fetch all binary rows from the `vectors` table once, sorted by
-    /// VectorRecordKey natural order.
+    /// Fetch serving-generation binary rows from the `vectors` table once,
+    /// sorted by VectorRecordKey natural order.
     ///
-    /// Called only when the sidecar is absent or stale — once per process
-    /// lifetime in the normal path.
+    /// Constrains to `kind = Binary AND <gen_pred>` so that rows written under
+    /// an active shadow generation are excluded from the resident binary index.
+    /// This closes the cf7de0c finding: a resident index rebuild while a shadow
+    /// is in flight must not load shadow-generation vectors, which are neither
+    /// at the serving generation nor yet published.
+    ///
+    /// `gen_pred` must be the caller's serving-generation predicate, built from
+    /// the durable `vector_generations` registry via `serving_gen_predicate_core`
+    /// (or `build_serving_gen_predicate`). It is passed in rather than derived
+    /// here because both callers already hold the state mutex. It must NOT be
+    /// derived from the in-memory serving-generation cache: that cache is empty
+    /// on a fresh reopen, which would collapse the predicate to `generation = 0`
+    /// and build the resident binary index from no rows at all once a swap has
+    /// advanced the serving generation past 0.
     fn fetch_all_binary_records(
         &self,
+        gen_pred: &StoragePredicate,
     ) -> Result<Vec<(VectorRecordKey, Vec<u8>)>, VectorKitError> {
+        let pred = StoragePredicate::all(vec![
+            StoragePredicate::Eq(
+                Column::new("vectors", "kind"),
+                TypedValue::Int(VectorKind::Binary.raw()),
+            ),
+            gen_pred.clone(),
+        ]);
         let rows = self
             .storage
             .row_store()
-            .query(
-                "vectors",
-                Some(&StoragePredicate::Eq(
-                    Column::new("vectors", "kind"),
-                    TypedValue::Int(VectorKind::Binary.raw()),
-                )),
-                &[],
-                None,
-                None,
-            )
+            .query("vectors", Some(&pred), &[], None, None)
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
         let mut records: Vec<(VectorRecordKey, Vec<u8>)> = Vec::with_capacity(rows.len());
@@ -4015,10 +4178,19 @@ impl VectorStore {
     /// upserted with shadow_state = 'building'. While a model has an active
     /// shadow, ALL vector writes for that model land tagged with shadow_generation
     /// and bypass all resident structures (resident array, float indices, HNSW).
-    /// Models not listed are unaffected. Re-entrant begin on a model with an
-    /// existing 'building' shadow abandons the stale shadow (its rows become
-    /// reclaimable via `reclaim_superseded_generations`) and allocates the next
-    /// generation — this is the crash-mid-build recovery path.
+    /// Models not listed are unaffected.
+    ///
+    /// Re-entrant begin (crash-mid-build recovery path): if the registry already
+    /// has a 'building' shadow for a model, the stale shadow's vector rows are
+    /// deleted via `abandon_shadow_generation` before the new generation is
+    /// allocated. Generation numbering is still max(stale_shadow, serving) + 1 so
+    /// no previously-issued generation number is ever re-used, even if its rows
+    /// have been deleted. This is the B2 fix: before this change, the stale rows
+    /// persisted forever because `shadow_state='building'` caused reclaim to skip
+    /// them, yet they were never at the serving generation.
+    ///
+    /// Each model that successfully begins is added to `open_shadows` — the B3
+    /// in-flight tracker that distinguishes live shadows from abandoned DB rows.
     ///
     /// Returns a map from model_id to the allocated shadow generation number.
     /// Mirror of Swift `VectorStore.beginShadowGeneration(modelIDs:)`.
@@ -4030,9 +4202,10 @@ impl VectorStore {
         for &model_id in model_ids {
             let serving = self.serving_generation(model_id)?;
 
-            // If a 'building' shadow already exists, read the stale shadow_gen
-            // so the new generation skips over it (stale rows become reclaimable
-            // since their generation ≠ serving AND ≠ new shadow).
+            // Query the registry to discover any stale 'building' shadow.
+            // Read existing_max BEFORE any abandon so the generation number
+            // accounts for the stale shadow even after its rows are deleted
+            // (generation numbers must never be re-issued).
             let row_store = self.storage.row_store();
             let rows = row_store
                 .query(
@@ -4055,6 +4228,22 @@ impl VectorStore {
             } else {
                 serving
             };
+
+            // If a stale 'building' shadow exists, abandon it first: delete its
+            // vector rows and clear the registry shadow columns. This is the B2
+            // fix — previously the stale rows were merely numbered past, leaving
+            // them permanently unreachable (not at serving gen, never promoted,
+            // exempt from reclaim because shadow_state='building').
+            let has_stale_shadow = rows.first().map(|r| {
+                matches!(
+                    (r.get("shadow_generation"), r.get("shadow_state")),
+                    (Some(TypedValue::Int(_)), Some(TypedValue::Text(s))) if s == "building"
+                )
+            }).unwrap_or(false);
+            if has_stale_shadow {
+                self.abandon_shadow_generation(&[model_id])?;
+            }
+
             let new_shadow = existing_max + 1;
 
             // Upsert the registry row: serving_generation unchanged, new shadow
@@ -4069,12 +4258,15 @@ impl VectorStore {
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
             // Update in-memory caches under the state lock.
+            // open_shadows receives this model: it is now genuinely in-flight in
+            // this process (B3: distinguishes live from abandoned DB rows).
             let mut state = self.state.lock()
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             state.serving_generations.insert(model_id.to_string(), serving);
             state.shadow_generations.insert(model_id.to_string(), new_shadow);
             state.shadow_states.insert(model_id.to_string(), "building".to_string());
             state.shadow_payload_bytes.insert(model_id.to_string(), 0);
+            state.open_shadows.insert(model_id.to_string());
             drop(state);
 
             result.insert(model_id.to_string(), new_shadow);
@@ -4166,6 +4358,9 @@ impl VectorStore {
                 state.serving_generations.insert(model_id.clone(), *shadow_gen);
                 state.shadow_generations.remove(model_id);
                 state.shadow_states.insert(model_id.clone(), "pending-reclaim".to_string());
+                // Remove from open_shadows: the shadow has been promoted, it is
+                // no longer an in-flight build. (B3)
+                state.open_shadows.remove(model_id);
                 // Drop stale float and HNSW indices — they were built on the old
                 // serving generation. A crash here leaves the maps empty, which is safe:
                 // the query path falls back to load_hnsw_graph_if_present / table scan.
@@ -4210,6 +4405,135 @@ impl VectorStore {
         }
 
         Ok(())
+    }
+
+    /// Abort the shadow build for the given model IDs, deleting all rows written
+    /// under the active shadow generation.
+    ///
+    /// For each model: if the registry row's shadow_state is not 'building' or
+    /// shadow_generation is NULL, this is a no-op for that model (idempotent).
+    /// Otherwise:
+    ///   1. Deletes every `vectors` row at (model_id, shadow_generation).
+    ///   2. Deletes any `hnsw_graph` rows at (model_id, shadow_generation).
+    ///   3. Upserts the registry row: serving_generation UNCHANGED,
+    ///      shadow_generation = NULL, shadow_state = NULL.
+    ///   4. Clears shadow_generations, shadow_states, open_shadows for the model.
+    ///
+    /// This is the ABORT half of the generation lifecycle: every vector on disk
+    /// is either at the serving generation or permanently gone; no row can persist
+    /// at a 'building' shadow generation that will never be promoted.
+    ///
+    /// Returns a map from model_id to the count of `vectors` rows deleted.
+    /// Mirror of Swift `VectorStore.abandonShadowGeneration(modelIDs:)`.
+    pub fn abandon_shadow_generation(
+        &self,
+        model_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, usize>, VectorKitError> {
+        let row_store = self.storage.row_store();
+        let mut summary: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for &model_id in model_ids {
+            // Query the registry to determine whether a 'building' shadow exists.
+            let rows = row_store
+                .query(
+                    "vector_generations",
+                    Some(&StoragePredicate::Eq(
+                        Column::new("vector_generations", "model_id"),
+                        TypedValue::Text(model_id.to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            let row = match rows.first() {
+                Some(r) => r,
+                None => continue, // No registry entry: model never began a shadow.
+            };
+
+            let shadow_gen = match (row.get("shadow_generation"), row.get("shadow_state")) {
+                (Some(TypedValue::Int(sg)), Some(TypedValue::Text(state_str)))
+                    if state_str == "building" =>
+                {
+                    *sg
+                }
+                _ => continue, // No active 'building' shadow: no-op for this model.
+            };
+
+            let serving_gen = match row.get("serving_generation") {
+                Some(TypedValue::Int(v)) => *v,
+                _ => 0,
+            };
+
+            // SAFETY CHECK: never delete a serving-generation row.
+            // This invariant must hold even if the registry is corrupt.
+            debug_assert_ne!(
+                shadow_gen, serving_gen,
+                "abandon: shadow_gen must not equal serving_gen"
+            );
+            if shadow_gen == serving_gen {
+                continue;
+            }
+
+            // 1. Delete all vectors rows at this shadow generation for this model.
+            let vec_pred = StoragePredicate::all(vec![
+                StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "generation"),
+                    TypedValue::Int(shadow_gen),
+                ),
+            ]);
+            let deleted = row_store
+                .delete("vectors", &vec_pred)
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // 2. Delete any hnsw_graph rows written for this shadow generation.
+            // (Normally none exist at abandon time — graphs are only persisted at
+            // publish — but defensive cleanup handles edge cases.)
+            row_store
+                .delete(
+                    "hnsw_graph",
+                    &StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "model_id"),
+                            TypedValue::Text(model_id.to_string()),
+                        ),
+                        StoragePredicate::Eq(
+                            Column::new("hnsw_graph", "generation"),
+                            TypedValue::Int(shadow_gen),
+                        ),
+                    ]),
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // 3. Clear registry shadow columns; serving_generation is unchanged.
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("model_id".to_string(), TypedValue::Text(model_id.to_string()));
+            values.insert("serving_generation".to_string(), TypedValue::Int(serving_gen));
+            values.insert("shadow_generation".to_string(), TypedValue::Null);
+            values.insert("shadow_state".to_string(), TypedValue::Null);
+            row_store
+                .upsert("vector_generations", values, &["model_id".to_string()])
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+            // 4. Clear in-memory caches under the state lock.
+            if let Ok(mut state) = self.state.lock() {
+                state.shadow_generations.remove(model_id);
+                state.shadow_states.remove(model_id);
+                state.shadow_payload_bytes.remove(model_id);
+                // Remove from open_shadows: this shadow is no longer in-flight.
+                state.open_shadows.remove(model_id);
+            }
+
+            if deleted > 0 {
+                summary.insert(model_id.to_string(), deleted);
+            }
+        }
+        Ok(summary)
     }
 
     /// Measured peak shadow payload bytes for the most recent (or current)
@@ -4276,6 +4600,18 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
+        // Read the open_shadows set once under the lock. This is the B3 fix:
+        // only models that are genuinely in-flight in THIS process are protected.
+        // A 'building' row whose model is NOT in open_shadows was left by a prior
+        // crashed process and is an abandoned shadow — its rows are reclaimable.
+        //
+        // Do NOT use shadow_generations as the in-flight signal: shadow_generation()
+        // populates that cache merely by READING the registry, so it loses the
+        // "opened in this process" distinction after any read.
+        let open_shadows_snapshot = self.state.lock()
+            .map(|s| s.open_shadows.clone())
+            .unwrap_or_default();
+
         let mut summary: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
         for row in &reg_rows {
@@ -4288,22 +4624,43 @@ impl VectorStore {
                 _ => continue,
             };
 
-            // Active shadow (if any) — only 'building' shadows are protected;
-            // 'pending-reclaim' rows are reclaimable.
+            // Determine whether to protect an active shadow row.
+            //
+            // Old rule: protect any 'building' shadow (too broad — protected
+            // abandoned rows from crashed processes forever).
+            //
+            // New rule (B3): protect a 'building' shadow ONLY when the model
+            // is in open_shadows (meaning begin_shadow_generation was called in
+            // THIS process). A 'building' row for a model NOT in open_shadows
+            // is an abandoned shadow — reclaim its rows.
             let active_shadow: Option<i64> = match (
                 row.get("shadow_generation"),
                 row.get("shadow_state"),
             ) {
                 (Some(TypedValue::Int(sg)), Some(TypedValue::Text(state)))
-                    if state == "building" =>
+                    if state == "building" && open_shadows_snapshot.contains(&model_id) =>
                 {
+                    // Genuinely in-flight shadow: protect it.
                     Some(*sg)
+                }
+                (Some(TypedValue::Int(_sg)), Some(TypedValue::Text(state)))
+                    if state == "building" && !open_shadows_snapshot.contains(&model_id) =>
+                {
+                    // Abandoned 'building' shadow from a prior crashed process.
+                    // Clear the registry shadow columns so reclaim can proceed.
+                    let mut values = std::collections::BTreeMap::new();
+                    values.insert("model_id".to_string(), TypedValue::Text(model_id.clone()));
+                    values.insert("serving_generation".to_string(), TypedValue::Int(serving_gen));
+                    values.insert("shadow_generation".to_string(), TypedValue::Null);
+                    values.insert("shadow_state".to_string(), TypedValue::Null);
+                    let _ = row_store.upsert("vector_generations", values, &["model_id".to_string()]);
+                    None // treat as no active shadow — rows will be reclaimed below
                 }
                 _ => None,
             };
 
             // Build the superseded-row predicate: model_id = X AND generation ≠ serving
-            // AND (if active shadow) generation ≠ active shadow.
+            // AND (if active in-flight shadow) generation ≠ active shadow.
             let mut pred_parts = vec![
                 StoragePredicate::Eq(
                     Column::new("vectors", "model_id"),
@@ -4519,10 +4876,15 @@ impl VectorStore {
     /// never-swapped models).
     ///
     /// Updates the in-memory serving-generation cache as a side effect.
+    /// Delegates predicate construction to `serving_gen_predicate_core`
+    /// (cache-updating) or `build_serving_gen_predicate` (cache-bypass fallback
+    /// when the mutex is poisoned — a store-fatal condition, but safe to continue).
     ///
     /// Mirror of Swift `VectorStore._servingGenPredicate()`.
     fn serving_gen_predicate(&self) -> Result<StoragePredicate, VectorKitError> {
-        let reg_rows = self.storage.row_store()
+        let reg_rows = self
+            .storage
+            .row_store()
             .query(
                 "vector_generations",
                 Some(&StoragePredicate::IsTrue),
@@ -4532,61 +4894,13 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
-        if reg_rows.is_empty() {
-            // No registry entries → all models at generation 0 (pre-swap baseline).
-            return Ok(StoragePredicate::Eq(
-                Column::new("vectors", "generation"),
-                TypedValue::Int(0),
-            ));
-        }
-
-        // Build:
-        //   (model_id NOT IN known_models AND generation = 0)
-        //   OR (model_id = M1 AND generation = SG1)
-        //   OR (model_id = M2 AND generation = SG2) ...
-        let mut known_model_ids: Vec<TypedValue> = Vec::new();
-        let mut per_model_clauses: Vec<StoragePredicate> = Vec::new();
-
-        for row in &reg_rows {
-            let mid = match row.get("model_id") {
-                Some(TypedValue::Text(s)) => s.clone(),
-                _ => continue,
-            };
-            let sg = match row.get("serving_generation") {
-                Some(TypedValue::Int(v)) => *v,
-                _ => continue,
-            };
-            // Populate the serving-generation cache.
-            if let Ok(mut state) = self.state.lock() {
-                state.serving_generations.insert(mid.clone(), sg);
-            }
-            known_model_ids.push(TypedValue::Text(mid.clone()));
-            per_model_clauses.push(StoragePredicate::all(vec![
-                StoragePredicate::Eq(
-                    Column::new("vectors", "model_id"),
-                    TypedValue::Text(mid),
-                ),
-                StoragePredicate::Eq(
-                    Column::new("vectors", "generation"),
-                    TypedValue::Int(sg),
-                ),
-            ]));
-        }
-
-        let unknown_clause = StoragePredicate::all(vec![
-            StoragePredicate::Not(Box::new(StoragePredicate::In(
-                Column::new("vectors", "model_id"),
-                known_model_ids,
-            ))),
-            StoragePredicate::Eq(
-                Column::new("vectors", "generation"),
-                TypedValue::Int(0),
-            ),
-        ]);
-
-        let mut all_clauses = vec![unknown_clause];
-        all_clauses.extend(per_model_clauses);
-        Ok(StoragePredicate::any(all_clauses))
+        // Lock briefly to update the in-memory cache via serving_gen_predicate_core.
+        // On mutex-poison fall back to the pure predicate builder (no cache update).
+        let pred = match self.state.lock() {
+            Ok(mut state) => Self::serving_gen_predicate_core(&reg_rows, &mut state),
+            Err(_) => Self::build_serving_gen_predicate(&reg_rows),
+        };
+        Ok(pred)
     }
 
     /// Rebuild the binary resident array from the `vectors` table.
