@@ -1459,16 +1459,29 @@ struct FirstPartyAuthServerTests {
             return results
         }
 
-        // Release them together.
-        await gate.openWhenWaiting(atLeast: 1)
+        // EVERY caller must be parked before the gate opens.
+        //
+        // Releasing after one waiter — which this test used to do — proves
+        // nothing: the gate stops suspending once open, so the remaining 383
+        // callers run to completion one at a time, each observing an accurate
+        // count. That serialized order is precisely the order the pre-await-only
+        // implementation survives. The bug is only reachable when every caller
+        // has passed the pre-await guard and is suspended simultaneously.
+        let allParked = await gate.waitUntilWaiting(atLeast: attempts)
+        // Without every caller parked, this test cannot distinguish a bounded
+        // server from an unbounded one.
+        #expect(allParked, "all callers must be parked before the gate is opened")
+        #expect(await gate.waitingCount == attempts)
+        await gate.open()
         let results = await outcomes
 
         let admitted = results.filter { $0 }.count
+        // The bound holds even though every caller passed the pre-await guard.
         #expect(await server.liveChallengeCount <= FirstPartyAuthProtocol.maxChallenges)
         #expect(admitted <= FirstPartyAuthProtocol.maxChallenges)
-        // The bound is a bound, not a suggestion: some callers must have been
-        // refused, or the test proved nothing.
+        // And it is a bound, not a coincidence: callers beyond it were refused.
         #expect(admitted < attempts)
+        #expect(admitted > 0, "a server that admits nothing would satisfy an upper bound trivially")
     }
 
     @Test("A republish during the suspension invalidates an in-flight challenge")
@@ -1495,7 +1508,8 @@ struct FirstPartyAuthServerTests {
 
         // Wait until the caller is parked inside the provider, then move the
         // descriptor underneath it and release.
-        await gate.waitUntilWaiting(atLeast: 1)
+        let parked = await gate.waitUntilWaiting(atLeast: 1)
+        #expect(parked, "the caller must be suspended inside the provider for this test to mean anything")
         await server.republish(descriptor: Self.signedDescriptor(descriptorGeneration: 2))
         await gate.open()
 
@@ -1661,6 +1675,10 @@ actor RootGate {
     private var isOpen = false
 
     func wait() async {
+        // Once opened the gate stops suspending. That is why a test MUST park
+        // every caller it cares about BEFORE opening: releasing early lets the
+        // remaining callers run straight through, one at a time, which is
+        // exactly the serialized order a broken implementation survives.
         if isOpen { return }
         await withCheckedContinuation { waiters.append($0) }
     }
@@ -1672,17 +1690,25 @@ actor RootGate {
         for waiter in parked { waiter.resume() }
     }
 
+    /// How many callers are suspended right now.
     var waitingCount: Int { waiters.count }
 
-    /// Spin until at least `count` callers are parked, then return.
-    func waitUntilWaiting(atLeast count: Int) async {
-        while waiters.count < count { await Task.yield() }
-    }
-
-    /// Wait for callers to park, then release them all together.
-    func openWhenWaiting(atLeast count: Int) async {
-        await waitUntilWaiting(atLeast: count)
-        open()
+    /// Park until at least `count` callers are suspended.
+    ///
+    /// Bounded and FAIL-CLOSED: it gives up after `maxYields` scheduler turns
+    /// and returns `false` rather than hanging the suite. A test that cannot
+    /// assemble the concurrency it needs must fail loudly, not quietly weaken
+    /// into a serial test that passes for the wrong reason.
+    ///
+    /// - Returns: `true` when `count` callers are parked; `false` on timeout.
+    func waitUntilWaiting(atLeast count: Int, maxYields: Int = 2_000_000) async -> Bool {
+        var spins = 0
+        while waiters.count < count {
+            if spins >= maxYields { return false }
+            spins += 1
+            await Task.yield()
+        }
+        return true
     }
 }
 
