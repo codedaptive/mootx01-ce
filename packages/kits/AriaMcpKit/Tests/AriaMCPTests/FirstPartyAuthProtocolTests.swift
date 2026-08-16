@@ -436,6 +436,257 @@ struct FirstPartyAuthProtocolTests {
         #expect(!FirstPartyAuthProtocol.constantTimeEquals(a, lastDiffers))
     }
 
+    // MARK: Golden vectors
+    //
+    // The JSON file is the single language-neutral source of truth. Swift emits
+    // it and Swift verifies it, but the assertion that matters is made in Rust:
+    // `rust/tests/first_party_auth_vectors.rs` reimplements RFC 2104 and RFC 5869
+    // over `sha2` and recomputes every value independently. If the two ports
+    // disagree on a single byte, the wire is not language-neutral and the
+    // mission fails.
+
+    /// Absolute path of the committed vector file.
+    static var vectorFileURL: URL {
+        // The test binary runs from .build, so the repository root is derived
+        // from this source file's location rather than from the cwd.
+        URL(fileURLWithPath: #filePath)                      // …/Tests/AriaMCPTests/<this>.swift
+            .deletingLastPathComponent()                     // …/Tests/AriaMCPTests
+            .deletingLastPathComponent()                     // …/Tests
+            .deletingLastPathComponent()                     // …/AriaMcpKit
+            .deletingLastPathComponent()                     // …/kits
+            .deletingLastPathComponent()                     // …/packages
+            .deletingLastPathComponent()                     // repo root
+            .appendingPathComponent("docs/reference/vectors/ARIA_MCP_FIRST_PARTY_AUTH_V1.json")
+    }
+
+    /// Every value the vector file publishes, recomputed from the protocol core.
+    ///
+    /// One function serves both the emitter and the verifier, so the file can
+    /// never drift from the implementation without a test failing.
+    static func computedVectors() -> [String: Any] {
+        let root = fixedRoot
+        let descriptorKey = FirstPartyAuthProtocol.descriptorKey(installationRoot: root)
+
+        var descriptor = vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: descriptorKey, message: descriptor.macInput()
+        )
+        let digest = descriptor.digest()
+
+        let clientNonce = [UInt8](repeating: 0xC1, count: 32)
+        let serverNonce = [UInt8](repeating: 0x53, count: 32)
+        let sessionID = [UInt8](repeating: 0x07, count: 16)
+        let issuedAt: UInt64 = 1_766_000_100
+        let idleExpiry = issuedAt + FirstPartyAuthProtocol.sessionIdleTimeout
+        let absoluteExpiry = issuedAt + FirstPartyAuthProtocol.sessionAbsoluteTimeout
+
+        let transcript = FirstPartyAuthProtocol.sessionTranscript(
+            descriptorDigest: digest,
+            providerIdentifier: descriptor.providerIdentifier,
+            serviceIdentifier: descriptor.serviceIdentifier,
+            endpoint: descriptor.endpoint,
+            instanceIdentifier: descriptor.instanceIdentifier,
+            estateIdentifier: descriptor.estateIdentifier,
+            binaryVersion: descriptor.binaryVersion,
+            descriptorSchemaVersion: descriptor.schemaVersion,
+            contractRevision: descriptor.contractRevision,
+            mcpProtocolVersion: descriptor.mcpProtocolVersion,
+            credentialGeneration: descriptor.credentialGeneration,
+            descriptorGeneration: descriptor.descriptorGeneration,
+            clientNonce: clientNonce,
+            serverNonce: serverNonce,
+            sessionIdentifier: sessionID,
+            issuedAt: issuedAt,
+            idleExpiry: idleExpiry,
+            absoluteExpiry: absoluteExpiry
+        )
+
+        let authKey = FirstPartyAuthProtocol.authKey(installationRoot: root, descriptorDigest: digest)
+        let sessionKey = FirstPartyAuthProtocol.sessionKey(installationRoot: root, transcript: transcript)
+
+        // Request vectors: sequences 1 and 2 in order, then 5/3/4 to exercise
+        // the out-of-order window on the verifying side.
+        let bodies: [(UInt64, String)] = [
+            (1, #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+            (2, #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#),
+            (5, #"{"jsonrpc":"2.0","id":5,"method":"ping"}"#),
+            (3, #"{"jsonrpc":"2.0","id":3,"method":"ping"}"#),
+            (4, #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+        ]
+        let requests: [[String: Any]] = bodies.map { sequence, body in
+            let data = Data(body.utf8)
+            let mac = FirstPartyAuthProtocol.requestMAC(
+                sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: sequence,
+                method: FirstPartyAuthProtocol.requestMethod,
+                path: FirstPartyAuthProtocol.requestPath,
+                contentType: FirstPartyAuthProtocol.contentType,
+                body: data
+            )
+            return [
+                "sequence": sequence,
+                "sequenceHeader": FirstPartyAuthProtocol.formatSequenceHeader(sequence),
+                "bodyUTF8": body,
+                "bodySHA256Hex": hex(FirstPartyAuthProtocol.sha256(data)),
+                "macHex": hex(mac),
+                "macBase64URL": FirstPartyAuthProtocol.base64URLEncode(mac),
+            ]
+        }
+
+        // Response vectors: a MACed 200 with a JSON body, and the MACed empty
+        // 204 a notification receives. The 204 carries no Content-Type, so the
+        // canonical content type is the empty string.
+        let okBody = Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8)
+        let okMAC = FirstPartyAuthProtocol.responseMAC(
+            sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: 1,
+            status: 200, contentType: FirstPartyAuthProtocol.contentType, body: okBody
+        )
+        let noContentMAC = FirstPartyAuthProtocol.responseMAC(
+            sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: 4,
+            status: 204, contentType: "", body: Data()
+        )
+        let unauthorizedMAC = FirstPartyAuthProtocol.responseMAC(
+            sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: 2,
+            status: 401, contentType: FirstPartyAuthProtocol.contentType, body: Data(#"{"error":"unauthorized"}"#.utf8)
+        )
+
+        // Negative vectors: a single flipped bit in the descriptor and in the
+        // transcript must move the digest and the proof. A verifier that
+        // reproduces the positive vectors but not these is not actually
+        // checking the input it claims to check.
+        var flippedDescriptor = descriptor
+        flippedDescriptor.descriptorMAC[0] ^= 0x01
+        var flippedTranscript = transcript
+        flippedTranscript[0] ^= 0x01
+        var flippedBody = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
+        flippedBody[0] ^= 0x01
+
+        return [
+            "vectorVersion": 1,
+            "authProtocol": FirstPartyAuthProtocol.authProtocolIdentifier,
+            "note": "Language-neutral golden vectors for the MOOTx01 first-party authenticated wire. "
+                + "Swift emits and verifies these; the Rust test recomputes them independently. "
+                + "The installation root here is a fixed non-secret test value.",
+            "installationRootHex": hex(root),
+            "descriptor": [
+                "schemaVersion": descriptor.schemaVersion,
+                "providerIdentifier": descriptor.providerIdentifier,
+                "serviceIdentifier": descriptor.serviceIdentifier,
+                "endpoint": descriptor.endpoint,
+                "authProtocol": descriptor.authProtocol,
+                "authKeyIdentifier": descriptor.authKeyIdentifier,
+                "publishedAt": descriptor.publishedAt,
+                "instanceIdentifier": descriptor.instanceIdentifier.uuidString,
+                "estateIdentifier": descriptor.estateIdentifier.uuidString,
+                "binaryVersion": descriptor.binaryVersion,
+                "contractRevision": descriptor.contractRevision,
+                "mcpProtocolVersion": descriptor.mcpProtocolVersion,
+                "capabilities": descriptor.capabilities,
+                "credentialGeneration": descriptor.credentialGeneration,
+                "descriptorGeneration": descriptor.descriptorGeneration,
+                "descriptorKeyHex": hex(descriptorKey),
+                "macInputHex": hex(descriptor.macInput()),
+                "descriptorMACHex": hex(descriptor.descriptorMAC),
+                "canonicalBytesHex": hex(descriptor.canonicalBytes()),
+                "digestHex": hex(digest),
+            ],
+            "session": [
+                "clientNonceHex": hex(clientNonce),
+                "serverNonceHex": hex(serverNonce),
+                "sessionIdentifierHex": hex(sessionID),
+                "sessionIdentifierBase64URL": FirstPartyAuthProtocol.base64URLEncode(sessionID),
+                "authorizationHeaderValue":
+                    "\(FirstPartyAuthProtocol.authorizationScheme) \(FirstPartyAuthProtocol.base64URLEncode(sessionID))",
+                "issuedAt": issuedAt,
+                "idleExpiry": idleExpiry,
+                "absoluteExpiry": absoluteExpiry,
+                "transcriptHex": hex(transcript),
+                "transcriptDigestHex": hex(FirstPartyAuthProtocol.sha256(transcript)),
+                "authKeyHex": hex(authKey),
+                "sessionKeyHex": hex(sessionKey),
+                "serverProofHex": hex(FirstPartyAuthProtocol.serverProof(authKey: authKey, transcript: transcript)),
+                "clientProofHex": hex(FirstPartyAuthProtocol.clientProof(authKey: authKey, transcript: transcript)),
+                "establishmentProofHex":
+                    hex(FirstPartyAuthProtocol.establishmentProof(sessionKey: sessionKey, transcript: transcript)),
+            ],
+            "requests": requests,
+            "responses": [
+                [
+                    "sequence": UInt64(1), "status": 200,
+                    "contentType": FirstPartyAuthProtocol.contentType,
+                    "bodyUTF8": #"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                    "macHex": hex(okMAC),
+                    "macBase64URL": FirstPartyAuthProtocol.base64URLEncode(okMAC),
+                ],
+                [
+                    "sequence": UInt64(4), "status": 204,
+                    "contentType": "", "bodyUTF8": "",
+                    "macHex": hex(noContentMAC),
+                    "macBase64URL": FirstPartyAuthProtocol.base64URLEncode(noContentMAC),
+                ],
+                [
+                    "sequence": UInt64(2), "status": 401,
+                    "contentType": FirstPartyAuthProtocol.contentType,
+                    "bodyUTF8": #"{"error":"unauthorized"}"#,
+                    "macHex": hex(unauthorizedMAC),
+                    "macBase64URL": FirstPartyAuthProtocol.base64URLEncode(unauthorizedMAC),
+                ],
+            ],
+            "negative": [
+                "descriptorMACBit0FlippedDigestHex": hex(flippedDescriptor.digest()),
+                "transcriptBit0FlippedServerProofHex":
+                    hex(FirstPartyAuthProtocol.serverProof(authKey: authKey, transcript: flippedTranscript)),
+                "requestBodyBit0FlippedMACHex": hex(FirstPartyAuthProtocol.requestMAC(
+                    sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: 1,
+                    method: FirstPartyAuthProtocol.requestMethod,
+                    path: FirstPartyAuthProtocol.requestPath,
+                    contentType: FirstPartyAuthProtocol.contentType,
+                    body: flippedBody
+                )),
+                "responseStatusMutated401MACHex": hex(FirstPartyAuthProtocol.responseMAC(
+                    sessionKey: sessionKey, sessionIdentifier: sessionID, sequence: 1,
+                    status: 401, contentType: FirstPartyAuthProtocol.contentType, body: okBody
+                )),
+            ],
+        ]
+    }
+
+    /// Lowercase hex, the one representation the vector file uses for bytes.
+    static func hex(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Regenerate the committed vector file. Opt-in, because a test that
+    /// rewrites its own expected values on every run verifies nothing.
+    ///
+    ///     MOOTX01_EMIT_VECTORS=1 swift test --filter FirstPartyAuthProtocolTests
+    @Test("Golden vectors regenerate on request")
+    func emitGoldenVectors() throws {
+        guard ProcessInfo.processInfo.environment["MOOTX01_EMIT_VECTORS"] == "1" else { return }
+        let json = try JSONSerialization.data(
+            withJSONObject: Self.computedVectors(),
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        try json.write(to: Self.vectorFileURL)
+    }
+
+    /// The committed vector file agrees with the implementation, byte for byte.
+    ///
+    /// This is what stops the file from silently ageing into a record of what
+    /// the protocol used to do.
+    @Test("Committed golden vectors match the implementation")
+    func goldenVectorsMatchImplementation() throws {
+        let data = try Data(contentsOf: Self.vectorFileURL)
+        let onDisk = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let computed = Self.computedVectors()
+        let expected = try JSONSerialization.data(
+            withJSONObject: computed, options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        let actual = try JSONSerialization.data(
+            withJSONObject: onDisk ?? [:], options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        #expect(actual == expected, "Committed vectors have drifted from the implementation")
+    }
+
     // MARK: Helpers
 
     /// A transcript built from the vector descriptor and fixed nonces.

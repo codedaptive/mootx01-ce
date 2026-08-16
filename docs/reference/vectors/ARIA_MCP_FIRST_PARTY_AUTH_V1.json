@@ -1,0 +1,123 @@
+{
+  "authProtocol" : "hmac-sha256-hkdf-v1",
+  "descriptor" : {
+    "authKeyIdentifier" : "installation-root-v1",
+    "authProtocol" : "hmac-sha256-hkdf-v1",
+    "binaryVersion" : "1.1.0",
+    "canonicalBytesHex" : "0000013d000000154d4f4f545830312d44455343524950544f522d763100000000000000020000000f636f6d2e6d6f6f747830312e6d677200000012636f6d2e6d6f6f747830312e6461656d6f6e00000025687474703a2f2f3132372e302e302e313a343234322f6d63702f66697273742d706172747900000013686d61632d7368613235362d686b64662d763100000014696e7374616c6c6174696f6e2d726f6f742d763100000000694305803f2504e04f8911d39a0c0305e82c33010a5b9c3d7e214f6a8b4c1d2e3f4a5b6c00000005312e312e3000000000000000020000000a323032352d31312d3235000000030000001961757468656e746963617465642d66697273742d70617274790000000f7265736964656e742d6573746174650000000c746f6f6c2d7375726661636500000000000000010000000000000001000000207706f7c2e82f7e3121371e77eaee0e757dc227130111e1101a5dd6bd0076d646",
+    "capabilities" : [
+      "authenticated-first-party",
+      "resident-estate",
+      "tool-surface"
+    ],
+    "contractRevision" : 2,
+    "credentialGeneration" : 1,
+    "descriptorGeneration" : 1,
+    "descriptorKeyHex" : "a0feb10a2585d23d18cb7dcfc0cb1113ed4588b6b855e17de1d3da7dc0732333",
+    "descriptorMACHex" : "7706f7c2e82f7e3121371e77eaee0e757dc227130111e1101a5dd6bd0076d646",
+    "digestHex" : "a77f6b5007f9806fe01d3f1fb461946fe8e2f4c5b25fb60c760a605c8ec0e68f",
+    "endpoint" : "http://127.0.0.1:4242/mcp/first-party",
+    "estateIdentifier" : "0A5B9C3D-7E21-4F6A-8B4C-1D2E3F4A5B6C",
+    "instanceIdentifier" : "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+    "macInputHex" : "000000154d4f4f545830312d44455343524950544f522d763100000000000000020000000f636f6d2e6d6f6f747830312e6d677200000012636f6d2e6d6f6f747830312e6461656d6f6e00000025687474703a2f2f3132372e302e302e313a343234322f6d63702f66697273742d706172747900000013686d61632d7368613235362d686b64662d763100000014696e7374616c6c6174696f6e2d726f6f742d763100000000694305803f2504e04f8911d39a0c0305e82c33010a5b9c3d7e214f6a8b4c1d2e3f4a5b6c00000005312e312e3000000000000000020000000a323032352d31312d3235000000030000001961757468656e746963617465642d66697273742d70617274790000000f7265736964656e742d6573746174650000000c746f6f6c2d7375726661636500000000000000010000000000000001",
+    "mcpProtocolVersion" : "2025-11-25",
+    "providerIdentifier" : "com.mootx01.mgr",
+    "publishedAt" : 1766000000,
+    "schemaVersion" : 2,
+    "serviceIdentifier" : "com.mootx01.daemon"
+  },
+  "installationRootHex" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "negative" : {
+    "descriptorMACBit0FlippedDigestHex" : "b5e0183147fb90ad20f9d628ade045c6c823c0bdf9322f7d789599d2002f1b43",
+    "requestBodyBit0FlippedMACHex" : "f343cb9e7d22343a5c3d9d9b4353969654324e86d9d4bfe289c1cc8fd8771486",
+    "responseStatusMutated401MACHex" : "1b5561d0ca47f308de21dc52c11c46055d310d36c7a440830d968da3267d4009",
+    "transcriptBit0FlippedServerProofHex" : "0df9e85fcb8bc43d3e788566f72d5aaf58079088cea8bd9ad827bfce96fccd2f"
+  },
+  "note" : "Language-neutral golden vectors for the MOOTx01 first-party authenticated wire. Swift emits and verifies these; the Rust test recomputes them independently. The installation root here is a fixed non-secret test value.",
+  "requests" : [
+    {
+      "bodySHA256Hex" : "98e0961a7c1232f08d2f2187d13c4a1a22a0641e00e5dec0eca645d646077fab",
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}",
+      "macBase64URL" : "_6X_-5CWZDpv-7uDTe3uQfUdSxeBtFJt13TTzkAl_04",
+      "macHex" : "ffa5fffb9096643a6ffbbb834dedee41f51d4b1781b4526dd774d3ce4025ff4e",
+      "sequence" : 1,
+      "sequenceHeader" : "1"
+    },
+    {
+      "bodySHA256Hex" : "0a9ce9d3bf28546a63b650d787b462f97f1a53c137e9fa52fd49dbacd1f9e450",
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}",
+      "macBase64URL" : "ELBEeA7E54p18WGwJbFrFQ7RChQA8oeS0q8L8oAOlEE",
+      "macHex" : "10b044780ec4e78a75f161b025b16b150ed10a1400f28792d2af0bf2800e9441",
+      "sequence" : 2,
+      "sequenceHeader" : "2"
+    },
+    {
+      "bodySHA256Hex" : "7230c7d26e4de6b9aebd4622dd6c4754a2eb818595db0194f5a1edb372c1d2b3",
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"ping\"}",
+      "macBase64URL" : "3-CnjRBsg-KF4otNkiFj9BvoYVi9czGOLdbI264ID-Y",
+      "macHex" : "dfe0a78d106c83e285e28b4d922163f41be86158bd73318e2dd6c8dbae080fe6",
+      "sequence" : 5,
+      "sequenceHeader" : "5"
+    },
+    {
+      "bodySHA256Hex" : "9ff7f7a7a3e737285c46e080532775bba75c96a25429ed7d6e4edf794c4dd0d3",
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}",
+      "macBase64URL" : "l_J1NM_XQ3S2Cdm0KCdR8LzBNxvABUxLHtMPeeR3qjY",
+      "macHex" : "97f27534cfd74374b609d9b4282751f0bcc1371bc0054c4b1ed30f79e477aa36",
+      "sequence" : 3,
+      "sequenceHeader" : "3"
+    },
+    {
+      "bodySHA256Hex" : "59951ca0b212b103876fa23a9e58bcbbc8fbcc0120e3f5ee7214461e2bd1cd5e",
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+      "macBase64URL" : "SdM1Wf5cVag-4IrrGjnLU8Q6AWw8nzlbW3V5BRUIX6I",
+      "macHex" : "49d33559fe5c55a83ee08aeb1a39cb53c43a016c3c9f395b5b75790515085fa2",
+      "sequence" : 4,
+      "sequenceHeader" : "4"
+    }
+  ],
+  "responses" : [
+    {
+      "bodyUTF8" : "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+      "contentType" : "application/json",
+      "macBase64URL" : "GyYWcH_LYY9byIL1A9nYO2jiqWwtQnnevD_IWhmVIkA",
+      "macHex" : "1b2616707fcb618f5bc882f503d9d83b68e2a96c2d4279debc3fc85a19952240",
+      "sequence" : 1,
+      "status" : 200
+    },
+    {
+      "bodyUTF8" : "",
+      "contentType" : "",
+      "macBase64URL" : "E2jY_-aOZ10ZWci8wlDquV5_GTUBwhsxoGz5kR1umIU",
+      "macHex" : "1368d8ffe68e675d1959c8bcc250eab95e7f193501c21b31a06cf9911d6e9885",
+      "sequence" : 4,
+      "status" : 204
+    },
+    {
+      "bodyUTF8" : "{\"error\":\"unauthorized\"}",
+      "contentType" : "application/json",
+      "macBase64URL" : "rY_6x9tbuNSjQu_UFoMI5mPO0saIaFsAb5AuFdlDQAY",
+      "macHex" : "ad8ffac7db5bb8d4a342efd4168308e663ced2c688685b006f902e15d9434006",
+      "sequence" : 2,
+      "status" : 401
+    }
+  ],
+  "session" : {
+    "absoluteExpiry" : 1766028900,
+    "authKeyHex" : "a67ae29fb9b55dce7a4cae2ce207a93615e95ebc5347102b3e1c6e38899501b6",
+    "authorizationHeaderValue" : "Mootx01Session BwcHBwcHBwcHBwcHBwcHBw",
+    "clientNonceHex" : "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "clientProofHex" : "ec78f8b659ef827a804bbef14d810b558e868486d3f413c003d5621f9c3d03ef",
+    "establishmentProofHex" : "ccf7d37c27b9412fc6b53fd1dcfcc18abc7ab8fa6f0c4616e8522337de115900",
+    "idleExpiry" : 1766001000,
+    "issuedAt" : 1766000100,
+    "serverNonceHex" : "5353535353535353535353535353535353535353535353535353535353535353",
+    "serverProofHex" : "dcf3293c6f747bff0060d496fd08fb3effced80ca2e155054c0ddc0d8788a437",
+    "sessionIdentifierBase64URL" : "BwcHBwcHBwcHBwcHBwcHBw",
+    "sessionIdentifierHex" : "07070707070707070707070707070707",
+    "sessionKeyHex" : "eff36be85618dca41e77d6f24b4665c9987388a695ce4fe606953e01df3c7d69",
+    "transcriptDigestHex" : "557512d71801a2296dc1d05f7bc710ccb5deae709134ff618c529102e84862d9",
+    "transcriptHex" : "000000194d4f4f545830312d4441454d4f4e2d53455353494f4e2d763100000020a77f6b5007f9806fe01d3f1fb461946fe8e2f4c5b25fb60c760a605c8ec0e68f0000000f636f6d2e6d6f6f747830312e6d677200000012636f6d2e6d6f6f747830312e6461656d6f6e00000025687474703a2f2f3132372e302e302e313a343234322f6d63702f66697273742d70617274793f2504e04f8911d39a0c0305e82c33010a5b9c3d7e214f6a8b4c1d2e3f4a5b6c00000005312e312e30000000000000000200000000000000020000000a323032352d31312d32350000000000000001000000000000000100000020c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1000000205353535353535353535353535353535353535353535353535353535353535353000000100707070707070707070707070707070700000000694305e400000000694309680000000069437664"
+  },
+  "vectorVersion" : 1
+}
