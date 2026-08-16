@@ -1271,7 +1271,7 @@ public struct HTTPServer: Sendable {
             // lane, so the request fails rather than answering in the clear.
             return firstPartyError(status: 401, code: "unauthorized")
         }
-        out.headers[FirstPartyAuthProtocol.responseMACHeader] = FirstPartyAuthProtocol.base64URLEncode(mac)
+        out.headers[FirstPartyAuthProtocol.responseMACHeaderWireName] = FirstPartyAuthProtocol.base64URLEncode(mac)
         return out
     }
 
