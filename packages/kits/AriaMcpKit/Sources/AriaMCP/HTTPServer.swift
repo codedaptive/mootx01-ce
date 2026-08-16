@@ -1266,7 +1266,13 @@ public struct HTTPServer: Sendable {
         response: HTTPResponse
     ) async -> HTTPResponse {
         var out = response
-        let contentType = out.headers["Content-Type"] ?? ""
+        // Case-insensitive lookup. HTTP field names are case-insensitive and
+        // `HTTPResponse` stores them in a plain dictionary, so a response built
+        // with "content-type" rather than "Content-Type" would MAC an empty
+        // content type here while the client verified against the real one — a
+        // spurious authentication failure that would be extremely hard to read
+        // from the outside.
+        let contentType = out.headers.first { $0.key.lowercased() == "content-type" }?.value ?? ""
         guard let mac = await auth.sealResponse(
             sessionIdentifier: authenticated.sessionIdentifier,
             sequence: authenticated.sequence,
