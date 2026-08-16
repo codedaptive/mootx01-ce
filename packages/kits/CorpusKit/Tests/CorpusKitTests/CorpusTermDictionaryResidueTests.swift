@@ -120,6 +120,182 @@ private func termPayloadRows(
 @Suite("CorpusTermDictionaryResidue", .serialized)
 struct CorpusTermDictionaryResidueTests {
 
+    /// V4 term dictionary carries no residue for content removed via CorpusContentEngine.
+    ///
+    /// Sequence: ingest A (nonce) → reindex → removeContent A → ingest B → reindex.
+    ///
+    /// CorpusContentEngine is the actor GeniusLocusKit calls for corpus content
+    /// deletion (VerbSurface calls corpus.removeContent(id:) on the engine).
+    /// Both CorpusContentEngine and the legacy Corpus actor route persistCounts
+    /// through CorpusProviderCountsStore.persistCounts → replaceTermPayloads.
+    /// This test confirms the shared fix applies on the engine entry point.
+    ///
+    /// Deletion path traced (for reviewers):
+    ///
+    ///   CorpusContentEngine.removeContent(id:now:) → clearDerivedState:
+    ///     Clears BM25, vector, and checkpoint rows for the content.
+    ///     Does NOT touch corpus_provider_term_dictionary or
+    ///     corpus_provider_term_payload directly.
+    ///
+    ///   CorpusContentEngine.reindex(now:) → trainTrainableSlots(now:force:) →
+    ///   persistCounts(now:) → CorpusProviderCountsStore.persistCounts →
+    ///   replaceTermPayloads(modelID:terms:into:):
+    ///     Clears the model bit on every dictionary row absent from the new term
+    ///     set; deletes rows whose bitmask reaches zero.
+    ///
+    /// Three assertions after removeContent + reindex (same structure as the
+    /// Corpus-actor test above):
+    ///   (1) corpus_provider_term_payload: no row for the nonce term.
+    ///   (2) corpus_provider_term_dictionary: no row for the nonce term.
+    ///   (3) loadTermPayloads("random-indexing-v1"): nonce term absent.
+    ///
+    /// Reopen window: a second engine instance over the same storage runs
+    /// reindex again. restoreCounts loads from the now-clean v4 rows so the
+    /// retrained basis must not re-introduce the nonce term.
+    @Test("V4 term dictionary carries no residue for engine-deleted content")
+    func enginePathDictionaryCarriesNoResidueForRemovedContent() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            // CorpusDocumentStore wraps storage without running migration; the
+            // engine init below (standalone mode) runs standaloneDeclaration(),
+            // which includes CorpusProviderCountsStore.schemaDeclaration and the
+            // v4 term dictionary tables.
+            let store = CorpusDocumentStore(storage: storage)
+            let config = try CorpusContentConfiguration(
+                mode: .standalone, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: config,
+                source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+
+            // Phase 1: write content A (nonce term repeated many times) into the
+            // document store and index it. RI accumulates co-occurrence counts
+            // in memory but does not yet write the v4 dictionary rows.
+            _ = try await store.put(textA, id: "source-A", now: t1)
+            try await engine.indexContent(id: "source-A", now: t1)
+
+            // Phase 2: reindex forces a full retrain of RI (trainTrainableSlots,
+            // force: true) which calls persistCounts → replaceTermPayloads.
+            // The nonce term enters corpus_provider_term_dictionary and
+            // corpus_provider_term_payload after this call.
+            try await engine.reindex(now: t1)
+
+            // Precondition: the nonce term must be present in the v4 dictionary
+            // before removal. If it is absent here, the RI provider did not take
+            // the decomposeCounts() path and the three assertions below would pass
+            // vacuously — the delete path would never be exercised.
+            let dictBeforeRemove = try await termDictRows(nonceToken, storage: storage)
+            guard !dictBeforeRemove.isEmpty else {
+                Issue.record(
+                    """
+                    Pre-remove baseline failed: '\(nonceToken)' not found in \
+                    corpus_provider_term_dictionary after indexContent + reindex \
+                    via CorpusContentEngine. RI must accumulate enough co-occurrences \
+                    to store a non-zero term vector. Confirm RandomIndexingProvider \
+                    implements decomposeCounts() and the tokeniser preserves the nonce \
+                    token as a single unit.
+                    """)
+                return
+            }
+
+            // Phase 3: remove content A. Two operations are required:
+            //   (a) Remove the canonical record from the document store so that
+            //       source.activeContentIDs() excludes source-A when reindex runs.
+            //   (b) Call removeContent on the engine — the verb GeniusLocusKit uses —
+            //       to clear BM25, vector, and checkpoint rows.
+            try await store.remove(id: "source-A", now: t2)
+            try await engine.removeContent(id: "source-A", now: t2)
+
+            // Phase 4: ingest content B (no nonce term) and index it.
+            _ = try await store.put(textB, id: "source-B", now: t2)
+            try await engine.indexContent(id: "source-B", now: t2)
+
+            // Phase 5: second reindex. source.activeContentIDs() returns only
+            // source-B. trainTrainableSlots retrains RI on B's term set only.
+            // replaceTermPayloads clears the RI bit on the nonce term's dictionary
+            // row (absent from B's set) and deletes the row when no model bit
+            // remains. deleteTermPayloads removes the payload row for the same term.
+            try await engine.reindex(now: t2)
+
+            let dictRows = try await termDictRows(nonceToken, storage: storage)
+            let payloadRows = try await termPayloadRows(dictRows: dictRows, storage: storage)
+
+            // Assertion (1) — no payload row for the nonce term.
+            //
+            // replaceTermPayloads deletes all payload rows for the model then
+            // re-inserts only the surviving terms. The nonce is absent from B's
+            // term set so its payload row must not reappear.
+            #expect(payloadRows.isEmpty,
+                    """
+                    corpus_provider_term_payload must have no row for '\(nonceToken)' \
+                    (RI model_id=\(riModelInt)) after removeContent + reindex via \
+                    CorpusContentEngine. replaceTermPayloads must have deleted the \
+                    payload row because the nonce is absent from the retrained term set. \
+                    Found \(payloadRows.count) row(s).
+                    """)
+
+            // Assertion (2) — no dictionary row at all for the nonce term.
+            //
+            // The row must be gone entirely, not merely have models=0. A row that
+            // survives with models=0 still carries the deleted content's term text
+            // in the estate, which is the residue this guarantee forbids.
+            #expect(dictRows.isEmpty,
+                    """
+                    corpus_provider_term_dictionary must have NO row for '\(nonceToken)' \
+                    after removeContent + reindex via CorpusContentEngine. Found \
+                    \(dictRows.count) row(s). A zero-bitmask row is still residue.
+                    """)
+
+            let nonceDictWithBit: [StorageRow] = dictRows.filter {
+                guard case let .int(models) = $0["models"] ?? .null else { return false }
+                return models & riModelBit != 0
+            }
+            #expect(nonceDictWithBit.isEmpty,
+                    """
+                    corpus_provider_term_dictionary must have no row with the RI bit \
+                    (\(riModelBit)) set for '\(nonceToken)' after removeContent + reindex \
+                    via CorpusContentEngine. Found \(nonceDictWithBit.count) row(s).
+                    """)
+
+            // Assertion (3) — loadTermPayloads returns no nonce term.
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let loadedTerms = try await countsStore.loadTermPayloads(modelID: "random-indexing-v1")
+            let noncePresent = loadedTerms.map(\.term).contains(nonceToken)
+            #expect(!noncePresent,
+                    """
+                    loadTermPayloads('random-indexing-v1') must not return '\(nonceToken)' \
+                    after removeContent + reindex via CorpusContentEngine. Both the payload \
+                    row and the dictionary row are deleted so the join returns nothing. \
+                    Found the nonce among \(loadedTerms.count) loaded terms.
+                    """)
+
+            // Reopen window: rebuild the engine over the same storage. The init runs
+            // reloadCountsFromStorage, which calls countsStore.restoreCounts from the
+            // now-clean v4 dictionary rows. A subsequent reindex retrains RI from the
+            // restored basis — the nonce must not reappear in the v4 tables because
+            // the restored basis reflects only B's terms.
+            let reopened = try await CorpusContentEngine(
+                storage: storage,
+                configuration: config,
+                source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await reopened.reindex(now: t2)
+
+            let reopenedTerms = try await countsStore.loadTermPayloads(
+                modelID: "random-indexing-v1")
+            let nonceInReopened = reopenedTerms.map(\.term).contains(nonceToken)
+            #expect(!nonceInReopened,
+                    """
+                    loadTermPayloads('random-indexing-v1') after engine reopen + reindex \
+                    must not return '\(nonceToken)'. restoreCounts must not reload the \
+                    nonce term from the clean v4 dictionary, and a retrain on the restored \
+                    basis must not reintroduce it. Found the nonce among \
+                    \(reopenedTerms.count) loaded terms.
+                    """)
+        }
+    }
+
     /// V4 term dictionary carries no residue for deleted corpus content.
     ///
     /// Sequence: ingest A (nonce) → reindex → expunge A → ingest B → reindex.
