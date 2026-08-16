@@ -220,20 +220,20 @@ public struct CountsIntegrityRunner {
     /// leaves them deliberately — so widening this check to the v4 tables would
     /// fail on a correctly migrated estate.
     ///
-    /// The emptiness test below is INLINE only because the Swift port has no
-    /// sentinel predicate to call. The Rust port does —
-    /// `corpus_provider_counts_store::is_invalidated_counts`, whose own comment
-    /// states it is "the only edit site" if the sentinel format ever changes.
-    /// This inline test is a second site, so it must be replaced by a call the
-    /// moment Swift grows the twin of that helper. Until then the two ports
-    /// disagree about where the sentinel is defined, not about what it is.
+    /// The test below calls `CorpusProviderCountsStore.isInvalidatedCounts`,
+    /// the Swift twin of `corpus_provider_counts_store::is_invalidated_counts`.
+    /// Both ports route every sentinel decision through their one predicate, so
+    /// a change to the sentinel format is a single edit per port. Do not inline
+    /// an emptiness test here: that would make this a second definition site,
+    /// and the two sites would be free to drift apart.
     public func invalidatedCountsHasNoSurvivingTermRows() async throws {
         let countsRows = try await rowStore.query(
             table: "corpus_provider_counts",
             where: nil, orderBy: [], limit: nil, offset: nil)
 
         for row in countsRows {
-            guard case let .blob(blob)? = row["counts"], blob.isEmpty else { continue }
+            guard case let .blob(blob)? = row["counts"],
+                  CorpusProviderCountsStore.isInvalidatedCounts(blob) else { continue }
             guard case let .text(model)? = row["model_id"],
                   case let .text(version)? = row["model_version"] else { continue }
 
