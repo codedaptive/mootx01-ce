@@ -477,6 +477,35 @@ public enum EstateEncryptionMigrator {
             recallTraces: try countRows(db, table: "recall_trace"))
     }
 
+    /// Every non-table schema object (index, trigger, view) by name.
+    ///
+    /// Row counts cannot see these. An index dropped by a conversion preserves
+    /// every row, passes an integrity check, and passes a table-by-table count
+    /// comparison — and changes retrieval, because the planner no longer has
+    /// the index. `sqlcipher_export()` copies indexes and triggers, so this
+    /// comparison is expected to hold; it is here because the failure it
+    /// catches is silent in every other check.
+    public static func schemaObjects(atPath path: String, keyHex: String? = nil) throws -> [String] {
+        let db = try openRaw(path: path, keyHex: keyHex)
+        defer { sqlite3_close_v2(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT type || ':' || name FROM sqlite_master "
+            + "WHERE type IN ('index','trigger','view') AND name NOT LIKE 'sqlite_%' "
+            + "ORDER BY type, name;",
+            -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            throw MigrationError.sqlite(
+                step: "list schema objects", detail: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var names: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) { names.append(String(cString: c)) }
+        }
+        return names
+    }
+
     /// Every user table (name → TOTAL row count) of the database at `path`,
     /// enumerated from `sqlite_master`. Enumerated, not listed: a gate built
     /// on a fixed table list goes silently incomplete the day the schema
@@ -574,6 +603,19 @@ public enum EstateEncryptionMigrator {
     ) throws -> VerificationCounts {
         do {
             try assertIntegrity(atPath: encryptedCopy.path, keyHex: keyHex(key))
+            // Indexes and triggers first: a dropped index is invisible to every
+            // row-count comparison below it.
+            let sourceSchema = try schemaObjects(atPath: original.path)
+            let copySchema = try schemaObjects(atPath: encryptedCopy.path, keyHex: keyHex(key))
+            guard sourceSchema == copySchema else {
+                let missing = Set(sourceSchema).subtracting(copySchema).sorted()
+                let extra = Set(copySchema).subtracting(sourceSchema).sorted()
+                throw MigrationError.verificationFailed(
+                    source: "\(sourceSchema.count) schema objects"
+                        + (missing.isEmpty ? "" : "; missing from copy: " + missing.joined(separator: " ")),
+                    copy: "\(copySchema.count) schema objects"
+                        + (extra.isEmpty ? "" : "; not in source: " + extra.joined(separator: " ")))
+            }
             let sourceTables = try allTableCounts(atPath: original.path)
             let copyTables = try allTableCounts(atPath: encryptedCopy.path, keyHex: keyHex(key))
             guard sourceTables == copyTables else {

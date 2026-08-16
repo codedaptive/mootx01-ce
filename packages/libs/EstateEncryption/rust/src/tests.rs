@@ -290,3 +290,38 @@ fn a_trashing_seam_is_reported_as_trashed_not_retained() {
     assert_eq!(detect_estate_file_state(&trashed), EstateFileState::Plaintext);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A conversion that loses an index preserves every row and every count, and
+/// changes retrieval. Only the schema-object comparison sees it.
+#[test]
+fn a_dropped_index_fails_verification() {
+    let dir = tmp_dir("dropped-index");
+    let estate = make_plaintext_estate(&dir, 20);
+
+    // Give the source an index, then export a copy and drop it from the copy.
+    {
+        let conn = Connection::open(&estate).unwrap();
+        conn.execute_batch("CREATE INDEX idx_drawers_probe ON drawers(id);").unwrap();
+    }
+    let copy = dir.join("estate.sqlite.encrypting");
+    export_encrypted_copy(&estate, &copy, &KEY).unwrap();
+
+    // The faithful copy verifies.
+    assert!(verify_encrypted_copy(&estate, &copy, &KEY).is_ok());
+
+    // Re-export onto a clean destination, then drop the index from the copy
+    // only. The export refuses a destination that already holds tables, which
+    // is itself the right behaviour — it just has to be respected here.
+    remove_database(&copy);
+    export_encrypted_copy(&estate, &copy, &KEY).unwrap();
+    {
+        let conn = open_raw(&copy, Some(&KEY)).unwrap();
+        conn.execute_batch("DROP INDEX idx_drawers_probe;").unwrap();
+    }
+    let err = verify_encrypted_copy(&estate, &copy, &KEY).unwrap_err();
+    assert!(
+        matches!(err, MigrationError::VerificationFailed { .. }),
+        "a dropped index must fail verification, got {err:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

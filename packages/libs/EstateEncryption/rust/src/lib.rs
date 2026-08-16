@@ -308,6 +308,34 @@ pub fn verification_counts(path: &Path, key: Option<&[u8]>) -> MigrationResult<V
     })
 }
 
+/// Every non-table schema object (index, trigger, view) by name.
+///
+/// Row counts cannot see these. An index dropped by a conversion preserves
+/// every row, passes an integrity check, and passes a table-by-table count
+/// comparison — and changes retrieval, because the planner no longer has the
+/// index. `sqlcipher_export()` copies indexes and triggers, so this comparison
+/// is expected to hold; it is here because the failure it catches is silent in
+/// every other check.
+pub fn schema_objects(path: &Path, key: Option<&[u8]>) -> MigrationResult<Vec<String>> {
+    let conn = open_raw(path, key)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT type || ':' || name FROM sqlite_master \
+             WHERE type IN ('index','trigger','view') AND name NOT LIKE 'sqlite_%' \
+             ORDER BY type, name;",
+        )
+        .map_err(|e| MigrationError::Sqlite {
+            step: "list schema objects".into(),
+            detail: e.to_string(),
+        })?;
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .and_then(|rows| rows.collect())
+        .map_err(|e| MigrationError::Sqlite {
+            step: "list schema objects".into(),
+            detail: e.to_string(),
+        })
+}
+
 /// Every user table (name → TOTAL row count), enumerated from `sqlite_master`.
 /// Enumerated, not listed: a gate built on a fixed table list goes silently
 /// incomplete the day the schema grows a table, and an unfaithful copy could
@@ -413,6 +441,30 @@ pub fn verify_encrypted_copy(
 ) -> MigrationResult<VerificationCounts> {
     let layered = (|| -> MigrationResult<()> {
         assert_integrity(encrypted_copy, Some(key))?;
+        // Indexes and triggers first: a dropped index is invisible to every
+        // row-count comparison below it.
+        let source_schema = schema_objects(original, None)?;
+        let copy_schema = schema_objects(encrypted_copy, Some(key))?;
+        if source_schema != copy_schema {
+            let missing: Vec<&String> =
+                source_schema.iter().filter(|o| !copy_schema.contains(o)).collect();
+            let extra: Vec<&String> =
+                copy_schema.iter().filter(|o| !source_schema.contains(o)).collect();
+            return Err(MigrationError::VerificationFailed {
+                source: format!(
+                    "{} schema objects{}",
+                    source_schema.len(),
+                    if missing.is_empty() { String::new() }
+                    else { format!("; missing from copy: {missing:?}") }
+                ),
+                copy: format!(
+                    "{} schema objects{}",
+                    copy_schema.len(),
+                    if extra.is_empty() { String::new() }
+                    else { format!("; not in source: {extra:?}") }
+                ),
+            });
+        }
         let source_tables = all_table_counts(original, None)?;
         let copy_tables = all_table_counts(encrypted_copy, Some(key))?;
         if source_tables != copy_tables {
