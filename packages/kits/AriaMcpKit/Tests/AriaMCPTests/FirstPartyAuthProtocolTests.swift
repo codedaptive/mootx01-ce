@@ -714,3 +714,719 @@ struct FirstPartyAuthProtocolTests {
         )
     }
 }
+
+// MARK: - Server lane — handshake, middleware, bounded state
+//
+// The protocol suite above tests the algebra. This one tests the lane: what the
+// daemon accepts, what it refuses, and — the property most of these cases exist
+// for — what it refuses WITHOUT changing state.
+
+@Suite("First-party auth server — handshake and middleware")
+struct FirstPartyAuthServerTests {
+
+    typealias Vectors = FirstPartyAuthProtocolTests
+
+    static let serverName = "ARIA_MCP"
+
+    /// A descriptor whose MAC is genuine under the fixed test root.
+    static func signedDescriptor(descriptorGeneration: UInt64 = 1) -> FirstPartyDescriptor {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorGeneration = descriptorGeneration
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        return descriptor
+    }
+
+    /// A server with a controllable clock and a counter-driven "randomness"
+    /// source, so nonces and session identifiers are reproducible and expiry is
+    /// exercisable. Real randomness would make replay and capacity tests
+    /// untestable rather than more secure.
+    static func makeServer(
+        provider: any FirstPartyRootProviding = FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+        descriptor: FirstPartyDescriptor? = nil,
+        clock: ManualClock = ManualClock()
+    ) -> (FirstPartyAuthServer, ManualClock) {
+        let counter = RandomCounter()
+        let server = FirstPartyAuthServer(
+            rootProvider: provider,
+            descriptor: descriptor ?? signedDescriptor(),
+            serverName: serverName,
+            now: { clock.seconds },
+            randomBytes: { count in counter.next(count) }
+        )
+        return (server, clock)
+    }
+
+    /// Drive a complete handshake and return the session identifier and key.
+    static func handshake(
+        _ server: FirstPartyAuthServer,
+        descriptor: FirstPartyDescriptor
+    ) async throws -> (sessionIdentifier: [UInt8], sessionKey: [UInt8]) {
+        let clientNonce = [UInt8](repeating: 0xC1, count: 32)
+        let issued = try await server.challenge(
+            clientNonce: clientNonce, descriptorDigest: descriptor.digest()
+        )
+        let transcript = FirstPartyAuthProtocol.sessionTranscript(
+            descriptorDigest: descriptor.digest(),
+            providerIdentifier: descriptor.providerIdentifier,
+            serviceIdentifier: descriptor.serviceIdentifier,
+            endpoint: descriptor.endpoint,
+            instanceIdentifier: descriptor.instanceIdentifier,
+            estateIdentifier: descriptor.estateIdentifier,
+            binaryVersion: descriptor.binaryVersion,
+            descriptorSchemaVersion: descriptor.schemaVersion,
+            contractRevision: descriptor.contractRevision,
+            mcpProtocolVersion: descriptor.mcpProtocolVersion,
+            credentialGeneration: descriptor.credentialGeneration,
+            descriptorGeneration: descriptor.descriptorGeneration,
+            clientNonce: clientNonce,
+            serverNonce: issued.serverNonce,
+            sessionIdentifier: issued.sessionIdentifier,
+            issuedAt: issued.issuedAt,
+            idleExpiry: issued.idleExpiry,
+            absoluteExpiry: issued.absoluteExpiry
+        )
+        let authKey = FirstPartyAuthProtocol.authKey(
+            installationRoot: Vectors.fixedRoot, descriptorDigest: descriptor.digest()
+        )
+        // The client checks the server proof before answering.
+        #expect(FirstPartyAuthProtocol.constantTimeEquals(
+            issued.serverProof,
+            FirstPartyAuthProtocol.serverProof(authKey: authKey, transcript: transcript)
+        ))
+        let clientProof = FirstPartyAuthProtocol.clientProof(authKey: authKey, transcript: transcript)
+        let established = try await server.establish(
+            sessionIdentifier: issued.sessionIdentifier, clientProof: clientProof
+        )
+        let sessionKey = FirstPartyAuthProtocol.sessionKey(
+            installationRoot: Vectors.fixedRoot, transcript: transcript
+        )
+        #expect(FirstPartyAuthProtocol.constantTimeEquals(
+            established,
+            FirstPartyAuthProtocol.establishmentProof(sessionKey: sessionKey, transcript: transcript)
+        ))
+        return (issued.sessionIdentifier, sessionKey)
+    }
+
+    /// Build a well-formed signed request on the lane.
+    static func signedRequest(
+        sessionIdentifier: [UInt8],
+        sessionKey: [UInt8],
+        sequence: UInt64,
+        body: String = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        method: String = "POST",
+        target: String = "/mcp/first-party",
+        contentType: String = "application/json",
+        extraHeaders: [StrictHeaderField] = []
+    ) -> StrictHTTPRequest {
+        let data = Data(body.utf8)
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: sessionKey, sessionIdentifier: sessionIdentifier, sequence: sequence,
+            method: method, path: target, contentType: contentType, body: data
+        )
+        var headers = [
+            StrictHeaderField(name: "content-type", value: contentType),
+            StrictHeaderField(
+                name: "authorization",
+                value: "\(FirstPartyAuthProtocol.authorizationScheme) "
+                    + FirstPartyAuthProtocol.base64URLEncode(sessionIdentifier)
+            ),
+            StrictHeaderField(
+                name: "mootx01-sequence",
+                value: FirstPartyAuthProtocol.formatSequenceHeader(sequence)
+            ),
+            StrictHeaderField(
+                name: "mootx01-request-mac",
+                value: FirstPartyAuthProtocol.base64URLEncode(mac)
+            ),
+        ]
+        headers.append(contentsOf: extraHeaders)
+        return StrictHTTPRequest(method: method, requestTarget: target, headers: headers, body: data)
+    }
+
+    // MARK: Handshake
+
+    @Test("A wrong descriptor digest is refused before any state is allocated")
+    func challengeVerifiesDescriptorFirst() async throws {
+        let (server, _) = Self.makeServer()
+        await #expect(throws: FirstPartyAuthError.descriptorMismatch) {
+            try await server.challenge(
+                clientNonce: [UInt8](repeating: 0xC1, count: 32),
+                descriptorDigest: [UInt8](repeating: 0xEE, count: 32)
+            )
+        }
+        // The point of checking first: a peer that cannot name the active
+        // descriptor must not be able to consume a slot in a bounded table.
+        #expect(await server.liveChallengeCount == 0)
+    }
+
+    @Test("A full handshake establishes exactly one session")
+    func handshakeEstablishesSession() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        _ = try await Self.handshake(server, descriptor: descriptor)
+        #expect(await server.liveSessionCount == 1)
+        // The challenge was consumed by establishment.
+        #expect(await server.liveChallengeCount == 0)
+    }
+
+    @Test("A challenge is single-use")
+    func challengeIsSingleUse() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        // Replaying establishment against the consumed challenge fails.
+        await #expect(throws: FirstPartyAuthError.unknownChallenge) {
+            try await server.establish(
+                sessionIdentifier: session.sessionIdentifier,
+                clientProof: [UInt8](repeating: 0x00, count: 32)
+            )
+        }
+    }
+
+    @Test("A reflected server proof does not authenticate as a client proof")
+    func reflectedServerProofRejected() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let issued = try await server.challenge(
+            clientNonce: [UInt8](repeating: 0xC1, count: 32),
+            descriptorDigest: descriptor.digest()
+        )
+        // Echo the server's own proof straight back. Distinct domains are what
+        // make this fail.
+        await #expect(throws: FirstPartyAuthError.badClientProof) {
+            try await server.establish(
+                sessionIdentifier: issued.sessionIdentifier, clientProof: issued.serverProof
+            )
+        }
+        #expect(await server.liveSessionCount == 0)
+    }
+
+    @Test("An expired challenge cannot be established")
+    func challengeExpires() async throws {
+        let descriptor = Self.signedDescriptor()
+        let clock = ManualClock()
+        let (server, _) = Self.makeServer(descriptor: descriptor, clock: clock)
+        let issued = try await server.challenge(
+            clientNonce: [UInt8](repeating: 0xC1, count: 32),
+            descriptorDigest: descriptor.digest()
+        )
+        clock.advance(FirstPartyAuthProtocol.challengeLifetime + 1)
+        await #expect(throws: FirstPartyAuthError.unknownChallenge) {
+            try await server.establish(
+                sessionIdentifier: issued.sessionIdentifier,
+                clientProof: [UInt8](repeating: 0x01, count: 32)
+            )
+        }
+    }
+
+    @Test("The challenge table is bounded and refuses rather than evicting a live entry")
+    func challengeTableIsBounded() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        for _ in 0..<FirstPartyAuthProtocol.maxChallenges {
+            _ = try await server.challenge(
+                clientNonce: [UInt8](repeating: 0xC1, count: 32),
+                descriptorDigest: descriptor.digest()
+            )
+        }
+        #expect(await server.liveChallengeCount == FirstPartyAuthProtocol.maxChallenges)
+        await #expect(throws: FirstPartyAuthError.capacityExhausted) {
+            try await server.challenge(
+                clientNonce: [UInt8](repeating: 0xC1, count: 32),
+                descriptorDigest: descriptor.digest()
+            )
+        }
+        // Still exactly at capacity: nothing live was displaced to make room.
+        #expect(await server.liveChallengeCount == FirstPartyAuthProtocol.maxChallenges)
+    }
+
+    // MARK: Credential faults
+
+    @Test("Every Keychain fault is fatal and never treated as absence", arguments: [
+        FirstPartyAuthError.missingEntitlement,
+        FirstPartyAuthError.rootUnavailable,
+        FirstPartyAuthError.rootMalformed,
+        FirstPartyAuthError.keychainUnavailable,
+        FirstPartyAuthError.rootSynchronizable,
+    ])
+    func credentialFaultsFailClosed(fault: FirstPartyAuthError) async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(
+            provider: FailingFirstPartyRootProvider(error: fault), descriptor: descriptor
+        )
+        await #expect(throws: fault) {
+            try await server.challenge(
+                clientNonce: [UInt8](repeating: 0xC1, count: 32),
+                descriptorDigest: descriptor.digest()
+            )
+        }
+        #expect(await server.liveSessionCount == 0)
+    }
+
+    @Test("errSecMissingEntitlement is reported as missing entitlement, not as a missing item")
+    func missingEntitlementIsNotAbsence() async throws {
+        let provider = DataProtectionKeychainRootProvider(
+            accessGroup: "G94X5T5GK7.com.codedaptive.mootx01.shared",
+            lookup: { _ in (errSecMissingEntitlement, nil) }
+        )
+        await #expect(throws: FirstPartyAuthError.missingEntitlement) {
+            try await provider.installationRoot()
+        }
+    }
+
+    @Test("The Keychain query selects the data-protection keychain and a non-synchronizable item")
+    func keychainQueryShape() {
+        let provider = DataProtectionKeychainRootProvider(
+            accessGroup: "G94X5T5GK7.com.codedaptive.mootx01.shared", lookup: { _ in (errSecSuccess, nil) }
+        )
+        let query = provider.query
+        // Without the data-protection flag, kSecAttrAccessGroup is not enforced
+        // on macOS — the group would be advisory and the item unprotected.
+        #expect(query[kSecUseDataProtectionKeychain as String] as? Bool == true)
+        #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
+        #expect(query[kSecAttrService as String] as? String == FirstPartyAuthProtocol.keychainService)
+        #expect(query[kSecAttrAccount as String] as? String == FirstPartyAuthProtocol.keychainAccount)
+        #expect(query[kSecAttrAccessGroup as String] as? String == "G94X5T5GK7.com.codedaptive.mootx01.shared")
+    }
+
+    @Test("An unexpanded or empty access group is refused before the Keychain is asked")
+    func unexpandedAccessGroupRefused() async throws {
+        for group in ["", "shared"] {
+            let provider = DataProtectionKeychainRootProvider(
+                accessGroup: group,
+                lookup: { _ in Issue.record("Keychain must not be queried"); return (errSecSuccess, nil) }
+            )
+            await #expect(throws: FirstPartyAuthError.missingEntitlement) {
+                try await provider.installationRoot()
+            }
+        }
+    }
+
+    @Test("A root of the wrong length is malformed, never padded")
+    func shortRootIsMalformed() async throws {
+        let provider = DataProtectionKeychainRootProvider(
+            accessGroup: "G94X5T5GK7.com.codedaptive.mootx01.shared",
+            lookup: { _ in (errSecSuccess, Data(repeating: 0x01, count: 16)) }
+        )
+        await #expect(throws: FirstPartyAuthError.rootMalformed) {
+            try await provider.installationRoot()
+        }
+    }
+
+    // MARK: Middleware
+
+    @Test("A well-formed signed request authenticates")
+    func happyPath() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        let request = Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier, sessionKey: session.sessionKey, sequence: 1
+        )
+        let authenticated = try await server.authenticate(request)
+        #expect(authenticated.sequence == 1)
+        #expect(authenticated.sessionIdentifier == session.sessionIdentifier)
+    }
+
+    @Test("A duplicated authentication header is refused rather than resolved last-wins")
+    func duplicateHeaderRefused() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        // A second Mootx01-Sequence line. LoopbackHTTP would have collapsed this
+        // to one value before the lane ever saw it; the strict parser keeps both
+        // so it can be refused.
+        let request = Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier, sessionKey: session.sessionKey, sequence: 1,
+            extraHeaders: [StrictHeaderField(name: "mootx01-sequence", value: "2")]
+        )
+        await #expect(throws: FirstPartyAuthError.malformedCredentials) {
+            try await server.authenticate(request)
+        }
+    }
+
+    @Test("Mutating any MAC-covered field is refused", arguments: [
+        "method", "target", "contentType", "body", "sequence", "session",
+    ])
+    func mutatedFieldsRefused(field: String) async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        // Sign one request, then alter one covered field after signing.
+        var request = Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier, sessionKey: session.sessionKey, sequence: 1
+        )
+        var headers = request.headers
+        switch field {
+        case "method":
+            request = StrictHTTPRequest(
+                method: "PUT", requestTarget: request.requestTarget,
+                headers: headers, body: request.body
+            )
+        case "target":
+            request = StrictHTTPRequest(
+                method: request.method, requestTarget: "/mcp/first-party?x=1",
+                headers: headers, body: request.body
+            )
+        case "contentType":
+            headers = headers.map {
+                $0.name == "content-type"
+                    ? StrictHeaderField(name: "content-type", value: "text/plain") : $0
+            }
+            request = StrictHTTPRequest(
+                method: request.method, requestTarget: request.requestTarget,
+                headers: headers, body: request.body
+            )
+        case "body":
+            request = StrictHTTPRequest(
+                method: request.method, requestTarget: request.requestTarget,
+                headers: headers, body: Data(#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#.utf8)
+            )
+        case "sequence":
+            headers = headers.map {
+                $0.name == "mootx01-sequence"
+                    ? StrictHeaderField(name: "mootx01-sequence", value: "7") : $0
+            }
+            request = StrictHTTPRequest(
+                method: request.method, requestTarget: request.requestTarget,
+                headers: headers, body: request.body
+            )
+        default:
+            headers = headers.map {
+                $0.name == "authorization"
+                    ? StrictHeaderField(
+                        name: "authorization",
+                        value: "\(FirstPartyAuthProtocol.authorizationScheme) "
+                            + FirstPartyAuthProtocol.base64URLEncode([UInt8](repeating: 0x09, count: 16))
+                      )
+                    : $0
+            }
+            request = StrictHTTPRequest(
+                method: request.method, requestTarget: request.requestTarget,
+                headers: headers, body: request.body
+            )
+        }
+
+        await #expect(throws: (any Error).self) { try await server.authenticate(request) }
+    }
+
+    @Test("A failed MAC does not burn the sequence")
+    func failedMACDoesNotCommitReplayState() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        // Forge sequence 1 with a body that was never signed.
+        let forged = StrictHTTPRequest(
+            method: "POST", requestTarget: "/mcp/first-party",
+            headers: Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 1
+            ).headers,
+            body: Data(#"{"jsonrpc":"2.0","id":666,"method":"ping"}"#.utf8)
+        )
+        await #expect(throws: FirstPartyAuthError.badRequestMAC) {
+            try await server.authenticate(forged)
+        }
+        // The legitimate client's sequence 1 must still be usable. If replay
+        // state were committed before the MAC verified, an unauthenticated peer
+        // could lock a client out by burning its sequence numbers.
+        let genuine = Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier, sessionKey: session.sessionKey, sequence: 1
+        )
+        let ok = try await server.authenticate(genuine)
+        #expect(ok.sequence == 1)
+    }
+
+    @Test("Replays are refused and out-of-order arrivals are accepted")
+    func replayAndConcurrency() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        func send(_ sequence: UInt64) async throws -> UInt64 {
+            try await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: sequence
+            )).sequence
+        }
+
+        #expect(try await send(1) == 1)
+        #expect(try await send(3) == 3)   // arrives before 2
+        #expect(try await send(2) == 2)   // genuine concurrency, not replay
+        await #expect(throws: FirstPartyAuthError.replayedSequence) { _ = try await send(2) }
+        await #expect(throws: FirstPartyAuthError.replayedSequence) { _ = try await send(1) }
+        // Zero is never legal.
+        await #expect(throws: FirstPartyAuthError.malformedCredentials) { _ = try await send(0) }
+    }
+
+    @Test("A sequence older than the window is refused")
+    func tooOldSequenceRefused() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        _ = try await server.authenticate(Self.signedRequest(
+            sessionIdentifier: session.sessionIdentifier, sessionKey: session.sessionKey, sequence: 500
+        ))
+        await #expect(throws: FirstPartyAuthError.replayedSequence) {
+            try await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 500 - 128
+            ))
+        }
+    }
+
+    @Test("Only an accepted request refreshes the idle deadline")
+    func rejectedRequestsDoNotHoldSessionOpen() async throws {
+        let descriptor = Self.signedDescriptor()
+        let clock = ManualClock()
+        let (server, _) = Self.makeServer(descriptor: descriptor, clock: clock)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        // Walk to just under the idle deadline, issuing only BAD requests.
+        clock.advance(FirstPartyAuthProtocol.sessionIdleTimeout - 1)
+        let forged = StrictHTTPRequest(
+            method: "POST", requestTarget: "/mcp/first-party",
+            headers: Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 1
+            ).headers,
+            body: Data(#"{"tampered":true}"#.utf8)
+        )
+        await #expect(throws: FirstPartyAuthError.badRequestMAC) { try await server.authenticate(forged) }
+
+        // Past the deadline the session is gone — the rejected traffic did not
+        // extend it.
+        clock.advance(2)
+        await #expect(throws: (any Error).self) {
+            try await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 1
+            ))
+        }
+    }
+
+    @Test("Absolute expiry is never refreshed by activity")
+    func absoluteExpiryIsHard() async throws {
+        let descriptor = Self.signedDescriptor()
+        let clock = ManualClock()
+        let (server, _) = Self.makeServer(descriptor: descriptor, clock: clock)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+
+        // Stay active well inside the idle window the whole time.
+        var sequence: UInt64 = 1
+        var elapsed: UInt64 = 0
+        while elapsed < FirstPartyAuthProtocol.sessionAbsoluteTimeout {
+            clock.advance(600)
+            elapsed += 600
+            if elapsed >= FirstPartyAuthProtocol.sessionAbsoluteTimeout { break }
+            _ = try? await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: sequence
+            ))
+            sequence += 1
+        }
+        clock.advance(1)
+        await #expect(throws: (any Error).self) {
+            try await server.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: sequence
+            ))
+        }
+    }
+
+    @Test("A credential rotation revokes live sessions")
+    func rotationRevokesSessions() async throws {
+        let descriptor = Self.signedDescriptor()
+        // The provider reports a NEWER generation than the session was minted
+        // under, which is what a rotation looks like to the middleware.
+        let rotating = FixedFirstPartyRootProvider(root: Vectors.fixedRoot, credentialGeneration: 2)
+        let clock = ManualClock()
+        let server = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot, credentialGeneration: 1),
+            descriptor: descriptor, serverName: Self.serverName,
+            now: { clock.seconds }, randomBytes: { RandomCounter().next($0) }
+        )
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        #expect(await server.liveSessionCount == 1)
+
+        let rotated = FirstPartyAuthServer(
+            rootProvider: rotating, descriptor: descriptor, serverName: Self.serverName,
+            now: { clock.seconds }, randomBytes: { RandomCounter().next($0) }
+        )
+        // A session minted under generation 1 is not valid against generation 2.
+        await #expect(throws: (any Error).self) {
+            try await rotated.authenticate(Self.signedRequest(
+                sessionIdentifier: session.sessionIdentifier,
+                sessionKey: session.sessionKey, sequence: 1
+            ))
+        }
+    }
+
+    @Test("Revocation clears every session and challenge")
+    func revokeAll() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        _ = try await Self.handshake(server, descriptor: descriptor)
+        await server.revokeAllSessions()
+        #expect(await server.liveSessionCount == 0)
+        #expect(await server.liveChallengeCount == 0)
+    }
+
+    @Test("Response sealing binds status, sequence, and body")
+    func responseSealing() async throws {
+        let descriptor = Self.signedDescriptor()
+        let (server, _) = Self.makeServer(descriptor: descriptor)
+        let session = try await Self.handshake(server, descriptor: descriptor)
+        let body = Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8)
+        let sealed = await server.sealResponse(
+            sessionIdentifier: session.sessionIdentifier, sequence: 1,
+            status: 200, contentType: "application/json", body: body
+        )
+        #expect(sealed == FirstPartyAuthProtocol.responseMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+            sequence: 1, status: 200, contentType: "application/json", body: body
+        ))
+        // An unknown session cannot be sealed for at all.
+        let unknown = await server.sealResponse(
+            sessionIdentifier: [UInt8](repeating: 0xAB, count: 16), sequence: 1,
+            status: 200, contentType: "application/json", body: body
+        )
+        #expect(unknown == nil)
+    }
+}
+
+// MARK: - Strict parser
+
+@Suite("First-party auth server — strict request parsing")
+struct StrictHTTPParserTests {
+
+    static func raw(_ text: String) -> Data { Data(text.utf8) }
+
+    @Test("A well-formed request parses and preserves duplicate headers in order")
+    func parsesAndPreservesDuplicates() {
+        let request = StrictHTTPParser.parse(Self.raw(
+            "POST /mcp/first-party HTTP/1.1\r\n"
+            + "Content-Type: application/json\r\n"
+            + "Mootx01-Sequence: 1\r\n"
+            + "Mootx01-Sequence: 2\r\n"
+            + "Content-Length: 2\r\n"
+            + "\r\n{}"
+        ), maxBodyBytes: 4096)
+        let parsed = try? #require(request)
+        #expect(parsed?.method == "POST")
+        #expect(parsed?.requestTarget == "/mcp/first-party")
+        // Both survive — which is the entire reason this parser exists.
+        #expect(parsed?.values(for: "mootx01-sequence") == ["1", "2"])
+        // …and a duplicated header therefore has no single value.
+        #expect(parsed?.singleValue(for: "mootx01-sequence") == nil)
+        #expect(parsed?.body == Data("{}".utf8))
+    }
+
+    @Test("Field names are matched case-insensitively")
+    func caseInsensitiveNames() {
+        let parsed = StrictHTTPParser.parse(Self.raw(
+            "POST /mcp/first-party HTTP/1.1\r\nCONTENT-TYPE: application/json\r\n\r\n"
+        ), maxBodyBytes: 4096)
+        #expect(parsed?.singleValue(for: "content-type") == "application/json")
+    }
+
+    @Test("Exactly the ASCII OWS the grammar allows is stripped, and nothing inside the value")
+    func onlyASCIIWhitespaceStripped() {
+        // Leading SP and trailing HTAB are the optional whitespace RFC 9110
+        // permits around a field value, so stripping them is authorized. Spacing
+        // INSIDE the value is part of the value and must survive — a parser that
+        // collapsed it would change the bytes a MAC was computed over.
+        let parsed = StrictHTTPParser.parse(Self.raw(
+            "POST /mcp/first-party HTTP/1.1\r\nX-Test: \tvalue  with   spacing\t \r\n\r\n"
+        ), maxBodyBytes: 4096)
+        #expect(parsed?.singleValue(for: "x-test") == "value  with   spacing")
+    }
+
+    @Test("A non-ASCII byte anywhere in the header block refuses the whole request")
+    func nonASCIIHeaderRefused() {
+        // RFC 9110 deprecates obs-text in field values, and this lane has no use
+        // for it. Refusing outright is stricter than decoding leniently, and it
+        // removes the class of bug where two parsers disagree about how a
+        // non-ASCII byte decodes — which for a MAC-bearing header means they
+        // disagree about what was signed.
+        #expect(StrictHTTPParser.parse(Self.raw(
+            "POST /mcp/first-party HTTP/1.1\r\nX-Test: \u{00A0}value\r\n\r\n"
+        ), maxBodyBytes: 4096) == nil)
+    }
+
+    @Test("Malformed requests are refused rather than normalized", arguments: [
+        // Obsolete line folding.
+        "POST /mcp/first-party HTTP/1.1\r\nContent-Type: application/\r\n json\r\n\r\n",
+        // Bare LF is not a line ending in HTTP/1.1.
+        "POST /mcp/first-party HTTP/1.1\nContent-Type: application/json\r\n\r\n",
+        // Whitespace before the colon.
+        "POST /mcp/first-party HTTP/1.1\r\nContent-Type : application/json\r\n\r\n",
+        // Two spaces in the start line.
+        "POST  /mcp/first-party HTTP/1.1\r\n\r\n",
+        // Content-Length disagrees with the body — the smuggling primitive.
+        "POST /mcp/first-party HTTP/1.1\r\nContent-Length: 99\r\n\r\n{}",
+        // Non-canonical Content-Length.
+        "POST /mcp/first-party HTTP/1.1\r\nContent-Length: 02\r\n\r\n{}",
+        // Duplicate Content-Length.
+        "POST /mcp/first-party HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+        // Transfer-Encoding is the other half of request smuggling.
+        "POST /mcp/first-party HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        // A body with no Content-Length at all.
+        "POST /mcp/first-party HTTP/1.1\r\n\r\n{}",
+        // Empty field name.
+        "POST /mcp/first-party HTTP/1.1\r\n: value\r\n\r\n",
+        // No header terminator.
+        "POST /mcp/first-party HTTP/1.1\r\n",
+    ])
+    func malformedRefused(text: String) {
+        #expect(StrictHTTPParser.parse(Self.raw(text), maxBodyBytes: 4096) == nil)
+    }
+
+    @Test("A body larger than the cap is refused, never truncated")
+    func oversizeBodyRefused() {
+        let body = String(repeating: "a", count: 100)
+        let text = "POST /mcp/first-party HTTP/1.1\r\nContent-Length: 100\r\n\r\n" + body
+        #expect(StrictHTTPParser.parse(Self.raw(text), maxBodyBytes: 50) == nil)
+    }
+}
+
+// MARK: - Test doubles
+
+/// A clock the tests drive by hand. Injected everywhere a security deadline is
+/// evaluated, because expiry that cannot be advanced cannot be tested.
+final class ManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64 = 1_766_000_100
+
+    var seconds: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func advance(_ delta: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        value += delta
+    }
+}
+
+/// Deterministic stand-in for `SecRandomCopyBytes`. Counter-driven so nonces and
+/// session identifiers are distinct and reproducible across a run.
+final class RandomCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counter: UInt64 = 0
+
+    func next(_ count: Int) -> [UInt8] {
+        lock.lock(); defer { lock.unlock() }
+        counter += 1
+        var out = [UInt8](repeating: 0, count: count)
+        for index in 0..<min(8, count) {
+            out[index] = UInt8(truncatingIfNeeded: counter >> (UInt64(index) * 8))
+        }
+        return out
+    }
+}
