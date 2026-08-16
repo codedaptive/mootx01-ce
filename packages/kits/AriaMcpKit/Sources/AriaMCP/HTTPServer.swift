@@ -446,6 +446,16 @@ public struct HTTPServer: Sendable {
     /// so SSE connections cannot starve POST / JSON-RPC traffic. Injectable for
     /// testing (default: process-wide `globalSSEConcurrencyGate`).
     public let sseConcurrencyGate: ConcurrencyGate
+    /// The first-party authenticated lane, or `nil` — the default, and what
+    /// every production construction site gets.
+    ///
+    /// `nil` makes the ENTIRE `/mcp/first-party` subtree unavailable: no
+    /// handshake route, no request route, and no capability advertisement. The
+    /// resident daemon (`ResidentDaemon.swift`) and the CLI never pass one, so
+    /// the lane is dark by construction rather than by a runtime flag someone
+    /// remembered to leave off. MACD-2c supplies the signed provider that will
+    /// eventually populate it.
+    public let firstPartyAuth: FirstPartyAuthServer?
 
     public init(
         dispatcher: ARIA_MCPDispatcher,
@@ -453,7 +463,8 @@ public struct HTTPServer: Sendable {
         maxBodyBytes: Int = 4 * 1024 * 1024,
         topologyReader: (@Sendable (String?) async -> Data?)? = nil,
         concurrencyGate: ConcurrencyGate = globalConcurrencyGate,
-        sseConcurrencyGate: ConcurrencyGate = globalSSEConcurrencyGate
+        sseConcurrencyGate: ConcurrencyGate = globalSSEConcurrencyGate,
+        firstPartyAuth: FirstPartyAuthServer? = nil
     ) {
         self.dispatcher = dispatcher
         self.port = port
@@ -461,6 +472,7 @@ public struct HTTPServer: Sendable {
         self.topologyReader = topologyReader
         self.concurrencyGate = concurrencyGate
         self.sseConcurrencyGate = sseConcurrencyGate
+        self.firstPartyAuth = firstPartyAuth
     }
 
     /// Bind the loopback listener and serve until the process is terminated.
@@ -498,6 +510,7 @@ public struct HTTPServer: Sendable {
         let reader = self.topologyReader
         let gate = self.concurrencyGate
         let sseGate = self.sseConcurrencyGate
+        let firstParty = self.firstPartyAuth
         let thread = Thread {
             while true {
                 guard let cfd = POSIXSocket.acceptOne(listenFD) else { continue }
@@ -530,7 +543,8 @@ public struct HTTPServer: Sendable {
                         maxBodyBytes: maxBody,
                         topologyReader: reader,
                         gate: gate,
-                        sseGate: sseGate
+                        sseGate: sseGate,
+                        firstPartyAuth: firstParty
                     )
                 }
             }
@@ -598,13 +612,22 @@ public struct HTTPServer: Sendable {
     /// release the normal gate slot early and acquire a slot from the dedicated
     /// `sseGate` instead. The SSE gate is held for the full stream lifetime; the
     /// normal gate is free immediately.
+    ///
+    /// FIRST-PARTY LANE. When `firstPartyAuth` is nil — the default, and what
+    /// every production caller and every pre-existing test passes — this method
+    /// behaves EXACTLY as it did before the lane existed, down to reading the
+    /// request through `LoopbackHTTP.HTTPRequest.read`. That is deliberate: the
+    /// strongest possible guarantee that the third-party lane did not regress is
+    /// that its code path is literally untouched. Only when a first-party server
+    /// is configured does the raw, strictly-parsed read path engage.
     static func serve(
         _ fd: Int32,
         dispatcher: ARIA_MCPDispatcher,
         maxBodyBytes: Int,
         topologyReader: (@Sendable (String?) async -> Data?)? = nil,
         gate: ConcurrencyGate = globalConcurrencyGate,
-        sseGate: ConcurrencyGate = globalSSEConcurrencyGate
+        sseGate: ConcurrencyGate = globalSSEConcurrencyGate,
+        firstPartyAuth: FirstPartyAuthServer? = nil
     ) async {
         // Phase 2: wait for a concurrency slot. This is the async suspension
         // point — the Task suspends (freeing its cooperative-pool thread)
@@ -655,14 +678,65 @@ public struct HTTPServer: Sendable {
         // the read blocks — matching moot-mgr's readRequestOffPool and the Rust
         // dedicated-thread-per-connection model. The 30s SO_RCVTIMEO below still
         // bounds a slow-header attacker exactly as before.
-        let request: HTTPRequest? = await withCheckedContinuation { (cont: CheckedContinuation<HTTPRequest?, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                var tv = timeval(tv_sec: 30, tv_usec: 0)
-                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-                cont.resume(returning: HTTPRequest.read(fd: fd, maxBodyBytes: maxBodyBytes))
+        //
+        // TWO READERS, ONE FLOW. With no first-party server configured — every
+        // production caller and every pre-existing test — the original
+        // `HTTPRequest.read` path runs verbatim. With one configured, the bytes
+        // are read raw and parsed by the strict parser so duplicate header lines
+        // and exact field values survive for the MAC check; the collapsed view
+        // handed to `route()` reproduces `HTTPRequest`'s own last-wins
+        // semantics, so a third-party request behaves identically either way.
+        var strictRequest: StrictHTTPRequest?
+        let request: HTTPRequest?
+        if firstPartyAuth != nil {
+            let raw: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var tv = timeval(tv_sec: 30, tv_usec: 0)
+                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                    cont.resume(returning: Self.readRawRequest(fd: fd, maxBodyBytes: maxBodyBytes))
+                }
+            }
+            guard let raw, let strict = StrictHTTPParser.parse(raw, maxBodyBytes: maxBodyBytes) else {
+                // Unparseable under the strict grammar. Refused, never guessed
+                // at: an ambiguous request on an authenticated lane is a refused
+                // request.
+                _ = global4xxCounter.add(1, ordering: .relaxed)
+                HTTPResponse(
+                    status: 400,
+                    headers: ["Content-Type": "application/json"],
+                    body: Data(#"{"error":"bad_request"}"#.utf8)
+                ).send(fd: fd)
+                return
+            }
+            strictRequest = strict
+            request = Self.collapsed(strict)
+        } else {
+            request = await withCheckedContinuation { (cont: CheckedContinuation<HTTPRequest?, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var tv = timeval(tv_sec: 30, tv_usec: 0)
+                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                    cont.resume(returning: HTTPRequest.read(fd: fd, maxBodyBytes: maxBodyBytes))
+                }
             }
         }
         guard let request else { return }
+
+        // The authenticated subtree. Handled here, before the origin guard, the
+        // GET host guard, the SSE branch, and `route()` — so no side channel
+        // under `/mcp/first-party` can be reached by any path that does not go
+        // through the MAC middleware first.
+        if let firstPartyAuth, let strict = strictRequest,
+           Self.isFirstPartyTarget(strict.requestTarget) {
+            let response = await Self.routeFirstParty(strict, dispatcher: dispatcher, auth: firstPartyAuth)
+            switch response.status {
+            case 400..<500: _ = global4xxCounter.add(1, ordering: .relaxed)
+            case 500..<600: _ = global5xxCounter.add(1, ordering: .relaxed)
+            default: break
+            }
+            if response.status != 202 { _ = globalRPCCounter.add(1, ordering: .relaxed) }
+            response.send(fd: fd)
+            return
+        }
 
         // DNS-rebinding guard: applies to ALL GET requests including SSE. A browser from
         // a rebinding domain always sends a non-loopback Host; native MCP clients omit it.
@@ -828,6 +902,21 @@ public struct HTTPServer: Sendable {
             )
         }
 
+        // The first-party subtree never reaches `route()` when a first-party
+        // server is configured — `serve()` handles it before this point. So
+        // arriving here means the lane is NOT configured, and the entire subtree
+        // must be unavailable. Without this guard a POST to /mcp/first-party
+        // would fall through to the JSON-RPC parser below and be dispatched
+        // WITHOUT authentication, which is the precise failure the lane exists
+        // to prevent.
+        guard !Self.isFirstPartyTarget(request.path) else {
+            return HTTPResponse(
+                status: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"not_found"}"#.utf8)
+            )
+        }
+
         // GET routes: read-only topology, admin estate, and lattice address snapshots.
         // Served before the POST guard so the transport supports both JSON-RPC (POST)
         // and side-channel read endpoints (GET) on the same loopback listener.
@@ -911,6 +1000,279 @@ public struct HTTPServer: Sendable {
         }
 
         return encodedResponse(response)
+    }
+
+    // MARK: - First-party authenticated lane
+    //
+    // Everything below is reachable only when an `FirstPartyAuthServer` was
+    // supplied. With none, `isFirstPartyTarget` is never consulted and the whole
+    // subtree falls through to `route()`, which 404s it (see the guard there).
+
+    /// True when a request target addresses the first-party subtree.
+    ///
+    /// Matched as the exact path or a path-segment prefix, so `/mcp/first-partyX`
+    /// is NOT first-party and cannot smuggle a request past the gate by sharing
+    /// a textual prefix.
+    static func isFirstPartyTarget(_ target: String) -> Bool {
+        let base = FirstPartyAuthProtocol.requestPath
+        if target == base { return true }
+        return target.hasPrefix(base + "/") || target.hasPrefix(base + "?")
+    }
+
+    /// Read a complete request as raw bytes, mirroring `HTTPRequest.read`'s
+    /// framing: accumulate until CRLFCRLF, then read exactly `Content-Length`
+    /// more. Returns the full byte string for the strict parser to judge.
+    static func readRawRequest(fd: Int32, maxBodyBytes: Int, maxHeaderBytes: Int = 64 * 1024) -> Data? {
+        let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        var buffer = Data()
+        var headerEnd: Range<Data.Index>?
+        while headerEnd == nil {
+            if let found = buffer.range(of: terminator) { headerEnd = found; break }
+            if buffer.count > maxHeaderBytes { return nil }
+            guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { return nil }
+            buffer.append(chunk)
+        }
+        guard let headerEnd else { return nil }
+
+        // Parse only enough of the header block to learn Content-Length; the
+        // strict parser re-reads and judges the whole thing afterwards.
+        let headerData = buffer[buffer.startIndex..<headerEnd.lowerBound]
+        guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
+        var declared = 0
+        for line in headerText.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[line.startIndex..<colon].lowercased()
+            guard name == "content-length" else { continue }
+            let raw = line[line.index(after: colon)...].trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+            guard let value = Int(raw), value >= 0, value <= maxBodyBytes else { return nil }
+            declared = value
+        }
+
+        var body = Data(buffer[headerEnd.upperBound...])
+        while body.count < declared {
+            guard let chunk = POSIXSocket.recv(fd, max: 16 * 1024), !chunk.isEmpty else { break }
+            body.append(chunk)
+        }
+        // Hand back exactly the header block, the terminator, and the declared
+        // body. A body longer than Content-Length is a framing error the strict
+        // parser will refuse rather than silently keep.
+        return Data(buffer[buffer.startIndex..<headerEnd.upperBound]) + body
+    }
+
+    /// Collapse a strictly-parsed request into the `HTTPRequest` shape the
+    /// third-party routes expect.
+    ///
+    /// Reproduces `LoopbackHTTP.HTTPRequest.parse`'s own semantics deliberately:
+    /// lowercased names and last-wins on duplicates. The lossy behaviour is
+    /// correct HERE — this value only ever reaches the third-party routes, which
+    /// must behave exactly as they did before this lane existed. The lossless
+    /// view is kept separately for the MAC check.
+    static func collapsed(_ strict: StrictHTTPRequest) -> HTTPRequest {
+        var headers: [String: String] = [:]
+        for field in strict.headers { headers[field.name] = field.value }
+        let path: String
+        let query: String
+        if let mark = strict.requestTarget.firstIndex(of: "?") {
+            path = String(strict.requestTarget[strict.requestTarget.startIndex..<mark])
+            query = String(strict.requestTarget[strict.requestTarget.index(after: mark)...])
+        } else {
+            path = strict.requestTarget
+            query = ""
+        }
+        return HTTPRequest(
+            method: strict.method, path: path, query: query, headers: headers, body: strict.body
+        )
+    }
+
+    /// Route one request on the authenticated first-party lane.
+    ///
+    /// Only three targets exist: the two handshake steps and the request lane
+    /// itself. Everything else under the subtree — GET, SSE, control, topology,
+    /// unlock — is 404, because a side channel that skips the middleware is a
+    /// side channel that skips authentication.
+    static func routeFirstParty(
+        _ request: StrictHTTPRequest,
+        dispatcher: ARIA_MCPDispatcher,
+        auth: FirstPartyAuthServer
+    ) async -> HTTPResponse {
+        // Only POST exists on this lane.
+        guard request.method == FirstPartyAuthProtocol.requestMethod else {
+            return firstPartyError(status: 405, code: "method_not_allowed")
+        }
+
+        switch request.requestTarget {
+        case FirstPartyAuthProtocol.challengePath:
+            return await firstPartyChallenge(request, auth: auth)
+        case FirstPartyAuthProtocol.establishPath:
+            return await firstPartyEstablish(request, auth: auth)
+        case FirstPartyAuthProtocol.requestPath:
+            return await firstPartyDispatch(request, dispatcher: dispatcher, auth: auth)
+        default:
+            return firstPartyError(status: 404, code: "not_found")
+        }
+    }
+
+    /// A bounded error response. Carries a short code and nothing else — never a
+    /// proof, a MAC, a key, or an internal error's description.
+    static func firstPartyError(status: Int, code: String) -> HTTPResponse {
+        HTTPResponse(
+            status: status,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"error":"\#(code)"}"#.utf8)
+        )
+    }
+
+    /// Handshake step 1.
+    static func firstPartyChallenge(
+        _ request: StrictHTTPRequest, auth: FirstPartyAuthServer
+    ) async -> HTTPResponse {
+        guard let contentType = request.singleValue(for: "content-type"),
+              contentType.lowercased() == FirstPartyAuthProtocol.contentType else {
+            return firstPartyError(status: 415, code: "unsupported_media_type")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let nonceRaw = object["clientNonce"] as? String,
+              let digestRaw = object["descriptorDigest"] as? String,
+              let clientNonce = FirstPartyAuthProtocol.base64URLDecode(nonceRaw),
+              let digest = FirstPartyAuthProtocol.base64URLDecode(digestRaw) else {
+            return firstPartyError(status: 400, code: "bad_request")
+        }
+        do {
+            let issued = try await auth.challenge(clientNonce: clientNonce, descriptorDigest: digest)
+            let payload: [String: Any] = [
+                "sessionIdentifier": FirstPartyAuthProtocol.base64URLEncode(issued.sessionIdentifier),
+                "serverNonce": FirstPartyAuthProtocol.base64URLEncode(issued.serverNonce),
+                "issuedAt": issued.issuedAt,
+                "idleExpiry": issued.idleExpiry,
+                "absoluteExpiry": issued.absoluteExpiry,
+                "serverProof": FirstPartyAuthProtocol.base64URLEncode(issued.serverProof),
+            ]
+            guard let body = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+                return firstPartyError(status: 500, code: "internal_error")
+            }
+            return .json(status: 200, body: body)
+        } catch {
+            return firstPartyError(status: 401, code: "unauthorized")
+        }
+    }
+
+    /// Handshake step 2.
+    static func firstPartyEstablish(
+        _ request: StrictHTTPRequest, auth: FirstPartyAuthServer
+    ) async -> HTTPResponse {
+        guard let contentType = request.singleValue(for: "content-type"),
+              contentType.lowercased() == FirstPartyAuthProtocol.contentType else {
+            return firstPartyError(status: 415, code: "unsupported_media_type")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let sessionRaw = object["sessionIdentifier"] as? String,
+              let proofRaw = object["clientProof"] as? String,
+              let sessionIdentifier = FirstPartyAuthProtocol.base64URLDecode(sessionRaw),
+              let clientProof = FirstPartyAuthProtocol.base64URLDecode(proofRaw) else {
+            return firstPartyError(status: 400, code: "bad_request")
+        }
+        do {
+            let proof = try await auth.establish(
+                sessionIdentifier: sessionIdentifier, clientProof: clientProof
+            )
+            let payload = ["establishmentProof": FirstPartyAuthProtocol.base64URLEncode(proof)]
+            guard let body = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+                return firstPartyError(status: 500, code: "internal_error")
+            }
+            return .json(status: 200, body: body)
+        } catch {
+            return firstPartyError(status: 401, code: "unauthorized")
+        }
+    }
+
+    /// The authenticated request lane.
+    ///
+    /// The middleware runs to completion before `JSONValue.parse` is reached —
+    /// an unauthenticated peer never reaches the JSON parser, let alone the
+    /// dispatcher. Every response leaving here is MACed, including the empty 204
+    /// a notification receives and any error emitted after authenticated
+    /// dispatch.
+    static func firstPartyDispatch(
+        _ request: StrictHTTPRequest,
+        dispatcher: ARIA_MCPDispatcher,
+        auth: FirstPartyAuthServer
+    ) async -> HTTPResponse {
+        let authenticated: FirstPartyAuthenticatedRequest
+        do {
+            authenticated = try await auth.authenticate(request)
+        } catch let error as FirstPartyAuthError {
+            // A replay is a conflict rather than a credential failure, and a
+            // wrong media type is neither; everything else is 401. No branch
+            // carries any detail beyond a short code.
+            switch error {
+            case .replayedSequence, .sequenceExhausted:
+                return firstPartyError(status: 409, code: "conflict")
+            case .malformedRequest:
+                return firstPartyError(status: 415, code: "unsupported_media_type")
+            default:
+                return firstPartyError(status: 401, code: "unauthorized")
+            }
+        } catch {
+            return firstPartyError(status: 401, code: "unauthorized")
+        }
+
+        // Authenticated. Only now is the body parsed.
+        let parsed: JSONValue
+        do {
+            parsed = try JSONValue.parse(authenticated.body)
+        } catch {
+            return await sealed(
+                auth: auth, authenticated: authenticated,
+                response: jsonRPCError(.null, code: JSONRPCErrorCode.parseError, message: "Parse error")
+            )
+        }
+        guard let rpc = JSONRPCRequest.decode(parsed) else {
+            return await sealed(
+                auth: auth, authenticated: authenticated,
+                response: jsonRPCError(
+                    .null, code: JSONRPCErrorCode.invalidRequest,
+                    message: "Invalid Request: malformed JSON-RPC envelope"
+                )
+            )
+        }
+        guard let response = await dispatcher.handle(rpc) else {
+            // Notification. It receives a MACed empty 204 rather than the
+            // third-party lane's bare 202: an unauthenticated "nothing happened"
+            // is as useful to an attacker as a forged result.
+            return await sealed(
+                auth: auth, authenticated: authenticated, response: HTTPResponse(status: 204)
+            )
+        }
+        return await sealed(auth: auth, authenticated: authenticated, response: encodedResponse(response))
+    }
+
+    /// Stamp the response MAC onto an outgoing first-party response.
+    ///
+    /// The MAC covers the status, the content type, and the exact body, bound to
+    /// the request's sequence — so a response cannot be replayed as the answer
+    /// to a different request, and a 200 cannot be downgraded to a 401 in
+    /// flight.
+    static func sealed(
+        auth: FirstPartyAuthServer,
+        authenticated: FirstPartyAuthenticatedRequest,
+        response: HTTPResponse
+    ) async -> HTTPResponse {
+        var out = response
+        let contentType = out.headers["Content-Type"] ?? ""
+        guard let mac = await auth.sealResponse(
+            sessionIdentifier: authenticated.sessionIdentifier,
+            sequence: authenticated.sequence,
+            status: UInt16(out.status),
+            contentType: contentType,
+            body: out.body
+        ) else {
+            // The session vanished between authentication and sealing (an
+            // expiry or a revocation). An unMACed body must never leave this
+            // lane, so the request fails rather than answering in the clear.
+            return firstPartyError(status: 401, code: "unauthorized")
+        }
+        out.headers[FirstPartyAuthProtocol.responseMACHeader] = FirstPartyAuthProtocol.base64URLEncode(mac)
+        return out
     }
 
     /// Encode a JSON-RPC response into a 200 application/json HTTP response,

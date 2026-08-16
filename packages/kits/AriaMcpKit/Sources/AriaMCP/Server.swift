@@ -79,10 +79,36 @@ public struct ARIA_MCPDispatcher: Sendable {
     public let tools: [ProjectedTool]
     public let tooling: ToolDispatcher
 
-    public init(info: ServerInfo, tooling: ToolDispatcher) {
+    /// The authenticated first-party identity this dispatcher reports, or `nil`
+    /// on the ordinary third-party lane.
+    ///
+    /// Defaulted to `nil`, which is load-bearing rather than convenient: every
+    /// existing construction site — the resident daemon, the CLI, the app, and
+    /// every test — inherits it and therefore produces byte-identical
+    /// `initialize` output. The extra `serverInfo` fields and the
+    /// `authenticated-first-party` capability appear ONLY when a first-party
+    /// server has supplied a verified identity, so the dispatcher can never
+    /// claim a capability the lane has not actually configured.
+    public let firstPartyIdentity: FirstPartyServerIdentity?
+
+    public init(
+        info: ServerInfo,
+        tooling: ToolDispatcher,
+        firstPartyIdentity: FirstPartyServerIdentity? = nil
+    ) {
         self.info = info
         self.tools = ToolProjection.tools()
         self.tooling = tooling
+        self.firstPartyIdentity = firstPartyIdentity
+    }
+
+    /// This dispatcher with a first-party identity attached.
+    ///
+    /// `FirstPartyAuthServer` holds one of these so the authenticated lane can
+    /// answer truthfully while the third-party dispatcher it was derived from
+    /// keeps reporting exactly what it reported before.
+    public func withFirstPartyIdentity(_ identity: FirstPartyServerIdentity) -> ARIA_MCPDispatcher {
+        ARIA_MCPDispatcher(info: info, tooling: tooling, firstPartyIdentity: identity)
     }
 
     /// Handle one parsed inbound request. Returns the response or `nil`
@@ -189,9 +215,40 @@ public struct ARIA_MCPDispatcher: Sendable {
             // field. Respond with our latest per the MCP spec §3 mandate.
             negotiated = Self.latestSupportedProtocolVersion
         }
+        // First-party lane only: the identity the client will compare against
+        // the descriptor it already verified. Every value is drawn from that
+        // same verified descriptor, so a truthful serverInfo and a verified
+        // descriptor cannot disagree — if they could, the client would have no
+        // way to tell which was lying.
+        //
+        // On the third-party lane `firstPartyIdentity` is nil, no extra key is
+        // emitted, and the response bytes are exactly what they were before this
+        // capability existed.
+        var serverInfoFields: [String: JSONValue] = [
+            "name": .string(info.name),
+            "version": .string(info.version),
+        ]
+        var capabilityFields: [String: JSONValue] = [:]
+        if let identity = firstPartyIdentity {
+            serverInfoFields["name"] = .string(identity.name)
+            serverInfoFields["version"] = .string(identity.binaryVersion)
+            serverInfoFields["instanceIdentifier"] = .string(identity.instanceIdentifier.uuidString)
+            serverInfoFields["estateIdentifier"] = .string(identity.estateIdentifier.uuidString)
+            serverInfoFields["descriptorGeneration"] = .integer(Int64(identity.descriptorGeneration))
+            serverInfoFields["credentialGeneration"] = .integer(Int64(identity.credentialGeneration))
+            serverInfoFields["contractRevision"] = .integer(Int64(identity.contractRevision))
+            serverInfoFields["mcpProtocolVersion"] = .string(identity.mcpProtocolVersion)
+            // Advertised only here, and only because reaching this branch means
+            // a validated root, an active descriptor, a bounded session store,
+            // and the request/response MAC middleware are all present — the
+            // `FirstPartyAuthServer` that supplied this identity is what proves
+            // each of them exists.
+            capabilityFields["authenticated-first-party"] = .object([:])
+        }
+
         let result: JSONValue = .object([
             "protocolVersion": .string(negotiated),
-            "capabilities": .object([
+            "capabilities": .object(capabilityFields.merging([
                 "tools": .object([:]),
                 // Resources and prompts are advertised (v1.0 conformance per
                 // ARIA_MCP_SPEC_v0.2 §9). Lists are empty until v1.1 implements
@@ -205,11 +262,8 @@ public struct ARIA_MCPDispatcher: Sendable {
                 "prompts": .object(["listChanged": .bool(false)]),
                 // Logging is advertised; the server logs to stderr per §5.
                 "logging": .object([:]),
-            ]),
-            "serverInfo": .object([
-                "name": .string(info.name),
-                "version": .string(info.version),
-            ]),
+            ]) { current, _ in current }),
+            "serverInfo": .object(serverInfoFields),
         ])
         return result
     }
