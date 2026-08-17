@@ -201,7 +201,13 @@ public struct DescriptorPublisher: Sendable {
         else {
             throw DaemonProviderError.publishPreconditionFailed(.authenticatorIncomplete)
         }
-        try SecureFiles.atomicReplace(Self.encode(descriptor), at: descriptorFile)
+        // A serialization failure yields empty bytes; publishing an empty
+        // record would be a self-inflicted substitution. Refuse instead.
+        let encoded = Self.encode(descriptor)
+        guard !encoded.isEmpty else {
+            throw DaemonProviderError.publishPreconditionFailed(.descriptorMalformed)
+        }
+        try SecureFiles.atomicReplace(encoded, at: descriptorFile)
     }
 
     /// Remove the published record ONLY when it is this provider's own:
