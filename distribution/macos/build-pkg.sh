@@ -38,7 +38,11 @@ DAEMON_BIN="${6:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$SCRIPT_DIR"
-WORK="$(mktemp -d)"
+# Explicit temp root: `mktemp -d` with no template does not reliably honor
+# TMPDIR on macOS (it can fall back to the per-user confstr directory), and
+# build-product placement is a policy matter for CI and dev-volume builds
+# alike. Naming the template makes the location observable and overridable.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/mootx01-pkg-build.XXXXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 PKG_ID="com.codedaptive.mootx01"
