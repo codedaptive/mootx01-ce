@@ -412,6 +412,49 @@ public enum DaemonBundle {
         [bundleExecutableURL(homeDirectory: homeDirectory).path, residentModeArgument]
     }
 
+    /// Run one READ-ONLY mode of the installed daemon bundle executable and
+    /// capture its single-line JSON report. Shared by `install` and `upgrade`
+    /// so the two commands cannot drift (and so the drain/wait ordering is
+    /// correct in exactly one place).
+    ///
+    /// stdout AND stderr are drained to EOF BEFORE `waitUntilExit()`: a child
+    /// that fills a pipe buffer blocks forever if the parent waits first, and
+    /// a census report on a machine with many candidates is not guaranteed to
+    /// be small.
+    ///
+    /// - Parameters:
+    ///   - mode: A read-only shell mode (`census`, `self-report`). Never a
+    ///     mode with side effects.
+    ///   - homeDirectory: The user's home directory.
+    /// - Returns: The exit code and the trimmed stdout line (nil when empty).
+    public static func runReadOnlyMode(
+        _ mode: String, homeDirectory: URL
+    ) -> (code: Int32, output: String?) {
+        let executable = bundleExecutableURL(homeDirectory: homeDirectory)
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            return (-1, nil)
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [mode]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return (-1, nil)
+        }
+        // Drain both pipes to EOF first; only then wait for the child.
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: outData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (process.terminationStatus, (text?.isEmpty ?? true) ? nil : text)
+    }
+
     /// Every artifact the daemon-bundle installation OWNS — the only things
     /// uninstall may remove. Estate databases, migration receipts, backups,
     /// key material, and every census candidate are NOT here and are NEVER

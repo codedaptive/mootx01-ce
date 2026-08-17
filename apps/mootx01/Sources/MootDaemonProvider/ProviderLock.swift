@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - MACD-2c1 — provider root, filesystem hygiene, and the exclusive lock
 //
@@ -234,7 +235,103 @@ public enum SecureFiles {
         try openValidatedCore(url, flags: flags, create: false, missingIsNil: true)
     }
 
-    /// Read every byte from a validated descriptor.
+    /// The I/O chunk size for every BOUNDED (streaming) path below: 256 KiB.
+    /// Large enough that syscall overhead is irrelevant beside SHA-256 work,
+    /// small enough that peak resident memory is a constant regardless of
+    /// estate size — a multi-gigabyte estate must never be slurped into RAM
+    /// (Perkins/Adams: `mootx01 install` runs the census on real estates).
+    public static let streamChunkBytes = 256 * 1024
+
+    /// SHA-256 hex of everything readable from `fd`, computed INCREMENTALLY
+    /// over fixed-size chunks. Same algorithm as
+    /// `FirstPartyAuthProtocol.sha256` (CryptoKit SHA-256) — the difference is
+    /// bounded memory, not a second algebra.
+    ///
+    /// - Returns: Lowercase hex digest.
+    /// - Throws: `DaemonProviderError.hygieneViolation(.unopenable)` on a read
+    ///   fault — a partial digest is never returned.
+    public static func streamingDigestHex(fd: Int32) throws -> String {
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: streamChunkBytes)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { raw in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<count]))
+            }
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// SHA-256 hex of the file at `url`, opened through the FULL hygiene
+    /// matrix and streamed (bounded memory).
+    public static func streamingDigestHex(of url: URL) throws -> String {
+        let fd = try openValidated(url, flags: O_RDONLY, create: false)
+        defer { close(fd) }
+        return try streamingDigestHex(fd: fd)
+    }
+
+    /// Copy `source` to `destination` in fixed-size chunks, computing the
+    /// SHA-256 of the bytes AS THEY ARE WRITTEN, then `fsync` the file and its
+    /// parent directory.
+    ///
+    /// Streaming and single-pass on purpose: a copy that first slurps and then
+    /// re-reads to digest holds the whole estate twice and can be raced
+    /// between the two passes. Here the digest describes exactly the bytes
+    /// this call wrote.
+    ///
+    /// The destination is created with `O_EXCL` — a pre-existing file at the
+    /// transaction's incoming path is an attack or a bug, and either refuses.
+    ///
+    /// - Returns: Lowercase hex digest of the copied bytes.
+    public static func streamingCopyDigestHex(from source: URL, to destination: URL) throws -> String {
+        let sourceFD = try openValidated(source, flags: O_RDONLY, create: false)
+        defer { close(sourceFD) }
+        let destinationFD = try openValidated(
+            destination, flags: O_WRONLY | O_EXCL, create: true
+        )
+        var closed = false
+        defer { if !closed { close(destinationFD) } }
+
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: streamChunkBytes)
+        while true {
+            let readCount = read(sourceFD, &buffer, buffer.count)
+            if readCount < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            if readCount == 0 { break }
+            buffer.withUnsafeBytes { raw in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<readCount]))
+            }
+            var written = 0
+            while written < readCount {
+                let result = buffer.withUnsafeBufferPointer { pointer -> Int in
+                    write(destinationFD, pointer.baseAddress! + written, readCount - written)
+                }
+                guard result > 0 else { throw DaemonProviderError.hygieneViolation(.unopenable) }
+                written += result
+            }
+        }
+        guard fsync(destinationFD) == 0 else {
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+        close(destinationFD)
+        closed = true
+        // fsync the parent so the new file's directory entry is durable.
+        let directoryFD = open(
+            destination.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC | O_DIRECTORY
+        )
+        if directoryFD >= 0 {
+            fsync(directoryFD)
+            close(directoryFD)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Read every byte from a validated descriptor. For SMALL state files
+    /// only (descriptor, generations, journal, receipt — all size-bounded by
+    /// their own strict decoders). Large-file paths use the streaming
+    /// primitives above.
     public static func readAll(fd: Int32) throws -> [UInt8] {
         var bytes = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 4096)

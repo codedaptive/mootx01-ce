@@ -851,6 +851,38 @@ private final class FakeFileMigration: FileMigrationAuthority, @unchecked Sendab
     var recorded: [String] { lock.lock(); defer { lock.unlock() }; return events }
 }
 
+/// A receipt store wrapper that can fail a chosen WRITE — the only way to
+/// reach the durable boundary AFTER the atomic rename and BEFORE the receipt
+/// is finalized (Adams CRITICAL-2a).
+private final class CrashingReceiptStore: MigrationReceiptPersisting, @unchecked Sendable {
+    private let lock = NSLock()
+    private let inner: MigrationReceiptStore
+    /// Fail the write that would move the receipt to this state.
+    var failWriteOfState: MigrationReceipt.State?
+    private(set) var writtenStates: [MigrationReceipt.State] = []
+
+    init(inner: MigrationReceiptStore) { self.inner = inner }
+
+    func load() throws -> MigrationReceipt? { try inner.load() }
+
+    func write(_ receipt: MigrationReceipt, lockProof: ProviderLockProof) throws {
+        lock.lock()
+        let shouldFail = failWriteOfState == receipt.state
+        if !shouldFail { writtenStates.append(receipt.state) }
+        lock.unlock()
+        if shouldFail {
+            // The staged receipt is already durable; the rename already
+            // happened. This is the crash between rename and finalize.
+            throw DaemonProviderError.migrationFault(.injectedFailure)
+        }
+        try inner.write(receipt, lockProof: lockProof)
+    }
+
+    var recordedStates: [MigrationReceipt.State] {
+        lock.lock(); defer { lock.unlock() }; return writtenStates
+    }
+}
+
 private struct MigratorHarness {
     let scratch: ConvergenceScratch
     let source: URL
@@ -858,6 +890,11 @@ private struct MigratorHarness {
     let sourceAccess: FakeSourceAccess
     let files: FakeFileMigration
     let receipts: MigrationReceiptStore
+    /// The injectable wrapper the migrator actually uses.
+    let crashingReceipts: CrashingReceiptStore
+    /// The one-use grant envelope this transaction consumed (a stand-in file
+    /// with non-secret bytes; the machine must remove it and verify absence).
+    let grantMaterial: URL
     let handle: ProviderLockHandle
 
     init() throws {
@@ -874,14 +911,17 @@ private struct MigratorHarness {
         receipts = MigrationReceiptStore(
             fileURL: scratch.url.appendingPathComponent("migration-receipt.v1.json")
         )
+        crashingReceipts = CrashingReceiptStore(inner: receipts)
+        grantMaterial = scratch.url.appendingPathComponent("migration-grant.v1.json")
+        try Data(#"{"proof":"stand-in envelope"}"#.utf8).write(to: grantMaterial)
         handle = try ProviderLock.acquire(
             at: scratch.url.appendingPathComponent("provider.lock"), context: .production
         )
     }
 
-    func migrator() -> DefaultEstateMigrator {
+    func migrator(keyTransition: KeyTransition = .escrowedExistingKey) -> DefaultEstateMigrator {
         DefaultEstateMigrator(
-            source: sourceAccess, files: files, receipts: receipts,
+            source: sourceAccess, files: files, receipts: crashingReceipts,
             lockProof: handle.proof,
             installationRoot: fixedRoot,
             transaction: MigrationTransaction(
@@ -893,7 +933,9 @@ private struct MigratorHarness {
                 backupDirectory: scratch.url.appendingPathComponent("backup"),
                 grantDigestHex: "aa" ,
                 generations: fixedGenerations,
-                staleAccepted: false
+                staleAccepted: false,
+                keyTransition: keyTransition,
+                grantMaterialURL: grantMaterial
             ),
             clock: fixedClock(2_000)
         )
@@ -951,24 +993,101 @@ struct MigrationMachineTests {
         #expect(try harness.receipts.load()?.state == .committed)
     }
 
-    @Test("crash after rename before finalize converges to verify-and-finalize on resume")
-    func crashAfterRename() async throws {
+    @Test("crash at the PRE-RENAME copy verification leaves no canonical and resumes to committed")
+    func crashAtPreRenameVerification() async throws {
         let harness = try MigratorHarness()
         defer { harness.teardown() }
+        // The destination verification that runs BEFORE the rename (the
+        // incoming copy's read-only open) — distinct from the post-rename
+        // resume verification exercised below.
         harness.sourceAccess.crashAt = .verify
         let migrator = harness.migrator()
         await #expect(throws: DaemonProviderError.migrationFault(.injectedFailure)) {
             _ = try await migrator.run()
         }
-        // Wait — destination verify happens BEFORE rename (incoming verify).
-        // The crash-at-verify case is the pre-rename verify; covered below.
-        // This assertion documents whichever durable state resulted is
-        // resumable to committed.
+        // Pre-staging failure: no receipt, no canonical, source retained.
+        #expect(try harness.receipts.load() == nil)
+        #expect(!FileManager.default.fileExists(atPath: harness.canonical.path))
+        #expect(FileManager.default.fileExists(atPath: harness.source.path))
         harness.sourceAccess.crashAt = .none
-        let resumed = harness.migrator()
-        let outcome = try await resumed.run()
+        let outcome = try await harness.migrator().run()
         #expect(outcome == .committed)
         #expect(FileManager.default.fileExists(atPath: harness.source.path))
+    }
+
+    @Test("crash BETWEEN rename and finalize resumes staged+canonical to verify-and-finalize")
+    func crashBetweenRenameAndFinalize() async throws {
+        let harness = try MigratorHarness()
+        defer { harness.teardown() }
+        // Fail exactly the finalize write: the staged receipt is already
+        // durable and the rename has already happened.
+        harness.crashingReceipts.failWriteOfState = .committed
+        await #expect(throws: DaemonProviderError.migrationFault(.injectedFailure)) {
+            _ = try await harness.migrator().run()
+        }
+        // The durable crash state KONG-3 exists to create: staged receipt
+        // WITH a canonical estate present, lineage intact.
+        #expect(try harness.receipts.load()?.state == .staged)
+        #expect(FileManager.default.fileExists(atPath: harness.canonical.path))
+        #expect(FileManager.default.fileExists(atPath: harness.source.path))
+        #expect(harness.crashingReceipts.recordedStates == [.staged])
+        let renamesBefore = harness.files.recorded.filter { $0 == "rename" }.count
+        #expect(renamesBefore == 1)
+
+        // Resume: verify-and-finalize — never a second copy or rename.
+        harness.crashingReceipts.failWriteOfState = nil
+        let outcome = try await harness.migrator().run()
+        #expect(outcome == .committed)
+        #expect(try harness.receipts.load()?.state == .committed)
+        #expect(harness.files.recorded.filter { $0 == "rename" }.count == renamesBefore)
+        #expect(harness.files.recorded.filter { $0 == "copy" }.count == 1)
+        // The resume path verified the CANONICAL file (not the incoming copy).
+        #expect(harness.sourceAccess.recorded.filter { $0 == "verify-destination" }.count == 2)
+        #expect(FileManager.default.fileExists(atPath: harness.source.path))
+    }
+
+    @Test("the grant material is removed after committed success, absence verified")
+    func grantMaterialRemovedAfterCommit() async throws {
+        let harness = try MigratorHarness()
+        defer { harness.teardown() }
+        #expect(FileManager.default.fileExists(atPath: harness.grantMaterial.path))
+        let outcome = try await harness.migrator().run()
+        #expect(outcome == .committed)
+        #expect(!FileManager.default.fileExists(atPath: harness.grantMaterial.path))
+        // Idempotent: a second run over the committed receipt still reports
+        // clean rather than tripping on the already-removed material.
+        #expect(try await harness.migrator().run() == .alreadyCommitted)
+    }
+
+    @Test("the receipt records the DERIVED key transition, not a hard-coded one")
+    func keyTransitionIsDerived() async throws {
+        // Escrowed grant → escrowed-existing-key.
+        let escrowed = try MigratorHarness()
+        _ = try await escrowed.migrator(keyTransition: .escrowedExistingKey).run()
+        #expect(try escrowed.receipts.load()?.keyTransition == .escrowedExistingKey)
+        escrowed.teardown()
+        // No escrow travelled → shared-existing (previously unreachable).
+        let shared = try MigratorHarness()
+        _ = try await shared.migrator(keyTransition: .sharedExisting).run()
+        #expect(try shared.receipts.load()?.keyTransition == .sharedExisting)
+        shared.teardown()
+    }
+
+    @Test("KeyTransition.derive maps the escrow marker and refuses on an escrow refusal")
+    func keyTransitionDerivation() {
+        #expect(KeyTransition.derive(
+            marker: .escrowed, decision: .useEscrowedKeyAfterReadOnlyVerify
+        ) == .escrowedExistingKey)
+        #expect(KeyTransition.derive(
+            marker: .none, decision: .useEscrowedKeyAfterReadOnlyVerify
+        ) == .sharedExisting)
+        // A refusal is not a transition: no transaction may be built from it.
+        #expect(KeyTransition.derive(
+            marker: .escrowed, decision: .refuse(.keyAbsentForCiphertext)
+        ) == nil)
+        #expect(KeyTransition.derive(
+            marker: .none, decision: .refuse(.plaintextRequiresEncryptionUpgrade)
+        ) == nil)
     }
 
     @Test("a committed receipt makes re-running the machine an idempotent no-op")
@@ -982,24 +1101,55 @@ struct MigrationMachineTests {
         #expect(harness.files.recorded.filter { $0 == "rename" }.count == renamesAfterFirst)
     }
 
-    @Test("verification failure quarantines the canonical and never touches the source")
-    func verifyFailureQuarantines() async throws {
+    @Test("a staged+canonical resume whose verification fails QUARANTINES the canonical")
+    func stagedCanonicalVerificationFailureQuarantines() async throws {
         let harness = try MigratorHarness()
         defer { harness.teardown() }
-        // First run to committed, then poison a re-verify pass: simulate a
-        // staged resume whose destination verification fails.
-        harness.files.crashAt = .rename
+        // Reach the exact durable state: staged receipt + canonical present.
+        harness.crashingReceipts.failWriteOfState = .committed
         await #expect(throws: DaemonProviderError.migrationFault(.injectedFailure)) {
             _ = try await harness.migrator().run()
         }
-        harness.files.crashAt = .none
-        harness.sourceAccess.crashAt = .verify
-        let resumed = harness.migrator()
-        let disposition = try await resumed.runExpectingFailure()
-        #expect(disposition == .recoveryRequired || disposition == .quarantined)
+        #expect(try harness.receipts.load()?.state == .staged)
+        #expect(FileManager.default.fileExists(atPath: harness.canonical.path))
+        // Now corrupt the canonical so the resume's digest check fails: the
+        // machine must quarantine what it created, never adopt it.
+        harness.crashingReceipts.failWriteOfState = nil
+        try Data("corrupted-canonical".utf8).write(to: harness.canonical)
+
+        let disposition = try await harness.migrator().runExpectingFailure()
+        // STRICT single outcome — no disjunction masking which leg ran.
+        #expect(disposition == .quarantined)
+        #expect(harness.files.recorded.contains("quarantine"))
+        #expect(try harness.receipts.load()?.state == .quarantined)
+        // The canonical was RENAMED aside (never unlinked) and is readable in
+        // the transaction's quarantine directory.
+        #expect(!FileManager.default.fileExists(atPath: harness.canonical.path))
+        let quarantined = harness.scratch.url
+            .appendingPathComponent("quarantine")
+            .appendingPathComponent(harness.canonical.lastPathComponent)
+        #expect(FileManager.default.fileExists(atPath: quarantined.path))
+        #expect(try Data(contentsOf: quarantined) == Data("corrupted-canonical".utf8))
+        // Terminal abort also removed the burnt grant material.
+        #expect(!FileManager.default.fileExists(atPath: harness.grantMaterial.path))
         // The source was never deleted or mutated on ANY path.
         #expect(FileManager.default.fileExists(atPath: harness.source.path))
         #expect(try Data(contentsOf: harness.source) == Data("legacy-estate-bytes".utf8))
+    }
+
+    @Test("a pre-rename failure with no canonical lands in recoveryRequired, source retained")
+    func preRenameFailureRecoveryRequired() async throws {
+        let harness = try MigratorHarness()
+        defer { harness.teardown() }
+        harness.files.crashAt = .rename
+        let disposition = try await harness.migrator().runExpectingFailure()
+        // STRICT: no canonical exists, so quarantine is impossible.
+        #expect(disposition == .recoveryRequired)
+        #expect(!harness.files.recorded.contains("quarantine"))
+        #expect(try harness.receipts.load()?.state == .recoveryRequired)
+        #expect(FileManager.default.fileExists(atPath: harness.source.path))
+        #expect(try Data(contentsOf: harness.source) == Data("legacy-estate-bytes".utf8))
+        #expect(!FileManager.default.fileExists(atPath: harness.grantMaterial.path))
     }
 
     @Test("a released lock proof refuses every step (hold-then-verify)")
@@ -1085,6 +1235,74 @@ struct MigrationReceiptTests {
         try Data("not json".utf8).write(to: scratch.url.appendingPathComponent("receipt.json"))
         #expect(throws: DaemonProviderError.migrationFault(.receiptUnreadable)) {
             _ = try store.load()
+        }
+    }
+}
+
+// MARK: - Streaming digest / chunked copy (MAJOR-5)
+
+@Suite("Bounded-memory file primitives")
+struct StreamingPrimitiveTests {
+
+    @Test("the streaming digest equals the one-shot algebra across chunk boundaries")
+    func digestEquivalence() throws {
+        let scratch = try ConvergenceScratch()
+        defer { scratch.remove() }
+        // Sizes straddling the 256 KiB chunk: empty, one byte, exactly one
+        // chunk, one chunk plus one, and two chunks plus a remainder.
+        let chunk = SecureFiles.streamChunkBytes
+        for size in [0, 1, chunk, chunk + 1, 2 * chunk + 7] {
+            let file = scratch.url.appendingPathComponent("blob-\(size).bin")
+            var bytes = [UInt8](repeating: 0, count: size)
+            for index in bytes.indices { bytes[index] = UInt8(index % 251) }
+            try Data(bytes).write(to: file)
+            let streamed = try SecureFiles.streamingDigestHex(of: file)
+            let oneShot = FirstPartyAuthProtocol.sha256(bytes)
+                .map { String(format: "%02x", $0) }.joined()
+            #expect(streamed == oneShot, "size \(size)")
+        }
+    }
+
+    @Test("the chunked copy reproduces the bytes and returns their digest in one pass")
+    func chunkedCopy() throws {
+        let scratch = try ConvergenceScratch()
+        defer { scratch.remove() }
+        let source = scratch.url.appendingPathComponent("source.bin")
+        let destination = scratch.url.appendingPathComponent("copy.bin")
+        var bytes = [UInt8](repeating: 0, count: SecureFiles.streamChunkBytes + 1_234)
+        for index in bytes.indices { bytes[index] = UInt8((index * 7) % 253) }
+        try Data(bytes).write(to: source)
+        let digest = try SecureFiles.streamingCopyDigestHex(from: source, to: destination)
+        #expect(try Data(contentsOf: destination) == Data(bytes))
+        #expect(digest == FirstPartyAuthProtocol.sha256(bytes)
+            .map { String(format: "%02x", $0) }.joined())
+    }
+
+    @Test("the chunked copy refuses to overwrite an existing destination (O_EXCL)")
+    func chunkedCopyRefusesOverwrite() throws {
+        let scratch = try ConvergenceScratch()
+        defer { scratch.remove() }
+        let source = scratch.url.appendingPathComponent("source.bin")
+        let destination = scratch.url.appendingPathComponent("copy.bin")
+        try Data("a".utf8).write(to: source)
+        try Data("pre-existing".utf8).write(to: destination)
+        #expect(throws: DaemonProviderError.hygieneViolation(.unopenable)) {
+            _ = try SecureFiles.streamingCopyDigestHex(from: source, to: destination)
+        }
+        // The pre-existing bytes are intact — a refusal never truncates.
+        #expect(try Data(contentsOf: destination) == Data("pre-existing".utf8))
+    }
+
+    @Test("the streaming digest applies the full hygiene matrix (symlink refused)")
+    func digestRefusesSymlink() throws {
+        let scratch = try ConvergenceScratch()
+        defer { scratch.remove() }
+        let real = scratch.url.appendingPathComponent("real.bin")
+        try Data("x".utf8).write(to: real)
+        let link = scratch.url.appendingPathComponent("link.bin")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(throws: DaemonProviderError.hygieneViolation(.symlink)) {
+            _ = try SecureFiles.streamingDigestHex(of: link)
         }
     }
 }

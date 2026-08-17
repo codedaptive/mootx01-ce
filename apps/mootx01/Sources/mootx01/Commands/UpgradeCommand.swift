@@ -246,6 +246,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 await runKGFactIdentityBackfill(home: home)
                 await runSharedContentReclaimIfPending(home: home)
                 updatePluginManifestIfNeeded(home: home)
+                convergeDaemonBundle(home: home)
                 restartAgents(home: home)
                 offerEstateEncryptionIfNeeded(home: home)
                 return
@@ -720,7 +721,60 @@ struct UpgradeCommand: AsyncParsableCommand {
         removeRedundantCodexDirectEntry(home: home)
         await runKGFactIdentityBackfill(home: home)
         await runSharedContentReclaimIfPending(home: home)
+        convergeDaemonBundle(home: home)
         restartAgents(home: home)
+    }
+
+    // MARK: - MACD-2c2 daemon-bundle convergence (macOS)
+
+    /// Converge the daemon provider bundle registration on upgrade, matching
+    /// the install path exactly: when the bundle artifact is present, write
+    /// the DISABLED bundle-form LaunchAgent plist (readback-verified) and
+    /// report the provider's read-only census.
+    ///
+    /// Deliberately NOT a takeover: the legacy raw-serve `com.mootx01.daemon`
+    /// registration, its plist, and its running job are RETAINED untouched
+    /// (different label — `DaemonBundle.launchAgentLabel`), because the bundle
+    /// provider does not prove authenticated readiness until estate hosting
+    /// activates. Nothing is bootstrapped or started here, and the arbiter —
+    /// never install source — decides any future duplicate.
+    ///
+    /// Idempotent: re-writing the same plist is the readback contract, and the
+    /// census creates nothing.
+    private func convergeDaemonBundle(home: URL) {
+        #if os(macOS)
+        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
+            // No bundle in this release payload: nothing to converge. Silent
+            // on purpose — an upgrade from a payload without the bundle is the
+            // ordinary case and not a fault.
+            return
+        }
+        print("\nConverging the daemon provider bundle\u{2026}")
+        switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
+        case let .installedDisabled(plistPath):
+            print("  \u{2713} Daemon provider bundle registered DISABLED (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    LaunchAgent: \(plistPath)")
+            if FileManager.default.fileExists(
+                atPath: MootPaths.daemonPlistURL(homeDirectory: home).path
+            ) {
+                print("    The existing resident daemon registration (\(MootPaths.daemonLabel)) is retained until the provider proves readiness.")
+            }
+        case let .launchctlFailed(message):
+            print("  \u{2717} Could not register the daemon provider bundle: \(message)")
+            return
+        case .installed, .binaryNotFound:
+            // installDaemonBundleDisabled never returns these cases.
+            return
+        }
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  \u{24D8} Census unavailable (provider exit \(census.code)).")
+        }
+        #endif
     }
 
     /// Re-execute the freshly installed binary to run `runConvergence` in the NEW

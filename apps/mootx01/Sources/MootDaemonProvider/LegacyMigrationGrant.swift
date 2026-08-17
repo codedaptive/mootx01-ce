@@ -586,12 +586,11 @@ public enum GrantResolutionPolicy {
         else {
             return .refused(.identityMismatch)
         }
-        // Content digest against the census oracle.
-        guard let contents = try? SecureFiles.readAll(fd: fd) else {
+        // Content digest against the census oracle — STREAMED (bounded
+        // memory: this verifies a whole estate file).
+        guard let digest = try? SecureFiles.streamingDigestHex(fd: fd) else {
             return .refused(.identityMismatch)
         }
-        let digest = FirstPartyAuthProtocol.sha256(contents)
-            .map { String(format: "%02x", $0) }.joined()
         guard digest == digestHex else {
             return .refused(.identityMismatch)
         }

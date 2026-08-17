@@ -61,8 +61,10 @@ public enum MigrationStep: Int, Sendable, Equatable, CaseIterable {
     /// The target provider proved authenticated readiness for the same
     /// estate UUID.
     case targetReady = 8
-    /// The receipt reached its terminal committed form and grant material
-    /// was removed.
+    /// The receipt reached its terminal committed form AND the one-use grant
+    /// material was removed with its absence verified (P-c2-5). Reached only
+    /// after `committed`; a machine that could not remove the material fails
+    /// with `.grantMaterialRetained` rather than claiming this state.
     case receiptFinal = 9
     /// Failure path: the canonical copy was quarantined (renamed aside,
     /// never unlinked).
@@ -142,25 +144,25 @@ public protocol FileMigrationAuthority: Sendable {
 }
 
 /// The production file-semantic conformer, built on `SecureFiles`' durable
-/// primitives. Bytes move through validated descriptors; every write is
-/// fsynced; the rename is `SecureFiles`-shaped (rename + parent fsync).
+/// primitives. Bytes move through validated descriptors in FIXED-SIZE CHUNKS
+/// (an estate is gigabytes — nothing here is ever resident whole); every write
+/// is fsynced; the rename is `SecureFiles`-shaped (rename + parent fsync).
 public struct SecureFileMigration: FileMigrationAuthority {
 
     public init() {}
 
     public func copyMainToIncoming(source: URL, incoming: URL) async throws -> String {
-        let bytes = try Self.readAllValidated(source)
         try FileManager.default.createDirectory(
             at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try SecureFiles.atomicReplace(Data(bytes), at: incoming)
-        return FirstPartyAuthProtocol.sha256(bytes).map { String(format: "%02x", $0) }.joined()
+        // Single-pass streaming copy: the returned digest describes exactly
+        // the bytes written, so no second read can be raced against the copy.
+        return try SecureFiles.streamingCopyDigestHex(from: source, to: incoming)
     }
 
     public func digestOf(url: URL) async throws -> String {
-        let bytes = try Self.readAllValidated(url)
-        return FirstPartyAuthProtocol.sha256(bytes).map { String(format: "%02x", $0) }.joined()
+        try SecureFiles.streamingDigestHex(of: url)
     }
 
     public func atomicRenameIntoCanonical(incoming: URL, canonical: URL) async throws {
@@ -190,20 +192,15 @@ public struct SecureFileMigration: FileMigrationAuthority {
     }
 
     public func preserveBackup(source: URL, backupDirectory: URL) async throws {
-        let bytes = try Self.readAllValidated(source)
         try FileManager.default.createDirectory(
             at: backupDirectory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try SecureFiles.atomicReplace(
-            Data(bytes), at: backupDirectory.appendingPathComponent(source.lastPathComponent)
-        )
-    }
-
-    private static func readAllValidated(_ url: URL) throws -> [UInt8] {
-        let fd = try SecureFiles.openValidated(url, flags: O_RDONLY, create: false)
-        defer { close(fd) }
-        return try SecureFiles.readAll(fd: fd)
+        let destination = backupDirectory.appendingPathComponent(source.lastPathComponent)
+        // O_EXCL inside the streaming copy: a backup that already exists is
+        // NOT overwritten — the immutable-backup contract means a second
+        // attempt refuses rather than replacing recoverable material.
+        _ = try SecureFiles.streamingCopyDigestHex(from: source, to: destination)
     }
 }
 
@@ -216,6 +213,32 @@ public enum KeyTransition: String, Sendable, Equatable {
     case escrowedExistingKey = "escrowed-existing-key"
     /// The key was already shared under the stable account; no transition.
     case sharedExisting = "shared-existing"
+
+    /// Derive the transition from the grant's escrow marker and the escrow
+    /// rules' decision (Adams MAJOR-6: the receipt must record what actually
+    /// happened, never a hard-coded assumption).
+    ///
+    /// - Parameters:
+    ///   - marker: The consumed grant's escrow marker.
+    ///   - decision: The `EscrowRules` verdict for the source. Only the
+    ///     use-the-escrowed-key verdict can produce an escrow transition; any
+    ///     refusal means no migration proceeds at all, so the caller must not
+    ///     build a transaction from it.
+    /// - Returns: The transition to bind into the receipt, or `nil` when the
+    ///   escrow rules refused (no transaction is legal).
+    public static func derive(
+        marker: EscrowMarker, decision: EscrowDecision
+    ) -> KeyTransition? {
+        guard decision == .useEscrowedKeyAfterReadOnlyVerify else { return nil }
+        switch marker {
+        case .escrowed:
+            return .escrowedExistingKey
+        case .none:
+            // No escrow travelled with the grant: the key was already
+            // reachable under the stable shared account.
+            return .sharedExisting
+        }
+    }
 }
 
 /// The MACed, idempotent migration receipt (KONG-3 corrected ordering:
@@ -446,9 +469,23 @@ public struct MigrationReceipt: Sendable, Equatable {
     }
 }
 
+/// The durable receipt persistence seam. The migrator depends on this
+/// protocol, not the concrete store, for two reasons: the receipt IS an
+/// authority (its ordering is the crash-safety contract, KONG-3), and every
+/// durable boundary must be independently fault-injectable — including the
+/// FINALIZE write that lands after the atomic rename, which no filesystem
+/// fake can reach.
+public protocol MigrationReceiptPersisting: Sendable {
+    /// Load the durable receipt, or `nil` when genuinely absent. Fail-closed
+    /// on any other fault.
+    func load() throws -> MigrationReceipt?
+    /// Durably persist `receipt`, serialized under the held provider lock.
+    func write(_ receipt: MigrationReceipt, lockProof: ProviderLockProof) throws
+}
+
 /// The durable receipt store: atomic, fsynced writes under the lock; reads
 /// through the full hygiene matrix, fail-closed.
-public struct MigrationReceiptStore: Sendable {
+public struct MigrationReceiptStore: MigrationReceiptPersisting, Sendable {
 
     private let fileURL: URL
 
@@ -518,12 +555,23 @@ public struct MigrationTransaction: Sendable, Equatable {
     public let generations: ProviderGenerations
     /// Whether the grant's bookmark resolution was accepted stale (P-c2-6d).
     public let staleAccepted: Bool
+    /// How the estate key transitioned — DERIVED by the caller from the
+    /// consumed grant's escrow marker and the `EscrowRules` decision
+    /// (`KeyTransition.derive`), never assumed by the migrator.
+    public let keyTransition: KeyTransition
+    /// The one-use grant envelope's location
+    /// (`ProviderRootLayout.migrationGrantFile`), or `nil` when this
+    /// transaction consumed no envelope (no sandboxed grant was required).
+    /// The machine removes it after committed success or terminal abort and
+    /// VERIFIES its absence (P-c2-5).
+    public let grantMaterialURL: URL?
 
     public init(
         transactionIdentifier: UUID, sourceClass: EstateCandidateClass,
         sourceURL: URL, canonicalURL: URL,
         incomingDirectory: URL, quarantineDirectory: URL, backupDirectory: URL,
-        grantDigestHex: String, generations: ProviderGenerations, staleAccepted: Bool
+        grantDigestHex: String, generations: ProviderGenerations, staleAccepted: Bool,
+        keyTransition: KeyTransition, grantMaterialURL: URL? = nil
     ) {
         self.transactionIdentifier = transactionIdentifier
         self.sourceClass = sourceClass
@@ -535,6 +583,8 @@ public struct MigrationTransaction: Sendable, Equatable {
         self.grantDigestHex = grantDigestHex
         self.generations = generations
         self.staleAccepted = staleAccepted
+        self.keyTransition = keyTransition
+        self.grantMaterialURL = grantMaterialURL
     }
 }
 
@@ -564,7 +614,7 @@ public actor DefaultEstateMigrator {
 
     private let source: any SourceEstateAccess
     private let files: any FileMigrationAuthority
-    private let receipts: MigrationReceiptStore
+    private let receipts: any MigrationReceiptPersisting
     private let lockProof: ProviderLockProof
     private let installationRoot: [UInt8]
     private let transaction: MigrationTransaction
@@ -576,7 +626,7 @@ public actor DefaultEstateMigrator {
     public init(
         source: any SourceEstateAccess,
         files: any FileMigrationAuthority,
-        receipts: MigrationReceiptStore,
+        receipts: any MigrationReceiptPersisting,
         lockProof: ProviderLockProof,
         installationRoot: [UInt8],
         transaction: MigrationTransaction,
@@ -624,6 +674,10 @@ public actor DefaultEstateMigrator {
             }
             switch existing.state {
             case .committed:
+                // Idempotent tail: a committed receipt whose grant material
+                // still exists (crash between finalize and removal) gets the
+                // removal completed here rather than left behind.
+                try removeGrantMaterial()
                 step = .receiptFinal
                 return .alreadyCommitted
             case .staged:
@@ -637,14 +691,30 @@ public actor DefaultEstateMigrator {
         return try await freshRun()
     }
 
-    /// Run with terminal-failure handling: on a migration failure, quarantine
-    /// a canonical this run created (rename aside, never unlink), durably
-    /// record the disposition, and return it. The source is never touched.
+    /// Run, converting a migration FAULT into its terminal disposition:
+    /// quarantine a canonical this run created (rename aside, never unlink),
+    /// durably record the disposition, remove the burnt grant material, and
+    /// return the disposition. The source is never touched on any path.
+    ///
+    /// This is the recovery entry point a supervisor calls when it wants the
+    /// disposition rather than the fault. A run that SUCCEEDS here is a
+    /// caller-sequencing error — the caller asked for failure handling on a
+    /// machine that had nothing to fail — and refuses with
+    /// `.sequenceViolation`; callers that may succeed use `run()`.
+    ///
+    /// NOTE (explicit deferral): `.rolledBack` has no producer in this
+    /// mission. Restoring a prior provider/configuration requires the
+    /// installer + resident authorities whose production conformers arrive
+    /// with MACD-3; until then every non-quarantinable failure lands in
+    /// `.recoveryRequired`, which retains the source and the backup and asks
+    /// for an operator. A rollback across an unsupported schema/auth
+    /// downgrade is the one outcome worse than a stalled migration, so
+    /// synthesizing one here would be the wrong kind of completeness.
     public func runExpectingFailure() async throws -> MigrationFailureDisposition {
         do {
             _ = try await run()
-            // The caller expected a failure disposition; a success here is a
-            // sequencing error in the TEST, not a machine state.
+            // Nothing failed: the caller's expectation, not the machine, is
+            // out of sequence.
             throw DaemonProviderError.migrationFault(.sequenceViolation)
         } catch let error as DaemonProviderError {
             guard case .migrationFault = error else { throw error }
@@ -661,6 +731,8 @@ public actor DefaultEstateMigrator {
                     receipt.state = .quarantined
                     try receipts.write(receipt.sealed(installationRoot: installationRoot), lockProof: lockProof)
                 }
+                // Terminal abort: the burnt grant's material goes too.
+                try removeGrantMaterial()
                 step = .quarantined
                 return .quarantined
             }
@@ -668,6 +740,8 @@ public actor DefaultEstateMigrator {
                 receipt.state = .recoveryRequired
                 try receipts.write(receipt.sealed(installationRoot: installationRoot), lockProof: lockProof)
             }
+            // Terminal abort: the burnt grant's material goes too.
+            try removeGrantMaterial()
             step = .recoveryRequired
             return .recoveryRequired
         }
@@ -725,7 +799,7 @@ public actor DefaultEstateMigrator {
             destinationDigestHex: copyDigest,
             estateIdentifier: identity.estateIdentifier,
             schemaVersion: identity.schemaVersion,
-            keyTransition: .escrowedExistingKey,
+            keyTransition: transaction.keyTransition,
             credentialGeneration: transaction.generations.credential,
             providerGeneration: transaction.generations.provider,
             descriptorGeneration: transaction.generations.descriptor,
@@ -749,8 +823,33 @@ public actor DefaultEstateMigrator {
         committed.state = .committed
         committed.finalizedAt = clock()
         try receipts.write(committed.sealed(installationRoot: installationRoot), lockProof: lockProof)
+        // 8. The one-use grant material is removed ONLY after the receipt is
+        //    committed, and its absence is verified (P-c2-5). Ordering
+        //    matters: removing earlier would destroy the audit link before
+        //    the lineage was durable.
+        try removeGrantMaterial()
         step = .receiptFinal
         return .committed
+    }
+
+    /// Remove the consumed grant envelope and VERIFY its absence (P-c2-5:
+    /// "removed after committed success or terminal abort, absence verified").
+    ///
+    /// A no-op when the transaction consumed no envelope. Genuine absence is
+    /// success — the material may already have been removed by a previous
+    /// attempt of an idempotent resume. Anything still present after the
+    /// unlink is `.grantMaterialRetained`: opaque bookmark bytes outliving
+    /// their one use is precisely the containment failure the rule forbids,
+    /// so the machine reports it rather than claiming `receiptFinal`.
+    private func removeGrantMaterial() throws {
+        guard let url = transaction.grantMaterialURL else { return }
+        if unlink(url.path) != 0, errno != ENOENT {
+            throw DaemonProviderError.migrationFault(.grantMaterialRetained)
+        }
+        var status = stat()
+        guard lstat(url.path, &status) != 0, errno == ENOENT else {
+            throw DaemonProviderError.migrationFault(.grantMaterialRetained)
+        }
     }
 
     // MARK: Resume
@@ -774,6 +873,7 @@ public actor DefaultEstateMigrator {
             committed.state = .committed
             committed.finalizedAt = clock()
             try receipts.write(committed.sealed(installationRoot: installationRoot), lockProof: lockProof)
+            try removeGrantMaterial()
             step = .receiptFinal
             return .committed
         }

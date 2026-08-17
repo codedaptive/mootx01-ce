@@ -298,6 +298,25 @@ public enum DaemonShellMain {
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
 
+        // Receipt lineage: a COMMITTED receipt names the class it migrated
+        // from and the digest it migrated. Read it (read-only, fail-closed —
+        // an unreadable receipt yields no lineage rather than a guess) so the
+        // judge's already-converged and diverged-from-receipt dispositions are
+        // reachable in production rather than only in tests.
+        var committedReceipt: MigrationReceipt?
+        #if canImport(Security)
+        if let identity = try? SecCodeEntitlementReadback().processIdentity(),
+           let eligibility = try? ProviderEligibilityJudge.judge(identity),
+           let layout = try? ProviderRootLayout.resolve(
+               resolver: AppGroupRootResolver(),
+               groupIdentifier: eligibility.appGroupIdentifier
+           ),
+           let receipt = try? MigrationReceiptStore(fileURL: layout.migrationReceiptFile).load(),
+           receipt.state == .committed {
+            committedReceipt = receipt
+        }
+        #endif
+
         var candidateRecords: [CensusCandidateRecord] = []
         var reported: [[String: Any]] = []
         for (candidateClass, mainURL) in legacyCandidateLocations(home: home) {
@@ -305,12 +324,26 @@ public enum DaemonShellMain {
             // signed Keychain entitlement surface and census must never turn
             // an entitlement fault into a decision — reported honestly as
             // not-probed (the judge does not consume key reachability).
-            let record = DefaultEstateCensus.observeFileLevel(
+            var record = DefaultEstateCensus.observeFileLevel(
                 candidateClass: candidateClass,
                 mainURL: mainURL,
                 keyReachability: .notProbed,
                 receiptCoverage: .none
             )
+            // Coverage applies ONLY to the class the receipt actually names,
+            // and the digest decides unchanged vs changed.
+            if let receipt = committedReceipt, receipt.sourceClass == candidateClass,
+               case .present(_, _, _, _, let digest) = record.main {
+                record = CensusCandidateRecord(
+                    candidateClass: record.candidateClass,
+                    main: record.main, wal: record.wal,
+                    encryption: record.encryption,
+                    keyReachability: record.keyReachability,
+                    identity: record.identity,
+                    receiptCoverage: digest == receipt.sourceDigestHex
+                        ? .coveredUnchanged : .coveredChanged
+                )
+            }
             candidateRecords.append(record)
             reported.append(Self.reportEntry(for: record))
         }
@@ -394,6 +427,7 @@ public enum DaemonShellMain {
             entry["walBytes"] = NSNumber(value: bytes)
         }
         entry["encryption"] = record.encryption.rawValue
+        entry["receiptCoverage"] = record.receiptCoverage.rawValue
         return entry
     }
 

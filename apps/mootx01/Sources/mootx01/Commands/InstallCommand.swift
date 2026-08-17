@@ -765,33 +765,12 @@ struct InstallCommand: AsyncParsableCommand {
         }
         // Read-only census through the signed provider. Classifications and
         // digests only — the provider prints no raw paths.
-        let census = Self.runBundleMode(executable: bundleExecutable, mode: "census")
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
         if let output = census.output, census.code == 0 {
             print("  Census (read-only, provider-reported):")
             print("    \(output)")
         } else {
             print("  ⓘ Census unavailable (provider exit \(census.code)).")
-        }
-    }
-
-    /// Run one read-only mode of the daemon bundle executable, capturing its
-    /// single-line JSON report.
-    static func runBundleMode(executable: URL, mode: String) -> (code: Int32, output: String?) {
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = [mode]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return (process.terminationStatus, text?.isEmpty == true ? nil : text)
-        } catch {
-            return (-1, nil)
         }
     }
     #endif

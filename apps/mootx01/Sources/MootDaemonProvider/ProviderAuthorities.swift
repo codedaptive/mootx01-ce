@@ -118,6 +118,11 @@ public enum MigrationFault: String, Sendable, Equatable {
     case sequenceViolation = "sequence-violation"
     /// The escrow rules refused (never mint over ciphertext, P-c2-7).
     case escrowRefused = "escrow-refused"
+    /// The one-use grant material could not be removed (or was still present
+    /// after removal) once the receipt committed. Opaque bookmark bytes
+    /// outliving their single use is a containment failure (P-c2-5), so the
+    /// machine reports it instead of claiming a clean terminal state.
+    case grantMaterialRetained = "grant-material-retained"
 }
 
 /// Marker for the PRODUCTION Keychain authority (Perkins P-c2-1). The mint

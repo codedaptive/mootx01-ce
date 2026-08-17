@@ -369,8 +369,10 @@ public enum DefaultEstateCensus {
                 identity: nil, receiptCoverage: receiptCoverage
             )
         }
-        // Digest through a validated descriptor; an unreadable candidate is
-        // reported unreadable, never guessed at.
+        // Digest through a validated descriptor, STREAMED in fixed-size chunks:
+        // a real estate is gigabytes, and `mootx01 install` runs this census on
+        // real estates, so peak memory must be a constant. An unreadable
+        // candidate is reported unreadable, never guessed at.
         let digestHex: String
         do {
             guard let fd = try SecureFiles.openValidatedIfExists(mainURL, flags: O_RDONLY) else {
@@ -381,9 +383,7 @@ public enum DefaultEstateCensus {
                 )
             }
             defer { close(fd) }
-            let bytes = try SecureFiles.readAll(fd: fd)
-            digestHex = FirstPartyAuthProtocol.sha256(bytes)
-                .map { String(format: "%02x", $0) }.joined()
+            digestHex = try SecureFiles.streamingDigestHex(fd: fd)
         } catch {
             return CensusCandidateRecord(
                 candidateClass: candidateClass,
