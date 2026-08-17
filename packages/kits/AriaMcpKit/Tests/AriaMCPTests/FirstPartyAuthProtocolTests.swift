@@ -1664,6 +1664,45 @@ struct StrictHTTPParserTests {
         let text = "POST /mcp/first-party HTTP/1.1\r\nContent-Length: 100\r\n\r\n" + body
         #expect(StrictHTTPParser.parse(Self.raw(text), maxBodyBytes: 50) == nil)
     }
+
+    // Codex Security 92eb919d. Splitting on CRLF alone leaves a bare LF (or a
+    // bare CR) INSIDE a surviving header line, where a lenient downstream
+    // parser would see a line break this parser did not — the classic
+    // request-smuggling disagreement. Every byte of the header section must
+    // therefore be free of bare line endings, not just the start line.
+    @Test("Bare LF or bare CR anywhere in the header section refuses the whole request", arguments: [
+        // Bare LF inside a header value — a lenient parser reads a forged
+        // Authorization header where this parser read one field.
+        "POST /mcp/first-party HTTP/1.1\r\nX-A: a\nAuthorization: forged\r\n\r\n",
+        // LF-only ending between two header lines.
+        "POST /mcp/first-party HTTP/1.1\r\nX-A: 1\nX-B: 2\r\n\r\n",
+        // Bare CR inside a header value.
+        "POST /mcp/first-party HTTP/1.1\r\nX-A: a\rb\r\n\r\n",
+        // Bare LF as the final byte before the CRLFCRLF terminator.
+        "POST /mcp/first-party HTTP/1.1\r\nX-A: ok\n\r\n\r\n",
+        // Smuggled second Content-Length hidden behind a bare LF in a benign
+        // header — the shape a front/back parser pair disagrees about.
+        "POST /mcp/first-party HTTP/1.1\r\nX-Ignore: a\nContent-Length: 5\r\nContent-Length: 2\r\n\r\n{}",
+    ])
+    func bareLineEndingInHeaderRefused(text: String) {
+        #expect(StrictHTTPParser.parse(Self.raw(text), maxBodyBytes: 4096) == nil)
+    }
+
+    @Test("A well-formed CRLF request parses identically when its bytes arrive fragmented")
+    func fragmentedWellFormedRequestParses() {
+        // TCP delivers bytes at arbitrary boundaries — including mid-CRLF.
+        // Reassembly must be byte-transparent: the same bytes parse the same
+        // way no matter how they were fragmented in transit.
+        let fragments = [
+            "POST /mcp/first-party HT", "TP/1.1\r", "\nContent-Type: application/json\r\n",
+            "Content-Length: 2", "\r", "\n\r", "\n{}",
+        ]
+        var assembled = Data()
+        for fragment in fragments { assembled.append(Data(fragment.utf8)) }
+        let parsed = StrictHTTPParser.parse(assembled, maxBodyBytes: 4096)
+        #expect(parsed?.singleValue(for: "content-type") == "application/json")
+        #expect(parsed?.body == Data("{}".utf8))
+    }
 }
 
 // MARK: - Test doubles
