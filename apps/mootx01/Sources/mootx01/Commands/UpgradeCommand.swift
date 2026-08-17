@@ -866,6 +866,10 @@ struct UpgradeCommand: AsyncParsableCommand {
         case .installed(_, let dashboardURL):
             print("  \u{2713} Daemon and management console restarted.")
             print("  \u{2713} Dashboard: \(dashboardURL)")
+        case .installedDisabled:
+            // restart() never returns this case (it belongs to the disabled
+            // bundle-form install), but the vocabulary is one enum.
+            print("  \u{24D8} Daemon bundle registration is disabled-install; nothing to restart.")
         case let .launchctlFailed(msg):
             print("  \u{2717} launchctl error: \(msg)")
             print("    Restart manually: launchctl kickstart -k gui/$(id -u)/com.mootx01.daemon")

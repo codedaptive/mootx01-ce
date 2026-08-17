@@ -32,6 +32,10 @@ public enum LaunchAgent {
         /// LaunchAgent written and bootstrapped; carries the plist path and
         /// the dashboard URL to print.
         case installed(plistPath: String, dashboardURL: String)
+        /// MACD-2c2: the DISABLED bundle-form LaunchAgent plist was written
+        /// and verified by readback — deliberately NOT bootstrapped (the
+        /// daemon bundle activates with MACD-3). Carries the plist path.
+        case installedDisabled(plistPath: String)
         /// No moot-mgr binary to point the agent at (dev build of mootx01
         /// alone, or a non-macOS install).
         case binaryNotFound
@@ -67,13 +71,21 @@ public enum LaunchAgent {
     ///     resident mootx01 daemon needs this (MOOTX01_HTTP_PORT etc.); the
     ///     moot-mgr agent passes none. Emitted in sorted order so the plist is
     ///     deterministic (testable).
+    ///   - runAtLoad: launchd `RunAtLoad`. Defaults true (the legacy agents'
+    ///     contract). The MACD-2c2 daemon-bundle plist passes false — the
+    ///     DISABLED-install variant (KONG-4): registered, never auto-started.
+    ///   - keepAlive: launchd `KeepAlive`. Defaults true; the bundle plist
+    ///     passes false so a manual start of the not-yet-activated resident
+    ///     mode cannot make launchd thrash on its honest refusal exit.
     /// - Returns: the complete plist XML document.
     public static func makePlist(
         label: String,
         programArguments: [String],
         stdoutPath: String,
         stderrPath: String,
-        environmentVariables: [String: String] = [:]
+        environmentVariables: [String: String] = [:],
+        runAtLoad: Bool = true,
+        keepAlive: Bool = true
     ) -> String {
         // Assembled line-by-line (not a single multi-line literal) so the
         // optional EnvironmentVariables block can't trip Swift's multi-line-string
@@ -103,9 +115,9 @@ public enum LaunchAgent {
         }
         lines.append(contentsOf: [
             "    <key>RunAtLoad</key>",
-            "    <true/>",
+            runAtLoad ? "    <true/>" : "    <false/>",
             "    <key>KeepAlive</key>",
-            "    <true/>",
+            keepAlive ? "    <true/>" : "    <false/>",
             "    <key>ProcessType</key>",
             "    <string>Interactive</string>",
             "    <key>StandardOutPath</key>",
@@ -123,6 +135,73 @@ public enum LaunchAgent {
         s.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    // MARK: - MACD-2c2 — the daemon-bundle LaunchAgent (KONG-4)
+
+    /// The DISABLED-install bundle-form daemon plist: ProgramArguments point
+    /// INSIDE the bundle's `Contents/MacOS` (never a raw binary with
+    /// "serve"), `RunAtLoad` and `KeepAlive` are false, and the label is the
+    /// bundle's own (`DaemonBundle.launchAgentLabel`) so the legacy
+    /// raw-serve registration is retained untouched until authenticated
+    /// readiness (MACD-3). Pure — unit-testable without launchd.
+    public static func makeDaemonBundlePlist(homeDirectory: URL) -> String {
+        let logsDir = MootPaths.logsDirURL(homeDirectory: homeDirectory)
+        return makePlist(
+            label: DaemonBundle.launchAgentLabel,
+            programArguments: DaemonBundle.programArguments(homeDirectory: homeDirectory),
+            stdoutPath: logsDir.appendingPathComponent("mootx01-provider.out.log").path,
+            stderrPath: logsDir.appendingPathComponent("mootx01-provider.err.log").path,
+            runAtLoad: false,
+            keepAlive: false
+        )
+    }
+
+    // MARK: - MACD-2c2 — honest status vocabulary (P-c2-10)
+
+    /// What the status surface observed about the bundle registration.
+    public enum DaemonRegistrationObservation: String, Sendable, Equatable {
+        /// No registration found.
+        case none
+        /// A LaunchAgent registration exists.
+        case registered
+    }
+
+    /// What the status surface observed about the resident port.
+    public enum DaemonPortObservation: String, Sendable, Equatable {
+        /// Nothing answers.
+        case unbound
+        /// Something accepts a TCP connection — which proves NOTHING about
+        /// identity or readiness (port liveness never elects; Kong).
+        case answering
+    }
+
+    /// The one honest status line for the daemon provider (P-c2-10).
+    ///
+    /// Registration, PID, or an answering port is NEVER reported as a
+    /// running/ready server. Readiness comes exclusively from the provider's
+    /// OWN authenticated report (`providerReportedState`, the arbiter wire
+    /// encoding the signed provider printed) — passed through VERBATIM so
+    /// this surface owns no second copy of the arbiter vocabulary
+    /// ("parallel copies fail").
+    public static func honestServerStatus(
+        registration: DaemonRegistrationObservation,
+        port: DaemonPortObservation,
+        providerReportedState: String?
+    ) -> String {
+        if let state = providerReportedState {
+            return "provider: \(state)"
+        }
+        switch (registration, port) {
+        case (.registered, .answering):
+            return "registered; port answering (unverified — not proof of readiness)"
+        case (.registered, .unbound):
+            return "registered (not started)"
+        case (.none, .answering):
+            return "unverified port holder (not proof of readiness)"
+        case (.none, .unbound):
+            return "not installed"
+        }
     }
 
     #if os(macOS)
@@ -210,6 +289,33 @@ public enum LaunchAgent {
         guard result.ok else { return .launchctlFailed(result.detail) }
         let port = environment["MOOTX01_HTTP_PORT"] ?? "4242"
         return .installed(plistPath: plistURL.path, dashboardURL: "http://127.0.0.1:\(port)")
+    }
+
+    /// Write the DISABLED bundle-form daemon plist and verify it by readback
+    /// (P-c2-10: post-install plist readback against the generator's source
+    /// of truth). NEVER bootstraps: the daemon bundle registers disabled and
+    /// activates only with MACD-3. No launchctl call happens here at all.
+    public static func installDaemonBundleDisabled(homeDirectory: URL) -> Status {
+        let fm = FileManager.default
+        let plistURL = DaemonBundle.launchAgentPlistURL(homeDirectory: homeDirectory)
+        let expected = makeDaemonBundlePlist(homeDirectory: homeDirectory)
+        do {
+            try fm.createDirectory(
+                at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try expected.write(to: plistURL, atomically: true, encoding: .utf8)
+        } catch {
+            return .launchctlFailed("could not write daemon bundle plist: \(error)")
+        }
+        // Readback validation: the on-disk bytes must BE the generator's.
+        // A mismatch (partial write, interference, wrong file) is reported,
+        // never ignored — a plist that says something else is a different
+        // registration than the one we claim to have made.
+        guard let onDisk = try? String(contentsOf: plistURL, encoding: .utf8),
+              onDisk == expected else {
+            return .launchctlFailed("daemon bundle plist readback mismatch at \(plistURL.path)")
+        }
+        return .installedDisabled(plistPath: plistURL.path)
     }
 
     /// bootout → bootstrap (legacy load fallback) → kickstart for a written

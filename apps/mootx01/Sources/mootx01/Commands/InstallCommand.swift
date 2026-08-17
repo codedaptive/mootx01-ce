@@ -488,6 +488,10 @@ struct InstallCommand: AsyncParsableCommand {
                     print("")
                     print("  ✗ Could not start the management console via launchd: \(message)")
                     print("    Start it manually any time with:  moot-mgr serve")
+                case .installedDisabled:
+                    // install() never returns this case (it belongs to the
+                    // daemon-bundle flow below); the vocabulary is one enum.
+                    break
                 case .binaryNotFound:
                     print("")
                     print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
@@ -546,10 +550,22 @@ struct InstallCommand: AsyncParsableCommand {
                 print("")
                 print("  ✗ Could not start the resident daemon via launchd: \(message)")
                 print("    Start it manually any time with:  mootx01 serve --http 4242")
+            case .installedDisabled:
+                // installDaemon() never returns this case (it belongs to the
+                // daemon-bundle flow below); the vocabulary is one enum.
+                break
             case .binaryNotFound:
                 print("")
                 print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
             }
+
+            // MACD-2c2: the signed app-like daemon provider bundle. When the
+            // release payload placed it, register it DISABLED (KONG-4:
+            // installs target disabled; it activates with MACD-3) and run
+            // the provider's read-only census. The legacy raw-serve daemon
+            // above is RETAINED — plist, label, and job untouched — until
+            // the bundle provider proves authenticated readiness.
+            installDaemonBundleIfPresent(home: home)
         }
         #endif
 
@@ -717,4 +733,66 @@ struct InstallCommand: AsyncParsableCommand {
         LaunchAgent.uninstall(homeDirectory: home)
         #endif
     }
+
+    // MARK: - MACD-2c2 daemon bundle (macOS)
+
+    #if os(macOS)
+    /// Register the daemon provider bundle DISABLED and run its read-only
+    /// census, when the bundle artifact is present. Honest skips otherwise:
+    /// the census requires the SIGNED provider (only it can observe the
+    /// canonical App Group tier), so no bundle means no census — never a
+    /// CLI-side imitation of it.
+    private func installDaemonBundleIfPresent(home: URL) {
+        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
+            print("")
+            print("  ⓘ Daemon provider bundle not present — skipping its (disabled) registration.")
+            return
+        }
+        switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
+        case let .installedDisabled(plistPath):
+            print("")
+            print("  ✓ Daemon provider bundle registered DISABLED (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    LaunchAgent: \(plistPath)")
+            print("    The provider activates with a later release; nothing was started.")
+        case let .launchctlFailed(message):
+            print("")
+            print("  ✗ Could not register the daemon provider bundle: \(message)")
+            return
+        case .installed, .binaryNotFound:
+            // installDaemonBundleDisabled never returns these cases.
+            return
+        }
+        // Read-only census through the signed provider. Classifications and
+        // digests only — the provider prints no raw paths.
+        let census = Self.runBundleMode(executable: bundleExecutable, mode: "census")
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  ⓘ Census unavailable (provider exit \(census.code)).")
+        }
+    }
+
+    /// Run one read-only mode of the daemon bundle executable, capturing its
+    /// single-line JSON report.
+    static func runBundleMode(executable: URL, mode: String) -> (code: Int32, output: String?) {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [mode]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (process.terminationStatus, text?.isEmpty == true ? nil : text)
+        } catch {
+            return (-1, nil)
+        }
+    }
+    #endif
 }
