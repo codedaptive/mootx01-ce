@@ -378,10 +378,14 @@ public enum DaemonBundle {
     /// never has to rewrite the plist when activation lands.
     public static let residentModeArgument = "resident"
 
-    /// The installed bundle location: `<home>/.mootx01/Mootx01DaemonProvider.app`.
+    /// The installed bundle location:
+    /// `<home>/.mootx01/bin/Mootx01DaemonProvider.app`. It lives inside the
+    /// `bin/` payload tree deliberately: the pkg postinstall relocates the
+    /// staged `bin/` directory wholesale, so the bundle rides the SAME
+    /// validated placement path as the CLI binaries — one relocation
+    /// contract, no second placement rule.
     public static func installedBundleURL(homeDirectory: URL) -> URL {
-        homeDirectory
-            .appendingPathComponent(".mootx01", isDirectory: true)
+        MootPaths.installedBinaryDirURL(homeDirectory: homeDirectory)
             .appendingPathComponent(bundleName, isDirectory: true)
     }
 

@@ -198,11 +198,11 @@ struct DaemonBundleContractTests {
         #expect(DaemonBundle.residentModeArgument == "resident")
         #expect(
             DaemonBundle.installedBundleURL(homeDirectory: home).path ==
-            "/Users/test/.mootx01/Mootx01DaemonProvider.app"
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app"
         )
         #expect(
             DaemonBundle.bundleExecutableURL(homeDirectory: home).path ==
-            "/Users/test/.mootx01/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider"
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider"
         )
         #expect(
             DaemonBundle.launchAgentPlistURL(homeDirectory: home).path ==
@@ -218,7 +218,7 @@ struct DaemonBundleContractTests {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let arguments = DaemonBundle.programArguments(homeDirectory: home)
         #expect(arguments == [
-            "/Users/test/.mootx01/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider",
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider",
             "resident",
         ])
         #expect(arguments[0].contains("/Contents/MacOS/"))

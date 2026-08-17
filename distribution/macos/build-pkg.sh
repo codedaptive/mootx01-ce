@@ -2,7 +2,14 @@
 # build-pkg.sh — assemble the macOS .pkg installer from pre-built binaries.
 #
 # Usage:
-#   ./build-pkg.sh <version> <arch> <mootx01-binary> <moot-mgr-binary> <setup-binary>
+#   ./build-pkg.sh <version> <arch> <mootx01-binary> <moot-mgr-binary> <setup-binary> [daemon-binary]
+#
+# [daemon-binary] (MACD-2c2): the mootx01-daemon thin-shell executable. When
+# supplied it is wrapped app-like as bin/Mootx01DaemonProvider.app (the signed
+# daemon provider bundle) inside the payload; the postinstall's existing bin/
+# relocation places it at ~/.mootx01/bin/Mootx01DaemonProvider.app, where
+# `mootx01 install` registers it DISABLED (InstallerCore DaemonBundle is the
+# constant surface these spellings are parity-checked against).
 #
 # Produces: mootx01-<version>-macos-<arch>.pkg (signed + ready for notarization).
 #
@@ -22,11 +29,12 @@
 
 set -euo pipefail
 
-VERSION="${1:?Usage: build-pkg.sh <version> <arch> <mootx01> <moot-mgr> <setup>}"
+VERSION="${1:?Usage: build-pkg.sh <version> <arch> <mootx01> <moot-mgr> <setup> [daemon]}"
 ARCH="${2:?}"
 MOOTX01_BIN="${3:?}"
 MGR_BIN="${4:?}"
 SETUP_BIN="${5:?}"
+DAEMON_BIN="${6:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$SCRIPT_DIR"
@@ -49,6 +57,50 @@ mkdir -p "$PAYLOAD/bin"
 cp "$MOOTX01_BIN" "$PAYLOAD/bin/mootx01"
 cp "$MGR_BIN"     "$PAYLOAD/bin/moot-mgr"
 chmod 755 "$PAYLOAD/bin/mootx01" "$PAYLOAD/bin/moot-mgr"
+
+# 1b. MACD-2c2: wrap the daemon provider shell app-like as
+#     bin/Mootx01DaemonProvider.app. The bundle rides the bin/ relocation
+#     contract (postinstall places bin/ wholesale), so no second placement
+#     rule exists. LaunchAgent ProgramArguments point INSIDE this bundle's
+#     Contents/MacOS — never at a raw binary (mission hard rule); the
+#     spellings here are parity-checked against InstallerCore DaemonBundle.
+if [ -n "$DAEMON_BIN" ]; then
+    DAEMON_APP="$PAYLOAD/bin/Mootx01DaemonProvider.app"
+    mkdir -p "$DAEMON_APP/Contents/MacOS"
+    cp "$DAEMON_BIN" "$DAEMON_APP/Contents/MacOS/Mootx01DaemonProvider"
+    chmod 755 "$DAEMON_APP/Contents/MacOS/Mootx01DaemonProvider"
+    # A minimal, generated Info.plist: the bundle is a background executable
+    # (LSUIElement), identified as the DIRECT-install daemon provider —
+    # distinct from the sandboxed nested helper's identifier.
+    cat > "$DAEMON_APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.codedaptive.mootx01.macos.daemonprovider</string>
+    <key>CFBundleExecutable</key>
+    <string>Mootx01DaemonProvider</string>
+    <key>CFBundleName</key>
+    <string>Mootx01DaemonProvider</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION#v}</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+    if [ -n "${APP_IDENTITY:-}" ]; then
+        "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
+            --sign "$APP_IDENTITY" "$DAEMON_APP"
+        codesign --verify --strict --verbose=2 "$DAEMON_APP"
+        echo "Signed daemon provider bundle: $DAEMON_APP"
+    else
+        echo "WARNING: APP_IDENTITY not set — daemon provider bundle left unsigned"
+    fi
+fi
 
 # 2. Build the setup assistant .app bundle from the bare executable.
 APP="$PAYLOAD/Mootx01Setup.app"
