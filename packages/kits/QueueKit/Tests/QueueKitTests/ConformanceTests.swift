@@ -165,6 +165,52 @@ final class ConformanceTests {
             "Area 4 BLOCKING: duplicate claim detected")
     }
 
+    // MARK: - Claim-slot crash recovery (QUEUEKIT_SPEC I-3)
+
+    /// A process that dies between the two claim renames strands the job file
+    /// in claim/ under its prefixed name. The next mount's reclaimInFlight
+    /// must sweep it back to new/ under its original name so it is re-driven
+    /// exactly once. Rust twin: conformance.rs claim_orphan_reclaimed_on_mount.
+    @Test func claimOrphanReclaimedOnMount() async throws {
+        let backend = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 7))
+        let job = Job(
+            id: JobID.generate(),
+            streamID: StreamID(rawValue: "orphan"),
+            submittedAt: HLC(physicalTime: 9, logicalCount: 0, nodeID: 7),
+            priority: 50, payload: Data(), extensions: [:])
+        try await backend.write(job)
+
+        // Simulate a crash after claim step 1: the job file sits in claim/
+        // under its per-claim unique name, and new/ is empty.
+        let filename = WireFormat.filename(for: job)
+        let token = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "").lowercased()
+        try FileManager.default.moveItem(
+            at: root.appendingPathComponent("new/\(filename)"),
+            to: root.appendingPathComponent("claim/\(token)-\(filename)"))
+
+        // A name too short to carry the 33-char prefix is not a claim file
+        // and must be left in place, not mangled into new/.
+        FileManager.default.createFile(
+            atPath: root.appendingPathComponent("claim/stray").path,
+            contents: Data("not-a-claim".utf8))
+
+        // Fresh mount: reclaim must recover exactly the one stranded job.
+        let remounted = try FilesystemBackend(
+            root: root, hlcGenerator: HLCGenerator(nodeID: 7))
+        let reclaimed = try await remounted.reclaimInFlight()
+        #expect(reclaimed == 1,
+            "expected exactly the stranded claim reclaimed, got \(reclaimed)")
+
+        let drained = try await remounted.drainAvailable()
+        #expect(drained.count == 1, "reclaimed job must be re-driven once")
+        #expect(drained.first?.job.id == job.id)
+        #expect(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("claim/stray").path),
+            "non-claim file must be left in claim/ untouched")
+    }
+
     // MARK: - Area 5: Extension preservation
 
     @Test func area5Extensions() async throws {
