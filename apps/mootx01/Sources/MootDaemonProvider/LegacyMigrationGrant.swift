@@ -56,11 +56,21 @@ public struct MigrationChallenge: Sendable, Equatable {
     public let issuedAt: UInt64
     /// Expiry, epoch seconds.
     public let expiresAt: UInt64
+    /// The provider's CURRENT generations at issue. The minting app copies
+    /// these into the envelope, and the challenge digest (the MAC salt)
+    /// covers them — so an envelope can only ever verify with the exact
+    /// generations the provider challenged with, and a rotation between
+    /// challenge and consume burns the grant twice over (salt mismatch AND
+    /// the exactly-current credential check).
+    public let credentialGeneration: UInt64
+    public let providerGeneration: UInt64
+    public let descriptorGeneration: UInt64
 
     public init(
         challengeIdentifier: UUID, providerInstance: UUID,
         candidateClass: EstateCandidateClass, nonce: [UInt8],
-        issuedAt: UInt64, expiresAt: UInt64
+        issuedAt: UInt64, expiresAt: UInt64,
+        credentialGeneration: UInt64, providerGeneration: UInt64, descriptorGeneration: UInt64
     ) {
         self.challengeIdentifier = challengeIdentifier
         self.providerInstance = providerInstance
@@ -68,6 +78,9 @@ public struct MigrationChallenge: Sendable, Equatable {
         self.nonce = nonce
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt
+        self.credentialGeneration = credentialGeneration
+        self.providerGeneration = providerGeneration
+        self.descriptorGeneration = descriptorGeneration
     }
 
     /// SHA-256 of the canonical challenge transcript — the HKDF salt for the
@@ -82,7 +95,72 @@ public struct MigrationChallenge: Sendable, Equatable {
         encoder.appendBytes(nonce)
         encoder.appendUInt64(issuedAt)
         encoder.appendUInt64(expiresAt)
+        encoder.appendUInt64(credentialGeneration)
+        encoder.appendUInt64(providerGeneration)
+        encoder.appendUInt64(descriptorGeneration)
         return FirstPartyAuthProtocol.sha256(encoder.bytes)
+    }
+
+    /// The exact key set of the durable challenge file (the App Group wire
+    /// form the attended app reads; ARIA_MCP_SPEC §migration grant).
+    private static let recordFields: Set<String> = [
+        "challengeIdentifier", "providerInstance", "candidateClass", "nonce",
+        "issuedAt", "expiresAt",
+        "credentialGeneration", "providerGeneration", "descriptorGeneration",
+    ]
+
+    /// Canonical JSON for the App Group challenge file (sorted keys,
+    /// base64url nonce, decimal-string integers). Carries no secret: the
+    /// nonce is public challenge material; authentication comes from
+    /// K_install possession, never from the nonce (P-c2-3).
+    public func encoded() -> Data {
+        let object: [String: Any] = [
+            "challengeIdentifier": challengeIdentifier.uuidString,
+            "providerInstance": providerInstance.uuidString,
+            "candidateClass": candidateClass.rawValue,
+            "nonce": FirstPartyAuthProtocol.base64URLEncode(nonce),
+            "issuedAt": ProviderGenerations.wireEncode(issuedAt),
+            "expiresAt": ProviderGenerations.wireEncode(expiresAt),
+            "credentialGeneration": ProviderGenerations.wireEncode(credentialGeneration),
+            "providerGeneration": ProviderGenerations.wireEncode(providerGeneration),
+            "descriptorGeneration": ProviderGenerations.wireEncode(descriptorGeneration),
+        ]
+        return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+    }
+
+    /// Decode a durable challenge file. `nil` for anything malformed.
+    public static func decode(_ data: Data) -> MigrationChallenge? {
+        guard let object = FirstPartyAuthProtocol.strictJSONObject(
+            data, expected: recordFields, maxBytes: 4 * 1024
+        ) else { return nil }
+        guard
+            let challengeRaw = object["challengeIdentifier"] as? String,
+            let challengeIdentifier = UUID(uuidString: challengeRaw),
+            let instanceRaw = object["providerInstance"] as? String,
+            let providerInstance = UUID(uuidString: instanceRaw),
+            let classRaw = object["candidateClass"] as? String,
+            let candidateClass = EstateCandidateClass(rawValue: classRaw),
+            let nonceRaw = object["nonce"] as? String,
+            let nonce = FirstPartyAuthProtocol.base64URLDecode(nonceRaw),
+            let issuedRaw = object["issuedAt"] as? String,
+            let issuedAt = ProviderGenerations.wireDecode(issuedRaw),
+            let expiresRaw = object["expiresAt"] as? String,
+            let expiresAt = ProviderGenerations.wireDecode(expiresRaw),
+            let credentialRaw = object["credentialGeneration"] as? String,
+            let credentialGeneration = ProviderGenerations.wireDecode(credentialRaw),
+            let providerRaw = object["providerGeneration"] as? String,
+            let providerGeneration = ProviderGenerations.wireDecode(providerRaw),
+            let descriptorRaw = object["descriptorGeneration"] as? String,
+            let descriptorGeneration = ProviderGenerations.wireDecode(descriptorRaw)
+        else { return nil }
+        return MigrationChallenge(
+            challengeIdentifier: challengeIdentifier, providerInstance: providerInstance,
+            candidateClass: candidateClass, nonce: nonce,
+            issuedAt: issuedAt, expiresAt: expiresAt,
+            credentialGeneration: credentialGeneration,
+            providerGeneration: providerGeneration,
+            descriptorGeneration: descriptorGeneration
+        )
     }
 }
 

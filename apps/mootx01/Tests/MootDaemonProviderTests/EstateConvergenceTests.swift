@@ -395,7 +395,10 @@ private func makeChallenge(now: UInt64 = 1_000) -> MigrationChallenge {
         candidateClass: .sandboxedPro,
         nonce: [UInt8](repeating: 0x11, count: 32),
         issuedAt: now,
-        expiresAt: now + MigrationChallenge.challengeLifetime
+        expiresAt: now + MigrationChallenge.challengeLifetime,
+        credentialGeneration: fixedGenerations.credential,
+        providerGeneration: fixedGenerations.provider,
+        descriptorGeneration: fixedGenerations.descriptor
     )
 }
 
@@ -453,13 +456,15 @@ struct GrantEnvelopeTests {
         let challenge = makeChallenge()
         let envelope = makeEnvelope(challenge: challenge)
         #expect(envelope.verifyMAC(installationRoot: fixedRoot, challenge: challenge))
-        var otherChallenge = challenge
-        otherChallenge = MigrationChallenge(
+        let otherChallenge = MigrationChallenge(
             challengeIdentifier: challenge.challengeIdentifier,
             providerInstance: challenge.providerInstance,
             candidateClass: challenge.candidateClass,
             nonce: [UInt8](repeating: 0x22, count: 32),
-            issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt
+            issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt,
+            credentialGeneration: challenge.credentialGeneration,
+            providerGeneration: challenge.providerGeneration,
+            descriptorGeneration: challenge.descriptorGeneration
         )
         #expect(!envelope.verifyMAC(installationRoot: fixedRoot, challenge: otherChallenge))
         #expect(throws: DaemonProviderError.grantInvalid(.badMAC)) {
@@ -585,6 +590,17 @@ struct GrantEnvelopeTests {
                 currentGenerations: fixedGenerations
             )
         }
+    }
+
+    @Test("the challenge wire form round-trips strictly")
+    func challengeRoundTrip() {
+        let challenge = makeChallenge()
+        let data = challenge.encoded()
+        #expect(MigrationChallenge.decode(data) == challenge)
+        var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        object["extra"] = "field"
+        let widened = try? JSONSerialization.data(withJSONObject: object)
+        #expect(MigrationChallenge.decode(widened ?? Data()) == nil)
     }
 
     @Test("the durable form round-trips and refuses a wrong key set or oversize record")

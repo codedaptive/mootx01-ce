@@ -87,6 +87,24 @@ public struct ProviderRootLayout: Sendable, Equatable {
     /// and serialization guarantees of every other provider state file.
     public var migrationReceiptFile: URL { providerDirectory.appendingPathComponent("migration-receipt.v1.json") }
 
+    /// The migration CHALLENGE file (MACD-2c2): written by the provider when
+    /// it enters awaiting-migration-grant, read by the attended app. Beside
+    /// the descriptor — not inside the provider directory — because its
+    /// reader is a CLIENT process, exactly like the descriptor's readers.
+    public var migrationChallengeFile: URL {
+        descriptorFile.deletingLastPathComponent()
+            .appendingPathComponent("migration-challenge.v1.json")
+    }
+
+    /// The migration GRANT envelope file (MACD-2c2, P-c2-5): the ONE place
+    /// opaque bookmark bytes may exist. Written by the attended app, consumed
+    /// once by the provider, removed after committed success or terminal
+    /// abort. Beside the descriptor for the same cross-process reason.
+    public var migrationGrantFile: URL {
+        descriptorFile.deletingLastPathComponent()
+            .appendingPathComponent("migration-grant.v1.json")
+    }
+
     /// Build a layout rooted at an already-resolved provider directory.
     /// Internal: callers go through `resolve`.
     internal init(providerDirectory: URL, descriptorFile: URL, context: ProviderLayoutContext) {
