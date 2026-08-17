@@ -185,7 +185,7 @@ fn area4_concurrent_claim_filesystem() {
     let before_dedup = all_ids.len();
     all_ids.dedup();
     assert_eq!(all_ids.len(), before_dedup,
-        "Duplicate claims detected — POSIX rename atomicity violated");
+        "Duplicate claims detected — two-step claim exclusivity violated (I-3)");
     assert_eq!(all_ids.len(), 100,
         "Expected 100 unique ids after dedup, got {}", all_ids.len());
 
