@@ -232,6 +232,96 @@ public enum ProviderArbiter {
     /// the elected winner; it can only surface a `conflicted` squatter report
     /// when nothing legitimate is running.
     public static func arbitrate(_ observation: ArbiterObservation) -> ProviderArbiterState {
-        .absent // RED placeholder — the matrix tests must fail against this.
+        // 1. Handover phases dominate everything: while the machine is mid-
+        //    handover, no other reading of the world is actionable.
+        switch observation.handover {
+        case .targetFailedAfterSourceStopped: return .recoveryRequired
+        case .preparing: return .handoverPreparing
+        case .leaseIssued: return .handoverLeaseIssued
+        case .sourceExitedLockReleased: return .handoverStarting
+        case .none: break
+        }
+
+        // 2. Lock-claim pathologies.
+        if observation.lockClaims.count >= 2 {
+            return .conflicted(.multipleLockClaims)
+        }
+
+        if let claim = observation.lockClaims.first {
+            // A claim whose process is gone is an indeterminate shutdown —
+            // the lock says "held", the process table says "nobody".
+            guard claim.liveness == .live else {
+                return .conflicted(.indeterminateShutdown)
+            }
+            // Ownership must be PROVED. Port liveness is not proof; the
+            // descriptor MAC + handshake is (Kong: port never elects).
+            guard claim.authentication == .authenticated else {
+                return .conflicted(.unprovenOwnership)
+            }
+            switch observation.descriptor {
+            case .present(let instance, let authentication):
+                // Ready requires an AUTHENTICATED descriptor that AGREES
+                // with the lock owner; anything else is a disagreement.
+                guard instance == claim.instance, authentication == .authenticated else {
+                    return .conflicted(.descriptorLockDisagreement)
+                }
+                // An authenticated but contract-incompatible provider is
+                // surfaced as incompatible in BOTH directions: a newer
+                // daemon is left running (the app updates), an older one is
+                // replaced only through the explicit approved handover.
+                guard claim.compatibility == .compatible else {
+                    return .incompatible(claim.compatibility)
+                }
+                // THE WINNER RULE: the running authenticated compatible
+                // lock owner wins, regardless of install source, version,
+                // registration mechanism, or who holds the port.
+                if observation.directRegistration == .registered
+                    && observation.bundledRegistration == .registered {
+                    return .duplicateRegistration(winner: claim.kind, instance: claim.instance)
+                }
+                return .ready(
+                    providerKind: claim.kind, instance: claim.instance,
+                    estate: claim.estate, version: claim.version
+                )
+            case .absent:
+                // A live authenticated owner that has not published yet.
+                guard claim.compatibility == .compatible else {
+                    return .incompatible(claim.compatibility)
+                }
+                if observation.directRegistration == .registered
+                    && observation.bundledRegistration == .registered {
+                    return .duplicateRegistration(winner: claim.kind, instance: claim.instance)
+                }
+                return claim.kind == .direct ? .standaloneRegistered : .bundledRegistered
+            }
+        }
+
+        // 3. No lock claim at all. A published descriptor with no owner can
+        //    never authenticate a replacement — report it, never trust it.
+        if case .present = observation.descriptor {
+            return .conflicted(.descriptorWithoutOwner)
+        }
+        // A port holder nothing can authenticate, with no legitimate state
+        // to hide behind, is reported as the squatter it is.
+        if observation.port == .unverifiedHolder {
+            return .conflicted(.unverifiedPortHolder)
+        }
+        // Both mechanisms registered with nothing live and no owner:
+        // ownership cannot be proved (Kong's "becomes a hard stop if ...
+        // ownership cannot be proved").
+        if observation.directRegistration == .registered
+            && observation.bundledRegistration == .registered {
+            return .conflicted(.dualRegistrationUnproven)
+        }
+        if observation.bundledRegistration == .awaitingApproval {
+            return .bundledAwaitingApproval
+        }
+        if observation.directRegistration == .registered {
+            return .standaloneRegistered
+        }
+        if observation.bundledRegistration == .registered {
+            return .bundledRegistered
+        }
+        return .absent
     }
 }

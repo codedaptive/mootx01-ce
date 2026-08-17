@@ -88,7 +88,69 @@ public struct GenerationStore: Sendable {
     ///   unopenable. Fail-closed: an unreadable monotonic record refuses, it
     ///   never resets to zero.
     public func load() throws -> ProviderGenerations? {
-        throw DaemonProviderError.unimplemented("GenerationStore.load")
+        let fd = open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            // Only genuine absence answers "no record". Anything else — a
+            // permission fault, a symlink, an I/O error — refuses.
+            if errno == ENOENT { return nil }
+            throw DaemonProviderError.generationFault(.unreadable)
+        }
+        defer { close(fd) }
+        var status = stat()
+        guard fstat(fd, &status) == 0, (status.st_mode & S_IFMT) == S_IFREG else {
+            throw DaemonProviderError.generationFault(.unreadable)
+        }
+        var bytes = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count < 0 { throw DaemonProviderError.generationFault(.unreadable) }
+            if count == 0 { break }
+            bytes.append(contentsOf: buffer[0..<count])
+        }
+        return try Self.parse(String(decoding: bytes, as: UTF8.self))
+    }
+
+    /// Parse and integrity-check one record line.
+    private static func parse(_ raw: String) throws -> ProviderGenerations {
+        let line = raw.hasSuffix("\n") ? String(raw.dropLast()) : raw
+        // Grammar: "<format> credential=<d> provider=<d> descriptor=<d> sha256=<hex>"
+        guard let checksumRange = line.range(of: " sha256=", options: .backwards) else {
+            throw DaemonProviderError.generationFault(.torn)
+        }
+        let payload = String(line[line.startIndex..<checksumRange.lowerBound])
+        let checksum = String(line[checksumRange.upperBound...])
+        guard Self.checksumHex(of: payload) == checksum else {
+            throw DaemonProviderError.generationFault(.torn)
+        }
+        let fields = payload.split(separator: " ").map(String.init)
+        guard fields.count == 4, fields[0] == Self.formatIdentifier,
+              fields[1].hasPrefix("credential="),
+              fields[2].hasPrefix("provider="),
+              fields[3].hasPrefix("descriptor="),
+              let credential = ProviderGenerations.wireDecode(String(fields[1].dropFirst("credential=".count))),
+              let provider = ProviderGenerations.wireDecode(String(fields[2].dropFirst("provider=".count))),
+              let descriptor = ProviderGenerations.wireDecode(String(fields[3].dropFirst("descriptor=".count)))
+        else {
+            throw DaemonProviderError.generationFault(.torn)
+        }
+        return ProviderGenerations(credential: credential, provider: provider, descriptor: descriptor)
+    }
+
+    /// SHA-256 hex over the record payload — the torn-write detector. A
+    /// partially persisted line cannot carry a matching digest.
+    private static func checksumHex(of payload: String) -> String {
+        FirstPartyAuthProtocol.sha256(Array(payload.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The canonical serialized record for `generations`.
+    private static func serialize(_ generations: ProviderGenerations) -> Data {
+        let payload = "\(formatIdentifier)"
+            + " credential=\(ProviderGenerations.wireEncode(generations.credential))"
+            + " provider=\(ProviderGenerations.wireEncode(generations.provider))"
+            + " descriptor=\(ProviderGenerations.wireEncode(generations.descriptor))"
+        return Data((payload + " sha256=\(checksumHex(of: payload))\n").utf8)
     }
 
     /// Create the initial record. Licensed only under the lock, and only when
@@ -97,7 +159,15 @@ public struct GenerationStore: Sendable {
     /// - Returns: The initial generations (credential 1, provider 1,
     ///   descriptor 0 — the descriptor counter advances at first publication).
     public func initialize(lockProof: ProviderLockProof) throws -> ProviderGenerations {
-        throw DaemonProviderError.unimplemented("GenerationStore.initialize")
+        _ = lockProof
+        guard try load() == nil else {
+            // Initializing over an existing record would be a reset; a reset
+            // of a monotonic counter is a rollback by another name.
+            throw DaemonProviderError.generationFault(.mismatch)
+        }
+        let initial = ProviderGenerations(credential: 1, provider: 1, descriptor: 0)
+        try SecureFiles.atomicReplace(Self.serialize(initial), at: fileURL)
+        return initial
     }
 
     /// Persist `next`, enforcing monotonicity against the CURRENT durable
@@ -110,12 +180,28 @@ public struct GenerationStore: Sendable {
     ///     must re-load rather than blindly overwrite.
     ///   - lockProof: Serialization proof (Perkins P6: serialized under lock).
     /// - Throws: `.rollback` when any counter would move backwards;
-    ///   `.overflow` when a counter cannot advance; `.mismatch`; `.torn`.
+    ///   `.mismatch` when `expecting` is stale; `.torn`/`.unreadable` from
+    ///   the underlying load.
     public func advance(
         to next: ProviderGenerations,
         expecting: ProviderGenerations,
         lockProof: ProviderLockProof
     ) throws -> ProviderGenerations {
-        throw DaemonProviderError.unimplemented("GenerationStore.advance")
+        _ = lockProof
+        guard let current = try load() else {
+            // Advancing a record that does not exist: the caller's world is
+            // wrong about the store's state.
+            throw DaemonProviderError.generationFault(.mismatch)
+        }
+        guard current == expecting else {
+            throw DaemonProviderError.generationFault(.mismatch)
+        }
+        guard next.credential >= current.credential,
+              next.provider >= current.provider,
+              next.descriptor >= current.descriptor else {
+            throw DaemonProviderError.generationFault(.rollback)
+        }
+        try SecureFiles.atomicReplace(Self.serialize(next), at: fileURL)
+        return next
     }
 }

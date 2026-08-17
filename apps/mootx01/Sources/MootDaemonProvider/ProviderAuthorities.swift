@@ -63,10 +63,6 @@ public enum DaemonProviderError: Error, Equatable, Sendable {
     /// Handover failed after the source stopped and no compatible rollback
     /// exists. Mirrors the arbiter's `recoveryRequired` state.
     case handoverRecoveryRequired
-
-    /// RED-phase placeholder: the substrate is not implemented yet. No GREEN
-    /// code path may raise this.
-    case unimplemented(String)
 }
 
 /// The four ineligible signing classes (Perkins P1). A shell in any of these

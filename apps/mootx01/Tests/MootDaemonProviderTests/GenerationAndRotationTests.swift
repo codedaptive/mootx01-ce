@@ -43,7 +43,8 @@ struct GenerationStoreTests {
 
     @Test("monotonic advance persists; any backwards counter is rollback")
     func rollbackRefused() throws {
-        let (_, store, handle) = try makeStore()
+        let (scratch, store, handle) = try makeStore()
+        defer { withExtendedLifetime(scratch) {} }
         let initial = try store.initialize(lockProof: handle.proof)
         _ = try store.advance(
             to: ProviderGenerations(credential: 2, provider: 1, descriptor: 1),
@@ -61,7 +62,8 @@ struct GenerationStoreTests {
 
     @Test("a stale expectation is mismatch, not overwrite")
     func mismatchRefused() throws {
-        let (_, store, handle) = try makeStore()
+        let (scratch, store, handle) = try makeStore()
+        defer { withExtendedLifetime(scratch) {} }
         let initial = try store.initialize(lockProof: handle.proof)
         _ = try store.advance(
             to: ProviderGenerations(credential: 1, provider: 2, descriptor: 0),

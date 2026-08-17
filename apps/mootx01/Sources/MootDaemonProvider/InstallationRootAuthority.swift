@@ -74,7 +74,26 @@ public struct InstallationRootAuthority: Sendable {
     ///   (`errSecItemNotFound`) — the only non-fatal miss.
     /// - Throws: `DaemonProviderError.keychainFatal` for every other fault.
     public func readRoot() throws -> [UInt8]? {
-        throw DaemonProviderError.unimplemented("InstallationRootAuthority.readRoot")
+        let result = keychain.copyItem(
+            service: FirstPartyAuthProtocol.keychainService,
+            account: FirstPartyAuthProtocol.keychainAccount,
+            accessGroup: eligibility.expandedKeychainGroup
+        )
+        switch result {
+        case .found(let bytes):
+            guard bytes.count == FirstPartyAuthProtocol.rootKeyByteCount else {
+                throw DaemonProviderError.keychainFatal(.corrupted)
+            }
+            return bytes
+        case .notFound:
+            return nil
+        case .missingEntitlement:
+            throw DaemonProviderError.keychainFatal(.missingEntitlement)
+        case .interactionRequired:
+            throw DaemonProviderError.keychainFatal(.interactionRequired)
+        case .unavailable:
+            throw DaemonProviderError.keychainFatal(.unavailable)
+        }
     }
 
     /// Read the root, minting it if — and only if — it is genuinely absent.
@@ -88,7 +107,49 @@ public struct InstallationRootAuthority: Sendable {
     /// - Returns: The root and its provenance.
     /// - Throws: `DaemonProviderError.keychainFatal`.
     public func ensureRoot(lockProof: ProviderLockProof) throws -> InstallationRoot {
-        throw DaemonProviderError.unimplemented("InstallationRootAuthority.ensureRoot")
+        // The lock proof is demanded, not used: possession is the license.
+        _ = lockProof
+        if let existing = try readRoot() {
+            return InstallationRoot(bytes: existing, provenance: .existing)
+        }
+        // GENUINE absence, judged by an eligible holder of the exclusive
+        // lock — the one licensed mint path in the entire product.
+        let minted = randomBytes(FirstPartyAuthProtocol.rootKeyByteCount)
+        guard minted.count == FirstPartyAuthProtocol.rootKeyByteCount else {
+            // Injected randomness that cannot produce 32 bytes is a broken
+            // security primitive, not an absence.
+            throw DaemonProviderError.keychainFatal(.unavailable)
+        }
+        let status = keychain.addItem(
+            service: FirstPartyAuthProtocol.keychainService,
+            account: FirstPartyAuthProtocol.keychainAccount,
+            accessGroup: eligibility.expandedKeychainGroup,
+            data: minted
+        )
+        switch status {
+        case .added:
+            // Read back and compare: a Keychain that stores different bytes
+            // than it was handed is lying to someone.
+            guard let readBack = try readRoot(),
+                  FirstPartyAuthProtocol.constantTimeEquals(readBack, minted) else {
+                throw DaemonProviderError.keychainFatal(.disagreement)
+            }
+            return InstallationRoot(bytes: minted, provenance: .minted)
+        case .duplicate:
+            // Lost an add race. Under the exclusive lock this should be
+            // impossible; judge the survivor rather than assume.
+            guard let readBack = try readRoot() else {
+                throw DaemonProviderError.keychainFatal(.disagreement)
+            }
+            if FirstPartyAuthProtocol.constantTimeEquals(readBack, minted) {
+                return InstallationRoot(bytes: readBack, provenance: .existing)
+            }
+            throw DaemonProviderError.keychainFatal(.disagreement)
+        case .missingEntitlement:
+            throw DaemonProviderError.keychainFatal(.missingEntitlement)
+        case .unavailable:
+            throw DaemonProviderError.keychainFatal(.unavailable)
+        }
     }
 }
 
@@ -105,18 +166,66 @@ public struct DataProtectionKeychainAuthority: KeychainItemAuthority {
 
     public init() {}
 
-    /// `SecItemCopyMatching` with the exact contract query.
+    /// `SecItemCopyMatching` with the exact contract query:
+    /// `kSecUseDataProtectionKeychain: true` (without it the access group is
+    /// advisory on macOS), non-synchronizable (device-bound root), and the
+    /// caller's runtime-expanded group.
     public func copyItem(
         service: String, account: String, accessGroup: String
     ) -> KeychainReadResult {
-        .unavailable // RED placeholder; real classification lands with GREEN.
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrSynchronizable as String: false,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data else { return .unavailable }
+            return .found(Array(data))
+        case errSecItemNotFound:
+            return .notFound
+        case errSecMissingEntitlement:
+            return .missingEntitlement
+        case errSecInteractionNotAllowed:
+            return .interactionRequired
+        default:
+            return .unavailable
+        }
     }
 
-    /// `SecItemAdd` with the exact contract attributes.
+    /// `SecItemAdd` with the exact contract attributes, pinning
+    /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (Kong decision 1).
     public func addItem(
         service: String, account: String, accessGroup: String, data: [UInt8]
     ) -> KeychainWriteStatus {
-        .unavailable // RED placeholder; real classification lands with GREEN.
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrSynchronizable as String: false,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: Data(data),
+        ]
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return .added
+        case errSecDuplicateItem:
+            return .duplicate
+        case errSecMissingEntitlement:
+            return .missingEntitlement
+        default:
+            return .unavailable
+        }
     }
 }
 #endif

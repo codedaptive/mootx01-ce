@@ -363,8 +363,10 @@ struct HandoverCoordinatorTests {
             let rig = Rig()
             _ = try await rig.drive(upTo: .leaseIssued)
             let before = rig.recorder.count(prefix: "installer.removeSource")
+            // The machine sits at leaseIssued, so the next legal step is
+            // sourceExited — that is what the violation names as expected.
             await #expect(throws: DaemonProviderError.handoverSequenceViolation(
-                expected: .targetReady, requested: .sourceRemoved
+                expected: .sourceExited, requested: .sourceRemoved
             )) {
                 try await rig.coordinator.removeSource()
             }

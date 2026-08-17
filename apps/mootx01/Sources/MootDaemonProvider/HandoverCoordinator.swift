@@ -48,14 +48,46 @@ public actor HandoverCoordinator {
         self.sourceAuthentication = sourceAuthentication
     }
 
+    /// The step the machine will accept next — what a sequencing violation
+    /// reports as `expected`. Terminal states accept nothing and report
+    /// themselves.
+    private var nextLegalStep: HandoverStep {
+        switch step {
+        case .idle: return .targetPrepared
+        case .targetPrepared: return .sourceAuthenticated
+        case .sourceAuthenticated: return .estateClosed
+        case .estateClosed: return .leaseIssued
+        case .leaseIssued: return .sourceExited
+        case .sourceExited: return .targetReady
+        case .targetReady: return .sourceRemoved
+        case .sourceRemoved, .rolledBack, .recoveryRequired: return step
+        }
+    }
+
+    /// Refuse unless `requested` is exactly the next legal step. Runs BEFORE
+    /// the step's authority is invoked, always.
+    private func gate(_ requested: HandoverStep) throws {
+        guard nextLegalStep == requested, step != requested else {
+            throw DaemonProviderError.handoverSequenceViolation(
+                expected: nextLegalStep, requested: requested
+            )
+        }
+    }
+
     /// Step 1 — install the target, disabled.
     public func prepareTarget() async throws {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.prepareTarget")
+        try gate(.targetPrepared)
+        try await installer.prepareTargetDisabled()
+        step = .targetPrepared
     }
 
     /// Step 2 — authenticate the source; capture its signing identity.
     public func authenticateSource() async throws -> SigningIdentityDescriptor {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.authenticateSource")
+        try gate(.sourceAuthenticated)
+        let identity = try await sourceAuthentication.authenticateSource()
+        authenticatedSource = identity
+        step = .sourceAuthenticated
+        return identity
     }
 
     /// Step 3 — quiesce the source in the mandated order (stop writes, drain,
@@ -68,10 +100,21 @@ public actor HandoverCoordinator {
     public func quiesceSource(
         advanceGenerations: @Sendable () throws -> ProviderGenerations
     ) async throws -> ProviderGenerations {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.quiesceSource")
+        try gate(.estateClosed)
+        // The order is the contract: writes stop before draining, the drain
+        // completes before the checkpoint, the checkpoint lands before the
+        // close. Reordering any pair loses acknowledged work.
+        try await estate.stopWrites()
+        try await estate.drain()
+        try await estate.checkpoint()
+        try await estate.closeEstate()
+        let generations = try advanceGenerations()
+        step = .estateClosed
+        return generations
     }
 
-    /// Step 4 — issue the MACed, expiring, single-use lease.
+    /// Step 4 — issue the MACed, expiring, single-use lease, bound to the
+    /// authenticated source identity captured at step 2.
     public func issueLease(
         authority: LeaseAuthority,
         estate estateProof: EstateReadyProof,
@@ -80,13 +123,33 @@ public actor HandoverCoordinator {
         generations: ProviderGenerations,
         installationRoot: [UInt8]
     ) async throws -> HandoverLease {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.issueLease")
+        try gate(.leaseIssued)
+        guard let source = authenticatedSource else {
+            // Unreachable through the gate (step 2 sets it), but a lease
+            // without a source identity must never exist.
+            throw DaemonProviderError.handoverSequenceViolation(
+                expected: .sourceAuthenticated, requested: .leaseIssued
+            )
+        }
+        let lease = authority.issue(
+            estate: estateProof,
+            sourceInstance: sourceInstance, targetInstance: targetInstance,
+            sourceIdentity: source, targetIdentity: targetIdentity,
+            generations: generations,
+            installationRoot: installationRoot
+        )
+        step = .leaseIssued
+        return lease
     }
 
     /// Step 5 — verify source exit AND lock release through the injected
-    /// process authority. Assumption is not verification.
+    /// process authority. Assumption is not verification: a still-running
+    /// source refuses and the machine does not advance.
     public func verifySourceExit() async throws {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.verifySourceExit")
+        try gate(.sourceExited)
+        try await process.verifySourceExited()
+        try await process.verifyLockReleased()
+        step = .sourceExited
     }
 
     /// Step 6 — the target consumes the lease atomically and activates:
@@ -95,19 +158,40 @@ public actor HandoverCoordinator {
     public func consumeAndStartTarget(
         activateTarget: @Sendable () async throws -> Void
     ) async throws {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.consumeAndStartTarget")
+        try gate(.targetReady)
+        try await activateTarget()
+        step = .targetReady
     }
 
     /// Step 7 — only after target readiness may the injected installer remove
     /// the source.
     public func removeSource() async throws {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.removeSource")
+        try gate(.sourceRemoved)
+        try await installer.removeSource()
+        step = .sourceRemoved
     }
 
-    /// Step 8 — failure handling from any post-quiescence position: invoke
-    /// the injected rollback when a compatible source configuration still
-    /// exists, else land in `recoveryRequired` and STOP.
+    /// Step 8 — failure handling from any in-flight position: invoke the
+    /// injected rollback when a compatible source configuration still exists,
+    /// else land in `recoveryRequired` and STOP (no rollback callback — a
+    /// rollback across an unsupported schema/auth downgrade is the one thing
+    /// worse than a stalled handover).
     public func fail(compatibleRollbackAvailable: Bool) async throws -> HandoverFailureDisposition {
-        throw DaemonProviderError.unimplemented("HandoverCoordinator.fail")
+        switch step {
+        case .idle, .sourceRemoved, .rolledBack, .recoveryRequired:
+            // Nothing in flight to fail, or already terminal.
+            throw DaemonProviderError.handoverSequenceViolation(
+                expected: nextLegalStep, requested: .rolledBack
+            )
+        default:
+            break
+        }
+        if compatibleRollbackAvailable {
+            try await installer.rollbackToSource()
+            step = .rolledBack
+            return .rolledBack
+        }
+        step = .recoveryRequired
+        return .recoveryRequired
     }
 }

@@ -96,34 +96,161 @@ public struct HandoverLease: Sendable, Equatable {
         )
     }
 
+    /// The lease transcript field list, in MAC-input order. Part of the
+    /// self-report: two shells that disagree here produce different module
+    /// digests, which is the "identical handover transcript format" claim
+    /// made checkable.
+    public static let transcriptFields: [String] = [
+        "leaseIdentifier", "estateIdentifier", "estateSchemaVersion",
+        "sourceInstance", "targetInstance", "sourceIdentity", "targetIdentity",
+        "credentialGeneration", "providerGeneration", "descriptorGeneration",
+        "issuedAt", "expiresAt", "nonce",
+    ]
+
     /// The canonical MAC input: the lease domain and every field except the
     /// MAC itself, in fixed order via `CanonicalEncoder` (length-prefixed —
-    /// the same anti-ambiguity argument as every MACD-2b MAC input).
+    /// the same anti-ambiguity argument as every MACD-2b MAC input; a
+    /// signing identity is itself three length-prefixed strings, so no two
+    /// identities can collide by concatenation).
     public func macInput() -> [UInt8] {
-        [] // RED placeholder.
+        var encoder = CanonicalEncoder()
+        encoder.appendString(Self.leaseDomain)
+        encoder.appendUUID(leaseIdentifier)
+        encoder.appendUUID(estateIdentifier)
+        encoder.appendUInt64(estateSchemaVersion)
+        encoder.appendUUID(sourceInstance)
+        encoder.appendUUID(targetInstance)
+        Self.appendIdentity(sourceIdentity, to: &encoder)
+        Self.appendIdentity(targetIdentity, to: &encoder)
+        encoder.appendUInt64(credentialGeneration)
+        encoder.appendUInt64(providerGeneration)
+        encoder.appendUInt64(descriptorGeneration)
+        encoder.appendUInt64(issuedAt)
+        encoder.appendUInt64(expiresAt)
+        encoder.appendBytes(nonce)
+        return encoder.bytes
+    }
+
+    private static func appendIdentity(
+        _ identity: SigningIdentityDescriptor, to encoder: inout CanonicalEncoder
+    ) {
+        encoder.appendString(identity.teamIdentifier)
+        encoder.appendString(identity.bundleIdentifier)
+        encoder.appendString(identity.signingClass.rawValue)
     }
 
     /// A copy with `leaseMAC` computed under `installationRoot`.
     public func sealed(installationRoot: [UInt8]) -> HandoverLease {
-        self // RED placeholder.
+        var copy = self
+        copy.leaseMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: Self.leaseKey(installationRoot: installationRoot),
+            message: macInput()
+        )
+        return copy
     }
 
     /// Constant-time MAC verification.
     public func verifyMAC(installationRoot: [UInt8]) -> Bool {
-        false // RED placeholder.
+        guard leaseMAC.count == FirstPartyAuthProtocol.macByteCount else { return false }
+        let expected = FirstPartyAuthProtocol.hmacSHA256(
+            key: Self.leaseKey(installationRoot: installationRoot),
+            message: macInput()
+        )
+        return FirstPartyAuthProtocol.constantTimeEquals(expected, leaseMAC)
     }
+
+    /// The exact key set of a durable lease record.
+    private static let recordFields: Set<String> = Set(transcriptFields).union(["leaseMAC"])
 
     /// Canonical JSON for the durable lease record (sorted keys, base64url
-    /// byte fields, decimal-string generations). Carries no secret: the MAC
-    /// key never appears, and the MAC itself proves nothing without
-    /// K_install.
+    /// byte fields, decimal-string integers). Carries no secret: the MAC key
+    /// never appears, and the MAC itself proves nothing without K_install.
     public func encoded() -> Data {
-        Data() // RED placeholder.
+        let object: [String: Any] = [
+            "leaseIdentifier": leaseIdentifier.uuidString,
+            "estateIdentifier": estateIdentifier.uuidString,
+            "estateSchemaVersion": ProviderGenerations.wireEncode(estateSchemaVersion),
+            "sourceInstance": sourceInstance.uuidString,
+            "targetInstance": targetInstance.uuidString,
+            "sourceIdentity": Self.encodeIdentity(sourceIdentity),
+            "targetIdentity": Self.encodeIdentity(targetIdentity),
+            "credentialGeneration": ProviderGenerations.wireEncode(credentialGeneration),
+            "providerGeneration": ProviderGenerations.wireEncode(providerGeneration),
+            "descriptorGeneration": ProviderGenerations.wireEncode(descriptorGeneration),
+            "issuedAt": ProviderGenerations.wireEncode(issuedAt),
+            "expiresAt": ProviderGenerations.wireEncode(expiresAt),
+            "nonce": FirstPartyAuthProtocol.base64URLEncode(nonce),
+            "leaseMAC": FirstPartyAuthProtocol.base64URLEncode(leaseMAC),
+        ]
+        return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }
 
-    /// Decode a durable record. `nil` for anything malformed.
+    private static func encodeIdentity(_ identity: SigningIdentityDescriptor) -> [String: String] {
+        [
+            "teamIdentifier": identity.teamIdentifier,
+            "bundleIdentifier": identity.bundleIdentifier,
+            "signingClass": identity.signingClass.rawValue,
+        ]
+    }
+
+    private static func decodeIdentity(_ value: Any?) -> SigningIdentityDescriptor? {
+        guard let object = value as? [String: String],
+              Set(object.keys) == ["teamIdentifier", "bundleIdentifier", "signingClass"],
+              let team = object["teamIdentifier"],
+              let bundle = object["bundleIdentifier"],
+              let classRaw = object["signingClass"],
+              let signingClass = SignedProcessIdentity.SigningClass(rawValue: classRaw)
+        else { return nil }
+        return SigningIdentityDescriptor(
+            teamIdentifier: team, bundleIdentifier: bundle, signingClass: signingClass
+        )
+    }
+
+    /// Decode a durable record. `nil` for anything malformed — wrong key set,
+    /// wrong types, non-canonical spellings.
     public static func decode(_ data: Data) -> HandoverLease? {
-        nil // RED placeholder.
+        guard let object = FirstPartyAuthProtocol.strictJSONObject(
+            data, expected: recordFields, maxBytes: 8 * 1024
+        ) else { return nil }
+        guard
+            let leaseRaw = object["leaseIdentifier"] as? String,
+            let leaseIdentifier = UUID(uuidString: leaseRaw),
+            let estateRaw = object["estateIdentifier"] as? String,
+            let estateIdentifier = UUID(uuidString: estateRaw),
+            let schemaRaw = object["estateSchemaVersion"] as? String,
+            let estateSchemaVersion = ProviderGenerations.wireDecode(schemaRaw),
+            let sourceRaw = object["sourceInstance"] as? String,
+            let sourceInstance = UUID(uuidString: sourceRaw),
+            let targetRaw = object["targetInstance"] as? String,
+            let targetInstance = UUID(uuidString: targetRaw),
+            let sourceIdentity = decodeIdentity(object["sourceIdentity"]),
+            let targetIdentity = decodeIdentity(object["targetIdentity"]),
+            let credentialRaw = object["credentialGeneration"] as? String,
+            let credentialGeneration = ProviderGenerations.wireDecode(credentialRaw),
+            let providerRaw = object["providerGeneration"] as? String,
+            let providerGeneration = ProviderGenerations.wireDecode(providerRaw),
+            let descriptorRaw = object["descriptorGeneration"] as? String,
+            let descriptorGeneration = ProviderGenerations.wireDecode(descriptorRaw),
+            let issuedRaw = object["issuedAt"] as? String,
+            let issuedAt = ProviderGenerations.wireDecode(issuedRaw),
+            let expiresRaw = object["expiresAt"] as? String,
+            let expiresAt = ProviderGenerations.wireDecode(expiresRaw),
+            let nonceRaw = object["nonce"] as? String,
+            let nonce = FirstPartyAuthProtocol.base64URLDecode(nonceRaw),
+            let macRaw = object["leaseMAC"] as? String,
+            let leaseMAC = FirstPartyAuthProtocol.base64URLDecode(macRaw)
+        else { return nil }
+        return HandoverLease(
+            leaseIdentifier: leaseIdentifier, estateIdentifier: estateIdentifier,
+            estateSchemaVersion: estateSchemaVersion,
+            sourceInstance: sourceInstance, targetInstance: targetInstance,
+            sourceIdentity: sourceIdentity, targetIdentity: targetIdentity,
+            credentialGeneration: credentialGeneration,
+            providerGeneration: providerGeneration,
+            descriptorGeneration: descriptorGeneration,
+            issuedAt: issuedAt, expiresAt: expiresAt,
+            nonce: nonce, leaseMAC: leaseMAC
+        )
     }
 }
 
@@ -139,16 +266,58 @@ public struct LeaseConsumptionJournal: Sendable {
 
     /// Whether `leaseIdentifier` is already recorded as consumed.
     ///
-    /// Fail-closed: only a genuinely ABSENT journal answers "not consumed";
-    /// an unreadable journal throws `.leaseInvalid(.journalUnavailable)`.
+    /// Fail-closed (the c0 `journalContains` rule): only a genuinely ABSENT
+    /// journal answers "not consumed"; a journal that exists but cannot be
+    /// opened or read is an unanswerable one-use question, and treating it as
+    /// "not consumed" would let an I/O fault license a replay.
     public func contains(_ leaseIdentifier: UUID) throws -> Bool {
-        throw DaemonProviderError.unimplemented("LeaseConsumptionJournal.contains")
+        let fd = open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == ENOENT { return false }
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        defer { close(fd) }
+        var bytes = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count < 0 { throw DaemonProviderError.leaseInvalid(.journalUnavailable) }
+            if count == 0 { break }
+            bytes.append(contentsOf: buffer[0..<count])
+        }
+        let target = Substring(leaseIdentifier.uuidString)
+        return String(decoding: bytes, as: UTF8.self)
+            .split(separator: "\n")
+            .contains { $0 == target }
     }
 
     /// Durably record consumption: O_APPEND one line, then fsync — ORDERED
-    /// BEFORE the lease is resolved into any capability.
+    /// BEFORE the lease is resolved into any capability, so a crash between
+    /// record and resolution burns the lease rather than doubling it.
     public func recordConsumption(_ leaseIdentifier: UUID) throws {
-        throw DaemonProviderError.unimplemented("LeaseConsumptionJournal.recordConsumption")
+        let fd = open(
+            fileURL.path,
+            O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
+            0o600
+        )
+        guard fd >= 0 else {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        defer { close(fd) }
+        let line = [UInt8]((leaseIdentifier.uuidString + "\n").utf8)
+        var written = 0
+        while written < line.count {
+            let result = line.withUnsafeBufferPointer { buffer -> Int in
+                write(fd, buffer.baseAddress! + written, line.count - written)
+            }
+            guard result > 0 else {
+                throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+            }
+            written += result
+        }
+        guard fsync(fd) == 0 else {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
     }
 }
 
@@ -170,6 +339,10 @@ public struct LeaseAuthority: Sendable {
     }
 
     /// Issue a sealed lease binding source, target, estate, and generations.
+    ///
+    /// The lease identifier and nonce both come from the INJECTED randomness
+    /// (Perkins P13) — an identifier a test cannot pin is an identifier a
+    /// test cannot replay on purpose.
     public func issue(
         estate: EstateReadyProof,
         sourceInstance: UUID, targetInstance: UUID,
@@ -177,16 +350,36 @@ public struct LeaseAuthority: Sendable {
         generations: ProviderGenerations,
         installationRoot: [UInt8]
     ) -> HandoverLease {
-        HandoverLease(
-            leaseIdentifier: UUID(), estateIdentifier: estate.estateIdentifier,
+        let now = clock()
+        let identifierBytes = randomBytes(16)
+        let lease = HandoverLease(
+            leaseIdentifier: Self.uuid(from: identifierBytes),
+            estateIdentifier: estate.estateIdentifier,
             estateSchemaVersion: estate.schemaVersion,
             sourceInstance: sourceInstance, targetInstance: targetInstance,
             sourceIdentity: sourceIdentity, targetIdentity: targetIdentity,
             credentialGeneration: generations.credential,
             providerGeneration: generations.provider,
             descriptorGeneration: generations.descriptor,
-            issuedAt: 0, expiresAt: 0, nonce: [], leaseMAC: []
-        ) // RED placeholder.
+            issuedAt: now, expiresAt: now + HandoverLease.leaseLifetime,
+            nonce: randomBytes(FirstPartyAuthProtocol.nonceByteCount),
+            leaseMAC: []
+        )
+        return lease.sealed(installationRoot: installationRoot)
+    }
+
+    /// Build a UUID from 16 injected bytes, tolerating a short injection by
+    /// zero-padding (a test seam convenience; production randomness always
+    /// yields the requested count).
+    private static func uuid(from bytes: [UInt8]) -> UUID {
+        var padded = bytes
+        if padded.count < 16 { padded += [UInt8](repeating: 0, count: 16 - padded.count) }
+        return UUID(uuid: (
+            padded[0], padded[1], padded[2], padded[3],
+            padded[4], padded[5], padded[6], padded[7],
+            padded[8], padded[9], padded[10], padded[11],
+            padded[12], padded[13], padded[14], padded[15]
+        ))
     }
 
     /// Consume a lease ATOMICALLY, in this exact order:
@@ -206,6 +399,42 @@ public struct LeaseAuthority: Sendable {
         targetInstance: UUID,
         currentGenerations: ProviderGenerations
     ) throws -> EstateReadyProof {
-        throw DaemonProviderError.unimplemented("LeaseAuthority.consume")
+        // 1. Authenticity before anything else: an unMACed lease's fields
+        //    are attacker input and must not steer later gates.
+        guard lease.verifyMAC(installationRoot: installationRoot) else {
+            throw DaemonProviderError.leaseInvalid(.badMAC)
+        }
+        // 2. Expiry, on the injected clock.
+        guard clock() <= lease.expiresAt else {
+            throw DaemonProviderError.leaseInvalid(.expired)
+        }
+        // 3. Binding: only the named target artifact, as the named instance,
+        //    may consume.
+        guard lease.targetIdentity == targetIdentity,
+              lease.targetInstance == targetInstance else {
+            throw DaemonProviderError.leaseInvalid(.bindingMismatch)
+        }
+        // 4. Generation freshness against the DURABLE store: the credential
+        //    generation must be exactly current (a rotation revokes every
+        //    outstanding lease), and the provider/descriptor generations must
+        //    not be older than what the store already records.
+        guard lease.credentialGeneration == currentGenerations.credential,
+              lease.providerGeneration >= currentGenerations.provider,
+              lease.descriptorGeneration >= currentGenerations.descriptor else {
+            throw DaemonProviderError.leaseInvalid(.staleGeneration)
+        }
+        // 5. Replay: the durable journal, fail-closed.
+        guard try !journal.contains(lease.leaseIdentifier) else {
+            throw DaemonProviderError.leaseInvalid(.consumed)
+        }
+        // 6. Burn BEFORE resolve (c0 journal-first): once this line returns,
+        //    the lease can never resolve again — even if we crash on the
+        //    very next instruction.
+        try journal.recordConsumption(lease.leaseIdentifier)
+        // 7. Resolve.
+        return EstateReadyProof(
+            estateIdentifier: lease.estateIdentifier,
+            schemaVersion: lease.estateSchemaVersion
+        )
     }
 }

@@ -134,10 +134,52 @@ public enum ProviderEligibilityJudge {
     /// Judge eligibility. Refuses the four ineligible classes (Perkins P1):
     /// unsigned, ad-hoc, wrong-team, wrong-group.
     ///
+    /// Order of judgment: signature class first (an unsigned or ad-hoc claim
+    /// is worthless regardless of what it claims), then the App Group and the
+    /// Keychain-group suffix (wrong-group), then the team prefix of the
+    /// matched group (wrong-team). Every branch fails closed.
+    ///
     /// - Returns: The positive judgment.
     /// - Throws: `DaemonProviderError.ineligible` naming the refused class.
     public static func judge(_ identity: SignedProcessIdentity) throws -> ProviderEligibility {
-        throw DaemonProviderError.unimplemented("ProviderEligibilityJudge.judge")
+        switch identity.signingClass {
+        case .unsigned:
+            throw DaemonProviderError.ineligible(.unsigned)
+        case .adHoc:
+            // Ad-hoc entitlement CLAIMS are unenforced by any authority, so
+            // the claims are not even examined.
+            throw DaemonProviderError.ineligible(.adHocSigned)
+        case .developerID, .appleDevelopment, .appleDistribution:
+            break
+        }
+        // A signed process without a team cannot own a team Keychain group;
+        // whatever group it claims, no team backs the claim.
+        guard let team = identity.teamIdentifier, !team.isEmpty else {
+            throw DaemonProviderError.ineligible(.wrongTeam)
+        }
+        guard identity.applicationGroups.contains(Self.requiredAppGroup) else {
+            throw DaemonProviderError.ineligible(.wrongGroup)
+        }
+        let suffix = "." + Self.requiredKeychainGroupSuffix
+        let candidates = identity.keychainAccessGroups.filter { $0.hasSuffix(suffix) }
+        guard !candidates.isEmpty else {
+            throw DaemonProviderError.ineligible(.wrongGroup)
+        }
+        // The matched group's prefix must be the SIGNING team — a group
+        // expanded under someone else's prefix is someone else's group.
+        guard let matched = candidates.first(where: { String($0.dropLast(suffix.count)) == team }) else {
+            throw DaemonProviderError.ineligible(.wrongTeam)
+        }
+        return ProviderEligibility(
+            identity: identity,
+            expandedKeychainGroup: matched,
+            appGroupIdentifier: Self.requiredAppGroup,
+            signingIdentity: SigningIdentityDescriptor(
+                teamIdentifier: team,
+                bundleIdentifier: identity.bundleIdentifier ?? "",
+                signingClass: identity.signingClass
+            )
+        )
     }
 }
 
@@ -152,8 +194,80 @@ public struct SecCodeEntitlementReadback: EntitlementReadback {
     public init() {}
 
     /// Read back this process's signing class, team, and entitlements.
+    ///
+    /// Classification is by the leaf certificate's subject summary — the
+    /// same strings Apple's signing identities carry ("Developer ID
+    /// Application", "Apple Development", "Apple Distribution" /
+    /// "3rd Party Mac Developer Application"). Anything signed that matches
+    /// none of them is classified AD-HOC: an unprovable channel earns no
+    /// channel, which fails closed at the eligibility judge.
     public func processIdentity() throws -> SignedProcessIdentity {
-        throw DaemonProviderError.unimplemented("SecCodeEntitlementReadback.processIdentity")
+        var codeRef: SecCode?
+        guard SecCodeCopySelf([], &codeRef) == errSecSuccess, let code = codeRef else {
+            return Self.unsignedIdentity
+        }
+        var staticRef: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticRef) == errSecSuccess, let staticCode = staticRef else {
+            return Self.unsignedIdentity
+        }
+        var infoRef: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(staticCode, flags, &infoRef) == errSecSuccess,
+              let info = infoRef as? [String: Any] else {
+            return Self.unsignedIdentity
+        }
+        // An unsigned binary yields signing information with no identifier.
+        guard info[kSecCodeInfoIdentifier as String] is String else {
+            return Self.unsignedIdentity
+        }
+
+        let team = info[kSecCodeInfoTeamIdentifier as String] as? String
+        let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] ?? [:]
+        let appGroups = entitlements["com.apple.security.application-groups"] as? [String] ?? []
+        let keychainGroups = entitlements["keychain-access-groups"] as? [String] ?? []
+        let bundle = Bundle.main.bundleIdentifier
+
+        // kSecCodeSignatureAdhoc (0x2) in the signature flags marks an
+        // ad-hoc signature regardless of what else the dictionary carries.
+        let signatureFlags = (info[kSecCodeInfoFlags as String] as? UInt32) ?? 0
+        if signatureFlags & 0x2 != 0 {
+            return SignedProcessIdentity(
+                signingClass: .adHoc, teamIdentifier: nil,
+                applicationGroups: appGroups, keychainAccessGroups: keychainGroups,
+                bundleIdentifier: bundle
+            )
+        }
+
+        var signingClass = SignedProcessIdentity.SigningClass.adHoc
+        if let certificates = info[kSecCodeInfoCertificates as String] as? [SecCertificate],
+           let leaf = certificates.first,
+           let summary = SecCertificateCopySubjectSummary(leaf) as String? {
+            if summary.contains("Developer ID Application") {
+                signingClass = .developerID
+            } else if summary.contains("Apple Development") || summary.contains("Mac Developer") {
+                signingClass = .appleDevelopment
+            } else if summary.contains("Apple Distribution")
+                        || summary.contains("3rd Party Mac Developer Application") {
+                signingClass = .appleDistribution
+            }
+        }
+
+        return SignedProcessIdentity(
+            signingClass: signingClass,
+            teamIdentifier: team,
+            applicationGroups: appGroups,
+            keychainAccessGroups: keychainGroups,
+            bundleIdentifier: bundle
+        )
+    }
+
+    /// The classification of a process with no usable signature.
+    private static var unsignedIdentity: SignedProcessIdentity {
+        SignedProcessIdentity(
+            signingClass: .unsigned, teamIdentifier: nil,
+            applicationGroups: [], keychainAccessGroups: [],
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
     }
 }
 #endif

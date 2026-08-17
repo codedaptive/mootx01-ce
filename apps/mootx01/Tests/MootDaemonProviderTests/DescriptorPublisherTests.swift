@@ -107,7 +107,7 @@ struct DescriptorPublishTests {
     private func makePublisher() -> (ScratchDirectory, DescriptorPublisher, URL, ProviderLockHandle) {
         let scratch = ScratchDirectory()
         let file = scratch.url.appendingPathComponent("daemon-descriptor.v2.json")
-        let publisher = DescriptorPublisher(descriptorFile: file, clock: FixedClock().closure)
+        let publisher = DescriptorPublisher(descriptorFile: file)
         let handle = try! ProviderLock.acquire(at: scratch.url.appendingPathComponent("provider.lock"))
         return (scratch, publisher, file, handle)
     }
@@ -125,7 +125,8 @@ struct DescriptorPublishTests {
 
     @Test("a fully proven publication writes the record atomically")
     func provenPublish() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         let descriptor = sealedDescriptor()
         try publisher.publish(
             descriptor, lockProof: handle.proof,
@@ -139,7 +140,8 @@ struct DescriptorPublishTests {
 
     @Test("republication atomically replaces the record")
     func replace() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         try publisher.publish(
             sealedDescriptor(descriptorGeneration: 1), lockProof: handle.proof,
             estateReady: estateProof, bind: BindProof(host: "127.0.0.1", port: 4242),
@@ -158,7 +160,8 @@ struct DescriptorPublishTests {
 
     @Test("a bind readback that is not exactly the contracted endpoint refuses")
     func bindMismatch() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         for bad in [BindProof(host: "0.0.0.0", port: 4242),
                     BindProof(host: "127.0.0.1", port: 4243),
                     BindProof(host: "localhost", port: 4242),
@@ -176,7 +179,8 @@ struct DescriptorPublishTests {
 
     @Test("an estate proof for a different estate refuses")
     func estateMismatch() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         #expect(throws: DaemonProviderError.publishPreconditionFailed(.estateNotReady)) {
             try publisher.publish(
                 sealedDescriptor(), lockProof: handle.proof,
@@ -191,7 +195,8 @@ struct DescriptorPublishTests {
 
     @Test("an incomplete authenticator refuses: missing capability or capability disagreement")
     func authenticatorIncomplete() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         // Missing the authenticated-first-party capability entirely.
         #expect(throws: DaemonProviderError.publishPreconditionFailed(.authenticatorIncomplete)) {
             try publisher.publish(
@@ -214,7 +219,8 @@ struct DescriptorPublishTests {
 
     @Test("a malformed descriptor refuses: wrong schema, wrong endpoint, wrong identity, wrong MAC width")
     func malformedDescriptorRefused() throws {
-        let (_, publisher, file, handle) = makePublisher()
+        let (scratch, publisher, file, handle) = makePublisher()
+        defer { withExtendedLifetime(scratch) {} }
         var wrongSchema = sealedDescriptor()
         wrongSchema.schemaVersion = 1
         var wrongEndpoint = sealedDescriptor()
@@ -246,13 +252,14 @@ struct DescriptorRemovalTests {
         let scratch = ScratchDirectory()
         let file = scratch.url.appendingPathComponent("daemon-descriptor.v2.json")
         try! DescriptorPublisher.encode(descriptor).write(to: file)
-        return (scratch, DescriptorPublisher(descriptorFile: file, clock: FixedClock().closure), file)
+        return (scratch, DescriptorPublisher(descriptorFile: file), file)
     }
 
     @Test("own instance and generation match removes the record")
     func removesOwn() throws {
         let own = sealedDescriptor(descriptorGeneration: 7)
-        let (_, publisher, file) = published(own)
+        let (scratch, publisher, file) = published(own)
+        defer { withExtendedLifetime(scratch) {} }
         let outcome = try publisher.removeOwnDescriptor(
             instanceIdentifier: own.instanceIdentifier, descriptorGeneration: 7
         )
@@ -263,7 +270,8 @@ struct DescriptorRemovalTests {
     @Test("a foreign instance is left in place — substitution defense")
     func leavesForeignInstance() throws {
         let foreign = sealedDescriptor(instance: UUID())
-        let (_, publisher, file) = published(foreign)
+        let (scratch, publisher, file) = published(foreign)
+        defer { withExtendedLifetime(scratch) {} }
         let outcome = try publisher.removeOwnDescriptor(
             instanceIdentifier: UUID(), descriptorGeneration: foreign.descriptorGeneration
         )
@@ -274,7 +282,8 @@ struct DescriptorRemovalTests {
     @Test("a different generation is left in place — a successor already republished")
     func leavesNewerGeneration() throws {
         let own = sealedDescriptor(descriptorGeneration: 9)
-        let (_, publisher, file) = published(own)
+        let (scratch, publisher, file) = published(own)
+        defer { withExtendedLifetime(scratch) {} }
         let outcome = try publisher.removeOwnDescriptor(
             instanceIdentifier: own.instanceIdentifier, descriptorGeneration: 8
         )
@@ -287,7 +296,7 @@ struct DescriptorRemovalTests {
         let scratch = ScratchDirectory()
         let file = scratch.url.appendingPathComponent("daemon-descriptor.v2.json")
         try Data("squatter garbage".utf8).write(to: file)
-        let publisher = DescriptorPublisher(descriptorFile: file, clock: FixedClock().closure)
+        let publisher = DescriptorPublisher(descriptorFile: file)
         let outcome = try publisher.removeOwnDescriptor(instanceIdentifier: UUID(), descriptorGeneration: 1)
         #expect(outcome == .leftForeign)
         #expect(FileManager.default.fileExists(atPath: file.path))
@@ -296,10 +305,7 @@ struct DescriptorRemovalTests {
     @Test("absence reports absent")
     func absent() throws {
         let scratch = ScratchDirectory()
-        let publisher = DescriptorPublisher(
-            descriptorFile: scratch.url.appendingPathComponent("none.json"),
-            clock: FixedClock().closure
-        )
+        let publisher = DescriptorPublisher(descriptorFile: scratch.url.appendingPathComponent("none.json"))
         #expect(try publisher.removeOwnDescriptor(instanceIdentifier: UUID(), descriptorGeneration: 1) == .absent)
     }
 }
