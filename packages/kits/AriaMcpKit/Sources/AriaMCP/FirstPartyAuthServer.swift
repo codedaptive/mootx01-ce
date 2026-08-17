@@ -334,10 +334,15 @@ public enum StrictHTTPParser {
 
         // Split on CRLF only. A bare LF is not a line ending in HTTP/1.1, and
         // accepting one is how two parsers come to disagree about where a
-        // header ends.
+        // header ends. After the split, any CR or LF remaining INSIDE a line
+        // is by construction a bare one (every CRLF pair was consumed by the
+        // split), so its presence anywhere — start line or header field —
+        // refuses the whole request rather than letting a lenient downstream
+        // parser see a line break this parser did not (Codex Security
+        // 92eb919d).
         let lines = headerText.components(separatedBy: "\r\n")
+        guard lines.allSatisfy({ !$0.contains("\n") && !$0.contains("\r") }) else { return nil }
         guard let startLine = lines.first, !startLine.isEmpty else { return nil }
-        guard !startLine.contains("\n"), !startLine.contains("\r") else { return nil }
 
         // Exactly three tokens separated by exactly one space each.
         let startTokens = startLine.split(separator: " ", omittingEmptySubsequences: false)
