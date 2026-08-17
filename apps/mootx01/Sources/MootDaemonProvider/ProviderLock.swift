@@ -33,6 +33,19 @@ public struct AppGroupRootResolver: ProviderRootResolving {
     }
 }
 
+/// Which layout produced a lock: the production provider directory, or a
+/// proof context nested beneath it. Carried by every lock handle and proof so
+/// downstream licenses (the K_install mint above all, Perkins P-c2-1) can be
+/// bound to WHERE the serialization actually lives — a proof-directory lock
+/// must never license an act against the production credential.
+public enum ProviderLayoutContext: String, Sendable, Equatable {
+    /// The production provider directory.
+    case production
+    /// A proof context (or any acquisition that did not positively claim the
+    /// production layout — the fail-closed default).
+    case proof
+}
+
 /// The provider's on-disk layout inside the App Group container. Every state
 /// file the substrate owns lives beside the lock, under one directory the
 /// hygiene rules validate.
@@ -41,6 +54,11 @@ public struct ProviderRootLayout: Sendable, Equatable {
     /// The provider directory: `<container>/Library/Application Support/MOOTx01/provider`
     /// (or a validated proof context beneath it).
     public let providerDirectory: URL
+
+    /// Whether this layout is the production one or a proof context —
+    /// stamped by `resolve` and consumed by `ProviderLock.acquire` so the
+    /// lock proof carries its provenance (Perkins P-c2-1).
+    public let context: ProviderLayoutContext
 
     /// The exclusive provider lock file.
     public var lockFile: URL { providerDirectory.appendingPathComponent("provider.lock") }
@@ -60,11 +78,21 @@ public struct ProviderRootLayout: Sendable, Equatable {
     /// write at the production descriptor location.
     public let descriptorFile: URL
 
+    /// The durable migration-grant consumption journal (MACD-2c2, one-use
+    /// enforcement for attended grants — same journal-first shape as leases).
+    public var grantJournal: URL { providerDirectory.appendingPathComponent("grant-consumption.journal") }
+
+    /// The durable migration receipt (MACD-2c2, KONG-3 staged→committed
+    /// ordering). Lives beside the lock so receipt writes share the hygiene
+    /// and serialization guarantees of every other provider state file.
+    public var migrationReceiptFile: URL { providerDirectory.appendingPathComponent("migration-receipt.v1.json") }
+
     /// Build a layout rooted at an already-resolved provider directory.
     /// Internal: callers go through `resolve`.
-    internal init(providerDirectory: URL, descriptorFile: URL) {
+    internal init(providerDirectory: URL, descriptorFile: URL, context: ProviderLayoutContext) {
         self.providerDirectory = providerDirectory
         self.descriptorFile = descriptorFile
+        self.context = context
     }
 
     /// Resolve the layout through the injected resolver (Perkins P2).
@@ -98,7 +126,8 @@ public struct ProviderRootLayout: Sendable, Equatable {
         guard let context = proofContext else {
             return ProviderRootLayout(
                 providerDirectory: productionProvider,
-                descriptorFile: supportDirectory.appendingPathComponent("daemon-descriptor.v2.json")
+                descriptorFile: supportDirectory.appendingPathComponent("daemon-descriptor.v2.json"),
+                context: .production
             )
         }
         // The context is a NAME: it must round-trip through UUID parsing, so
@@ -111,7 +140,8 @@ public struct ProviderRootLayout: Sendable, Equatable {
             .appendingPathComponent(contextUUID.uuidString, isDirectory: true)
         return ProviderRootLayout(
             providerDirectory: proofDirectory,
-            descriptorFile: proofDirectory.appendingPathComponent("daemon-descriptor.v2.json")
+            descriptorFile: proofDirectory.appendingPathComponent("daemon-descriptor.v2.json"),
+            context: .proof
         )
     }
 }
@@ -298,8 +328,13 @@ public final class ProviderLockHandle: @unchecked Sendable {
     private let closeOnce = NSLock()
     private var released = false
 
-    internal init(fileDescriptor: Int32) {
+    /// Which layout produced this lock (Perkins P-c2-1). Immutable after
+    /// acquisition; every proof vended from the handle carries it.
+    public let layoutContext: ProviderLayoutContext
+
+    internal init(fileDescriptor: Int32, layoutContext: ProviderLayoutContext) {
         self.fileDescriptor = fileDescriptor
+        self.layoutContext = layoutContext
     }
 
     /// The proof token the rest of the pipeline demands. Only a live handle
@@ -351,6 +386,13 @@ public struct ProviderLockProof: Sendable {
         return !owner.isReleased
     }
 
+    /// The layout context of the originating handle (Perkins P-c2-1). A proof
+    /// whose handle is gone answers `.proof` — fail-closed: a dead lock can
+    /// never testify to a production layout.
+    public var layoutContext: ProviderLayoutContext {
+        owner?.layoutContext ?? .proof
+    }
+
     /// Refuse unless the lock is still held.
     ///
     /// - Throws: `DaemonProviderError.lockUnavailable` for a stale proof —
@@ -371,12 +413,21 @@ public enum ProviderLock {
     /// which is what lets the in-process race tests prove the same property
     /// the two-shell live proof re-proves across processes.
     ///
+    /// - Parameters:
+    ///   - url: The lock file location.
+    ///   - context: The layout context that produced `url` (P-c2-1). The
+    ///     default is `.proof` — FAIL-CLOSED: an acquisition that does not
+    ///     positively claim the production layout can never license a
+    ///     production-credential mint. Callers with a resolved
+    ///     `ProviderRootLayout` pass `layout.context`.
     /// - Returns: The held lock handle.
     /// - Throws: `DaemonProviderError.lockUnavailable` when another holder
     ///   exists (the caller is the race loser and must perform no further
     ///   side effect); `DaemonProviderError.hygieneViolation` on any P3
     ///   failure.
-    public static func acquire(at url: URL) throws -> ProviderLockHandle {
+    public static func acquire(
+        at url: URL, context: ProviderLayoutContext = .proof
+    ) throws -> ProviderLockHandle {
         let fd = try SecureFiles.openValidated(url, flags: O_RDWR, create: true)
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             let failure = errno
@@ -384,6 +435,6 @@ public enum ProviderLock {
             if failure == EWOULDBLOCK { throw DaemonProviderError.lockUnavailable }
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
-        return ProviderLockHandle(fileDescriptor: fd)
+        return ProviderLockHandle(fileDescriptor: fd, layoutContext: context)
     }
 }

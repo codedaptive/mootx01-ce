@@ -1,7 +1,10 @@
 import Foundation
 import AriaMCP
+#if canImport(Security)
+import Security
+#endif
 
-// MARK: - MACD-2c1 — the shared shell entry and the canonical self-report
+// MARK: - The shared shell entry and the canonical self-report
 //
 // Kong K2: the direct Developer-ID shell and the sandboxed bundled helper are
 // THIN MAINS over this one module. Everything a shell does lives here, so the
@@ -9,8 +12,39 @@ import AriaMCP
 // structurally identical — "parallel copies fail" enforced by there being
 // nothing in a shell to diverge.
 //
-// c1 shell modes are run-to-completion; the resident service mode is
-// MACD-2c2's deliverable and no run loop starts here.
+// Every mode runs to completion; no run loop starts here. The `resident`
+// mode exists as the LaunchAgent contract's entry point but fail-closes
+// honestly until MACD-3 activates estate hosting (the estate stack sits
+// above this package's frozen dependency graph), and the daemon bundle
+// installs DISABLED until then — an honest not-yet-activated state, keyed
+// off real observations, never a fake readiness.
+
+/// The production CSPRNG (Perkins P-c2-2): `SecRandomCopyBytes`,
+/// status-checked and FAIL-CLOSED — a generator that cannot answer returns
+/// an empty array, which every consumer treats as a broken security
+/// primitive (wrong-count refusals), never as usable randomness.
+///
+/// This is composition-root material: engines never call it directly; the
+/// shell injects `ProductionRandomness.secRandomBytes` as the
+/// `ProviderRandomness` of every NON-proof mode. The proof race keeps its
+/// deliberately pinnable `UInt8.random` fake — proof/test-only.
+public enum ProductionRandomness {
+    /// `count` cryptographically random bytes, or `[]` when the system
+    /// generator fails (fail-closed).
+    public static func secRandomBytes(_ count: Int) -> [UInt8] {
+        guard count > 0 else { return [] }
+        #if canImport(Security)
+        var bytes = [UInt8](repeating: 0, count: count)
+        guard SecRandomCopyBytes(kSecRandomDefault, count, &bytes) == errSecSuccess else {
+            return []
+        }
+        return bytes
+        #else
+        // No Security framework: there is no production randomness to offer.
+        return []
+        #endif
+    }
+}
 
 /// The canonical self-report both shells must emit IDENTICALLY.
 public enum ProviderSelfReport {
@@ -25,8 +59,11 @@ public enum ProviderSelfReport {
     /// descriptor schema, contract revision, MCP version, Keychain service,
     /// Keychain account, generation format + wire encoding, the twelve
     /// arbiter wire encodings, the handover step count, the lease transcript
-    /// field list, and the lease domain. Two shells that agree on this digest
-    /// agree on every encoding a peer can observe.
+    /// field list, the lease domain, and — since MACD-2c2 — the migration
+    /// grant domain, the migration receipt domain, the census disposition
+    /// encodings, and the migration step encodings (an ADDITIVE tail: the
+    /// digest changes, and both shells change identically). Two shells that
+    /// agree on this digest agree on every encoding a peer can observe.
     public static func digestInput() -> [UInt8] {
         var encoder = CanonicalEncoder()
         encoder.appendString("mootx01-daemon-provider-module-v1")
@@ -50,6 +87,15 @@ public enum ProviderSelfReport {
             encoder.appendString(field)
         }
         encoder.appendString(HandoverLease.leaseDomain)
+        // MACD-2c2 additive tail: the estate-convergence contract.
+        encoder.appendString(MigrationGrantEnvelope.grantDomain)
+        encoder.appendString(MigrationReceipt.receiptDomain)
+        for encoding in CensusDisposition.allWireEncodings {
+            encoder.appendString(encoding)
+        }
+        for encoding in MigrationStep.allWireEncodings {
+            encoder.appendString(encoding)
+        }
         return encoder.bytes
     }
 
@@ -73,16 +119,20 @@ public enum ProviderSelfReport {
             "contractRevision": FirstPartyAuthProtocol.contractRevision,
             "descriptorSchemaVersion": FirstPartyAuthProtocol.descriptorSchemaVersion,
             "endpoint": FirstPartyAuthProtocol.endpoint,
+            "censusDispositions": CensusDisposition.allWireEncodings,
             "generationEncoding": generationEncoding,
             "generationFormat": GenerationStore.formatIdentifier,
+            "grantDomain": MigrationGrantEnvelope.grantDomain,
             "handoverStepCount": HandoverStep.allCases.count,
             "keychainAccount": FirstPartyAuthProtocol.keychainAccount,
             "keychainService": FirstPartyAuthProtocol.keychainService,
             "leaseDomain": HandoverLease.leaseDomain,
             "leaseTranscriptFields": HandoverLease.transcriptFields,
             "mcpProtocolVersion": FirstPartyAuthProtocol.mcpProtocolVersion,
+            "migrationSteps": MigrationStep.allWireEncodings,
             "moduleDigest": moduleDigest(),
             "providerIdentifier": FirstPartyAuthProtocol.providerIdentifier,
+            "receiptDomain": MigrationReceipt.receiptDomain,
             "serviceIdentifier": FirstPartyAuthProtocol.serviceIdentifier,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
@@ -107,6 +157,9 @@ public enum DaemonShellMain {
         case ineligible = 2
         /// Race lost — lock unavailable, zero side-effect callbacks.
         case lockLost = 3
+        /// `resident` requested before MACD-3 activates estate hosting —
+        /// an honest, documented refusal (INSTALLER_INTERFACE §daemon bundle).
+        case residentUnavailable = 4
         /// Any other refusal.
         case failure = 1
     }
@@ -115,14 +168,27 @@ public enum DaemonShellMain {
     ///
     /// Modes:
     /// - `self-report` — print `ProviderSelfReport.canonicalReport()` and exit.
+    /// - `census` — read-only FILE-LEVEL census of the legacy default-estate
+    ///   candidates and the canonical location: presence, size, digest, WAL
+    ///   posture, encryption posture (SQLite magic header). Prints one JSON
+    ///   line of class labels, digests, and the conservative disposition —
+    ///   never a raw path (P-c2-8/P-c2-11). Creates nothing, checkpoints
+    ///   nothing, mints nothing. The identity tier (estate UUID/schema)
+    ///   requires the injected SQLite seam, which has no production
+    ///   conformer here, so nonempty candidates classify UNVERIFIABLE and
+    ///   the disposition hard-stops conservatively (KONG-2) until MACD-3.
+    /// - `resident` — the LaunchAgent contract's entry point. Fail-closes
+    ///   honestly (exit 4) until MACD-3 activates estate hosting; the
+    ///   installer writes the bundle plist DISABLED, so nothing launches
+    ///   this mode in production before then.
     /// - `race --context <uuid> [--hold-ms <n>]` — proof mode: judge REAL
     ///   eligibility (reported honestly, never overridden), resolve the REAL
     ///   App Group root, then race for the provider lock inside the named
     ///   proof context with JOURNALING FAKE authorities (file-backed Keychain
     ///   fake, counting estate/bind/session fakes). The production
     ///   data-protection Keychain is NEVER touched in proof mode — minting
-    ///   the production credential from a proof would be a real installation
-    ///   act, which is c2's, behind the real pipeline only.
+    ///   the production credential is licensed only by the production
+    ///   pipeline (production lock layout + nil proof context, P-c2-1).
     ///
     /// The context argument is a UUID NAME nested under the resolver-derived
     /// root — argv never supplies a path (Perkins P2), and no mode deletes
@@ -146,6 +212,21 @@ public enum DaemonShellMain {
         case "self-report":
             guard arguments.count == 1 else { return (ExitCode.usage.rawValue, usageText) }
             return (ExitCode.success.rawValue, ProviderSelfReport.canonicalReport())
+        case "census":
+            guard arguments.count == 1 else { return (ExitCode.usage.rawValue, usageText) }
+            return runCensus()
+        case "resident":
+            guard arguments.count == 1 else { return (ExitCode.usage.rawValue, usageText) }
+            // Honest refusal: estate hosting activates with MACD-3. The
+            // bundle plist is written DISABLED, so launchd never spins on
+            // this exit; a manual invocation gets the truth, not a fake bind.
+            let refusal: [String: Any] = [
+                "mode": "resident",
+                "moduleDigest": ProviderSelfReport.moduleDigest(),
+                "outcome": "resident-unavailable",
+            ]
+            let encoded = (try? JSONSerialization.data(withJSONObject: refusal, options: [.sortedKeys])) ?? Data()
+            return (ExitCode.residentUnavailable.rawValue, String(decoding: encoded, as: UTF8.self))
         case "race":
             guard let options = RaceOptions(arguments: Array(arguments.dropFirst())) else {
                 return (ExitCode.usage.rawValue, usageText)
@@ -158,8 +239,163 @@ public enum DaemonShellMain {
 
     private static let usageText = """
     usage: mootx01-daemon self-report
+           mootx01-daemon census
+           mootx01-daemon resident
            mootx01-daemon race --context <uuid> [--hold-ms <milliseconds>]
     """
+
+    // MARK: - Census mode (read-only, file level)
+
+    /// The four legacy candidate classes and their KNOWN default locations,
+    /// derived from the process's own home directory — never from argv, an
+    /// envelope, or any foreign input (path is never authority; these are the
+    /// contract locations the census CONTRACT enumerates).
+    private static func legacyCandidateLocations(home: URL) -> [(EstateCandidateClass, URL)] {
+        let support = home
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+        return [
+            // Sandboxed Pro app-local default, inside the Pro container.
+            (.sandboxedPro, home
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Containers", isDirectory: true)
+                .appendingPathComponent("com.codedaptive.mootx01.macos", isDirectory: true)
+                .appendingPathComponent("Data", isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+                .appendingPathComponent("mootx01", isDirectory: true)
+                .appendingPathComponent("mootx01.sqlite", isDirectory: false)),
+            // Unsandboxed Community default.
+            (.community, support
+                .appendingPathComponent("mootx01", isDirectory: true)
+                .appendingPathComponent("mootx01.sqlite", isDirectory: false)),
+            // Swift CLI legacy default.
+            (.swiftCE, support
+                .appendingPathComponent("com.mootx01.ce", isDirectory: true)
+                .appendingPathComponent("estate.sqlite", isDirectory: false)),
+            // Rust CLI legacy default (databases/default per the Rust spec).
+            (.rustCE, support
+                .appendingPathComponent("ai.mootx01.ce", isDirectory: true)
+                .appendingPathComponent("databases", isDirectory: true)
+                .appendingPathComponent("default", isDirectory: true)
+                .appendingPathComponent("estate.sqlite", isDirectory: false)),
+        ]
+    }
+
+    /// Named sibling estates (`databases/<name>`, name != default) under one
+    /// data directory. Names only — reported, never candidates.
+    private static func siblingNames(dataDirectory: URL) -> [String] {
+        let databases = dataDirectory.appendingPathComponent("databases", isDirectory: true)
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: databases.path)) ?? []
+        return entries.filter { $0 != "default" && !$0.hasPrefix(".") }.sorted()
+    }
+
+    /// The read-only census mode: observe, judge conservatively, report
+    /// classifications. Zero writes, zero SQL, zero Keychain calls.
+    private static func runCensus() -> (code: Int32, output: String) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let support = home
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+
+        var candidateRecords: [CensusCandidateRecord] = []
+        var reported: [[String: Any]] = []
+        for (candidateClass, mainURL) in legacyCandidateLocations(home: home) {
+            // Key custody is NOT probed in census mode: a probe needs the
+            // signed Keychain entitlement surface and census must never turn
+            // an entitlement fault into a decision — reported honestly as
+            // not-probed (the judge does not consume key reachability).
+            let record = DefaultEstateCensus.observeFileLevel(
+                candidateClass: candidateClass,
+                mainURL: mainURL,
+                keyReachability: .notProbed,
+                receiptCoverage: .none
+            )
+            candidateRecords.append(record)
+            reported.append(Self.reportEntry(for: record))
+        }
+
+        // The canonical location resolves through the shell's OWN signed
+        // eligibility; an ineligible or unresolvable shell reports the
+        // canonical tier unobservable rather than guessing.
+        var canonicalRecord: CensusCandidateRecord?
+        var canonicalObservable = false
+        #if canImport(Security)
+        if let identity = try? SecCodeEntitlementReadback().processIdentity(),
+           let eligibility = try? ProviderEligibilityJudge.judge(identity),
+           let container = AppGroupRootResolver().containerURL(
+               forSecurityApplicationGroupIdentifier: eligibility.appGroupIdentifier
+           ) {
+            let canonicalURL = container
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+                .appendingPathComponent("MOOTx01", isDirectory: true)
+                .appendingPathComponent("estate.sqlite", isDirectory: false)
+            canonicalRecord = DefaultEstateCensus.observeFileLevel(
+                candidateClass: .canonical,
+                mainURL: canonicalURL,
+                keyReachability: .notProbed,
+                receiptCoverage: .none
+            )
+            canonicalObservable = true
+        }
+        #endif
+
+        let siblings = siblingNames(
+            dataDirectory: support.appendingPathComponent("com.mootx01.ce", isDirectory: true)
+        ) + siblingNames(
+            dataDirectory: support.appendingPathComponent("ai.mootx01.ce", isDirectory: true)
+        )
+
+        var object: [String: Any] = [
+            "mode": "census",
+            "moduleDigest": ProviderSelfReport.moduleDigest(),
+            "candidates": reported,
+            "siblings": siblings.sorted(),
+            "canonicalObservable": canonicalObservable,
+        ]
+        if canonicalObservable {
+            let disposition = DefaultEstateCensus.judge(CensusObservation(
+                candidates: candidateRecords,
+                canonical: canonicalRecord,
+                siblings: siblings
+            ))
+            object["disposition"] = disposition.wireEncoding
+            if let canonicalRecord {
+                object["canonical"] = Self.reportEntry(for: canonicalRecord)
+            }
+        } else {
+            // Without the canonical tier no disposition can be honest: the
+            // judge would be electing against an unobserved canonical.
+            object["disposition"] = "canonical-unobservable"
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+            return (ExitCode.failure.rawValue, #"{"mode":"census","outcome":"report-encoding-failed"}"#)
+        }
+        return (ExitCode.success.rawValue, String(decoding: data, as: UTF8.self))
+    }
+
+    /// One candidate's report entry: class label, posture classifications,
+    /// byte count, and digest — NEVER a path (P-c2-8/P-c2-11).
+    private static func reportEntry(for record: CensusCandidateRecord) -> [String: Any] {
+        var entry: [String: Any] = ["class": record.candidateClass.rawValue]
+        switch record.main {
+        case .absent:
+            entry["main"] = "absent"
+        case .present(let bytes, _, _, _, let digest):
+            entry["main"] = "present"
+            entry["bytes"] = NSNumber(value: bytes)
+            entry["digest"] = digest
+        }
+        switch record.wal {
+        case .absent: entry["wal"] = "absent"
+        case .present(let bytes):
+            entry["wal"] = "present"
+            entry["walBytes"] = NSNumber(value: bytes)
+        }
+        entry["encryption"] = record.encryption.rawValue
+        return entry
+    }
 
     /// Parsed race-mode options. Failable parse: anything not exactly the
     /// grammar above is a usage error before any side effect.
@@ -320,7 +556,9 @@ final class ProofCallRecorder: @unchecked Sendable {
 /// A file-backed Keychain FAKE for the proof race: the "root" lives in a file
 /// inside the proof context, so two racing shells share it while the real
 /// data-protection Keychain is never touched (production darkness — the real
-/// credential mint is a real installation act and belongs to c2's pipeline).
+/// credential mint is licensed only by the production pipeline: production
+/// lock layout + nil proof context, P-c2-1; this fake carries no
+/// ProductionCredentialAuthority marker, which is what keeps it usable here).
 struct ProofFileKeychain: KeychainItemAuthority {
     let recorder: ProofCallRecorder
     let context: String
@@ -378,7 +616,7 @@ struct ProofEstate: EstateLifecycleAuthority {
 
 /// Proof bind authority: counts and reports the contracted readback WITHOUT
 /// binding — the race proof is about the LOCK; a real bind belongs to the
-/// resident service (c2), and a proof that bound port 4242 would collide
+/// resident service (MACD-3), and a proof that bound port 4242 would collide
 /// with any genuinely running daemon on the machine.
 struct ProofBind: BindAuthority {
     let recorder: ProofCallRecorder

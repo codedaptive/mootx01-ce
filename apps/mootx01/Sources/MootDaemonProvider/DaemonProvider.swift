@@ -124,6 +124,14 @@ public actor DaemonProvider {
     ///   performed zero side effects; a loser AT the lock has invoked zero
     ///   Keychain/estate/bind/publish callbacks (Perkins P1/P4).
     public func activate() async throws -> ProviderActivation {
+        // 0. P-c2-1 construction refusal, enforced at the earliest
+        //    zero-side-effect point: a PRODUCTION Keychain authority may
+        //    never be composed with a proof context. (The mint site in
+        //    InstallationRootAuthority additionally re-judges the lock's
+        //    layout — defense in depth, both fail-closed.)
+        if keychain is ProductionCredentialAuthority, configuration.proofContext != nil {
+            throw DaemonProviderError.keychainFatal(.proofContextRefused)
+        }
         // 1. Eligibility — the first judgment, before any side effect. The
         //    four ineligible classes exit here (Perkins P1).
         let identity = try readback.processIdentity()
@@ -141,7 +149,7 @@ public actor DaemonProvider {
         // 3. THE RACE GATE. A loser throws here having invoked zero
         //    Keychain/estate/bind/publish callbacks — everything below this
         //    line runs only while the exclusive lock is held (Perkins P4).
-        let handle = try ProviderLock.acquire(at: layout.lockFile)
+        let handle = try ProviderLock.acquire(at: layout.lockFile, context: layout.context)
         do {
             let proof = handle.proof
 
@@ -164,8 +172,10 @@ public actor DaemonProvider {
                 generations = try store.initialize(lockProof: proof)
             }
 
-            // 6. Estate open through the injected authority (production
-            //    implementation is c2's; c1 proves the ordering).
+            // 6. Estate open through the injected authority. No production
+            //    conformer exists in this module (frozen package graph); the
+            //    real estate host arrives with MACD-3 — until then this seam
+            //    is exercised by fakes, and the ordering is what is proven.
             let estateProof = try await estate.openEstate()
 
             // 7. Bind, then read the bound address back (Perkins P8's
@@ -223,8 +233,11 @@ public actor DaemonProvider {
     /// per Kong decision 1 / Perkins P7. It does NOT re-mint K_install — the
     /// `KeychainItemAuthority` seam deliberately has no update/delete
     /// primitive, so a root re-mint is structurally impossible here;
-    /// post-compromise HKDF derivability of prior rungs is an accepted c1
-    /// posture, and the root-rotation seam is a queued c2 constraint.
+    /// post-compromise HKDF derivability of prior rungs is an accepted
+    /// posture, and the root-rotation seam (under-lock update/delete with a
+    /// descriptor+session+lease cascade) is an EXPLICIT DEFERRAL: MACD-2c2
+    /// landed no root rotation, so the seam deliberately still has no
+    /// update/delete primitive. Recorded for MACD-3.
     ///
     /// - Returns: The republished descriptor.
     public func rotateCredential() async throws -> FirstPartyDescriptor {

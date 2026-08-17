@@ -1,19 +1,24 @@
 import Foundation
 
-// MARK: - MACD-2c1 — injected authority seams
+// MARK: - Injected authority seams (MACD-2c1 base, MACD-2c2 convergence)
 //
 // The provider substrate NEVER constructs a production estate, installer,
 // process supervisor, or Keychain path on its own. Every side-effectful
-// capability arrives through one of the protocols in this file, injected at
-// construction. In MACD-2c1 the only implementations of the estate and
-// installer seams are adversarial counting fakes in the test target and
-// journaling fakes in the proof shell; the production implementations are
-// MACD-2c2's deliverable. This is the mission's production-darkness boundary
-// expressed as a type-system fact rather than a convention.
+// capability arrives through one of the protocols in this file (and the
+// census/grant/migration seams in DefaultEstateCensus.swift,
+// LegacyMigrationGrant.swift, and DefaultEstateMigrator.swift), injected at
+// construction. The SQLite-semantic seams have NO production conformer in
+// this module by design: the estate stack sits above this package's frozen
+// dependency graph, so the production conformers arrive with MACD-3 estate
+// routing, and until then every conformer is an adversarial counting fake in
+// the test target or a journaling fake in the proof shell. This is the
+// production-darkness boundary expressed as a type-system fact rather than a
+// convention.
 //
-// Determinism (Perkins P13): clocks and randomness are injected everywhere a
-// security decision is taken. No engine below ever calls Date() or
-// SecRandomCopyBytes directly.
+// Determinism (Perkins P13/P-c2-12): clocks and randomness are injected
+// everywhere a security decision is taken. No engine below ever calls Date()
+// or SecRandomCopyBytes directly; the composition roots in ProviderShell are
+// the only license (ProductionRandomness there is the one production CSPRNG).
 
 /// Why a provider operation was refused.
 ///
@@ -61,7 +66,68 @@ public enum DaemonProviderError: Error, Equatable, Sendable {
     /// A handover that fails TERMINALLY is not an error case here — it is the
     /// `HandoverFailureDisposition` the coordinator's `fail` step returns.
     case handoverSequenceViolation(expected: HandoverStep, requested: HandoverStep)
+
+    /// A migration grant failed validation or one-use consumption
+    /// (MACD-2c2, Perkins P-c2-3/4/5).
+    case grantInvalid(GrantFault)
+
+    /// A default-estate migration invariant failed (MACD-2c2, KONG-3).
+    case migrationFault(MigrationFault)
 }
+
+/// A migration-grant fault (Perkins P-c2-3/4/5). The grant reuses the lease's
+/// fail-closed one-use discipline; the classifications mirror `LeaseFault`
+/// deliberately so operators read one vocabulary.
+public enum GrantFault: String, Sendable, Equatable {
+    /// The envelope MAC did not verify under the challenge-derived key.
+    case badMAC = "bad-mac"
+    /// The grant is past its expiry (injected clock).
+    case expired
+    /// The grant identifier is already in the consumption journal.
+    case consumed
+    /// A binding field (provider instance, candidate class, challenge)
+    /// disagrees with the outstanding challenge or this provider.
+    case bindingMismatch = "binding-mismatch"
+    /// The grant's credential generation is not exactly current.
+    case staleGeneration = "stale-generation"
+    /// The durable record cannot be decoded (wrong key set, oversize, or
+    /// non-canonical spellings).
+    case malformed
+    /// The consumption journal cannot answer or record. Fail-closed: an
+    /// unanswerable one-use question refuses, it never passes (c0 pattern).
+    case journalUnavailable = "journal-unavailable"
+}
+
+/// A default-estate migration fault (KONG-3). Classifications only — no case
+/// carries a path, key, or bookmark byte (Perkins P-c2-11).
+public enum MigrationFault: String, Sendable, Equatable {
+    /// An injected authority failed (or crash injection fired, in tests).
+    case injectedFailure = "injected-failure"
+    /// The durable receipt exists but cannot be read or fails its MAC.
+    /// Fail-closed: an unreadable receipt refuses, it never resets.
+    case receiptUnreadable = "receipt-unreadable"
+    /// The staged receipt disagrees with this transaction's identity set.
+    case receiptMismatch = "receipt-mismatch"
+    /// A digest comparison failed (copy verification or resume re-verify).
+    case digestMismatch = "digest-mismatch"
+    /// The source or destination estate identity disagreed with the census.
+    case identityMismatch = "identity-mismatch"
+    /// The WAL was not provably empty after checkpoint(TRUNCATE).
+    case walNotEmpty = "wal-not-empty"
+    /// A migration step was requested out of order.
+    case sequenceViolation = "sequence-violation"
+    /// The escrow rules refused (never mint over ciphertext, P-c2-7).
+    case escrowRefused = "escrow-refused"
+}
+
+/// Marker for the PRODUCTION Keychain authority (Perkins P-c2-1). The mint
+/// license in `InstallationRootAuthority.ensureRoot` — and the activation
+/// guard in `DaemonProvider` — refuse to pair a conformer of this marker with
+/// anything but a production-layout lock proof and a nil proof context, so a
+/// proof-directory lock plus the real data-protection Keychain fails closed
+/// BEFORE `SecItemAdd` is reachable. Test fakes must NOT conform unless the
+/// test is deliberately proving this refusal.
+public protocol ProductionCredentialAuthority {}
 
 /// The four ineligible signing classes (Perkins P1). A shell in any of these
 /// classes exits before the lock with zero side effects.
@@ -107,6 +173,10 @@ public enum KeychainFault: String, Sendable, Equatable {
     case unavailable
     /// A freshly minted or re-read item disagrees with what was written.
     case disagreement
+    /// A PRODUCTION credential authority was paired with a proof-layout (or
+    /// unspecified) lock proof, or a non-nil proof context (Perkins P-c2-1).
+    /// Refused before any Keychain call is made.
+    case proofContextRefused = "proof-context-refused"
 }
 
 /// A violated durable-generation invariant (Perkins P6).
@@ -242,11 +312,12 @@ public struct AuthenticatorReadiness: Sendable, Equatable {
     }
 }
 
-// MARK: - Injected authorities (fakes-only in c1)
+// MARK: - Injected authorities (no production estate conformer in this module)
 
-/// Estate lifecycle operations, injected. MACD-2c1 has NO production
-/// implementation of this protocol — the estate itself is out of scope, and
-/// tests inject adversarial counting fakes. c2 supplies the real one.
+/// Estate lifecycle operations, injected. This module has NO production
+/// implementation of this protocol — the estate stack sits above this
+/// package's frozen dependency graph, so the production conformer arrives
+/// with MACD-3 estate routing. Tests inject adversarial counting fakes.
 public protocol EstateLifecycleAuthority: Sendable {
     /// Refuse new writes. Handover step 3 begins here.
     func stopWrites() async throws
@@ -261,8 +332,10 @@ public protocol EstateLifecycleAuthority: Sendable {
     func openEstate() async throws -> EstateReadyProof
 }
 
-/// Installer operations, injected. c1 has NO production implementation
-/// (installer convergence is c2); tests inject counting fakes.
+/// Installer operations, injected. The installer-parity artifacts (daemon
+/// bundle, disabled LaunchAgent) live in MootInstallerCore; a production
+/// conformer of THIS handover seam is composed only when live handover is
+/// authorized (MACD-3). Tests inject counting fakes.
 public protocol InstallerAuthority: Sendable {
     /// Handover step 1: install the target, disabled.
     func prepareTargetDisabled() async throws
@@ -296,8 +369,9 @@ public protocol SessionRevocationAuthority: Sendable {
     func revokeAllSessions() async
 }
 
-/// Binds the loopback listener and reads the bound address back. c1 tests
-/// inject fakes; the real conformer arrives with c2's resident service.
+/// Binds the loopback listener and reads the bound address back. Tests
+/// inject fakes; the real conformer belongs to the resident service, which
+/// activates with MACD-3 (the daemon bundle installs disabled until then).
 public protocol BindAuthority: Sendable {
     /// Bind and return the `getsockname(2)` readback.
     func bindLoopback() async throws -> BindProof

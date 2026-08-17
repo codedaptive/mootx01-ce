@@ -99,10 +99,14 @@ public struct InstallationRootAuthority: Sendable {
     /// Read the root, minting it if — and only if — it is genuinely absent.
     ///
     /// Requires the lock proof: the mint license is eligibility AND lock AND
-    /// genuine absence, all three (Perkins P5). After a mint the item is read
-    /// back and compared; disagreement is fatal. An add that reports
-    /// `duplicate` re-reads and compares — losing an add race to an item with
-    /// the same bytes is fine, to different bytes is `disagreement`.
+    /// genuine absence, all three (Perkins P5) — and, since MACD-2c2, the
+    /// lock's LAYOUT (Perkins P-c2-1): a PRODUCTION Keychain authority is
+    /// refused outright under a proof-layout (or unspecified) lock proof,
+    /// before even the read, so a proof-directory lock can never probe or
+    /// mint the production credential. After a mint the item is read back and
+    /// compared; disagreement is fatal. An add that reports `duplicate`
+    /// re-reads and compares — losing an add race to an item with the same
+    /// bytes is fine, to different bytes is `disagreement`.
     ///
     /// - Returns: The root and its provenance.
     /// - Throws: `DaemonProviderError.keychainFatal`.
@@ -110,6 +114,15 @@ public struct InstallationRootAuthority: Sendable {
         // The proof must be LIVE: a stale proof (its handle already released)
         // must never license a mint.
         try lockProof.validate()
+        // P-c2-1: the mint license is bound to WHICH layout produced the
+        // lock. The production credential authority (marker protocol) may
+        // only ever be exercised under the production layout's lock — a
+        // proof-context lock satisfying the P5 conditions against the REAL
+        // data-protection Keychain was the c1 carry-forward hole this closes.
+        if keychain is ProductionCredentialAuthority,
+           lockProof.layoutContext != .production {
+            throw DaemonProviderError.keychainFatal(.proofContextRefused)
+        }
         if let existing = try readRoot() {
             return InstallationRoot(bytes: existing, provenance: .existing)
         }
@@ -163,7 +176,11 @@ public struct InstallationRootAuthority: Sendable {
 /// the shell's own signed entitlements. Adds pin
 /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and non-synchronizable
 /// — the root is device-bound (Kong decision 1).
-public struct DataProtectionKeychainAuthority: KeychainItemAuthority {
+///
+/// Conforms to `ProductionCredentialAuthority` (P-c2-1): pairing this type
+/// with a proof-layout lock or a non-nil proof context fails closed before
+/// any `SecItem*` call is reachable.
+public struct DataProtectionKeychainAuthority: KeychainItemAuthority, ProductionCredentialAuthority {
 
     public init() {}
 

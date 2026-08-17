@@ -765,7 +765,7 @@ private final class FakeSourceAccess: SourceEstateAccess, @unchecked Sendable {
     private func record(_ event: String, crash: CrashPoint) throws {
         lock.lock(); defer { lock.unlock() }
         events.append(event)
-        if crashAt == crash { throw DaemonProviderError.migrationFault(.injectedFailure) }
+        if crash != .none && crashAt == crash { throw DaemonProviderError.migrationFault(.injectedFailure) }
     }
     func openExclusive() async throws { try record("open", crash: .none) }
     func checkpointTruncate() async throws { try record("checkpoint", crash: .checkpoint) }
@@ -793,7 +793,7 @@ private final class FakeFileMigration: FileMigrationAuthority, @unchecked Sendab
     private func record(_ event: String, crash: CrashPoint) throws {
         lock.lock(); defer { lock.unlock() }
         events.append(event)
-        if crashAt == crash { throw DaemonProviderError.migrationFault(.injectedFailure) }
+        if crash != .none && crashAt == crash { throw DaemonProviderError.migrationFault(.injectedFailure) }
     }
     func copyMainToIncoming(source: URL, incoming: URL) async throws -> String {
         try record("copy", crash: .copy)
