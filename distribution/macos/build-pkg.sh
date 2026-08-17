@@ -127,6 +127,35 @@ PLIST
 </dict>
 ENTITLEMENTS
         printf '</plist>\n' >> "$DAEMON_ENTITLEMENTS"
+        # An App Group entitlement on a Developer ID artifact is only HONORED
+        # when a provisioning profile granting it is embedded in the bundle;
+        # without one the kernel refuses the launch outright (observed: SIGKILL
+        # at exec, verified in the MACD-2c2 pkg proof). So the two must travel
+        # together: entitlements without a profile is an artifact that cannot
+        # run, which is worse than one that is merely ineligible.
+        #
+        # DAEMON_PROVISIONING_PROFILE is the path to the .provisionprofile that
+        # grants group.com.codedaptive.mootx01 and the team Keychain group to
+        # this bundle identifier. CI supplies it from a secret; a local layout
+        # build may omit it and gets an honestly-labelled unrunnable artifact.
+        if [ -n "${DAEMON_PROVISIONING_PROFILE:-}" ]; then
+            [ -f "$DAEMON_PROVISIONING_PROFILE" ] || {
+                echo "ERROR: DAEMON_PROVISIONING_PROFILE is set but not a file:" >&2
+                echo "       $DAEMON_PROVISIONING_PROFILE" >&2
+                exit 1
+            }
+            cp "$DAEMON_PROVISIONING_PROFILE" "$DAEMON_APP/Contents/embedded.provisionprofile"
+            echo "Embedded provisioning profile in the daemon provider bundle"
+        elif [ -n "${REQUIRE_SIGNING:-}" ]; then
+            echo "ERROR: the daemon provider bundle is signed with App Group and Keychain" >&2
+            echo "       entitlements, but DAEMON_PROVISIONING_PROFILE is empty. Without an" >&2
+            echo "       embedded profile granting those entitlements the artifact is killed" >&2
+            echo "       at launch — refusing to publish a daemon that cannot start." >&2
+            exit 1
+        else
+            echo "WARNING: no DAEMON_PROVISIONING_PROFILE — the entitled daemon bundle will"
+            echo "         be REFUSED AT LAUNCH on this machine (local layout build only)."
+        fi
         "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
             --entitlements "$DAEMON_ENTITLEMENTS" \
             --sign "$APP_IDENTITY" "$DAEMON_APP"
