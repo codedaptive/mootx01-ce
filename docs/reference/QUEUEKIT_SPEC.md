@@ -1,8 +1,8 @@
 ---
 title: QueueKit Specification
-version: 1.4.2
+version: 1.5.0
 status: active
-date: 2026-07-16
+date: 2026-08-17
 description: "Behavioral specification for QueueKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -157,12 +157,26 @@ processing are fully decoupled.
 at a time — `new` (claimable), `cur` (in-flight), or `done`
 (terminal). No job exists in two states simultaneously. On the
 Filesystem backend the directory is the authoritative state; there is
-no separate in-memory authority.
+no separate in-memory authority. (The Filesystem backend additionally
+uses a transient `claim/` slot during the two-step claim of I-3; a job
+mid-claim is in-flight, and a crash mid-claim is recovered by the
+mount-time reclaim exactly like a `cur/` orphan.)
 
 **I-3 (no double-claim):** two concurrent drainers against the same
-queue never both receive the same job. On the Filesystem backend this
-rests on POSIX `rename(2)` atomicity (exactly one caller gets return
-value `0` for a given source path); on the PersistenceKit backend it
+queue never both receive the same job. On the Filesystem backend the
+claim is TWO renames per file: `new/<name>` →
+`claim/<32-lowercase-hex>-<name>` (a destination unique to the claim
+attempt), then `claim/<32hex>-<name>` → `cur/<name>`. A single direct
+`rename(new/<name> → cur/<name>)` is NOT a safe claim and must never
+be reintroduced: POSIX mandates that when `old` and `new` resolve to
+the same existing file, `rename(2)` succeeds as a no-op, so a losing
+concurrent claimer that resolves `old` before the winner's rename
+commits and `new` after it receives a duplicate success (observed
+deterministically on external APFS volumes). The unique first-step
+destination cannot pre-exist, so exactly one caller wins it; every
+loser gets ENOENT. The 33-char claim prefix (32 hex + `-`) is a
+cross-port protocol constant — a claim written by either port must be
+reclaimable by the other. On the PersistenceKit backend the guarantee
 rests on a `.serializable` transaction whose claim update is guarded
 by a `status = "new"` predicate.
 
@@ -372,6 +386,17 @@ PersistenceKit backend is behaviour-conformant, not byte-identical,
 since it stores rows rather than files.)
 
 ## Changelog
+
+### 1.5.0 -- 2026-08-17
+Filesystem claim protocol hardened (both ports, QUEUEKIT-CONCURRENT-CLAIM):
+the I-3 no-double-claim mechanism is now a two-step rename through a
+per-claim-unique `claim/<32hex>-<name>` intermediate, because the previous
+single `rename(new→cur)` claim was unsound — POSIX's same-file rule lets a
+losing concurrent claimer receive success as a no-op (reproduced
+deterministically on external APFS volumes: 105–116 claims of 100 jobs).
+`claim/` joins the maildir subdirs; mount-time reclaim sweeps stranded
+claim files back to `new/` under their original names. I-2 notes the
+transient slot. Wire format, filenames, and public API are unchanged.
 
 ### 1.4.2 -- 2026-07-16
 Added "Invalid identifier" row to the § 6 error model table: a `StreamID`, `JobID`,

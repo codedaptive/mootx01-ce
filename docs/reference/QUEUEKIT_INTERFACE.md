@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-16
-version: 1.5.1
+date: 2026-08-17
+version: 1.6.0
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -87,14 +87,14 @@ public final class QueueKit: Sendable {
     /// composition layer (e.g. GeniusLocusKit) before any drain calls.
     nonisolated(unsafe) public var estateTag: String   // default "unknown"
 
-    /// Mount the Filesystem backend at `root`: creates the four
+    /// Mount the Filesystem backend at `root`: creates the five
     /// maildir subdirectories and sweeps stale tmp/ files (SPEC § 4 I-2, B-7).
     public init(root: URL, hlcGenerator: HLCGenerator) throws
     /// Mount an explicit backend (PersistenceKit / InMemory / tests).
     public init(backend: any QueueBackend, root: URL? = nil)
 
     // Maildir management (Filesystem)
-    public static let maildirSubdirs: [String]    // ["tmp","new","cur","done"]
+    public static let maildirSubdirs: [String]    // ["tmp","new","cur","claim","done"]
     public static func ensureMaildir(root: URL) throws
     public static func cleanStaleTmpFiles(root: URL) throws
 }
@@ -176,8 +176,9 @@ backend-specific: the **PersistenceKit** backend mints ONE session per
 `drainAvailable()` pass — every job claimed in that pass shares it as a
 claim-group handle, which `completeSession(_:status:)` retires in one
 update (SPEC I-3 / B-4a). The **Filesystem** backend mints one session
-per claimed file (its claim is a per-file `rename`, with no batch group),
-and offers no `completeSession`. `StreamID` is URL-safe, ≤ 64 chars;
+per claimed file (its claim is a per-file two-step rename through
+`claim/`, SPEC I-3, with no batch group), and offers no
+`completeSession`. `StreamID` is URL-safe, ≤ 64 chars;
 `ToolName` names a tool for allowlist validation (SPEC § 9).
 
 **Swift:**
@@ -1037,6 +1038,13 @@ These types have peers in both ports; they are listed here to record the concord
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-08-17
+`maildirSubdirs` gains `"claim"` (now five subdirs): the Filesystem claim
+became a two-step rename through a per-claim-unique `claim/<32hex>-<name>`
+intermediate (SPEC 1.5.0 I-3, QUEUEKIT-CONCURRENT-CLAIM). No signature
+changes; the constant's VALUE changed and the § session-granularity note now
+cites the two-step claim.
 
 ### 1.5.1 -- 2026-07-16
 Closed two critical INTERFACE gaps identified by the post-1.5.0 verifier pass:
