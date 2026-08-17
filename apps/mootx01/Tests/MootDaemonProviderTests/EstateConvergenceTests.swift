@@ -1066,7 +1066,7 @@ struct MigrationMachineTests {
         _ = try await escrowed.migrator(keyTransition: .escrowedExistingKey).run()
         #expect(try escrowed.receipts.load()?.keyTransition == .escrowedExistingKey)
         escrowed.teardown()
-        // No escrow travelled → shared-existing (previously unreachable).
+        // No escrow travelled → shared-existing.
         let shared = try MigratorHarness()
         _ = try await shared.migrator(keyTransition: .sharedExisting).run()
         #expect(try shared.receipts.load()?.keyTransition == .sharedExisting)
@@ -1096,9 +1096,14 @@ struct MigrationMachineTests {
         defer { harness.teardown() }
         _ = try await harness.migrator().run()
         let renamesAfterFirst = harness.files.recorded.filter { $0 == "rename" }.count
+        let copiesAfterFirst = harness.files.recorded.filter { $0 == "copy" }.count
+        let backupsAfterFirst = harness.files.recorded.filter { $0 == "backup" }.count
         let outcome = try await harness.migrator().run()
         #expect(outcome == .alreadyCommitted)
+        // Zero ADDITIONAL file work of any kind: no rename, no copy, no backup.
         #expect(harness.files.recorded.filter { $0 == "rename" }.count == renamesAfterFirst)
+        #expect(harness.files.recorded.filter { $0 == "copy" }.count == copiesAfterFirst)
+        #expect(harness.files.recorded.filter { $0 == "backup" }.count == backupsAfterFirst)
     }
 
     @Test("a staged+canonical resume whose verification fails QUARANTINES the canonical")
@@ -1149,6 +1154,13 @@ struct MigrationMachineTests {
         #expect(try harness.receipts.load()?.state == .recoveryRequired)
         #expect(FileManager.default.fileExists(atPath: harness.source.path))
         #expect(try Data(contentsOf: harness.source) == Data("legacy-estate-bytes".utf8))
+        // The immutable backup is RETAINED too: recoveryRequired hands the
+        // operator both the source and a recoverable copy of it.
+        let backup = harness.scratch.url
+            .appendingPathComponent("backup")
+            .appendingPathComponent(harness.source.lastPathComponent)
+        #expect(FileManager.default.fileExists(atPath: backup.path))
+        #expect(try Data(contentsOf: backup) == Data("legacy-estate-bytes".utf8))
         #expect(!FileManager.default.fileExists(atPath: harness.grantMaterial.path))
     }
 

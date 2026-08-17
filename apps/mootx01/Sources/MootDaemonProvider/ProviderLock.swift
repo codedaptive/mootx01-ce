@@ -242,6 +242,57 @@ public enum SecureFiles {
     /// (Perkins/Adams: `mootx01 install` runs the census on real estates).
     public static let streamChunkBytes = 256 * 1024
 
+    /// `read(2)` that retries on `EINTR`. A signal arriving mid-copy is not a
+    /// data fault, and turning it into a refusal would make a multi-gigabyte
+    /// migration spuriously fail; every OTHER error still throws (fail-closed).
+    private static func readRetrying(
+        _ fd: Int32, _ buffer: inout [UInt8], _ count: Int
+    ) throws -> Int {
+        while true {
+            let result = read(fd, &buffer, count)
+            if result >= 0 { return result }
+            if errno == EINTR { continue }
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+    }
+
+    /// `write(2)` of exactly `count` bytes from `buffer`, retrying `EINTR` and
+    /// short writes. Returns only when every byte is written.
+    private static func writeFully(
+        _ fd: Int32, _ buffer: [UInt8], _ count: Int
+    ) throws {
+        var written = 0
+        while written < count {
+            let result = buffer.withUnsafeBufferPointer { pointer -> Int in
+                write(fd, pointer.baseAddress! + written, count - written)
+            }
+            if result > 0 {
+                written += result
+                continue
+            }
+            if result < 0 && errno == EINTR { continue }
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+    }
+
+    /// `fsync` the directory containing `url` so a newly created or renamed
+    /// entry is durable, CHECKED: Perkins P-c2-9 requires the file AND its
+    /// parent to be synced, so an unopenable or unsyncable parent is a
+    /// durability failure and refuses rather than passing silently.
+    private static func fsyncParentDirectory(of url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        let directoryFD = open(directory.path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
+        guard directoryFD >= 0 else {
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+        defer { close(directoryFD) }
+        var result = fsync(directoryFD)
+        while result != 0 && errno == EINTR { result = fsync(directoryFD) }
+        guard result == 0 else {
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+    }
+
     /// SHA-256 hex of everything readable from `fd`, computed INCREMENTALLY
     /// over fixed-size chunks. Same algorithm as
     /// `FirstPartyAuthProtocol.sha256` (CryptoKit SHA-256) — the difference is
@@ -254,8 +305,7 @@ public enum SecureFiles {
         var hasher = SHA256()
         var buffer = [UInt8](repeating: 0, count: streamChunkBytes)
         while true {
-            let count = read(fd, &buffer, buffer.count)
-            if count < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            let count = try readRetrying(fd, &buffer, buffer.count)
             if count == 0 { break }
             buffer.withUnsafeBytes { raw in
                 hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<count]))
@@ -272,14 +322,20 @@ public enum SecureFiles {
         return try streamingDigestHex(fd: fd)
     }
 
-    /// Copy `source` to `destination` in fixed-size chunks, computing the
-    /// SHA-256 of the bytes AS THEY ARE WRITTEN, then `fsync` the file and its
-    /// parent directory.
+    /// Copy `source` to `destination` in fixed-size chunks, hashing each chunk
+    /// AS IT IS READ and writing that same chunk before the next read, then
+    /// `fsync` the file and its parent directory.
+    ///
+    /// Precisely what the digest covers: the bytes read from `source`, each of
+    /// which is then written to completion (a short write is retried until the
+    /// chunk is fully written, and any write fault throws). So the digest
+    /// describes the source bytes, and the copy is proven complete rather than
+    /// the digest being computed from the destination — one pass, no second
+    /// read to race, and no window in which a hashed byte went unwritten.
     ///
     /// Streaming and single-pass on purpose: a copy that first slurps and then
     /// re-reads to digest holds the whole estate twice and can be raced
-    /// between the two passes. Here the digest describes exactly the bytes
-    /// this call wrote.
+    /// between the two passes.
     ///
     /// The destination is created with `O_EXCL` — a pre-existing file at the
     /// transaction's incoming path is an attack or a bug, and either refuses.
@@ -297,34 +353,23 @@ public enum SecureFiles {
         var hasher = SHA256()
         var buffer = [UInt8](repeating: 0, count: streamChunkBytes)
         while true {
-            let readCount = read(sourceFD, &buffer, buffer.count)
-            if readCount < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            let readCount = try readRetrying(sourceFD, &buffer, buffer.count)
             if readCount == 0 { break }
             buffer.withUnsafeBytes { raw in
                 hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<readCount]))
             }
-            var written = 0
-            while written < readCount {
-                let result = buffer.withUnsafeBufferPointer { pointer -> Int in
-                    write(destinationFD, pointer.baseAddress! + written, readCount - written)
-                }
-                guard result > 0 else { throw DaemonProviderError.hygieneViolation(.unopenable) }
-                written += result
-            }
+            try writeFully(destinationFD, buffer, readCount)
         }
-        guard fsync(destinationFD) == 0 else {
+        var syncResult = fsync(destinationFD)
+        while syncResult != 0 && errno == EINTR { syncResult = fsync(destinationFD) }
+        guard syncResult == 0 else {
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
         close(destinationFD)
         closed = true
-        // fsync the parent so the new file's directory entry is durable.
-        let directoryFD = open(
-            destination.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC | O_DIRECTORY
-        )
-        if directoryFD >= 0 {
-            fsync(directoryFD)
-            close(directoryFD)
-        }
+        // The parent fsync is CHECKED (P-c2-9: file AND parent) — a durable
+        // file behind a non-durable directory entry is not a durable copy.
+        try fsyncParentDirectory(of: destination)
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
