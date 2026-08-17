@@ -200,6 +200,7 @@ table=hnsw_graph
   col=node_id type=text null=0 default=- role=-
   col=layer type=int null=0 default=- role=-
   col=neighbours type=blob null=0 default=- role=-
+  col=generation type=int null=0 default=int role=-
   pk=model_id,node_idx,layer
   appendOnly=0 hashable=0
 table=iix_doclens
@@ -370,6 +371,13 @@ table=tunnels
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
+table=vector_generations
+  col=model_id type=text null=0 default=- role=-
+  col=serving_generation type=int null=0 default=int role=-
+  col=shadow_generation type=int null=1 default=- role=-
+  col=shadow_state type=text null=1 default=- role=-
+  pk=model_id
+  appendOnly=0 hashable=0
 table=vector_rep_claims
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
@@ -390,8 +398,9 @@ table=vectors
   col=scale type=float null=1 default=- role=-
   col=filed_at type=timestamp null=0 default=- role=-
   col=ext type=json null=1 default=- role=-
+  col=generation type=int null=0 default=int role=-
   pk=id
-  unique=item_id,vector_index,model_id
+  unique=item_id,vector_index,model_id,generation
   appendOnly=0 hashable=0
 index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
 index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
@@ -432,4 +441,5 @@ index=idx_tunnels_target table=tunnels cols=targetWing,targetRoom unique=0
 index=idx_vector_rep_claims_consumer table=vector_rep_claims cols=consumer unique=0
 index=idx_vectors_filed_at_item table=vectors cols=filed_at,item_id unique=0
 index=idx_vectors_item table=vectors cols=item_id unique=0
+index=idx_vectors_model_generation table=vectors cols=model_id,generation unique=0
 index=idx_vectors_model_item table=vectors cols=model_id,item_id unique=0
