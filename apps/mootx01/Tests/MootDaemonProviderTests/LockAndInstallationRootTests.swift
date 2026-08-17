@@ -29,6 +29,38 @@ struct ProviderLockTests {
         second.release()
     }
 
+    @Test("a proof from a released handle is stale and refuses everywhere it is consumed")
+    func staleProofRefused() throws {
+        let scratch = ScratchDirectory()
+        let handle = try ProviderLock.acquire(at: scratch.url.appendingPathComponent("provider.lock"))
+        let proof = handle.proof
+        #expect(proof.isLive)
+        handle.release()
+        #expect(!proof.isLive)
+
+        // K_install mint refuses under a stale proof.
+        let keychain = CountingKeychain(recorder: CallRecorder())
+        let authority = InstallationRootAuthority(
+            keychain: keychain, eligibility: try makeEligibility(),
+            randomBytes: SeededRandom().closure
+        )
+        #expect(throws: DaemonProviderError.lockUnavailable) {
+            _ = try authority.ensureRoot(lockProof: proof)
+        }
+        #expect(keychain.recorder.count(prefix: "keychain.add") == 0)
+
+        // Generation writes refuse under a stale proof.
+        let store = GenerationStore(fileURL: scratch.url.appendingPathComponent("generations.v1"))
+        #expect(throws: DaemonProviderError.lockUnavailable) {
+            _ = try store.initialize(lockProof: proof)
+        }
+
+        // A fresh handle over the same lock file vends live proofs again.
+        let fresh = try ProviderLock.acquire(at: scratch.url.appendingPathComponent("provider.lock"))
+        _ = try store.initialize(lockProof: fresh.proof)
+        fresh.release()
+    }
+
     @Test("a symlinked lock path is refused before flocking anything")
     func symlinkedLockRefused() throws {
         let scratch = ScratchDirectory()

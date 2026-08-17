@@ -227,6 +227,41 @@ struct HandoverLeaseTests {
         }
     }
 
+    @Test("a hard-linked journal fails closed — an aliased one-use record answers nothing")
+    func journalHardLinkRefused() throws {
+        let scratch = ScratchDirectory()
+        let journalURL = scratch.url.appendingPathComponent("lease.journal")
+        try Data("x\n".utf8).write(to: journalURL)
+        try FileManager.default.linkItem(at: journalURL, to: scratch.url.appendingPathComponent("alias"))
+        let journal = LeaseConsumptionJournal(fileURL: journalURL)
+        #expect(throws: DaemonProviderError.leaseInvalid(.journalUnavailable)) {
+            _ = try journal.contains(UUID())
+        }
+        #expect(throws: DaemonProviderError.leaseInvalid(.journalUnavailable)) {
+            try journal.recordConsumption(UUID())
+        }
+    }
+
+    @Test("a FIFO where the journal should be fails closed")
+    func journalFIFORefused() throws {
+        let scratch = ScratchDirectory()
+        let journalURL = scratch.url.appendingPathComponent("lease.journal")
+        guard mkfifo(journalURL.path, 0o600) == 0 else {
+            Issue.record("mkfifo failed with errno \(errno)")
+            return
+        }
+        // Hold the FIFO open O_RDWR so the journal's O_RDONLY open cannot
+        // park waiting for a writer; the fstat S_ISREG gate is then what
+        // refuses it.
+        let keepAlive = open(journalURL.path, O_RDWR | O_NONBLOCK)
+        #expect(keepAlive >= 0)
+        defer { close(keepAlive) }
+        let journal = LeaseConsumptionJournal(fileURL: journalURL)
+        #expect(throws: DaemonProviderError.leaseInvalid(.journalUnavailable)) {
+            _ = try journal.contains(UUID())
+        }
+    }
+
     @Test("the consumption record is durable BEFORE the lease resolves")
     func journalFirst() throws {
         let scratch = ScratchDirectory()

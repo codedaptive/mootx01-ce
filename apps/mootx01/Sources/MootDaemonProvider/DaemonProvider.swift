@@ -219,6 +219,13 @@ public actor DaemonProvider {
     /// bump burns them all) → republish the descriptor ONLY after complete
     /// readiness is re-proven.
     ///
+    /// SCOPE (c1): rotation is generation bump + revocation + republication
+    /// per Kong decision 1 / Perkins P7. It does NOT re-mint K_install — the
+    /// `KeychainItemAuthority` seam deliberately has no update/delete
+    /// primitive, so a root re-mint is structurally impossible here;
+    /// post-compromise HKDF derivability of prior rungs is an accepted c1
+    /// posture, and the root-rotation seam is a queued c2 constraint.
+    ///
     /// - Returns: The republished descriptor.
     public func rotateCredential() async throws -> FirstPartyDescriptor {
         guard let handle = lockHandle, let layout, let current = activation,

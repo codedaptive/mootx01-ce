@@ -167,6 +167,12 @@ public enum ConflictReason: String, Sendable, Equatable {
     /// ownership cannot be proved (Kong: "it becomes a hard stop if ...
     /// ownership cannot be proved").
     case dualRegistrationUnproven = "dual-registration-unproven"
+    /// A live authenticated lock owner that NO registration mechanism
+    /// accounts for. Its identity is proven but its launch state is not —
+    /// Kong's `conflicted` covers descriptor/lock/LAUNCH disagreement, and a
+    /// provider running outside every registration mechanism is exactly a
+    /// launch-state disagreement.
+    case unregisteredLockOwner = "unregistered-lock-owner"
     /// A descriptor is published but nothing holds the lock. A stale
     /// descriptor alone can never authenticate a replacement process.
     case descriptorWithoutOwner = "descriptor-without-owner"
@@ -292,7 +298,22 @@ public enum ProviderArbiter {
                     && observation.bundledRegistration == .registered {
                     return .duplicateRegistration(winner: claim.kind, instance: claim.instance)
                 }
-                return claim.kind == .direct ? .standaloneRegistered : .bundledRegistered
+                // The registered-but-not-proven-ready states are used only
+                // when the OWNER'S OWN mechanism actually shows a
+                // registration — those states assert registration evidence,
+                // and asserting it from zero evidence would be a lie. An
+                // owner running outside every registration mechanism is a
+                // launch-state disagreement and surfaces as conflicted
+                // (Kong's `conflicted` includes launch disagreement; none of
+                // the other eleven states is truthful here).
+                switch claim.kind {
+                case .direct where observation.directRegistration == .registered:
+                    return .standaloneRegistered
+                case .bundled where observation.bundledRegistration == .registered:
+                    return .bundledRegistered
+                default:
+                    return .conflicted(.unregisteredLockOwner)
+                }
             }
         }
 

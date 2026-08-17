@@ -107,8 +107,9 @@ public struct InstallationRootAuthority: Sendable {
     /// - Returns: The root and its provenance.
     /// - Throws: `DaemonProviderError.keychainFatal`.
     public func ensureRoot(lockProof: ProviderLockProof) throws -> InstallationRoot {
-        // The lock proof is demanded, not used: possession is the license.
-        _ = lockProof
+        // The proof must be LIVE: a stale proof (its handle already released)
+        // must never license a mint.
+        try lockProof.validate()
         if let existing = try readRoot() {
             return InstallationRoot(bytes: existing, provenance: .existing)
         }

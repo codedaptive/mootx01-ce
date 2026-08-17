@@ -88,25 +88,19 @@ public struct GenerationStore: Sendable {
     ///   unopenable. Fail-closed: an unreadable monotonic record refuses, it
     ///   never resets to zero.
     public func load() throws -> ProviderGenerations? {
-        let fd = open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else {
-            // Only genuine absence answers "no record". Anything else — a
-            // permission fault, a symlink, an I/O error — refuses.
-            if errno == ENOENT { return nil }
+        // The READ path applies the same full hygiene matrix as every write
+        // (O_NOFOLLOW|O_CLOEXEC, parent ownership/mode, regular file, link
+        // count 1). Only genuine absence answers "no record"; every other
+        // fault — permission, symlink, hard link, FIFO, I/O — refuses.
+        let bytes: [UInt8]
+        do {
+            guard let fd = try SecureFiles.openValidatedIfExists(fileURL, flags: O_RDONLY) else {
+                return nil
+            }
+            defer { close(fd) }
+            bytes = try SecureFiles.readAll(fd: fd)
+        } catch DaemonProviderError.hygieneViolation {
             throw DaemonProviderError.generationFault(.unreadable)
-        }
-        defer { close(fd) }
-        var status = stat()
-        guard fstat(fd, &status) == 0, (status.st_mode & S_IFMT) == S_IFREG else {
-            throw DaemonProviderError.generationFault(.unreadable)
-        }
-        var bytes = [UInt8]()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = read(fd, &buffer, buffer.count)
-            if count < 0 { throw DaemonProviderError.generationFault(.unreadable) }
-            if count == 0 { break }
-            bytes.append(contentsOf: buffer[0..<count])
         }
         return try Self.parse(String(decoding: bytes, as: UTF8.self))
     }
@@ -159,7 +153,8 @@ public struct GenerationStore: Sendable {
     /// - Returns: The initial generations (credential 1, provider 1,
     ///   descriptor 0 — the descriptor counter advances at first publication).
     public func initialize(lockProof: ProviderLockProof) throws -> ProviderGenerations {
-        _ = lockProof
+        // A stale proof (its handle released) must never serialize anything.
+        try lockProof.validate()
         guard try load() == nil else {
             // Initializing over an existing record would be a reset; a reset
             // of a monotonic counter is a rollback by another name.
@@ -187,7 +182,8 @@ public struct GenerationStore: Sendable {
         expecting: ProviderGenerations,
         lockProof: ProviderLockProof
     ) throws -> ProviderGenerations {
-        _ = lockProof
+        // A stale proof (its handle released) must never serialize anything.
+        try lockProof.validate()
         guard let current = try load() else {
             // Advancing a record that does not exist: the caller's world is
             // wrong about the store's state.

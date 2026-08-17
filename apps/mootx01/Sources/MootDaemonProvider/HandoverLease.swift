@@ -271,19 +271,18 @@ public struct LeaseConsumptionJournal: Sendable {
     /// opened or read is an unanswerable one-use question, and treating it as
     /// "not consumed" would let an I/O fault license a replay.
     public func contains(_ leaseIdentifier: UUID) throws -> Bool {
-        let fd = open(fileURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else {
-            if errno == ENOENT { return false }
+        // Full hygiene matrix on the READ (symlink, hard link, FIFO, parent
+        // ownership/mode) — a journal that can be aliased or swapped is a
+        // journal whose one-use answer can be forged.
+        let bytes: [UInt8]
+        do {
+            guard let fd = try SecureFiles.openValidatedIfExists(fileURL, flags: O_RDONLY) else {
+                return false
+            }
+            defer { close(fd) }
+            bytes = try SecureFiles.readAll(fd: fd)
+        } catch DaemonProviderError.hygieneViolation {
             throw DaemonProviderError.leaseInvalid(.journalUnavailable)
-        }
-        defer { close(fd) }
-        var bytes = [UInt8]()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = read(fd, &buffer, buffer.count)
-            if count < 0 { throw DaemonProviderError.leaseInvalid(.journalUnavailable) }
-            if count == 0 { break }
-            bytes.append(contentsOf: buffer[0..<count])
         }
         let target = Substring(leaseIdentifier.uuidString)
         return String(decoding: bytes, as: UTF8.self)
@@ -295,12 +294,12 @@ public struct LeaseConsumptionJournal: Sendable {
     /// BEFORE the lease is resolved into any capability, so a crash between
     /// record and resolution burns the lease rather than doubling it.
     public func recordConsumption(_ leaseIdentifier: UUID) throws {
-        let fd = open(
-            fileURL.path,
-            O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
-            0o600
-        )
-        guard fd >= 0 else {
+        // Validated append: the same hygiene matrix as every other state
+        // open, plus O_APPEND for the journal-first durable record.
+        let fd: Int32
+        do {
+            fd = try SecureFiles.openValidated(fileURL, flags: O_WRONLY | O_APPEND, create: true)
+        } catch DaemonProviderError.hygieneViolation {
             throw DaemonProviderError.leaseInvalid(.journalUnavailable)
         }
         defer { close(fd) }

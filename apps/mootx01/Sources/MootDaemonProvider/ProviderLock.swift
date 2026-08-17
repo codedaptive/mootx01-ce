@@ -169,6 +169,39 @@ public enum SecureFiles {
     public static func openValidated(
         _ url: URL, flags: Int32, create: Bool
     ) throws -> Int32 {
+        guard let fd = try openValidatedCore(url, flags: flags, create: create, missingIsNil: false) else {
+            // Unreachable: missingIsNil=false never returns nil.
+            throw DaemonProviderError.hygieneViolation(.unopenable)
+        }
+        return fd
+    }
+
+    /// `openValidated` for READ paths that must distinguish genuine absence:
+    /// returns `nil` on ENOENT and applies the FULL hygiene matrix to
+    /// everything that exists. One-use and monotonic records need this shape —
+    /// only true absence may answer "no record"; every other fault refuses.
+    public static func openValidatedIfExists(
+        _ url: URL, flags: Int32
+    ) throws -> Int32? {
+        try openValidatedCore(url, flags: flags, create: false, missingIsNil: true)
+    }
+
+    /// Read every byte from a validated descriptor.
+    public static func readAll(fd: Int32) throws -> [UInt8] {
+        var bytes = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            if count == 0 { break }
+            bytes.append(contentsOf: buffer[0..<count])
+        }
+        return bytes
+    }
+
+    private static func openValidatedCore(
+        _ url: URL, flags: Int32, create: Bool, missingIsNil: Bool
+    ) throws -> Int32? {
         let parent = url.deletingLastPathComponent()
         var parentStatus = stat()
         guard lstat(parent.path, &parentStatus) == 0,
@@ -188,6 +221,9 @@ public enum SecureFiles {
         guard fd >= 0 else {
             // O_NOFOLLOW refuses a symlink terminal component with ELOOP.
             if errno == ELOOP { throw DaemonProviderError.hygieneViolation(.symlink) }
+            // Genuine absence is an answer only on read paths that asked for
+            // it (one-use and monotonic records); everywhere else it refuses.
+            if errno == ENOENT && missingIsNil { return nil }
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
         var status = stat()
@@ -267,11 +303,23 @@ public final class ProviderLockHandle: @unchecked Sendable {
     }
 
     /// The proof token the rest of the pipeline demands. Only a live handle
-    /// vends one, so a `ProviderLockProof` in hand IS evidence the lock is
-    /// held (Perkins P4's ordering, enforced by the type system).
-    public var proof: ProviderLockProof { ProviderLockProof() }
+    /// vends one, and the proof stays valid ONLY while this handle holds the
+    /// lock: releasing the handle (or dropping the last reference) invalidates
+    /// every outstanding proof, so a stale proof cannot license a mint, a
+    /// generation write, or a publication after the lock is gone
+    /// (Perkins P4's ordering, enforced at every consumption site through
+    /// `ProviderLockProof.validate()`).
+    public var proof: ProviderLockProof { ProviderLockProof(owner: self) }
 
-    /// Release the lock by closing the descriptor. Idempotent.
+    /// Whether `release()` has run (or the descriptor was closed by deinit).
+    public var isReleased: Bool {
+        closeOnce.lock()
+        defer { closeOnce.unlock() }
+        return released
+    }
+
+    /// Release the lock by closing the descriptor. Idempotent. Every proof
+    /// vended from this handle becomes invalid at this moment.
     public func release() {
         closeOnce.lock()
         defer { closeOnce.unlock() }
@@ -284,9 +332,32 @@ public final class ProviderLockHandle: @unchecked Sendable {
 }
 
 /// Proof that the exclusive provider lock is held. Constructible only from a
-/// live `ProviderLockHandle`.
+/// live `ProviderLockHandle`, and valid only while that handle still holds
+/// the lock — a weak back-reference ties the proof's life to the lock's, so
+/// release (or handle deallocation) invalidates it.
 public struct ProviderLockProof: Sendable {
-    internal init() {}
+
+    // Weak on purpose: the proof must never keep the lock alive, only
+    // observe whether it still is.
+    private weak var owner: ProviderLockHandle?
+
+    internal init(owner: ProviderLockHandle) {
+        self.owner = owner
+    }
+
+    /// Whether the originating handle still holds the lock.
+    public var isLive: Bool {
+        guard let owner else { return false }
+        return !owner.isReleased
+    }
+
+    /// Refuse unless the lock is still held.
+    ///
+    /// - Throws: `DaemonProviderError.lockUnavailable` for a stale proof —
+    ///   the caller no longer holds the serialization it is claiming.
+    public func validate() throws {
+        guard isLive else { throw DaemonProviderError.lockUnavailable }
+    }
 }
 
 /// Acquires the exclusive provider lock.

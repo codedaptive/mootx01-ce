@@ -165,7 +165,8 @@ public struct DescriptorPublisher: Sendable {
         bind: BindProof,
         authenticator: AuthenticatorReadiness
     ) throws {
-        _ = lockProof
+        // A stale proof (its handle released) must never serialize anything.
+        try lockProof.validate()
         // 1. The descriptor itself must be exactly the frozen contract.
         guard descriptor.schemaVersion == FirstPartyAuthProtocol.descriptorSchemaVersion,
               descriptor.providerIdentifier == FirstPartyAuthProtocol.providerIdentifier,
@@ -220,8 +221,20 @@ public struct DescriptorPublisher: Sendable {
         instanceIdentifier: UUID,
         descriptorGeneration: UInt64
     ) throws -> DescriptorRemovalOutcome {
-        guard let data = try? Data(contentsOf: descriptorFile) else {
-            return FileManager.default.fileExists(atPath: descriptorFile.path) ? .leftForeign : .absent
+        // Read through a validated O_NOFOLLOW descriptor, never a path-based
+        // convenience read: a symlinked or aliased record must not be READ as
+        // if it were the published descriptor — and anything the hygiene
+        // matrix refuses is by definition not this provider's own record, so
+        // it is left in place.
+        let data: Data
+        do {
+            guard let fd = try SecureFiles.openValidatedIfExists(descriptorFile, flags: O_RDONLY) else {
+                return .absent
+            }
+            defer { close(fd) }
+            data = Data(try SecureFiles.readAll(fd: fd))
+        } catch DaemonProviderError.hygieneViolation {
+            return .leftForeign
         }
         guard let current = Self.decode(data),
               current.instanceIdentifier == instanceIdentifier,

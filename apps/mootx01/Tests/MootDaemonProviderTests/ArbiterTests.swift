@@ -133,6 +133,23 @@ struct ArbiterStateTests {
         )) == .bundledRegistered)
     }
 
+    @Test("an owner outside every registration mechanism is conflicted, never claimed registered")
+    func unregisteredOwnerConflicted() {
+        // Zero registration evidence: the registered states would assert
+        // evidence that does not exist, and absent would deny a live owner.
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(
+            lockClaims: [liveOwner()]
+        )) == .conflicted(.unregisteredLockOwner))
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(
+            lockClaims: [liveOwner(kind: .bundled)]
+        )) == .conflicted(.unregisteredLockOwner))
+        // Cross-registration: the OTHER mechanism's record does not account
+        // for this owner either.
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(
+            bundledRegistration: .registered, lockClaims: [liveOwner(kind: .direct)]
+        )) == .conflicted(.unregisteredLockOwner))
+    }
+
     @Test("the twelve wire encodings are frozen")
     func wireEncodings() {
         #expect(ProviderArbiterState.allWireEncodings == [

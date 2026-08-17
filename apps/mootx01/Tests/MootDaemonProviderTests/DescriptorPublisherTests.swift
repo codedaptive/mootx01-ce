@@ -302,6 +302,28 @@ struct DescriptorRemovalTests {
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
 
+    @Test("a symlinked descriptor record is never read as the published one — left in place")
+    func symlinkedRecordLeft() throws {
+        let scratch = ScratchDirectory()
+        let own = sealedDescriptor(descriptorGeneration: 3)
+        // The REAL record lives elsewhere; the descriptor path is a symlink
+        // to it. Reading through the link would let an attacker point the
+        // provider's own-record check at content they control — the
+        // O_NOFOLLOW read refuses, and nothing is unlinked.
+        let elsewhere = scratch.url.appendingPathComponent("elsewhere.json")
+        try DescriptorPublisher.encode(own).write(to: elsewhere)
+        let file = scratch.url.appendingPathComponent("daemon-descriptor.v2.json")
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: elsewhere)
+        let publisher = DescriptorPublisher(descriptorFile: file)
+        let outcome = try publisher.removeOwnDescriptor(
+            instanceIdentifier: own.instanceIdentifier, descriptorGeneration: 3
+        )
+        #expect(outcome == .leftForeign)
+        #expect(FileManager.default.fileExists(atPath: elsewhere.path))
+        // The link itself is also still there: no blind unlink of any kind.
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: file.path)) != nil)
+    }
+
     @Test("absence reports absent")
     func absent() throws {
         let scratch = ScratchDirectory()
