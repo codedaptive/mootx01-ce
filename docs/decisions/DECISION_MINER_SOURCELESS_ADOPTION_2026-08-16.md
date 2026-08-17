@@ -1,5 +1,5 @@
 ---
-version: 1.0.0
+version: 1.0.1
 status: accepted
 date: 2026-08-16
 description: Adoption semantics for pre-anchor sourceless miner facts under the anchor-scoped MinerEngine.
@@ -26,7 +26,9 @@ old sourceless rows would never retire (Adams post-flight round 1, finding 2).
 sourceless facts with that exact subject (`subject_exact` +
 `source_id_exact:""`, both SQL-indexed) and, once the anchored replacement is
 safely in place (filed, or already present unchanged), retires the sourceless
-twin. Identities the run is not mining are never enumerated or touched.
+twin. Sourceless facts outside the mined subjects are never even fetched; among
+fetched rows, only facts whose full subject+predicate identity is being mined
+this run are ever retired — everything else is never touched.
 
 ## Accepted consequence
 
@@ -41,5 +43,9 @@ are structurally outside the sweep and always survive.
 
 ## Changelog
 
+- 1.0.1 (2026-08-16): Precision fix (Adams round 2): same-subject
+  different-predicate sourceless facts ARE fetched by the subject-scoped
+  query and never retired; only facts outside the mined subjects are never
+  fetched at all.
 - 1.0.0 (2026-08-16): Initial decision, recorded during
   MOOTX01-EE-CURRENT-CODE-SECURITY-HARDENING-R1.
