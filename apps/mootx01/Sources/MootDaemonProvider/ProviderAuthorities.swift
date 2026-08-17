@@ -58,11 +58,9 @@ public enum DaemonProviderError: Error, Equatable, Sendable {
 
     /// A handover callback was requested out of order. The offending authority
     /// call was NOT made; sequencing violations refuse before side effects.
+    /// A handover that fails TERMINALLY is not an error case here — it is the
+    /// `HandoverFailureDisposition` the coordinator's `fail` step returns.
     case handoverSequenceViolation(expected: HandoverStep, requested: HandoverStep)
-
-    /// Handover failed after the source stopped and no compatible rollback
-    /// exists. Mirrors the arbiter's `recoveryRequired` state.
-    case handoverRecoveryRequired
 }
 
 /// The four ineligible signing classes (Perkins P1). A shell in any of these
