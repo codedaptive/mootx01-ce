@@ -173,11 +173,12 @@ public struct SecureFileMigration: FileMigrationAuthority {
         guard rename(incoming.path, canonical.path) == 0 else {
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
-        let parentFD = open(canonical.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
-        if parentFD >= 0 {
-            fsync(parentFD)
-            close(parentFD)
-        }
+        // THE most durability-load-bearing fsync in the mission: this is the
+        // rename that makes an estate canonical, and KONG-3's crash matrix
+        // assumes it is durable before the receipt is finalized. Checked, so a
+        // parent that cannot be synced fails the migration instead of leaving
+        // a canonical estate that may not survive a power loss.
+        try SecureFiles.fsyncParentDirectory(of: canonical)
     }
 
     public func quarantineCanonical(canonical: URL, quarantineDirectory: URL) async throws {
@@ -189,6 +190,12 @@ public struct SecureFileMigration: FileMigrationAuthority {
         guard rename(canonical.path, destination.path) == 0 else {
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
+        // Quarantine is a recovery artifact: if its directory entry is not
+        // durable, a power loss can lose the very copy an operator was told to
+        // inspect. Both parents are synced — the destination's (the new entry)
+        // and the source's (the removed entry).
+        try SecureFiles.fsyncParentDirectory(of: destination)
+        try SecureFiles.fsyncParentDirectory(of: canonical)
     }
 
     public func preserveBackup(source: URL, backupDirectory: URL) async throws {

@@ -36,6 +36,24 @@ MGR_BIN="${4:?}"
 SETUP_BIN="${5:?}"
 DAEMON_BIN="${6:-}"
 
+# NEW-4 (Perkins): the entire daemon-bundle block below — including its signing,
+# entitlement and profile guards — is skipped when DAEMON_BIN is empty. A
+# find-miss in CI would therefore publish a signed, notarized pkg with NO
+# provider bundle and no guard ever firing. Under REQUIRE_SIGNING the bundle is
+# mandatory, so its absence fails the build here, before anything is staged.
+if [ -n "${REQUIRE_SIGNING:-}" ] && [ -z "$DAEMON_BIN" ]; then
+    echo "ERROR: REQUIRE_SIGNING is set but no daemon provider binary was passed" >&2
+    echo "       (argument 6 is empty). A release pkg must carry the signed daemon" >&2
+    echo "       provider bundle; publishing without it would ship an installer whose" >&2
+    echo "       provider is simply missing, with none of the signing guards reached." >&2
+    exit 1
+fi
+if [ -n "${REQUIRE_SIGNING:-}" ] && [ ! -f "$DAEMON_BIN" ]; then
+    echo "ERROR: REQUIRE_SIGNING is set but the daemon provider binary does not exist:" >&2
+    echo "       $DAEMON_BIN" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$SCRIPT_DIR"
 # Explicit temp root: `mktemp -d` with no template does not reliably honor
@@ -148,8 +166,35 @@ ENTITLEMENTS
                 echo "       $DAEMON_PROVISIONING_PROFILE" >&2
                 exit 1
             }
+            # A path check is NOT a validity check: any 18 bytes of garbage
+            # satisfies `-f`, embeds happily, and passes the codesign
+            # entitlement readback — producing exactly the signed, notarizable,
+            # killed-at-exec artifact this guard exists to prevent. So the
+            # profile's CONTENT is validated in the same fail-closed shape as
+            # the readback below: it must decode as CMS, parse as a plist, and
+            # NAME both entitlement groups it is supposed to grant.
+            PROFILE_PLIST="$WORK/daemon-profile.plist"
+            if ! /usr/bin/security cms -D -i "$DAEMON_PROVISIONING_PROFILE" \
+                    > "$PROFILE_PLIST" 2>/dev/null; then
+                echo "ERROR: DAEMON_PROVISIONING_PROFILE is not a decodable provisioning" >&2
+                echo "       profile (security cms -D failed): $DAEMON_PROVISIONING_PROFILE" >&2
+                exit 1
+            fi
+            if ! /usr/bin/plutil -p "$PROFILE_PLIST" > "$PROFILE_PLIST.txt" 2>/dev/null; then
+                echo "ERROR: the decoded provisioning profile is not a readable plist:" >&2
+                echo "       $DAEMON_PROVISIONING_PROFILE" >&2
+                exit 1
+            fi
+            /usr/bin/grep -q "${DAEMON_TEAM_ID}.group.com.codedaptive.mootx01" "$PROFILE_PLIST.txt" \
+                || { echo "ERROR: the provisioning profile does not grant the App Group" >&2
+                     echo "       ${DAEMON_TEAM_ID}.group.com.codedaptive.mootx01 — refusing." >&2
+                     exit 1; }
+            /usr/bin/grep -q "${DAEMON_TEAM_ID}.com.codedaptive.mootx01.shared" "$PROFILE_PLIST.txt" \
+                || { echo "ERROR: the provisioning profile does not grant the team Keychain" >&2
+                     echo "       group ${DAEMON_TEAM_ID}.com.codedaptive.mootx01.shared — refusing." >&2
+                     exit 1; }
             cp "$DAEMON_PROVISIONING_PROFILE" "$DAEMON_APP/Contents/embedded.provisionprofile"
-            echo "Embedded provisioning profile in the daemon provider bundle"
+            echo "Embedded provisioning profile (content validated: CMS + plist + both groups)"
         elif [ -n "${REQUIRE_SIGNING:-}" ]; then
             echo "ERROR: the daemon provider bundle is signed with App Group and Keychain" >&2
             echo "       entitlements, but DAEMON_PROVISIONING_PROFILE is empty. Without an" >&2

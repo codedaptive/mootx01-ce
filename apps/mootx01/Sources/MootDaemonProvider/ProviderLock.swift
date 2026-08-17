@@ -279,7 +279,7 @@ public enum SecureFiles {
     /// entry is durable, CHECKED: Perkins P-c2-9 requires the file AND its
     /// parent to be synced, so an unopenable or unsyncable parent is a
     /// durability failure and refuses rather than passing silently.
-    private static func fsyncParentDirectory(of url: URL) throws {
+    internal static func fsyncParentDirectory(of url: URL) throws {
         let directory = url.deletingLastPathComponent()
         let directoryFD = open(directory.path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
         guard directoryFD >= 0 else {
@@ -381,8 +381,10 @@ public enum SecureFiles {
         var bytes = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
-            let count = read(fd, &buffer, buffer.count)
-            if count < 0 { throw DaemonProviderError.hygieneViolation(.unopenable) }
+            // EINTR retried here too, so a signal cannot truncate a state
+            // record into a "torn" verdict (same posture as the streaming
+            // reads; every other error still refuses).
+            let count = try readRetrying(fd, &buffer, buffer.count)
             if count == 0 { break }
             bytes.append(contentsOf: buffer[0..<count])
         }
@@ -448,19 +450,19 @@ public enum SecureFiles {
         defer {
             if cleanupTemp { unlink(temp.path) }
         }
-        var written = 0
+        // Writes and fsync retry EINTR (a signal is not a data fault) and
+        // every other error still refuses — aligned with the streaming
+        // primitives above so all durable writes share one posture.
         let bytes = [UInt8](data)
-        while written < bytes.count {
-            let result = bytes.withUnsafeBufferPointer { buffer -> Int in
-                write(fd, buffer.baseAddress! + written, bytes.count - written)
-            }
-            guard result > 0 else {
-                close(fd)
-                throw DaemonProviderError.hygieneViolation(.unopenable)
-            }
-            written += result
+        do {
+            try writeFully(fd, bytes, bytes.count)
+        } catch {
+            close(fd)
+            throw error
         }
-        guard fsync(fd) == 0 else {
+        var syncResult = fsync(fd)
+        while syncResult != 0 && errno == EINTR { syncResult = fsync(fd) }
+        guard syncResult == 0 else {
             close(fd)
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
@@ -469,12 +471,11 @@ public enum SecureFiles {
             throw DaemonProviderError.hygieneViolation(.unopenable)
         }
         cleanupTemp = false
-        // fsync the directory so the rename itself is durable.
-        let directoryFD = open(directory.path, O_RDONLY | O_CLOEXEC | O_DIRECTORY)
-        if directoryFD >= 0 {
-            fsync(directoryFD)
-            close(directoryFD)
-        }
+        // fsync the directory so the rename itself is durable — CHECKED, not
+        // best-effort: this function's contract is durability, so a parent
+        // that cannot be opened or synced is a failure, not a silent pass
+        // (Perkins NEW-3; the same rule as the streaming copy above).
+        try fsyncParentDirectory(of: url)
     }
 }
 
