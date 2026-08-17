@@ -118,11 +118,18 @@ public struct ProviderEligibility: Sendable, Equatable {
 /// Judges a `SignedProcessIdentity` against the provider contract.
 public enum ProviderEligibilityJudge {
 
-    /// The canonical App Group (MACD-2a live signed/runtime correction; also
-    /// the group every shipping target's entitlements declare). Not an AriaMCP
-    /// constant because the App Group is a provider/packaging concern, not a
-    /// wire concern — the wire contract deliberately carries no container
-    /// identity.
+    /// The canonical App Group PORTAL record. Not an AriaMCP constant because
+    /// the App Group is a provider/packaging concern, not a wire concern —
+    /// the wire contract deliberately carries no container identity.
+    ///
+    /// MACD-2a live signed/runtime correction: on macOS the SIGNED and
+    /// RUNTIME identifier may be the team-prefixed form
+    /// `<TEAMID>.group.com.codedaptive.mootx01` (Apple's emitted profile
+    /// wildcard covers only that form), while entitlements files authored
+    /// against the portal record carry this bare spelling. The judge accepts
+    /// both and propagates WHICHEVER the shell's own signature declares,
+    /// because `containerURL(forSecurityApplicationGroupIdentifier:)` must be
+    /// handed the signed spelling.
     public static let requiredAppGroup = "group.com.codedaptive.mootx01"
 
     /// The team Keychain group SUFFIX. The full group is always the runtime-
@@ -157,7 +164,13 @@ public enum ProviderEligibilityJudge {
         guard let team = identity.teamIdentifier, !team.isEmpty else {
             throw DaemonProviderError.ineligible(.wrongTeam)
         }
-        guard identity.applicationGroups.contains(Self.requiredAppGroup) else {
+        // Accept the portal record or the team-prefixed runtime spelling
+        // (MACD-2a correction), and remember which one the SIGNATURE says —
+        // that exact string is what the container resolver must be handed.
+        let runtimeAppGroup = team + "." + Self.requiredAppGroup
+        guard let matchedAppGroup = identity.applicationGroups.first(where: {
+            $0 == Self.requiredAppGroup || $0 == runtimeAppGroup
+        }) else {
             throw DaemonProviderError.ineligible(.wrongGroup)
         }
         let suffix = "." + Self.requiredKeychainGroupSuffix
@@ -173,7 +186,7 @@ public enum ProviderEligibilityJudge {
         return ProviderEligibility(
             identity: identity,
             expandedKeychainGroup: matched,
-            appGroupIdentifier: Self.requiredAppGroup,
+            appGroupIdentifier: matchedAppGroup,
             signingIdentity: SigningIdentityDescriptor(
                 teamIdentifier: team,
                 bundleIdentifier: identity.bundleIdentifier ?? "",

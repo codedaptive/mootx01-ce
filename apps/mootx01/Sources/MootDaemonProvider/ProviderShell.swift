@@ -210,8 +210,9 @@ public enum DaemonShellMain {
         } catch {
             return (ExitCode.failure.rawValue, raceReport(outcome: "readback-failed", identity: nil, recorder: nil))
         }
+        let eligibility: ProviderEligibility
         do {
-            _ = try ProviderEligibilityJudge.judge(identity)
+            eligibility = try ProviderEligibilityJudge.judge(identity)
         } catch let DaemonProviderError.ineligible(reason) {
             return (
                 ExitCode.ineligible.rawValue,
@@ -235,7 +236,12 @@ public enum DaemonShellMain {
             ),
             readback: readback,
             resolver: AppGroupRootResolver(),
-            keychain: ProofFileKeychain(recorder: recorder, context: options.context),
+            keychain: ProofFileKeychain(
+                recorder: recorder, context: options.context,
+                // The SAME signed group spelling the provider will resolve
+                // with, so both racing shells' fake "keychain" is one file.
+                appGroupIdentifier: eligibility.appGroupIdentifier
+            ),
             estate: ProofEstate(recorder: recorder),
             bind: ProofBind(recorder: recorder),
             sessions: ProofSessions(recorder: recorder),
@@ -318,13 +324,16 @@ final class ProofCallRecorder: @unchecked Sendable {
 struct ProofFileKeychain: KeychainItemAuthority {
     let recorder: ProofCallRecorder
     let context: String
+    /// The signed App Group spelling from the judged eligibility — the same
+    /// identifier the provider resolves with.
+    let appGroupIdentifier: String
 
     /// The fake item's location: inside the proof context, resolved through
     /// the SAME resolver-derived layout the provider uses — never argv.
     private func itemURL() -> URL? {
         guard let layout = try? ProviderRootLayout.resolve(
             resolver: AppGroupRootResolver(),
-            groupIdentifier: ProviderEligibilityJudge.requiredAppGroup,
+            groupIdentifier: appGroupIdentifier,
             proofContext: context
         ) else { return nil }
         return layout.providerDirectory.appendingPathComponent("proof-root.bin")

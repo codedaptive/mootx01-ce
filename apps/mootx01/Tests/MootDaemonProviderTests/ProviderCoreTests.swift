@@ -17,6 +17,20 @@ struct EligibilityJudgeTests {
         #expect(eligibility.signingIdentity.signingClass == .developerID)
     }
 
+    @Test("the MACD-2a team-prefixed runtime App Group spelling is accepted and propagated")
+    func teamPrefixedAppGroupAccepted() throws {
+        let runtime = testTeam + "." + ProviderEligibilityJudge.requiredAppGroup
+        let identity = SignedProcessIdentity(
+            signingClass: .developerID, teamIdentifier: testTeam,
+            applicationGroups: [runtime],
+            keychainAccessGroups: [testTeam + "." + ProviderEligibilityJudge.requiredKeychainGroupSuffix],
+            bundleIdentifier: "com.codedaptive.mootx01.test-shell"
+        )
+        let eligibility = try ProviderEligibilityJudge.judge(identity)
+        // The resolver must be handed the SIGNED spelling, verbatim.
+        #expect(eligibility.appGroupIdentifier == runtime)
+    }
+
     @Test("all three signed channels are eligible")
     func signedChannelsEligible() throws {
         for signingClass in [SignedProcessIdentity.SigningClass.developerID, .appleDevelopment, .appleDistribution] {
