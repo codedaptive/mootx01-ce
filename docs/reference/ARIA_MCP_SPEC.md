@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.40.0
+version: 1.41.0
 status: accepted-1.1-target
-date: 2026-08-16
+date: 2026-08-17
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1059,6 +1059,69 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.41.0 -- 2026-08-17
+
+- **Descriptor v2 FILE format (MACD-2c2).** The published first-party
+  descriptor is a single canonical JSON object at
+  `<App Group container>/Library/Application Support/MOOTx01/daemon-descriptor.v2.json`
+  (beside — not inside — the provider directory; its readers are clients).
+  Exactly sixteen keys: `schemaVersion`, `providerIdentifier`,
+  `serviceIdentifier`, `endpoint`, `authProtocol`, `authKeyIdentifier`,
+  `publishedAt`, `instanceIdentifier`, `estateIdentifier`, `binaryVersion`,
+  `contractRevision`, `mcpProtocolVersion`, `capabilities`,
+  `credentialGeneration`, `descriptorGeneration`, `descriptorMAC`. Sorted
+  keys; UUIDs canonical-string; generations DECIMAL STRINGS; `descriptorMAC`
+  base64url without padding; capabilities sorted. A reader refuses any record
+  with a different key set, non-canonical spellings, or >64 KiB.
+
+- **Attended migration grant (MACD-2c2), first-party lane.** Cross-process
+  contract for converging a legacy default estate onto the canonical App
+  Group estate. The provider (holding the exclusive provider lock, census
+  showing exactly one otherwise-valid candidate) writes a CHALLENGE file
+  `migration-challenge.v1.json` beside the descriptor: exactly nine keys —
+  `challengeIdentifier`, `providerInstance`, `candidateClass`, `nonce`
+  (base64url, 32 bytes), `issuedAt`, `expiresAt`, `credentialGeneration`,
+  `providerGeneration`, `descriptorGeneration` (decimal strings). The signed
+  first-party app answers with a GRANT ENVELOPE `migration-grant.v1.json`
+  (the ONE place opaque bookmark bytes exist): exactly thirteen keys —
+  `grantIdentifier`, `providerInstance`, `candidateClass`,
+  `challengeIdentifier`, the three generations copied from the challenge,
+  `issuedAt`, `expiresAt`, `bookmarkDigest`, `bookmark` (both base64url),
+  `escrowMarker` (`none`|`escrowed`), `grantMAC`. Envelope cap 16384 bytes,
+  judged before parsing.
+
+- **Grant MAC domains.** `K_grant = HKDF-SHA256(K_install,
+  salt = SHA-256(challenge transcript), info = "MOOTX01-MIGRATION-GRANT-v1")`;
+  the challenge transcript is CanonicalEncoder length-prefixed under
+  `"MOOTX01-MIGRATION-CHALLENGE-v1"` over all nine fields, so an envelope
+  verifies only against the exact outstanding challenge and the exact
+  generations it named. The MAC input covers every envelope field except the
+  raw bookmark bytes, which participate via `bookmarkDigest`. Bookmarks are
+  created with `bookmarkData(options: [])` exactly — no security scope.
+  Possession of K_install (read via the READ-ONLY data-protection Keychain
+  root provider) is the provenance proof; a nonce never authenticates.
+  Consumption is one-use, journal-first (durable record fsynced before the
+  bookmark resolves), refusing replay, expiry, wrong
+  instance/candidate/challenge, and any non-current credential generation.
+  The migration receipt domain is `"MOOTX01-MIGRATION-RECEIPT-v1"`.
+
+- **Census dispositions and migration steps in the self-report.** The
+  provider module digest gains an additive tail: the grant and receipt
+  domains, the five census disposition encodings (`none-found`, `one-valid`,
+  `already-converged`, `byte-identical-duplicates`,
+  `multiple-estates-hard-stop`), and the thirteen migration step encodings
+  (`migration-census` … `migration-recovery-required`, with
+  `awaiting-migration-grant` carrying the mission name). The TWELVE arbiter
+  wire encodings are unchanged and remain frozen; migration state is a
+  separate vocabulary, never an arbiter state.
+
+- **First-party lane posture unchanged.** The authenticated first-party lane
+  remains dark: no shipping GUI consumes the transport, and no production
+  build opens the canonical estate through it. The daemon provider bundle
+  registers DISABLED; its `resident` mode refuses honestly (exit 4) until
+  estate routing lands (MACD-3).
+
 
 ### 1.40.0 -- 2026-08-16
 

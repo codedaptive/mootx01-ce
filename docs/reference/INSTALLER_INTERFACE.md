@@ -1,8 +1,8 @@
 ---
 title: Installer Interface
 status: active
-version: 1.2.0
-date: 2026-08-07
+version: 1.3.0
+date: 2026-08-17
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -483,6 +483,60 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-08-17
+
+- **Daemon provider bundle artifact (MACD-2c2).** The macOS pkg payload and
+  release archive gain the signed app-like daemon bundle
+  `Mootx01DaemonProvider.app` (bundle id
+  `com.codedaptive.mootx01.macos.daemonprovider`), wrapped from the
+  `mootx01-daemon` thin shell and staged inside the `bin/` payload so it
+  rides the existing postinstall relocation to
+  `~/.mootx01/bin/Mootx01DaemonProvider.app`. All artifact spellings live in
+  ONE Swift constant surface — `MootInstallerCore.DaemonBundle`
+  (`bundleName`, `executableName`, `bundleIdentifier`, `launchAgentLabel`,
+  `residentModeArgument`, `installedBundleURL`, `bundleExecutableURL`,
+  `launchAgentPlistURL`, `programArguments`, `ownedArtifactPaths`) — and the
+  Makefile / distribution/macos/build-pkg.sh / .github/workflows/release.yml
+  spellings are parity-checked against it by LaunchAgentTests.
+
+- **LaunchAgent contract.** The bundle-form daemon plist
+  (`com.codedaptive.mootx01.daemon`, distinct from the retained legacy
+  raw-serve `com.mootx01.daemon`) carries ProgramArguments pointing INSIDE
+  the bundle: `[…/Contents/MacOS/Mootx01DaemonProvider, resident]` — never a
+  raw binary with `serve`. It is the DISABLED-install variant
+  (`RunAtLoad=false`, `KeepAlive=false`); `LaunchAgent.makeDaemonBundlePlist`
+  is the source of truth and `LaunchAgent.installDaemonBundleDisabled`
+  writes it, verifies it by READBACK, and never bootstraps. The `resident`
+  mode exits 4 (`resident-unavailable`) until estate hosting activates
+  (MACD-3); the disabled install makes that state unreachable in production.
+  Upgrade retains the legacy artifact (plist, label, and running job
+  untouched) until the bundle provider proves authenticated readiness.
+
+- **Honest status vocabulary.** `LaunchAgent.honestServerStatus(registration:port:providerReportedState:)`
+  plus `DaemonRegistrationObservation` / `DaemonPortObservation`: a
+  registration, PID, or answering port is NEVER reported as a running/ready
+  server; the provider's own reported arbiter state passes through verbatim
+  (the status surface owns no second copy of the arbiter vocabulary).
+  `mootx01 status` now reports through this surface.
+
+- **Census dispositions and migration receipt.** `mootx01 install` registers
+  the bundle disabled when present and runs the provider's read-only
+  `census` mode (class labels, digests, conservative disposition; the five
+  dispositions are `none-found` / `one-valid` / `already-converged` /
+  `byte-identical-duplicates` / `multiple-estates-hard-stop`, with
+  unverifiable identity always classifying toward the hard stop). The
+  migration receipt (`MOOTX01-MIGRATION-RECEIPT-v1`, staged-before-rename,
+  committed after) lives in the provider directory and is never touched by
+  the installer.
+
+- **Uninstall preservation.** Uninstall removes ONLY owned artifacts
+  (`DaemonBundle.ownedArtifactPaths`: the bundle and its registration plist,
+  plus the previously owned binaries/plists). Estate databases, migration
+  receipts, backups, and Keychain credentials (K_install, estate keys)
+  survive every uninstall; the explicit data-removal flow is separate,
+  typed-confirmation-gated, and never touches non-owned census candidates.
+
 
 ### 1.2.0 -- 2026-08-07
 Added Harness Memory Mode (MXE-HM) public surface. New `MootInstallerCore` types:

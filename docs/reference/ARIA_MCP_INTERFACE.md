@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.46.0
+version: 1.47.0
 status: accepted-1.1-target
-date: 2026-08-16
+date: 2026-08-17
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1270,6 +1270,38 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.47.0 -- 2026-08-17
+
+- **`MootDaemonProvider` estate-convergence surface (MACD-2c2).** New public
+  types in the shared provider module (apps/mootx01, linked identically by
+  the direct daemon shell and the sandboxed helper): `DefaultEstateCensus`
+  (pure disposition judge + file-level observation), `CensusCandidateRecord`
+  / `CensusObservation` / `CensusIdentity` / `CensusDisposition` /
+  `EstateCandidateClass`; `MigrationChallenge` / `MigrationGrantEnvelope` /
+  `MigrationGrantAuthority` / `ConsumedGrant` (challenge-bound MAC,
+  journal-first one-use consumption); `GrantResolutionPolicy` (production
+  stale policy with F4 denial classification); `EscrowRules` /
+  `KeyEscrowAuthority` (structurally mint-free); `DefaultEstateMigrator` /
+  `MigrationReceipt` / `MigrationReceiptStore` / `MigrationTransaction` /
+  `MigrationStep` (staged-before-rename receipts, idempotent resume);
+  `SourceEstateAccess` / `FileMigrationAuthority` (injected seams — no
+  production SQLite conformer in this module; arrives with MACD-3);
+  `ProductionRandomness` (SecRandomCopyBytes, fail-closed);
+  `ProviderLayoutContext` + layout-context-bound `ProviderLock.acquire(at:context:)`
+  and the `ProductionCredentialAuthority` marker (a production Keychain
+  authority refuses under any non-production lock proof or proof context).
+  `ProviderRootLayout` gains `grantJournal`, `migrationReceiptFile`,
+  `migrationChallengeFile`, `migrationGrantFile`.
+
+- **Shell modes.** `DaemonShellMain` adds `census` (read-only file-level
+  census; one JSON line of class labels, digests, and the conservative
+  disposition — never a raw path) and `resident` (the LaunchAgent contract
+  entry point; exits 4 `resident-unavailable` until MACD-3). The canonical
+  self-report adds `grantDomain`, `receiptDomain`, `censusDispositions`,
+  `migrationSteps`; the module digest changes accordingly (additive tail,
+  both shells identical).
+
 
 ### 1.46.0 -- 2026-08-16
 
