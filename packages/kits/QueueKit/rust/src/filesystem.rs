@@ -22,6 +22,14 @@ use crate::job::{
 
 const STALE_TMP: Duration = Duration::from_secs(5 * 60);
 
+/// Length of the claim-name prefix: 32 lowercase hex chars (a hyphenless
+/// UUIDv4) plus one `-` separator. A claimed-in-progress file is named
+/// `claim/<32hex>-<original filename>`; stripping exactly this many bytes
+/// recovers the original name. The format is a cross-port protocol constant
+/// (a Swift producer and a Rust drainer may share one maildir), mirrored by
+/// Swift `FilesystemBackend.claimPrefixLength`. See QUEUEKIT_SPEC I-3.
+const CLAIM_PREFIX_LEN: usize = 33;
+
 /// Poll cadence for the directory watcher's polling path.
 ///
 /// 200 ms — matches Swift's `Watcher.watchPoll` interval (200_000_000 ns)
@@ -114,24 +122,104 @@ impl FilesystemBackend {
     fn tmp_dir(&self) -> PathBuf { self.root.join("tmp") }
     fn new_dir(&self) -> PathBuf { self.root.join("new") }
     fn cur_dir(&self) -> PathBuf { self.root.join("cur") }
+    fn claim_dir(&self) -> PathBuf { self.root.join("claim") }
     fn done_dir(&self) -> PathBuf { self.root.join("done") }
 
+    /// Atomically claim `new/<entry>`, returning true if THIS caller won.
+    ///
+    /// A direct `rename(new/X → cur/X)` is NOT a safe claim: POSIX mandates
+    /// that when `old` and `new` resolve to the same existing file, rename
+    /// returns success and performs no action. In the concurrent-drain race a
+    /// losing drainer can resolve `src` before the winner's rename commits and
+    /// `dst` after it — both then reference the same inode and the loser gets
+    /// a success no-op, i.e. a duplicate claim (observed deterministically on
+    /// external APFS volumes; QUEUEKIT-CONCURRENT-CLAIM).
+    ///
+    /// So the claim is two renames:
+    ///   1. `new/<entry>` → `claim/<32hex>-<entry>` — the destination is
+    ///      unique to this claim attempt and does not pre-exist, so the
+    ///      same-file rule can never manufacture a second success; exactly one
+    ///      caller wins, every loser gets ENOENT.
+    ///   2. `claim/<32hex>-<entry>` → `cur/<entry>` — uncontended (the winner
+    ///      exclusively owns the claim file); keeps `cur/` names unchanged for
+    ///      `complete`/`in_flight`/`reclaim_in_flight`.
+    ///
+    /// A crash between the two renames strands the file in `claim/`; the
+    /// mount-time `reclaim_in_flight` sweeps it back to `new/`.
+    fn claim_entry(&self, entry: &str) -> Result<bool, QueueError> {
+        let src = self.new_dir().join(entry);
+        let claim_name = format!("{}-{}", uuid::Uuid::new_v4().simple(), entry);
+        let claim_path = self.claim_dir().join(&claim_name);
+        match fs::rename(&src, &claim_path) {
+            Ok(()) => {}
+            // A concurrent drainer moved it out of new/ first — it won.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(QueueError::RenameFailed {
+                from: src.display().to_string(),
+                to: claim_path.display().to_string(),
+                msg: e.to_string(),
+            }),
+        }
+        let dst = self.cur_dir().join(entry);
+        // Fail-closed (SPEC §5 B-3): if the publish rename fails, the job is
+        // safe in claim/ and the next mount's reclaim recovers it.
+        fs::rename(&claim_path, &dst).map_err(|e| QueueError::RenameFailed {
+            from: claim_path.display().to_string(),
+            to: dst.display().to_string(),
+            msg: e.to_string(),
+        })?;
+        Ok(true)
+    }
+
     /// Crash recovery: move every job left in `cur/` (claimed by a prior process
-    /// that exited before completing it) back to `new/`, so the next
-    /// `drain_available` re-drives it. The inverse of the new/→cur/ claim.
+    /// that exited before completing it) back to `new/`, and sweep any file
+    /// stranded in `claim/` (a crash between the two claim renames — see
+    /// `claim_entry`) back to `new/` under its original name, so the next
+    /// `drain_available` re-drives all of them.
     ///
     /// Safe to call ONLY at mount, when no drain session is live: a freshly
-    /// started process owns no in-flight work, so every entry in `cur/` is a crash
-    /// orphan from a prior run. With one writer per estate this holds. Returns the
-    /// number of jobs reclaimed. Mirrors Swift `FilesystemBackend.reclaimInFlight()`.
+    /// started process owns no in-flight work, so every entry in `cur/` and
+    /// `claim/` is a crash orphan from a prior run. With one writer per estate
+    /// this holds. Returns the number of jobs reclaimed (both slots). Mirrors
+    /// Swift `FilesystemBackend.reclaimInFlight()`.
     pub fn reclaim_in_flight(&self) -> Result<usize, QueueError> {
+        let mut reclaimed = 0usize;
+
+        // claim/ sweep first: strip the fixed `<32hex>-` prefix to recover the
+        // original filename. A name too short to carry the prefix is not ours
+        // (only claim_entry writes here) and is left in place.
+        let mut claim_entries: Vec<String> = fs::read_dir(self.claim_dir())
+            .map_err(|e| QueueError::BackendUnavailable(format!("list claim/: {}", e)))?
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        claim_entries.sort();
+        for entry in claim_entries {
+            if entry.len() <= CLAIM_PREFIX_LEN
+                || entry.as_bytes()[CLAIM_PREFIX_LEN - 1] != b'-' {
+                continue;
+            }
+            let src = self.claim_dir().join(&entry);
+            let dst = self.new_dir().join(&entry[CLAIM_PREFIX_LEN..]);
+            match fs::rename(&src, &dst) {
+                Ok(()) => reclaimed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(QueueError::RenameFailed {
+                        from: src.display().to_string(),
+                        to: dst.display().to_string(),
+                        msg: e.to_string(),
+                    })
+                }
+            }
+        }
+
         let mut entries: Vec<String> = fs::read_dir(self.cur_dir())
             .map_err(|e| QueueError::BackendUnavailable(format!("list cur/: {}", e)))?
             .filter_map(Result::ok)
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
         entries.sort();
-        let mut reclaimed = 0usize;
         for entry in entries {
             let src = self.cur_dir().join(&entry);
             let dst = self.new_dir().join(&entry);
@@ -151,7 +239,7 @@ impl FilesystemBackend {
     }
 
     fn ensure_maildir(&self) -> Result<(), QueueError> {
-        for sub in &["tmp", "new", "cur", "done"] {
+        for sub in &["tmp", "new", "cur", "claim", "done"] {
             let p = self.root.join(sub);
             fs::create_dir_all(&p).map_err(|e|
                 QueueError::DirectoryCreationFailed(format!("{}: {}", p.display(), e)))?;
@@ -346,18 +434,12 @@ impl QueueBackend for FilesystemBackend {
             .collect();
         entries.sort();
 
+        // Two-step exclusive claim per file (see claim_entry): a losing
+        // concurrent drainer gets false, never a duplicate success.
         let mut claimed: Vec<String> = vec![];
         for entry in entries {
-            let src = self.new_dir().join(&entry);
-            let dst = self.cur_dir().join(&entry);
-            match fs::rename(&src, &dst) {
-                Ok(()) => claimed.push(entry),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(QueueError::RenameFailed {
-                    from: src.display().to_string(),
-                    to: dst.display().to_string(),
-                    msg: e.to_string(),
-                }),
+            if self.claim_entry(&entry)? {
+                claimed.push(entry);
             }
         }
 
@@ -570,12 +652,13 @@ impl QueueBackend for FilesystemBackend {
         entries.sort();
 
         // Decode each file WHILE it is still in new/ — a read does not claim it —
-        // and rename ONLY matching-stream files into cur/. Non-matching files are
-        // never touched, so concurrent drainers of different streams (encode +
-        // dreaming) cannot steal or race on each other's jobs. (The earlier
-        // claim-all-then-unclaim form transiently moved every stream's files into
-        // cur/, which collided under concurrent stream drains — recall-driven dreaming  requires
-        // that one stream's drain never disturbs another's.)
+        // and claim ONLY matching-stream files (two-step, via claim_entry).
+        // Non-matching files are never touched, so concurrent drainers of
+        // different streams (encode + dreaming) cannot steal or race on each
+        // other's jobs. (The earlier claim-all-then-unclaim form transiently
+        // moved every stream's files into cur/, which collided under concurrent
+        // stream drains — recall-driven dreaming requires that one stream's
+        // drain never disturbs another's.)
         let mut results: Vec<(Job, SessionId)> = vec![];
         for entry in entries {
             let new_path = self.new_dir().join(&entry);
@@ -590,18 +673,12 @@ impl QueueBackend for FilesystemBackend {
                     if &j.stream_id != stream {
                         continue; // belongs to another stream — leave it in new/
                     }
-                    // Atomic claim: new/ → cur/. A same-stream drainer that won the
-                    // race renames it first → our rename hits NotFound → skip.
-                    let cur_path = self.cur_dir().join(&entry);
-                    match fs::rename(&new_path, &cur_path) {
-                        Ok(()) => results.push(
-                            (j, SessionId(uuid::Uuid::new_v4().to_string().to_lowercase()))),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(e) => return Err(QueueError::RenameFailed {
-                            from: new_path.display().to_string(),
-                            to: cur_path.display().to_string(),
-                            msg: e.to_string(),
-                        }),
+                    // Two-step exclusive claim (see claim_entry): a same-stream
+                    // drainer that won the race moved it out of new/ first →
+                    // claim_entry returns false → skip.
+                    if self.claim_entry(&entry)? {
+                        results.push(
+                            (j, SessionId(uuid::Uuid::new_v4().to_string().to_lowercase())));
                     }
                 }
                 Err(_) => {
