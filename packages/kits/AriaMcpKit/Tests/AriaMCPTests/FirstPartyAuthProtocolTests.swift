@@ -63,7 +63,10 @@ struct FirstPartyAuthProtocolTests {
         #expect(FirstPartyAuthProtocol.establishPath == "/mcp/first-party/session/establish")
         #expect(FirstPartyAuthProtocol.authProtocolIdentifier == "hmac-sha256-hkdf-v1")
         #expect(FirstPartyAuthProtocol.authKeyIdentifier == "installation-root-v1")
-        #expect(FirstPartyAuthProtocol.descriptorSchemaVersion == 2)
+        // MACD-3B1: descriptorSchemaVersion bumped from 2 to 3.
+        // The schema-2 golden MAC vectors below use literal schemaVersion: 2
+        // to prove the schema-2 MAC bytes are provably unchanged (R1).
+        #expect(FirstPartyAuthProtocol.descriptorSchemaVersion == 3)
         #expect(FirstPartyAuthProtocol.contractRevision == 2)
         #expect(FirstPartyAuthProtocol.mcpProtocolVersion == "2025-11-25")
         #expect(FirstPartyAuthProtocol.contentType == "application/json")

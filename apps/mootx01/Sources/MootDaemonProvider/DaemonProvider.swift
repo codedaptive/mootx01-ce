@@ -32,19 +32,23 @@ public struct ProviderActivation: Sendable, Equatable {
     public let rootProvenance: InstallationRoot.Provenance
     /// The durable generations after activation.
     public let generations: ProviderGenerations
-    /// The published descriptor.
+    /// The published schema-3 descriptor.
     public let descriptor: FirstPartyDescriptor
+    /// The schema-3 version vector companion that was published alongside the descriptor.
+    public let versionVector: ProviderVersionVector
 
     public init(
         eligibility: ProviderEligibility,
         rootProvenance: InstallationRoot.Provenance,
         generations: ProviderGenerations,
-        descriptor: FirstPartyDescriptor
+        descriptor: FirstPartyDescriptor,
+        versionVector: ProviderVersionVector
     ) {
         self.eligibility = eligibility
         self.rootProvenance = rootProvenance
         self.generations = generations
         self.descriptor = descriptor
+        self.versionVector = versionVector
     }
 }
 
@@ -58,17 +62,22 @@ public struct DaemonProviderConfiguration: Sendable, Equatable {
     public let capabilities: [String]
     /// Optional proof-context UUID string (see `ProviderRootLayout.resolve`).
     public let proofContext: String?
+    /// The schema-3 version vector for this build.  Defaults to the module's
+    /// compile-time `.current` vector so all existing call sites are unchanged.
+    public let versionVector: ProviderVersionVector
 
     public init(
         instanceIdentifier: UUID,
         binaryVersion: String,
         capabilities: [String],
-        proofContext: String? = nil
+        proofContext: String? = nil,
+        versionVector: ProviderVersionVector = .current
     ) {
         self.instanceIdentifier = instanceIdentifier
         self.binaryVersion = binaryVersion
         self.capabilities = capabilities.sorted()
         self.proofContext = proofContext
+        self.versionVector = versionVector
     }
 }
 
@@ -188,13 +197,13 @@ public actor DaemonProvider {
             generations = try store.advance(
                 to: generations.bumpedDescriptor(), expecting: generations, lockProof: proof
             )
-            let descriptor = Self.sealedDescriptor(
+            let (descriptor, vector) = Self.sealedDescriptor(
                 configuration: configuration, root: root.bytes,
                 estate: estateProof, generations: generations, publishedAt: clock()
             )
             let publisher = DescriptorPublisher(descriptorFile: layout.descriptorFile)
             try publisher.publish(
-                descriptor, lockProof: proof,
+                descriptor, vector: vector, lockProof: proof,
                 estateReady: estateProof, bind: bindProof,
                 authenticator: AuthenticatorReadiness(capabilities: configuration.capabilities)
             )
@@ -203,7 +212,8 @@ public actor DaemonProvider {
                 eligibility: eligibility,
                 rootProvenance: root.provenance,
                 generations: generations,
-                descriptor: descriptor
+                descriptor: descriptor,
+                versionVector: vector
             )
             self.lockHandle = handle
             self.activation = activation
@@ -268,12 +278,12 @@ public actor DaemonProvider {
         generations = try store.advance(
             to: generations.bumpedDescriptor(), expecting: generations, lockProof: proof
         )
-        let descriptor = Self.sealedDescriptor(
+        let (descriptor, vector) = Self.sealedDescriptor(
             configuration: configuration, root: root,
             estate: estateProof, generations: generations, publishedAt: clock()
         )
         try DescriptorPublisher(descriptorFile: layout.descriptorFile).publish(
-            descriptor, lockProof: proof,
+            descriptor, vector: vector, lockProof: proof,
             estateReady: estateProof, bind: bindProof,
             authenticator: AuthenticatorReadiness(capabilities: configuration.capabilities)
         )
@@ -281,7 +291,8 @@ public actor DaemonProvider {
             eligibility: current.eligibility,
             rootProvenance: current.rootProvenance,
             generations: generations,
-            descriptor: descriptor
+            descriptor: descriptor,
+            versionVector: vector
         )
         ProviderLog.logger.info("credential rotated; sessions revoked before republication")
         return descriptor
@@ -309,14 +320,24 @@ public actor DaemonProvider {
         return outcome
     }
 
-    /// Build and MAC-seal the schema-2 descriptor for this configuration.
+    /// Build and MAC-seal the schema-3 descriptor + version vector for this configuration.
+    ///
+    /// Returns a `(FirstPartyDescriptor, ProviderVersionVector)` pair.  The descriptor's
+    /// `descriptorMAC` is the SCHEMA-3 MAC: `HMAC-SHA256(K_descriptor,
+    /// descriptor.macInput() || vector.wire1Fields)`.  The vector comes from
+    /// `configuration.versionVector` (the module compile-time `.current` by default).
+    ///
+    /// `FirstPartyDescriptor.macInput()` is untouched per R1 — schema-2 MAC bytes are
+    /// provably unchanged.  The schema-3 MAC extends the input with the 7 new wire
+    /// scalar fields from `ProviderVersionVector.appendWire1Fields`.
     private static func sealedDescriptor(
         configuration: DaemonProviderConfiguration,
         root: [UInt8],
         estate: EstateReadyProof,
         generations: ProviderGenerations,
         publishedAt: UInt64
-    ) -> FirstPartyDescriptor {
+    ) -> (FirstPartyDescriptor, ProviderVersionVector) {
+        let vector = configuration.versionVector
         var descriptor = FirstPartyDescriptor(
             schemaVersion: FirstPartyAuthProtocol.descriptorSchemaVersion,
             providerIdentifier: FirstPartyAuthProtocol.providerIdentifier,
@@ -335,10 +356,11 @@ public actor DaemonProvider {
             descriptorGeneration: generations.descriptor,
             descriptorMAC: []
         )
-        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
-            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: root),
-            message: descriptor.macInput()
+        // Schema-3 MAC: descriptor.macInput() (schema-2 fields, UNCHANGED per R1)
+        // followed by the 7 version-vector scalar fields in fixed documented order.
+        descriptor.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: descriptor, vector: vector, installationRoot: root
         )
-        return descriptor
+        return (descriptor, vector)
     }
 }

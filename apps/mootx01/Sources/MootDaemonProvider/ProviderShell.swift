@@ -62,8 +62,10 @@ public enum ProviderSelfReport {
     /// field list, the lease domain, and — since MACD-2c2 — the migration
     /// grant domain, the migration receipt domain, the census disposition
     /// encodings, and the migration step encodings (an ADDITIVE tail: the
-    /// digest changes, and both shells change identically). Two shells that
-    /// agree on this digest agree on every encoding a peer can observe.
+    /// digest changes, and both shells change identically), and — since
+    /// MACD-3B1 — the providerReleaseGeneration constant and the 7 schema-3
+    /// wire field-identifier strings (another ADDITIVE tail: 3B2 appends after).
+    /// Two shells that agree on this digest agree on every encoding a peer can observe.
     public static func digestInput() -> [UInt8] {
         var encoder = CanonicalEncoder()
         encoder.appendString("mootx01-daemon-provider-module-v1")
@@ -96,8 +98,31 @@ public enum ProviderSelfReport {
         for encoding in MigrationStep.allWireEncodings {
             encoder.appendString(encoding)
         }
+        // MACD-3B1 additive tail: the schema-3 version-vector contract.
+        // The release generation is the compile-time constant shared by both shells;
+        // the 7 field-identifier strings commit the wire field names to the digest.
+        // 3B2 appends its own entries AFTER this tail — the ordering is FROZEN.
+        encoder.appendUInt64(ProviderVersionVector.releaseGeneration)
+        for fieldName in schema3WireFieldNames {
+            encoder.appendString(fieldName)
+        }
         return encoder.bytes
     }
+
+    /// The 7 schema-3 wire field names, in the same fixed lexicographic order
+    /// they appear in `DescriptorPublisher.encode`.  Committed to the digest so
+    /// any rename is a breaking change caught by the identity assertion.
+    ///
+    /// Order is lexicographic (matching JSON sorted-key output) and FROZEN.
+    static let schema3WireFieldNames: [String] = [
+        "dataPlaneRevisionMaximum",
+        "dataPlaneRevisionMinimum",
+        "estateSchemaMaximum",
+        "estateSchemaMinimum",
+        "managementRevisionMaximum",
+        "managementRevisionMinimum",
+        "providerReleaseGeneration",
+    ]
 
     /// SHA-256 hex of `digestInput()` — the "shared-provider module digest"
     /// the mission's identity assertion compares across shells.
@@ -108,9 +133,10 @@ public enum ProviderSelfReport {
 
     /// The full self-report as canonical sorted-key JSON (one line, UTF-8):
     /// module digest, identifiers, schema/revision/protocol constants,
-    /// generation encoding, arbiter encodings, handover/lease format, and the
-    /// lease domain. Deterministic byte-for-byte — the live proof diffs the
-    /// two shells' outputs directly.
+    /// generation encoding, arbiter encodings, handover/lease format, the
+    /// lease domain, and — since MACD-3B1 — the provider release generation
+    /// and the schema-3 wire field names. Deterministic byte-for-byte — the
+    /// live proof diffs the two shells' outputs directly.
     public static func canonicalReport() -> String {
         let object: [String: Any] = [
             "arbiterStates": ProviderArbiterState.allWireEncodings,
@@ -134,6 +160,9 @@ public enum ProviderSelfReport {
             "providerIdentifier": FirstPartyAuthProtocol.providerIdentifier,
             "receiptDomain": MigrationReceipt.receiptDomain,
             "serviceIdentifier": FirstPartyAuthProtocol.serviceIdentifier,
+            // MACD-3B1 additions: version-vector contract.
+            "providerReleaseGeneration": ProviderVersionVector.releaseGeneration,
+            "schema3WireFieldNames": schema3WireFieldNames,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
             // Unreachable for a literal dictionary of strings and arrays;

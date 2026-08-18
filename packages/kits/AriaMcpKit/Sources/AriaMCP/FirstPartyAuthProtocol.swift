@@ -106,7 +106,13 @@ public enum FirstPartyAuthProtocol {
     public static let authKeyIdentifier = "installation-root-v1"
 
     /// The descriptor wire-schema this contract implements.
-    public static let descriptorSchemaVersion = 2
+    ///
+    /// Schema 3 adds the ProviderVersionVector companion (7 new wire fields:
+    /// providerReleaseGeneration, management/dataPlane/estateSchema revision
+    /// ranges).  The app-side `DaemonContract.schemaVersion` (= 2) is an
+    /// independent literal; its refusal of schema-3 descriptors is correct DARK
+    /// behaviour until Wave 2 authorises the routing flip.
+    public static let descriptorSchemaVersion = 3
 
     /// The client/daemon contract revision this file implements.
     public static let contractRevision = 2
@@ -658,6 +664,31 @@ public struct CanonicalEncoder: Sendable {
         appendUInt32(UInt32(sorted.count))
         for value in sorted {
             appendString(value)
+        }
+    }
+
+    /// A deterministic sorted-key map of `String → UInt64` entries.
+    ///
+    /// Encoding (consistent with `appendCapabilities` — length-prefixed,
+    /// big-endian, sorted by key):
+    ///
+    ///   UInt32 count
+    ///   for each entry in lexicographic key order:
+    ///     UInt32 keyByteLength | keyUTF8Bytes   (appendString)
+    ///     UInt64 value                          (appendUInt64, 8 bytes big-endian)
+    ///
+    /// This primitive exists for `capabilityRevisions` in the Wave 2 MAC
+    /// extension of `ProviderVersionVector`.  It is additive in AriaMcpKit and
+    /// does not affect any existing MAC input builder.
+    ///
+    /// - Parameter map: The `String → UInt64` map to encode.  An empty map
+    ///   encodes as a single zero `UInt32` (4 bytes).
+    public mutating func appendSortedMap(_ map: [String: UInt64]) {
+        let sorted = map.sorted { $0.key < $1.key }
+        appendUInt32(UInt32(sorted.count))
+        for (key, value) in sorted {
+            appendString(key)
+            appendUInt64(value)
         }
     }
 }
