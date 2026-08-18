@@ -168,6 +168,10 @@ public struct ArbiterObservation: Sendable, Equatable {
 
     /// True when the caller confirms no handover is in progress.  Same
     /// derivability note: the arbiter has `handover`, but explicit is required.
+    /// Structurally, `arbitrate` returns early on any non-`.none` handover
+    /// before the repair gate is reached, so this field is always consistent
+    /// with `handover == .none` at that point — it is a caller assertion
+    /// (P4: explicit, never inferred), not an independent protection.
     public var noHandoverInProgress: Bool
 
     /// True when the caller confirms the bundled provider artifact (the app

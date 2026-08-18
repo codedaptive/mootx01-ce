@@ -510,4 +510,36 @@ struct PreferenceSelfReportTests {
         #expect(report.contains("\"preferenceDomain\""), "canonicalReport must include preferenceDomain key")
         #expect(report.contains("MOOTX01-PROVIDER-PREFERENCE-v1"), "canonicalReport must include the domain value")
     }
+
+    @Test("digestInput() commits every macTranscriptFields name")
+    func digestCommitsTranscriptFieldNames() {
+        // A rename of any transcript field must change the module digest, or
+        // the two shells could disagree about the MAC transcript while
+        // reporting identical digests.  Assert each name's UTF-8 bytes appear
+        // in the digest input (they are length-prefixed strings, so byte
+        // containment of the exact name is the correct check).
+        let digestData = Data(ProviderSelfReport.digestInput())
+        for name in ProviderPreference.macTranscriptFields {
+            let nameData = Data(name.utf8)
+            #expect(
+                digestData.range(of: nameData) != nil,
+                "digestInput() must commit transcript field name '\(name)'"
+            )
+        }
+    }
+
+    @Test("canonicalReport() emits the preferenceTranscriptFields key with all names")
+    func canonicalReportEmitsTranscriptFields() {
+        let report = ProviderSelfReport.canonicalReport()
+        #expect(
+            report.contains("\"preferenceTranscriptFields\""),
+            "canonicalReport must include the preferenceTranscriptFields key"
+        )
+        for name in ProviderPreference.macTranscriptFields {
+            #expect(
+                report.contains("\"\(name)\""),
+                "canonicalReport preferenceTranscriptFields must list '\(name)'"
+            )
+        }
+    }
 }

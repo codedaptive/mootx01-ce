@@ -1063,11 +1063,13 @@ advisory behaviour for an ungranted caller, in both ports.
 ### 1.43.0 -- 2026-08-18
 
 - **Durable provider preference contract (MACD-3B2, dark Wave 1).** The
-  self-report's `digestInput()` gains an additive tail entry after the
+  self-report's `digestInput()` gains additive tail entries after the
   MACD-3B1 schema-3 entries: the preference MAC domain constant
-  `"MOOTX01-PROVIDER-PREFERENCE-v1"`.  `canonicalReport()` gains the
-  corresponding `"preferenceDomain"` JSON key (sorted by `.sortedKeys`,
-  alphabetically between "preferenceDomain" and "providerIdentifier").  The
+  `"MOOTX01-PROVIDER-PREFERENCE-v1"` followed by each of the 7
+  `ProviderPreference.macTranscriptFields` names, so a transcript-field rename
+  changes the module digest.  `canonicalReport()` gains the corresponding
+  `"preferenceDomain"` and `"preferenceTranscriptFields"` JSON keys
+  (ordered by `.sortedKeys`).  The
   module digest changes by construction; both shells emit the same new digest.
   No new `ProviderArbiterState` wire encoding — the twelve frozen states are
   sufficient; the preference influences the policy layer above the arbiter

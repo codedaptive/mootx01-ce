@@ -1309,9 +1309,13 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 
 - **`ProviderArbiter.arbitrate(_:)` authority-level-4 branch (MACD-3B2).**
   After the dual-registration conflict check, when ALL six repair conditions
-  are `true` AND preference is `.verified`, the dual-registration conflict is
-  resolved to `.standaloneRegistered` or `.bundledRegistered` according to the
-  preferred kind.  A preference NEVER overrides a live owner, a handover, a
+  are `true` AND preference is `.verified(.standalone)`, the dual-registration
+  conflict is resolved to `.standaloneRegistered`.  A `.bundled` preference can
+  never satisfy the repair gate: `bundledArtifactAbsentOrUnusable` is a
+  required condition, proving the bundled artifact absent, so a `.bundled`
+  preference falls through to `.conflicted(.dualRegistrationUnproven)` —
+  `.bundledRegistered` is not a possible output of the authority-level-4
+  branch.  A preference NEVER overrides a live owner, a handover, a
   recovery state, a compatibility failure, or an ambiguous census.  No new
   `ProviderArbiterState` wire encoding — the twelve frozen states are
   sufficient; `allWireEncodings` unchanged.
@@ -1322,9 +1326,11 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
   `migrationChallengeFile` — NOT inside `providerDirectory`).
 
 - **`ProviderSelfReport.digestInput` + `canonicalReport` (MACD-3B2).**
-  MACD-3B2 additive tail: the preference MAC domain string
-  `"MOOTX01-PROVIDER-PREFERENCE-v1"` appended after the MACD-3B1 tail.
-  `canonicalReport()` gains `"preferenceDomain"` key.  Module digest changes
+  `digestInput()` appends, after the MACD-3B1 schema-3 tail, the preference
+  MAC domain constant and each of the 7 `ProviderPreference.macTranscriptFields`
+  names (a transcript-field rename changes the module digest).
+  `canonicalReport()` gains `"preferenceDomain"` and
+  `"preferenceTranscriptFields"` keys.  Module digest changes
   by construction; both shells compute the same new digest.
 
 ### 1.48.0 -- 2026-08-18
