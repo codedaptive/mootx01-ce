@@ -366,7 +366,11 @@ impl DrawerStoreCore {
 
         let defaults: [(&str, String); 18] = [
             ("manifest_version", "1.0".to_string()),
-            ("schema_version", "1.0".to_string()),
+            // 1.1 since 2026-08-17 — see the Swift twin's note in
+            // DrawerStore.populateV1ManifestDefaults. The estate format moved
+            // (shared-content cutover, then vector generations) while this
+            // string stayed at the ratification value.
+            ("schema_version", "1.1".to_string()),
             ("estate_uuid", estate_uuid),
             ("estate_name", String::new()),
             ("owner_identifier", String::new()),

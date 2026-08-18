@@ -231,7 +231,14 @@ public actor DrawerStore {
 
         let defaults: [(String, String)] = [
             ("manifest_version", "1.0"),
-            ("schema_version", "1.0"),
+            // 1.1 since 2026-08-17. The value names the estate FORMAT, and
+            // the format moved twice after v1.0 ratification without this
+            // string following: the shared-content cutover retired the legacy
+            // `chunks` copy lane, and the shadow-generation swap (2026-08-15)
+            // added vector generations. An estate built by this binary has
+            // neither the copy lane nor the pre-generation vector table, so
+            // "1.0" named a shape it no longer had.
+            ("schema_version", "1.1"),
             ("estate_uuid", estateUUID),
             ("estate_name", ""),
             ("owner_identifier", ""),
