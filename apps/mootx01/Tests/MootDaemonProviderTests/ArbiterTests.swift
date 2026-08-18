@@ -423,3 +423,150 @@ struct PreferenceAuthorityTests {
         )) == .ready(providerKind: .direct, instance: ownerInstance, estate: ownerEstate, version: "1.0.18"))
     }
 }
+
+// MARK: - MACD-3B2: per-condition repair gate tests (six separate tests, as required)
+//
+// The mission requires one test per repair condition to make the gate contract
+// explicit and grep-searchable.  The `partialGateFails` loop above exercises
+// the same six cases together; these tests each name exactly one failing
+// condition so a future breakage is immediately attributable.
+
+@Suite("Repair gate — per-condition (MACD-3B2)")
+struct RepairGatePerConditionTests {
+
+    private let pref: ProviderPreferenceObservation =
+        .verified(preferredKind: .direct, preferenceGeneration: 1)
+
+    /// Both registrations present; all conditions true except the one under
+    /// test.  Helper keeps each test body terse.
+    private func allButOne(
+        noAuthenticatedLockOwner: Bool = true,
+        noHandoverInProgress: Bool = true,
+        bundledArtifactAbsentOrUnusable: Bool = true,
+        unambiguousCensus: Bool = true,
+        directProviderSchemaCompatible: Bool = true,
+        generationRollbackChecksPassed: Bool = true
+    ) -> ArbiterObservation {
+        ArbiterObservation(
+            directRegistration: .registered,
+            bundledRegistration: .registered,
+            preference: pref,
+            noAuthenticatedLockOwner: noAuthenticatedLockOwner,
+            noHandoverInProgress: noHandoverInProgress,
+            bundledArtifactAbsentOrUnusable: bundledArtifactAbsentOrUnusable,
+            unambiguousCensus: unambiguousCensus,
+            directProviderSchemaCompatible: directProviderSchemaCompatible,
+            generationRollbackChecksPassed: generationRollbackChecksPassed
+        )
+    }
+
+    @Test("absent noAuthenticatedLockOwner blocks preference repair")
+    func missingNoAuthenticatedLockOwnerBlocksRepair() {
+        let obs = allButOne(noAuthenticatedLockOwner: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("absent noHandoverInProgress blocks preference repair")
+    func missingNoHandoverInProgressBlocksRepair() {
+        // NOTE: noHandoverInProgress = false means caller cannot confirm there
+        // is no in-progress handover — the arbiter fails closed to conflicted,
+        // not to a handover phase (the handover observation itself is .none here,
+        // so steps 1–2 are not triggered; it is the repair condition that fails).
+        let obs = allButOne(noHandoverInProgress: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("absent bundledArtifactAbsentOrUnusable blocks preference repair")
+    func missingBundledArtifactAbsentBlocksRepair() {
+        // The caller cannot confirm the bundled artifact is gone — the repair
+        // condition is the key signal for the app-removal scenario (the
+        // SMAppService entry may still appear .registered after the app is
+        // removed, so the arbiter requires an explicit caller assertion rather
+        // than inferring from the registration field).
+        let obs = allButOne(bundledArtifactAbsentOrUnusable: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("absent unambiguousCensus blocks preference repair (ambiguous census gates preference)")
+    func missingUnambiguousCensusBlocksRepair() {
+        // A preference can request convergence but NEVER elects when multiple
+        // estates are present (MULTIPLE_ESTATES_HARD_STOP gate from the design).
+        // The caller signals ambiguity by leaving unambiguousCensus = false;
+        // the arbiter fails closed to conflicted, not to a preference outcome.
+        let obs = allButOne(unambiguousCensus: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("absent directProviderSchemaCompatible blocks preference repair")
+    func missingDirectSchemaCompatibleBlocksRepair() {
+        // Prevents preference from electing an incompatible provider in the
+        // no-live-owner path.  Schema compatibility must be explicitly confirmed
+        // by the caller — the arbiter cannot check the schema itself.
+        let obs = allButOne(directProviderSchemaCompatible: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("absent generationRollbackChecksPassed blocks preference repair")
+    func missingGenerationRollbackChecksBlocksRepair() {
+        // The store's monotonic generation check has already run by the time
+        // the caller builds the observation.  If the check failed (rollback
+        // detected), the caller leaves this false and the arbiter fails closed.
+        let obs = allButOne(generationRollbackChecksPassed: false)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+}
+
+// MARK: - MACD-3B2: stale bundled-preferred scenario
+
+@Suite("Stale preference after app removal (MACD-3B2)")
+struct StaleBundledPreferenceTests {
+
+    @Test("stale bundled preference cannot block recovery-required state")
+    func staleBundledPreferenceCannotBlockRecovery() {
+        // Design scenario: the app is removed but (a) the SMAppService
+        // registration still appears as .registered (stale) and (b) the on-disk
+        // preference still names .bundled (stale preference file).  When the
+        // handover target subsequently fails after the source stopped, the
+        // machine must enter recoveryRequired — the stale preference MUST NOT
+        // prevent recovery.
+        //
+        // Authority order: recoveryRequired (handover failure) is level 1 —
+        // ABOVE every preference, registration, and repair condition.
+        let obs = ArbiterObservation(
+            directRegistration: .registered,
+            bundledRegistration: .registered,  // stale SMAppService entry
+            handover: .targetFailedAfterSourceStopped,
+            preference: .verified(preferredKind: .bundled, preferenceGeneration: 7),
+            noAuthenticatedLockOwner: true,
+            noHandoverInProgress: false,  // handover phase IS in progress (failed)
+            bundledArtifactAbsentOrUnusable: true,
+            unambiguousCensus: true,
+            directProviderSchemaCompatible: true,
+            generationRollbackChecksPassed: true
+        )
+        // Recovery-required wins.  The stale bundled preference is irrelevant.
+        #expect(ProviderArbiter.arbitrate(obs) == .recoveryRequired)
+    }
+
+    @Test("stale bundled preference in dual-registration without recovery produces conflicted, not bundledRegistered")
+    func staleBundledPreferenceDualRegistrationNoRecovery() {
+        // Same stale-preference scenario but WITHOUT a recovery-required
+        // handover phase.  The caller cannot confirm bundledArtifactAbsentOrUnusable
+        // (the app removal hasn't been verified yet) — the arbiter MUST fail
+        // closed to conflicted rather than electing the stale bundled preference.
+        // This ensures a stale preference file cannot unilaterally resolve a
+        // dual-registration conflict when the bundled artifact may still be live.
+        let obs = ArbiterObservation(
+            directRegistration: .registered,
+            bundledRegistration: .registered,  // stale SMAppService entry
+            preference: .verified(preferredKind: .bundled, preferenceGeneration: 7),
+            noAuthenticatedLockOwner: true,
+            noHandoverInProgress: true,
+            bundledArtifactAbsentOrUnusable: false,  // caller cannot confirm app is gone
+            unambiguousCensus: true,
+            directProviderSchemaCompatible: true,
+            generationRollbackChecksPassed: true
+        )
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+}
