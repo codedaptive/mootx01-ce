@@ -2,7 +2,7 @@
 title: The Road Ahead for MOOTx01
 status: active-roadmap
 audience: public
-updated: 2026-07-24
+updated: 2026-08-18
 ---
 
 # The Road Ahead for MOOTx01
@@ -66,6 +66,27 @@ reported and never automatically erase estate memories.
 
 The next chapter is MOOTx01-App: one native product across iOS, iPadOS, and
 macOS.
+
+### One Mac, one resident estate
+
+Version 1.1 also makes the command-line distribution and signed native
+MOOTx01 editions safe to install on the same Mac.
+
+When the command-line tools are installed alone, their resident provider owns
+the estate. When an approved, compatible native-app provider is available, the
+Mac can hand ownership to it without creating another estate. Installing the
+CLI afterward adds commands and client wiring without starting a competing
+daemon. Both paths continue to use the same logical service and memory.
+
+Provider versions are checked before any swap. A newer compatible provider can
+take over through a cooperative, crash-recoverable handoff; an older provider
+cannot replace a newer one. If the versions, estate schema, or required service
+contract do not overlap safely, MOOTx01 leaves the working provider in place
+and tells you which component to update. It never resolves a mismatch by
+opening an empty estate or running two writers.
+
+The public cross-edition contract is recorded in
+[`DECISION_MACOS_PROVIDER_COEXISTENCE_V1_1.md`](docs/decisions/DECISION_MACOS_PROVIDER_COEXISTENCE_V1_1.md).
 
 ### Ask what MOOT remembers
 
