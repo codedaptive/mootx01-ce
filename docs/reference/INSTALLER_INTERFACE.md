@@ -1,8 +1,8 @@
 ---
 title: Installer Interface
 status: active
-version: 1.3.0
-date: 2026-08-17
+version: 1.4.0
+date: 2026-08-18
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -483,6 +483,49 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-08-18
+Added MACD-3B3 authenticated coexistence surface.  New public types and
+entrypoints in `MootInstallerCore`:
+
+- **`OwnershipProbeOutcome` computed properties (MACD-3B3 C2/C3/C4).**
+  `requiresClientOnlyInstall: Bool` — `true` only for `.healthy(.bundled)`;
+  the single gate for skipping daemon + bundle-plist registration.
+  `blocksInstallByVersionMismatch: Bool` — `true` for `.incompatible`; no
+  second provider is started.
+  `normalInstallProceeds: Bool` — `true` for `.absent` and `.unauthenticated`
+  (both allow normal install; `.unauthenticated` never kills the running process).
+
+- **`LaunchAgent.authenticatedBundledOwner(outcome:) -> String?` (C5).**
+  The single authoritative format point mapping a `ProviderOwnershipProbe`
+  outcome into the `providerReportedState` string for `honestServerStatus`.
+  `.absent` returns `nil` (fall through to registration/port observation).
+  Healthy, incompatible, and unauthenticated outcomes produce non-nil strings
+  carrying the provider's own wire vocabulary verbatim — no second copy of the
+  arbiter vocabulary ("parallel copies fail").
+
+- **`mootx01 install` coexistence gate (C2/C3/C4).**
+  `ProviderOwnershipProbe` runs before every daemon registration decision
+  inside the `!noDaemon` block.  Healthy bundled owner → client-only install
+  (MCP client wiring only; `LaunchAgent.installDaemon` and
+  `installDaemonBundleIfPresent` are both skipped; output: "Using
+  MOOTx01-App resident provider").  Incompatible owner → verdict surfaced
+  verbatim; no registration; no second provider.  Absent or unauthenticated
+  → normal install path; unauthenticated warns but never kills.
+
+- **`mootx01 upgrade` coexistence gate (C2/C4).**
+  `UpgradeCommand.convergeDaemonBundle` runs the same probe before
+  `LaunchAgent.installDaemonBundleDisabled`.  Healthy bundled → bundle
+  convergence silently skipped.  Incompatible → verdict logged; return early.
+
+- **`mootx01 status` provider-verbatim wire (C5).**
+  `StatusCommand` calls `ProviderOwnershipProbe().detect()` and threads its
+  result through `LaunchAgent.authenticatedBundledOwner(outcome:)` into
+  `honestServerStatus`.  The `providerReportedState: nil` placeholder (MACD-2c2)
+  is replaced with the live probe result.  Status never equates
+  registration/port/PID with readiness.
+
+Minor-version bump: additive surface; all existing signatures unchanged.
 
 ### 1.3.0 -- 2026-08-17
 
