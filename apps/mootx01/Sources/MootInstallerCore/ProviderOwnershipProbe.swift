@@ -84,6 +84,73 @@ public struct BundleSignatureVerifier: Sendable {
     public static let alwaysValid = BundleSignatureVerifier(verify: { _ in true })
 }
 
+// MARK: - BundleCensusGate
+
+/// The result of verifying the daemon bundle executable before a census exec
+/// or a disabled-plist staging operation.
+///
+/// Both `InstallCommand` and `UpgradeCommand` call `BundleSignatureVerifier.gate(homeDirectory:)`
+/// so the census and plist-write security boundary has ONE verification authority —
+/// never two independent copies that could drift (Perkins F1 census-site fix).
+public enum BundleCensusGate: Sendable, Equatable {
+
+    /// The bundle executable is absent or not executable at the expected path.
+    ///
+    /// This is the ordinary case when the release payload does not yet include
+    /// the daemon provider bundle.  Callers should skip silently.
+    case absent
+
+    /// Bundle is present and its static code signature was verified.
+    ///
+    /// Census may proceed and the disabled plist may be staged.
+    case verified
+
+    /// Bundle is present but its static code signature could not be verified.
+    ///
+    /// Causes: unsigned, ad-hoc, wrong bundle identifier, or a Security-framework
+    /// API error.  `userMessage` is a complete, printable warning line for CLI output.
+    ///
+    /// Census MUST NOT execute.  The disabled plist MUST NOT be staged — a
+    /// disabled plist names the executable path in ProgramArguments and could be
+    /// enabled by the same attacker who planted the impostor binary.
+    case unverified(userMessage: String)
+}
+
+// MARK: - BundleSignatureVerifier.gate
+
+extension BundleSignatureVerifier {
+
+    /// Evaluate whether the daemon bundle executable is present and has a valid
+    /// static code signature.
+    ///
+    /// This is the single verification authority for census exec sites and the
+    /// disabled-plist staging operation in both `InstallCommand` and `UpgradeCommand`
+    /// (Perkins F1 — three exec sites, one gate).  Call this BEFORE writing any
+    /// LaunchAgent plist or running `DaemonBundle.runReadOnlyMode("census", ...)`.
+    ///
+    /// - Parameter homeDirectory: The user's home directory, used to locate the
+    ///   bundle executable via `DaemonBundle.bundleExecutableURL(homeDirectory:)`.
+    /// - Returns: `.absent` when no executable file is found, `.verified` when the
+    ///   signature satisfies the requirement, `.unverified(userMessage:)` when the
+    ///   binary is present but fails signature verification.  Never throws.
+    public func gate(homeDirectory: URL) -> BundleCensusGate {
+        let executable = DaemonBundle.bundleExecutableURL(homeDirectory: homeDirectory)
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            return .absent
+        }
+        guard verify(executable) else {
+            // A binary is present but cannot be verified: refuse both the census
+            // exec and the plist staging.  Surface an actionable message to the user
+            // so the situation is not silently swallowed.
+            return .unverified(
+                userMessage: "\u{26A0} Provider bundle present but its signature could " +
+                    "not be verified; skipping provider census. No provider process was started."
+            )
+        }
+        return .verified
+    }
+}
+
 // MARK: - SecStaticBundleVerifier
 
 #if canImport(Security)

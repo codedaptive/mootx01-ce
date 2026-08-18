@@ -461,3 +461,231 @@ struct ProbeSignatureVerifierTests {
     }
     #endif
 }
+
+// MARK: - BundleCensusGate tests (Perkins F1 — census-site gate)
+
+/// Tests for `BundleSignatureVerifier.gate(homeDirectory:)`, the shared helper
+/// that gates census exec and disabled-plist staging in both `InstallCommand`
+/// and `UpgradeCommand`.
+///
+/// Coverage:
+///  - absent executable → .absent
+///  - verifier reject → .unverified with actionable message
+///  - verifier pass → .verified
+///  - planted unsigned binary with real Security verifier → .unverified (RED exploit test)
+///  - source invariant: both command files call the gate before census
+@Suite("BundleCensusGate — shared pre-census verification helper (Perkins F1)")
+struct BundleCensusGateTests {
+
+    private static let fakeHome = URL(fileURLWithPath: "/Users/test-census-gate", isDirectory: true)
+
+    @Test("absent executable → .absent (no executable at bundle path)")
+    func absentExecutable() {
+        // fakeHome has no real bundle executable; gate must return .absent without
+        // calling the verifier.
+        let alwaysReject = BundleSignatureVerifier(verify: { _ in false })
+        let result = alwaysReject.gate(homeDirectory: Self.fakeHome)
+        #expect(result == .absent,
+                "non-existent executable must yield .absent, verifier must not be called")
+    }
+
+    @Test("verifier reject → .unverified with actionable message (planted unsigned binary)")
+    func verifierRejectYieldsUnverified() throws {
+        // Create a fake home with an executable at the bundle path so isExecutableFile
+        // returns true, then inject an always-rejecting verifier to simulate an
+        // unsigned binary.
+        let fakeHomeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("census-gate-reject-\(UUID().uuidString)", isDirectory: true)
+        let execURL = DaemonBundle.bundleExecutableURL(homeDirectory: fakeHomeDir)
+        try FileManager.default.createDirectory(
+            at: execURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        defer { try? FileManager.default.removeItem(at: fakeHomeDir) }
+
+        // Plant a minimal executable (unsigned shell script) so isExecutableFile is true.
+        let script = "#!/bin/sh\necho census-exploit"
+        try script.write(to: execURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: execURL.path
+        )
+
+        // Inject always-rejecting verifier to simulate unsigned/ad-hoc/wrong-identity binary.
+        let alwaysReject = BundleSignatureVerifier(verify: { _ in false })
+        let result = alwaysReject.gate(homeDirectory: fakeHomeDir)
+
+        // Must be .unverified — the census caller must skip census and plist.
+        switch result {
+        case .unverified(let msg):
+            // Message must be actionable: warn about the unverified bundle and
+            // confirm no process was started.
+            #expect(msg.contains("signature could not be verified"),
+                    "message must name the signature check failure; got: \(msg)")
+            #expect(msg.contains("No provider process was started"),
+                    "message must confirm no process was started; got: \(msg)")
+        case .absent:
+            Issue.record("executable present but gate returned .absent — verifier was not called")
+        case .verified:
+            Issue.record("always-rejecting verifier must not yield .verified")
+        }
+    }
+
+    @Test("verifier pass → .verified (census may proceed)")
+    func verifierPassYieldsVerified() throws {
+        // Create a fake home with an executable and inject an always-valid verifier.
+        let fakeHomeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("census-gate-pass-\(UUID().uuidString)", isDirectory: true)
+        let execURL = DaemonBundle.bundleExecutableURL(homeDirectory: fakeHomeDir)
+        try FileManager.default.createDirectory(
+            at: execURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        defer { try? FileManager.default.removeItem(at: fakeHomeDir) }
+
+        let script = "#!/bin/sh\necho {}"
+        try script.write(to: execURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: execURL.path
+        )
+
+        // alwaysValid simulates a legitimately signed bundle.
+        let result = BundleSignatureVerifier.alwaysValid.gate(homeDirectory: fakeHomeDir)
+        #expect(result == .verified,
+                "always-valid verifier with an executable binary must yield .verified")
+    }
+
+    // RED exploit test — Perkins F1 census-site: planted unsigned binary at the census
+    // exec path, real Security-framework verifier.  The gate must return .unverified
+    // before any census exec, so the attacker's subprocess never runs.
+    #if canImport(Security)
+    @Test("planted unsigned binary at census path → .unverified, not .verified (F1 census-site exploit closed)")
+    func plantedBinaryCensusGateRefused() throws {
+        let fakeHomeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("census-gate-f1-\(UUID().uuidString)", isDirectory: true)
+        let execURL = DaemonBundle.bundleExecutableURL(homeDirectory: fakeHomeDir)
+        try FileManager.default.createDirectory(
+            at: execURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        defer { try? FileManager.default.removeItem(at: fakeHomeDir) }
+
+        // Exploit payload: an unsigned shell script that emits a fake census report.
+        // In the pre-fix code this binary would have reached DaemonBundle.runReadOnlyMode
+        // ("census") after only isExecutableFile, giving the attacker arbitrary code
+        // execution as the census subprocess with its output printed to the user.
+        let exploitScript = "#!/bin/sh\necho 'attacker census output'"
+        try exploitScript.write(to: execURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: execURL.path
+        )
+
+        // Real Security-framework verifier — this is what production uses.
+        let productionVerifier = BundleSignatureVerifier(
+            verify: SecStaticBundleVerifier.verify(executableURL:)
+        )
+        let result = productionVerifier.gate(homeDirectory: fakeHomeDir)
+
+        // Gate must refuse the unsigned script — census exec is never reached.
+        switch result {
+        case .unverified:
+            break  // correct — exploit blocked
+        case .verified:
+            Issue.record("real verifier must not pass an unsigned shell script — census-site exploit still open")
+        case .absent:
+            Issue.record("executable is present; gate must not return .absent")
+        }
+    }
+    #endif
+}
+
+// MARK: - Census-site source invariant tests (Perkins F1)
+
+/// Source-level invariant tests verifying that both InstallCommand and UpgradeCommand
+/// call `BundleSignatureVerifier.production.gate(homeDirectory:)` before any census
+/// exec.  These tests catch regressions where the gate is removed or bypassed.
+@Suite("Census-site gate source invariants (Perkins F1)")
+struct CensusSiteGateSourceTests {
+
+    private static func commandSource(_ name: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // MootInstallerCoreTests/
+            .deletingLastPathComponent()   // Tests/
+            .deletingLastPathComponent()   // apps/mootx01/
+            .appendingPathComponent("Sources/mootx01/Commands/\(name).swift")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @Test("InstallCommand calls BundleSignatureVerifier.production.gate before census exec")
+    func installCommandGatesBeforeCensus() throws {
+        let source = try Self.commandSource("InstallCommand")
+        #expect(source.contains("BundleSignatureVerifier.production.gate(homeDirectory:"),
+                "InstallCommand must call BundleSignatureVerifier.production.gate before census")
+        // The gate call must appear BEFORE the census call in the source.
+        let gateRange = try #require(
+            source.range(of: "BundleSignatureVerifier.production.gate"),
+            "gate call not found in InstallCommand"
+        )
+        let censusRange = try #require(
+            source.range(of: "runReadOnlyMode(\"census\""),
+            "census call not found in InstallCommand"
+        )
+        #expect(gateRange.lowerBound < censusRange.lowerBound,
+                "gate call must precede census call in InstallCommand source order")
+    }
+
+    @Test("UpgradeCommand calls BundleSignatureVerifier.production.gate before census exec")
+    func upgradeCommandGatesBeforeCensus() throws {
+        let source = try Self.commandSource("UpgradeCommand")
+        #expect(source.contains("BundleSignatureVerifier.production.gate(homeDirectory:"),
+                "UpgradeCommand must call BundleSignatureVerifier.production.gate before census")
+        let gateRange = try #require(
+            source.range(of: "BundleSignatureVerifier.production.gate"),
+            "gate call not found in UpgradeCommand"
+        )
+        let censusRange = try #require(
+            source.range(of: "runReadOnlyMode(\"census\""),
+            "census call not found in UpgradeCommand"
+        )
+        #expect(gateRange.lowerBound < censusRange.lowerBound,
+                "gate call must precede census call in UpgradeCommand source order")
+    }
+
+    @Test("InstallCommand skips plist staging on .unverified (no disabled plist for impostor binary)")
+    func installCommandSkipsPlistOnUnverified() throws {
+        let source = try Self.commandSource("InstallCommand")
+        // The .unverified branch must return before installDaemonBundleDisabled is called.
+        let unverifiedRange = try #require(
+            source.range(of: "case .unverified"),
+            ".unverified case not found in InstallCommand"
+        )
+        let plistRange = try #require(
+            source.range(of: "installDaemonBundleDisabled"),
+            "plist install call not found in InstallCommand"
+        )
+        // .unverified branch must appear before installDaemonBundleDisabled in source
+        // AND the .unverified case must contain a `return` before reaching it.
+        #expect(unverifiedRange.lowerBound < plistRange.lowerBound,
+                ".unverified case must appear before plist staging in source order")
+    }
+
+    @Test("UpgradeCommand skips plist staging on .unverified (no disabled plist for impostor binary)")
+    func upgradeCommandSkipsPlistOnUnverified() throws {
+        let source = try Self.commandSource("UpgradeCommand")
+        let unverifiedRange = try #require(
+            source.range(of: "case .unverified"),
+            ".unverified case not found in UpgradeCommand"
+        )
+        let plistRange = try #require(
+            source.range(of: "installDaemonBundleDisabled"),
+            "plist install call not found in UpgradeCommand"
+        )
+        #expect(unverifiedRange.lowerBound < plistRange.lowerBound,
+                ".unverified case must appear before plist staging in UpgradeCommand source order")
+    }
+}

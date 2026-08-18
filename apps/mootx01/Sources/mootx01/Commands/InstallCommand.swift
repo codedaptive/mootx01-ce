@@ -785,26 +785,47 @@ struct InstallCommand: AsyncParsableCommand {
 
     #if os(macOS)
     /// Register the daemon provider bundle DISABLED and run its read-only
-    /// census, when the bundle artifact is present. Honest skips otherwise:
-    /// the census requires the SIGNED provider (only it can observe the
-    /// canonical App Group tier), so no bundle means no census — never a
-    /// CLI-side imitation of it.
+    /// census, when the bundle artifact is present and its static code
+    /// signature can be verified.  Honest skips otherwise:
+    /// - Bundle absent: skip silently (ordinary case for payloads without the bundle).
+    /// - Bundle present but signature fails: skip both the plist staging and the
+    ///   census; a disabled plist must not name an impostor binary in its
+    ///   ProgramArguments even when the plist would remain disabled (Perkins F1).
+    /// - Bundle present and signature verified: proceed to plist install and census.
     private func installDaemonBundleIfPresent(home: URL) {
-        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
-        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
+        // Perkins F1 census-site gate: verify the bundle executable's static code
+        // signature BEFORE staging the disabled plist or running census.
+        // A same-UID attacker could plant an unsigned binary at the bundle path;
+        // BundleSignatureVerifier.gate() refuses it before any exec or plist write
+        // so neither the census output (arbitrary code execution as the census
+        // subprocess) nor the plist (which names the executable) are tainted.
+        switch BundleSignatureVerifier.production.gate(homeDirectory: home) {
+        case .absent:
             print("")
-            print("  ⓘ Daemon provider bundle not present — skipping its (disabled) registration.")
+            print("  \u{2139} Daemon provider bundle not present — skipping its (disabled) registration.")
             return
+        case .unverified(let message):
+            // Present but unverified: skip both plist staging and census.
+            // Do NOT write a disabled plist pointing at an unverified binary —
+            // even a disabled plist names the executable path in ProgramArguments
+            // and could be enabled by the attacker who planted the impostor.
+            // Treat this as a conflict: client config is already wired; report here.
+            print("")
+            print("  \(message)")
+            print("    Install client config only; daemon bundle registration skipped until the signature is repaired.")
+            return
+        case .verified:
+            break  // proceed to plist install and census below
         }
         switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
         case let .installedDisabled(plistPath):
             print("")
-            print("  ✓ Daemon provider bundle registered DISABLED (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("  \u{2713} Daemon provider bundle registered DISABLED (launchd: \(DaemonBundle.launchAgentLabel))")
             print("    LaunchAgent: \(plistPath)")
             print("    The provider activates with a later release; nothing was started.")
         case let .launchctlFailed(message):
             print("")
-            print("  ✗ Could not register the daemon provider bundle: \(message)")
+            print("  \u{2717} Could not register the daemon provider bundle: \(message)")
             return
         case .installed, .binaryNotFound:
             // installDaemonBundleDisabled never returns these cases.
@@ -817,7 +838,7 @@ struct InstallCommand: AsyncParsableCommand {
             print("  Census (read-only, provider-reported):")
             print("    \(output)")
         } else {
-            print("  ⓘ Census unavailable (provider exit \(census.code)).")
+            print("  \u{2139} Census unavailable (provider exit \(census.code)).")
         }
     }
     #endif

@@ -743,12 +743,31 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// census creates nothing.
     private func convergeDaemonBundle(home: URL) {
         #if os(macOS)
-        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
-        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
-            // No bundle in this release payload: nothing to converge. Silent
-            // on purpose — an upgrade from a payload without the bundle is the
-            // ordinary case and not a fault.
+        // Perkins F1 census-site gate: verify the bundle executable's static code
+        // signature BEFORE staging the disabled plist or running census.  The same
+        // BundleSignatureVerifier used by ProviderOwnershipProbe is the single
+        // authority so the three exec sites (owner-status, install-census,
+        // upgrade-census) cannot diverge.
+        //
+        // A same-UID attacker could plant an unsigned binary at the bundle path.
+        // Without this gate a planted binary would reach DaemonBundle.runReadOnlyMode
+        // ("census") after only isExecutableFile — arbitrary code execution as the
+        // census subprocess, with its output printed to the user.
+        switch BundleSignatureVerifier.production.gate(homeDirectory: home) {
+        case .absent:
+            // No bundle in this release payload: nothing to converge.  Silent on
+            // purpose — an upgrade from a payload without the bundle is the ordinary
+            // case and not a fault.
             return
+        case .unverified(let message):
+            // Present but unverified: do NOT stage a plist or run census.  Skip
+            // convergence and report the issue actionably.
+            print("")
+            print("  \(message)")
+            print("    Daemon bundle convergence skipped until the signature is repaired.")
+            return
+        case .verified:
+            break  // proceed to ownership probe and convergence below
         }
 
         // MACD-3B3 C2/C4: probe before registering the bundle DISABLED.
