@@ -865,7 +865,15 @@ public struct FirstPartyDescriptor: Sendable, Equatable {
     /// Recompute the MAC under `installationRoot` and compare it in constant
     /// time against the published one.
     ///
-    /// - Returns: `true` only when the descriptor is authentic.
+    /// **Schema-3 descriptors:** this method computes the HMAC over the raw
+    /// `macInput()` bytes only (the schema-2 path).  A schema-3 descriptor's
+    /// stored MAC is the schema-3 MAC, which covers the length-prefixed macInput
+    /// contribution plus 7 version-vector UInt64 fields.  Calling this method on a
+    /// schema-3 descriptor therefore always returns `false` — fail-closed, but
+    /// wrong.  Use `ProviderVersionVector.verifySchema3MAC(descriptor:vector:installationRoot:)`
+    /// for schema-3 verification.
+    ///
+    /// - Returns: `true` only when the descriptor is authentic (schema-2 MAC path).
     public func verifyMAC(installationRoot: [UInt8]) -> Bool {
         guard hasEncodableFieldWidths else { return false }
         guard descriptorMAC.count == FirstPartyAuthProtocol.macByteCount else { return false }

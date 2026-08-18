@@ -15,10 +15,15 @@ import AriaMCP
 // refusal of schema-3 descriptors is correct dark behaviour.
 //
 // MAC architecture (R1/R2):
-//   schema-3 MAC input = FirstPartyDescriptor.macInput() bytes (schema-2 fields,
-//   UNCHANGED — R1) THEN the 7 wire scalar fields from ProviderVersionVector in the
-//   FIXED ORDER documented on appendWire1Fields. This guarantees the schema-2 MAC
-//   bytes are provably unchanged and schema-3 adds an authenticated extension tail.
+//   schema-3 MAC input = CanonicalEncoder.appendBytes(descriptor.macInput()) THEN
+//   the 7 wire scalar fields appended via appendWire1Fields.
+//   CanonicalEncoder.appendBytes prepends a 4-byte UInt32 big-endian length before
+//   the payload, so the complete MAC message byte layout is:
+//     [UInt32(len of macInput) BE | macInput bytes | 7×UInt64 fields]
+//   NOT a raw concatenation of macInput and the scalar fields.
+//   Wave-2 implementers verifying schema-3 MACs MUST reproduce this layout exactly
+//   using appendBytes — feeding raw macInput() bytes without the length prefix
+//   produces a different HMAC input and silent verification failure on every descriptor.
 //
 //   migrationTargetSchema and capabilityRevisions live in the Swift type for the
 //   evaluator and Wave 2 MAC extension, but are NOT part of the Wave 1 MAC or
@@ -218,16 +223,23 @@ public struct ProviderVersionVector: Sendable, Equatable {
     ///     `descriptorMAC` is `[]` at call time, as it is excluded from its own input).
     ///   - vector: The companion `ProviderVersionVector`.
     ///   - installationRoot: The 32-byte K_install from which K_descriptor is derived.
-    /// - Returns: `HMAC-SHA256(K_descriptor, schema-2-mac-input || vector-fields)`.
+    /// - Returns: `HMAC-SHA256(K_descriptor, appendBytes(macInput()) || appendWire1Fields())`.
+    ///   `CanonicalEncoder.appendBytes` prepends a 4-byte UInt32 big-endian length, so
+    ///   the MAC message byte layout is `[UInt32(len) BE | macInput bytes | 7×UInt64 fields]`.
+    ///   Wave-2 MAC verification MUST reproduce this layout via `appendBytes` —
+    ///   raw-concatenating `macInput()` without the length prefix produces a different
+    ///   HMAC input and silent verification failure on every schema-3 descriptor.
     public static func schema3MAC(
         descriptor: FirstPartyDescriptor,
         vector: ProviderVersionVector,
         installationRoot: [UInt8]
     ) -> [UInt8] {
         var encoder = CanonicalEncoder()
-        // Schema-2 fields first — the frozen MAC input that preserves backward
-        // provability of any schema-2 descriptor: the schema-2 slice is identical
-        // to what FirstPartyDescriptor.macInput() has always produced.
+        // Schema-2 fields via CanonicalEncoder.appendBytes — which prepends a 4-byte
+        // UInt32 big-endian length before the macInput payload.  The contribution to
+        // the MAC message is [UInt32(len) BE | macInput_bytes], NOT the raw macInput()
+        // bytes alone.  Wave-2 verification must call appendBytes here, not assign
+        // macInput() bytes directly, or it will compute a different HMAC input.
         encoder.appendBytes(descriptor.macInput())
         // Schema-3 additive extension: the 7 version-vector scalar fields.
         vector.appendWire1Fields(&encoder)
@@ -235,6 +247,45 @@ public struct ProviderVersionVector: Sendable, Equatable {
             key: FirstPartyAuthProtocol.descriptorKey(installationRoot: installationRoot),
             message: encoder.bytes
         )
+    }
+
+    // MARK: Schema-3 MAC verification
+
+    /// Verify a schema-3 descriptor's MAC.
+    ///
+    /// **Always use this method — not `descriptor.verifyMAC(installationRoot:)` — for
+    /// schema-3 descriptors.**  `FirstPartyDescriptor.verifyMAC` computes the HMAC
+    /// over only the schema-2 `macInput()` bytes (raw, not length-prefixed).  A
+    /// schema-3 descriptor's stored MAC is the schema-3 MAC, which covers the
+    /// length-prefixed macInput contribution plus 7 version-vector UInt64 fields.
+    /// Calling `verifyMAC` on a schema-3 descriptor therefore always returns `false`
+    /// — fail-closed, but silently incorrect from the caller's perspective.
+    ///
+    /// This method recomputes `schema3MAC` under the same key and performs a
+    /// constant-time comparison against the stored `descriptor.descriptorMAC`.
+    ///
+    /// - Parameters:
+    ///   - descriptor: The decoded schema-3 descriptor whose MAC is to be verified.
+    ///   - vector: The companion version vector decoded alongside the descriptor.
+    ///   - installationRoot: The 32-byte K_install from which K_descriptor is derived.
+    /// - Returns: `true` when the stored MAC matches the freshly computed schema-3
+    ///   MAC.  `false` for any mismatch, malformed MAC length, or un-encodable fields
+    ///   — always fail closed.
+    public static func verifySchema3MAC(
+        descriptor: FirstPartyDescriptor,
+        vector: ProviderVersionVector,
+        installationRoot: [UInt8]
+    ) -> Bool {
+        // Pre-checks mirror FirstPartyDescriptor.verifyMAC: fail closed when the
+        // fields cannot be canonically encoded or the stored MAC is the wrong length.
+        guard descriptor.hasEncodableFieldWidths else { return false }
+        guard descriptor.descriptorMAC.count == FirstPartyAuthProtocol.macByteCount else { return false }
+        let expected = schema3MAC(
+            descriptor: descriptor,
+            vector: vector,
+            installationRoot: installationRoot
+        )
+        return FirstPartyAuthProtocol.constantTimeEquals(expected, descriptor.descriptorMAC)
     }
 
     // MARK: Legacy detection
@@ -283,11 +334,20 @@ public struct ProviderVersionVector: Sendable, Equatable {
 
 /// The verdict of a coexistence compatibility evaluation.
 ///
-/// The evaluator always returns exactly one of these verdicts.  Update-direction
-/// messages in the UI and CLI are derived from the verdict plus the specific owner
-/// and candidate versions observed.  These verdicts live in MootDaemonProvider —
-/// NOT in `MootClientState`, `DaemonContract`, or `DaemonReadiness` (those are
-/// Wave 2 / apps/Mootx01-App territory, per D6).
+/// **Wave-1 evaluator reachability:**
+/// `VersionVectorEvaluator.evaluate()` produces one of: `compatible`,
+/// `generationDowngrade`, `keepOwnerNoOverlap`, `candidateCannotReadEstate`,
+/// or `updateApp`.  `evaluateLegacyCandidate()` always produces
+/// `legacyNotEligibleForAutomatedTakeover`.
+///
+/// The cases `updateCliService`, `updateCliClient`, and `repairOwnership` are
+/// Wave-2 / caller-side verdicts.  The Wave-1 evaluator never produces them —
+/// they are defined here so Wave-2 callers share a single verdict type (D6).
+///
+/// Update-direction messages in the UI and CLI are derived from the verdict plus
+/// the specific owner and candidate versions observed.  These verdicts live in
+/// MootDaemonProvider — NOT in `MootClientState`, `DaemonContract`, or
+/// `DaemonReadiness` (those are Wave 2 / apps/Mootx01-App territory, per D6).
 public enum VersionCompatibilityVerdict: String, Sendable, Equatable, CaseIterable {
     /// All compatibility gates pass.  Follow the preference policy; hand over
     /// only through the full lease sequence.
@@ -319,7 +379,20 @@ public enum VersionCompatibilityVerdict: String, Sendable, Equatable, CaseIterab
 
     /// The standalone CLI service provider is too old to participate in authenticated
     /// handover.  Named for the specific update-direction message.
+    /// Wave-2 / caller-side verdict — not produced by the Wave-1 evaluator.
     case updateCliService
+
+    /// The CLI client (mootx01 binary the user invokes) is too old for the running
+    /// app provider.  The CLI client must be updated before it can authenticate.
+    /// Wave-2 / caller-side verdict — not produced by the Wave-1 evaluator.
+    case updateCliClient
+
+    /// Provider registration, ownership lock, and descriptor are inconsistent with
+    /// each other.  The ownership record requires repair — not downgrade.  This is
+    /// produced by Wave-2 callers that detect a broken ownership state; it is never
+    /// produced by `VersionVectorEvaluator` (which only compares two authenticated
+    /// descriptors, not registry state).
+    case repairOwnership
 }
 
 // MARK: - VersionVectorEvaluator

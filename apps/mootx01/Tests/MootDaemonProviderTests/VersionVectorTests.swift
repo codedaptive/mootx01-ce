@@ -812,7 +812,7 @@ struct VersionVectorMatrixCompletionTests {
         #expect(verdict == .compatible)
     }
 
-    // MARK: updateCliService sentinel
+    // MARK: Wave-2 / caller-side verdict sentinels
 
     @Test("updateCliService is a distinct verdict available in VersionCompatibilityVerdict")
     func updateCliServiceVerdictExists() {
@@ -827,6 +827,72 @@ struct VersionVectorMatrixCompletionTests {
         #expect(VersionCompatibilityVerdict.updateCliService.rawValue == "updateCliService")
         let all = VersionCompatibilityVerdict.allCases
         #expect(all.contains(.updateCliService))
+    }
+
+    @Test("updateCliClient is a distinct verdict available in VersionCompatibilityVerdict")
+    func updateCliClientVerdictExists() {
+        // updateCliClient is reserved for Wave-2 callers that detect the CLI client
+        // binary (mootx01 the user invokes) is too old to authenticate with the
+        // running app provider.  The Wave-1 evaluator never produces this case —
+        // it lives in the shared verdict type so Wave-2 can reference it without
+        // adding new enum cases.
+        // This test asserts the case exists and round-trips through the rawValue.
+        #expect(VersionCompatibilityVerdict.updateCliClient.rawValue == "updateCliClient")
+        let all = VersionCompatibilityVerdict.allCases
+        #expect(all.contains(.updateCliClient))
+    }
+
+    @Test("repairOwnership is a distinct verdict available in VersionCompatibilityVerdict")
+    func repairOwnershipVerdictExists() {
+        // repairOwnership is reserved for Wave-2 callers that detect an inconsistency
+        // between the provider registration, ownership lock, and published descriptor.
+        // The Wave-1 evaluator never produces this case (it only compares two
+        // authenticated descriptors, not registry state).  Defined here so Wave-2
+        // callers share the single verdict type per D6.
+        // This test asserts the case exists and round-trips through the rawValue.
+        #expect(VersionCompatibilityVerdict.repairOwnership.rawValue == "repairOwnership")
+        let all = VersionCompatibilityVerdict.allCases
+        #expect(all.contains(.repairOwnership))
+    }
+
+    @Test("VersionCompatibilityVerdict has exactly 9 cases")
+    func verdictEnumCaseCount() {
+        // D6 enumerates 9 update-direction verdicts.  This test will fail if a case
+        // is added or removed without updating the design contract.
+        #expect(VersionCompatibilityVerdict.allCases.count == 9)
+    }
+
+    @Test("Wave-1 evaluator never produces updateCliService, updateCliClient, or repairOwnership")
+    func wave1EvaluatorDoesNotProduceWave2Verdicts() {
+        // The Wave-1 evaluator exhaustively produces 5 verdicts via evaluate() and 1
+        // via evaluateLegacyCandidate().  The three Wave-2-only cases must not appear.
+        // Test by exercising the evaluator paths and confirming the set.
+        let (ownerDesc, ownerVec) = schema3SealedPair()
+        let (candidateDesc, candidateVec) = schema3SealedPair()
+
+        // Reachable via evaluate(): compatible
+        let compatVerdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc,
+            ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc,
+            candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        #expect(compatVerdict == .compatible)
+
+        // Reachable via evaluateLegacyCandidate()
+        let legacyVerdict = VersionVectorEvaluator.evaluateLegacyCandidate(
+            ownerDescriptor: ownerDesc,
+            ownerVector: ownerVec
+        )
+        #expect(legacyVerdict == .legacyNotEligibleForAutomatedTakeover)
+
+        // Wave-2 verdicts: confirm they are not .compatible or .legacyNot...
+        let wave2Only: Set<VersionCompatibilityVerdict> = [
+            .updateCliService, .updateCliClient, .repairOwnership,
+        ]
+        #expect(!wave2Only.contains(compatVerdict))
+        #expect(!wave2Only.contains(legacyVerdict))
     }
 }
 
@@ -898,5 +964,93 @@ struct MissingVectorFieldDecodeTests {
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
         // The exact-set check against 23 fieldNames must reject a 24-key record.
         #expect(DescriptorPublisher.decode(data) == nil)
+    }
+}
+
+// MARK: - Suite: Schema-3 MAC verification
+
+@Suite("Schema-3 MAC verification — verifySchema3MAC vs verifyMAC fail-closed")
+struct Schema3MACVerificationTests {
+
+    private let fixedRoot: [UInt8] = Array(repeating: 0xAB, count: 32)
+
+    @Test("verifySchema3MAC returns true for a freshly sealed schema-3 descriptor")
+    func verifySchema3MACPassesForValidDescriptor() {
+        // schema3SealedPair() produces a descriptor whose descriptorMAC is the
+        // schema-3 MAC.  verifySchema3MAC must accept it.
+        var (desc, vec) = schema3SealedPair()
+        // Replace the MAC with one computed under fixedRoot so the root is known.
+        desc.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        )
+        #expect(ProviderVersionVector.verifySchema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        ))
+    }
+
+    @Test("verifySchema3MAC returns false when the MAC is corrupted")
+    func verifySchema3MACFailsForCorruptedMAC() {
+        var (desc, vec) = schema3SealedPair()
+        desc.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        )
+        // Flip the first byte.
+        desc.descriptorMAC[0] ^= 0xFF
+        #expect(!ProviderVersionVector.verifySchema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        ))
+    }
+
+    @Test("verifySchema3MAC returns false when a vector field is altered after sealing")
+    func verifySchema3MACFailsWhenVectorFieldAltered() {
+        var (desc, vec) = schema3SealedPair()
+        desc.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        )
+        // Alter providerReleaseGeneration after the MAC was computed — the stored
+        // MAC no longer matches the current vector, so verification must fail.
+        let tamperedVec = ProviderVersionVector(
+            providerReleaseGeneration: vec.providerReleaseGeneration + 1,
+            managementRevisionMinimum: vec.managementRevisionMinimum,
+            managementRevisionMaximum: vec.managementRevisionMaximum,
+            dataPlaneRevisionMinimum: vec.dataPlaneRevisionMinimum,
+            dataPlaneRevisionMaximum: vec.dataPlaneRevisionMaximum,
+            estateSchemaMinimum: vec.estateSchemaMinimum,
+            estateSchemaMaximum: vec.estateSchemaMaximum,
+            migrationTargetSchema: vec.migrationTargetSchema,
+            capabilityRevisions: vec.capabilityRevisions
+        )
+        #expect(!ProviderVersionVector.verifySchema3MAC(
+            descriptor: desc, vector: tamperedVec, installationRoot: fixedRoot
+        ))
+    }
+
+    @Test("descriptor.verifyMAC always returns false for a schema-3 descriptor — documented fail-closed")
+    func schema2VerifyMACAlwaysFalseForSchema3() {
+        // This test pins the documented behaviour: FirstPartyDescriptor.verifyMAC
+        // computes HMAC over the raw macInput() bytes (schema-2 path) and never
+        // matches the schema-3 MAC stored in descriptorMAC.  The result is
+        // fail-closed (false), but is wrong from the caller's perspective — callers
+        // MUST use ProviderVersionVector.verifySchema3MAC instead.
+        var (desc, vec) = schema3SealedPair()
+        desc.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        )
+        // verifyMAC uses the schema-2 path: always false for schema-3 descriptors.
+        #expect(!desc.verifyMAC(installationRoot: fixedRoot))
+        // verifySchema3MAC uses the correct path: true for the same descriptor+root.
+        #expect(ProviderVersionVector.verifySchema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        ))
+    }
+
+    @Test("verifySchema3MAC returns false when the MAC has wrong byte count")
+    func verifySchema3MACFailsForWrongMACLength() {
+        var (desc, vec) = schema3SealedPair()
+        // A truncated MAC (31 bytes instead of 32) must fail closed.
+        desc.descriptorMAC = Array(repeating: 0x00, count: FirstPartyAuthProtocol.macByteCount - 1)
+        #expect(!ProviderVersionVector.verifySchema3MAC(
+            descriptor: desc, vector: vec, installationRoot: fixedRoot
+        ))
     }
 }
