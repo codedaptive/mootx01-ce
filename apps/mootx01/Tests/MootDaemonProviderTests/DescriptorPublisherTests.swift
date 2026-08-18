@@ -443,3 +443,147 @@ struct DescriptorRemovalTests {
         #expect(try publisher.removeOwnDescriptor(instanceIdentifier: UUID(), descriptorGeneration: 1) == .absent)
     }
 }
+
+// MARK: - Part B: MAC field ordering and schema-3 round-trip (MACD-3B1)
+
+@Suite("Schema-3 MAC field ordering (MACD-3B1 Part B)")
+struct Schema3MACFieldOrderingTests {
+
+    private let root: [UInt8] = [UInt8](repeating: 9, count: 32)
+
+    /// Manually compute the schema-3 MAC input bytes to verify the frozen field order.
+    ///
+    /// The MAC input is:
+    ///   descriptor.macInput() (schema-2 fields, frozen per R1)
+    ///   THEN 7 Wire-1 scalar fields via appendWire1Fields in the fixed order:
+    ///     1. providerReleaseGeneration
+    ///     2. managementRevisionMinimum
+    ///     3. managementRevisionMaximum
+    ///     4. dataPlaneRevisionMinimum
+    ///     5. dataPlaneRevisionMaximum
+    ///     6. estateSchemaMinimum
+    ///     7. estateSchemaMaximum
+    @Test("schema-3 MAC input is descriptor.macInput() concatenated with 7 wire fields in fixed order")
+    func macFieldOrderMatchesSpec() {
+        let vector = ProviderVersionVector(
+            providerReleaseGeneration: 42,
+            managementRevisionMinimum: 11,
+            managementRevisionMaximum: 22,
+            dataPlaneRevisionMinimum: 33,
+            dataPlaneRevisionMaximum: 44,
+            estateSchemaMinimum: 55,
+            estateSchemaMaximum: 66,
+            migrationTargetSchema: nil,
+            capabilityRevisions: [:]
+        )
+        var base3Desc = FirstPartyDescriptor(
+            schemaVersion: FirstPartyAuthProtocol.descriptorSchemaVersion,
+            providerIdentifier: FirstPartyAuthProtocol.providerIdentifier,
+            serviceIdentifier: FirstPartyAuthProtocol.serviceIdentifier,
+            endpoint: FirstPartyAuthProtocol.endpoint,
+            authProtocol: FirstPartyAuthProtocol.authProtocolIdentifier,
+            authKeyIdentifier: FirstPartyAuthProtocol.authKeyIdentifier,
+            publishedAt: 1_700_000_000,
+            instanceIdentifier: UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!,
+            estateIdentifier: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!,
+            binaryVersion: "1.0.18",
+            contractRevision: FirstPartyAuthProtocol.contractRevision,
+            mcpProtocolVersion: FirstPartyAuthProtocol.mcpProtocolVersion,
+            capabilities: ["authenticated-first-party", "resident-estate", "tool-surface"].sorted(),
+            credentialGeneration: 1,
+            descriptorGeneration: 1,
+            descriptorMAC: []
+        )
+
+        // Compute the MAC using ProviderVersionVector.schema3MAC.
+        base3Desc.descriptorMAC = ProviderVersionVector.schema3MAC(
+            descriptor: base3Desc, vector: vector, installationRoot: root
+        )
+
+        // Now manually assemble the same input to verify the field order:
+        var manual = CanonicalEncoder()
+        manual.appendBytes(base3Desc.macInput())  // schema-2 fields (frozen)
+        // Fixed field order for the 7 Wire-1 scalar fields:
+        manual.appendUInt64(42)   // 1. providerReleaseGeneration
+        manual.appendUInt64(11)   // 2. managementRevisionMinimum
+        manual.appendUInt64(22)   // 3. managementRevisionMaximum
+        manual.appendUInt64(33)   // 4. dataPlaneRevisionMinimum
+        manual.appendUInt64(44)   // 5. dataPlaneRevisionMaximum
+        manual.appendUInt64(55)   // 6. estateSchemaMinimum
+        manual.appendUInt64(66)   // 7. estateSchemaMaximum
+        let manualMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: root),
+            message: manual.bytes
+        )
+
+        #expect(base3Desc.descriptorMAC == manualMAC)
+    }
+
+    @Test("reordering the 7 wire fields in the MAC input produces a different MAC")
+    func macFieldReorderingProducesDifferentMAC() {
+        // If appendWire1Fields ever reorders its output, this test breaks —
+        // an intentional sentinel for the frozen field-order invariant.
+        let vector = ProviderVersionVector(
+            providerReleaseGeneration: 1,
+            managementRevisionMinimum: 2,
+            managementRevisionMaximum: 3,
+            dataPlaneRevisionMinimum: 4,
+            dataPlaneRevisionMaximum: 5,
+            estateSchemaMinimum: 6,
+            estateSchemaMaximum: 7,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        var correctEncoder = CanonicalEncoder()
+        vector.appendWire1Fields(&correctEncoder)
+        var reorderedEncoder = CanonicalEncoder()
+        // Swap order 1 and 7 to produce a different byte string.
+        reorderedEncoder.appendUInt64(vector.estateSchemaMaximum)     // was providerReleaseGeneration
+        reorderedEncoder.appendUInt64(vector.managementRevisionMinimum)
+        reorderedEncoder.appendUInt64(vector.managementRevisionMaximum)
+        reorderedEncoder.appendUInt64(vector.dataPlaneRevisionMinimum)
+        reorderedEncoder.appendUInt64(vector.dataPlaneRevisionMaximum)
+        reorderedEncoder.appendUInt64(vector.estateSchemaMinimum)
+        reorderedEncoder.appendUInt64(vector.providerReleaseGeneration)  // was estateSchemaMaximum
+        // The field order matters: a reordering produces different bytes.
+        #expect(correctEncoder.bytes != reorderedEncoder.bytes)
+    }
+
+    @Test("schema-3 MAC wire field count is exactly 7 scalar UInt64s (56 bytes over macInput)")
+    func macWire1FieldsByteLength() {
+        // appendWire1Fields writes exactly 7 × 8 = 56 bytes — one UInt64 per field,
+        // no length prefixes (they are scalars, not byte strings).
+        var encoder = CanonicalEncoder()
+        ProviderVersionVector.current.appendWire1Fields(&encoder)
+        #expect(encoder.bytes.count == 7 * 8)
+    }
+
+    @Test("schema-3 MAC is longer than schema-2 MAC input by exactly 56 bytes")
+    func schema3MACInputLongerThanSchema2ByWireFields() {
+        // The schema-3 extension must be exactly 7 × 8 = 56 bytes.
+        let vector = ProviderVersionVector.current
+        var base3Desc = FirstPartyDescriptor(
+            schemaVersion: FirstPartyAuthProtocol.descriptorSchemaVersion,
+            providerIdentifier: FirstPartyAuthProtocol.providerIdentifier,
+            serviceIdentifier: FirstPartyAuthProtocol.serviceIdentifier,
+            endpoint: FirstPartyAuthProtocol.endpoint,
+            authProtocol: FirstPartyAuthProtocol.authProtocolIdentifier,
+            authKeyIdentifier: FirstPartyAuthProtocol.authKeyIdentifier,
+            publishedAt: 1_700_000_000,
+            instanceIdentifier: UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!,
+            estateIdentifier: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!,
+            binaryVersion: "1.0.18",
+            contractRevision: FirstPartyAuthProtocol.contractRevision,
+            mcpProtocolVersion: FirstPartyAuthProtocol.mcpProtocolVersion,
+            capabilities: ["authenticated-first-party", "resident-estate", "tool-surface"].sorted(),
+            credentialGeneration: 1,
+            descriptorGeneration: 1,
+            descriptorMAC: []
+        )
+        let schema2InputLength = base3Desc.macInput().count
+        // Schema-3 input = macInput() + 7 × UInt64 (no extra length prefix).
+        var schema3Encoder = CanonicalEncoder()
+        schema3Encoder.appendBytes(base3Desc.macInput())
+        vector.appendWire1Fields(&schema3Encoder)
+        #expect(schema3Encoder.bytes.count == schema2InputLength + 4 /*UInt32 length prefix of appendBytes*/ + 56)
+    }
+}

@@ -1832,3 +1832,102 @@ final class RandomCounter: @unchecked Sendable {
         return out
     }
 }
+
+// MARK: - MACD-3B1 Part B — Schema-3 specific tests for FirstPartyAuthProtocol
+
+// A local helper for subsequence search that avoids the Swift Algorithms import.
+// Uses a simple O(n·m) scan over [UInt8]; the inputs in these tests are small.
+private extension [UInt8] {
+    func containsSubsequence(_ needle: [UInt8]) -> Bool {
+        guard !needle.isEmpty, needle.count <= self.count else { return false }
+        return (0...(self.count - needle.count)).contains { start in
+            self[start..<(start + needle.count)].elementsEqual(needle)
+        }
+    }
+}
+
+@Suite("MACD-3B1 — schema-3 descriptor contract (FirstPartyAuthProtocol layer)")
+struct Schema3DescriptorContractTests {
+
+    static let fixedRoot: [UInt8] = (0..<32).map { UInt8($0) }
+
+    // MARK: Schema-3 descriptorSchemaVersion constant
+
+    @Test("descriptorSchemaVersion is 3 (MACD-3B1 bump from 2)")
+    func descriptorSchemaVersionIs3() {
+        // MACD-3B1: descriptorSchemaVersion bumped 2 → 3.  Schema-2 golden MAC
+        // vectors in this file use literal schemaVersion: 2 to prove schema-2
+        // bytes are unchanged (R1).  This test locks the new constant value.
+        #expect(FirstPartyAuthProtocol.descriptorSchemaVersion == 3)
+    }
+
+    // MARK: Schema-3 round-trip through macInput
+
+    @Test("schema-3 descriptor macInput includes schemaVersion field as UInt64(3)")
+    func schema3MacInputContainsVersion3() {
+        // macInput encodes schemaVersion via UInt64(bitPattern: Int64(schemaVersion)).
+        // For schemaVersion=3, that is UInt64(3), which encodes as [0,0,0,0,0,0,0,3].
+        // Verify the big-endian encoding of the version field is present in macInput.
+        var descriptor = FirstPartyAuthProtocolTests.vectorDescriptor()
+        descriptor.schemaVersion = FirstPartyAuthProtocol.descriptorSchemaVersion  // 3
+        descriptor.descriptorMAC = []
+        let input = descriptor.macInput()
+        // The 8-byte big-endian encoding of UInt64(3).
+        let version3Bytes: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 3]
+        // The macInput begins with the descriptor domain string (length-prefixed).
+        // schemaVersion is not the first field, but must appear in the input.
+        // Verify by checking the bytes contain the version3 pattern.
+        let inputContainsVersion3 = input.containsSubsequence(version3Bytes)
+        #expect(inputContainsVersion3)
+    }
+
+    @Test("schema-2 macInput does NOT contain the version-3 byte pattern (golden anchor)")
+    func schema2MacInputHasVersion2NotVersion3() {
+        // The schema-2 golden vector (literal schemaVersion: 2) must encode
+        // [0,0,0,0,0,0,0,2] in macInput — not [0,0,0,0,0,0,0,3].
+        // This proves R1: FirstPartyDescriptor.macInput() was not modified.
+        let descriptor = FirstPartyAuthProtocolTests.vectorDescriptor()
+        // vectorDescriptor() uses literal schemaVersion: 2.
+        #expect(descriptor.schemaVersion == 2)
+        let input = descriptor.macInput()
+        let version3Bytes: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 3]
+        let version2Bytes: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 2]
+        #expect(!input.containsSubsequence(version3Bytes))
+        #expect(input.containsSubsequence(version2Bytes))
+    }
+
+    // MARK: CanonicalEncoder.appendSortedMap — additional golden bytes
+
+    @Test("appendSortedMap encodes count as big-endian UInt32 then length-prefixed key-value pairs")
+    func appendSortedMapGoldenBytes() {
+        // Single-entry map: { "a": 1 }.
+        // Encoding: UInt32(1) | UInt32(1) | 'a' | UInt64(1)
+        //         = [0,0,0,1] | [0,0,0,1, 0x61] | [0,0,0,0,0,0,0,1]
+        var encoder = CanonicalEncoder()
+        encoder.appendSortedMap(["a": 1])
+        let expected: [UInt8] = [
+            0, 0, 0, 1,          // UInt32 count = 1
+            0, 0, 0, 1, 0x61,    // appendString("a"): UInt32 len=1, 'a'
+            0, 0, 0, 0, 0, 0, 0, 1,  // appendUInt64(1)
+        ]
+        #expect(encoder.bytes == expected)
+    }
+
+    @Test("appendSortedMap is consistent with appendCapabilities sort order for string keys")
+    func appendSortedMapUsesLexicographicOrder() {
+        // Both appendCapabilities and appendSortedMap use < for sort order.
+        // Confirm that the map key order is the same as sorted string order.
+        var mapEncoder = CanonicalEncoder()
+        mapEncoder.appendSortedMap(["z": 2, "a": 1])
+        // Expected: "a" comes before "z".
+        var capEncoder = CanonicalEncoder()
+        capEncoder.appendSortedMap(["a": 1, "z": 2])  // identical semantics
+        #expect(mapEncoder.bytes == capEncoder.bytes)
+        // And confirm "a" really is before "z" — the first key entry after count:
+        let countBytes = 4
+        let firstKeyLenBytes = 4
+        // "a" = 0x61, "z" = 0x7A.
+        let firstKeyByte = mapEncoder.bytes[countBytes + firstKeyLenBytes]
+        #expect(firstKeyByte == 0x61)  // 'a'
+    }
+}

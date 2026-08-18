@@ -589,3 +589,314 @@ struct VersionVectorEvaluatorTests {
         #expect(v1 == v2)
     }
 }
+
+// MARK: - Suite: Evaluator — Part B matrix completions and edge cases
+//
+// The tests below complete the 8-row version-mismatch matrix and cover the
+// additional "PLUS" cases listed in MACD-3B1 Part B:
+//   - Equal generations (same gen, compatible)
+//   - Higher generation but no management overlap (necessary-not-sufficient)
+//   - Row 6: migration-target (Wave 1 fail-closed → candidateCannotReadEstate)
+//   - Row 7: capability revision absent (data-plane mismatch → updateApp)
+//   - Missing schema-3 wire field → decode returns nil (fail-closed)
+//
+// These are encoded as data-driven cases where possible so Wave 2 missions
+// can reuse them for the app-side mirror (DaemonContract / MootClientState).
+
+@Suite("VersionVectorEvaluator — Part B matrix completions")
+struct VersionVectorMatrixCompletionTests {
+
+    private let root: [UInt8] = [UInt8](repeating: 7, count: 32)
+
+    private func ownerDescriptor(
+        vector: ProviderVersionVector
+    ) -> (FirstPartyDescriptor, ProviderVersionVector) {
+        schema3SealedPair(
+            instance: UUID(uuidString: "EEEEEEEE-0000-0000-0000-000000000011")!,
+            root: root, vector: vector
+        )
+    }
+
+    private func candidateDescriptor(
+        vector: ProviderVersionVector
+    ) -> (FirstPartyDescriptor, ProviderVersionVector) {
+        schema3SealedPair(
+            instance: UUID(uuidString: "FFFFFFFF-0000-0000-0000-000000000012")!,
+            root: root, vector: vector
+        )
+    }
+
+    // MARK: Equal generations
+
+    @Test("equal owner and candidate release generations return compatible when all gates pass")
+    func equalGenerationsCompatible() {
+        // Same generation: replacement is allowed through the preference policy.
+        // Higher is NECESSARY for replacement — equal satisfies the gate.
+        let shared = ProviderVersionVector(
+            providerReleaseGeneration: 3,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 2,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 2,
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let (ownerDesc, ownerVec) = ownerDescriptor(vector: shared)
+        let (candidateDesc, candidateVec) = candidateDescriptor(vector: shared)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        #expect(verdict == .compatible)
+    }
+
+    // MARK: Higher generation necessary but not sufficient (step 2 + step 3 interaction)
+
+    @Test("higher candidate generation is necessary but not sufficient: no management overlap keeps owner")
+    func higherGenerationNecessaryNotSufficientManagement() {
+        // The candidate has a higher providerReleaseGeneration (step 2 passes),
+        // but the management revision ranges have no overlap (step 3 fails).
+        // This test makes the "necessary not sufficient" semantics explicit:
+        // upgrading the release generation alone is NOT sufficient for replacement.
+        let ownerVec = ProviderVersionVector(
+            providerReleaseGeneration: 10,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 3,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 2,
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let candidateVec = ProviderVersionVector(
+            providerReleaseGeneration: 99,  // much higher — step 2 passes
+            managementRevisionMinimum: 10, managementRevisionMaximum: 12,  // no overlap with 1..3
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 2,
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let (ownerDesc, _) = ownerDescriptor(vector: ownerVec)
+        let (candidateDesc, _) = candidateDescriptor(vector: candidateVec)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        // Step 3 must stop evaluation at keepOwnerNoOverlap even though the
+        // candidate's release generation is much higher.
+        #expect(verdict == .keepOwnerNoOverlap)
+    }
+
+    // MARK: Row 6 — migration-target (Wave 1 behaviour)
+
+    @Test("row 6: candidate with migrationTargetSchema cannot bypass Wave-1 estate read gate")
+    func migrationTargetRowWave1FailClosed() {
+        // Design row 6: "Any | Target requires a one-way schema migration →
+        // Source closes and checkpoints first; target stages backup, migrates, verifies,
+        // and only then commits ownership."
+        //
+        // In Wave 1 the migration executor is not deployed.  The evaluator
+        // must NOT permit a candidate to replace the owner merely because it
+        // carries a non-nil migrationTargetSchema — it must still return
+        // candidateCannotReadEstate for any candidate whose estateSchema range
+        // does not include the CURRENT estate schema.
+        //
+        // This test pins that Wave-1 fail-closed behaviour so Wave-2 missions
+        // have a clear regression baseline for when they implement the migration
+        // execution path.
+        let candidateVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 2,
+            // Can only open schema 3+ but current estate is schema 1.
+            estateSchemaMinimum: 3, estateSchemaMaximum: 5,
+            // Non-nil: signals it COULD migrate from 1 to 3, but Wave 1 does not execute.
+            migrationTargetSchema: 3,
+            capabilityRevisions: [:]
+        )
+        let (ownerDesc, ownerVec) = ownerDescriptor(vector: .current)
+        let (candidateDesc, _) = candidateDescriptor(vector: candidateVec)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1  // estate is at schema 1; candidate needs 3+
+        )
+        // Wave 1: migration is not executed — fail closed.
+        #expect(verdict == .candidateCannotReadEstate)
+    }
+
+    @Test("row 6: candidate with migrationTargetSchema that CAN read the estate returns compatible")
+    func migrationTargetCanReadEstateCompatible() {
+        // If the candidate's estateSchemaMaximum DOES cover the current schema,
+        // it is not blocked by the estate gate — compatible regardless of migrationTargetSchema.
+        let candidateVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 2,
+            // CAN read schema 1 (minimum=1, maximum=3).
+            estateSchemaMinimum: 1, estateSchemaMaximum: 3,
+            // migrationTargetSchema present but irrelevant: the range check passes.
+            migrationTargetSchema: 3,
+            capabilityRevisions: [:]
+        )
+        let (ownerDesc, ownerVec) = ownerDescriptor(vector: .current)
+        let (candidateDesc, _) = candidateDescriptor(vector: candidateVec)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        #expect(verdict == .compatible)
+    }
+
+    // MARK: Row 7 — capability revision absent (data-plane mismatch, client update-required)
+
+    @Test("row 7: non-overlapping data-plane revision ranges return updateApp (client update-required)")
+    func capabilityRevisionAbsentDataPlaneMismatch() {
+        // Design row 7: "Required capability revision absent → Provider may remain
+        // healthy for other clients, but this client reports update-required and
+        // sends no estate request."
+        //
+        // In Wave 1, per-capability revision checks are not implemented
+        // (capabilityRevisions is always empty).  The data-plane revision range
+        // is the proxy: a non-overlapping range means the candidate cannot serve
+        // this client's revision, triggering updateApp.  The running provider
+        // stays healthy for other clients — no kill, no downgrade.
+        let ownerVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 5, dataPlaneRevisionMaximum: 7,  // newer owner
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let candidateVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,  // equal generation — step 2 passes
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 3,  // no overlap with 5..7
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let (ownerDesc, _) = ownerDescriptor(vector: ownerVec)
+        let (candidateDesc, _) = candidateDescriptor(vector: candidateVec)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        // The candidate's data-plane is too old — client update-required.
+        #expect(verdict == .updateApp)
+    }
+
+    @Test("row 7: provider with capability revisions and client that overlaps returns compatible")
+    func capabilityRevisionOverlapCompatible() {
+        // When data-plane ranges overlap, the evaluator reaches compatible
+        // regardless of whether capabilityRevisions is populated.
+        let ownerVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 2, dataPlaneRevisionMaximum: 4,
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil,
+            capabilityRevisions: ["tool-surface": 3, "resident-estate": 1]
+        )
+        let candidateVec = ProviderVersionVector(
+            providerReleaseGeneration: 5,
+            managementRevisionMinimum: 1, managementRevisionMaximum: 1,
+            dataPlaneRevisionMinimum: 3, dataPlaneRevisionMaximum: 5,  // overlaps 3..4
+            estateSchemaMinimum: 1, estateSchemaMaximum: 1,
+            migrationTargetSchema: nil, capabilityRevisions: [:]
+        )
+        let (ownerDesc, _) = ownerDescriptor(vector: ownerVec)
+        let (candidateDesc, _) = candidateDescriptor(vector: candidateVec)
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: ownerDesc, ownerVector: ownerVec,
+            candidateDescriptor: candidateDesc, candidateVector: candidateVec,
+            currentEstateSchema: 1
+        )
+        #expect(verdict == .compatible)
+    }
+
+    // MARK: updateCliService sentinel
+
+    @Test("updateCliService is a distinct verdict available in VersionCompatibilityVerdict")
+    func updateCliServiceVerdictExists() {
+        // updateCliService is a named case for the update-direction message
+        // "Update the MOOTx01 command-line service when the standalone provider
+        // is too old to participate in authenticated handover."
+        // In Wave 1 the evaluator does not produce this verdict on its own
+        // (keepOwnerNoOverlap covers the management-mismatch case); Wave 2
+        // callers will produce it when they detect the owner is a CLI binary
+        // at a management revision below the candidate's minimum.
+        // This test asserts the case exists and round-trips through the rawValue.
+        #expect(VersionCompatibilityVerdict.updateCliService.rawValue == "updateCliService")
+        let all = VersionCompatibilityVerdict.allCases
+        #expect(all.contains(.updateCliService))
+    }
+}
+
+// MARK: - Suite: Missing schema-3 field — fail-closed decode
+
+@Suite("Missing schema-3 vector field — fail-closed decode")
+struct MissingVectorFieldDecodeTests {
+
+    /// Build a valid 23-field schema-3 JSON, then remove one field and confirm
+    /// that DescriptorPublisher.decode() returns nil (exact-set check fails).
+    private func dataDropping(_ key: String) -> Data {
+        let (desc, vec) = schema3SealedPair()
+        let full = DescriptorPublisher.encode(desc, vector: vec)
+        guard var object = try? JSONSerialization.jsonObject(with: full) as? [String: Any] else {
+            return Data()
+        }
+        object.removeValue(forKey: key)
+        return (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+    }
+
+    @Test("missing providerReleaseGeneration decodes as nil")
+    func missingProviderReleaseGeneration() {
+        #expect(DescriptorPublisher.decode(dataDropping("providerReleaseGeneration")) == nil)
+    }
+
+    @Test("missing managementRevisionMinimum decodes as nil")
+    func missingManagementRevisionMinimum() {
+        #expect(DescriptorPublisher.decode(dataDropping("managementRevisionMinimum")) == nil)
+    }
+
+    @Test("missing managementRevisionMaximum decodes as nil")
+    func missingManagementRevisionMaximum() {
+        #expect(DescriptorPublisher.decode(dataDropping("managementRevisionMaximum")) == nil)
+    }
+
+    @Test("missing dataPlaneRevisionMinimum decodes as nil")
+    func missingDataPlaneRevisionMinimum() {
+        #expect(DescriptorPublisher.decode(dataDropping("dataPlaneRevisionMinimum")) == nil)
+    }
+
+    @Test("missing dataPlaneRevisionMaximum decodes as nil")
+    func missingDataPlaneRevisionMaximum() {
+        #expect(DescriptorPublisher.decode(dataDropping("dataPlaneRevisionMaximum")) == nil)
+    }
+
+    @Test("missing estateSchemaMinimum decodes as nil")
+    func missingEstateSchemaMinimum() {
+        #expect(DescriptorPublisher.decode(dataDropping("estateSchemaMinimum")) == nil)
+    }
+
+    @Test("missing estateSchemaMaximum decodes as nil")
+    func missingEstateSchemaMaximum() {
+        #expect(DescriptorPublisher.decode(dataDropping("estateSchemaMaximum")) == nil)
+    }
+
+    @Test("missing a schema-2 field also decodes as nil")
+    func missingSchemaVersionDecodeNil() {
+        #expect(DescriptorPublisher.decode(dataDropping("schemaVersion")) == nil)
+    }
+
+    @Test("an extra field (24 keys) decodes as nil — exact-set check rejects it")
+    func extraFieldDecodeNil() {
+        let (desc, vec) = schema3SealedPair()
+        let full = DescriptorPublisher.encode(desc, vector: vec)
+        guard var object = try? JSONSerialization.jsonObject(with: full) as? [String: Any] else {
+            return
+        }
+        object["unexpectedNewField"] = "injected"  // 24th key
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+        // The exact-set check against 23 fieldNames must reject a 24-key record.
+        #expect(DescriptorPublisher.decode(data) == nil)
+    }
+}
