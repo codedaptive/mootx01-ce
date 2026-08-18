@@ -282,6 +282,20 @@ public enum DaemonShellMain {
                 return (ExitCode.usage.rawValue, usageText)
             }
             return await runRace(options)
+        case "owner-status":
+            // MACD-3B3 (C1 MUST_UPDATE) — authenticated live-owner detection.
+            // Reads K_install from the data-protection Keychain (entitlement
+            // available only to the signed bundle subprocess — never to the CLI
+            // process), resolves the App Group layout, reads and MAC-verifies
+            // the descriptor + ProviderVersionVector, reads and MAC-verifies the
+            // ProviderPreference, and emits one-line JSON with the outcome.
+            //
+            // Called exclusively by ProviderOwnershipProbe in MootInstallerCore
+            // via DaemonBundle.runReadOnlyMode("owner-status", homeDirectory:).
+            // The CLI process delegates authentication here because it has no
+            // App Group or Keychain entitlements (Kong K2 / MACD-3B3 BRR).
+            guard arguments.count == 1 else { return (ExitCode.usage.rawValue, usageText) }
+            return runOwnerStatus()
         default:
             return (ExitCode.usage.rawValue, usageText)
         }
@@ -292,6 +306,7 @@ public enum DaemonShellMain {
            mootx01-daemon census
            mootx01-daemon resident
            mootx01-daemon race --context <uuid> [--hold-ms <milliseconds>]
+           mootx01-daemon owner-status
     """
 
     // MARK: - Census mode (read-only, file level)
@@ -480,6 +495,223 @@ public enum DaemonShellMain {
         entry["receiptCoverage"] = record.receiptCoverage.rawValue
         return entry
     }
+
+    // MARK: - Owner-status mode (read-only, authenticated)
+
+    /// Authenticated live-owner detection — the C1 implementation (MACD-3B3).
+    ///
+    /// Runs entirely inside the signed bundle subprocess, which holds the
+    /// App Group and data-protection Keychain entitlements the CLI process
+    /// does NOT have.  All MAC verification therefore happens here; the CLI
+    /// only decodes the JSON result via `ProviderOwnershipProbe`.
+    ///
+    /// Outcome JSON keys (always sorted):
+    /// - `mode`:          "owner-status"
+    /// - `outcome`:       "healthy" | "absent" | "unauthenticated" | "incompatible"
+    /// - `kind`:          ProviderKind.rawValue (present when outcome == "healthy" or "incompatible")
+    /// - `preferredKind`: ProviderKind.rawValue (present when outcome == "healthy" and preference found)
+    /// - `verdict`:       VersionCompatibilityVerdict.rawValue (present when outcome == "incompatible" or
+    ///                    when outcome == "unauthenticated" due to a legacy schema-2 descriptor)
+    ///
+    /// Fail-closed: every error path emits "absent" or "unauthenticated", never a false positive.
+    private static func runOwnerStatus() -> (code: Int32, output: String) {
+        #if canImport(Security)
+        // Step 1: Read the signed identity — the bundle has the required
+        // App Group and Keychain entitlements; an ineligible shell exits here.
+        let readback = SecCodeEntitlementReadback()
+        let identity: SignedProcessIdentity
+        do {
+            identity = try readback.processIdentity()
+        } catch {
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+        let eligibility: ProviderEligibility
+        do {
+            eligibility = try ProviderEligibilityJudge.judge(identity)
+        } catch {
+            // Ineligible shell cannot read the Keychain group.
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+
+        // Step 2: Resolve the App Group layout.
+        let layout: ProviderRootLayout
+        do {
+            layout = try ProviderRootLayout.resolve(
+                resolver: AppGroupRootResolver(),
+                groupIdentifier: eligibility.appGroupIdentifier
+            )
+        } catch {
+            // Unresolvable App Group — no authenticated owner can exist.
+            return ownerStatusReport(outcome: "absent")
+        }
+
+        // Step 3: Read descriptor file.  Genuine absence → "absent".
+        // We use Data(contentsOf:) rather than SecureFiles to avoid creating
+        // the provider directory as a side effect — this is a READ-ONLY mode.
+        guard let descriptorData = try? Data(contentsOf: layout.descriptorFile),
+              !descriptorData.isEmpty else {
+            return ownerStatusReport(outcome: "absent")
+        }
+
+        // Step 4: Legacy schema-2 detection (C3 carry-forward — Perkins A1).
+        // A schema-2 descriptor pre-dates the authenticated coexistence contract;
+        // treat it as "unauthenticated" so the caller knows SOMETHING is there
+        // but cannot be authenticated, rather than silently claiming absence.
+        // NEVER kills or replaces a process running behind this descriptor.
+        if ProviderVersionVector.isLegacyDescriptor(descriptorData) {
+            return ownerStatusReport(outcome: "unauthenticated", verdict: "legacyNotEligibleForAutomatedTakeover")
+        }
+
+        // Step 5: Decode as schema-3.  Failure → "unauthenticated" (fail-closed:
+        // something is on disk that doesn't match the schema-3 field set).
+        guard let (descriptor, vector) = DescriptorPublisher.decode(descriptorData) else {
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+
+        // Step 6: Explicit schemaVersion == 3 check (C3 binding decision,
+        // Perkins A1 carry-forward).  DescriptorPublisher.decode accepts the
+        // exact 23-key schema-3 field set and constructs a FirstPartyDescriptor
+        // with the decoded schemaVersion; we guard it explicitly here rather
+        // than trusting the decode path alone.
+        guard descriptor.schemaVersion == FirstPartyAuthProtocol.descriptorSchemaVersion else {
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+
+        // Step 7: Read K_install from the data-protection Keychain.
+        // The SIGNED BUNDLE has the Keychain access-group entitlement; the CLI
+        // process does not — this is the architectural reason this mode must run
+        // inside the bundle subprocess rather than in-process in MootInstallerCore.
+        //
+        // `readRoot()` returns nil for genuine errSecItemNotFound (K_install never
+        // minted = provider has never activated = no authenticated owner).
+        // It throws DaemonProviderError.keychainFatal for every other Keychain
+        // fault (entitlement missing, interaction required, corruption, etc.)
+        // — all non-absence faults are treated as "unauthenticated" (fail-closed).
+        let rootAuthority = InstallationRootAuthority(
+            keychain: DataProtectionKeychainAuthority(),
+            eligibility: eligibility,
+            randomBytes: ProductionRandomness.secRandomBytes
+        )
+        let installationRoot: [UInt8]
+        do {
+            guard let root = try rootAuthority.readRoot() else {
+                // Genuine absence: K_install was never minted — the provider has
+                // never completed a successful activation on this installation.
+                return ownerStatusReport(outcome: "absent")
+            }
+            installationRoot = root
+        } catch {
+            // Keychain fatal (entitlement, interaction, corruption): cannot
+            // authenticate.  Treat as "unauthenticated" — something is on disk
+            // but we cannot verify it.
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+
+        // Step 8: Schema-3 MAC verification (MACD-3B1 ProviderVersionVector.verifySchema3MAC).
+        // MUST use verifySchema3MAC, NOT descriptor.verifyMAC(installationRoot:): the
+        // schema-3 MAC input is CanonicalEncoder.appendBytes(macInput()) (UInt32
+        // length-prefixed) followed by the 7 vector fields.  Calling the schema-2
+        // verifyMAC path on a schema-3 descriptor always returns false — wrong input.
+        guard ProviderVersionVector.verifySchema3MAC(
+            descriptor: descriptor,
+            vector: vector,
+            installationRoot: installationRoot
+        ) else {
+            // MAC mismatch: descriptor present, K_install present, but MAC is
+            // wrong — an impostor or tampered record.
+            return ownerStatusReport(outcome: "unauthenticated")
+        }
+
+        // Step 9: Version compatibility.
+        // Evaluate whether this binary (the candidate) can coexist with the
+        // authenticated running owner.  Use ProviderVersionVector.current —
+        // the compile-time constants for this build — as the candidate vector.
+        // The owner's vector is what was MAC-verified in step 8.
+        //
+        // The evaluator requires FirstPartyDescriptor for both sides; the owner
+        // descriptor is already decoded.  For the candidate descriptor, we pass
+        // the owner's descriptor as a stand-in: in Wave 1 the evaluator's
+        // VersionCompatibilityVerdict is computed purely from the vectors, so the
+        // descriptor values in both arguments are not accessed in the verdict path.
+        //
+        // For currentEstateSchema: the estate cannot be opened in this read-only
+        // mode.  Use the owner's declared estateSchemaMinimum as a conservative
+        // floor — correct for the single-schema Wave 1 estate.
+        let candidateVector = ProviderVersionVector.current
+        let verdict = VersionVectorEvaluator.evaluate(
+            ownerDescriptor: descriptor,
+            ownerVector: vector,
+            candidateDescriptor: descriptor,
+            candidateVector: candidateVector,
+            currentEstateSchema: vector.estateSchemaMinimum
+        )
+
+        // Step 10: Read the preference (MAC-verified by ProviderPreferenceStore.load).
+        // Fail-closed: a missing, malformed, or MAC-invalid preference is not an
+        // error — it means no durable preference has been written yet.
+        let prefStore = ProviderPreferenceStore(
+            fileURL: layout.preferenceFile,
+            installationRoot: installationRoot
+        )
+        let preferredKind: ProviderKind?
+        switch prefStore.load() {
+        case .verified(let kind, _):
+            preferredKind = kind
+        case .none, .invalid:
+            preferredKind = nil
+        }
+
+        // owner-status is only invoked via DaemonBundle.runReadOnlyMode from the
+        // bundle executable — the kind is always .bundled when this mode runs.
+        let kind = ProviderKind.bundled
+
+        switch verdict {
+        case .compatible:
+            return ownerStatusReport(outcome: "healthy", kind: kind, preferredKind: preferredKind)
+        default:
+            // Surface the verdict verbatim (C4 mandate).  The probe decodes
+            // this field and exposes it to the CLI for user-facing messaging.
+            return ownerStatusReport(
+                outcome: "incompatible",
+                kind: kind,
+                preferredKind: preferredKind,
+                verdict: verdict.rawValue
+            )
+        }
+        #else
+        // Non-Darwin: no Security framework, no entitlements, no Keychain.
+        // Report absent so the CLI proceeds with normal install (fail-open for
+        // non-macOS platforms is acceptable — the bundled provider is macOS-only).
+        return ownerStatusReport(outcome: "absent")
+        #endif
+    }
+
+    /// Encode the owner-status JSON report.
+    ///
+    /// Only the fields relevant to the `outcome` are included.  Absent optional
+    /// fields are omitted entirely rather than carried as null — the probe's
+    /// decoder uses explicit key-presence checks, so omitted fields are treated
+    /// as "not provided" cleanly.
+    private static func ownerStatusReport(
+        outcome: String,
+        kind: ProviderKind? = nil,
+        preferredKind: ProviderKind? = nil,
+        verdict: String? = nil
+    ) -> (code: Int32, output: String) {
+        var object: [String: Any] = ["mode": "owner-status", "outcome": outcome]
+        if let kind { object["kind"] = kind.rawValue }
+        if let preferredKind { object["preferredKind"] = preferredKind.rawValue }
+        if let verdict { object["verdict"] = verdict }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        ) else {
+            return (ExitCode.failure.rawValue, #"{"mode":"owner-status","outcome":"report-encoding-failed"}"#)
+        }
+        return (ExitCode.success.rawValue, String(decoding: data, as: UTF8.self))
+    }
+
+    // MARK: - Race mode (proof only, never production)
 
     /// Parsed race-mode options. Failable parse: anything not exactly the
     /// grammar above is a usage error before any side effect.
