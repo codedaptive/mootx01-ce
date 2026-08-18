@@ -14,9 +14,123 @@
 // itself.  All ProviderDaemonProvider types used here are for the RETURN TYPE
 // vocabulary only (ProviderKind, VersionCompatibilityVerdict) — the values
 // themselves come from the subprocess output.
+//
+// TRUST BOUNDARY (Perkins F1 fix): delegating all MAC verification to the
+// subprocess is only sound when the subprocess IS the legitimate signed binary.
+// ProviderOwnershipProbe verifies the bundle executable's static code signature
+// (via `BundleSignatureVerifier`) BEFORE running it.  A planted unsigned or
+// wrong-identity binary is refused with .unauthenticated; it is never executed
+// and its JSON output is never decoded.
 
 import Foundation
+#if canImport(Security)
+import Security
+#endif
 import MootDaemonProvider
+
+// MARK: - BundleSignatureVerifier
+
+/// Verifies the static code signature of the daemon bundle executable BEFORE
+/// the CLI trusts or launches it.
+///
+/// This type closes the Perkins F1 trust-boundary gap.  The CLI's architecture
+/// delegates all MAC verification to the bundle subprocess, but that delegation
+/// is only sound when the subprocess IS the legitimate signed binary.  A same-UID
+/// attacker who plants an unsigned shell script at the bundle executable path
+/// could otherwise cause the CLI to decode attacker-controlled JSON as an
+/// authenticated coexistence verdict.
+///
+/// The verification is a STATIC code-signature check (no process launch) against
+/// a requirement derived from the canonical constants the codebase already uses:
+/// - `anchor apple generic`: the binary is signed with an Apple-trusted certificate
+///   (rules out unsigned and ad-hoc signatures).
+/// - `identifier`: the bundle identifier must match `DaemonBundle.bundleIdentifier`
+///   (the registered, unique identifier for the daemon provider bundle).
+///
+/// Team identifier is NOT compiled in — there is no team-constant in this codebase.
+/// The enforced identity is the combination of Apple's root anchor and the globally
+/// unique bundle identifier.  If a team-constant is added in a future release, the
+/// requirement string must be updated to pin
+/// `certificate leaf[subject.OU] = "<TEAM_ID>"` as well.
+///
+/// This type is injectable so functional tests can pass an always-valid fake without
+/// requiring a real signed binary, while a separate RED test exercises the real
+/// Security-framework path against a planted unsigned binary.
+public struct BundleSignatureVerifier: Sendable {
+
+    /// Verify the static code signature of `executableURL`.
+    ///
+    /// - Returns: `true` when the binary satisfies the requirement (Apple-generic
+    ///   anchor AND correct bundle identifier); `false` for any failure: unsigned,
+    ///   ad-hoc, wrong bundle identifier, wrong anchor, API error.  Fail-closed.
+    public var verify: @Sendable (URL) -> Bool
+
+    /// Production verifier — uses `SecStaticCodeCheckValidityWithErrors`.
+    public static let production: BundleSignatureVerifier = {
+        #if canImport(Security)
+        return BundleSignatureVerifier(verify: SecStaticBundleVerifier.verify(executableURL:))
+        #else
+        // Non-Darwin: Security framework absent; the bundled provider does not
+        // exist on this platform so any caller-side "absent" result is correct.
+        // Returning true here is safe: if the file does not exist, the runner
+        // returns -1 → .absent; if it inexplicably does exist, we cannot check
+        // its signature and the subprocess will fail naturally.
+        return BundleSignatureVerifier(verify: { _ in true })
+        #endif
+    }()
+
+    /// Always-valid verifier for decode-logic unit tests that inject a fake
+    /// subprocess runner and never write a real binary to disk.
+    public static let alwaysValid = BundleSignatureVerifier(verify: { _ in true })
+}
+
+// MARK: - SecStaticBundleVerifier
+
+#if canImport(Security)
+/// Real Security-framework implementation of the static bundle signature check.
+///
+/// Called by `BundleSignatureVerifier.production`.  Public so the RED exploit
+/// test in `ProviderOwnershipProbeTests` can inject it directly against a
+/// planted unsigned binary.
+public enum SecStaticBundleVerifier {
+
+    /// Verify the static code signature of the bundle executable at `executableURL`.
+    ///
+    /// Requirement string source:
+    /// - `anchor apple generic`: cited from the Apple Developer documentation for
+    ///   Developer-ID / App Store distribution; rules out unsigned and ad-hoc.
+    /// - `identifier "..."`: pinned to `DaemonBundle.bundleIdentifier`, the
+    ///   registered, unique identifier defined in `Paths.swift`.  Team identifier
+    ///   is not compiled in; the unique bundle-ID is the binding identity constant.
+    ///
+    /// - Returns: `true` when the binary satisfies the requirement; `false` for any
+    ///   failure.  Never throws — all errors map to `false` (fail-closed).
+    public static func verify(executableURL: URL) -> Bool {
+        var staticCodeRef: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executableURL as CFURL, [], &staticCodeRef) == errSecSuccess,
+              let staticCode = staticCodeRef else {
+            // Cannot create a static code object: path may be unreadable, the bundle
+            // structure may be malformed, or an unexpected Security error occurred.
+            return false
+        }
+        // Requirement: signed by an Apple-generic anchor (not unsigned, not ad-hoc)
+        // AND the binary's bundle identifier must match the canonical
+        // DaemonBundle.bundleIdentifier registered for this product.  The CLI-side
+        // requirement pins the PUBLIC identity only; team identity enforcement for
+        // the entitlement groups happens INSIDE the subprocess via SecCodeCopySelf
+        // (ProviderEligibilityJudge in MootDaemonProvider).
+        let requirement = "anchor apple generic and identifier \"\(DaemonBundle.bundleIdentifier)\""
+        var reqRef: SecRequirement?
+        guard SecRequirementCreateWithString(requirement as CFString, [], &reqRef) == errSecSuccess,
+              let req = reqRef else {
+            // Requirement string parse failure: unexpected — the string is a
+            // compile-time constant derived from DaemonBundle.bundleIdentifier.
+            return false
+        }
+        return SecStaticCodeCheckValidityWithErrors(staticCode, [], req, nil) == errSecSuccess
+    }
+}
+#endif
 
 // MARK: - OwnershipProbeOutcome
 
@@ -50,7 +164,14 @@ public enum OwnershipProbeOutcome: Sendable, Equatable {
     case incompatible(verdict: VersionCompatibilityVerdict)
 
     /// A descriptor or process is present but cannot be authenticated.
-    /// Causes: wrong MAC, schema-2 legacy descriptor, Keychain fatal error.
+    /// Causes:
+    /// - The bundle executable is present but fails static code-signature
+    ///   verification (unsigned, ad-hoc, or wrong bundle identifier) — this
+    ///   is the F1 trust-boundary guard: a planted impostor binary is refused
+    ///   here before it is ever launched.
+    /// - Wrong MAC, schema-2 legacy descriptor, or Keychain fatal error (as
+    ///   reported by the subprocess after successful signature verification).
+    ///
     /// NEVER kills or replaces the running process — only blocks automated
     /// client-only install (C2/C3 mandate).
     case unauthenticated
@@ -85,9 +206,10 @@ extension OwnershipProbeOutcome {
     /// `true` when normal (full) install should proceed.
     ///
     /// Both `.absent` (no owner on disk) and `.unauthenticated` (owner
-    /// present but MAC verification failed or schema-2 legacy) permit
-    /// normal install.  For `.unauthenticated`, the running process is
-    /// NOT killed or replaced — normal install runs independently (C3).
+    /// present but signature verification failed, MAC verification failed,
+    /// or schema-2 legacy) permit normal install.  For `.unauthenticated`,
+    /// the running process is NOT killed or replaced — normal install runs
+    /// independently (C3).
     public var normalInstallProceeds: Bool {
         switch self {
         case .absent, .unauthenticated: return true
@@ -107,7 +229,29 @@ extension OwnershipProbeOutcome {
 /// Calls `DaemonBundle.runReadOnlyMode("owner-status", homeDirectory:)` and
 /// decodes its JSON result into an `OwnershipProbeOutcome`.  Never elects a
 /// winner, never kills a process, never starts a second provider.
+///
+/// **Trust boundary (Perkins F1):** The subprocess-delegation model is only
+/// sound when the subprocess IS the legitimate signed binary.  Before invoking
+/// the runner, `detect()` verifies the bundle executable's static code signature
+/// via the injected `BundleSignatureVerifier`.  A planted unsigned or wrong-
+/// identity binary is refused with `.unauthenticated` — never `.absent` (which
+/// would permit a normal install over an unknown tampered state) — before it is
+/// ever executed or its JSON decoded.
 public struct ProviderOwnershipProbe: Sendable {
+
+    /// The bundle signature verifier seam.
+    ///
+    /// Called with the bundle executable URL when the file exists on disk, BEFORE
+    /// the subprocess is launched.  Failure maps to `.unauthenticated` (not
+    /// `.absent`): returning `.absent` for a failed verification would permit a
+    /// normal install over an unknown tampered state — an attacker could plant an
+    /// unsigned binary that reports absence, triggering install that overwrites a
+    /// legitimate owner.
+    ///
+    /// Production: `BundleSignatureVerifier.production` (SecStaticCode check).
+    /// Test injection: `BundleSignatureVerifier.alwaysValid` for decode-logic tests
+    /// that never write a real binary to disk; the real verifier for RED exploit tests.
+    private let signatureVerifier: BundleSignatureVerifier
 
     /// The subprocess runner seam.
     ///
@@ -116,8 +260,10 @@ public struct ProviderOwnershipProbe: Sendable {
     /// probe's decode logic is verified without requiring a real bundle binary.
     private let runner: @Sendable (String, URL) -> (code: Int32, output: String?)
 
-    /// Production initialiser — delegates to the real daemon bundle subprocess.
+    /// Production initialiser — delegates to the real daemon bundle subprocess
+    /// with the real Security-framework signature verifier.
     public init() {
+        self.signatureVerifier = .production
         self.runner = { mode, home in
             DaemonBundle.runReadOnlyMode(mode, homeDirectory: home)
         }
@@ -125,22 +271,51 @@ public struct ProviderOwnershipProbe: Sendable {
 
     /// Testable initialiser.
     ///
-    /// Injects a subprocess runner fake so the probe's JSON decoding logic is
-    /// verified without requiring a real signed bundle binary or Keychain.
-    internal init(runner: @Sendable @escaping (String, URL) -> (code: Int32, output: String?)) {
+    /// - Parameters:
+    ///   - runner: A subprocess runner fake so the probe's JSON decoding logic is
+    ///     verified without requiring a real signed bundle binary or Keychain.
+    ///   - verifier: A signature verifier.  Defaults to `BundleSignatureVerifier.alwaysValid`
+    ///     so decode-logic tests that inject a fake runner need no additional seam.
+    ///     Pass `BundleSignatureVerifier(verify: SecStaticBundleVerifier.verify(executableURL:))`
+    ///     for RED exploit tests that exercise the real Security-framework path.
+    internal init(
+        runner: @Sendable @escaping (String, URL) -> (code: Int32, output: String?),
+        verifier: BundleSignatureVerifier = .alwaysValid
+    ) {
         self.runner = runner
+        self.signatureVerifier = verifier
     }
 
     // MARK: - Public API
 
     /// Run the authenticated owner-status probe against the bundle subprocess.
     ///
-    /// Fail-closed on every subprocess failure or JSON parse error.
+    /// Fail-closed on signature verification failure, subprocess failure, and
+    /// JSON parse error.
+    ///
+    /// **Signature verification:** when the bundle executable file exists on disk,
+    /// its static code signature is verified BEFORE launching it.  Verification
+    /// failure returns `.unauthenticated` immediately — the subprocess is never
+    /// run and no JSON is decoded.  Non-existence is NOT a verification failure;
+    /// the runner handles the absent-binary case (exit code -1 → `.absent`).
     ///
     /// - Parameter homeDirectory: The user's home directory, passed to
     ///   `DaemonBundle.runReadOnlyMode` to locate the bundle executable.
     /// - Returns: The `OwnershipProbeOutcome` decoded from the subprocess.
     public func detect(homeDirectory: URL) -> OwnershipProbeOutcome {
+        let executable = DaemonBundle.bundleExecutableURL(homeDirectory: homeDirectory)
+        // Only verify when the file exists: non-existence is correctly handled
+        // by the runner (returns -1 → .absent).  Verifying a non-existent path
+        // would fail SecStaticCodeCreateWithPath and return .unauthenticated,
+        // shadowing the correct .absent result.
+        if FileManager.default.fileExists(atPath: executable.path) {
+            // Verify BEFORE exec.  Failure is .unauthenticated, not .absent:
+            // returning .absent for an impostor binary would permit a normal
+            // install over an unknown/tampered state (Perkins F1).
+            guard signatureVerifier.verify(executable) else {
+                return .unauthenticated
+            }
+        }
         let result = runner("owner-status", homeDirectory)
         return decode(result)
     }
@@ -166,6 +341,12 @@ public struct ProviderOwnershipProbe: Sendable {
     /// - `"absent"`:          no authenticated owner on disk → `.absent`.
     /// - `"healthy"`:         MAC-verified, schema-3, compatible owner → `.healthy`.
     /// - `"unauthenticated"`: MAC fails, schema-2 legacy, or Keychain error → `.unauthenticated`.
+    ///                        Note: the subprocess emits a `verdict` field alongside
+    ///                        `"unauthenticated"` for schema-2 legacy descriptors, but
+    ///                        `OwnershipProbeOutcome.unauthenticated` carries no associated
+    ///                        value — the field is intentionally dropped.  Both legacy-schema-2
+    ///                        and MAC-failed correctly yield `normalInstallProceeds = true`;
+    ///                        callers do not need the sub-reason.
     /// - `"incompatible"`:    authenticated owner, version mismatch → `.incompatible(verdict:)`.
     /// - unknown string:      fail-closed → `.unauthenticated`.
     internal func decode(_ result: (code: Int32, output: String?)) -> OwnershipProbeOutcome {
@@ -211,6 +392,10 @@ public struct ProviderOwnershipProbe: Sendable {
             return .healthy(kind: kind, preferredKind: preferredKind)
 
         case "unauthenticated":
+            // The `verdict` field is emitted by the subprocess for legacy-schema-2
+            // descriptors but is NOT surfaced here: OwnershipProbeOutcome.unauthenticated
+            // carries no associated value.  Both legacy-schema-2 and MAC-failed yield
+            // normalInstallProceeds = true; callers do not need the sub-reason.
             return .unauthenticated
 
         case "incompatible":

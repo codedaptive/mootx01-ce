@@ -308,3 +308,156 @@ struct ProbeFailClosedTests {
         #expect(p.detect(homeDirectory: fakeHome) == .unauthenticated)
     }
 }
+
+// MARK: - Missing decode-path tests (Adams MINOR 3)
+
+@Suite("ProviderOwnershipProbe — incompatible decode paths (repairOwnership / keepOwnerNoOverlap / candidateCannotReadEstate)")
+struct ProbeMissingVerdictDecodeTests {
+
+    // These three VersionCompatibilityVerdict rawValues were not previously exercised
+    // in the JSON-decode path.  A typo in any rawValue would silently produce
+    // .unauthenticated without any test catching the decode failure.
+
+    @Test("repairOwnership verdict → .incompatible(.repairOwnership)")
+    func incompatibleRepairOwnership() {
+        let p = probe(returning: fakeResult(json: [
+            "mode": "owner-status",
+            "outcome": "incompatible",
+            "kind": ProviderKind.bundled.rawValue,
+            "verdict": VersionCompatibilityVerdict.repairOwnership.rawValue,
+        ]))
+        #expect(p.detect(homeDirectory: fakeHome) == .incompatible(verdict: .repairOwnership))
+    }
+
+    @Test("keepOwnerNoOverlap verdict → .incompatible(.keepOwnerNoOverlap)")
+    func incompatibleKeepOwnerNoOverlap() {
+        let p = probe(returning: fakeResult(json: [
+            "mode": "owner-status",
+            "outcome": "incompatible",
+            "kind": ProviderKind.bundled.rawValue,
+            "verdict": VersionCompatibilityVerdict.keepOwnerNoOverlap.rawValue,
+        ]))
+        #expect(p.detect(homeDirectory: fakeHome) == .incompatible(verdict: .keepOwnerNoOverlap))
+    }
+
+    @Test("candidateCannotReadEstate verdict → .incompatible(.candidateCannotReadEstate)")
+    func incompatibleCandidateCannotReadEstate() {
+        let p = probe(returning: fakeResult(json: [
+            "mode": "owner-status",
+            "outcome": "incompatible",
+            "kind": ProviderKind.bundled.rawValue,
+            "verdict": VersionCompatibilityVerdict.candidateCannotReadEstate.rawValue,
+        ]))
+        #expect(p.detect(homeDirectory: fakeHome) == .incompatible(verdict: .candidateCannotReadEstate))
+    }
+}
+
+// MARK: - Signature verifier seam tests (Perkins F1)
+
+@Suite("ProviderOwnershipProbe — signature verification seam (Perkins F1)")
+struct ProbeSignatureVerifierTests {
+
+    // These tests exercise the BundleSignatureVerifier seam introduced to close
+    // the Perkins F1 trust-boundary gap: before the CLI runs the bundle subprocess,
+    // it must verify the binary is the legitimate signed artifact.
+
+    @Test("verifier refusal → .unauthenticated even when runner returns healthy (F1 gate)")
+    func verifierRefusalGate() {
+        // Simulates a planted unsigned binary: the runner WOULD return healthy JSON
+        // (as in the exploit), but the verifier refuses the file first.
+        let p = ProviderOwnershipProbe(
+            runner: { _, _ in
+                (0, "{\"mode\":\"owner-status\",\"outcome\":\"healthy\",\"kind\":\"bundled\"}")
+            },
+            verifier: .init(verify: { _ in false })  // simulate unsigned/wrong-team binary
+        )
+        // Verifier refuses → .unauthenticated, not .absent (see trust-boundary comment)
+        #expect(p.detect(homeDirectory: fakeHome) == .unauthenticated)
+    }
+
+    @Test("verifier pass + runner healthy → .healthy (normal path)")
+    func verifierPassThenHealthy() {
+        // Verifier accepts the binary; the runner returns a healthy verdict.
+        // Confirms the verifier seam does not interfere with the success path.
+        let p = ProviderOwnershipProbe(
+            runner: { _, _ in
+                fakeResult(json: [
+                    "mode": "owner-status",
+                    "outcome": "healthy",
+                    "kind": ProviderKind.bundled.rawValue,
+                ])
+            },
+            verifier: .alwaysValid
+        )
+        #expect(p.detect(homeDirectory: fakeHome) == .healthy(kind: .bundled, preferredKind: nil))
+    }
+
+    @Test("verifier not called when executable absent → .absent from runner (not .unauthenticated)")
+    func verifierSkippedForAbsentBinary() {
+        // When the bundle executable does not exist at the expected path, the
+        // verifier must NOT be called (verifying a non-existent path would
+        // spuriously return .unauthenticated, shadowing .absent).
+        //
+        // Proof: inject a verifier that returns false for every path.  If the
+        // verifier were called for a non-existent binary, the outcome would be
+        // .unauthenticated; .absent proves the verifier was skipped.
+        let p = ProviderOwnershipProbe(
+            runner: { _, _ in (-1, nil) },
+            verifier: .init(verify: { _ in false })  // always-reject; called iff file exists
+        )
+        // fakeHome (/Users/test-probe) has no real bundle binary; fileExists returns false.
+        // The runner's -1 exit maps to .absent, proving the verifier was not called.
+        let outcome = p.detect(homeDirectory: fakeHome)
+        #expect(outcome == .absent,
+                "absent binary must yield .absent, not .unauthenticated — verifier must not run for non-existent paths")
+    }
+
+    // RED TEST — Perkins F1 exploit: planted unsigned shell script at the bundle
+    // executable path, real Security-framework verifier.
+    //
+    // This test reproduces the exact exploit scenario: a process running as the
+    // current user places an unsigned shell script at the daemon bundle executable
+    // path that emits a healthy JSON response.  With the real SecStaticBundleVerifier,
+    // the probe must refuse with .unauthenticated — the impostor is never launched.
+    #if canImport(Security)
+    @Test("planted unsigned shell script at bundle path → .unauthenticated (F1 exploit closed)")
+    func plantedShellScriptRefused() throws {
+        // Build a fake home directory and create the full bundle executable path.
+        let fakeHomeDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("probe-f1-test-\(UUID().uuidString)", isDirectory: true)
+        let execURL = DaemonBundle.bundleExecutableURL(homeDirectory: fakeHomeDir)
+        try FileManager.default.createDirectory(
+            at: execURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        defer { try? FileManager.default.removeItem(at: fakeHomeDir) }
+
+        // Plant an unsigned shell script at the exact path the probe will check.
+        // This is the Perkins F1 exploit payload: the script emits a "healthy"
+        // JSON response that, without signature verification, would route
+        // InstallCommand / UpgradeCommand to the client-only path — skipping all
+        // daemon registration.
+        let exploitScript = "#!/bin/sh\necho '{\"mode\":\"owner-status\",\"outcome\":\"healthy\",\"kind\":\"bundled\"}'"
+        try exploitScript.write(to: execURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: execURL.path
+        )
+
+        // Probe with the REAL Security-framework verifier and a runner that would
+        // return healthy if ever reached (it must NOT be reached).
+        let probe = ProviderOwnershipProbe(
+            runner: { _, _ in
+                (0, "{\"mode\":\"owner-status\",\"outcome\":\"healthy\",\"kind\":\"bundled\"}")
+            },
+            verifier: .init(verify: SecStaticBundleVerifier.verify(executableURL:))
+        )
+        // The real verifier must reject the unsigned shell script — exploit blocked.
+        #expect(
+            probe.detect(homeDirectory: fakeHomeDir) == .unauthenticated,
+            "planted unsigned binary must be refused; Perkins F1 exploit must be blocked"
+        )
+    }
+    #endif
+}
