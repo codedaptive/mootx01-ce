@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.48.0
+version: 1.49.0
 status: accepted-1.1-target
 date: 2026-08-18
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -1270,6 +1270,62 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.49.0 -- 2026-08-18
+
+- **`ProviderPreference` record (MACD-3B2, dark Wave 1).** New public value
+  type in `MootDaemonProvider`.  Fields (P1 exact set): `preferredKind:
+  ProviderKind`, `preferenceGeneration: UInt64`, `issuingIdentity:
+  SigningIdentityDescriptor`, `issuedAt: UInt64`,
+  `lastCompletedHandoverGeneration: UInt64`, `preferenceMAC: [UInt8]`.  No
+  estate key, bearer credential, capability inventory, or migration bookmark.
+  Static `preferenceKey(installationRoot:)` derives K_preference via
+  HKDF-SHA256 with domain `"MOOTX01-PROVIDER-PREFERENCE-v1"` and zero salt
+  (both legitimate writers derive independently from K_install — no per-write
+  challenge to bind).  `macInput()` encodes all five fields via
+  `CanonicalEncoder`.  `signing(installationRoot:)` and
+  `verifyMAC(installationRoot:)` (constant-time).  `encoded()` produces
+  canonical sorted-key JSON with 8 exact keys.  `decode(_:)` uses
+  `strictJSONObject(expected:)` — extra or missing keys return nil (fail-closed).
+
+- **`ProviderPreferenceObservation` enum (MACD-3B2).** Arbiter-facing summary:
+  `.none` / `.verified(preferredKind: ProviderKind, preferenceGeneration:
+  UInt64)` / `.invalid`.  Never carries raw MAC bytes.
+
+- **`ProviderPreferenceStore` (MACD-3B2).** Durable store: atomic replace via
+  `SecureFiles.atomicReplace`, fail-closed reads (unreadable / malformed /
+  MAC-invalid / monotonic rollback → `.none` or `.invalid`, never permissive),
+  monotonic generation enforcement on write (equal-or-lower generation refused
+  with `DaemonProviderError.generationFault(.overflow)`) and on read
+  (`minimumExpectedGeneration` parameter).  Lock-free: no provider lock required
+  (the preference sits below the lock in the authority hierarchy).
+
+- **`ArbiterObservation` extended (MACD-3B2).** Gains `preference:
+  ProviderPreferenceObservation` (default `.none`) and six explicit repair-gate
+  Bool inputs (all default `false`, fail-closed): `noAuthenticatedLockOwner`,
+  `noHandoverInProgress`, `bundledArtifactAbsentOrUnusable`, `unambiguousCensus`,
+  `directProviderSchemaCompatible`, `generationRollbackChecksPassed`.  All
+  existing call sites compile unchanged (keyword-only, all-defaults init).
+
+- **`ProviderArbiter.arbitrate(_:)` authority-level-4 branch (MACD-3B2).**
+  After the dual-registration conflict check, when ALL six repair conditions
+  are `true` AND preference is `.verified`, the dual-registration conflict is
+  resolved to `.standaloneRegistered` or `.bundledRegistered` according to the
+  preferred kind.  A preference NEVER overrides a live owner, a handover, a
+  recovery state, a compatibility failure, or an ambiguous census.  No new
+  `ProviderArbiterState` wire encoding — the twelve frozen states are
+  sufficient; `allWireEncodings` unchanged.
+
+- **`ProviderRootLayout.preferenceFile` (MACD-3B2).** New computed var
+  returning `"provider-preference.v1.json"` in `supportDirectory` beside the
+  descriptor (same custody namespace as `migrationGrantFile` /
+  `migrationChallengeFile` — NOT inside `providerDirectory`).
+
+- **`ProviderSelfReport.digestInput` + `canonicalReport` (MACD-3B2).**
+  MACD-3B2 additive tail: the preference MAC domain string
+  `"MOOTX01-PROVIDER-PREFERENCE-v1"` appended after the MACD-3B1 tail.
+  `canonicalReport()` gains `"preferenceDomain"` key.  Module digest changes
+  by construction; both shells compute the same new digest.
 
 ### 1.48.0 -- 2026-08-18
 

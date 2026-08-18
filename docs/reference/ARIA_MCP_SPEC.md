@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.42.0
+version: 1.43.0
 status: accepted-1.1-target
 date: 2026-08-18
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -1059,6 +1059,19 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.43.0 -- 2026-08-18
+
+- **Durable provider preference contract (MACD-3B2, dark Wave 1).** The
+  self-report's `digestInput()` gains an additive tail entry after the
+  MACD-3B1 schema-3 entries: the preference MAC domain constant
+  `"MOOTX01-PROVIDER-PREFERENCE-v1"`.  `canonicalReport()` gains the
+  corresponding `"preferenceDomain"` JSON key (sorted by `.sortedKeys`,
+  alphabetically between "preferenceDomain" and "providerIdentifier").  The
+  module digest changes by construction; both shells emit the same new digest.
+  No new `ProviderArbiterState` wire encoding — the twelve frozen states are
+  sufficient; the preference influences the policy layer above the arbiter
+  rather than producing a 13th state.
 
 ### 1.42.0 -- 2026-08-18
 
