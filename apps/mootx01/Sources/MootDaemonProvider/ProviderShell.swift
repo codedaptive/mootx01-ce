@@ -510,8 +510,12 @@ public enum DaemonShellMain {
     /// - `outcome`:       "healthy" | "absent" | "unauthenticated" | "incompatible"
     /// - `kind`:          ProviderKind.rawValue (present when outcome == "healthy" or "incompatible")
     /// - `preferredKind`: ProviderKind.rawValue (present when outcome == "healthy" and preference found)
-    /// - `verdict`:       VersionCompatibilityVerdict.rawValue (present when outcome == "incompatible" or
-    ///                    when outcome == "unauthenticated" due to a legacy schema-2 descriptor)
+    /// - `verdict`:       VersionCompatibilityVerdict.rawValue (present when outcome == "incompatible";
+    ///                    also emitted alongside outcome == "unauthenticated" for legacy schema-2
+    ///                    descriptors, but `ProviderOwnershipProbe.decode()` intentionally drops the
+    ///                    field in that case — `OwnershipProbeOutcome.unauthenticated` has no
+    ///                    associated value, because both legacy-schema-2 and MAC-failed yield
+    ///                    `normalInstallProceeds = true` and callers do not need the sub-reason)
     ///
     /// Fail-closed: every error path emits "absent" or "unauthenticated", never a false positive.
     private static func runOwnerStatus() -> (code: Int32, output: String) {
@@ -634,6 +638,16 @@ public enum DaemonShellMain {
         // VersionCompatibilityVerdict is computed purely from the vectors, so the
         // descriptor values in both arguments are not accessed in the verdict path.
         //
+        // WAVE-2 HAZARD: this stand-in invariant is implementation-derived from the
+        // current VersionVectorEvaluator source and is NOT enforced by the type
+        // system.  If a Wave-2 change extends VersionVectorEvaluator.evaluate() to
+        // access candidateDescriptor.schemaVersion, candidateDescriptor.endpoint, or
+        // any other descriptor field, this call site MUST be updated to supply the
+        // actual candidate descriptor — passing the owner's descriptor for both sides
+        // would silently produce wrong verdicts (e.g., comparing the owner's endpoint
+        // against itself rather than the candidate's endpoint).  The Wave-2 implementer
+        // must grep for uses of this candidateDescriptor stand-in pattern and fix them.
+        //
         // For currentEstateSchema: the estate cannot be opened in this read-only
         // mode.  Use the owner's declared estateSchemaMinimum as a conservative
         // floor — correct for the single-schema Wave 1 estate.
@@ -680,8 +694,11 @@ public enum DaemonShellMain {
         }
         #else
         // Non-Darwin: no Security framework, no entitlements, no Keychain.
-        // Report absent so the CLI proceeds with normal install (fail-open for
-        // non-macOS platforms is acceptable — the bundled provider is macOS-only).
+        // The bundled provider is a macOS-only artifact; on any other platform
+        // there is no bundle, no descriptor, and no Keychain to consult.
+        // Reporting "absent" is the CORRECT answer — not a security relaxation:
+        // the bundled provider cannot exist on this platform, so absent IS the
+        // ground truth.  Normal install proceeds.
         return ownerStatusReport(outcome: "absent")
         #endif
     }

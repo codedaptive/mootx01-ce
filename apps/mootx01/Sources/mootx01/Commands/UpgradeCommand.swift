@@ -770,6 +770,11 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
         // .absent or .unauthenticated: converge normally.
         // For .unauthenticated: any running process is left untouched (C3).
+        if case .unauthenticated = ownerOutcome {
+            print("")
+            print("  \u{26A0} A provider is present but could not be authenticated.")
+            print("    Upgrading normally; the existing process is not stopped (C3).")
+        }
         print("\nConverging the daemon provider bundle\u{2026}")
         switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
         case let .installedDisabled(plistPath):
