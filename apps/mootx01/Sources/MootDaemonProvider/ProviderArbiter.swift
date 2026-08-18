@@ -133,13 +133,81 @@ public struct ArbiterObservation: Sendable, Equatable {
     /// The handover phase.
     public var handover: HandoverObservation
 
+    // MARK: Authority-level-4 inputs (MACD-3B2)
+    //
+    // Preference and the six repair conditions are evaluated ONLY in the
+    // no-live-owner section (step 3 of arbitrate), AFTER all level-1/2/3
+    // priority rules have been applied.  Every condition is an EXPLICIT caller
+    // input — never inferred from timestamps (design mandate, P4).
+    //
+    // Authority order (fixed, design "Terms and authorities"):
+    //   1. recovery-required
+    //   2. valid in-progress handover lease
+    //   3. authenticated live lock ownership with matching descriptor
+    //   4. MACed preference (this block, guarded by the six repair conditions)
+    //   5. registration/artifact observations
+    //   6. port/path observations
+    //
+    // A preference can request convergence but NEVER elects over a live owner,
+    // a lease, a recovery state, a compatibility failure, or an ambiguous census.
+    // The six conditions below express the exact gate; if ANY is false (or
+    // defaults to false), the preference is ignored and the factual registration
+    // state is returned unchanged.
+
+    /// The MAC-verified preference observation.  Defaults to `.none` so all
+    /// 30+ existing call sites compile without modification.
+    public var preference: ProviderPreferenceObservation
+
+    // Repair conditions (all default to false — fail-closed: unmet conditions
+    // never allow a preference to override a conflict or absent state).
+
+    /// True when the caller confirms no authenticated lock owner is present.
+    /// Although the arbiter can derive this from `lockClaims`, the design
+    /// requires an explicit caller assertion to avoid inference (P4).
+    public var noAuthenticatedLockOwner: Bool
+
+    /// True when the caller confirms no handover is in progress.  Same
+    /// derivability note: the arbiter has `handover`, but explicit is required.
+    public var noHandoverInProgress: Bool
+
+    /// True when the caller confirms the bundled provider artifact (the app
+    /// bundle + SMAppService helper) is absent or not usable.  This is the
+    /// key signal for the app-removal recovery scenario: the SMAppService
+    /// registration may still appear as `.registered` even after the app is
+    /// removed, so the arbiter cannot derive this from the registration field.
+    public var bundledArtifactAbsentOrUnusable: Bool
+
+    /// True when the caller confirms a single unambiguous estate was found
+    /// (the MULTIPLE_ESTATES_HARD_STOP gate from the design).  Preference is
+    /// never applied when multiple estates are present.
+    public var unambiguousCensus: Bool
+
+    /// True when the caller confirms the direct (Developer-ID) provider is
+    /// schema-compatible with the on-disk estate.  Prevents preference from
+    /// electing an incompatible provider in the no-live-owner path.
+    public var directProviderSchemaCompatible: Bool
+
+    /// True when the caller confirms the preference generation has not rolled
+    /// back relative to the last confirmed generation.  An arbiter that cannot
+    /// verify rollback on its own needs an explicit confirmation here (the
+    /// store's monotonic check has already run by the time the caller builds
+    /// the observation).
+    public var generationRollbackChecksPassed: Bool
+
     public init(
         directRegistration: RegistrationObservation = .none,
         bundledRegistration: RegistrationObservation = .none,
         lockClaims: [LockClaim] = [],
         descriptor: DescriptorObservation = .absent,
         port: PortObservation = .unbound,
-        handover: HandoverObservation = .none
+        handover: HandoverObservation = .none,
+        preference: ProviderPreferenceObservation = .none,
+        noAuthenticatedLockOwner: Bool = false,
+        noHandoverInProgress: Bool = false,
+        bundledArtifactAbsentOrUnusable: Bool = false,
+        unambiguousCensus: Bool = false,
+        directProviderSchemaCompatible: Bool = false,
+        generationRollbackChecksPassed: Bool = false
     ) {
         self.directRegistration = directRegistration
         self.bundledRegistration = bundledRegistration
@@ -147,6 +215,13 @@ public struct ArbiterObservation: Sendable, Equatable {
         self.descriptor = descriptor
         self.port = port
         self.handover = handover
+        self.preference = preference
+        self.noAuthenticatedLockOwner = noAuthenticatedLockOwner
+        self.noHandoverInProgress = noHandoverInProgress
+        self.bundledArtifactAbsentOrUnusable = bundledArtifactAbsentOrUnusable
+        self.unambiguousCensus = unambiguousCensus
+        self.directProviderSchemaCompatible = directProviderSchemaCompatible
+        self.generationRollbackChecksPassed = generationRollbackChecksPassed
     }
 }
 
@@ -329,9 +404,38 @@ public enum ProviderArbiter {
         }
         // Both mechanisms registered with nothing live and no owner:
         // ownership cannot be proved (Kong's "becomes a hard stop if ...
-        // ownership cannot be proved").
+        // ownership cannot be proved") — UNLESS authority level 4 resolves it.
         if observation.directRegistration == .registered
             && observation.bundledRegistration == .registered {
+            // Authority level 4: a MAC-verified preference may resolve the
+            // dual-registration conflict when ALL six repair conditions are
+            // explicitly met by the caller.  This covers the app-removal
+            // scenario: the bundled artifact is gone, the direct provider is
+            // schema-compatible, the census is unambiguous, and the preference
+            // generation has not rolled back.
+            //
+            // A preference can request convergence but NEVER elects over a
+            // live owner, a lease, a recovery state, a compatibility failure,
+            // or an ambiguous census.  All six conditions must be true — any
+            // false default keeps the conflict state (fail-closed).
+            //
+            // The returned state (standaloneRegistered / bundledRegistered) is
+            // FACTUALLY correct given the repair conditions: the repair
+            // conditions prove that the other mechanism's artifact is absent,
+            // making the preferred mechanism the only viable one.  No new wire
+            // state is needed or introduced (P6).
+            if case .verified(let kind, _) = observation.preference,
+               observation.noAuthenticatedLockOwner,
+               observation.noHandoverInProgress,
+               observation.bundledArtifactAbsentOrUnusable,
+               observation.unambiguousCensus,
+               observation.directProviderSchemaCompatible,
+               observation.generationRollbackChecksPassed {
+                switch kind {
+                case .direct: return .standaloneRegistered
+                case .bundled: return .bundledRegistered
+                }
+            }
             return .conflicted(.dualRegistrationUnproven)
         }
         if observation.bundledRegistration == .awaitingApproval {

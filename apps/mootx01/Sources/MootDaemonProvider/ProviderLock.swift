@@ -106,6 +106,20 @@ public struct ProviderRootLayout: Sendable, Equatable {
             .appendingPathComponent("migration-grant.v1.json")
     }
 
+    /// The durable provider preference file (MACD-3B2).
+    ///
+    /// Lives in `supportDirectory` BESIDE the descriptor — same custody
+    /// namespace as `migrationGrantFile` and `migrationChallengeFile` — and
+    /// NOT inside `providerDirectory` (mode 0700, daemon-written).  The app
+    /// is a legitimate writer here; the daemon is a read-only consumer that
+    /// validates MAC + monotonic generation without holding the provider lock
+    /// (the preference sits below the lock in the authority hierarchy — Kong
+    /// advisory P3).
+    public var preferenceFile: URL {
+        descriptorFile.deletingLastPathComponent()
+            .appendingPathComponent("provider-preference.v1.json")
+    }
+
     /// Build a layout rooted at an already-resolved provider directory.
     /// Internal: callers go through `resolve`.
     internal init(providerDirectory: URL, descriptorFile: URL, context: ProviderLayoutContext) {

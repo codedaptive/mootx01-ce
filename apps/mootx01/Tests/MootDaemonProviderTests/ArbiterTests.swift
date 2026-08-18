@@ -261,3 +261,165 @@ struct WinnerMatrixTests {
         }
     }
 }
+
+// MARK: - MACD-3B2: preference authority and repair-gate
+
+@Suite("Preference authority (MACD-3B2)")
+struct PreferenceAuthorityTests {
+
+    // A fully-passing repair gate: all six conditions true.
+    // preference comes BEFORE the Bool repair conditions in the init.
+    private func repairGate(preference: ProviderPreferenceObservation) -> ArbiterObservation {
+        ArbiterObservation(
+            directRegistration: .registered,
+            bundledRegistration: .registered,
+            preference: preference,
+            noAuthenticatedLockOwner: true,
+            noHandoverInProgress: true,
+            bundledArtifactAbsentOrUnusable: true,
+            unambiguousCensus: true,
+            directProviderSchemaCompatible: true,
+            generationRollbackChecksPassed: true
+        )
+    }
+
+    @Test("verified preference + all repair conditions resolves dual-registration to standaloneRegistered")
+    func preferDirectResolvesConflict() {
+        let obs = repairGate(preference: .verified(preferredKind: .direct, preferenceGeneration: 1))
+        #expect(ProviderArbiter.arbitrate(obs) == .standaloneRegistered)
+    }
+
+    @Test("verified preference for bundled + all repair conditions resolves to bundledRegistered")
+    func preferBundledResolvesConflict() {
+        let obs = repairGate(preference: .verified(preferredKind: .bundled, preferenceGeneration: 2))
+        #expect(ProviderArbiter.arbitrate(obs) == .bundledRegistered)
+    }
+
+    @Test("invalid preference + all repair conditions still returns conflicted")
+    func invalidPreferenceKeepsConflict() {
+        let obs = repairGate(preference: .invalid)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("no preference + all repair conditions still returns conflicted")
+    func noPreferenceKeepsConflict() {
+        let obs = repairGate(preference: .none)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
+    }
+
+    @Test("verified preference + ONE failed repair condition returns conflicted")
+    func partialGateFails() {
+        let pref: ProviderPreferenceObservation = .verified(preferredKind: .direct, preferenceGeneration: 1)
+        // Each of the six conditions individually blocks the preference when false.
+        // preference precedes all Bool repair fields in the init — keep that order.
+        for observation in [
+            // noAuthenticatedLockOwner = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noHandoverInProgress: true, bundledArtifactAbsentOrUnusable: true,
+                unambiguousCensus: true, directProviderSchemaCompatible: true,
+                generationRollbackChecksPassed: true
+            ),
+            // noHandoverInProgress = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noAuthenticatedLockOwner: true,
+                bundledArtifactAbsentOrUnusable: true,
+                unambiguousCensus: true, directProviderSchemaCompatible: true,
+                generationRollbackChecksPassed: true
+            ),
+            // bundledArtifactAbsentOrUnusable = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noAuthenticatedLockOwner: true, noHandoverInProgress: true,
+                unambiguousCensus: true, directProviderSchemaCompatible: true,
+                generationRollbackChecksPassed: true
+            ),
+            // unambiguousCensus = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noAuthenticatedLockOwner: true, noHandoverInProgress: true,
+                bundledArtifactAbsentOrUnusable: true,
+                directProviderSchemaCompatible: true,
+                generationRollbackChecksPassed: true
+            ),
+            // directProviderSchemaCompatible = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noAuthenticatedLockOwner: true, noHandoverInProgress: true,
+                bundledArtifactAbsentOrUnusable: true, unambiguousCensus: true,
+                generationRollbackChecksPassed: true
+            ),
+            // generationRollbackChecksPassed = false (default)
+            ArbiterObservation(
+                directRegistration: .registered, bundledRegistration: .registered,
+                preference: pref,
+                noAuthenticatedLockOwner: true, noHandoverInProgress: true,
+                bundledArtifactAbsentOrUnusable: true, unambiguousCensus: true,
+                directProviderSchemaCompatible: true
+            ),
+        ] {
+            #expect(ProviderArbiter.arbitrate(observation) == .conflicted(.dualRegistrationUnproven),
+                    "one failed condition must still produce conflicted")
+        }
+    }
+
+    @Test("verified preference does NOT affect a live authenticated owner")
+    func preferenceIgnoredForLiveOwner() {
+        // The preference is authority level 4; a live level-3 owner wins.
+        let obs = ArbiterObservation(
+            directRegistration: .registered,
+            lockClaims: [liveOwner(kind: .bundled)],
+            descriptor: .present(instance: ownerInstance, authentication: .authenticated),
+            preference: .verified(preferredKind: .direct, preferenceGeneration: 99)
+        )
+        // The BUNDLED owner wins (winner rule) even though preference says direct.
+        #expect(ProviderArbiter.arbitrate(obs)
+                == .ready(providerKind: .bundled, instance: ownerInstance, estate: ownerEstate, version: "1.0.18"))
+    }
+
+    @Test("verified preference does NOT affect a handover in progress")
+    func preferenceIgnoredDuringHandover() {
+        for phase in [HandoverObservation.preparing, .leaseIssued, .sourceExitedLockReleased] {
+            let obs = ArbiterObservation(
+                handover: phase,
+                preference: .verified(preferredKind: .direct, preferenceGeneration: 1)
+            )
+            let state = ProviderArbiter.arbitrate(obs)
+            #expect(state != .standaloneRegistered && state != .bundledRegistered,
+                    "handover phase \(phase) must not be overridden by preference")
+        }
+    }
+
+    @Test("verified preference does NOT affect a recovery-required state")
+    func preferenceIgnoredInRecovery() {
+        let obs = ArbiterObservation(
+            handover: .targetFailedAfterSourceStopped,
+            preference: .verified(preferredKind: .direct, preferenceGeneration: 1)
+        )
+        #expect(ProviderArbiter.arbitrate(obs) == .recoveryRequired)
+    }
+
+    @Test("all existing 30+ single-mechanism cases are unaffected by a default preference (.none)")
+    func existingCasesUnchangedWithDefaultPreference() {
+        // Preference defaults to .none and repair conditions to false — no
+        // existing arbitration outcome changes.  A spot-check of the most
+        // common states.
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation()) == .absent)
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(directRegistration: .registered))
+                == .standaloneRegistered)
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(bundledRegistration: .registered))
+                == .bundledRegistered)
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(bundledRegistration: .awaitingApproval))
+                == .bundledAwaitingApproval)
+        #expect(ProviderArbiter.arbitrate(ArbiterObservation(
+            lockClaims: [liveOwner()],
+            descriptor: .present(instance: ownerInstance, authentication: .authenticated)
+        )) == .ready(providerKind: .direct, instance: ownerInstance, estate: ownerEstate, version: "1.0.18"))
+    }
+}

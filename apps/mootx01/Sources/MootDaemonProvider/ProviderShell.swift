@@ -64,7 +64,8 @@ public enum ProviderSelfReport {
     /// encodings, and the migration step encodings (an ADDITIVE tail: the
     /// digest changes, and both shells change identically), and — since
     /// MACD-3B1 — the providerReleaseGeneration constant and the 7 schema-3
-    /// wire field-identifier strings (another ADDITIVE tail: 3B2 appends after).
+    /// wire field-identifier strings (another ADDITIVE tail), and — since
+    /// MACD-3B2 — the preference MAC domain string (a further ADDITIVE tail).
     /// Two shells that agree on this digest agree on every encoding a peer can observe.
     public static func digestInput() -> [UInt8] {
         var encoder = CanonicalEncoder()
@@ -101,11 +102,17 @@ public enum ProviderSelfReport {
         // MACD-3B1 additive tail: the schema-3 version-vector contract.
         // The release generation is the compile-time constant shared by both shells;
         // the 7 field-identifier strings commit the wire field names to the digest.
-        // 3B2 appends its own entries AFTER this tail — the ordering is FROZEN.
+        // ORDERING IS FROZEN — 3B2 appends AFTER item 8 (providerReleaseGeneration).
         encoder.appendUInt64(ProviderVersionVector.releaseGeneration)
         for fieldName in schema3WireFieldNames {
             encoder.appendString(fieldName)
         }
+        // MACD-3B2 additive tail: the durable provider preference contract.
+        // The MAC domain constant commits the preference key-derivation domain
+        // to the module digest — a domain rename is a cryptographic breaking
+        // change and is caught here by the identity assertion.
+        // ORDERING IS FROZEN — future missions append AFTER this entry.
+        encoder.appendString(providerPreferenceDomain)
         return encoder.bytes
     }
 
@@ -135,8 +142,9 @@ public enum ProviderSelfReport {
     /// module digest, identifiers, schema/revision/protocol constants,
     /// generation encoding, arbiter encodings, handover/lease format, the
     /// lease domain, and — since MACD-3B1 — the provider release generation
-    /// and the schema-3 wire field names. Deterministic byte-for-byte — the
-    /// live proof diffs the two shells' outputs directly.
+    /// and the schema-3 wire field names, and — since MACD-3B2 — the
+    /// preference MAC domain. Deterministic byte-for-byte — the live proof
+    /// diffs the two shells' outputs directly.
     public static func canonicalReport() -> String {
         let object: [String: Any] = [
             "arbiterStates": ProviderArbiterState.allWireEncodings,
@@ -163,6 +171,11 @@ public enum ProviderSelfReport {
             // MACD-3B1 additions: version-vector contract.
             "providerReleaseGeneration": ProviderVersionVector.releaseGeneration,
             "schema3WireFieldNames": schema3WireFieldNames,
+            // MACD-3B2 additions: durable provider preference contract.
+            // The preference domain constant is committed to the self-report
+            // so a domain rename is a cryptographic breaking change caught by
+            // the identity assertion (same pattern as leaseDomain/grantDomain).
+            "preferenceDomain": providerPreferenceDomain,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
             // Unreachable for a literal dictionary of strings and arrays;
