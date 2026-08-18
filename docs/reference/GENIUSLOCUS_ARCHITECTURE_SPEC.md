@@ -1,11 +1,11 @@
 ---
 title: GeniusLocus Architecture Specification
-version: 1.1.0
+version: 1.2.0
 description: "Authoritative architecture specification for the GeniusLocus substrate: estate model, Brain layer, recall pipeline, and audit reconstruction."
 status: accepted-1.1-target
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-07-20
+date: 2026-08-17
 relates_to:
   - the recorded engineering rule-05-07.md (lattice decision)
   - the provenance-bitmap contract (provenance bitmap decision)
@@ -491,11 +491,29 @@ compiler-policed against the other.
 
 ### 5.9 Manifest schema
 
+`schema_version` names the estate STORAGE FORMAT and is currently **1.1**. It
+is distinct from `manifest_version`, which names the shape of this key-value
+table and remains 1.0.
+
+The value is set on first open and is never rewritten by ordinary use. It moved
+from 1.0 to 1.1 on 2026-08-17, recording two changes that had already shipped:
+the shared-content cutover, which retired the legacy `chunks` copy lane so that
+derived rows key on the drawer rather than on a copied chunk, and the
+shadow-generation vector swap, which added generation columns to `vectors`
+along with the `vector_generations` and `vector_rep_claims` tables. An estate
+carrying either the old copy lane or the pre-generation vector table is 1.0; an
+estate built by a current binary is 1.1.
+
+Detection of the older format is STRUCTURAL, never a read of this string: a
+1.0 estate is one whose storage still carries the `chunks` copy lane. The
+version is a label for consumers, and the migration path decides what to do
+from the layout itself.
+
 The manifest is a key-value table within the estate's primary database. The schema is locked by `the estate-manifest contract`. v1 required keys:
 
 ```
 manifest_version          string   semantic version of the manifest schema
-schema_version            string   semantic version of the storage schema
+schema_version            string   semantic version of the storage schema (currently "1.1")
 estate_uuid               string   UUIDv4 identifying this estate
 estate_name               string   human-readable name
 owner_identifier          string   iCloud-account-keyed owner ID
@@ -1943,6 +1961,16 @@ versioning discipline makes this possible additively.
 *End of Addendum A.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-08-17
+
+Recorded the estate storage format as 1.1 in the manifest schema (§5.9). The
+string had read 1.0 since v1.0 ratification while the format moved twice
+beneath it: the shared-content cutover retired the legacy `chunks` copy lane,
+and the shadow-generation vector swap added generation columns and the
+`vector_generations` / `vector_rep_claims` tables. Documented that detection of
+the older format is structural rather than a read of the version string, and
+that `manifest_version` is a separate value which remains 1.0.
 
 ### 1.1.0 -- 2026-07-20
 
