@@ -323,9 +323,12 @@ public actor DaemonProvider {
     /// Build and MAC-seal the schema-3 descriptor + version vector for this configuration.
     ///
     /// Returns a `(FirstPartyDescriptor, ProviderVersionVector)` pair.  The descriptor's
-    /// `descriptorMAC` is the SCHEMA-3 MAC: `HMAC-SHA256(K_descriptor,
-    /// descriptor.macInput() || vector.wire1Fields)`.  The vector comes from
-    /// `configuration.versionVector` (the module compile-time `.current` by default).
+    /// `descriptorMAC` is the SCHEMA-3 MAC computed by `ProviderVersionVector.schema3MAC`
+    /// (the authoritative construction): a `CanonicalEncoder` input of
+    /// `appendBytes(descriptor.macInput())` — UInt32 length-prefixed, not raw
+    /// concatenation — followed by `appendWire1Fields` (the 7 wire scalars), keyed
+    /// with `K_descriptor`.  The vector comes from `configuration.versionVector`
+    /// (the module compile-time `.current` by default).
     ///
     /// `FirstPartyDescriptor.macInput()` is untouched per R1 — schema-2 MAC bytes are
     /// provably unchanged.  The schema-3 MAC extends the input with the 7 new wire
