@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.41.0
+version: 1.42.0
 status: accepted-1.1-target
-date: 2026-08-17
+date: 2026-08-18
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1059,6 +1059,26 @@ differ only in whether sensitive rows exist, asserted to produce identical
 advisory behaviour for an ungranted caller, in both ports.
 
 ## Changelog
+
+### 1.42.0 -- 2026-08-18
+
+- **Descriptor schema 3 (MACD-3B1, dark Wave 1).** `descriptorSchemaVersion`
+  advances from 2 to 3. The published record gains 7 new wire keys alongside
+  the existing 16 (total 23): `providerReleaseGeneration` (decimal string
+  UInt64), `managementRevisionMinimum`, `managementRevisionMaximum`,
+  `dataPlaneRevisionMinimum`, `dataPlaneRevisionMaximum`,
+  `estateSchemaMinimum`, `estateSchemaMaximum` (all UInt integers).
+  These encode the four compatibility axes required for coexistence
+  arbitration.  The `descriptorMAC` now covers all 23 fields: the schema-2
+  `macInput()` bytes followed by the 7 new scalar fields in fixed frozen
+  order.  Schema-2 records decode as nil (exact-set check against 23-key
+  `fieldNames` fails) — fail-closed behaviour.  App-side
+  `DaemonContract.schemaVersion` remains 2 (dark); Wave 2 will flip it.
+  The `ProviderVersionVector` companion type also carries
+  `migrationTargetSchema` (optional) and `capabilityRevisions` ([String:UInt64])
+  for the Wave 2 MAC extension and evaluator, but these are not Wave 1 wire
+  fields.  `CanonicalEncoder.appendSortedMap` added for the Wave 2 MAC
+  encoding of `capabilityRevisions`.
 
 ### 1.41.0 -- 2026-08-17
 

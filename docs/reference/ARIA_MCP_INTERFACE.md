@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.47.0
+version: 1.48.0
 status: accepted-1.1-target
-date: 2026-08-17
+date: 2026-08-18
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -1270,6 +1270,45 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.48.0 -- 2026-08-18
+
+- **`ProviderVersionVector` (MACD-3B1, dark Wave 1).** New public value type
+  in `MootDaemonProvider`.  Fields: `providerReleaseGeneration: UInt64`,
+  `managementRevisionMinimum/Maximum: UInt64`, `dataPlaneRevisionMinimum/Maximum: UInt64`,
+  `estateSchemaMinimum/Maximum: UInt64`, `migrationTargetSchema: UInt64?`,
+  `capabilityRevisions: [String:UInt64]`.  Static `.current` carries module
+  compile-time constants.  `hasEncodableFieldWidths` safety gate.
+  `appendWire1Fields` (fixed frozen MAC order for schema-3 MAC extension).
+  `schema3MAC(descriptor:vector:installationRoot:)` computes schema-3 MAC.
+  `isLegacyDescriptor(_:)` classifies schema-2 16-key records (R4 fail-closed
+  legacy path).
+
+- **`VersionCompatibilityVerdict` + `VersionVectorEvaluator` (MACD-3B1).**
+  Pure-function evaluator implementing the design's 7-step deterministic
+  coexistence policy.  Verdicts: `compatible`, `generationDowngrade`,
+  `keepOwnerNoOverlap`, `candidateCannotReadEstate`,
+  `legacyNotEligibleForAutomatedTakeover`, `updateApp`, `updateCliService`.
+
+- **`DescriptorPublisher` schema-3 API (MACD-3B1).**  `fieldNames` now 23
+  keys (16 + 7 new vector fields).  `encode(_ descriptor:, vector:)` and
+  `decode(_ data:) -> (descriptor:, vector:)?` carry `ProviderVersionVector`
+  companion.  `publish(_ descriptor:, vector:, lockProof:, estateReady:,
+  bind:, authenticator:)` gains `vector` parameter.  Schema-2 records decode
+  as `nil` (fail-closed).
+
+- **`DaemonProviderConfiguration` + `ProviderActivation` (MACD-3B1).**
+  Both gain `versionVector: ProviderVersionVector` (defaulted to `.current`
+  in configuration, preserving existing call sites).
+
+- **`CanonicalEncoder.appendSortedMap` (MACD-3B1).** Additive deterministic
+  sorted-key map primitive (`[String:UInt64]`, UInt32-length-prefixed,
+  lexicographic key order).  Consistent with `appendCapabilities` encoding.
+
+- **`ProviderSelfReport.digestInput` + `canonicalReport` (MACD-3B1).**
+  MACD-3B1 additive tail: `ProviderVersionVector.releaseGeneration` (UInt64)
+  plus 7 frozen schema-3 wire field-identifier strings.  Module digest
+  changes by construction; both shells compute the same new digest.
 
 ### 1.47.0 -- 2026-08-17
 
