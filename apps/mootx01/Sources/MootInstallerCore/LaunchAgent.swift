@@ -11,6 +11,7 @@
 // shell out to /bin/launchctl and are compiled only on macOS.
 
 import Foundation
+import MootDaemonProvider
 
 /// Manages the `com.mootx01.mgr` LaunchAgent: plist generation, load + start,
 /// and teardown.
@@ -201,6 +202,40 @@ public enum LaunchAgent {
             return "unverified port holder (not proof of readiness)"
         case (.none, .unbound):
             return "not installed"
+        }
+    }
+
+    /// Convert an `OwnershipProbeOutcome` into the `providerReportedState`
+    /// string for `honestServerStatus` (C5 mandate, P-c2-10).
+    ///
+    /// This is the SINGLE authoritative format point for the probe result →
+    /// status-vocabulary mapping.  `StatusCommand` must not hold a second
+    /// copy of this mapping ("parallel copies fail").
+    ///
+    /// `.absent` returns `nil` so `honestServerStatus` falls back to the
+    /// registration/port observation — there is no provider state to report
+    /// when no authenticated owner was found.
+    ///
+    /// The outcome strings are the provider's own wire vocabulary (decoded
+    /// from the `owner-status` JSON); this function formats them into the
+    /// one-line summary `honestServerStatus` prepends with `"provider: "`.
+    public static func authenticatedBundledOwner(
+        outcome: OwnershipProbeOutcome
+    ) -> String? {
+        switch outcome {
+        case .absent:
+            // No authenticated owner: fall through to registration/port observation.
+            return nil
+        case .healthy(let kind, let preferredKind):
+            if let preferred = preferredKind {
+                return "healthy (kind: \(kind.rawValue), preferred: \(preferred.rawValue))"
+            }
+            return "healthy (kind: \(kind.rawValue))"
+        case .incompatible(let verdict):
+            // Surface the verbatim verdict (C4 mandate) — do not rephrase.
+            return "version mismatch: \(verdict.rawValue)"
+        case .unauthenticated:
+            return "present; authentication failed"
         }
     }
 

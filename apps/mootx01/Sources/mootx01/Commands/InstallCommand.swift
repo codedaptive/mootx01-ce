@@ -513,59 +513,106 @@ struct InstallCommand: AsyncParsableCommand {
         // so the console observes it out of the box. macOS-only (launchd).
         #if os(macOS)
         if !noDaemon {
-            let dataDir = MootPaths.resolveDataDirectory(
-                environment: ProcessInfo.processInfo.environment,
-                homeDirectory: home
-            )
-            // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
-            // The flag pair is mutually exclusive by convention: if both are set
-            // (CLI parse does not block this) --vault-off wins (safer default).
-            // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
-            let vaultValue = vaultOff ? "0" : "1"
-            // MOOTX01_ENCRYPT: "0" = --no-encrypt, "1" = encrypted (default).
-            // Recorded for observability and parity with MOOTX01_VAULT. The
-            // AUTHORITATIVE signal is the marker file written above, because a
-            // hand-run `mootx01 serve` carries no launchd environment at all and
-            // the two must never disagree about the same estate.
-            let encryptValue = noEncrypt ? "0" : "1"
-            // MOOTX01_SUBJECT_RIDER: "0" = --subject-rider-off; "1" = on
-            // (the rider-default ruling, 2026-08-02). Availability is still
-            // checked at serve; this only records the operator's choice.
-            let subjectRiderValue = subjectRiderOff ? "0" : "1"
-            let daemonEnv = [
-                "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
-                "MOOTX01_DATA_DIR": dataDir.path,
-                "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
-                "MOOTX01_VAULT": vaultValue,
-                "MOOTX01_ENCRYPT": encryptValue,
-                "MOOTX01_SUBJECT_RIDER": subjectRiderValue,
-            ]
-            switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
-            case let .installed(plistPath, endpointURL):
-                print("")
-                print("  ✓ Resident mootx01 daemon running in the background (launchd: \(MootPaths.daemonLabel))")
-                print("    MCP endpoint: \(endpointURL)")
-                print("    LaunchAgent:  \(plistPath)")
-            case let .launchctlFailed(message):
-                print("")
-                print("  ✗ Could not start the resident daemon via launchd: \(message)")
-                print("    Start it manually any time with:  mootx01 serve --http 4242")
-            case .installedDisabled:
-                // installDaemon() never returns this case (it belongs to the
-                // daemon-bundle flow below); the vocabulary is one enum.
-                break
-            case .binaryNotFound:
-                print("")
-                print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
-            }
+            // MACD-3B3 C2/C4: the probe is the SINGLE branch point before any
+            // registration decision.  An authenticated healthy bundled owner
+            // overrides the !noDaemon path: we enter this block but exit via
+            // the client-only branch without registering anything (Kong CRITICAL).
+            //
+            // Probe semantics:
+            //   .healthy(.bundled): client-only install (C2) — skip ALL
+            //      registration (LaunchAgent.installDaemon AND
+            //      installDaemonBundleIfPresent).  "Direct recovery artifact
+            //      stays DISABLED and unregistered" (C2 mandate).
+            //   .incompatible: block install, surface verdict verbatim (C4).
+            //      NEVER authorises starting a second provider.
+            //   .absent / .unauthenticated: normal install proceeds (C3).
+            //      For .unauthenticated, the running process is NOT killed (C3).
+            let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
 
-            // MACD-2c2: the signed app-like daemon provider bundle. When the
-            // release payload placed it, register it DISABLED (KONG-4:
-            // installs target disabled; it activates with MACD-3) and run
-            // the provider's read-only census. The legacy raw-serve daemon
-            // above is RETAINED — plist, label, and job untouched — until
-            // the bundle provider proves authenticated readiness.
-            installDaemonBundleIfPresent(home: home)
+            if ownerOutcome.requiresClientOnlyInstall {
+                // C2: authenticated healthy bundled owner — client-only path.
+                // MCP client wiring already completed above; skip daemon + bundle.
+                print("")
+                print("  ✓ Using MOOTx01-App resident provider — MCP clients wired; daemon registration skipped.")
+                if case .healthy(_, let preferredKind) = ownerOutcome, let pk = preferredKind {
+                    print("    Preferred provider: \(pk.rawValue)")
+                }
+            } else if ownerOutcome.blocksInstallByVersionMismatch {
+                // C4: version mismatch — surface the verbatim verdict; skip daemon
+                // registration; NEVER start a second provider.
+                if case .incompatible(let verdict) = ownerOutcome {
+                    print("")
+                    print("  ✗ Provider version mismatch: \(verdict.rawValue)")
+                    print("    A second provider was not started. Resolve the version mismatch and re-run.")
+                }
+            } else {
+                // .absent or .unauthenticated: normal install path.
+                // For .unauthenticated, the running process (if any) is left
+                // untouched — never killed or replaced (C3 mandate).
+                if case .unauthenticated = ownerOutcome {
+                    print("")
+                    print("  ⚠ A provider is present but could not be authenticated.")
+                    print("    Installing normally; the existing process is not stopped (C3).")
+                }
+
+                let dataDir = MootPaths.resolveDataDirectory(
+                    environment: ProcessInfo.processInfo.environment,
+                    homeDirectory: home
+                )
+                // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
+                // The flag pair is mutually exclusive by convention: if both are set
+                // (CLI parse does not block this) --vault-off wins (safer default).
+                // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
+                let vaultValue = vaultOff ? "0" : "1"
+                // MOOTX01_ENCRYPT: "0" = --no-encrypt, "1" = encrypted (default).
+                // Recorded for observability and parity with MOOTX01_VAULT. The
+                // AUTHORITATIVE signal is the marker file written above, because a
+                // hand-run `mootx01 serve` carries no launchd environment at all and
+                // the two must never disagree about the same estate.
+                let encryptValue = noEncrypt ? "0" : "1"
+                // MOOTX01_SUBJECT_RIDER: "0" = --subject-rider-off; "1" = on
+                // (the rider-default ruling, 2026-08-02). Availability is still
+                // checked at serve; this only records the operator's choice.
+                let subjectRiderValue = subjectRiderOff ? "0" : "1"
+                let daemonEnv = [
+                    "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
+                    "MOOTX01_DATA_DIR": dataDir.path,
+                    "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
+                    "MOOTX01_VAULT": vaultValue,
+                    "MOOTX01_ENCRYPT": encryptValue,
+                    "MOOTX01_SUBJECT_RIDER": subjectRiderValue,
+                ]
+                switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
+                case let .installed(plistPath, endpointURL):
+                    print("")
+                    print("  ✓ Resident mootx01 daemon running in the background (launchd: \(MootPaths.daemonLabel))")
+                    print("    MCP endpoint: \(endpointURL)")
+                    print("    LaunchAgent:  \(plistPath)")
+                case let .launchctlFailed(message):
+                    print("")
+                    print("  ✗ Could not start the resident daemon via launchd: \(message)")
+                    print("    Start it manually any time with:  mootx01 serve --http 4242")
+                case .installedDisabled:
+                    // installDaemon() never returns this case (it belongs to the
+                    // daemon-bundle flow below); the vocabulary is one enum.
+                    break
+                case .binaryNotFound:
+                    print("")
+                    print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
+                }
+
+                // MACD-2c2: the signed app-like daemon provider bundle. When the
+                // release payload placed it, register it DISABLED (KONG-4:
+                // installs target disabled; it activates with MACD-3) and run
+                // the provider's read-only census. The legacy raw-serve daemon
+                // above is RETAINED — plist, label, and job untouched — until
+                // the bundle provider proves authenticated readiness.
+                //
+                // C2: this call is inside the else-branch — skipped for the
+                // client-only path (healthy bundled owner) as "direct recovery
+                // artifact stays DISABLED and unregistered" (C2 mandate).
+                installDaemonBundleIfPresent(home: home)
+            }
         }
         #endif
 

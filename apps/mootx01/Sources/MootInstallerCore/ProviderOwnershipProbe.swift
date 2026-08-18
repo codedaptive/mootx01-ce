@@ -56,6 +56,46 @@ public enum OwnershipProbeOutcome: Sendable, Equatable {
     case unauthenticated
 }
 
+// MARK: - OwnershipProbeOutcome decision helpers
+
+extension OwnershipProbeOutcome {
+
+    /// `true` when an authenticated healthy bundled owner is running and
+    /// client-only install is required (C2 mandate).
+    ///
+    /// This is the single gate for skipping legacy daemon registration and
+    /// bundle plist registration.  A `.direct` owner does NOT trigger this
+    /// gate — a direct-install (standalone) provider uses a different
+    /// registration channel.
+    public var requiresClientOnlyInstall: Bool {
+        if case .healthy(let kind, _) = self, kind == .bundled { return true }
+        return false
+    }
+
+    /// `true` when a version mismatch blocks install entirely (C4 mandate).
+    ///
+    /// The `verdict` field carries the verbatim update direction from the
+    /// `VersionVectorEvaluator` and MUST be surfaced to the user unchanged.
+    /// This case NEVER authorises starting a second provider.
+    public var blocksInstallByVersionMismatch: Bool {
+        if case .incompatible = self { return true }
+        return false
+    }
+
+    /// `true` when normal (full) install should proceed.
+    ///
+    /// Both `.absent` (no owner on disk) and `.unauthenticated` (owner
+    /// present but MAC verification failed or schema-2 legacy) permit
+    /// normal install.  For `.unauthenticated`, the running process is
+    /// NOT killed or replaced — normal install runs independently (C3).
+    public var normalInstallProceeds: Bool {
+        switch self {
+        case .absent, .unauthenticated: return true
+        case .healthy, .incompatible:   return false
+        }
+    }
+}
+
 // MARK: - ProviderOwnershipProbe
 
 /// The single authenticated live-owner detection seam.

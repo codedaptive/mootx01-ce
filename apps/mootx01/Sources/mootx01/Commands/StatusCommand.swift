@@ -41,6 +41,15 @@ struct StatusCommand: AsyncParsableCommand {
         let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
         #if os(macOS)
+        // MACD-3B3 C5: run the authenticated ownership probe so the provider's
+        // verbatim state flows into `honestServerStatus`.  This surface owns no
+        // second copy of the arbiter vocabulary — the format rule lives in
+        // `LaunchAgent.authenticatedBundledOwner` (P-c2-10, rule at line 183).
+        // The probe is fail-closed: subprocess failure, JSON parse error, and
+        // any unrecognised outcome map to `.absent` or `.unauthenticated`, never
+        // to a false `.healthy`.
+        let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
+        let providerReportedState = LaunchAgent.authenticatedBundledOwner(outcome: ownerOutcome)
         let legacyRegistered = FileManager.default.fileExists(
             atPath: MootPaths.daemonPlistURL(homeDirectory: home).path
         )
@@ -51,7 +60,7 @@ struct StatusCommand: AsyncParsableCommand {
             (legacyRegistered || bundleRegistered) ? .registered : .none
         let port: LaunchAgent.DaemonPortObservation =
             portIsListening(port: residentPort) ? .answering : .unbound
-        print("Server: \(LaunchAgent.honestServerStatus(registration: registration, port: port, providerReportedState: nil))")
+        print("Server: \(LaunchAgent.honestServerStatus(registration: registration, port: port, providerReportedState: providerReportedState))")
         if bundleRegistered {
             print("Daemon provider bundle: registered disabled (launchd: \(DaemonBundle.launchAgentLabel))")
         }

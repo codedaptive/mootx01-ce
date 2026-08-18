@@ -750,6 +750,26 @@ struct UpgradeCommand: AsyncParsableCommand {
             // ordinary case and not a fault.
             return
         }
+
+        // MACD-3B3 C2/C4: probe before registering the bundle DISABLED.
+        // An authenticated healthy bundled owner means upgrade is client-only —
+        // skip bundle re-registration (same gate as install, same mandate).
+        // An incompatible owner surfaces the verdict verbatim and skips
+        // registration; NEVER starts a second provider.
+        // Absent or unauthenticated: normal convergence proceeds.
+        let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
+        if ownerOutcome.requiresClientOnlyInstall {
+            print("\n  \u{2713} Using MOOTx01-App resident provider — daemon bundle convergence skipped (C2).")
+            return
+        }
+        if ownerOutcome.blocksInstallByVersionMismatch {
+            if case .incompatible(let verdict) = ownerOutcome {
+                print("\n  \u{26A0} Provider version mismatch: \(verdict.rawValue) — daemon bundle not re-registered. Resolve the mismatch before upgrading.")
+            }
+            return
+        }
+        // .absent or .unauthenticated: converge normally.
+        // For .unauthenticated: any running process is left untouched (C3).
         print("\nConverging the daemon provider bundle\u{2026}")
         switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
         case let .installedDisabled(plistPath):
