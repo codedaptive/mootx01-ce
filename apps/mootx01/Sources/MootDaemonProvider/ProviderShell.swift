@@ -111,8 +111,14 @@ public enum ProviderSelfReport {
         // The MAC domain constant commits the preference key-derivation domain
         // to the module digest — a domain rename is a cryptographic breaking
         // change and is caught here by the identity assertion.
-        // ORDERING IS FROZEN — future missions append AFTER this entry.
+        // Following the 3B1 schema3WireFieldNames pattern, the 7 MAC transcript
+        // field names are also committed: any rename of a preference record field
+        // is a cryptographic breaking change caught here by the identity assertion.
+        // ORDERING IS FROZEN — future missions append AFTER these entries.
         encoder.appendString(providerPreferenceDomain)
+        for fieldName in ProviderPreference.macTranscriptFields {
+            encoder.appendString(fieldName)
+        }
         return encoder.bytes
     }
 
@@ -172,10 +178,12 @@ public enum ProviderSelfReport {
             "providerReleaseGeneration": ProviderVersionVector.releaseGeneration,
             "schema3WireFieldNames": schema3WireFieldNames,
             // MACD-3B2 additions: durable provider preference contract.
-            // The preference domain constant is committed to the self-report
-            // so a domain rename is a cryptographic breaking change caught by
-            // the identity assertion (same pattern as leaseDomain/grantDomain).
+            // The preference domain constant and the MAC transcript field names
+            // are both committed to the self-report — a domain rename or field
+            // rename is a cryptographic breaking change caught by the identity
+            // assertion (same pattern as leaseDomain/grantDomain/schema3WireFieldNames).
             "preferenceDomain": providerPreferenceDomain,
+            "preferenceTranscriptFields": ProviderPreference.macTranscriptFields,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
             // Unreachable for a literal dictionary of strings and arrays;

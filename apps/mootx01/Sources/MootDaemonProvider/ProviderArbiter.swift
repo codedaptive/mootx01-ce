@@ -419,11 +419,13 @@ public enum ProviderArbiter {
             // or an ambiguous census.  All six conditions must be true — any
             // false default keeps the conflict state (fail-closed).
             //
-            // The returned state (standaloneRegistered / bundledRegistered) is
-            // FACTUALLY correct given the repair conditions: the repair
-            // conditions prove that the other mechanism's artifact is absent,
-            // making the preferred mechanism the only viable one.  No new wire
-            // state is needed or introduced (P6).
+            // The six repair conditions include `bundledArtifactAbsentOrUnusable`
+            // which, when true, confirms the BUNDLED artifact is absent/unusable.
+            // This set of conditions authorises ONLY the direct-provider
+            // (app-removal) outcome: the bundled provider's own artifact is proven
+            // absent, so a preference for `.bundled` cannot be honoured and falls
+            // through to `.conflicted` (fail-closed).  A preference for `.direct`
+            // is the only path the repair gate resolves — no new wire state (P6).
             if case .verified(let kind, _) = observation.preference,
                observation.noAuthenticatedLockOwner,
                observation.noHandoverInProgress,
@@ -433,7 +435,10 @@ public enum ProviderArbiter {
                observation.generationRollbackChecksPassed {
                 switch kind {
                 case .direct: return .standaloneRegistered
-                case .bundled: return .bundledRegistered
+                // bundled preference cannot be honoured: `bundledArtifactAbsentOrUnusable`
+                // proves the bundled executable is absent — electing it would produce an
+                // immediate launch failure.  Fall through to conflicted (fail-closed).
+                case .bundled: break
                 }
             }
             return .conflicted(.dualRegistrationUnproven)

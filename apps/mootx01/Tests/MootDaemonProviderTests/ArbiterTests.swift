@@ -289,10 +289,14 @@ struct PreferenceAuthorityTests {
         #expect(ProviderArbiter.arbitrate(obs) == .standaloneRegistered)
     }
 
-    @Test("verified preference for bundled + all repair conditions resolves to bundledRegistered")
-    func preferBundledResolvesConflict() {
+    @Test("verified preference for bundled + repair conditions stays conflicted — bundled artifact is proven absent")
+    func preferBundledUnderRepairConditionsStaysConflicted() {
+        // The six repair conditions include `bundledArtifactAbsentOrUnusable = true`,
+        // which proves the bundled executable is absent.  A preference for `.bundled`
+        // cannot be honoured under these conditions — electing it would produce an
+        // immediate launch failure.  The arbiter must fail closed to `.conflicted`.
         let obs = repairGate(preference: .verified(preferredKind: .bundled, preferenceGeneration: 2))
-        #expect(ProviderArbiter.arbitrate(obs) == .bundledRegistered)
+        #expect(ProviderArbiter.arbitrate(obs) == .conflicted(.dualRegistrationUnproven))
     }
 
     @Test("invalid preference + all repair conditions still returns conflicted")

@@ -129,8 +129,11 @@ public struct ProviderPreference: Sendable, Equatable {
 
     /// The transcript fields, in fixed frozen MAC-input order.
     ///
-    /// Order is committed to the self-report digest via the `macTranscriptFields`
-    /// constant.  Any reordering is a cryptographic breaking change.
+    /// These field names are committed verbatim to the self-report digest via
+    /// `ProviderSelfReport.digestInput()` and appear in `canonicalReport()` under
+    /// the key `"preferenceTranscriptFields"`.  Any rename is a cryptographic
+    /// breaking change caught by the identity assertion (same pattern as
+    /// `schema3WireFieldNames` in MACD-3B1).
     public static let macTranscriptFields: [String] = [
         "preferredKind",
         "preferenceGeneration",
