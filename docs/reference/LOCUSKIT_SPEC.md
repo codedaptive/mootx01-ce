@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.21.0
+version: 1.22.0
 status: active
-date: 2026-08-13
+date: 2026-08-19
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1295,6 +1295,9 @@ Documented `KGFact` full adjective-axis parity with `Drawer`: `KGFact` now expos
 
 ### 1.1.1 -- 2026-06-17
 Clarified the store-backend posture: `all_drawers` and `room_level_fingerprints` are now compile-required `DrawerStore` reads (no trait default) on the Rust leg, matching the Swift surface; the rest of the read surface retains the fail-loud `DatabaseUnavailable` default. Updated the newtype-forwarding-contract paragraph accordingly. No behaviour change; no new invariant.
+
+### 1.22.0 -- 2026-08-19
+MACD-3D: `SensitivityFilteredStorage` and `SensitivityCeilingError` added to LocusKit as their permanent cross-platform home. `SensitivityFilteredStorage` wraps `any Storage` with a dynamic `AdjectiveSensitivity` ceiling, gating outbound `TableChange` events and inbound sync writes (Perkins Gate CVK-ICLOUD P5-M1). No new invariant; the Perkins Amendment 1 structural mandate (the wrapper must be the EXACT handle passed to `engine.enable()`) is enforced by `SyncController` and `DaemonSyncService` at their call sites. Swift-only — no Rust port required.
 
 ### 1.1.0 -- 2026-06-17
 Added invariant I-12 (the `ext` forward-compat slot, the forward-compatible ext-slot contract): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.

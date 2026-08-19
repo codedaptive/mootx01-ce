@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.25.0
+version: 1.26.0
 status: active
-date: 2026-08-13
+date: 2026-08-19
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1782,6 +1782,9 @@ fresh-batch drawers. `DrawerStore.findActivePredecessor` visibility widened from
 `private` to `internal` to support the batch split. Returns drawers in input
 order. Callers must invoke `moot_reindex` / `moot_dream` to rebuild BM25/vector
 lanes after batch import.
+
+### 1.26.0 -- 2026-08-19
+MACD-3D (Kong ruling 3002C59F, Work Unit C): `SensitivityFilteredStorage` and `SensitivityCeilingError` re-homed from `MootProGateway/Sync/` to `LocusKit` — the cross-platform (macOS + iOS v26) kit that owns `AdjectiveSensitivity` and the `adjectiveBitmap` schema semantics. Both types are EE-only by usage policy (sync ceiling enforcement) but are defined in the open LocusKit module; daemon and app packages both import LocusKit and can reference the single implementation. `SensitivityFilteredStorage` is a public `final class` wrapping `any Storage` with a dynamic `AdjectiveSensitivity` ceiling; `SensitivityCeilingError` is the inbound-gate error (thrown when `adjectiveBitmap` sensitivity exceeds the ceiling). The internal `_retractionStream` test hook remains unexported. Swift-only — no Rust port required (sync ceiling enforcement is app/daemon-layer concern, not substrate).
 
 ### 1.8.0 -- 2026-06-21
 NT-DOC-1: Added 5 the node-integrity contract concordance rows to § 7. Entities section gains `Node`
