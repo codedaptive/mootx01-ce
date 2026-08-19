@@ -246,15 +246,24 @@ public enum DaemonShellMain {
     /// owns the context, not to a shell flag).
     ///
     /// - Returns: The process exit code; the caller passes it to `exit(2)`.
-    public static func run(arguments: [String]) async -> Int32 {
-        let (code, output) = await runCollecting(arguments: arguments)
+    ///
+    /// - Parameter extraCapabilities: Additional capability tokens to include in
+    ///   `DaemonProviderConfiguration.capabilities`.  The SHARED module never
+    ///   hard-codes EE-specific tokens; the EE composition root injects them here
+    ///   so the SHARED code remains edition-neutral (Kong invariant 4).
+    ///   Defaults to empty — the CE daemon passes no extras.
+    public static func run(arguments: [String], extraCapabilities: [String] = []) async -> Int32 {
+        let (code, output) = await runCollecting(arguments: arguments, extraCapabilities: extraCapabilities)
         if !output.isEmpty { print(output) }
         return code
     }
 
     /// `run(arguments:)` with the output returned instead of printed, so the
     /// tests judge exact bytes and the shells stay printable-only wrappers.
-    public static func runCollecting(arguments: [String]) async -> (code: Int32, output: String) {
+    public static func runCollecting(
+        arguments: [String],
+        extraCapabilities: [String] = []
+    ) async -> (code: Int32, output: String) {
         guard let mode = arguments.first else {
             return (ExitCode.usage.rawValue, usageText)
         }
@@ -281,7 +290,7 @@ public enum DaemonShellMain {
             guard let options = RaceOptions(arguments: Array(arguments.dropFirst())) else {
                 return (ExitCode.usage.rawValue, usageText)
             }
-            return await runRace(options)
+            return await runRace(options, extraCapabilities: extraCapabilities)
         case "owner-status":
             // MACD-3B3 (C1 MUST_UPDATE) — authenticated live-owner detection.
             // Reads K_install from the data-protection Keychain (entitlement
@@ -763,7 +772,10 @@ public enum DaemonShellMain {
     }
 
     /// The proof race: real eligibility, real resolver, fake authorities.
-    private static func runRace(_ options: RaceOptions) async -> (code: Int32, output: String) {
+    private static func runRace(
+        _ options: RaceOptions,
+        extraCapabilities: [String] = []
+    ) async -> (code: Int32, output: String) {
         #if canImport(Security)
         let readback: any EntitlementReadback = SecCodeEntitlementReadback()
         #else
@@ -797,10 +809,13 @@ public enum DaemonShellMain {
             configuration: DaemonProviderConfiguration(
                 instanceIdentifier: UUID(),
                 binaryVersion: "0.0.0-proof",
+                // Base capabilities + any EE extras injected by the composition
+                // root (Kong invariant 4: the SHARED module never hard-codes EE
+                // tokens; the EE composition root passes them via extraCapabilities).
                 capabilities: [
                     DescriptorPublisher.authenticatedFirstPartyCapability,
                     "resident-estate", "tool-surface",
-                ],
+                ] + extraCapabilities,
                 proofContext: options.context
             ),
             readback: readback,
