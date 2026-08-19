@@ -192,6 +192,14 @@ public indirect enum Filter: Sendable {
     case createdAfter(Date)
     /// Rows captured strictly before this timestamp.
     case createdBefore(Date)
+    /// Rows whose EVENT time (the two-clock effective capture instant,
+    /// ING-01) is at or after this timestamp. Distinct from `createdAfter`,
+    /// which reads `filedAt` (when the row was written). Inclusive, so a
+    /// [start, end] window is `.all([.eventAfter(start), .eventBefore(end)])`.
+    case eventAfter(Date)
+    /// Rows whose EVENT time is at or before this timestamp. Inclusive;
+    /// see `eventAfter`.
+    case eventBefore(Date)
     /// Rows with a matching lattice anchor.
     case latticeAnchor(LatticeAnchor)
     /// Rows whose UDC code begins with this prefix (depth-axis subtree).

@@ -203,10 +203,19 @@ pub enum Filter {
     InWing(String),
     /// Rows with this lineage identifier.
     LineageID(LineageID),
-    /// Rows captured strictly after this timestamp (epoch seconds).
+    /// Rows captured strictly after this timestamp (epoch milliseconds,
+    /// the port's drawer time unit).
     CreatedAfter(i64),
-    /// Rows captured strictly before this timestamp (epoch seconds).
+    /// Rows captured strictly before this timestamp (epoch milliseconds).
     CreatedBefore(i64),
+    /// Rows whose EVENT time (two-clock effective capture instant, ING-01)
+    /// is at or after this timestamp (epoch milliseconds). Distinct from
+    /// `CreatedAfter`, which reads `filed_at`. Inclusive, so a [start, end]
+    /// window is `All(vec![EventAfter(start), EventBefore(end)])`.
+    EventAfter(i64),
+    /// Rows whose EVENT time is at or before this timestamp (epoch
+    /// milliseconds). Inclusive; see `EventAfter`.
+    EventBefore(i64),
     /// Rows with a matching lattice anchor.
     LatticeAnchor(LatticeAnchor),
     /// Rows whose UDC code begins with this prefix (depth-axis subtree).

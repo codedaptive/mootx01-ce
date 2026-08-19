@@ -335,6 +335,30 @@ struct EvaluatorTests {
         #expect(rows.first?.id != d1.id)
     }
 
+    @Test(".eventAfter/.eventBefore window on eventTime, inclusive at the edges")
+    func eventWindow_filtersByEventTime() async throws {
+        let estate = try await makeEstate()
+        let iso = ISO8601DateFormatter()
+        let early = iso.date(from: "2023-05-08T13:00:00Z")!
+        let edge = iso.date(from: "2023-07-17T14:31:00Z")!
+        let late = iso.date(from: "2023-11-30T09:00:00Z")!
+        var f1 = frame(content: "early"); f1.eventTime = early
+        var f2 = frame(content: "edge"); f2.eventTime = edge
+        var f3 = frame(content: "late"); f3.eventTime = late
+        _ = try await captureAndConfirm(f1, into: estate)
+        let d2 = try await captureAndConfirm(f2, into: estate)
+        _ = try await captureAndConfirm(f3, into: estate)
+        // [June 1, edge] — the edge drawer sits exactly on the upper bound
+        // and must be INSIDE (inclusive window semantics, unlike created*).
+        let stream = await estate.recall(RecallFrame(filterChain: [
+            .all([.eventAfter(iso.date(from: "2023-06-01T00:00:00Z")!),
+                  .eventBefore(edge)])
+        ]))
+        let rows = await drain(stream)
+        #expect(rows.count == 1)
+        #expect(rows.first?.id == d2.id)
+    }
+
     @Test(".createdBefore returns only drawers filed strictly before the timestamp")
     func createdBefore_filtersByTime() async throws {
         let estate = try await makeEstate()

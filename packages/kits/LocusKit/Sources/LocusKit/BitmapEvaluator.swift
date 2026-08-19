@@ -38,8 +38,9 @@ import SubstrateTypes
 ///    `AuditLogFold.projectStateAt` (cookbook § 5.3) when
 ///    `frame.asOf` is non-nil; state is keyed on HLC.
 /// 3. Structured tier (§ 7.9.4 step 3) — `.inRoom`, `.inWing`,
-///    `.lineageID`, `.createdAfter`, `.createdBefore`,
-///    `.latticeAnchor`, `.latticeUnder`, `.wikidataConcept`.
+///    `.lineageID`, `.createdAfter`, `.createdBefore`, `.eventAfter`,
+///    `.eventBefore`, `.latticeAnchor`, `.latticeUnder`,
+///    `.wikidataConcept`.
 /// 4. Content tier (§ 7.9.4 step 4) — `.contentMatches` via
 ///    `localizedCaseInsensitiveContains`.
 ///
@@ -569,6 +570,7 @@ struct BitmapEvaluator {
     private static func isStructuralFilter(_ f: Filter) -> Bool {
         switch f {
         case .inRoom, .inWing, .lineageID, .createdAfter, .createdBefore,
+             .eventAfter, .eventBefore,
              .latticeAnchor, .latticeUnder, .wikidataConcept:
             return true
         case .all(let fs), .any(let fs):
@@ -591,6 +593,11 @@ struct BitmapEvaluator {
         case .lineageID(let l):     return drawer.lineageID == l
         case .createdAfter(let d):  return drawer.filedAt > d
         case .createdBefore(let d): return drawer.filedAt < d
+        // Event-time bounds are INCLUSIVE (window semantics), unlike the
+        // strict createdAfter/Before pair: a drawer whose eventTime equals
+        // a window edge is inside the window.
+        case .eventAfter(let d):    return drawer.eventTime >= d
+        case .eventBefore(let d):   return drawer.eventTime <= d
         case .latticeAnchor(let a): return drawer.udcCode == a.udcCode
         case .latticeUnder(let p):  return drawer.udcCode.hasPrefix(p)
         case .wikidataConcept(let q):
