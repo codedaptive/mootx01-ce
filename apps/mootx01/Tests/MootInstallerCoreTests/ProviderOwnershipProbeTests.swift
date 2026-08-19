@@ -689,3 +689,61 @@ struct CensusSiteGateSourceTests {
                 ".unverified case must appear before plist staging in UpgradeCommand source order")
     }
 }
+
+// MARK: - Requirement-string team-OU pin invariant tests (MACD-3B3 residual)
+
+/// Source-level invariant tests verifying that SecStaticBundleVerifier.verify
+/// pins the signing team via `certificate leaf[subject.OU] = "G94X5T5GK7"`.
+///
+/// These tests close the MACD-3B3 blocking residual (seal 7CCC18C3): without the
+/// OU pin, any Apple-issued developer certificate from any team naming the same
+/// bundle identifier would satisfy the `anchor apple generic and identifier` check.
+/// A source-level test makes the pin visible to review and prevents silent removal.
+@Suite("SecStaticBundleVerifier requirement — OU pin invariant (MACD-3B3)")
+struct RequirementOUPinTests {
+
+    private static func probeSource() throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // MootInstallerCoreTests/
+            .deletingLastPathComponent()   // Tests/
+            .deletingLastPathComponent()   // apps/mootx01/
+            .appendingPathComponent("Sources/MootInstallerCore/ProviderOwnershipProbe.swift")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @Test("requirement string contains team OU pin G94X5T5GK7 (MACD-3B3 residual)")
+    func requirementPinsTeamOU() throws {
+        let source = try Self.probeSource()
+        // The requirement must pin the signing team.  Without this clause any
+        // Apple-issued developer certificate from any team naming the same
+        // bundle identifier would satisfy the anchor+identifier check.
+        #expect(
+            source.contains("certificate leaf[subject.OU] = \"G94X5T5GK7\""),
+            "SecStaticBundleVerifier.verify must pin the team OU — MACD-3B3 residual"
+        )
+    }
+
+    @Test("requirement string retains anchor apple generic")
+    func requirementRetainsAnchor() throws {
+        let source = try Self.probeSource()
+        // The anchor clause rules out unsigned and ad-hoc signatures.  It must
+        // not be removed when the OU pin is present.
+        #expect(
+            source.contains("anchor apple generic"),
+            "SecStaticBundleVerifier.verify must retain anchor apple generic"
+        )
+    }
+
+    @Test("requirement string retains bundle identifier pin")
+    func requirementRetainsBundleID() throws {
+        let source = try Self.probeSource()
+        // The identifier clause pins the binary to the registered, unique bundle
+        // identifier.  It must not be removed when the OU pin is present.
+        // Check via raw string: in the source file the requirement string literal
+        // contains `identifier \"<id>\"` (Swift-escaped), so look for that form.
+        #expect(
+            source.contains(#"identifier \"\(DaemonBundle.bundleIdentifier)\""#),
+            "SecStaticBundleVerifier.verify must retain the bundle identifier pin"
+        )
+    }
+}

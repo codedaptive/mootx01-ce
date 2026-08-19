@@ -44,14 +44,13 @@ import MootDaemonProvider
 /// a requirement derived from the canonical constants the codebase already uses:
 /// - `anchor apple generic`: the binary is signed with an Apple-trusted certificate
 ///   (rules out unsigned and ad-hoc signatures).
+/// - `certificate leaf[subject.OU] = "G94X5T5GK7"`: the signing team must be
+///   Codedaptive, LLC.  G94X5T5GK7 was MEASURED from this machine's Developer ID
+///   Application and Apple Distribution identities (MACD-3B3 residual, closed by
+///   seal 7CCC18C3).  Without this pin any Apple-issued developer certificate from
+///   any team naming the same bundle identifier would satisfy the requirement.
 /// - `identifier`: the bundle identifier must match `DaemonBundle.bundleIdentifier`
 ///   (the registered, unique identifier for the daemon provider bundle).
-///
-/// Team identifier is NOT compiled in — there is no team-constant in this codebase.
-/// The enforced identity is the combination of Apple's root anchor and the globally
-/// unique bundle identifier.  If a team-constant is added in a future release, the
-/// requirement string must be updated to pin
-/// `certificate leaf[subject.OU] = "<TEAM_ID>"` as well.
 ///
 /// This type is injectable so functional tests can pass an always-valid fake without
 /// requiring a real signed binary, while a separate RED test exercises the real
@@ -166,9 +165,13 @@ public enum SecStaticBundleVerifier {
     /// Requirement string source:
     /// - `anchor apple generic`: cited from the Apple Developer documentation for
     ///   Developer-ID / App Store distribution; rules out unsigned and ad-hoc.
+    /// - `certificate leaf[subject.OU] = "G94X5T5GK7"`: pins the signing team to
+    ///   Codedaptive, LLC.  G94X5T5GK7 MEASURED from Developer ID Application and
+    ///   Apple Distribution identities on this machine (MACD-3B3 residual, seal
+    ///   7CCC18C3).  Closes the gap where any Apple-issued cert naming the same
+    ///   bundle identifier would satisfy the requirement without the OU pin.
     /// - `identifier "..."`: pinned to `DaemonBundle.bundleIdentifier`, the
-    ///   registered, unique identifier defined in `Paths.swift`.  Team identifier
-    ///   is not compiled in; the unique bundle-ID is the binding identity constant.
+    ///   registered, unique identifier defined in `Paths.swift`.
     ///
     /// - Returns: `true` when the binary satisfies the requirement; `false` for any
     ///   failure.  Never throws — all errors map to `false` (fail-closed).
@@ -180,18 +183,20 @@ public enum SecStaticBundleVerifier {
             // structure may be malformed, or an unexpected Security error occurred.
             return false
         }
-        // Requirement: signed by an Apple-generic anchor (not unsigned, not ad-hoc)
-        // AND the binary's bundle identifier must match the canonical
-        // DaemonBundle.bundleIdentifier registered for this product.  The CLI-side
-        // requirement pins the PUBLIC identity only; team identity enforcement for
-        // the entitlement groups happens INSIDE the subprocess via SecCodeCopySelf
-        // (ProviderEligibilityJudge in MootDaemonProvider).
-        let requirement = "anchor apple generic and identifier \"\(DaemonBundle.bundleIdentifier)\""
+        // Requirement: Apple-generic anchor (not unsigned, not ad-hoc) AND the signing
+        // team is G94X5T5GK7 (Codedaptive, LLC — MEASURED from Developer ID Application
+        // and Apple Distribution identities on this machine; closes MACD-3B3 blocking
+        // residual, seal 7CCC18C3) AND the binary's bundle identifier matches the
+        // canonical DaemonBundle.bundleIdentifier.  The OU pin is the critical addition:
+        // without it any Apple-issued developer certificate naming the same bundle
+        // identifier from any team would satisfy the anchor+identifier requirement.
+        let requirement = "anchor apple generic and certificate leaf[subject.OU] = \"G94X5T5GK7\" and identifier \"\(DaemonBundle.bundleIdentifier)\""
         var reqRef: SecRequirement?
         guard SecRequirementCreateWithString(requirement as CFString, [], &reqRef) == errSecSuccess,
               let req = reqRef else {
             // Requirement string parse failure: unexpected — the string is a
-            // compile-time constant derived from DaemonBundle.bundleIdentifier.
+            // compile-time constant derived from DaemonBundle.bundleIdentifier and
+            // the literal team-ID G94X5T5GK7; a parse failure is unexpected.
             return false
         }
         return SecStaticCodeCheckValidityWithErrors(staticCode, [], req, nil) == errSecSuccess
