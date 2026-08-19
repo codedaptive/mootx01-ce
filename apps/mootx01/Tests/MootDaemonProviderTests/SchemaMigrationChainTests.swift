@@ -71,22 +71,54 @@ private func chainIdentity() -> CensusIdentity {
     )
 }
 
+// MARK: - Shared time-ordered event log
+
+/// A synchronized event log shared by ChainSourceAccess and ChainFileMigration.
+///
+/// Both fakes write into their own per-seam arrays AND into this shared log,
+/// which records every event in the order it was received across both seams.
+/// This is the only harness-level mechanism that enables true cross-seam
+/// ordering assertions: per-seam arrays alone cannot distinguish whether
+/// source.close() preceded files.copyMainToIncoming() because the arrays
+/// are populated independently, not interleaved.
+private final class SharedEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var events: [String] = []
+
+    func record(_ event: String) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+}
+
 // MARK: - Chain-specific source-access fake with ordered event log
 
-/// A SourceEstateAccess fake that records the full event sequence in a shared
-/// ordered log. The crash-injection mechanism from EstateConvergenceTests is
-/// intentionally absent here — these tests assert ORDERING, not crash recovery
-/// (crash convergence is already proven in EstateConvergenceTests §7).
+/// A SourceEstateAccess fake that records the full event sequence both in its
+/// own per-seam log and in the shared time-ordered log. The crash-injection
+/// mechanism from EstateConvergenceTests is intentionally absent here — these
+/// tests assert ORDERING, not crash recovery (crash convergence is already
+/// proven in EstateConvergenceTests §7).
 private final class ChainSourceAccess: SourceEstateAccess, @unchecked Sendable {
     private let lock = NSLock()
+    private let sharedLog: SharedEventLog
     private(set) var events: [String] = []
     /// When non-nil, verifyReadOnlyOpen returns a MISMATCHED identity — used
     /// to verify that the migrator throws identityMismatch before committing.
     var mismatchedIdentity: CensusIdentity?
 
+    init(sharedLog: SharedEventLog) {
+        self.sharedLog = sharedLog
+    }
+
     private func record(_ event: String) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         events.append(event)
+        lock.unlock()
+        // Write to the shared log AFTER releasing the per-seam lock to avoid
+        // nested lock acquisition. The migrator is sequential so ordering is
+        // preserved without holding both locks simultaneously.
+        sharedLog.record(event)
     }
 
     func openExclusive() async throws { record("open-exclusive") }
@@ -108,15 +140,24 @@ private final class ChainSourceAccess: SourceEstateAccess, @unchecked Sendable {
 
 /// A FileMigrationAuthority fake that performs real file operations on a
 /// scratch directory so the on-disk invariants (source exists, canonical UUID)
-/// can be verified directly. Records operations in the same ordered log as
-/// ChainSourceAccess for cross-seam ordering assertions.
+/// can be verified directly. Records operations in its own per-seam log and
+/// in the shared time-ordered log to enable cross-seam ordering assertions.
 private final class ChainFileMigration: FileMigrationAuthority, @unchecked Sendable {
     private let lock = NSLock()
+    private let sharedLog: SharedEventLog
     private(set) var events: [String] = []
 
+    init(sharedLog: SharedEventLog) {
+        self.sharedLog = sharedLog
+    }
+
     private func record(_ event: String) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         events.append(event)
+        lock.unlock()
+        // Write to the shared log AFTER releasing the per-seam lock; see
+        // ChainSourceAccess.record() for the rationale.
+        sharedLog.record(event)
     }
 
     func copyMainToIncoming(source: URL, incoming: URL) async throws -> String {
@@ -177,6 +218,9 @@ private struct ChainHarness {
     let canonical: URL
     let incoming: URL
     let backup: URL
+    /// Combined time-ordered event log shared by both fakes.
+    /// Use for cross-seam ordering assertions (e.g. close-before-copy).
+    let sharedLog: SharedEventLog
     let sourceAccess: ChainSourceAccess
     let files: ChainFileMigration
     let receipts: MigrationReceiptStore
@@ -194,8 +238,9 @@ private struct ChainHarness {
         )
         // Write a distinctive payload so digest comparisons are meaningful.
         try Data("chain-test-estate-bytes-\(chainEstateUUID.uuidString)".utf8).write(to: source)
-        sourceAccess = ChainSourceAccess()
-        files = ChainFileMigration()
+        sharedLog = SharedEventLog()
+        sourceAccess = ChainSourceAccess(sharedLog: sharedLog)
+        files = ChainFileMigration(sharedLog: sharedLog)
         receipts = MigrationReceiptStore(
             fileURL: scratch.url.appendingPathComponent("migration-receipt.v1.json")
         )
@@ -239,60 +284,51 @@ struct MigrationChainCloseBeforeCopyTests {
 
     /// Proves invariant I-A: the source is closed BEFORE the copy is made.
     ///
-    /// Regression: if copyMainToIncoming is reordered to precede close(), this
-    /// test fails because "close" will appear AFTER "copy-main-to-incoming" in
-    /// the event log, proving two simultaneous open authorities existed during
-    /// the copy window.
-    @Test("source close() precedes copyMainToIncoming() in the event log")
+    /// Uses the shared time-ordered event log that both fakes write into, which
+    /// records every event in actual call order across both seams. This is the
+    /// only way to prove cross-seam ordering: per-seam arrays are populated
+    /// independently and cannot distinguish a reordering regression.
+    ///
+    /// Regression: if copyMainToIncoming is reordered to precede close(), the
+    /// shared log records "copy-main-to-incoming" before "close", the index
+    /// comparison fails, and the regression is caught.
+    @Test("source close() precedes copyMainToIncoming() in the time-ordered combined event log")
     func closeBeforeCopy() async throws {
         let h = try ChainHarness()
         defer { h.teardown() }
 
         _ = try await h.migrator().run()
 
-        let allEvents = h.sourceAccess.events + h.files.events
-        // Reconstruct the interleaved event log in the order recorded. Since
-        // the source and file seams record into separate arrays we derive
-        // ordering by calling order in freshRun, which is deterministic:
-        // openExclusive → checkpoint → emptyWAL → readIdentity → close
-        //   → preserveBackup → copyMainToIncoming → ...
+        // The shared log records events across both seams in actual call order.
+        // freshRun drives source and file operations sequentially, so the log
+        // is deterministic: open-exclusive → checkpoint-truncate →
+        // verify-empty-wal → read-identity → close → preserve-backup →
+        // copy-main-to-incoming → verify-read-only-open → atomic-rename-into-canonical.
+        let combined = h.sharedLog.events
+        guard let closeInCombined = combined.firstIndex(of: "close") else {
+            Issue.record("source.close() was not recorded in shared log: \(combined)")
+            return
+        }
+        guard let copyInCombined = combined.firstIndex(of: "copy-main-to-incoming") else {
+            Issue.record("files.copyMainToIncoming was not recorded in shared log: \(combined)")
+            return
+        }
+        #expect(
+            closeInCombined < copyInCombined,
+            "close must precede copyMainToIncoming in combined log — two open authorities co-existed: \(combined)"
+        )
+
+        // verifyReadOnlyOpen opens the COPY (destination), not the source.
+        // It is called after copyMainToIncoming (step 4 vs step 3 in freshRun),
+        // so it must appear AFTER close in the source-seam log.
         let sourceEvents = h.sourceAccess.events
-        let fileEvents = h.files.events
-        guard let closeIdx = sourceEvents.firstIndex(of: "close") else {
-            Issue.record("source.close() was not recorded")
+        guard let closeIdx = sourceEvents.firstIndex(of: "close"),
+              let verifyIdx = sourceEvents.firstIndex(of: "verify-read-only-open") else {
+            Issue.record("expected close and verify-read-only-open in source events: \(sourceEvents)")
             return
         }
-        guard let copyIdx = fileEvents.firstIndex(of: "copy-main-to-incoming") else {
-            Issue.record("files.copyMainToIncoming was not recorded")
-            return
-        }
-        // close is the 5th source event (index 4). copyMainToIncoming is the
-        // 2nd file event (after preserveBackup). Because freshRun calls close()
-        // before any file operation, close must appear in sourceEvents before
-        // copy appears in fileEvents — verified by checking close's position
-        // is before the first file event (backup is the first file event,
-        // which itself precedes copy).
-        _ = closeIdx   // confirm it is recorded
-        _ = copyIdx    // confirm it is recorded
-        // The structural proof: the entire source sequence (open through close)
-        // is emitted by freshRun BEFORE any FileMigrationAuthority call.
-        // Therefore the EVENT COUNT in sourceAccess must include "close" before
-        // the file events array is non-empty.
-        #expect(sourceEvents.firstIndex(of: "close") != nil,
-                "close was not recorded — source left open")
-        #expect(sourceEvents.firstIndex(of: "close")! < sourceEvents.count,
-                "close must appear in the source event log before file events begin")
-        // Additional proof: verifyReadOnlyOpen opens the COPY (destination),
-        // not the source — confirmed by it appearing AFTER copy.
-        guard let verifyIdx = sourceEvents.firstIndex(of: "verify-read-only-open") else {
-            Issue.record("verifyReadOnlyOpen was not recorded")
-            return
-        }
-        // verifyReadOnlyOpen is called after copyMainToIncoming (step 4 vs step 3
-        // in freshRun). In sourceAccess.events, verify-read-only-open appears
-        // after close because it is called after the copy is made.
         #expect(verifyIdx > closeIdx,
-                "verifyReadOnlyOpen must follow close — it opens the COPY, not the source")
+                "verifyReadOnlyOpen must follow close in source events — it opens the COPY, not the source")
     }
 
     /// Proves the backup is preserved BEFORE the copy is made.
