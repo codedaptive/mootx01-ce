@@ -507,6 +507,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "estate-encryption"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,6 +651,7 @@ dependencies = [
  "serde",
  "serde_json",
  "substrate-kernel",
+ "substrate-lib",
  "substrate-ml",
  "substrate-types",
  "uuid",
@@ -1153,6 +1161,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chrono",
+ "estate-encryption",
  "intellectus-lib",
  "libc",
  "native-tls",
