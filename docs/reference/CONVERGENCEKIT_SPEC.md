@@ -1,8 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.4
+version: 1.5
 status: active
-date: 2026-07-17
+date: 2026-08-19
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -113,6 +113,18 @@ it does not call the substrate-internal sync paths procedurally.
 CorpusKit is the present consumer (it builds a chunk-table manifest).
 ConvergenceKit is a foundation peer of PersistenceKit, not a layer above
 the substrate kits.
+
+**Integration note — authorized caller (MACD-3D):** in any split-process
+architecture the process that holds the `Storage` handle is the authorized
+ConvergenceKit caller — the only one that may call `enable`, `disable`,
+`push`, `pull`, `subscribe`, or `nudge`. In the macOS App configuration this
+is the resident daemon (not the GUI process). A GUI courier that forwards
+user intent over an IPC boundary does not hold the `Storage` handle and must
+not call the engine methods directly. A second process calling `enable` on
+the same estate would violate the one-writer invariant and is an integration
+error. The `SensitivityFilteredStorage` wrapper is mandatory at the call site
+of `enable` — the daemon must wrap the raw `Storage` before passing it to the
+engine (Perkins Amendment 1, `SensitivityFilteredStorage`).
 
 ## § 4 — Invariants
 
@@ -837,6 +849,16 @@ configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
 without a live CloudKit container).
 
 ## Changelog
+
+### 1.5 -- 2026-08-19 (MACD-3D)
+- **Added integration note — authorized caller (§3):** in a split-process
+  architecture the process that holds the `Storage` handle is the authorized
+  ConvergenceKit caller. In the macOS App configuration this is the resident
+  daemon, not the GUI. A GUI courier must not call engine methods directly;
+  doing so violates the one-writer invariant. `SensitivityFilteredStorage`
+  is mandatory at the `enable` call site (Perkins Amendment 1).
+
+### 1.4 -- 2026-07-17 (CVK-WC8)
 
 ### 1.3 -- 2026-07-17 (CVK-WC6)
 - **Firmed B-7 (Federation pairing):** expanded from a one-paragraph
