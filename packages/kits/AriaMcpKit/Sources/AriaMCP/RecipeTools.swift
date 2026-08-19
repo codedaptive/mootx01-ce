@@ -57,6 +57,7 @@ enum RecipeTools {
     static let listRecipesCatalogToolName = "moot_list_recipes"
     static let groundedSynthesisToolName = "moot_synthesize"
     static let preciseRecallToolName = "moot_recall_precise"
+    static let temporalRecallToolName = "moot_recall_temporal"
     static let vagueRecallToolName = "moot_recall_vague"
     /// Shaped-recall tool: a single recall tool with a discoverable `preset` enum
     /// param selecting one named RecallShape from the GLK roster. Preferable to ~20
@@ -121,6 +122,7 @@ enum RecipeTools {
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
             || name == preciseRecallToolName
+            || name == temporalRecallToolName
             || name == vagueRecallToolName
             || name == shapedRecallToolName
             || name == connectedRecallToolName
@@ -144,6 +146,7 @@ enum RecipeTools {
             listRecipesCatalogTool(),
             groundedSynthesisTool(),
             preciseRecallTool(),
+            temporalRecallTool(),
             shapedRecallTool(),
             connectedRecallTool(),
             runMigrationBenchmarkTool(),
@@ -269,6 +272,32 @@ enum RecipeTools {
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
                     "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe,
+            outputSchema: ToolProjection.recallResultsOutputSchema())
+    }
+
+    /// The temporal-recall tool. Runs the TemporalRecall recipe: parse the
+    /// query's absolute date expression (or take an explicit from/to window),
+    /// coarse-grab a wide candidate pool, and apply the window — loose ranks
+    /// in-window drawers first, tight returns only in-window drawers. The
+    /// query-date reading no other lane performs.
+    private static func temporalRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: temporalRecallToolName,
+            description: "Temporal recall: reads the date stated in the query (\"on 8 May 2023\", \"in July\", \"in 2023\" — absolute dates only) and matches it against each memory's event_time. window=loose (default) ranks in-window memories first and keeps everything; window=tight returns ONLY in-window memories — use tight as the retry when an ordinary search of a date-anchored question came back weak. Pass from/to (YYYY-MM-DD or full ISO) to supply the window explicitly; explicit beats parsing. Month-only dates match that month in every year the estate covers. Returns dense rows in the same shape as moot_memory_search plus a temporal: line naming the applied window.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The search query text — drives the coarse recall and, absent from/to, the date parse."),
+                    "window": stringSchema("Window mode: loose (boost — in-window first, nothing dropped; default) or tight (hard filter — in-window only; errors when no window is stated or parsed). Omit for loose; null is invalid."),
+                    "from": stringSchema("Optional explicit window start, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ. Explicit windows override the query parse. Omit to parse the query; null is invalid."),
+                    "to": stringSchema("Optional explicit window end, same forms as from. Omit to parse the query; null is invalid."),
+                    "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
+                    "pool": integerSchema("Coarse candidate-pool size grabbed before the window applies. Default 120 (wider than moot_recall_precise — the window is the discriminator). Omit to use the default; null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
+                    "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -575,6 +604,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case temporalRecallToolName:
+            return try await runTemporalRecall(args, kit: kit, handle: handle)
         case connectedRecallToolName:
             return try await runConnectedRecall(args, kit: kit, handle: handle)
         case vagueRecallToolName:
@@ -938,6 +969,93 @@ enum RecipeTools {
         if !hasDistinctive {
             lines.append("hint: query contains no distinctive tokens (numbers or proper nouns) — "
                 + "results may be imprecise. Refine with specific identifiers for higher confidence.")
+        }
+        return ToolDispatcher.structuredTextResult(
+            lines.joined(separator: "\n"), results: results)
+    }
+
+    // MARK: - recall_temporal
+
+    /// Run the TemporalRecall recipe and serialize matches in the SAME
+    /// dense-row shape `moot_memory_search` emits, with a trailing
+    /// `temporal:` line naming the applied window(s), mode, and source —
+    /// the window is the tool's whole reason to exist, so the reply says
+    /// what was applied.
+    private static func runTemporalRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        let limit = try ToolDispatcher.clampLimit(
+            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
+        let pool = try ToolDispatcher.clampLimit(
+            try optionalInt(args["pool"], argument: "pool"),
+            argument: "pool",
+            default: CognitionKit.TemporalRecall.defaultPool)
+        let baseFilter = try decodeSingleFilter(args["filter"])
+        let filter: LocusKit.Filter
+        if let wingName = try optionalString(args["wing"], argument: "wing") {
+            filter = .all([baseFilter, .inWing(wingName)])
+        } else {
+            filter = baseFilter
+        }
+        let mode: TemporalWindowMode
+        if let rawMode = try optionalString(args["window"], argument: "window") {
+            guard let parsed = TemporalWindowMode(rawValue: rawMode) else {
+                return ToolDispatcher.errorResult(
+                    "window must be 'loose' or 'tight'; got '\(rawMode)'")
+            }
+            mode = parsed
+        } else {
+            mode = .loose
+        }
+        let from = try optionalString(args["from"], argument: "from")
+        let to = try optionalString(args["to"], argument: "to")
+
+        let outcome: TemporalRecallOutcome
+        do {
+            outcome = try await TemporalRecall.run(
+                kit: kit, handle: handle, query: query, filter: filter,
+                limit: limit, pool: pool, mode: mode, from: from, to: to)
+        } catch let error as TemporalRecallError {
+            // Caller misuse (tight without a window, malformed from/to) is a
+            // tool error with the exact reason, never an empty result.
+            return ToolDispatcher.errorResult(error.description)
+        }
+        let matches = outcome.matches
+
+        // Dense-row reply (house shape): one structured-tier fetch feeds both
+        // the text rows and the typed structured rows.
+        let estate = try await kit.estate(for: handle)
+        let shownMatches = Array(matches.prefix(50))
+        let drawersByID = try await structuredDrawersByID(
+            ids: shownMatches.map { $0.id }, estate: estate)
+        let denseByID = drawersByID.mapValues { DenseRow.render($0) }
+        let nodeNames = try await estate.resolveNodeNames(
+            parentNodeIds: drawersByID.values.map { $0.parentNodeId })
+
+        var lines: [String] = ["found \(matches.count) memory(s)"]
+        var results: [ToolDispatcher.StructuredRecallRow] = []
+        for match in shownMatches {
+            lines.append(denseByID[match.id] ?? DenseRow.renderUnhydrated(id: match.id))
+            if let d = drawersByID[match.id] {
+                results.append(ToolDispatcher.structuredRecallRow(
+                    id: match.id,
+                    room: nodeNames[d.parentNodeId]?.room,
+                    content: match.content, drawer: d))
+            } else {
+                results.append(ToolDispatcher.opaqueStructuredRow(id: match.id))
+            }
+        }
+        // The temporal narration line: window mode, source, and bounds.
+        if outcome.windows.isEmpty {
+            lines.append("temporal: \(outcome.mode.rawValue) — no date stated or parsed; coarse order unchanged")
+        } else {
+            let bounds = outcome.windows
+                .map { "\($0.start.prefix(10))..\($0.end.prefix(10))" }
+                .joined(separator: ", ")
+            lines.append("temporal: \(outcome.mode.rawValue) (\(outcome.windowSource)) window \(bounds)")
         }
         return ToolDispatcher.structuredTextResult(
             lines.joined(separator: "\n"), results: results)

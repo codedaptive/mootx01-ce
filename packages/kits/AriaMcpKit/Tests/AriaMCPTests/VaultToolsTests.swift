@@ -112,9 +112,10 @@ struct VaultToolsTests {
         #expect(!names.contains("moot_palace_import"))
         #expect(!names.contains("moot_json_import"))
         // Vault-off removes the five moot_vault_* tools plus the two gated
-        // import lanes. 78 vault-on − 7 = 71 (dataset + packet +
-        // contradiction-hunter + timing-report tools are not vault-gated).
-        #expect(toolsOff.count == 71)
+        // import lanes (dataset + packet +
+        // contradiction-hunter + timing-report + temporal-recall tools are
+        // not vault-gated). 79 vault-on − 7 = 72.
+        #expect(toolsOff.count == 72)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -124,8 +125,8 @@ struct VaultToolsTests {
         #expect(names.contains("moot_vault_export"))
         // 67 baseline + 2 contradiction-hunter + 3 dataset tools + 4 packet
         // tools + moot_json_import (MXE-JI-1) + moot_timing_report (C3+A6)
-        // = 78 (incl. moot_recall_connected).
-        #expect(toolsNoEnv.count == 78)
+        // + moot_recall_temporal = 79 (incl. moot_recall_connected).
+        #expect(toolsNoEnv.count == 79)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.

@@ -72,9 +72,10 @@ struct ToolProjectionTests {
         // moot_dataset_query, moot_dataset_stats) + 4 packet tools (FAB5-I2:
         // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) + moot_recall_connected
         // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated)
-        // + moot_timing_report (C3+A6 audit-derived timing metrics) = 78.
-        #expect(ToolProjection.tools(environment: [:]).count == 78,
-                "tools() must return exactly 78 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // + moot_timing_report (C3+A6 audit-derived timing metrics)
+        // + moot_recall_temporal (query-date window recipe) = 79.
+        #expect(ToolProjection.tools(environment: [:]).count == 79,
+                "tools() must return exactly 79 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -331,9 +332,9 @@ struct TierDecompositionTests {
         // The specific figures the prose layer states today. When a tool is
         // added, these move — and so must every prose copy.
         #expect(tier5 == 10)
-        #expect(tier7 == 9)
-        #expect(RecipeTools.tools().count == 13)
+        #expect(tier7 == 10)
+        #expect(RecipeTools.tools().count == 14)
         #expect(packet == 4)
-        #expect(liveVaultOn == 78)
+        #expect(liveVaultOn == 79)
     }
 }
