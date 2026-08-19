@@ -626,12 +626,8 @@ struct MigrationChainAuthenticatedReadinessTests {
     // the live rows) arrives with MACD-3 estate routing. The seam-based tests
     // above prove the machine's structural guarantee; the production path
     // proof is a MACD-3 deliverable.
-    @Test("BLOCKED: live SQLite integrity_check via SourceEstateAccess production conformer")
-    func blockedLiveIntegrityCheck() {
-        // This test is intentionally empty — the path requires a live
-        // entitled provider. Marking it here makes the gap explicit in the
-        // matrix rather than silently absent.
-        //
-        // UNBLOCKED by: production SourceEstateAccess conformer (MACD-3).
-    }
+    // BLOCKED: live SQLite integrity_check via SourceEstateAccess production conformer.
+    // The path requires a live entitled provider. The gap is noted here rather than
+    // silently absent. UNBLOCKED by: production SourceEstateAccess conformer (MACD-3).
+    // No @Test — a vacuous empty test provides false positive evidence; see Adams r2.
 }

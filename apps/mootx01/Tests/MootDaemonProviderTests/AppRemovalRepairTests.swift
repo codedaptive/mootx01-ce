@@ -346,9 +346,8 @@ struct AppRemovalRepairEstateIdentityTests {
     // the AppGroup entitlement and a real SQLite database. The structural proof
     // above (R4 gate) is the in-process boundary. The production verification
     // is a MACD-3 deliverable.
-    @Test("BLOCKED: live direct provider opens existing canonical estate (not a new default)")
-    func blockedLiveProviderEstateIdentity() {
-        // Intentionally empty. Unblocked by: production EstateLifecycleAuthority
-        // conformer (MACD-3 estate routing) + AppGroup-entitled signed binary.
-    }
+    // BLOCKED: live direct provider opens existing canonical estate (not a new default).
+    // Unblocked by: production EstateLifecycleAuthority conformer (MACD-3 estate routing)
+    // + AppGroup-entitled signed binary.
+    // No @Test — a vacuous empty test provides false positive evidence; see Adams r2.
 }

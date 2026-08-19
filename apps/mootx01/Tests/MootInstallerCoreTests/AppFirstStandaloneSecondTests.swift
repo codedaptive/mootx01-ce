@@ -294,9 +294,7 @@ struct AppFirstStep5MismatchTests {
     // client-only branch, which calls installDaemonBundleDisabled() but NOT
     // LaunchAgent.install() or bootstrapJob(). The production verification
     // is a MACD-3 deliverable requiring an AppGroup-entitled signed build.
-    @Test("BLOCKED: live subprocess authentication via BundleSignatureVerifier.production")
-    func blockedLiveSubprocessAuthentication() {
-        // Intentionally empty. Unblocked by: signed daemon bundle + App Group
-        // entitlement (MACD-3 provider activation).
-    }
+    // BLOCKED: live subprocess authentication via BundleSignatureVerifier.production.
+    // Unblocked by: signed daemon bundle + App Group entitlement (MACD-3 provider activation).
+    // No @Test — a vacuous empty test provides false positive evidence; see Adams r2.
 }
