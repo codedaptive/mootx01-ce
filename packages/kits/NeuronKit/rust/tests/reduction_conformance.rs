@@ -89,6 +89,7 @@ fn candidate(spec: &CandidateSpec) -> ReductionCandidate {
         udc_facets: None,
         coarse_rank: spec.coarse_rank,
         event_time: None,
+        filed_at: None,
         is_currently_believed: spec.is_currently_believed,
         // precision_score is populated by the composition fold; 0 here because
         // this builds pre-fold candidates for the conformance harness.
