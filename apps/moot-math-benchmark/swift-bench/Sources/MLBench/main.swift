@@ -2,7 +2,8 @@
 //
 // SubstrateML algorithm benchmark sweep. Measures per-(algorithm,
 // size, params) latency for the 15 SubstrateML algorithms plus the
-// GLK matrix_decayed_projection maintenance pass (16 total) — the
+// GLK matrix_decayed_projection maintenance pass and the §8.3
+// qid_adjacency BFS distance (17 total) — the
 // cold-path / dreaming-daemon math — and emits structured JSON.
 //
 // Swift mirror of rust/src/bin/ml_bench.rs.
@@ -387,6 +388,46 @@ func measureTemporalCompression(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: U
     return out
 }
 
+func measureQIDAdjacency(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measurement] {
+    // §8.3 Q-ID adjacency (Wikidata graph) distance — depth-4 BFS over
+    // an adjacency provider (canonical primitive qid_adjacency, S8
+    // wave). Synthetic connected graph (spanning tree + n extra edges,
+    // symmetrized — the same construction the harness vectors use);
+    // one random pair per size. Cost is bounded by the depth-4
+    // frontier, so this measures BFS fan-out at graded densities, not
+    // whole-graph scans.
+    struct MapAdjacency: WikidataAdjacencyProvider {
+        let adj: [UInt64: Set<UInt64>]
+        func neighbors(of qid: UInt64) -> Set<UInt64> { adj[qid] ?? [] }
+    }
+    var out: [Measurement] = []
+    for n in [100, 1_000, 10_000] {
+        var adj: [UInt64: Set<UInt64>] = [:]
+        for k in 1...n { adj[UInt64(k)] = [] }
+        for k in 2...n {
+            let p = UInt64(1 + Int(rng.next() % UInt64(k - 1)))
+            adj[UInt64(k)]!.insert(p)
+            adj[p]!.insert(UInt64(k))
+        }
+        for _ in 0..<n {
+            let u = UInt64(1 + Int(rng.next() % UInt64(n)))
+            let v = UInt64(1 + Int(rng.next() % UInt64(n)))
+            if u != v {
+                adj[u]!.insert(v)
+                adj[v]!.insert(u)
+            }
+        }
+        let provider = MapAdjacency(adj: adj)
+        let a = UInt64(1 + Int(rng.next() % UInt64(n)))
+        let b = UInt64(1 + Int(rng.next() % UInt64(n)))
+        let t = timeLoop(warmupNs: wu, measureNs: me) {
+            blackHole(WikidataGraphDistance.distance(from: a, to: b, provider: provider))
+        }
+        out.append(make("qid_adjacency_distance", "n=\(n)", t))
+    }
+    return out
+}
+
 func measureMatrixDecayedProjection(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measurement] {
     // S4-C decayed matrix projections (W2.5): the per-entry
     // exp(−age·ln2/τ) FULL-recompute pass that runs in every matrix-tier
@@ -547,6 +588,7 @@ runIf("moment_summary", measureMomentSummary)
 runIf("nmf", measureNMF)
 runIf("random_walks", measureRandomWalks)
 runIf("temporal_compression", measureTemporalCompression)
+runIf("qid_adjacency", measureQIDAdjacency)
 runIf("matrix_decayed_projection", measureMatrixDecayedProjection)
 
 let df = DateFormatter()

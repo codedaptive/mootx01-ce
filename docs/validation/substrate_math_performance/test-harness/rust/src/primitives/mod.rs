@@ -25,6 +25,7 @@ pub mod bradley_terry;
 pub mod nmf;
 pub mod or_reduce;
 pub mod pairing_handshake;
+pub mod qid_adjacency;
 pub mod partial_state_recall;
 pub mod registry;
 pub mod sampling;

@@ -199,14 +199,14 @@ selection (see the performance methodology gate).
 | `timing.measure_ms` | int | yes | `200` for normal, `40` for `--quick` |
 | `timing.quick_mode` | bool | yes | `true` ↔ `--quick` was passed |
 | `measurements` | array | yes | exactly one entry per `(algorithm, params)` cell |
-| `measurements[].algorithm` | string | yes | one of the 16+ canonical names (see grid below) |
+| `measurements[].algorithm` | string | yes | one of the 17+ canonical names (see grid below) |
 | `measurements[].params` | string | yes | free-form size/params tag, e.g. `"n=1024"`, `"m=64,n=64,rank=8"` |
 | `measurements[].iterations` | int | yes | how many calls fit in the measurement window |
 | `measurements[].ns_per_call_min` | int | yes | minimum wall-ns/call seen |
 | `measurements[].ns_per_call_mean` | int | yes | mean wall-ns/call |
 | `measurements[].ns_per_call_stddev` | int | yes | stddev of wall-ns/call |
 
-### Canonical sweep grid (16 algorithms, 92 cells)
+### Canonical sweep grid (17 algorithms, 95 cells)
 
 | Algorithm name(s) | Sweep axis | Cells |
 |---|---|---|
@@ -225,8 +225,9 @@ selection (see the performance methodology gate).
 | `nmf_factorize` | `(m, n) × rank` (rank < min(m,n)) | 11 |
 | `random_walks_walk` | `n × length` | 6 |
 | `temporal_compression_compress` | `rows ∈ {100, 1k, 10k}` | 3 |
+| `qid_adjacency_distance` | `n ∈ {100, 1k, 10k}` | 3 |
 | `matrix_decayed_co_occurrence`, `matrix_rebuild_temporal_decayed` | `entries ∈ {1k, 10k, 100k}` | 6 |
-| **Total** |   | **92** |
+| **Total** |   | **95** |
 
 The `params` string within each cell is **free-form key=value pairs
 joined by commas**. Both the Rust and Swift reference ports emit

@@ -79,6 +79,7 @@ public enum PrimitiveRegistry {
         HLCPrimitive.descriptor,
         FingerprintPrimitive.descriptor,
         LatticePrimitive.descriptor,
+        QIDAdjacencyPrimitive.descriptor,
         InfoTheoryPrimitive.descriptor,
         BradleyTerryPrimitive.descriptor,
         PartialStateRecallPrimitive.descriptor,

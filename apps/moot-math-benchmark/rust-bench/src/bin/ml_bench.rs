@@ -2,7 +2,8 @@
 //
 // SubstrateML algorithm benchmark sweep. Measures per-(algorithm,
 // size, params) latency for the 15 SubstrateML algorithms plus the
-// GLK matrix_decayed_projection maintenance pass (16 total) — the
+// GLK matrix_decayed_projection maintenance pass and the §8.3
+// qid_adjacency BFS distance (17 total) — the
 // cold-path / dreaming-daemon math — and emits structured JSON.
 //
 // Rust mirror of swift/Sources/MLBench/main.swift.
@@ -19,7 +20,7 @@
 // USAGE
 //
 //   ml-bench [--seed <0xhex>]
-//            [--algorithm <name>]   (one of the 16 algorithms or `all`)
+//            [--algorithm <name>]   (one of the 17 algorithms or `all`)
 //            [--out <path>]          (.json file or directory)
 //            [--quick]               (smaller sweep for iteration)
 
@@ -608,6 +609,59 @@ fn measure_temporal_compression(
     out
 }
 
+fn measure_qid_adjacency(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
+    // §8.3 Q-ID adjacency (Wikidata graph) distance — depth-4 BFS over
+    // an adjacency provider (canonical primitive qid_adjacency, S8
+    // wave). Synthetic connected graph (spanning tree + n extra edges,
+    // symmetrized — the same construction the harness vectors use);
+    // one random pair per size. Cost is bounded by the depth-4
+    // frontier, so this measures BFS fan-out at graded densities, not
+    // whole-graph scans. Twin of Swift measureQIDAdjacency.
+    use std::collections::{HashMap, HashSet};
+    use substrate_ml::lattice_distance::{WikidataAdjacencyProvider, WikidataGraphDistance};
+    struct MapAdjacency {
+        adj: HashMap<u64, HashSet<u64>>,
+    }
+    impl WikidataAdjacencyProvider for MapAdjacency {
+        fn neighbors(&self, qid: u64) -> HashSet<u64> {
+            self.adj.get(&qid).cloned().unwrap_or_default()
+        }
+    }
+    let mut out = Vec::new();
+    for n in [100usize, 1_000, 10_000] {
+        let mut adj: HashMap<u64, HashSet<u64>> = HashMap::new();
+        for k in 1..=n {
+            adj.insert(k as u64, HashSet::new());
+        }
+        for k in 2..=n {
+            let p = 1 + (rng.next() % (k as u64 - 1));
+            adj.get_mut(&(k as u64)).unwrap().insert(p);
+            adj.get_mut(&p).unwrap().insert(k as u64);
+        }
+        for _ in 0..n {
+            let u = 1 + (rng.next() % n as u64);
+            let v = 1 + (rng.next() % n as u64);
+            if u != v {
+                adj.get_mut(&u).unwrap().insert(v);
+                adj.get_mut(&v).unwrap().insert(u);
+            }
+        }
+        let provider = MapAdjacency { adj };
+        let a = 1 + (rng.next() % n as u64);
+        let b = 1 + (rng.next() % n as u64);
+        let t = time_loop(warmup, measure, || {
+            black_box(WikidataGraphDistance::distance(
+                a, b, &provider, WikidataGraphDistance::MAX_DEPTH));
+        });
+        out.push(make("qid_adjacency_distance", format!("n={}", n), t));
+    }
+    out
+}
+
 fn measure_matrix_decayed_projection(
     rng: &mut SplitMix64,
     warmup: Duration,
@@ -735,7 +789,7 @@ fn usage() -> ! {
     eprintln!("            eigenvalue_centrality, feature_extractors, fft, float_simhash,");
     eprintln!("            info_theory, lattice_distance, llm_calibration, moment_summary,");
     eprintln!("            nmf, random_walks, temporal_compression,
-            matrix_decayed_projection, all (default: all)");
+            qid_adjacency, matrix_decayed_projection, all (default: all)");
     process::exit(2);
 }
 
@@ -810,6 +864,7 @@ fn main() {
     run!("nmf", measure_nmf);
     run!("random_walks", measure_random_walks);
     run!("temporal_compression", measure_temporal_compression);
+    run!("qid_adjacency", measure_qid_adjacency);
     run!("matrix_decayed_projection", measure_matrix_decayed_projection);
     let out = match out_arg {
         Some(p) => {
