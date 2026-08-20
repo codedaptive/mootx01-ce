@@ -49,11 +49,17 @@ import Foundation
 /// (compaction tables, Stage 5 ordering, estimator formula) — stored
 /// renderings regenerate lazily against the new contract.
 public enum DistillationPipelineVersion {
-    /// Phase 1 contract: TokenCompaction tables v1 + Stage 5 core-first
-    /// ordering + the (3B + 16W + 12)/24 token estimator, all pinned to
-    /// `DistillationPipeline.defaultExtractor` (the extractor present and
-    /// bit-identical on both legs).
-    public static let current = "p1"
+    /// Phase 2 contract (DECISION_DENSE_LANE_ENRICHMENT, Wave 2): the p1
+    /// rendering (TokenCompaction tables v1 + Stage 5 core-first ordering +
+    /// the (3B + 16W + 12)/24 token estimator over
+    /// `DistillationPipeline.defaultExtractor`) PLUS the deterministic
+    /// categorizer trailer (EnrichmentStage: HMM noun classification →
+    /// EideticLib FDC anchor → frame label + ancestor label, grammar-v1
+    /// trailer). The "-det" engine tag names the deterministic engine —
+    /// the benchmarkable default; LLM engines record their own tags.
+    /// Bumping this string re-distills every estate lazily via the
+    /// existing sweep (version-mismatch eligibility).
+    public static let current = "p2-det"
 }
 
 /// The §7.6 token-compaction transform and §6 token estimator. No

@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-14
-version: 1.35.0
+date: 2026-08-20
+version: 1.36.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
 package: GeniusLocusKit
@@ -2188,6 +2188,8 @@ basis-retrain duty (NEURONKIT_SPEC § 12.6.1 / NEURONKIT_INTERFACE 1.11.0).
   (AssociateSweepReport both ports).
 
 ### 1.29.0 -- 2026-08-05
+
+- **v1.36.0 (2026-08-20)** — EnrichmentStage (Brain, internal): `trailer(forContent:) -> String` (Rust `brain::enrichment_stage::enrichment_trailer`), `maxFacts` = 6. No public API change; the p2-det contract is observable through distilled renderings and distilled_pipeline_version.
 
 - **`VectorSimilaritySignal.spec` gains a `probeLimit` / `probe_limit`
   parameter (default 50).** Swift: `probeLimit: Int = defaultProbeLimit`

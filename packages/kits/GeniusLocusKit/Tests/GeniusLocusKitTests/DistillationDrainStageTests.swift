@@ -166,7 +166,9 @@ struct DistillationDrainStageTests {
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [drawer.id]).first)
-        #expect(row.distilled == "STUB RENDERING")
+        // p2 welds the categorizer trailer AFTER the injected rendering —
+        // the override governs the compaction half only.
+        #expect(row.distilled?.hasPrefix("STUB RENDERING") == true)
     }
 
     // MARK: - §9/§13.3 geometry probe

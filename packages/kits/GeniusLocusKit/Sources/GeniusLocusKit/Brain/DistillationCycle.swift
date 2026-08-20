@@ -134,12 +134,19 @@ public extension GeniusLocusKit {
                 extractFeatures: DistillationPipeline.defaultExtractor)
         }
 
+        // Pipeline p2 (DECISION_DENSE_LANE_ENRICHMENT): weld the categorizer
+        // trailer onto the rendering. Facts come from the VERBATIM content
+        // (the enrichment source of truth), the trailer rides the distilled
+        // lane only, and CorpusKit's trailer lexical supplement admits its
+        // tokens to BM25 at index time.
+        let enriched = rendering + EnrichmentStage.trailer(forContent: content)
+
         // Write 1 of 2 (§7.2): the four representation columns, atomically.
         let updated = try await estate.setDistilledRepresentation(
             drawerId: drawerID,
-            distilled: rendering,
+            distilled: enriched,
             pipelineVersion: DistillationPipelineVersion.current,
-            tokenCount: TokenCompaction.estimateTokenCount(rendering),
+            tokenCount: TokenCompaction.estimateTokenCount(enriched),
             at: now)
         guard updated == 1 else { return false }
 

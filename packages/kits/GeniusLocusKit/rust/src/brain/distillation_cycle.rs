@@ -84,12 +84,22 @@ pub fn render_distillation(
         } else {
             output.distilled_text
         };
+        // Pipeline p2: weld the categorizer trailer (facts from the
+        // VERBATIM content) onto the rendering. Twin of Swift distillItem.
+        let rendering = format!(
+            "{rendering}{}",
+            super::enrichment_stage::enrichment_trailer(content)
+        );
         (rendering, output.feature_fingerprint)
     } else {
         // Short-item path (§7.5): token-compaction fallback, fingerprint via
         // the query-fingerprint construction over the content.
         (
-            compaction_rendering(content),
+            format!(
+                "{}{}",
+                compaction_rendering(content),
+                super::enrichment_stage::enrichment_trailer(content)
+            ),
             DistillationPipeline::query_fingerprint(
                 content,
                 DistillationPipeline::default_extractor,

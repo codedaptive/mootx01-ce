@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.28.0
+version: 1.29.0
 status: accepted-1.1-target
-date: 2026-08-13
+date: 2026-08-20
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -2079,6 +2079,8 @@ Probe order is recency with id tiebreak, so same-seed estates write
 the same associations.
 
 ### 1.23.0 -- 2026-08-05
+
+- **v1.29.0 (2026-08-20)** — Distillation pipeline contract p2-det (DECISION_DENSE_LANE_ENRICHMENT Wave 2, stage B): the p1 rendering gains a deterministic categorizer trailer — HMM noun classification → EideticLib FDC anchor (root class "000" skipped) → frame label + first-ancestor label, rendered in grammar v1 (labels comma-truncated to stay grammar-safe), capped at 6 deduplicated facts. Facts derive from the VERBATIM content; the trailer rides the distilled lane only, where CorpusKit's trailer lexical supplement admits it to BM25. distilled_token_count now measures the enriched rendering. The version bump re-distills estates lazily via the existing sweep.
 
 - **VectorSimilaritySignal probe window parameterized.**
   `spec(...)` gains `probeLimit: Int = defaultProbeLimit` (Swift) /

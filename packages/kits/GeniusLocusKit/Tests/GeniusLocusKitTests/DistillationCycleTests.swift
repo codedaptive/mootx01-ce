@@ -196,10 +196,13 @@ struct DistillationCycleTests {
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [itemID]).first)
-        // The §7.6 transform's canonical rendering of the §5.4 example.
-        #expect(row.distilled == "My favorite color blue.")
+        // The §7.6 transform's canonical rendering of the §5.4 example,
+        // with the p2 categorizer trailer welded on (any anchoring noun in
+        // the content may contribute; the prefix is the compaction pin).
+        let distilledText = try #require(row.distilled)
+        #expect(distilledText.hasPrefix("My favorite color blue."))
         #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
-        #expect(row.distilledTokenCount == TokenCompaction.estimateTokenCount("My favorite color blue."))
+        #expect(row.distilledTokenCount == TokenCompaction.estimateTokenCount(distilledText))
     }
 
     // MARK: - §7.5/§8: lane entry independence and re-key
