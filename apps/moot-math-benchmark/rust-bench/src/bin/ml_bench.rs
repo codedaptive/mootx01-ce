@@ -1,7 +1,8 @@
 // src/bin/ml_bench.rs
 //
 // SubstrateML algorithm benchmark sweep. Measures per-(algorithm,
-// size, params) latency for the 15 SubstrateML algorithms — the
+// size, params) latency for the 15 SubstrateML algorithms plus the
+// GLK matrix_decayed_projection maintenance pass (16 total) — the
 // cold-path / dreaming-daemon math — and emits structured JSON.
 //
 // Rust mirror of swift/Sources/MLBench/main.swift.
@@ -18,7 +19,7 @@
 // USAGE
 //
 //   ml-bench [--seed <0xhex>]
-//            [--algorithm <name>]   (one of the 15 algorithms or `all`)
+//            [--algorithm <name>]   (one of the 16 algorithms or `all`)
 //            [--out <path>]          (.json file or directory)
 //            [--quick]               (smaller sweep for iteration)
 
@@ -31,6 +32,11 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use harness::{hardware, SplitMix64};
+
+use genius_locus_kit::audit::log::EntryUUID;
+use genius_locus_kit::matrix::matrix::MatrixTier;
+use genius_locus_kit::{AuditTier, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
+use substrate_types::hlc::HLC as GlkHLC;
 
 use substrate_ml::moment_summary::TimeRange;
 use substrate_types::fingerprint256::Fingerprint256;
@@ -602,6 +608,89 @@ fn measure_temporal_compression(
     out
 }
 
+fn measure_matrix_decayed_projection(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
+    // S4-C decayed matrix projections (W2.5): the per-entry
+    // exp(-age*ln2/tau) FULL-recompute pass that runs in every
+    // matrix-tier maintenance cycle — O(audit log) by design (fp
+    // non-associativity forbids incremental decay). Graded log sizes
+    // characterize the maintenance cost as estates grow. Synthetic
+    // log: one capture bundle every 15 minutes, 4 bitmap-field entries
+    // per bundle, ages spread so decay weights vary; now_ms is one day
+    // past the last bundle. The 15-minute spacing keeps a CONSTANT
+    // ~17 bundles inside the 256-minute temporal-causality fold
+    // window, so cells scale linearly with log size (the production
+    // question). Denser spacing multiplies window pairing, not
+    // log-size scaling — a 1-minute spacing made the 100k cell run
+    // for minutes per call. Twin of Swift
+    // measureMatrixDecayedProjection.
+    let mut out = Vec::new();
+    let fields = [
+        "bitmap.adjective",
+        "bitmap.operational",
+        "bitmap.temporal",
+        "bitmap.provenance",
+    ];
+    for n_entries in [1_000usize, 10_000, 100_000] {
+        let bundles = n_entries / 4;
+        let base_ms: i64 = 1_700_000_000_000;
+        let mut log = UnifiedAuditLog::new();
+        for b in 0..bundles {
+            let w0 = rng.next();
+            let w1 = rng.next();
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&w0.to_le_bytes());
+            bytes[8..].copy_from_slice(&w1.to_le_bytes());
+            let row = EntryUUID(bytes);
+            let at = GlkHLC {
+                physical_time: base_ms + (b as i64) * 900_000,
+                logical_count: 0,
+                node_id: 1,
+            };
+            for field in fields {
+                // |1 keeps every bitmap non-zero so each entry yields a
+                // coordinate.
+                log.add(UnifiedAuditEntry::new(
+                    AuditTier::Locus,
+                    at,
+                    UnifiedAuditVerb::Capture,
+                    row,
+                    field,
+                    UnifiedAuditValue::Null,
+                    UnifiedAuditValue::Bitmap(rng.next() | 1),
+                    None,
+                ));
+            }
+        }
+        let now_ms = base_ms + (bundles as i64) * 900_000 + 86_400_000;
+        let t = time_loop(warmup, measure, || {
+            black_box(MatrixTier::decayed_co_occurrence(&log, now_ms));
+        });
+        out.push(make(
+            "matrix_decayed_co_occurrence",
+            format!("entries={}", n_entries),
+            t,
+        ));
+        let t = time_loop(warmup, measure, || {
+            black_box(MatrixTier::rebuild_temporal_from_with_decay(
+                &log,
+                GlkHLC::zero(),
+                &std::collections::HashMap::new(),
+                Some(now_ms),
+            ));
+        });
+        out.push(make(
+            "matrix_rebuild_temporal_decayed",
+            format!("entries={}", n_entries),
+            t,
+        ));
+    }
+    out
+}
+
 fn write_report(
     out: &Path,
     seed: u64,
@@ -645,7 +734,8 @@ fn usage() -> ! {
     eprintln!("Algorithms: anomaly, bradley_terry, community_detection, composite_distance,");
     eprintln!("            eigenvalue_centrality, feature_extractors, fft, float_simhash,");
     eprintln!("            info_theory, lattice_distance, llm_calibration, moment_summary,");
-    eprintln!("            nmf, random_walks, temporal_compression, all (default: all)");
+    eprintln!("            nmf, random_walks, temporal_compression,
+            matrix_decayed_projection, all (default: all)");
     process::exit(2);
 }
 
@@ -720,6 +810,7 @@ fn main() {
     run!("nmf", measure_nmf);
     run!("random_walks", measure_random_walks);
     run!("temporal_compression", measure_temporal_compression);
+    run!("matrix_decayed_projection", measure_matrix_decayed_projection);
     let out = match out_arg {
         Some(p) => {
             if p.is_dir() || p.extension().is_none() {

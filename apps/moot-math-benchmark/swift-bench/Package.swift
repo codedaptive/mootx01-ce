@@ -38,6 +38,9 @@ let package = Package(
         .package(path: "../../../packages/libs/SubstrateTypes"),
         .package(path: "../../../packages/libs/SubstrateML"),
         .package(path: "../../../packages/libs/LatticeLib"),
+        // ml-bench matrix_decayed_projection cells time the production
+        // S4-C maintenance-pass math (MatrixTier decayed projections).
+        .package(path: "../../../packages/kits/GeniusLocusKit"),
     ],
     targets: [
         .executableTarget(
@@ -65,6 +68,7 @@ let package = Package(
                 .product(name: "Harness", package: "swift"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
             ]
         ),
         .executableTarget(

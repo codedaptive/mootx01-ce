@@ -1,7 +1,8 @@
 // MLBench/main.swift
 //
 // SubstrateML algorithm benchmark sweep. Measures per-(algorithm,
-// size, params) latency for the 15 SubstrateML algorithms — the
+// size, params) latency for the 15 SubstrateML algorithms plus the
+// GLK matrix_decayed_projection maintenance pass (16 total) — the
 // cold-path / dreaming-daemon math — and emits structured JSON.
 //
 // Swift mirror of rust/src/bin/ml_bench.rs.
@@ -12,6 +13,7 @@ import Foundation
 import Harness
 import SubstrateTypes
 import SubstrateML
+import GeniusLocusKit
 
 let DEFAULT_SEED: UInt64 = 0xCAFEBABEDEADBEEF
 let WARMUP_FULL_NS: UInt64 = 50_000_000   // 50 ms
@@ -385,6 +387,60 @@ func measureTemporalCompression(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: U
     return out
 }
 
+func measureMatrixDecayedProjection(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measurement] {
+    // S4-C decayed matrix projections (W2.5): the per-entry
+    // exp(−age·ln2/τ) FULL-recompute pass that runs in every matrix-tier
+    // maintenance cycle — O(audit log) by design (fp non-associativity
+    // forbids incremental decay). Graded log sizes characterize the
+    // maintenance cost as estates grow. Synthetic log: one capture
+    // bundle every 15 minutes, 4 bitmap-field entries per bundle, ages
+    // spread so decay weights vary; nowMs is one day past the last
+    // bundle. The 15-minute spacing keeps a CONSTANT ~17 bundles inside
+    // the 256-minute temporal-causality fold window, so cells scale
+    // linearly with log size (the production question). Denser spacing
+    // multiplies window pairing, not log-size scaling — a 1-minute
+    // spacing made the 100k cell run for minutes per call.
+    var out: [Measurement] = []
+    for nEntries in [1_000, 10_000, 100_000] {
+        let bundles = nEntries / 4
+        var entries: [UnifiedAuditEntry] = []
+        entries.reserveCapacity(nEntries)
+        let baseMs: Int64 = 1_700_000_000_000
+        let fields = ["bitmap.adjective", "bitmap.operational", "bitmap.temporal", "bitmap.provenance"]
+        for b in 0..<bundles {
+            let w0 = rng.next(), w1 = rng.next()
+            var bytes = [UInt8](repeating: 0, count: 16)
+            for j in 0..<8 {
+                bytes[j] = UInt8((w0 >> (UInt64(j) * 8)) & 0xFF)
+                bytes[8 + j] = UInt8((w1 >> (UInt64(j) * 8)) & 0xFF)
+            }
+            let row = UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                                  bytes[4], bytes[5], bytes[6], bytes[7],
+                                  bytes[8], bytes[9], bytes[10], bytes[11],
+                                  bytes[12], bytes[13], bytes[14], bytes[15]))
+            let at = HLC(physicalTime: baseMs + Int64(b) * 900_000, logicalCount: 0, nodeID: 1)
+            for field in fields {
+                // |1 keeps every bitmap non-zero so each entry yields a coordinate.
+                entries.append(UnifiedAuditEntry(
+                    tier: .locus, hlc: at, verb: .capture, rowID: row,
+                    fieldPath: field, beforeValue: .null,
+                    afterValue: .bitmap(rng.next() | 1)))
+            }
+        }
+        let log = UnifiedAuditLog(entries: entries)
+        let nowMs = baseMs + Int64(bundles) * 900_000 + 86_400_000
+        var t = timeLoop(warmupNs: wu, measureNs: me) {
+            blackHole(MatrixTier.decayedCoOccurrence(from: log, nowMs: nowMs))
+        }
+        out.append(make("matrix_decayed_co_occurrence", "entries=\(nEntries)", t))
+        t = timeLoop(warmupNs: wu, measureNs: me) {
+            blackHole(MatrixTier.rebuildTemporal(from: log, decayNowMs: nowMs))
+        }
+        out.append(make("matrix_rebuild_temporal_decayed", "entries=\(nEntries)", t))
+    }
+    return out
+}
+
 // ---------- JSON output ----------
 
 func writeReport(out: URL, seed: UInt64, quick: Bool, measurements: [Measurement]) throws {
@@ -491,6 +547,7 @@ runIf("moment_summary", measureMomentSummary)
 runIf("nmf", measureNMF)
 runIf("random_walks", measureRandomWalks)
 runIf("temporal_compression", measureTemporalCompression)
+runIf("matrix_decayed_projection", measureMatrixDecayedProjection)
 
 let df = DateFormatter()
 df.dateFormat = "yyyy-MM-dd"

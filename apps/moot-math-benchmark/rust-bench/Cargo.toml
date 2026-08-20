@@ -45,6 +45,9 @@ substrate-types = { path = "../../../packages/libs/SubstrateTypes/rust" }
 substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../packages/libs/SubstrateML/rust" }
 lattice-lib = { path = "../../../packages/libs/LatticeLib/rust" }
+# ml-bench matrix_decayed_projection cells time the production S4-C
+# maintenance-pass math (MatrixTier decayed projections).
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 
 [features]
 default = ["simd-nightly"]
