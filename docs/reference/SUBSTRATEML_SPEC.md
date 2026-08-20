@@ -1,6 +1,6 @@
 ---
 title: SubstrateML Specification
-version: 1.4.0
+version: 1.5.0
 status: active
 date: 2026-08-20
 description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
@@ -1307,7 +1307,9 @@ DeltaFeatureExtractor, DistillationScorer, DistillationPipeline, conformance);
 conformance). § 6 error model extended with JacobiSVD preconditions.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.4.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2-det" → "p2.1-det" (Wikidata-subset fact upgrade in the GLK categorizer).
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.5.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2.1-det" → "p2.2-det" (multi-word entity anchoring).
+
+- **1.4.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2-det" → "p2.1-det" (Wikidata-subset fact upgrade in the GLK categorizer).
 
 - **v1.3.0 (2026-08-20)** — DistillationPipelineVersion.current: "p1" → "p2-det" (rendering contract now includes the GLK categorizer trailer; the constant lives here, the stage lives in GeniusLocusKit). Version-mismatch sweeps re-distill all estates lazily.
 

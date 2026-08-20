@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.30.0
+version: 1.31.0
 status: accepted-1.1-target
 date: 2026-08-20
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
@@ -2079,6 +2079,8 @@ Probe order is recency with id tiebreak, so same-seed estates write
 the same associations.
 
 ### 1.23.0 -- 2026-08-05
+
+- **1.31.0 (2026-08-20)** — Pipeline p2.2-det: multi-word entity pre-pass — greedy longest-match (5..2-word n-grams) against the vendored multi-word labels before single-token anchoring; matched tokens consumed. Contract change → lazy re-distill.
 
 - **1.30.0 (2026-08-20)** — Distillation pipeline p2.1-det: the categorizer prefers the vendored Wikidata facts when the anchor carries a Q-ID — kind from the first QIDClosure taxonomic ancestor label, place + country from P17 — with the FDC frame label retained as the fdc fact and kind fallback. Rendering contract change → version bump re-distills lazily.
 

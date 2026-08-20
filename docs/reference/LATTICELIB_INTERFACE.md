@@ -1,6 +1,6 @@
 ---
 title: LatticeLib Interface
-version: 1.5.0
+version: 1.6.0
 description: Public API surface for LatticeLib in both the Swift and Rust ports.
 status: active
 spec_type: kit
@@ -1147,6 +1147,8 @@ than reimplementing the ancestor walk inline (Gate 2 compliance). Added the new
 façade row to the concordance table. Drift summary updated.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.5.0 (2026-08-20)** — `QIDFacts.label(for:)`, `countryQID(for:)`, `countryLabel(for:)`, `isAvailable`, `dataVersion` (Rust qid_facts::label/country_qid/country_label/is_available/data_version).
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.6.0 (2026-08-20)** — `QIDFacts.qid(forPhrase:)` (Rust `qid_for_phrase`): multi-word-label → Q-ID index, smallest Q-ID wins on collisions; single-word phrases return nil by design.
+
+- **1.5.0 (2026-08-20)** — `QIDFacts.label(for:)`, `countryQID(for:)`, `countryLabel(for:)`, `isAvailable`, `dataVersion` (Rust qid_facts::label/country_qid/country_label/is_available/data_version).
 
 
