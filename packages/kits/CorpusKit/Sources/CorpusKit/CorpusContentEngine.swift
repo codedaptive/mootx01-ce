@@ -1962,7 +1962,12 @@ public actor CorpusContentEngine {
 
     /// One index unit: its derived-row key plus the two text surfaces.
     ///
-    /// `text` is always the LEXICAL text — used for BM25 keyword tokenisation.
+    /// `text` is the LEXICAL text — used for BM25 keyword tokenisation. For
+    /// whole-content units it is the verbatim canonical text PLUS the
+    /// grammar-v1 enrichment-trailer tokens scanned from the dense text
+    /// (`TrailerGrammar.lexicalSupplement`, DECISION_DENSE_LANE_ENRICHMENT
+    /// Wave-2 ruling: trailer facts are keyword-indexed; the verbatim
+    /// canonical text itself is never modified and remains the payload).
     /// `denseText` is the dense-composition text for the float vector lane; nil
     /// means fall back to `text` (default). Separating the two here keeps the
     /// BM25 / dense-embedding split explicit through every downstream code path
@@ -1993,8 +1998,13 @@ public actor CorpusContentEngine {
             // Whole-content unit: lexical text for BM25; dense-composition
             // text (when set) for vector embedding. The two paths stay
             // independent through replaceUnits and prepareIndex.
+            // Lexical text = verbatim + trailer tokens (anarrow shape). The
+            // supplement affects TOKENISATION only; the returned payload is
+            // resolved from the canonical record, never from this unit.
             units = [IndexUnit(
-                key: record.id, text: record.text,
+                key: record.id,
+                text: record.text + TrailerGrammar.lexicalSupplement(
+                    fromDenseText: record.denseCompositionText),
                 denseText: record.denseCompositionText)]
 #if CORPUSKIT_STANDALONE_PASSAGES
         case .tokenWindows(let window, let overlap):

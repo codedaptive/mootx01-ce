@@ -2152,7 +2152,18 @@ impl CorpusContentEngine {
             CorpusIndexUnitPolicy::WholeContent => {
                 // Carry dense_composition_text so embed_pair uses
                 // effective_dense_text (dense when supplied, lexical when None).
-                vec![(record.id.clone(), record.text.clone(), record.dense_composition_text.clone())]
+                // Lexical text = verbatim + grammar-v1 trailer tokens scanned
+                // from the dense text (anarrow shape, twin of Swift): the
+                // supplement affects BM25 TOKENISATION only — the canonical
+                // record text is unmodified and remains the payload.
+                let lexical = format!(
+                    "{}{}",
+                    record.text,
+                    crate::trailer_lexical_supplement::lexical_supplement(
+                        record.dense_composition_text.as_deref()
+                    )
+                );
+                vec![(record.id.clone(), lexical, record.dense_composition_text.clone())]
             }
             #[cfg(feature = "standalone-passages")]
             CorpusIndexUnitPolicy::TokenWindows {

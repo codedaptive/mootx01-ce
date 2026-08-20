@@ -37,6 +37,7 @@ pub mod chunker;
 // Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
 pub mod content;
 pub mod content_engine;
+pub mod trailer_lexical_supplement;
 pub mod content_engine_queue;
 pub mod corpus;
 pub mod corpus_ingest_queue;
