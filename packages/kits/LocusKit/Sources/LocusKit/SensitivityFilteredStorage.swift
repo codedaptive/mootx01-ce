@@ -100,11 +100,9 @@
 // The ceiling is now dynamic, backed by TierAuthorizationStore. When the user
 // revokes authorization for a tier, retractAndLowerCeiling(to:tables:) is called:
 //
-// 1. Queries base storage for rows in the sensitive table(s) whose adjectiveBitmap
-//    exceeds the new (lower) ceiling.
-// 2. Yields a synthetic delete TableChange (tombstone intent) per above-ceiling
-//    row into the retraction stream.
-// 3. Updates the ceiling atomically.
+// 1. Lowers the local ceiling first, immediately blocking new above-ceiling egress.
+// 2. Queries base storage for rows above the new ceiling.
+// 3. Losslessly yields a tombstone intent for every such row or throws.
 //
 // The retraction stream is merged into the "drawers" observer stream so the sync
 // engine's recordOutbound picks up the tombstones and ships them on the next push.
@@ -119,6 +117,12 @@ import os
 import PersistenceKit
 
 // MARK: - Error
+
+public enum SensitivityRetractionError: Error, Sendable, Equatable {
+    case missingRowIdentifier(table: String)
+    case streamTerminated(table: String, rowKey: UUID)
+    case streamDropped(table: String, rowKey: UUID)
+}
 
 /// Thrown by SensitivityFilteredRowStore when an inbound sync write carries a row
 /// whose adjectiveBitmap sensitivity tier exceeds the configured syncCeiling.
@@ -388,14 +392,14 @@ private struct SensitivityFilteredRowStore: RowStore {
         let ceiling = ceilingGetter()
         // Pre-flight: check whether the row being deleted is above-ceiling locally.
         // Use the same predicate as the delete so this compiles to one DB lookup.
-        let existing = try? await base.query(
+        let existing = try await base.query(
             table: table,
             where: predicate,
             orderBy: [],
             limit: 1,
             offset: nil
         )
-        if let row = existing?.first, exceedsCeiling(row.values, ceiling: ceiling) {
+        if let row = existing.first, exceedsCeiling(row.values, ceiling: ceiling) {
             // Row exists locally and is above the sensitivity ceiling.
             // Block the inbound tombstone — the local restricted copy must survive.
             // Caller-initiated deletes use delete() (not deleteSync()) so they are
@@ -509,7 +513,7 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
         self.base = base
         self._ceiling = OSAllocatedUnfairLock(initialState: ceiling)
         let (stream, continuation) = AsyncStream<TableChange>.makeStream(
-            bufferingPolicy: .bufferingNewest(256))
+            bufferingPolicy: .unbounded)
         self._retractionStream = stream
         self._retractionContinuation = continuation
     }
@@ -524,7 +528,7 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
     public var rowStore: any RowStore {
         SensitivityFilteredRowStore(
             base: base.rowStore,
-            ceilingGetter: { [weak self] in self?.syncCeiling ?? .elevated })
+            ceilingGetter: { [self] in self.syncCeiling })
     }
 
     public var blobStore: any BlobStore { base.blobStore }
@@ -537,7 +541,7 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
     public var observer: any StorageObserver {
         SensitivityFilteredObserver(
             base: base.observer,
-            ceilingGetter: { [weak self] in self?.syncCeiling ?? .elevated },
+            ceilingGetter: { [self] in self.syncCeiling },
             retractionStream: _retractionStream)
     }
 
@@ -599,25 +603,40 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
     public func retractAndLowerCeiling(
         to newCeiling: AdjectiveSensitivity,
         tables: [String]
-    ) async {
+    ) async throws {
         // Ceiling is updated FIRST so no concurrent observer Task can slip an
         // above-ceiling UPDATE through the stale (higher) ceiling between the
         // last tombstone yield and the lock write (Perkins ADVISORY-2).
         _ceiling.withLock { $0 = newCeiling }
         for table in tables {
-            let rows = (try? await base.rowStore.query(
-                table: table, where: nil, orderBy: [], limit: nil, offset: nil)) ?? []
+            let rows = try await base.rowStore.query(
+                table: table, where: nil, orderBy: [], limit: nil, offset: nil)
             for row in rows {
                 guard exceedsCeiling(row.values, ceiling: newCeiling) else { continue }
                 // Extract row ID: drawers use the "id" UUID column.
-                guard case .uuid(let rowKey) = row.values["id"] else { continue }
-                _retractionContinuation.yield(TableChange(
+                guard case .uuid(let rowKey) = row.values["id"] else {
+                    throw SensitivityRetractionError.missingRowIdentifier(table: table)
+                }
+                let result = _retractionContinuation.yield(TableChange(
                     table: table,
                     event: .delete,
                     rowKey: rowKey,
                     values: nil,
                     origin: .local
                 ))
+                switch result {
+                case .enqueued:
+                    break
+                case .terminated:
+                    throw SensitivityRetractionError.streamTerminated(
+                        table: table, rowKey: rowKey)
+                case .dropped:
+                    throw SensitivityRetractionError.streamDropped(
+                        table: table, rowKey: rowKey)
+                @unknown default:
+                    throw SensitivityRetractionError.streamTerminated(
+                        table: table, rowKey: rowKey)
+                }
             }
         }
     }
