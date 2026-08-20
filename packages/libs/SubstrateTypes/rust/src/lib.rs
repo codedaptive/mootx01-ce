@@ -18,6 +18,7 @@ pub mod float_simhash_planes;
 pub mod fnv;
 pub mod gset;
 pub mod hamming;
+pub mod jaccard;
 pub mod hlc;
 pub mod hyperplane;
 pub mod lattice_anchor;
