@@ -1,6 +1,6 @@
 ---
 title: SubstrateML Interface
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-08-20
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
@@ -2330,6 +2330,8 @@ hash64. Updated the signature block for `RandomWalks` in the API section and add
 a concordance row. The existing indexed `walk(adjacency:start:length:...)` is unchanged.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **v1.3.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2-det" (Rust `DISTILLATION_PIPELINE_VERSION`).
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.4.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2.1-det".
+
+- **v1.3.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2-det" (Rust `DISTILLATION_PIPELINE_VERSION`).
 
 

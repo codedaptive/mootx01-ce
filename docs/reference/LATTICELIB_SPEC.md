@@ -1,8 +1,8 @@
 ---
 title: LatticeLib Specification
-version: v0.1
+version: v0.2
 status: active
-date: 2026-07-16
+date: 2026-08-20
 description: "Behavioral specification for LatticeLib: the FDC encoder, QID closure, and novel-token learning loop."
 spec_type: lib
 authors: MOOTx01 maintainers
@@ -406,3 +406,7 @@ The Snowball/Porter2 stemmer conformance is gated by
 ---
 
 *End of LatticeLib Specification.*
+
+## Changelog
+
+- **v0.2 (2026-08-20)** — QIDFacts: vendored Wikidata property subset (en labels + P17 country) for the canon QID universe (38,503 entries / 3,595 with country; run-once fetch tool tools/wikidata-subset/fetch_wikidata_facts.py — the runtime never queries Wikidata). Loaded once per process from the shared bundled artifact, twin ports, Paris/France cross-port pins.
