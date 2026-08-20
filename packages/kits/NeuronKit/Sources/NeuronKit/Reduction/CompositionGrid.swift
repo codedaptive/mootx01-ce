@@ -12,6 +12,7 @@
 // gauntlet and reads the per-tier leaderboard.
 
 import Foundation
+import SubstrateML
 
 extension NeuronKit {
 
@@ -131,6 +132,19 @@ extension NeuronKit {
                 .init(.temporalState, weight: 0.2),
                 .init(.lattice, weight: 0.2),
                 .init(.bm25, weight: 0.2),
+            ]),
+
+            // --- composite: cookbook §8.4, THE designed primary retrieval
+            // distance, activated by W2.5 Track M3. d = αL·lattice_distance
+            // + αF·hamming/256 with αL = αF = 0.5 at estate creation. The
+            // grid scores SIMILARITIES (1 − each normalized distance), so
+            // this weighted-similarity entry is the same ordering as the
+            // §8.4 distance (affine flip; weights ARE the §8.4 alphas, read
+            // from the designed constants so Track R's Bradley-Terry-learned
+            // alphas later flow through one source of truth).
+            .init(name: "composite", terms: [
+                .init(.lattice, weight: CompositeDistance.defaultAlphaLattice),
+                .init(.hamming, weight: CompositeDistance.defaultAlphaFingerprint),
             ]),
         ]
 

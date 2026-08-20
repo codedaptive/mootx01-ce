@@ -127,6 +127,23 @@ pub fn all() -> Vec<ReductionComposition> {
                 WeightedSignal::weighted(Bm25, 0.2),
             ],
         ),
+        // --- composite: cookbook §8.4, activated by W2.5 Track M3 (twin
+        // of the Swift entry — see its comment for the distance→similarity
+        // affine-flip argument; weights are the §8.4 alphas from the
+        // designed constants).
+        ReductionComposition::new(
+            "composite",
+            vec![
+                WeightedSignal::weighted(
+                    Lattice,
+                    substrate_ml::composite_distance::CompositeDistance::DEFAULT_ALPHA_LATTICE,
+                ),
+                WeightedSignal::weighted(
+                    Hamming,
+                    substrate_ml::composite_distance::CompositeDistance::DEFAULT_ALPHA_FINGERPRINT,
+                ),
+            ],
+        ),
     ]
 }
 
