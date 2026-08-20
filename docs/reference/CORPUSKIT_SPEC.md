@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.20.0
+version: 1.21.0
 status: accepted-1.1-target
-date: 2026-08-15
+date: 2026-08-20
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.20.0: MG-02, counts-invalidation sentinel and sentinel-preserving flush now documented for both ports; reindex-latch description corrected. 1.19.0: MG-01, counts-invalidation sentinel contract added to B-14. 1.18.2 disambiguates the two frozen-base senses (counts blob vs document count). 1.18.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason for standalone RI; B-22 guard 4 and RI per-provider behavior clarified."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1153,4 +1153,6 @@ deterministic, byte-identical cross-port). Updated B-12 to note the third
 (BasisStore) schema applied at init. Additive; no existing contract changed.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **v1.21.0 (2026-08-20)** — Trailer lexical supplement (DECISION_DENSE_LANE_ENRICHMENT Wave-2 delivery ruling): whole-content index units tokenize the verbatim canonical text PLUS the grammar-v1 enrichment-trailer tokens scanned (never regex) from the dense-composition text — the LAST well-formed `(*[ … ]*)` block. The canonical text itself is never modified and remains the payload; the supplement participates in BM25 keyword scoring only (measured basis: the anarrow oracle arm — temporal MRR 0.4154→0.4487, 3/11 never-rescued misses recovered; storage cost <1%). Supersedes the "text is always the lexical text" note. Passage-mode sub-spans remain verbatim-only.
+
+

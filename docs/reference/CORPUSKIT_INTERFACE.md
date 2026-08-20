@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-15
+date: 2026-08-20
 spec_type: kit
-version: 1.23.0
+version: 1.24.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.23.0: TASK-MXE-2026-0358, Swift sentinel API added to CorpusProviderCountsStore; persistCounts/restoreCounts documented in both ports; sentinel-preserving flush described. 1.22.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
 package: CorpusKit
 languages: [swift, rust]
@@ -2583,4 +2583,6 @@ round-trip law, and the cross-port byte-identity contract. Purely additive; no
 existing API changed.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **v1.24.0 (2026-08-20)** — `TrailerGrammar.lexicalSupplement(fromDenseText:) -> String` (Rust `trailer_lexical_supplement::lexical_supplement`): returns " " + inner text of the last well-formed trailer block, or "" (fail-quiet). Delimiter constants `open`/`close` (`(*[`, `]*)`).
+
+
