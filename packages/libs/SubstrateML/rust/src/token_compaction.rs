@@ -17,7 +17,8 @@
 // deterministic engine — the benchmarkable default.
 // p2.1: categorizer facts upgraded with the vendored Wikidata property
 // subset (qid_facts + qid_closure) — rendering contract change.
-pub const DISTILLATION_PIPELINE_VERSION: &str = "p2.1-det";
+// p2.2: multi-word entity anchoring (phrase pre-pass over vendored labels).
+pub const DISTILLATION_PIPELINE_VERSION: &str = "p2.2-det";
 
 /// Single-word drops (rule 2), matched against the lowercase word core.
 /// MUST stay identical to Swift `TokenCompaction.stopwords`.

@@ -53,12 +53,63 @@ enum EnrichmentStage {
     /// FDC ancestor — the hypernym chain the register-gap misses need
     /// ("painting" → arts). Labels are deduplicated across nouns; the
     /// first-seen order is preserved.
+    /// Longest phrase length attempted by the multi-word pre-pass. The
+    /// vendored label table tops out at ~5-word labels.
+    private static let maxPhraseWords = 5
+
     static func trailer(forContent content: String) -> String {
         var facts: [(label: String, value: String)] = []
         var seenValues = Set<String>()
         var seenNouns = Set<String>()
 
-        for rawToken in content.split(whereSeparator: { !$0.isLetter }) {
+        // MULTI-WORD ENTITY PRE-PASS (p2.2): greedy longest-match of content
+        // n-grams (5..2 words, lowercased, letter tokens) against the
+        // vendored multi-word labels. "rio de janeiro" anchors as a phrase
+        // where the single-token pass sees only "rio" (measured miss cause,
+        // ENRICHMENT_ORACLE study). Matched tokens are consumed so the
+        // single-token pass below never re-anchors fragments of a phrase.
+        let tokens = content.split(whereSeparator: { !$0.isLetter })
+            .map { $0.lowercased() }
+        var consumed = Set<Int>()
+        var i = 0
+        while i < tokens.count && facts.count < maxFacts {
+            var matched = false
+            var n = min(maxPhraseWords, tokens.count - i)
+            while n >= 2 {
+                let phrase = tokens[i..<(i + n)].joined(separator: " ")
+                if let qid = QIDFacts.qid(forPhrase: phrase) {
+                    for k in i..<(i + n) { consumed.insert(k) }
+                    if seenValues.insert("entity:\(phrase)").inserted {
+                        facts.append((label: "entity", value: phrase))
+                    }
+                    if facts.count < maxFacts,
+                       let country = QIDFacts.countryLabel(for: qid).map(Self.grammarSafe) {
+                        if seenValues.insert("place:\(phrase)").inserted,
+                           facts.count < maxFacts {
+                            facts.append((label: "place", value: phrase))
+                        }
+                        if facts.count < maxFacts,
+                           seenValues.insert("country:\(country)").inserted {
+                            facts.append((label: "country", value: country))
+                        }
+                    }
+                    if facts.count < maxFacts,
+                       let parent = QIDClosure.ancestors(of: qid).first,
+                       let kind = QIDFacts.label(for: parent).map(Self.grammarSafe),
+                       seenValues.insert("kind:\(kind)").inserted {
+                        facts.append((label: "kind", value: kind))
+                    }
+                    i += n
+                    matched = true
+                    break
+                }
+                n -= 1
+            }
+            if !matched { i += 1 }
+        }
+
+        for (tokenIndex, rawToken) in content.split(whereSeparator: { !$0.isLetter }).enumerated() {
+            if consumed.contains(tokenIndex) { continue }
             if facts.count >= maxFacts { break }
             let token = rawToken.lowercased()
             guard token.count >= minNounLength,

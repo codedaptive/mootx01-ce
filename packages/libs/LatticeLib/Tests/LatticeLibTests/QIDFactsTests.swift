@@ -22,4 +22,11 @@ struct QIDFactsTests {
         #expect(QIDFacts.label(for: "") == nil)
         #expect(QIDFacts.label(for: "Q999999999") == nil)
     }
+
+    @Test("multi-word phrase index (Rio de Janeiro → Brazil)")
+    func phrasePins() {
+        #expect(QIDFacts.qid(forPhrase: "rio de janeiro") == "Q8678")
+        #expect(QIDFacts.countryLabel(for: "Q8678") == "Brazil")
+        #expect(QIDFacts.qid(forPhrase: "rio") == nil)
+    }
 }

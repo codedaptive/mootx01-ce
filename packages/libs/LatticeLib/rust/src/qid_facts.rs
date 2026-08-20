@@ -53,6 +53,41 @@ pub fn country_label(qid: &str) -> Option<&'static str> {
     label(country_qid(qid)?)
 }
 
+static PHRASE_INDEX: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn phrase_index() -> &'static HashMap<String, String> {
+    PHRASE_INDEX.get_or_init(|| {
+        let mut index: HashMap<String, String> = HashMap::new();
+        if let Some(t) = table() {
+            for (qid, entry) in &t.facts {
+                let Some(label) = entry.label.as_deref() else { continue };
+                if !label.contains(' ') {
+                    continue;
+                }
+                let key = label.to_lowercase();
+                let num = |q: &str| q[1..].parse::<u64>().unwrap_or(u64::MAX);
+                match index.get(&key) {
+                    Some(existing) if num(existing) <= num(qid) => {}
+                    _ => {
+                        index.insert(key, qid.clone());
+                    }
+                }
+            }
+        }
+        index
+    })
+}
+
+/// The Q-ID whose MULTI-WORD English label matches `phrase` (lowercase,
+/// single-space joined), or None. Twin of Swift `QIDFacts.qid(forPhrase:)`;
+/// smallest Q-ID wins on lowercase-label collisions.
+pub fn qid_for_phrase(phrase: &str) -> Option<&'static str> {
+    if !phrase.contains(' ') {
+        return None;
+    }
+    phrase_index().get(phrase).map(String::as_str)
+}
+
 /// True when the bundled artifact parsed and the surface is ready.
 pub fn is_available() -> bool {
     table().is_some()
@@ -72,6 +107,13 @@ mod tests {
     fn loads() {
         assert!(is_available());
         assert_ne!(data_version(), "0.0.0-unavailable");
+    }
+
+    #[test]
+    fn phrase_pins() {
+        assert_eq!(qid_for_phrase("rio de janeiro"), Some("Q8678"));
+        assert_eq!(country_label("Q8678"), Some("Brazil"));
+        assert_eq!(qid_for_phrase("rio"), None);
     }
 
     #[test]

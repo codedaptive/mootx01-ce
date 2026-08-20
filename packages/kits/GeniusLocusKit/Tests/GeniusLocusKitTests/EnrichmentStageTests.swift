@@ -41,6 +41,16 @@ struct EnrichmentStageTests {
         #expect(!t.contains("entity: they"))
     }
 
+    @Test("multi-word entities anchor as phrases with country facts")
+    func multiWordAnchoring() {
+        let t = EnrichmentStage.trailer(
+            forContent: "We got back from an awesome trip to Rio de Janeiro yesterday.")
+        #expect(t.contains("entity: rio de janeiro"))
+        #expect(t.contains("country: brazil"))
+        // The fragments never re-anchor separately.
+        #expect(!t.contains("entity: rio,") && !t.contains("entity: janeiro"))
+    }
+
     @Test("facts are capped and deduplicated")
     func capAndDedup() {
         let long = Array(repeating: "painting music travel robot guitar camera festival", count: 5)

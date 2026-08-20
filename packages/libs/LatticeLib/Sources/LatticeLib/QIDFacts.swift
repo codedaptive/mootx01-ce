@@ -35,6 +35,36 @@ public enum QIDFacts {
         countryQID(for: qid).flatMap(label(for:))
     }
 
+    /// The Q-ID whose MULTI-WORD English label matches `phrase` (lowercase,
+    /// single-space joined), or nil. Single-word labels are deliberately
+    /// excluded — single tokens anchor through the Lexicon/EideticLib path;
+    /// this surface exists for multi-word entity anchoring
+    /// (DECISION_DENSE_LANE_ENRICHMENT v0.2, p2.2). When two Q-IDs share a
+    /// lowercase label the numerically smallest wins (deterministic).
+    public static func qid(forPhrase phrase: String) -> String? {
+        guard phrase.contains(" ") else { return nil }
+        return phraseIndex[phrase]
+    }
+
+    /// Lazily built lowercase multi-word label → Q-ID index.
+    private static let phraseIndex: [String: String] = {
+        guard let table else { return [:] }
+        var index: [String: String] = [:]
+        for (qid, entry) in table.facts {
+            guard let label = entry.label, label.contains(" ") else { continue }
+            let key = label.lowercased()
+            if let existing = index[key] {
+                // Numerically smallest Q-ID wins.
+                if (Int(qid.dropFirst()) ?? .max) < (Int(existing.dropFirst()) ?? .max) {
+                    index[key] = qid
+                }
+            } else {
+                index[key] = qid
+            }
+        }
+        return index
+    }()
+
     /// True when the bundled artifact loaded and the surface is ready.
     public static var isAvailable: Bool { table != nil }
 

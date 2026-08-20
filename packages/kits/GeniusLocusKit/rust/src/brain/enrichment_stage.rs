@@ -32,12 +32,82 @@ fn grammar_safe(label: &str) -> String {
 
 /// Builds the grammar-v1 trailer for an item's verbatim content, or ""
 /// when no noun anchors. Twin of Swift `EnrichmentStage.trailer(forContent:)`.
+/// Longest phrase length attempted by the multi-word pre-pass.
+const MAX_PHRASE_WORDS: usize = 5;
+
 pub fn enrichment_trailer(content: &str) -> String {
     let mut facts: Vec<(&'static str, String)> = Vec::new();
     let mut seen_values: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen_nouns: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // MULTI-WORD ENTITY PRE-PASS (p2.2): greedy longest-match against the
+    // vendored multi-word labels; matched tokens are consumed so the
+    // single-token pass never re-anchors phrase fragments. Twin of Swift.
+    let tokens: Vec<String> = content
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect();
+    let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < tokens.len() && facts.len() < ENRICHMENT_MAX_FACTS {
+        let mut matched = false;
+        let mut n = MAX_PHRASE_WORDS.min(tokens.len() - i);
+        while n >= 2 {
+            let phrase = tokens[i..i + n].join(" ");
+            if let Some(qid) = lattice_lib::qid_facts::qid_for_phrase(&phrase) {
+                for k in i..i + n {
+                    consumed.insert(k);
+                }
+                if seen_values.insert(format!("entity:{phrase}")) {
+                    facts.push(("entity", phrase.clone()));
+                }
+                if facts.len() < ENRICHMENT_MAX_FACTS {
+                    if let Some(country) = lattice_lib::qid_facts::country_label(qid) {
+                        let country = grammar_safe(country);
+                        if facts.len() < ENRICHMENT_MAX_FACTS
+                            && seen_values.insert(format!("place:{phrase}"))
+                        {
+                            facts.push(("place", phrase.clone()));
+                        }
+                        if facts.len() < ENRICHMENT_MAX_FACTS
+                            && seen_values.insert(format!("country:{country}"))
+                        {
+                            facts.push(("country", country));
+                        }
+                    }
+                }
+                if facts.len() < ENRICHMENT_MAX_FACTS {
+                    if let Some(parent) = lattice_lib::qid_closure::ancestors(qid).first() {
+                        if let Some(kind) = lattice_lib::qid_facts::label(parent) {
+                            let kind = grammar_safe(kind);
+                            if seen_values.insert(format!("kind:{kind}")) {
+                                facts.push(("kind", kind));
+                            }
+                        }
+                    }
+                }
+                i += n;
+                matched = true;
+                break;
+            }
+            n -= 1;
+        }
+        if !matched {
+            i += 1;
+        }
+    }
+
+    let mut token_index_iter = 0usize;
     for raw in content.split(|c: char| !c.is_alphabetic()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let this_index = token_index_iter;
+        token_index_iter += 1;
+        if consumed.contains(&this_index) {
+            continue;
+        }
         if facts.len() >= ENRICHMENT_MAX_FACTS {
             break;
         }
@@ -152,6 +222,14 @@ mod tests {
         let t = enrichment_trailer("The idea is that they have been with you and them about it.");
         assert!(!t.contains("entity: the"));
         assert!(!t.contains("entity: they"));
+    }
+
+    #[test]
+    fn multi_word_anchoring() {
+        let t = enrichment_trailer("We got back from an awesome trip to Rio de Janeiro yesterday.");
+        assert!(t.contains("entity: rio de janeiro"), "{t}");
+        assert!(t.contains("country: brazil"), "{t}");
+        assert!(!t.contains("entity: rio,") && !t.contains("entity: janeiro"));
     }
 
     #[test]

@@ -62,7 +62,10 @@ public enum DistillationPipelineVersion {
     /// p2.1: the categorizer's facts upgraded with the vendored Wikidata
     /// property subset (QIDFacts: en labels + P17 country; QIDClosure
     /// taxonomic kind) — rendering contract change, hence the bump.
-    public static let current = "p2.1-det"
+    /// p2.2: multi-word entity anchoring — the categorizer greedy-matches
+    /// content n-grams against the vendored multi-word labels before the
+    /// single-token pass ("rio de janeiro" anchors as a phrase).
+    public static let current = "p2.2-det"
 }
 
 /// The §7.6 token-compaction transform and §6 token estimator. No
