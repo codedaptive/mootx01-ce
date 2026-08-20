@@ -266,7 +266,12 @@ mod tests {
         assert!(!m.served_from_content);
         assert!(m.token_count.is_some(), "per-hit token count (§13.4)");
         assert_ne!(m.text, body, "payload is the dense rendering");
-        assert!(m.text.len() < body.len(), "strictly smaller payload");
+        // The p2 categorizer trailer is welded to the dense body, so the
+        // payload is no longer guaranteed strictly smaller than short
+        // bodies; the contract is the dense rendering with a well-formed
+        // grammar-v1 trailer. Mirrors the Swift CK-DR-1 assertion.
+        assert!(m.text.contains(" (*[ ") && m.text.ends_with(" ]*)"),
+            "distilled payloads carry the p2 trailer");
         assert!(!m.text.starts_with("[DIST|"));
     }
 
