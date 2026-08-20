@@ -33,6 +33,14 @@ struct EnrichmentStageTests {
             forContent: "I finally finished my first full screenplay and printed it last Friday."))
     }
 
+    @Test("function words never become facts")
+    func stopwordsNeverAnchor() {
+        let t = EnrichmentStage.trailer(
+            forContent: "The idea is that they have been with you and them about it.")
+        #expect(!t.contains("entity: the"))
+        #expect(!t.contains("entity: they"))
+    }
+
     @Test("facts are capped and deduplicated")
     func capAndDedup() {
         let long = Array(repeating: "painting music travel robot guitar camera festival", count: 5)

@@ -26,6 +26,14 @@ enum EnrichmentStage {
     /// tokens produce junk FDC hits).
     private static let minNounLength = 3
 
+    /// Function words and conversational fillers that the word-class
+    /// baseline sometimes admits as nouns ("the" was observed anchoring to
+    /// a junk category on the first native build). Pinned identically in
+    /// both ports; extending it bumps the pipeline version.
+    private static let stopwords: Set<String> = [
+        "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
+    ]
+
     /// Lowercases a frame label and truncates at the first comma: the
     /// trailer grammar separates PAIRS with commas, so a label-internal
     /// comma ("general works, books and libraries, …") would forge extra
@@ -54,6 +62,7 @@ enum EnrichmentStage {
             if facts.count >= maxFacts { break }
             let token = rawToken.lowercased()
             guard token.count >= minNounLength,
+                  !stopwords.contains(token),
                   !seenNouns.contains(token),
                   LatticeLib.wordClass(token) == .noun else { continue }
             seenNouns.insert(token)

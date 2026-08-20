@@ -11,6 +11,13 @@ pub const ENRICHMENT_MAX_FACTS: usize = 6;
 /// Nouns shorter than this never anchor (Swift `minNounLength`).
 const MIN_NOUN_LENGTH: usize = 3;
 
+/// Function words and fillers the word-class baseline sometimes admits as
+/// nouns. Pinned identically to the Swift twin; extending it bumps the
+/// pipeline version.
+const STOPWORDS: [&str; 48] = [
+    "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
+];
+
 /// Lowercases a frame label and truncates at the first comma (the trailer
 /// grammar separates PAIRS with commas). Twin of Swift `grammarSafe`.
 fn grammar_safe(label: &str) -> String {
@@ -36,6 +43,7 @@ pub fn enrichment_trailer(content: &str) -> String {
         }
         let token = raw.to_lowercase();
         if token.chars().count() < MIN_NOUN_LENGTH
+            || STOPWORDS.contains(&token.as_str())
             || seen_nouns.contains(&token)
             || lattice_lib::word_class_table::word_class(&token) != lattice_lib::WordClass::Noun
         {
@@ -106,6 +114,13 @@ mod tests {
                 "");
         }
         assert_eq!(t, enrichment_trailer(content));
+    }
+
+    #[test]
+    fn stopwords_never_anchor() {
+        let t = enrichment_trailer("The idea is that they have been with you and them about it.");
+        assert!(!t.contains("entity: the"));
+        assert!(!t.contains("entity: they"));
     }
 
     #[test]
