@@ -60,6 +60,37 @@ pub fn enrichment_trailer(content: &str) -> String {
         if seen_values.insert(format!("entity:{token}")) {
             facts.push(("entity", token.clone()));
         }
+        // Wikidata property subset (DECISION v0.2): when the anchor carries
+        // a Q-ID, the vendored facts beat the FDC frame — `kind` from the
+        // first taxonomic ancestor's label, `place` + `country` from P17.
+        // The FDC frame label remains the `fdc` fact and the kind fallback.
+        let mut kind_emitted = false;
+        if let Some(qid) = anchor.wikidata_qid.as_deref().filter(|q| !q.is_empty()) {
+            if facts.len() < ENRICHMENT_MAX_FACTS {
+                if let Some(country) = lattice_lib::qid_facts::country_label(qid) {
+                    let country = grammar_safe(country);
+                    if seen_values.insert(format!("place:{token}")) {
+                        facts.push(("place", token.clone()));
+                    }
+                    if facts.len() < ENRICHMENT_MAX_FACTS
+                        && seen_values.insert(format!("country:{country}"))
+                    {
+                        facts.push(("country", country));
+                    }
+                }
+            }
+            if facts.len() < ENRICHMENT_MAX_FACTS {
+                if let Some(parent) = lattice_lib::qid_closure::ancestors(qid).first() {
+                    if let Some(kind) = lattice_lib::qid_facts::label(parent) {
+                        let kind = grammar_safe(kind);
+                        if seen_values.insert(format!("kind:{kind}")) {
+                            facts.push(("kind", kind));
+                            kind_emitted = true;
+                        }
+                    }
+                }
+            }
+        }
         if facts.len() < ENRICHMENT_MAX_FACTS {
             if let Some(label) = lattice_lib::fdc_runtime::Fdc::label(&anchor.code) {
                 let label = grammar_safe(&label);
@@ -68,7 +99,7 @@ pub fn enrichment_trailer(content: &str) -> String {
                 }
             }
         }
-        if facts.len() < ENRICHMENT_MAX_FACTS {
+        if !kind_emitted && facts.len() < ENRICHMENT_MAX_FACTS {
             if let Some(parent) = lattice_lib::fdc_runtime::Fdc::ancestors(&anchor.code).first() {
                 if let Some(kind) = lattice_lib::fdc_runtime::Fdc::label(parent) {
                     let kind = grammar_safe(&kind);

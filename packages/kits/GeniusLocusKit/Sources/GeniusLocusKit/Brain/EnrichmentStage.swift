@@ -75,12 +75,38 @@ enum EnrichmentStage {
             if seenValues.insert("entity:\(token)").inserted {
                 facts.append((label: "entity", value: token))
             }
+            // Wikidata property subset (DECISION v0.2): when the anchor
+            // carries a Q-ID, the vendored facts beat the FDC frame —
+            // `kind` from the first taxonomic ancestor's label, `place` +
+            // `country` from P17. The FDC frame label remains the `fdc`
+            // fact and the kind fallback.
+            var kindEmitted = false
+            if let qid = anchor.wikidataQID, !qid.isEmpty {
+                if facts.count < maxFacts,
+                   let country = QIDFacts.countryLabel(for: qid).map(Self.grammarSafe) {
+                    if seenValues.insert("place:\(token)").inserted {
+                        facts.append((label: "place", value: token))
+                    }
+                    if facts.count < maxFacts,
+                       seenValues.insert("country:\(country)").inserted {
+                        facts.append((label: "country", value: country))
+                    }
+                }
+                if facts.count < maxFacts,
+                   let parent = QIDClosure.ancestors(of: qid).first,
+                   let kind = QIDFacts.label(for: parent).map(Self.grammarSafe),
+                   seenValues.insert("kind:\(kind)").inserted {
+                    facts.append((label: "kind", value: kind))
+                    kindEmitted = true
+                }
+            }
             if facts.count < maxFacts,
                let label = FDC.label(for: anchor.code).map(Self.grammarSafe),
                seenValues.insert("fdc:\(label)").inserted {
                 facts.append((label: "fdc", value: label))
             }
-            if facts.count < maxFacts,
+            if !kindEmitted,
+               facts.count < maxFacts,
                let parent = FDC.ancestors(of: anchor.code).first,
                let kind = FDC.label(for: parent).map(Self.grammarSafe),
                seenValues.insert("kind:\(kind)").inserted {

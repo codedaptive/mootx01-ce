@@ -15,7 +15,9 @@
 // p2 (DECISION_DENSE_LANE_ENRICHMENT, Wave 2): p1 rendering + the
 // deterministic categorizer trailer (enrichment_stage). "-det" names the
 // deterministic engine — the benchmarkable default.
-pub const DISTILLATION_PIPELINE_VERSION: &str = "p2-det";
+// p2.1: categorizer facts upgraded with the vendored Wikidata property
+// subset (qid_facts + qid_closure) — rendering contract change.
+pub const DISTILLATION_PIPELINE_VERSION: &str = "p2.1-det";
 
 /// Single-word drops (rule 2), matched against the lowercase word core.
 /// MUST stay identical to Swift `TokenCompaction.stopwords`.

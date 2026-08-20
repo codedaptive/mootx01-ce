@@ -59,7 +59,10 @@ public enum DistillationPipelineVersion {
     /// the benchmarkable default; LLM engines record their own tags.
     /// Bumping this string re-distills every estate lazily via the
     /// existing sweep (version-mismatch eligibility).
-    public static let current = "p2-det"
+    /// p2.1: the categorizer's facts upgraded with the vendored Wikidata
+    /// property subset (QIDFacts: en labels + P17 country; QIDClosure
+    /// taxonomic kind) — rendering contract change, hence the bump.
+    public static let current = "p2.1-det"
 }
 
 /// The §7.6 token-compaction transform and §6 token estimator. No
