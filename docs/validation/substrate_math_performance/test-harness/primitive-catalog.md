@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-06-06
-last_updated: 2026-06-20
+last_updated: 2026-08-20
 ---
 
 # Primitive Catalog
@@ -17,14 +17,14 @@ This document is kept in sync with the registries in:
 
 ## Conformance state
 
-All 29 primitives in the Tier 1-3 tables below pass the conformance
+All 30 primitives in the Tier 1-3 tables below pass the conformance
 gate. Each has a committed vector file in `test-harness/vectors/`
-(29 `.json` files, one per primitive).
-A 30th primitive, `community_detection`, has a live reference but
+(30 `.json` files, one per primitive).
+A 31st primitive, `community_detection`, has a live reference but
 is not yet harnessed; it is listed under "Pending future work" and
 is NOT part of the conformance gate.
 
-For the 27 generator-driven primitives, the full four-way matrix is:
+For the 28 generator-driven primitives, the full four-way matrix is:
 
 | Vector file generated in | Validated by Swift | Validated by Rust |
 |---|---|---|
@@ -47,6 +47,7 @@ both languages for every primitive.
 |---|---|---|---|---|
 | `simhash` | `0xddd18e12` | §3.6 | `SubstrateTypes/Sources/SubstrateTypes/SimHash.swift` | `SubstrateTypes/rust/src/simhash.rs` |
 | `hamming` | `0xce4deb85` | §8.2 | `SubstrateTypes/Sources/SubstrateTypes/Hamming.swift` | `SubstrateTypes/rust/src/hamming.rs` |
+| `jaccard` | `0x2fe8941e` | §8.21 | `SubstrateTypes/Sources/SubstrateTypes/Jaccard.swift` | `SubstrateTypes/rust/src/jaccard.rs` |
 | `or_reduce` | `0x4ee84d73` | §8.5 | `SubstrateTypes/Sources/SubstrateTypes/ORReduce.swift` | `SubstrateTypes/rust/src/or_reduce.rs` |
 | `bitwise` | `0x05230c95` | §8.6 | `SubstrateTypes/Sources/SubstrateTypes/BitwiseArithmetic.swift` | `SubstrateTypes/rust/src/bitwise.rs` |
 | `fingerprint` | `0x4449238e` | §3.1 | `SubstrateTypes/Sources/SubstrateTypes/Fingerprint256.swift` | `SubstrateTypes/rust/src/fingerprint256.rs` |
@@ -106,19 +107,19 @@ The conformance CI at `.github/workflows/geniuslocus-conformance.yml`
 runs the four-way matrix on every push and pull request affecting
 the substrate or harness sources.
 
-Of the 29 conformant primitives, the 27 generator-driven ones run
+Of the 30 conformant primitives, the 28 generator-driven ones run
 through the generator-driven iterator below. The two hand-crafted
 primitives (`association_rule_mining` and `formal_concept_analysis`)
 are gated separately, as described in the note under the Tier 3
 table: their `generate()` throws, so CI validates them against
 checked-in hand-crafted vectors rather than regenerating from a
-seed. 27 generator-driven + 2 hand-crafted = all 29 conformant
+seed. 28 generator-driven + 2 hand-crafted = all 30 conformant
 primitives.
 
 The matrix iterator:
 
 ```sh
-for primitive in simhash hamming or_reduce bitwise anomaly hlc \
+for primitive in simhash hamming jaccard or_reduce bitwise anomaly hlc \
                  fingerprint bit_field_masked_equals \
                  lattice info_theory bradley_terry \
                  partial_state_recall temporal_compression \
@@ -134,7 +135,7 @@ for primitive in simhash hamming or_reduce bitwise anomaly hlc \
 done
 ```
 
-The loop above covers the 27 generator-driven primitives. The two
+The loop above covers the 28 generator-driven primitives. The two
 hand-crafted primitives (`association_rule_mining`,
 `formal_concept_analysis`) are validated in a separate CI step
 against their checked-in vectors. Any cell failing in either step

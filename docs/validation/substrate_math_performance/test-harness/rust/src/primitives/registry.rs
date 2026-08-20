@@ -17,6 +17,7 @@ use crate::primitives::hamming::HammingPrimitive;
 use crate::primitives::hamming_nn::HammingNNPrimitive;
 use crate::primitives::hlc::HLCPrimitive;
 use crate::primitives::info_theory::InfoTheoryPrimitive;
+use crate::primitives::jaccard::JaccardPrimitive;
 use crate::primitives::lattice::LatticePrimitive;
 use crate::primitives::matrix_decay::MatrixDecayPrimitive;
 use crate::primitives::merkle_commitment::MerkleCommitmentPrimitive;
@@ -62,6 +63,7 @@ pub fn all_primitives() -> Vec<PrimitiveDescriptor> {
         AssociationRuleMiningPrimitive::descriptor(),
         FormalConceptAnalysisPrimitive::descriptor(),
         HammingPrimitive::descriptor(),
+        JaccardPrimitive::descriptor(),
         ORReducePrimitive::descriptor(),
         BitwisePrimitive::descriptor(),
         HLCPrimitive::descriptor(),

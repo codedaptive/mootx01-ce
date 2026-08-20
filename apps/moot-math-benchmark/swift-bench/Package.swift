@@ -52,6 +52,11 @@ let package = Package(
             dependencies: [
                 .product(name: "Harness", package: "swift"),
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
+                // Jaccard metric variant benches the production
+                // SubstrateTypes.Jaccard scan (no kernel op exists;
+                // the product serves Jaccard from the brute-force
+                // engine only).
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
             ]
         ),
         .executableTarget(

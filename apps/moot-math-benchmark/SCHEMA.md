@@ -14,7 +14,11 @@ the result file will be rejected.
 
 Produced by the `topk-bench` binary. Sweeps `hamming_top_k` across
 K ∈ {1, 4, 10, 32, 100} × N ∈ {256, 1024, 4096, 16384, 65536, 262144,
-1048576} for every available kernel.
+1048576} for every available kernel. With `--metric jaccard` the same
+sweep runs the brute-force Jaccard scan (`op` `"jaccard_top_k"`,
+cookbook §8.21); Jaccard has no kernel op — the product serves it from
+the brute-force engine only — so every jaccard measurement reports
+kernel `"scalar"`.
 
 ```json
 {
@@ -50,7 +54,7 @@ K ∈ {1, 4, 10, 32, 100} × N ∈ {256, 1024, 4096, 16384, 65536, 262144,
 |---|---|---|---|
 | `schema_version` | string | yes | exactly `"topk-1"` |
 | `language` | string | yes | implementer chooses (`"rust"`, `"swift"`, `"go"`, `"python"`, etc.) |
-| `op` | string | yes | exactly `"hamming_top_k"` |
+| `op` | string | yes | `"hamming_top_k"`, or `"jaccard_top_k"` for `--metric jaccard` runs (all-scalar) |
 | `date` | string | yes | `YYYY-MM-DD` of the run |
 | `hardware_tag` | string | yes | short identifier, e.g. `"apple-m5-max"`, `"graviton4-c8g"`. No spaces. |
 | `seed` | string | yes | hex with `0x` prefix, e.g. `"0xcafebabedeadbeef"`. Determines random-input generation. |

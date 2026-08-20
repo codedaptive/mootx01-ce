@@ -73,6 +73,7 @@ public enum PrimitiveRegistry {
         SimHashPrimitive.descriptor,
         AnomalyPrimitive.descriptor,
         HammingPrimitive.descriptor,
+        JaccardPrimitive.descriptor,
         ORReducePrimitive.descriptor,
         BitwisePrimitive.descriptor,
         HLCPrimitive.descriptor,

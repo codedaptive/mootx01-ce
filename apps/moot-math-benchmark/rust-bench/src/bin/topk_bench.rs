@@ -22,12 +22,23 @@
 // USAGE
 //
 //   topk-bench [--seed <0xhex>]
-//              [--kernel <name>]    (default: all available)
+//              [--metric <name>]    (hamming | jaccard; default: hamming)
+//              [--kernel <name>]    (default: all available; hamming only)
 //              [--n <list>]         (default: 256,1024,4096,16384,
 //                                    65536,262144,1048576)
 //              [--k <list>]         (default: 1,4,10,32,100)
 //              [--out <path>]
 //              [--quick]
+//
+// METRIC jaccard (cookbook section 8.21, W2.5 Track M1): benches
+// the production substrate_types::jaccard similarity in a
+// brute-force top-K scan. There is no kernel Jaccard op — the
+// product serves BinaryMetric::Jaccard from the brute-force engine
+// only (MIH is Hamming-specific) — so the jaccard variant runs a
+// single scalar pass and reports kernel "scalar". Output op
+// "jaccard_top_k", default file jaccard_topk-rust.json; same
+// measurement fields as hamming_top_k so hamming-vs-jaccard scan
+// cost is a field diff.
 //
 // OUTPUT
 //
@@ -49,6 +60,7 @@ use harness::{hardware, kernel_registry};
 
 use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::jaccard;
 
 const DEFAULT_SEED: u64 = 0xCAFEBABEDEADBEEFu64;
 
@@ -77,11 +89,12 @@ struct Args {
     k_list: Vec<usize>,
     out: Option<String>,
     quick: bool,
+    metric: String,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: topk-bench [--seed <0xhex>] [--kernel <name>] \
+        "usage: topk-bench [--seed <0xhex>] [--metric <hamming|jaccard>] [--kernel <name>] \
          [--n <comma-list>] [--k <comma-list>] [--out <path>] [--quick]\n\
          \n\
          Defaults:\n\
@@ -125,6 +138,7 @@ fn parse_args() -> Args {
         k_list: DEFAULT_K.to_vec(),
         out: None,
         quick: false,
+        metric: "hamming".to_string(),
     };
     let mut i = 1;
     while i < argv.len() {
@@ -172,6 +186,17 @@ fn parse_args() -> Args {
                     usage();
                 }
                 args.out = Some(argv[i].clone());
+            }
+            "--metric" => {
+                i += 1;
+                if i >= argv.len() {
+                    usage();
+                }
+                if argv[i] != "hamming" && argv[i] != "jaccard" {
+                    eprintln!("unknown metric: {}", argv[i]);
+                    process::exit(2);
+                }
+                args.metric = argv[i].clone();
             }
             "--quick" => {
                 args.quick = true;
@@ -278,6 +303,74 @@ fn measure_top_k(
     }
 }
 
+/// Brute-force Jaccard top-K — the production scan shape (VectorKit
+/// serves BinaryMetric::Jaccard from the brute-force engine; per-pair
+/// math is substrate_types::jaccard). Descending insertion ladder,
+/// same workload shape as the kernels' hamming_top_k; scalar only.
+/// Twin of the Swift jaccardTopK in TopKBench/main.swift.
+fn jaccard_top_k(
+    probe: &Fingerprint256,
+    candidates: &[Fingerprint256],
+    k: usize,
+) -> Vec<(usize, f64)> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut best: Vec<(usize, f64)> = Vec::with_capacity(k);
+    for (i, c) in candidates.iter().enumerate() {
+        let s = jaccard::similarity(probe, c);
+        if best.len() < k {
+            let mut j = best.len();
+            best.push((i, s));
+            while j > 0 && best[j - 1].1 < s {
+                best[j] = best[j - 1];
+                j -= 1;
+            }
+            best[j] = (i, s);
+        } else if s > best[k - 1].1 {
+            let mut j = k - 1;
+            while j > 0 && best[j - 1].1 < s {
+                best[j] = best[j - 1];
+                j -= 1;
+            }
+            best[j] = (i, s);
+        }
+    }
+    best
+}
+
+fn measure_jaccard_top_k(
+    rng: &mut SplitMix64,
+    n: usize,
+    k: usize,
+    warmup: Duration,
+    measure: Duration,
+) -> TopKMeasurement {
+    let probe = fingerprint_from_rng(rng);
+    let candidates: Vec<Fingerprint256> = (0..n).map(|_| fingerprint_from_rng(rng)).collect();
+    let mut sink: f64 = 0.0;
+
+    let (iters, min, mean, stddev) = time_loop(warmup, measure, || {
+        let result = jaccard_top_k(&probe, &candidates, k);
+        if !result.is_empty() {
+            sink += result[0].1;
+        }
+    });
+    if sink == -1.0 {
+        eprintln!("# sink: {}", sink);
+    }
+
+    TopKMeasurement {
+        kernel: KernelKind::Scalar,
+        n,
+        k,
+        iterations: iters,
+        ns_min: min,
+        ns_mean: mean,
+        ns_stddev: stddev,
+    }
+}
+
 fn today_date_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
@@ -299,6 +392,7 @@ fn default_output_dir() -> PathBuf {
 fn write_json(
     ms: &[TopKMeasurement],
     path: &std::path::Path,
+    op: &str,
     seed: u64,
     warmup: Duration,
     measure: Duration,
@@ -309,7 +403,7 @@ fn write_json(
     writeln!(w, "{{")?;
     writeln!(w, "  \"schema_version\": \"topk-1\",")?;
     writeln!(w, "  \"language\": \"rust\",")?;
-    writeln!(w, "  \"op\": \"hamming_top_k\",")?;
+    writeln!(w, "  \"op\": \"{}\",", op)?;
     writeln!(w, "  \"date\": \"{}\",", today_date_utc())?;
     writeln!(w, "  \"hardware_tag\": \"{}\",", hardware::tag())?;
     writeln!(w, "  \"seed\": \"0x{:016x}\",", seed)?;
@@ -364,7 +458,11 @@ fn main() {
             eprintln!("failed to create output dir {}: {}", dir.display(), e);
             process::exit(1);
         }
-        dir.join("hamming_topk-rust.json")
+        if args.metric == "jaccard" {
+            dir.join("jaccard_topk-rust.json")
+        } else {
+            dir.join("hamming_topk-rust.json")
+        }
     };
 
     eprintln!("# topk-bench (rust)");
@@ -389,6 +487,24 @@ fn main() {
     eprintln!();
 
     let mut all_measurements: Vec<TopKMeasurement> = Vec::new();
+    if args.metric == "jaccard" {
+        // Single scalar pass: no kernel Jaccard op exists; the
+        // product serves Jaccard from the brute-force engine only.
+        eprintln!("  metric=jaccard (scalar brute-force scan)");
+        let mut rng = SplitMix64::new(args.seed);
+        for &n in &args.n_list {
+            for &k_val in &args.k_list {
+                let m = measure_jaccard_top_k(&mut rng, n, k_val, warmup, measure);
+                eprintln!(
+                    "    N={:>7}  K={:>4}  min: {:>9}ns  ({} iters)",
+                    n, k_val, m.ns_min, m.iterations
+                );
+                all_measurements.push(m);
+            }
+        }
+        eprintln!();
+    }
+    if args.metric == "hamming" {
     for k_kind in &kernels {
         let kernel = PortableKernel::of_kind(*k_kind);
         // Match the Swift mirror: if the dispatcher returned a
@@ -417,10 +533,12 @@ fn main() {
         }
         eprintln!();
     }
+    }
 
     if let Err(e) = write_json(
         &all_measurements,
         &out_path,
+        if args.metric == "jaccard" { "jaccard_top_k" } else { "hamming_top_k" },
         args.seed,
         warmup,
         measure,

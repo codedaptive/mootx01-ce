@@ -1,9 +1,9 @@
 ---
 title: GeniusLocus Substrate Conformance Harness Reference
-version: 1.0.2
+version: 1.1.0
 description: Single-source index of the substrate's conformance-gated primitives, their Swift/Rust API surfaces, test vectors, and file locations.
 status: implementation-grade specification
-date: 2026-06-20
+date: 2026-08-20
 author: MOOTx01 maintainers
 purpose: |
   Single-source index of the substrate's conformance-gated
@@ -42,10 +42,10 @@ Rust implementations are byte-for-byte identical on their canonical
 test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
-The gate currently holds **29** conformance-gated primitives (the
+The gate currently holds **30** conformance-gated primitives (the
 count of record is `primitive-catalog.md`, the machine-readable
 catalog, and the Swift/Rust harness registries — all three agree at
-29). This reference details all 29 in full below. For the canonical
+30). This reference details all 30 in full below. For the canonical
 gated-primitive list and CRC source of record, treat
 `primitive-catalog.md` as authoritative.
 
@@ -87,7 +87,7 @@ candidate for promotion (see §5).
 
 ---
 
-## §2. The conformance-gated primitives (29 indexed here)
+## §2. The conformance-gated primitives (30 indexed here)
 
 Each row tells an agent four things:
 1. **Where the math lives** (cookbook §).
@@ -108,6 +108,7 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 |---|---|---|---|
 | `simhash` | SubstrateTypes | `SimHash.swift` | `simhash.rs` |
 | `hamming` | SubstrateTypes | `Hamming.swift` | `hamming.rs` |
+| `jaccard` | SubstrateTypes | `Jaccard.swift` | `jaccard.rs` |
 | `or_reduce` | SubstrateTypes | `ORReduce.swift` | `or_reduce.rs` |
 | `bitwise` | SubstrateTypes | `BitwiseArithmetic.swift` | `bitwise.rs` |
 | `fingerprint` | SubstrateTypes | `Fingerprint256.swift` | `fingerprint256.rs` |
@@ -139,7 +140,7 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 (`AuditGate`, `Verbs`, and `RowStateAutomaton` are the orchestration
 layer in SubstrateLib — not gated primitives, so not in this table.)
 
-### §2.1. Tier 1 — atomic primitives (9 ops)
+### §2.1. Tier 1 — atomic primitives (10 ops)
 
 These are the substrate's irreducible bit operations. Any kit using
 these MUST call the substrate API named below — never a reimplementation
@@ -165,6 +166,21 @@ these MUST call the substrate API named below — never a reimplementation
 - **Vector:** `vectors/hamming.json`
 - **What:** Bit-count of XOR over two 256-bit fingerprints.
   Drives every nearest-neighbor query.
+
+#### `jaccard` — §8.21 — CRC `0x2fe8941e`
+- **Swift:** `Jaccard.{similarity,distance}(_:_:) -> Double`
+  in `packages/libs/SubstrateTypes/Sources/SubstrateTypes/Jaccard.swift`
+- **Rust:** `jaccard::{similarity,distance}(a:b:) -> f64`
+  in `packages/libs/SubstrateTypes/rust/src/jaccard.rs`
+- **Harness:** `JaccardPrimitive.swift` / `jaccard.rs`
+- **Vector:** `vectors/jaccard.json`
+- **What:** Jaccard set similarity over 256-bit fingerprints:
+  popcount(a AND b) / popcount(a OR b), distance = 1 − similarity.
+  Empty-union convention: both-empty → 0.0, never 1.0 (no evidence
+  must not read as a perfect match). Integer popcount operands make
+  the single f64 division bit-identical across ports. Backs the
+  VectorKit `BinaryMetric.jaccard` retrieval lane and the shaped
+  "jaccard" preset (W2.5 Track M1 activation).
 
 #### `or_reduce` — §8.5 — CRC `0x4ee84d73`
 - **Swift:** `Fingerprint256.orReduce(_ inputs: [Fingerprint256]) -> Fingerprint256`
@@ -847,6 +863,15 @@ you don't have to write are 12 lines of bugs you don't have to
 fix.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-08-20
+Added `jaccard` as the 30th conformance-gated primitive at CRC
+`0x2fe8941e` (cookbook §8.21, W2.5 Track M1 activation — the
+fingerprint set-overlap metric behind VectorKit's
+`BinaryMetric.jaccard`). Tier 1 grows to 10 ops; §0/§2 counts and
+the §2.0 package map updated. Vector file `vectors/jaccard.json`
+(34 cases: 32 seeded pairs cycling identical/complement/subset/
+independent, plus two fixed empty-union edge cases).
 
 ### 1.0.2 -- 2026-06-20
 Added `merkle_commitment` as the 29th conformance-gated primitive

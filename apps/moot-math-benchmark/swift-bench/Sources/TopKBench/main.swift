@@ -9,11 +9,21 @@
 // USAGE
 //
 //   topk-bench [--seed <0xhex>]
-//              [--kernel <name>]    (default: all available)
+//              [--metric <name>]    (hamming | jaccard; default: hamming)
+//              [--kernel <name>]    (default: all available; hamming only)
 //              [--n <list>]          (default: 256,1024,4096,16384,65536,262144,1048576)
 //              [--k <list>]          (default: 1,4,10,32,100)
 //              [--out <path>]
 //              [--quick]
+//
+// METRIC jaccard (cookbook §8.21, W2.5 Track M1): benches the
+// production SubstrateTypes.Jaccard similarity in a brute-force
+// top-K scan. There is no kernel Jaccard op — the product serves
+// BinaryMetric.jaccard from the brute-force engine only (MIH is
+// Hamming-specific) — so the jaccard variant runs a single scalar
+// pass and reports kernel "scalar". Output op "jaccard_top_k",
+// default file jaccard_topk-swift.json; same measurement fields as
+// hamming_top_k so hamming-vs-jaccard scan cost is a field diff.
 //
 // OUTPUT
 //
@@ -23,6 +33,7 @@
 import Foundation
 import Harness
 import GeniusLocusReference
+import SubstrateTypes
 
 let DEFAULT_SEED: UInt64 = 0xCAFEBABEDEADBEEF
 let DEFAULT_N: [Int] = [256, 1024, 4096, 16384, 65536, 262144, 1048576]
@@ -50,11 +61,12 @@ struct Args {
     var nList: [Int] = DEFAULT_N
     var kList: [Int] = DEFAULT_K
     var quick: Bool = false
+    var metric: String = "hamming"
 }
 
 func usage() -> Never {
     FileHandle.standardError.write("""
-    usage: topk-bench [--seed <0xhex>] [--kernel <name>] \
+    usage: topk-bench [--seed <0xhex>] [--metric <hamming|jaccard>] [--kernel <name>] \
     [--n <comma-list>] [--k <comma-list>] [--out <path>] [--quick]
 
     Defaults:
@@ -97,6 +109,14 @@ func parseArgs() -> Args {
                 exit(2)
             }
             args.kernel = k
+        case "--metric":
+            i += 1
+            guard i < cli.count else { usage() }
+            guard cli[i] == "hamming" || cli[i] == "jaccard" else {
+                FileHandle.standardError.write("unknown metric: \(cli[i])\n".data(using: .utf8)!)
+                exit(2)
+            }
+            args.metric = cli[i]
         case "--n":
             i += 1
             guard i < cli.count, let vs = parseList(cli[i]) else { usage() }
@@ -168,9 +188,9 @@ func timeLoop(warmupNS: UInt64, measureNS: UInt64, body: () -> Void)
     return (iters, minNS, UInt64(mean), UInt64(stddev))
 }
 
-func fingerprintFromRNG(_ rng: inout Harness.SplitMix64) -> Fingerprint256 {
-    return Fingerprint256(block0: rng.next(), block1: rng.next(),
-                          block2: rng.next(), block3: rng.next())
+func fingerprintFromRNG(_ rng: inout Harness.SplitMix64) -> GeniusLocusReference.Fingerprint256 {
+    return GeniusLocusReference.Fingerprint256(block0: rng.next(), block1: rng.next(),
+                                               block2: rng.next(), block3: rng.next())
 }
 
 func measureTopK(_ kernel: SubstrateKernel,
@@ -179,7 +199,7 @@ func measureTopK(_ kernel: SubstrateKernel,
                  _ warmupNS: UInt64, _ measureNS: UInt64) -> TopKMeasurement
 {
     let probe = fingerprintFromRNG(&rng)
-    let candidates: [Fingerprint256] = (0..<n).map { _ in fingerprintFromRNG(&rng) }
+    let candidates: [GeniusLocusReference.Fingerprint256] = (0..<n).map { _ in fingerprintFromRNG(&rng) }
     var sink: Int = 0
 
     let (its, mn, mu, sd) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
@@ -190,6 +210,66 @@ func measureTopK(_ kernel: SubstrateKernel,
 
     return TopKMeasurement(
         kernel: kernel.kind, n: n, k: k,
+        iterations: its, nsMin: mn, nsMean: mu, nsStddev: sd)
+}
+
+/// Brute-force Jaccard top-K over SubstrateTypes fingerprints — the
+/// production scan shape (VectorKit serves BinaryMetric.jaccard from
+/// the brute-force engine; per-pair math is SubstrateTypes.Jaccard).
+/// Descending insertion ladder, same workload shape as the kernels'
+/// hammingTopK; scalar only.
+func jaccardTopK(probe: SubstrateTypes.Fingerprint256,
+                 candidates: [SubstrateTypes.Fingerprint256],
+                 k: Int) -> [(index: Int, similarity: Double)]
+{
+    guard k > 0 else { return [] }
+    var best: [(index: Int, similarity: Double)] = []
+    best.reserveCapacity(k)
+    for (i, c) in candidates.enumerated() {
+        let s = Jaccard.similarity(probe, c)
+        if best.count < k {
+            var j = best.count
+            best.append((i, s))
+            while j > 0 && best[j - 1].similarity < s {
+                best[j] = best[j - 1]
+                j -= 1
+            }
+            best[j] = (i, s)
+        } else if s > best[k - 1].similarity {
+            var j = k - 1
+            while j > 0 && best[j - 1].similarity < s {
+                best[j] = best[j - 1]
+                j -= 1
+            }
+            best[j] = (i, s)
+        }
+    }
+    return best
+}
+
+func substrateFingerprintFromRNG(_ rng: inout Harness.SplitMix64) -> SubstrateTypes.Fingerprint256 {
+    return SubstrateTypes.Fingerprint256(block0: rng.next(), block1: rng.next(),
+                                         block2: rng.next(), block3: rng.next())
+}
+
+func measureJaccardTopK(_ rng: inout Harness.SplitMix64,
+                        _ n: Int, _ k: Int,
+                        _ warmupNS: UInt64, _ measureNS: UInt64) -> TopKMeasurement
+{
+    let probe = substrateFingerprintFromRNG(&rng)
+    let candidates: [SubstrateTypes.Fingerprint256] = (0..<n).map { _ in
+        substrateFingerprintFromRNG(&rng)
+    }
+    var sink: Double = 0
+
+    let (its, mn, mu, sd) = timeLoop(warmupNS: warmupNS, measureNS: measureNS) {
+        let result = jaccardTopK(probe: probe, candidates: candidates, k: k)
+        if !result.isEmpty { sink += result[0].similarity }
+    }
+    if sink == -1 { print("# sink: \(sink)") }
+
+    return TopKMeasurement(
+        kernel: .scalar, n: n, k: k,
         iterations: its, nsMin: mn, nsMean: mu, nsStddev: sd)
 }
 
@@ -215,7 +295,7 @@ func defaultOutputDir() -> String {
         .path
 }
 
-func writeJSON(_ ms: [TopKMeasurement], path: String,
+func writeJSON(_ ms: [TopKMeasurement], path: String, op: String,
                seed: UInt64, warmupNS: UInt64, measureNS: UInt64,
                quick: Bool) throws
 {
@@ -223,7 +303,7 @@ func writeJSON(_ ms: [TopKMeasurement], path: String,
     s += "{\n"
     s += "  \"schema_version\": \"topk-1\",\n"
     s += "  \"language\": \"swift\",\n"
-    s += "  \"op\": \"hamming_top_k\",\n"
+    s += "  \"op\": \"\(op)\",\n"
     s += "  \"date\": \"\(todayDate())\",\n"
     s += "  \"hardware_tag\": \"\(Hardware.tag())\",\n"
     s += String(format: "  \"seed\": \"0x%016llx\",\n", seed)
@@ -266,7 +346,9 @@ if let p = args.out {
 } else {
     let dir = defaultOutputDir()
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    outPath = "\(dir)/hamming_topk-swift.json"
+    outPath = args.metric == "jaccard"
+        ? "\(dir)/jaccard_topk-swift.json"
+        : "\(dir)/hamming_topk-swift.json"
 }
 
 let err = FileHandle.standardError
@@ -279,6 +361,22 @@ err.write("# K values:   \(args.kList)\n".data(using: .utf8)!)
 err.write("# timing:     warmup \(warmupNS / 1_000_000)ms, measure \(measureNS / 1_000_000)ms\(args.quick ? " (quick)" : "")\n\n".data(using: .utf8)!)
 
 var allMeasurements: [TopKMeasurement] = []
+if args.metric == "jaccard" {
+    // Single scalar pass: no kernel Jaccard op exists; the product
+    // serves Jaccard from the brute-force engine only.
+    err.write("  metric=jaccard (scalar brute-force scan)\n".data(using: .utf8)!)
+    var rng = Harness.SplitMix64(seed: args.seed)
+    for n in args.nList {
+        for kv in args.kList {
+            let m = measureJaccardTopK(&rng, n, kv, warmupNS, measureNS)
+            err.write(String(format: "    N=%7d  K=%4d  min: %9lluns  (%llu iters)\n",
+                             n, kv, m.nsMin, m.iterations).data(using: .utf8)!)
+            allMeasurements.append(m)
+        }
+    }
+    err.write("\n".data(using: .utf8)!)
+}
+if args.metric == "hamming" {
 for k in kernels {
     let kernel = PortableKernel.kernel(of: k)
     if kernel.kind != k {
@@ -297,9 +395,11 @@ for k in kernels {
     }
     err.write("\n".data(using: .utf8)!)
 }
+}
 
 do {
     try writeJSON(allMeasurements, path: outPath,
+                  op: args.metric == "jaccard" ? "jaccard_top_k" : "hamming_top_k",
                   seed: args.seed, warmupNS: warmupNS, measureNS: measureNS,
                   quick: args.quick)
     err.write("  wrote \(outPath)\n".data(using: .utf8)!)

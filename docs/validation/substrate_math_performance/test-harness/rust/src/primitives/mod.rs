@@ -12,6 +12,7 @@ pub mod hamming;
 pub mod hamming_nn;
 pub mod hlc;
 pub mod info_theory;
+pub mod jaccard;
 pub mod lattice;
 pub mod matrix_decay;
 pub mod merkle_commitment;
