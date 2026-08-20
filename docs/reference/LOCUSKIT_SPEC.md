@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.22.0
+version: 1.23.0
 status: active
-date: 2026-08-19
+date: 2026-08-20
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1064,6 +1064,20 @@ records `changedBy` into the ledger's `reviewedBy` — reviewer identity
 is recorded on accept and reject alike.
 
 ## Changelog
+
+### 1.23.0 -- 2026-08-20
+
+- Schema v15: `recall_trace` gains the lane-attribution trio — `door`
+  (tool/recipe identity), `composition` (lane composition at trace
+  time), `laneRanks` (the target's 1-based per-lane rank packed as a
+  canonical JSON object, fixed lane order locus/bm25/hamming/dense).
+  All TEXT nullable; NULL means the row was written without attribution
+  (pre-v15 rows, plain locus-verb traces). No query text is stored
+  (privacy ruling 2026-08-20). Migration ships as ladder entry
+  v14 → v15 (addColumn ×3), delivered to populated estates through
+  `mootx01 upgrade`. W2.5 Track R(a): the columns make used-trace rows
+  attributable to lanes so the optimizer can aggregate per-lane reward
+  (Bradley-Terry, cookbook §8.12) without re-deriving lane membership.
 
 ### 1.21.0 -- 2026-08-13
 

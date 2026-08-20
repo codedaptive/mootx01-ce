@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.26.0
+version: 1.27.0
 status: active
-date: 2026-08-19
+date: 2026-08-20
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1501,6 +1501,17 @@ InMemory inherits).
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.27.0 -- 2026-08-20
+
+- `RecallTraceItem` gains the lane-attribution trio (schema v15, W2.5
+  Track R(a)): optional `door`, `composition`, `laneRanks` fields
+  (Swift init parameters defaulted to nil; Rust `with_attribution`
+  builder). New static `packLaneRanks(_:)` / `pack_lane_ranks` packs
+  per-lane 1-based ranks into the canonical JSON string in the fixed
+  `laneRankOrder` / `LANE_RANK_ORDER` (locus, bm25, hamming, dense) —
+  a cross-port byte-identical conformance surface. `DrawerStore`
+  trace encode/decode and both used-mark rebuild paths carry the trio.
 
 ### 1.25.0 -- 2026-08-13
 

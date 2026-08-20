@@ -6824,6 +6824,30 @@ fn recall_trace_values(item: &RecallTraceItem) -> BTreeMap<String, TypedValue> {
         "operationalBitmap".to_string(),
         TypedValue::Bitmap(item.operational_bitmap),
     );
+    // Lane-attribution trio (v15, W2.5 Track R(a)). TEXT nullable: Null
+    // when the writer has no attribution (plain locus-verb traces); the
+    // recall coordinator fills all three.
+    m.insert(
+        "door".to_string(),
+        item.door
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "composition".to_string(),
+        item.composition
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "laneRanks".to_string(),
+        item.lane_ranks
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
     m
 }
 
@@ -7275,6 +7299,9 @@ fn recall_trace_from_row(row: &StorageRow) -> RecallTraceItem {
         recalled_at: recalled_at_string(row.get("recalledAt")),
         score: opt_float_value_of(row.get("score")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        door: opt_string_value_of(row.get("door")),
+        composition: opt_string_value_of(row.get("composition")),
+        lane_ranks: opt_string_value_of(row.get("laneRanks")),
     }
 }
 

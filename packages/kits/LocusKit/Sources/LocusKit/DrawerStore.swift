@@ -3297,7 +3297,10 @@ public actor DrawerStore {
             target: item.target,
             recalledAt: item.recalledAt,
             score: item.score,
-            operationalBitmap: newBitmap)
+            operationalBitmap: newBitmap,
+            door: item.door,
+            composition: item.composition,
+            laneRanks: item.laneRanks)
         try await storage.rowStore.update(
             table: "recall_trace",
             values: Self.recallTraceValues(updated),
@@ -3355,7 +3358,10 @@ public actor DrawerStore {
                 target: item.target,
                 recalledAt: item.recalledAt,
                 score: item.score,
-                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed
+                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed,
+                door: item.door,
+                composition: item.composition,
+                laneRanks: item.laneRanks
             )
             try await storage.rowStore.update(
                 table: "recall_trace",
@@ -3908,7 +3914,13 @@ public actor DrawerStore {
             // score is REAL (float) nullable: TypedValue.float for Double,
             // .null when the recall did not produce a score.
             "score": item.score.map { TypedValue.float($0) } ?? .null,
-            "operationalBitmap": .bitmap(item.operationalBitmap)
+            "operationalBitmap": .bitmap(item.operationalBitmap),
+            // Lane-attribution trio (v15, W2.5 Track R(a)). TEXT nullable:
+            // NULL when the writer has no attribution (plain locus-verb
+            // traces); the RecallDirector fills all three.
+            "door": item.door.map { TypedValue.text($0) } ?? .null,
+            "composition": item.composition.map { TypedValue.text($0) } ?? .null,
+            "laneRanks": item.laneRanks.map { TypedValue.text($0) } ?? .null
         ]
     }
 
@@ -3918,7 +3930,10 @@ public actor DrawerStore {
             target: string(row["target"]),
             recalledAt: try date(table: "recall_traces", column: "recalledAt", row["recalledAt"]),
             score: optDouble(row["score"]),
-            operationalBitmap: int64(row["operationalBitmap"])
+            operationalBitmap: int64(row["operationalBitmap"]),
+            door: optString(row["door"]),
+            composition: optString(row["composition"]),
+            laneRanks: optString(row["laneRanks"])
         )
     }
 

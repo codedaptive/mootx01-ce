@@ -118,7 +118,13 @@ public enum LocusKitSchema {
     /// schema change from v13 on ships a ladder entry.
     /// v14 added idx_drawers_filedAt (ORDER BY filedAt DESC LIMIT 256 on
     /// the Director recall path ran a full-table sort without this index).
-    public static let version = 14
+    /// v15 adds the recall_trace lane-attribution trio (`door`,
+    /// `composition`, `laneRanks`, all TEXT nullable) — W2.5 Track R(a).
+    /// NULL on pre-v15 rows and on rows written without door identity;
+    /// no query text is stored (privacy ruling 2026-08-20). Delivered to
+    /// populated estates through `mootx01 upgrade` (the only migration
+    /// vehicle), which opens each estate and replays this ladder.
+    public static let version = 15
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -239,6 +245,18 @@ public enum LocusKitSchema {
                         name: "idx_drawers_filedAt",
                         table: "drawers",
                         columns: ["filedAt"])),
+                ]),
+                // v14 → v15: recall_trace lane-attribution trio (W2.5 Track
+                // R(a)). All three nullable TEXT, no backfill — NULL IS the
+                // honest value for rows written before attribution existed,
+                // and the optimizer's trace aggregation skips NULL-attribution
+                // rows. Without the addColumns, a pre-v15 estate hits
+                // "no such column" on the first attributed trace write after
+                // the daemon binary upgrades (same failure mode as v8 → v9).
+                Migration(fromVersion: 14, toVersion: 15, operations: [
+                    .addColumn(table: "recall_trace", column: .text("door", nullable: true)),
+                    .addColumn(table: "recall_trace", column: .text("composition", nullable: true)),
+                    .addColumn(table: "recall_trace", column: .text("laneRanks", nullable: true)),
                 ]),
             ]
         )
@@ -786,6 +804,13 @@ public enum LocusKitSchema {
     // `score` is REAL nullable: the recall may not produce a score for
     // every row (e.g. ordered-by-capture-time queries).
     // `recalledAt` is TEXT ISO8601 (fleet date-storage rule).
+    //
+    // Lane-attribution trio (v15, W2.5 Track R(a)): `door` names the
+    // tool/recipe that issued the recall, `composition` the lane
+    // composition active at trace time, `laneRanks` the target's 1-based
+    // per-lane rank packed as JSON (RecallTraceItem.packLaneRanks). All
+    // nullable TEXT; NULL = written without attribution (pre-v15 rows,
+    // plain locus-verb traces). No query text is stored (privacy ruling).
     static let recallTraceTable = TableDeclaration(
         name: "recall_trace",
         columns: [
@@ -796,6 +821,9 @@ public enum LocusKitSchema {
             // exposes Double precision via the .float column type.
             .float("score", nullable: true),
             .bitmap("operationalBitmap"),
+            .text("door", nullable: true),
+            .text("composition", nullable: true),
+            .text("laneRanks", nullable: true),
             .json("ext", nullable: true)
         ],
         primaryKey: ["id"]

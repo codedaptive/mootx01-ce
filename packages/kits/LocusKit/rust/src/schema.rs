@@ -52,7 +52,14 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v14 adds `idx_drawers_filedAt` — the Director
+/// Current schema version. v15 adds the recall_trace lane-attribution
+/// trio (`door`, `composition`, `laneRanks`, all TEXT nullable) — W2.5
+/// Track R(a). NULL on pre-v15 rows and rows written without door
+/// identity; no query text is stored (privacy ruling 2026-08-20).
+/// Delivered to populated estates through `mootx01 upgrade` (the only
+/// migration vehicle). Matches Swift `LocusKitSchema.version`.
+///
+/// v14 adds `idx_drawers_filedAt` — the Director
 /// recall path sorts by `filed_at DESC LIMIT 256` without an index, forcing
 /// SQLite to sort all ~53,000 rows before truncating. One index turns the
 /// sort into a 256-entry index walk. Matches Swift `LocusKitSchema.version`.
@@ -92,7 +99,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -125,6 +132,29 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v14 → v15: recall_trace lane-attribution trio (W2.5 Track
+            // R(a)). All three nullable TEXT, no backfill — NULL IS the
+            // honest value for rows written before attribution existed;
+            // the optimizer's trace aggregation skips NULL-attribution
+            // rows. Matches Swift v14 → v15 exactly.
+            Migration {
+                from_version: 14,
+                to_version: 15,
+                operations: vec![
+                    SchemaOperation::AddColumn {
+                        table: "recall_trace".to_string(),
+                        column: ColumnDeclaration::text("door").nullable(),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "recall_trace".to_string(),
+                        column: ColumnDeclaration::text("composition").nullable(),
+                    },
+                    SchemaOperation::AddColumn {
+                        table: "recall_trace".to_string(),
+                        column: ColumnDeclaration::text("laneRanks").nullable(),
+                    },
+                ],
+            },
             // v13 → v14: add idx_drawers_filedAt. The Director recall path
             // orders by `filed_at DESC LIMIT 256`; without this index SQLite
             // sorts all ~53,000 rows before truncating. Matches Swift v13 → v14.
@@ -892,6 +922,14 @@ fn recall_trace_table() -> TableDeclaration {
             ColumnDeclaration::timestamp("recalledAt"),
             ColumnDeclaration::float("score").nullable(),
             ColumnDeclaration::bitmap("operationalBitmap"),
+            // Lane-attribution trio (v15, W2.5 Track R(a)): door names the
+            // tool/recipe that issued the recall, composition the lane
+            // composition at trace time, laneRanks the target's 1-based
+            // per-lane rank packed as JSON (RecallTraceItem::pack_lane_ranks).
+            // All nullable; NULL = written without attribution.
+            ColumnDeclaration::text("door").nullable(),
+            ColumnDeclaration::text("composition").nullable(),
+            ColumnDeclaration::text("laneRanks").nullable(),
             ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["id".to_string()],
@@ -1286,35 +1324,40 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_fourteen() {
-        assert_eq!(SCHEMA_VERSION, 14);
-        // Five migrations: v9 → v10 (FINDING-3 dedup + unique index),
-        //                  v10 → v11 (operationalAND on container_fingerprints),
-        //                  v11 → v12 (subject trio on drawers),
-        //                  v12 → v13 (kg_facts identity trio),
-        //                  v13 → v14 (idx_drawers_filedAt).
+    fn schema_version_is_fifteen() {
+        assert_eq!(SCHEMA_VERSION, 15);
+        // Six migrations: v9 → v10 (FINDING-3 dedup + unique index),
+        //                 v10 → v11 (operationalAND on container_fingerprints),
+        //                 v11 → v12 (subject trio on drawers),
+        //                 v12 → v13 (kg_facts identity trio),
+        //                 v13 → v14 (idx_drawers_filedAt),
+        //                 v14 → v15 (recall_trace lane-attribution trio).
         let m = schema();
-        assert_eq!(m.migrations.len(), 5);
-        // v13 → v14 is listed first (newest-first order).
-        assert_eq!(m.migrations[0].from_version, 13);
-        assert_eq!(m.migrations[0].to_version, 14);
-        assert_eq!(m.migrations[0].operations.len(), 1);
-        // v12 → v13 is listed second.
-        assert_eq!(m.migrations[1].from_version, 12);
-        assert_eq!(m.migrations[1].to_version, 13);
-        assert_eq!(m.migrations[1].operations.len(), 3);
-        // v11 → v12 is listed third.
-        assert_eq!(m.migrations[2].from_version, 11);
-        assert_eq!(m.migrations[2].to_version, 12);
+        assert_eq!(m.migrations.len(), 6);
+        // v14 → v15 is listed first (newest-first order).
+        assert_eq!(m.migrations[0].from_version, 14);
+        assert_eq!(m.migrations[0].to_version, 15);
+        assert_eq!(m.migrations[0].operations.len(), 3);
+        // v13 → v14 is listed second.
+        assert_eq!(m.migrations[1].from_version, 13);
+        assert_eq!(m.migrations[1].to_version, 14);
+        assert_eq!(m.migrations[1].operations.len(), 1);
+        // v12 → v13 is listed third.
+        assert_eq!(m.migrations[2].from_version, 12);
+        assert_eq!(m.migrations[2].to_version, 13);
         assert_eq!(m.migrations[2].operations.len(), 3);
-        // v10 → v11 is listed fourth.
-        assert_eq!(m.migrations[3].from_version, 10);
-        assert_eq!(m.migrations[3].to_version, 11);
-        assert_eq!(m.migrations[3].operations.len(), 1);
-        // v9 → v10 is listed fifth.
-        assert_eq!(m.migrations[4].from_version, 9);
-        assert_eq!(m.migrations[4].to_version, 10);
-        assert_eq!(m.migrations[4].operations.len(), 2);
+        // v11 → v12 is listed fourth.
+        assert_eq!(m.migrations[3].from_version, 11);
+        assert_eq!(m.migrations[3].to_version, 12);
+        assert_eq!(m.migrations[3].operations.len(), 3);
+        // v10 → v11 is listed fifth.
+        assert_eq!(m.migrations[4].from_version, 10);
+        assert_eq!(m.migrations[4].to_version, 11);
+        assert_eq!(m.migrations[4].operations.len(), 1);
+        // v9 → v10 is listed sixth.
+        assert_eq!(m.migrations[5].from_version, 9);
+        assert_eq!(m.migrations[5].to_version, 10);
+        assert_eq!(m.migrations[5].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1514,6 +1557,9 @@ mod tests {
                 "recalledAt",
                 "score",
                 "operationalBitmap",
+                "door",
+                "composition",
+                "laneRanks",
                 "ext"
             ]
         );
