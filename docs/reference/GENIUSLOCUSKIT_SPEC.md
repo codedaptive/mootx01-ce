@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.31.0
+version: 1.32.0
 status: accepted-1.1-target
 date: 2026-08-20
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
@@ -2079,6 +2079,8 @@ Probe order is recency with id tiebreak, so same-seed estates write
 the same associations.
 
 ### 1.23.0 -- 2026-08-05
+
+- **1.32.0 (2026-08-20)** — RecallShape gains `binaryMetric` ("hamming" default | "jaccard"; unknown degrades to hamming; Codable-additive via custom decoder) applied to the engram and distillation-fingerprint lanes of the scored path. New shaped preset "jaccard" (21st): identical fusion, Jaccard set-overlap scoring on the binary lanes.
 
 - **1.31.0 (2026-08-20)** — Pipeline p2.2-det: multi-word entity pre-pass — greedy longest-match (5..2-word n-grams) against the vendored multi-word labels before single-token anchoring; matched tokens consumed. Contract change → lazy re-distill.
 

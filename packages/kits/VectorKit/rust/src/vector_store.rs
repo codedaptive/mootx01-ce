@@ -117,7 +117,7 @@ pub struct StoredVector {
 
 /// Result of a `VectorStore::find_nearest` call. Parallel to Swift
 /// `VectorMatch`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VectorMatch {
     /// Renamed from `drawer_id` (Lane F rename).
     pub item_id: String,
@@ -129,7 +129,18 @@ pub struct VectorMatch {
     /// Contract parity: both ports expose this field on every VectorMatch
     /// construction site (SHADOWSWAP_DESIGN_CONTRACT §3).
     pub generation: i64,
+    /// Metric-native similarity in [0,1] when the producing metric is not
+    /// Hamming (W2.5 M1: Jaccard); None for Hamming matches. `distance`
+    /// remains the ordering key in both cases. Twin of Swift
+    /// `VectorMatch.score`.
+    pub score: Option<f64>,
 }
+
+// Manual Eq: the derived impl was dropped when `score: Option<f64>` landed
+// (f64 is not Eq). Equality remains total here because `score` is always a
+// finite ratio in [0,1] or None — never NaN — so the Eq marker's
+// reflexivity contract holds. Ord (below) reads only distance + item_id.
+impl Eq for VectorMatch {}
 
 impl Ord for VectorMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -1946,6 +1957,19 @@ impl VectorStore {
         model_id: &str,
         k: usize,
     ) -> Result<Vec<VectorMatch>, VectorKitError> {
+        self.find_nearest_with_metric(probe, model_id, k, DenseMetric::HAMMING)
+    }
+
+    /// `find_nearest` with an explicit binary metric (W2.5 M1). Jaccard
+    /// always serves from the brute-force engine — MIH's band structure is
+    /// Hamming-specific. Twin of Swift `findNearest(probe:modelID:limit:metric:)`.
+    pub fn find_nearest_with_metric(
+        &self,
+        probe: &Engram,
+        model_id: &str,
+        k: usize,
+        metric: DenseMetric,
+    ) -> Result<Vec<VectorMatch>, VectorKitError> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -1968,10 +1992,10 @@ impl VectorStore {
 
         // Delegate all Hamming arithmetic to the active index (I-7).
         // Both indexes are EXACT and produce bit-identical results.
-        let hits = if state.is_mih_active {
-            state.mih_index.search(&probe_payload, DenseMetric::HAMMING, k, Some(&filter))?
+        let hits = if state.is_mih_active && metric != DenseMetric::JACCARD {
+            state.mih_index.search(&probe_payload, metric, k, Some(&filter))?
         } else {
-            state.brute_force_index.search(&probe_payload, DenseMetric::HAMMING, k, Some(&filter))?
+            state.brute_force_index.search(&probe_payload, metric, k, Some(&filter))?
         };
 
         // Map DenseHit → VectorMatch. BruteForceIndex already enforces
@@ -1981,11 +2005,28 @@ impl VectorStore {
         let serving_gen_for_binary = state.serving_generations.get(model_id).copied().unwrap_or(0);
         let result: Vec<VectorMatch> = hits
             .into_iter()
-            .map(|h| VectorMatch {
-                item_id: h.key.item_id.clone(),
-                distance: h.raw_distance,
-                model_id: model_id.to_string(),
-                generation: serving_gen_for_binary,
+            .map(|h| {
+                // Jaccard (W2.5 M1): raw_distance is an f32 bit pattern —
+                // map onto the 0..=256 integer scale (Hamming's range) so
+                // shared consumers keep working, and carry the exact
+                // similarity in `score`. Twin of Swift.
+                if let Some(jd) = h.jaccard_distance() {
+                    VectorMatch {
+                        item_id: h.key.item_id.clone(),
+                        distance: (jd * 256.0).round() as i32,
+                        model_id: model_id.to_string(),
+                        generation: serving_gen_for_binary,
+                        score: Some(1.0 - jd),
+                    }
+                } else {
+                    VectorMatch {
+                        item_id: h.key.item_id.clone(),
+                        distance: h.raw_distance,
+                        model_id: model_id.to_string(),
+                        generation: serving_gen_for_binary,
+                        score: None,
+                    }
+                }
             })
             .collect();
 
@@ -2123,6 +2164,7 @@ impl VectorStore {
                     model_id: model_id.to_string(),
                     // Float index built from serving-generation rows only.
                     generation: serving_gen,
+                score: None,
                 }).collect());
             }
             // ensure_float_index_built_locked returned false. That means EITHER no
@@ -2139,6 +2181,7 @@ impl VectorStore {
             distance: (dist * 10_000.0).round() as i32,
             model_id: model_id.to_string(),
             generation: 0, // Table scan serves generation 0 until serving-gen filter is wired.
+            score: None,
         }).collect())
     }
 
@@ -2188,6 +2231,7 @@ impl VectorStore {
                     model_id: model_id.to_string(),
                     // Float index built from serving-generation rows only.
                     generation: serving_gen,
+                score: None,
                 }).collect());
             }
             // ensure_float_index_built_locked returned false. That means EITHER no
@@ -2203,6 +2247,7 @@ impl VectorStore {
             distance: (dist * 10_000.0).round() as i32,
             model_id: model_id.to_string(),
             generation: 0, // Table scan serves generation 0 until serving-gen filter is wired.
+            score: None,
         }).collect())
     }
 

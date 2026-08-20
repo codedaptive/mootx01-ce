@@ -105,6 +105,15 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// clamped to the same `[64, 256]` envelope (see `effectiveFrontierK`).
     public let frontierK: Int?
 
+    /// Binary-lane metric selector (W2.5 M1 unlock): `"hamming"` (default)
+    /// or `"jaccard"`. Jaccard scores set OVERLAP over set UNION of the
+    /// 256-bit fingerprints (a length-normalized alternative to Hamming's
+    /// symmetric-difference count) and always serves from the brute-force
+    /// engine. Unknown values read as `"hamming"` — a shape must degrade,
+    /// never fail, per the shape contract. Codable-additive: shapes
+    /// persisted before this field decode with the default.
+    public let binaryMetric: String
+
     /// The inclusive lower bound for any `frontierK` override. Mirrors the
     /// RecallDirector's `frontierK` floor so a shape cannot request a pool
     /// narrower than the engine's own minimum.
@@ -126,13 +135,31 @@ public struct RecallShape: Sendable, Codable, Equatable {
     ///   - frontierK: optional candidate-pool depth override, clamped to
     ///     `[frontierKFloor, frontierKCeiling]` when read via `effectiveFrontierK`.
     ///     Defaults to `nil` (the engine's computed default).
+    private enum CodingKeys: String, CodingKey {
+        case laneWeights, antiSimilarLanes, frontierK, binaryMetric
+    }
+
+    /// Custom decode so payloads persisted BEFORE `binaryMetric` existed
+    /// (and any future additive field) decode with their defaults instead
+    /// of failing on a missing key — the additive-Codable contract the
+    /// field documentation promises.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.laneWeights = try c.decodeIfPresent([String: Float].self, forKey: .laneWeights) ?? [:]
+        self.antiSimilarLanes = try c.decodeIfPresent(Set<String>.self, forKey: .antiSimilarLanes) ?? []
+        self.frontierK = try c.decodeIfPresent(Int.self, forKey: .frontierK)
+        self.binaryMetric = try c.decodeIfPresent(String.self, forKey: .binaryMetric) ?? "hamming"
+    }
+
     public init(
         laneWeights: [String: Float] = [:],
         antiSimilarLanes: Set<String> = [],
-        frontierK: Int? = nil
+        frontierK: Int? = nil,
+        binaryMetric: String = "hamming"
     ) {
         self.laneWeights = laneWeights
         self.antiSimilarLanes = antiSimilarLanes
+        self.binaryMetric = binaryMetric
         self.frontierK = frontierK
     }
 
@@ -220,6 +247,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         "lsa_forward",
         "nmf_forward",
         "fast",
+        "jaccard",
         "structural",
         "temporal",
         "connection",
@@ -308,6 +336,13 @@ public struct RecallShape: Sendable, Codable, Equatable {
                     "dense": 0,
                     "hamming": 0,
                 ])
+
+        // Binary-lane metric swap (W2.5 M1): identical fusion, but the
+        // engram lanes score Jaccard set-overlap instead of Hamming
+        // symmetric difference. Length-normalized: sparse fingerprints are
+        // not penalized for having few bits.
+        case "jaccard":
+            return RecallShape(binaryMetric: "jaccard")
 
         // Suppress the literal lanes: ZERO bm25 + fdc so only the distributional
         // and structural lanes decide. The complement of `lexical`.
@@ -445,6 +480,8 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling."
         case "lexical":
             return "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes."
+        case "jaccard":
+            return "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity."
         case "not_lexical":
             return "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide."
         case "associative":

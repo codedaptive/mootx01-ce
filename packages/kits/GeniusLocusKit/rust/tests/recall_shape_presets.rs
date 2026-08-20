@@ -40,8 +40,8 @@ fn preset_names_are_discoverable_and_each_resolves() {
             );
         }
     }
-    // session_hybrid is the 20th preset (added in W1-session-hybrid).
-    assert_eq!(RecallShape::PRESET_NAMES.len(), 20);
+    // jaccard is the 21st preset (W2.5 M1 binary-metric unlock).
+    assert_eq!(RecallShape::PRESET_NAMES.len(), 21);
 }
 
 #[test]

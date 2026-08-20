@@ -36,7 +36,7 @@ struct RecallShapePresetTests {
             }
         }
         // session_hybrid is the 20th preset (added in W1-session-hybrid).
-        #expect(RecallShape.presetNames.count == 20)
+        #expect(RecallShape.presetNames.count == 21)
     }
 
     @Test("precise amplifies lexical + field and narrows the frontier")

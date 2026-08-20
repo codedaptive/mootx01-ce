@@ -33,8 +33,9 @@ import Foundation
 ///
 /// rawDistance is the raw score in the metric's natural units:
 /// - Hamming: integer in 0…256 (nearer = smaller).
-/// - Jaccard: reserved; `BruteForceIndex` currently rejects `.binary(.jaccard)`.
-///   The `jaccardDistance` accessor is present for future use.
+/// - Jaccard: LIVE (W2.5 Track M1 unlock): the Jaccard DISTANCE in [0,1]
+///   stored as the Float bit pattern (same encoding as the float lane).
+///   Read it back with `jaccardDistance`.
 /// - Cosine / L2 / dot: Float (sign depends on the specific metric).
 ///
 /// The engine returns [DenseHit] sorted by rawDistance ascending
@@ -56,8 +57,8 @@ public struct DenseHit: Sendable, Equatable {
     /// - Hamming: the integer distance cast to Int32 (range 0…256).
     ///   Stored as Int32 to match the Rust i32 wire type and to avoid
     ///   signed/unsigned confusion at call sites. Always non-negative.
-    /// - Jaccard: reserved path. `jaccardDistance` reconstructs a Double
-    ///   from an Int32 rawDistance; `BruteForceIndex` currently rejects
+    /// - Jaccard: the Jaccard distance in [0,1] as a Float bit pattern
+    ///   (the float-lane encoding). `BruteForceIndex` serves
     ///   `.binary(.jaccard)` so this path is not exercised in production.
     /// - Float cosine / L2 / dot: the Float cast to a bit-identical Int32
     ///   representation. Use floatDistance to read it back.
@@ -80,6 +81,15 @@ public struct DenseHit: Sendable, Equatable {
         self.key = key
         self.rawDistance = rawDistance
         self.metric = metric
+    }
+
+    /// Convenience: Jaccard hit (W2.5 M1). Stores the distance's Float
+    /// bit pattern — Float precision is exact enough for a [0,1] ratio of
+    /// small integers and keeps the Int32 wire shape (additive-only rule).
+    public init(key: VectorRecordKey, jaccardDistance: Double) {
+        self.key = key
+        self.rawDistance = Int32(bitPattern: Float(jaccardDistance).bitPattern)
+        self.metric = .binary(.jaccard)
     }
 
     /// Convenience: Hamming hit.
@@ -108,10 +118,13 @@ public struct DenseHit: Sendable, Equatable {
     /// Returns nil if the metric is not Jaccard — use this to guard
     /// at the call site rather than force-casting.
     ///
-    /// Not yet used in Lane F; reserved for Lane A (BruteForceIndex).
+    /// Live in Lane A (BruteForceIndex) since the W2.5 M1 unlock. The
+    /// original reserved encoding (Double bit pattern through Int32) could
+    /// never round-trip — corrected to the float-lane Float-bit-pattern
+    /// encoding before first production use.
     public var jaccardDistance: Double? {
         guard case .binary(.jaccard) = metric else { return nil }
-        return Double(bitPattern: UInt64(bitPattern: Int64(rawDistance)))
+        return Double(Float(bitPattern: UInt32(bitPattern: rawDistance)))
     }
 
     /// Float distance. Valid when metric is a float-lane metric.

@@ -2215,7 +2215,8 @@ public actor VectorStore {
     public func findNearest(
         probe: Engram,
         modelID: String,
-        limit: Int
+        limit: Int,
+        metric: DenseMetric = .binary(.hamming)
     ) async throws -> [VectorMatch] {
         let startTime = Date().timeIntervalSince1970
 
@@ -2236,9 +2237,18 @@ public actor VectorStore {
         // Delegate all Hamming arithmetic to the active DenseIndex (I-7).
         // hotIndex is either bruteForceIndex or mihIndex — both implement the
         // DenseIndex seam and produce identical results (conformance gate).
-        let hits = try await hotIndex.search(
+        // Jaccard (W2.5 M1) always routes to the brute-force engine: MIH's
+        // band structure is Hamming-specific and cannot serve Jaccard order.
+        // Hamming keeps the hot index (brute force or MIH, conformance-gated).
+        let servingIndex: any DenseIndex
+        if case .binary(.jaccard) = metric {
+            servingIndex = bruteForceIndex
+        } else {
+            servingIndex = hotIndex
+        }
+        let hits = try await servingIndex.search(
             probe: probePayload,
-            metric: .hamming,
+            metric: metric,
             k: limit,
             filter: filter
         )
@@ -2252,7 +2262,21 @@ public actor VectorStore {
         // hits share the same modelID and one servingGen lookup covers all.
         let servingGen = try await _servingGeneration(for: modelID)
         let result: [VectorMatch] = hits.map { hit in
-            VectorMatch(
+            // Jaccard (W2.5 M1): rawDistance is a Float bit pattern.
+            // VectorMatch.distance must stay a MONOTONE ordering key — map
+            // the [0,1] jaccard distance onto the 0…256 integer scale
+            // (matching Hamming's range so shared consumers keep working)
+            // and carry the exact similarity in `score`.
+            if let jd = hit.jaccardDistance {
+                return VectorMatch(
+                    itemID: hit.key.itemID,
+                    distance: Int((jd * 256.0).rounded()),
+                    modelID: hit.key.modelID,
+                    generation: servingGen,
+                    score: 1.0 - jd
+                )
+            }
+            return VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int(hit.rawDistance),
                 modelID: hit.key.modelID,

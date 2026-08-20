@@ -38,9 +38,9 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "VectorKit")
 /// ResidentVectorArray. **The conformance oracle**: MIH and all other
 /// binary indexes are gated against this output.
 ///
-/// Only `.binary(.hamming)` is supported in Lane A. Callers that
-/// request `.binary(.jaccard)` or any float metric receive
-/// `VectorKitError.invalidPayload`.
+/// `.binary(.hamming)` and `.binary(.jaccard)` are supported in Lane A
+/// (Jaccard lit by the W2.5 M1 unlock). Float metrics receive
+/// `VectorKitError.invalidPayload` — they belong to the float engine.
 ///
 /// All Hamming arithmetic is delegated to `EngramLib` (I-7 absolute).
 /// Zero Hamming math in this file.
@@ -113,9 +113,9 @@ public actor BruteForceIndex: DenseIndex {
             throw VectorKitError.invalidPayload(
                 "BruteForceIndex.search: binary probe must be exactly 32 bytes, got \(probe.bytes.count)")
         }
-        guard case .binary(.hamming) = metric else {
+        guard case .binary = metric else {
             throw VectorKitError.invalidPayload(
-                "BruteForceIndex.search: only .binary(.hamming) is supported in Lane A; got \(metric)")
+                "BruteForceIndex.search: only binary metrics are supported in Lane A; got \(metric)")
         }
         guard k > 0 else { return [] }
 
@@ -179,12 +179,21 @@ public actor BruteForceIndex: DenseIndex {
         // distances — the actual Hamming math — and sorting ourselves
         // is the correct division of labour: EngramLib provides the
         // kernel-gated distances, we provide the total order.
-        let distances = EngramLib.distances(probe: probeEngram, candidates: engrams)
-
-        // --- Build DenseHit list for all live candidates ---
-        var allHits: [DenseHit] = (0..<engrams.count).map { i in
-            let slotIdx = slotIndices[i]
-            return DenseHit(key: array.keys[slotIdx], hammingDistance: distances[i])
+        // Metric dispatch (W2.5 M1): Hamming stays on the kernel-gated
+        // batch-distance path; Jaccard composes the same conformance-gated
+        // primitives via EngramLib.jaccardSimilarities. Both produce hits
+        // in the metric's natural unit; the total order below is shared.
+        var allHits: [DenseHit]
+        if case .binary(.jaccard) = metric {
+            let sims = EngramLib.jaccardSimilarities(probe: probeEngram, candidates: engrams)
+            allHits = (0..<engrams.count).map { i in
+                DenseHit(key: array.keys[slotIndices[i]], jaccardDistance: 1.0 - sims[i])
+            }
+        } else {
+            let distances = EngramLib.distances(probe: probeEngram, candidates: engrams)
+            allHits = (0..<engrams.count).map { i in
+                DenseHit(key: array.keys[slotIndices[i]], hammingDistance: distances[i])
+            }
         }
 
         // --- Sort to enforce total order: (distance ASC, key ASC) ---
@@ -199,6 +208,12 @@ public actor BruteForceIndex: DenseIndex {
         // candidates tied at the k-th boundary distance, the ones with
         // smaller keys are kept — not the ones that happen to be first in
         // the array.
+        // Metric-safety note (W2.5 M1): this Int32 comparison is ALSO
+        // correct for the Jaccard path, where rawDistance holds a Float
+        // bit pattern — IEEE-754 bit patterns of NON-NEGATIVE floats are
+        // monotone under integer comparison, and Jaccard distance is
+        // always in [0, 1] (sign bit 0). If a signed metric ever lands in
+        // Lane A, this sort must decode before comparing.
         allHits.sort { lhs, rhs in
             if lhs.rawDistance != rhs.rawDistance {
                 return lhs.rawDistance < rhs.rawDistance

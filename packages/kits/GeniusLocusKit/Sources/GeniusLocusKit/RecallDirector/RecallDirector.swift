@@ -406,7 +406,8 @@ public extension GeniusLocusKit {
             } else {
                 do {
                     matchResult = .success(try await store.findNearest(
-                        probe: engram, modelID: modelID, limit: plan.frontierK))
+                        probe: engram, modelID: modelID, limit: plan.frontierK,
+                        metric: binaryMetric(for: request.recallShape)))
                 } catch {
                     matchResult = .failure(error)
                 }
@@ -443,7 +444,8 @@ public extension GeniusLocusKit {
         if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
             do {
                 let fpMatches = try await store.findNearest(
-                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK,
+                    metric: binaryMetric(for: request.recallShape))
                 // Merge by max-score: a drawer already in Lane A keeps the higher
                 // of the two Hamming similarity scores. Lane B-only drawers append.
                 var vectorByID: [String: Float] = [:]
@@ -687,7 +689,8 @@ public extension GeniusLocusKit {
                 } else {
                     do {
                         matchResult = .success(try await store.findNearest(
-                            probe: engram, modelID: modelID, limit: plan.frontierK))
+                            probe: engram, modelID: modelID, limit: plan.frontierK,
+                            metric: binaryMetric(for: request.recallShape)))
                     } catch {
                         matchResult = .failure(error)
                     }
@@ -724,7 +727,8 @@ public extension GeniusLocusKit {
            let store = vectorStores[handle] {
             do {
                 let fpMatches = try await store.findNearest(
-                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK)
+                    probe: fp, modelID: "distillation-features-v1", limit: plan.frontierK,
+                    metric: binaryMetric(for: request.recallShape))
                 var vectorByID: [String: Float] = [:]
                 vectorByID.reserveCapacity(vectorList.count)
                 for item in vectorList { vectorByID[item.id] = item.score }
@@ -1157,6 +1161,12 @@ public extension GeniusLocusKit {
     ///   - laneKeys: the stable lane id for each fusion list, in list order.
     /// - Returns: a weight per lane (empty when `shape` is nil, so `rrfFuseN`
     ///   takes its all-1.0 fast path).
+    /// Resolve the shape's binary-lane metric (W2.5 M1). Unknown values
+    /// degrade to Hamming per the shape contract.
+    private func binaryMetric(for shape: RecallShape?) -> DenseMetric {
+        shape?.binaryMetric == "jaccard" ? .binary(.jaccard) : .binary(.hamming)
+    }
+
     private func laneWeights(for shape: RecallShape?, laneKeys: [String]) -> [Float] {
         guard let shape else { return [] }
         return laneKeys.map { shape.weight(for: $0) }

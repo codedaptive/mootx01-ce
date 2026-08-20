@@ -644,6 +644,7 @@ impl HNSWIndex {
                     // (§4 generation-identity check), so self.generation equals the
                     // serving generation at the time this search fires.
                     generation: self.generation,
+                score: None,
                 }
             })
             .collect();

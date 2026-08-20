@@ -39,11 +39,20 @@ public struct VectorMatch: Sendable, Comparable, Equatable {
     /// verify this matches the expected generation after a swap completes.
     public let generation: Int64
 
-    public init(itemID: String, distance: Int, modelID: String, generation: Int64) {
+    /// Metric-native similarity in [0, 1] when the producing metric is
+    /// not Hamming (W2.5 M1: Jaccard). nil for Hamming matches — their
+    /// score is derived from `distance` by the caller ((256-d)/256), and
+    /// `distance` remains the ordering key in both cases (additive-only
+    /// rule: defaulted so existing memberwise callers do not break).
+    public let score: Double?
+
+    public init(itemID: String, distance: Int, modelID: String, generation: Int64,
+                score: Double? = nil) {
         self.itemID = itemID
         self.distance = distance
         self.modelID = modelID
         self.generation = generation
+        self.score = score
     }
 
     public static func < (lhs: VectorMatch, rhs: VectorMatch) -> Bool {

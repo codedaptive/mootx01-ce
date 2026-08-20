@@ -1,8 +1,8 @@
 ---
 title: VectorKit Specification
-version: 1.7.0
+version: 1.8.0
 status: accepted-1.1-target
-date: 2026-08-15
+date: 2026-08-20
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -740,4 +740,6 @@ clears all per-model indices; `deleteAllVectors`/`delete*` clear the affected
 model's index.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.8.0 (2026-08-20)** — Jaccard binary metric unlocked (W2.5 Track M1): BruteForceIndex serves .binary(.jaccard) — set-overlap/union over 256-bit fingerprints, composed from the conformance-gated zip4+popcount primitives (SubstrateTypes.Jaccard; scalar is the oracle). Jaccard always serves from the brute-force engine (MIH is Hamming-specific). DenseHit stores the [0,1] distance as an f32 bit pattern (the float-lane encoding; the original reserved Double-through-Int32 encoding could never round-trip and was corrected before first use). VectorMatch gains an additive `score` field carrying metric-native similarity; `distance` maps Jaccard onto the 0…256 integer scale as the ordering key.
+
+

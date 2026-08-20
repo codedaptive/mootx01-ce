@@ -46,6 +46,29 @@ pub struct DenseHit {
 }
 
 impl DenseHit {
+    /// Construct a Jaccard hit (W2.5 M1): stores the [0,1] Jaccard
+    /// DISTANCE as its f32 bit pattern in `raw_distance` (the float-lane
+    /// encoding; non-negative floats stay monotone under integer
+    /// comparison, so the shared raw_distance sort remains correct).
+    /// Twin of Swift `DenseHit.init(key:jaccardDistance:)`.
+    pub fn jaccard(key: VectorRecordKey, distance: f64) -> Self {
+        Self {
+            key,
+            raw_distance: (distance as f32).to_bits() as i32,
+            metric: DenseMetric::JACCARD,
+        }
+    }
+
+    /// The Jaccard distance for `Binary(Jaccard)` hits, decoded from the
+    /// f32 bit pattern. Twin of Swift `DenseHit.jaccardDistance`.
+    pub fn jaccard_distance(&self) -> Option<f64> {
+        if self.metric == DenseMetric::JACCARD {
+            Some(f64::from(f32::from_bits(self.raw_distance as u32)))
+        } else {
+            None
+        }
+    }
+
     /// The Hamming distance for Binary metrics. Returns `None` if
     /// the metric is not binary.
     pub fn hamming_distance(&self) -> Option<u32> {

@@ -9507,7 +9507,12 @@ impl EstateCoordinator {
                             if let Some(ref err_msg) = force_vector_hamming_error {
                                 Err(vectorkit::VectorKitError::StoreUnavailable(err_msg.clone()))
                             } else {
-                                vs.find_nearest(&probe, &model, plan.frontier_k * 4)
+                                vs.find_nearest_with_metric(
+                                    &probe,
+                                    &model,
+                                    plan.frontier_k * 4,
+                                    binary_metric_for(request.recall_shape.as_ref()),
+                                )
                             };
                         match nearest_result {
                             Ok(matches) => matches
@@ -9583,10 +9588,11 @@ impl EstateCoordinator {
                 );
                 if fp != Engram::ZERO {
                     // Over-fetch 4× for the same K-boundary reason as Lanes A and BM25.
-                    if let Ok(fp_matches) = vs.find_nearest(
+                    if let Ok(fp_matches) = vs.find_nearest_with_metric(
                         &fp,
                         crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
                         plan.frontier_k * 4,
+                        binary_metric_for(request.recall_shape.as_ref()),
                     ) {
                         // Max-score merge: build id→score from Lane A, then walk Lane B.
                         let mut score_by_id: HashMap<String, f32> = vector_list
@@ -13607,5 +13613,16 @@ mod tests {
             !after.is_endorsed(),
             "stale endorsed bit must not be applied by rejected write"
         );
+    }
+}
+
+
+/// Resolve a shape's binary-lane metric (W2.5 M1). Unknown values degrade
+/// to Hamming per the shape contract. Twin of Swift
+/// `RecallDirector.binaryMetric(for:)`.
+fn binary_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::DenseMetric {
+    match shape.map(|s| s.binary_metric.as_str()) {
+        Some("jaccard") => vectorkit::engine::metric::DenseMetric::JACCARD,
+        _ => vectorkit::engine::metric::DenseMetric::HAMMING,
     }
 }

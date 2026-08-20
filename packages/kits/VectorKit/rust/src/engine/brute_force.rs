@@ -32,7 +32,8 @@ use engram_lib::{Engram, EngramLib};
 
 /// The binary brute-force dense index.
 ///
-/// Only `.binary(.hamming)` is supported (Lane A). Jaccard and float
+/// `.binary(.hamming)` and `.binary(.jaccard)` are supported (Lane A —
+/// Jaccard lit by the W2.5 M1 unlock). Float
 /// metrics return `VectorKitError::InvalidPayload`.
 #[derive(Debug)]
 pub struct BruteForceIndex {
@@ -220,9 +221,9 @@ impl DenseIndex for BruteForceIndex {
                 probe.kind
             )));
         }
-        if !matches!(metric, DenseMetric::Binary(crate::engine::metric::BinaryMetric::Hamming)) {
+        if !matches!(metric, DenseMetric::Binary(_)) {
             return Err(VectorKitError::InvalidPayload(format!(
-                "BruteForceIndex.search: Lane A only supports Binary(Hamming); got {:?}",
+                "BruteForceIndex.search: Lane A only supports binary metrics; got {:?}",
                 metric
             )));
         }
@@ -261,21 +262,38 @@ impl DenseIndex for BruteForceIndex {
             return Ok(vec![]);
         }
 
-        // --- Delegate ALL Hamming computation to EngramLib (I-7) ---
-        // EngramLib::distances calls SubstrateKernel::hamming_distance_batch,
-        // which is four-way conformance-gated. We are the oracle because
+        // --- Delegate ALL set/distance arithmetic to EngramLib (I-7) ---
+        // Hamming: EngramLib::distances → SubstrateKernel batch (four-way
+        // conformance-gated). Jaccard (W2.5 M1): engram_lib::
+        // jaccard_similarities composes the same conformance-gated
+        // primitives (zip4 AND/OR + popcount). We are the oracle because
         // we do no math ourselves.
-        let distances = EngramLib::distances(&probe_engram, &engrams);
+        let mut all_hits: Vec<DenseHit> = if metric == DenseMetric::JACCARD {
+            let sims = EngramLib::jaccard_similarities(&probe_engram, &engrams);
+            (0..engrams.len())
+                .map(|i| {
+                    DenseHit::jaccard(
+                        self.array.keys[slot_indices[i]].clone(),
+                        1.0 - sims[i],
+                    )
+                })
+                .collect()
+        } else {
+            let distances = EngramLib::distances(&probe_engram, &engrams);
+            (0..engrams.len())
+                .map(|i| DenseHit {
+                    key: self.array.keys[slot_indices[i]].clone(),
+                    raw_distance: distances[i] as i32,
+                    metric,
+                })
+                .collect()
+        };
 
-        // Build DenseHit for all live candidates.
-        let mut all_hits: Vec<DenseHit> = (0..engrams.len())
-            .map(|i| DenseHit {
-                key: self.array.keys[slot_indices[i]].clone(),
-                raw_distance: distances[i] as i32,
-                metric,
-            })
-            .collect();
-
+        // Metric-safety note (W2.5 M1): the i32 comparison is ALSO correct
+        // for the Jaccard path (raw_distance = f32 bit pattern; IEEE-754
+        // bit patterns of NON-NEGATIVE floats are monotone under integer
+        // comparison, and Jaccard distance is in [0,1]). A signed metric
+        // in Lane A would require decoding before comparing.
         // Sort by (distance ASC, VectorRecordKey ASC) — strict total order.
         // Using the full VectorRecordKey (itemID, vectorIndex, modelID, modelVersion)
         // rather than itemID alone ensures that distinct records sharing the same

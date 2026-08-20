@@ -600,6 +600,11 @@ pub struct RecallShape {
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
     /// clamped to `[FRONTIER_K_FLOOR, FRONTIER_K_CEILING]`.
     pub frontier_k: Option<usize>,
+    /// Binary-lane metric selector (W2.5 M1): "hamming" (default) or
+    /// "jaccard". Unknown values degrade to Hamming (shape contract).
+    /// Twin of Swift `RecallShape.binaryMetric` (which is Codable-additive;
+    /// this port's shape is constructed in-process, not deserialized).
+    pub binary_metric: String,
 }
 
 impl RecallShape {
@@ -618,7 +623,15 @@ impl RecallShape {
             lane_weights,
             anti_similar_lanes: HashSet::new(),
             frontier_k,
+            binary_metric: "hamming".to_string(),
         }
+    }
+
+    /// Builder: select the binary-lane metric ("hamming" | "jaccard",
+    /// W2.5 M1). Unknown values degrade to Hamming at the read site.
+    pub fn with_binary_metric(mut self, metric: &str) -> Self {
+        self.binary_metric = metric.to_string();
+        self
     }
 
     /// Builder: set the dense lane keys (`"dense:<modelID>"`) that invert their
@@ -684,12 +697,13 @@ impl RecallShape {
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
     /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 20] = [
+    pub const PRESET_NAMES: [&'static str; 21] = [
         "balanced",
         "precise",
         "conceptual",
         "broad",
         "lexical",
+        "jaccard",
         "not_lexical",
         "associative",
         "consensus",
@@ -787,6 +801,12 @@ impl RecallShape {
                 None,
             )),
 
+            // Binary-lane metric swap (W2.5 M1): identical fusion, but the
+            // engram lanes score Jaccard set-overlap instead of Hamming.
+            "jaccard" => Some(
+                shape(&[], None).with_binary_metric("jaccard")
+            ),
+
             // Suppress the literal lanes: ZERO bm25 + fdc. Complement of lexical.
             "not_lexical" => Some(shape(&[("bm25", 0.0), (Self::DENSE_FDC, 0.0)], None)),
 
@@ -870,6 +890,7 @@ impl RecallShape {
             "conceptual" => "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/LSA/NMF), damp bm25.",
             "broad" => "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling.",
             "lexical" => "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes.",
+            "jaccard" => "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity.",
             "not_lexical" => "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide.",
             "associative" => "Loose association — amplify the RI + NMF distributional lanes over a wide frontier.",
             "consensus" => "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree.",

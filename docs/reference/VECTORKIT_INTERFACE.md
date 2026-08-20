@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: accepted-1.1-target
-version: 1.9.0
-date: 2026-08-15
+version: 1.10.0
+date: 2026-08-20
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -1290,4 +1290,6 @@ Schema v2 → v3 (the forward-compatible ext-slot contract): added the nullable 
 Added `VectorPayload` row to the Swift/Rust Concordance — engine types table. Type exists in both ports; the audit regex missed it because the Swift declaration does not use a keyword the regex tracks (VectorPayload is a plain `public struct`; the gap was solely a missing concordance row).
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.10.0 (2026-08-20)** — `findNearest(probe:modelID:limit:metric:)` (metric default .binary(.hamming); Rust `find_nearest_with_metric`); `VectorMatch.score: Double?` (additive); `DenseHit.init(key:jaccardDistance:)` + corrected `jaccardDistance` accessor; `EngramLib.jaccardSimilarities(probe:candidates:)` (Rust twin).
+
+
