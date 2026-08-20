@@ -29,7 +29,9 @@ Design constraints, on purpose:
 
 Environment:
   MOOTX01_CONTEXT_WINDOW   Override the assumed context window size in tokens
-                           (default 200000).
+                           (default: inferred — 200000, or 1000000 when the
+                         transcript names a "[1m]" model or the measured
+                         footprint exceeds 200000).
 """
 
 import json
@@ -39,6 +41,9 @@ import tempfile
 
 THRESHOLDS = (65, 75, 85, 95)
 DEFAULT_WINDOW = 200_000
+# 1M-token window ("[1m]"-suffixed model ids); inferred, or set
+# MOOTX01_CONTEXT_WINDOW explicitly.
+LARGE_WINDOW = 1_000_000
 
 # Markers are the MCP-QUALIFIED tool-name fragment ("mcp__<server>__moot_*"
 # contains "__moot_*"), which only appears in genuine tool-use records of the
@@ -149,14 +154,16 @@ def save_state(session_id, state):
 
 
 def estimate_context_tokens(transcript_path):
-    """Return the latest main-chain context footprint in tokens, or None.
+    """Return (tokens, large_window_hint) for the main-chain context, or None.
 
     Claude Code transcripts are JSONL. Assistant entries carry a usage block;
     the most recent one reflects what the current context actually costs.
-    """
+    large_window_hint is True when any main-chain entry names a 1M-window
+    model (the "[1m]" model-id suffix)."""
     if not transcript_path:
         return None
     latest = 0
+    large_hint = False
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -172,6 +179,9 @@ def estimate_context_tokens(transcript_path):
                 message = entry.get("message")
                 if not isinstance(message, dict):
                     continue
+                model = message.get("model")
+                if isinstance(model, str) and "[1m]" in model:
+                    large_hint = True
                 usage = message.get("usage")
                 if not isinstance(usage, dict):
                     continue
@@ -189,20 +199,33 @@ def estimate_context_tokens(transcript_path):
                     latest = total
     except Exception:
         return None
-    return latest or None
+    if not latest:
+        return None
+    return latest, large_hint
 
 
 def mode_context(data):
     session_id = data.get("session_id", "default")
-    tokens = estimate_context_tokens(data.get("transcript_path"))
-    if tokens is None:
+    estimate = estimate_context_tokens(data.get("transcript_path"))
+    if estimate is None:
         return
+    tokens, large_hint = estimate
     try:
-        window = int(os.environ.get("MOOTX01_CONTEXT_WINDOW", DEFAULT_WINDOW))
+        window = int(os.environ.get("MOOTX01_CONTEXT_WINDOW", 0))
     except ValueError:
-        window = DEFAULT_WINDOW
+        window = 0
     if window <= 0:
-        window = DEFAULT_WINDOW
+        # No explicit override: infer the window. A context footprint can
+        # only exceed a window that is bigger than the default, and a
+        # "[1m]" model id in the transcript names a 1M-window model — in
+        # either case percentages against the 200k default would read
+        # "100% full" on every prompt of a healthy large-window session
+        # (the calibration bug this replaces). Default stays 200k for
+        # everything else, so small-window behavior is unchanged.
+        if large_hint or tokens > DEFAULT_WINDOW:
+            window = LARGE_WINDOW
+        else:
+            window = DEFAULT_WINDOW
     pct = min(100, int(round(tokens * 100.0 / window)))
 
     state = load_state(session_id)
