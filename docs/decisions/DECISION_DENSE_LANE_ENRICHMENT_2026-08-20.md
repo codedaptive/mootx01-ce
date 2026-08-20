@@ -1,5 +1,5 @@
 ---
-version: v0.1
+version: v0.2
 status: accepted
 date: 2026-08-20
 description: Dense-lane enrichment doctrine — platform-unique evolving dense text, trailer grammar v1, capability-shape parity, engine provenance, benchmark defaults
@@ -69,7 +69,21 @@ parenthetical trailer:
 - Enrichment is a provenance axis: run keys append `-enrich_<tag>` (absent
   for legacy/none) and `artifact.json` records the `enrichment` field.
 
+## Acceptance rulings (Bob, 2026-08-20)
+
+- **p2-det is the accepted shipping default** (search door +0.084 any@10
+  over base, exceeding the oracle's lexical arm; worst regression
+  noise-level). The deterministic engine remains the benchmarkable
+  default per the benchmark-defaults section.
+- **Wikidata property subset: green-lit** (vendor policy: fetch script +
+  in-repo table, both ports; QID → P17 country / P31 instance-of /
+  P279 subclass-of labels, sized to the FDC canon's QID coverage).
+  Target: close the fact-quality gap the acceptance cells measured
+  (temporal door captured ~10% of ceiling; 0/11 miss rescues vs 2/11).
+
 ## Changelog
+
+- **v0.2 (2026-08-20)** — Acceptance rulings: p2-det default accepted; Wikidata property subset green-lit.
 
 - **v0.1 (2026-08-20)** — Initial record from the enrichment program
   planning session (Gaps 1/2/3, oracle-gated waves).
