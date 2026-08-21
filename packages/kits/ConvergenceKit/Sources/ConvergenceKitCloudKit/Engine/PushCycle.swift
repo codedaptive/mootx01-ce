@@ -138,7 +138,11 @@ extension CloudKitStateActor {
                         columnHLCs: columnHLCs,
                         // Route declared columns through CKRecord.encryptedValues (FAB5-EV Phase 2).
                         // Empty default for undeclared tables preserves byte-identical wire format.
-                        encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? []
+                        encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? [],
+                        // Explicit representation threading: must match the zone's manifest
+                        // declaration. Default .legacyPacked preserves byte-identical behavior
+                        // for all existing zones. Fulcrum v2 zones opt in via .fullWidthV2.
+                        representation: manifest.hlcWireRepresentation
                     )
                     // SecretSync control records have their own immutable staging
                     // and conditional head-CAS path. They must never enter this
@@ -165,7 +169,11 @@ extension CloudKitStateActor {
                     kitID: manifest.kitID,
                     deleteHLC: hlc,
                     schemaVersion: manifest.schemaVersion,
-                    zone: zoneID
+                    zone: zoneID,
+                    // Explicit representation threading: must match the zone's manifest
+                    // declaration. Default .legacyPacked preserves byte-identical behavior
+                    // for all existing zones. Fulcrum v2 zones opt in via .fullWidthV2.
+                    representation: manifest.hlcWireRepresentation
                 )
                 saved.append(tombstone)
                 recordToEntryID[tombstone.recordID] = entry.id

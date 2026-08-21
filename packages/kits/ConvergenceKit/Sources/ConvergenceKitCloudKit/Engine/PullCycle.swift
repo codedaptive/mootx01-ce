@@ -130,14 +130,26 @@ extension CloudKitStateActor {
         // any records that fail to decode will be counted as conflicts in the main
         // loop below where the error is properly classified.
         let batchKeys: [(table: String, rowKey: UUID)] = pulledRecords.compactMap { record in
-            guard let decoded = try? CKRecordMapping.decode(record) else { return nil }
+            // Representation-aware decode: use the zone's declared HLC wire format.
+            // Decode failures here are silent (try?) — they are counted as conflicts
+            // in the main loop below where the error is properly classified.
+            guard let decoded = try? CKRecordMapping.decode(
+                record,
+                representation: manifest.hlcWireRepresentation
+            ) else { return nil }
             return (table: decoded.table, rowKey: decoded.rowKey)
         }
         let preloadedSyncHLCs = try? await readSyncHLCs(batch: batchKeys, storage: storage)
 
         for record in pulledRecords {
             do {
-                let decoded = try CKRecordMapping.decode(record)
+                // Representation-aware decode: use the zone's declared HLC wire format.
+                // Fails closed on mixed representation (legacyPacked zone receives fullWidthV2
+                // record, or vice versa) — SyncError.decodingFailure counted as conflict below.
+                let decoded = try CKRecordMapping.decode(
+                    record,
+                    representation: manifest.hlcWireRepresentation
+                )
                 guard decoded.kitID == manifest.kitID else {
                     throw SyncError.kitMismatch(expected: manifest.kitID, received: decoded.kitID)
                 }
