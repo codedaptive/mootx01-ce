@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // PacketTools.swift
 // AriaMcpKit
 //

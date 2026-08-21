@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // LensTools.swift
 //
 // The CognitionKit reasoning-lens surface on ARIA_MCP — one hard-bound
