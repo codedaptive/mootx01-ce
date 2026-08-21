@@ -93,12 +93,18 @@ public struct ZoneSnapshotResult: Sendable {
     /// Tombstone records (moot_sync_deleted == 1) are removed from this set;
     /// raw CKRecord.ID deletions (deletedRecordIDs) are also removed by
     /// recordName match. This is the inventory of currently-live data.
+    ///
+    /// MANIFEST-SCOPING: only records whose CKRecord.recordType belongs to
+    /// this manifest's synced table set appear here. Records from other
+    /// zone inhabitants (device-slot registry, SecretSync, etc.) are excluded
+    /// and counted in `nonManifestRecordCount` instead.
     public let inventory: Set<ZoneRecordIdentity>
 
     /// Per-live-record HLC, keyed by recordName (UUID string).
     ///
     /// Derived from representation-aware `CKRecordMapping.decode` on each
     /// modified record. Tombstones and raw-ID deletions do not appear here.
+    /// Non-manifest records are excluded (see `nonManifestRecordCount`).
     ///
     /// LEGACYPACKED NOTE: under .legacyPacked, the decoded HLC may reflect
     /// truncated magnitudes (48/12/4 ceilings). Under .fullWidthV2, the HLC
@@ -128,18 +134,40 @@ public struct ZoneSnapshotResult: Sendable {
     /// Schema version echoed from `manifest.schemaVersion`.
     public let schemaVersion: Int
 
+    /// Count of records observed in the zone whose CKRecord.recordType is NOT
+    /// among this manifest's synced tables.
+    ///
+    /// A CloudKit zone is shared by multiple sub-systems: application data rows
+    /// (owned by this manifest), the device-slot registry (recordType
+    /// "ck_device_slot"), SecretSync records (SSDeviceCredentialV1, etc.), and
+    /// any future system records that co-reside in the zone.
+    ///
+    /// These non-manifest records are EXCLUDED from `inventory` and `recordHLCs`
+    /// — they cannot be decoded via CKRecordMapping and are not application data
+    /// rows. A non-zero count is NOT an error. It simply records that the zone
+    /// contains rows this manifest does not own, keeping the snapshot honest
+    /// without failing on legitimate zone inhabitants.
+    ///
+    /// A caller who sees a non-zero count can log it for diagnostics without
+    /// treating it as a failure condition.
+    ///
+    /// Zero for a zone that contains only manifest-table records.
+    public let nonManifestRecordCount: Int
+
     public init(
         inventory: Set<ZoneRecordIdentity>,
         recordHLCs: [String: HLC],
         hlcFloor: HLC,
         zoneID: CKRecordZone.ID,
-        schemaVersion: Int
+        schemaVersion: Int,
+        nonManifestRecordCount: Int = 0
     ) {
         self.inventory = inventory
         self.recordHLCs = recordHLCs
         self.hlcFloor = hlcFloor
         self.zoneID = zoneID
         self.schemaVersion = schemaVersion
+        self.nonManifestRecordCount = nonManifestRecordCount
     }
 }
 
@@ -184,10 +212,45 @@ public func takeZoneSnapshot(
 ) async throws -> ZoneSnapshotResult {
     let representation = manifest.hlcWireRepresentation
 
+    // MANIFEST-SCOPING RULE — why this is the correct approach:
+    //
+    // A real CloudKit zone contains records written by multiple sub-systems that
+    // share the zone to avoid creating additional CloudKit quota buckets. The
+    // application data rows (owned by this manifest) co-exist with:
+    //   - Device-slot registry rows  (SlotRecordMapping.recordType = "ck_device_slot")
+    //   - SecretSync records         (e.g. "SSDeviceCredentialV1", "SSScopeHeadV1")
+    //   - Any future zone inhabitant added by another sub-system
+    //
+    // CKRecordMapping.decode() requires the moot_sync_hlc sync-metadata field,
+    // which only manifest-owned application rows carry. Attempting to decode a
+    // slot registry record or a SecretSync record via CKRecordMapping would throw
+    // SyncError.decodingFailure — not because those records are corrupt, but because
+    // they are structurally different records that do not speak the ConvergenceKit
+    // wire format.
+    //
+    // The truthful solution is a positive allow-list: compute the exact set of
+    // CKRecord.recordType strings this manifest owns (kitID + "_" + tableName for
+    // each synced table), then restrict decode and inventory to that set. Records
+    // outside the set are EXCLUDED-AND-COUNTED — counted because silent exclusion
+    // would hide zone contents; counted without error because foreign rows are
+    // expected and legitimate.
+    //
+    // PullCycle.swift (lines 73–76) used a negative deny-list that named
+    // SlotRecordMapping.recordType and SecretSyncCloudKitRecordType explicitly.
+    // The manifest-scoping approach is strictly superior: it is future-proof against
+    // new zone inhabitants and requires no code change here when they appear.
+    let manifestRecordTypes: Set<String> = Set(
+        manifest.tables.map { CKRecordMapping.recordType(kitID: manifest.kitID, table: $0.name) }
+    )
+
     // Accumulate live inventory and per-record HLCs across all pages.
     var inventory: Set<ZoneRecordIdentity> = []
     var recordHLCs: [String: HLC] = [:]
     var token: CKServerChangeToken? = nil
+    // Running count of records excluded because their type is not in the manifest.
+    // Accumulated across all pages; callers inspect this to see that the zone
+    // contains non-manifest inhabitants without those rows corrupting the inventory.
+    var nonManifestRecordCount = 0
 
     // Pagination loop: issue fetchZoneChanges until moreComing == false.
     // On each iteration, pass the previous page's changeToken to request the next
@@ -197,14 +260,34 @@ public func takeZoneSnapshot(
     repeat {
         let changes = try await database.fetchZoneChanges(inZoneWith: zoneID, since: token)
 
-        // Process modified records. Decode representation-awarely via CKRecordMapping.
-        // Decode failures are not silently swallowed — they indicate a manifest/zone
-        // mismatch (wrong representation, corrupt HLC field) and must surface loudly.
+        // Process modified records. Apply the manifest-scoping gate before decode:
+        // only records whose recordType is in the manifest's table set are inventory
+        // candidates. Everything else is a non-manifest zone inhabitant.
         for record in changes.modifiedRecords {
+
+            // Manifest-scoping gate: check whether this record belongs to one of
+            // the manifest's synced tables before attempting CKRecordMapping.decode.
+            //
+            // If NOT in the manifest's table set: the record is from another
+            // sub-system (slot registry, SecretSync, etc.). It cannot and must not
+            // be decoded via CKRecordMapping. Count it and move on.
+            //
+            // If IN the manifest's table set: decode normally. A decode failure on
+            // a manifest-typed record IS a real error (wrong representation, corrupt
+            // HLC field, or manifest/zone mismatch) and must surface loudly.
+            guard manifestRecordTypes.contains(record.recordType) else {
+                nonManifestRecordCount += 1
+                continue
+            }
+
             let decoded: DecodedRecord
             do {
                 decoded = try CKRecordMapping.decode(record, representation: representation)
             } catch {
+                // Manifest-typed record that fails decode: this is a genuine protocol
+                // violation — wrong representation, corrupt moot_sync_hlc, or schema
+                // mismatch. Do NOT swallow. Surface loudly so the caller can treat it
+                // as an operational error rather than a mystery empty inventory.
                 throw ZoneSnapshotError.decodeFailure(
                     recordName: record.recordID.recordName,
                     underlying: error
@@ -259,6 +342,7 @@ public func takeZoneSnapshot(
         recordHLCs: recordHLCs,
         hlcFloor: hlcFloor,
         zoneID: zoneID,
-        schemaVersion: manifest.schemaVersion
+        schemaVersion: manifest.schemaVersion,
+        nonManifestRecordCount: nonManifestRecordCount
     )
 }

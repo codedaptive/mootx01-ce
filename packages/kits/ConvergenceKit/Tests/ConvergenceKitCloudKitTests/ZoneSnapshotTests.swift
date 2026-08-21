@@ -35,11 +35,15 @@ private func testZone() -> CKRecordZone.ID {
 }
 
 private func testManifest(representation: HLCWireRepresentation = .fullWidthV2) -> SyncManifest {
+    // The manifest declares the "items" table so that records created by makeRecord
+    // (recordType = "snap_test_items") pass the manifest-scoping gate in takeZoneSnapshot.
+    // Without this, all makeRecord records would be treated as non-manifest inhabitants
+    // and excluded from inventory — which would break every existing snapshot test.
     SyncManifest(
         kitID: "snap_test",
         schemaVersion: 1,
         zoneIdentifier: "TestV2Zone",
-        tables: [],
+        tables: [SyncedTable(name: "items", primaryKeyColumn: "id")],
         hlcWireRepresentation: representation
     )
 }
@@ -963,5 +967,188 @@ struct ReadbackIndependenceTests {
         // Snapshot after tombstone push — must see 0 live records.
         let snap2 = try await takeZoneSnapshot(zoneID: zone, manifest: manifest, database: fake)
         #expect(snap2.inventory.isEmpty, "snapshot after tombstone push must see no live records")
+    }
+}
+
+// MARK: - (g) Manifest-scoped exclusion
+
+/// Build a raw CKRecord that looks like a slot-registry entry.
+///
+/// Slot records carry four fields (device_uuid, epoch, last_active_hlc, claimed_at)
+/// but NOT moot_sync_hlc. CKRecordMapping.decode would fail on them with
+/// decodingFailure, which is exactly why takeZoneSnapshot must gate on
+/// manifest-table membership before attempting decode.
+///
+/// Uses SlotRecordMapping.recordType ("ck_device_slot") — the actual constant
+/// from Registry/SlotRecordMapping.swift — rather than a hardcoded string literal,
+/// so the test stays correct if the constant ever changes.
+private func makeSlotRecord(slot: Int, zone: CKRecordZone.ID) -> CKRecord {
+    let id = CKRecord.ID(recordName: "slot_\(slot)", zoneID: zone)
+    let record = CKRecord(recordType: SlotRecordMapping.recordType, recordID: id)
+    // Populate the four slot fields (from SlotRecordMapping.swift schema).
+    // These fields do not include moot_sync_hlc — slot records are not
+    // ConvergenceKit application rows and cannot be decoded by CKRecordMapping.
+    record["device_uuid"] = UUID().uuidString as CKRecordValue
+    record["epoch"] = Int64(1) as CKRecordValue
+    record["last_active_hlc"] = Int64(0) as CKRecordValue
+    record["claimed_at"] = "2026-08-21T00:00:00Z" as CKRecordValue
+    return record
+}
+
+/// Build a raw CKRecord with an arbitrary foreign type (not in any manifest).
+///
+/// Simulates an unknown third-party record sharing the zone — something neither
+/// the application manifest nor the slot registry owns.
+private func makeForeignRecord(recordType: String, zone: CKRecordZone.ID) -> CKRecord {
+    let id = CKRecord.ID(recordName: UUID().uuidString, zoneID: zone)
+    let record = CKRecord(recordType: recordType, recordID: id)
+    record["some_field"] = "some_value" as CKRecordValue
+    return record
+}
+
+@Suite("(g) Manifest-scoped exclusion — non-manifest zone inhabitants are excluded, not errors")
+struct ManifestScopedExclusionTests {
+    let zone = testZone()
+    // Manifest with the "items" table declared — so snap_test_items records pass the gate.
+    let manifest = testManifest(representation: .fullWidthV2)
+
+    @Test("mixed zone: manifest records + slot records + foreign type → snapshot succeeds, nonManifestRecordCount correct")
+    func mixedZoneExcludesNonManifestRecords() async throws {
+        // Three manifest-typed application rows.
+        let appRow1 = UUID()
+        let appRow2 = UUID()
+        let appRow3 = UUID()
+        let hlc1 = HLC(physicalTime: 1_784_000_000_100, logicalCount: 1, nodeID: 1)
+        let hlc2 = HLC(physicalTime: 1_784_000_000_200, logicalCount: 1, nodeID: 1)
+        let hlc3 = HLC(physicalTime: 1_784_000_000_300, logicalCount: 1, nodeID: 1)
+        let appRec1 = try makeRecord(rowKey: appRow1, hlc: hlc1, representation: .fullWidthV2, zone: zone)
+        let appRec2 = try makeRecord(rowKey: appRow2, hlc: hlc2, representation: .fullWidthV2, zone: zone)
+        let appRec3 = try makeRecord(rowKey: appRow3, hlc: hlc3, representation: .fullWidthV2, zone: zone)
+
+        // Two slot-registry records (recordType "ck_device_slot", no moot_sync_hlc).
+        // SlotClaimOperation writes these into the same zone as application data —
+        // this is the concrete scenario that caused the U3 defect.
+        let slotRec1 = makeSlotRecord(slot: 1, zone: zone)
+        let slotRec2 = makeSlotRecord(slot: 2, zone: zone)
+
+        // One record with an arbitrary unknown type (not a manifest table, not a slot).
+        let foreignRec = makeForeignRecord(recordType: "some_external_system_record", zone: zone)
+
+        // Total: 3 manifest records, 2 slot records, 1 foreign = 3 non-manifest.
+        let allRecords = [appRec1, appRec2, appRec3, slotRec1, slotRec2, foreignRec]
+        let fake = SinglePageFake(records: allRecords)
+
+        // Must succeed despite the slot and foreign records being undecipherable by CKRecordMapping.
+        let snap = try await takeZoneSnapshot(zoneID: zone, manifest: manifest, database: fake)
+
+        // Inventory contains only the three manifest-typed application rows.
+        #expect(snap.inventory.count == 3, "only manifest-table records must appear in inventory")
+        #expect(snap.inventory.contains(where: { $0.recordName == appRow1.uuidString }))
+        #expect(snap.inventory.contains(where: { $0.recordName == appRow2.uuidString }))
+        #expect(snap.inventory.contains(where: { $0.recordName == appRow3.uuidString }))
+
+        // Slot and foreign records must NOT appear in inventory.
+        #expect(!snap.inventory.contains(where: { $0.recordType == SlotRecordMapping.recordType }),
+                "slot registry records must be excluded from inventory")
+        #expect(!snap.inventory.contains(where: { $0.recordType == "some_external_system_record" }),
+                "foreign-typed records must be excluded from inventory")
+
+        // nonManifestRecordCount must be exactly 3: 2 slot records + 1 foreign record.
+        #expect(snap.nonManifestRecordCount == 3,
+                "nonManifestRecordCount must count all non-manifest records (2 slot + 1 foreign)")
+
+        // HLC floor covers only manifest records — must be hlc3 (the highest).
+        #expect(snap.hlcFloor.physicalTime == hlc3.physicalTime,
+                "floor must be max HLC across manifest-table records only")
+    }
+
+    @Test("manifest-typed record with missing moot_sync_hlc still throws decodeFailure")
+    func manifestTypedRecordWithMissingHLCThrows() async throws {
+        // A record whose CKRecord.recordType IS in the manifest ("snap_test_items")
+        // but which does not carry moot_sync_hlc is a genuine protocol violation.
+        // The manifest-scoping gate lets it through; CKRecordMapping.decode then
+        // throws SyncError.decodingFailure because the required sync-metadata field
+        // is absent. ZoneSnapshot must surface this as ZoneSnapshotError.decodeFailure.
+        let corruptID = CKRecord.ID(recordName: UUID().uuidString, zoneID: zone)
+        // Record type matches the manifest table ("snap_test_items" = kitID + "_" + "items").
+        let corruptRecord = CKRecord(recordType: "snap_test_items", recordID: corruptID)
+        // Deliberately omit moot_sync_hlc and all other sync-metadata fields.
+        // Only a random application field is set so the record is non-empty but structurally
+        // incorrect for CKRecordMapping.decode.
+        corruptRecord["title"] = "corrupt row" as CKRecordValue
+
+        let fake = SinglePageFake(records: [corruptRecord])
+
+        await #expect(
+            throws: ZoneSnapshotError.self,
+            "manifest-typed record without moot_sync_hlc must throw ZoneSnapshotError.decodeFailure"
+        ) {
+            try await takeZoneSnapshot(zoneID: zone, manifest: manifest, database: fake)
+        }
+    }
+
+    @Test("pagination + exclusion: foreign rows across pages counted once each, manifest rows combined")
+    func paginationAndExclusionInteractCorrectly() async throws {
+        // Page 1: 2 manifest records + 1 slot record.
+        let appRow1 = UUID()
+        let appRow2 = UUID()
+        let hlcA = HLC(physicalTime: 1_784_000_000_100, logicalCount: 1, nodeID: 1)
+        let hlcB = HLC(physicalTime: 1_784_000_000_200, logicalCount: 1, nodeID: 1)
+        let appRec1 = try makeRecord(rowKey: appRow1, hlc: hlcA, representation: .fullWidthV2, zone: zone)
+        let appRec2 = try makeRecord(rowKey: appRow2, hlc: hlcB, representation: .fullWidthV2, zone: zone)
+        let slotOnPage1 = makeSlotRecord(slot: 3, zone: zone)
+
+        // Page 2: 2 manifest records + 2 foreign records of different types.
+        let appRow3 = UUID()
+        let appRow4 = UUID()
+        let hlcC = HLC(physicalTime: 1_784_000_000_300, logicalCount: 1, nodeID: 1)
+        let hlcD = HLC(physicalTime: 1_784_000_000_400, logicalCount: 1, nodeID: 1)
+        let appRec3 = try makeRecord(rowKey: appRow3, hlc: hlcC, representation: .fullWidthV2, zone: zone)
+        let appRec4 = try makeRecord(rowKey: appRow4, hlc: hlcD, representation: .fullWidthV2, zone: zone)
+        let foreignOnPage2a = makeForeignRecord(recordType: "external_type_alpha", zone: zone)
+        let foreignOnPage2b = makeForeignRecord(recordType: "external_type_beta", zone: zone)
+
+        let page1 = [appRec1, appRec2, slotOnPage1]
+        let page2 = [appRec3, appRec4, foreignOnPage2a, foreignOnPage2b]
+        let fake = MultiPageFake(page1: page1, page2: page2)
+
+        let snap = try await takeZoneSnapshot(zoneID: zone, manifest: manifest, database: fake)
+
+        // Both pages must have been fetched.
+        let fetchCount = await fake.fetchCallCount
+        #expect(fetchCount == 2, "pagination must issue two fetches")
+
+        // All 4 manifest records must appear in inventory (combined from both pages).
+        #expect(snap.inventory.count == 4, "inventory must contain all 4 manifest records from both pages")
+        for rowKey in [appRow1, appRow2, appRow3, appRow4] {
+            #expect(snap.inventory.contains(where: { $0.recordName == rowKey.uuidString }),
+                    "row \(rowKey.uuidString.prefix(8)) must appear in inventory")
+        }
+
+        // nonManifestRecordCount must be 3: 1 slot on page 1 + 2 foreign on page 2.
+        // Each non-manifest record is counted exactly once, regardless of which page it arrived on.
+        #expect(snap.nonManifestRecordCount == 3,
+                "nonManifestRecordCount must accumulate across pages (1 slot + 2 foreign)")
+
+        // Floor must be the max manifest HLC = hlcD (physicalTime 1_784_000_000_400).
+        #expect(snap.hlcFloor.physicalTime == hlcD.physicalTime,
+                "floor must be max manifest HLC across both pages")
+    }
+
+    @Test("zone with only non-manifest records: snapshot succeeds with empty inventory and correct count")
+    func zoneWithOnlyNonManifestRecords() async throws {
+        // Simulate a zone that currently has no application rows at all — only
+        // slot registry records (e.g. before any user data is synced). The snapshot
+        // must not throw; it must return an empty inventory with a non-zero count.
+        let slot1 = makeSlotRecord(slot: 1, zone: zone)
+        let slot2 = makeSlotRecord(slot: 2, zone: zone)
+        let slot3 = makeSlotRecord(slot: 3, zone: zone)
+
+        let fake = SinglePageFake(records: [slot1, slot2, slot3])
+        let snap = try await takeZoneSnapshot(zoneID: zone, manifest: manifest, database: fake)
+
+        #expect(snap.inventory.isEmpty, "no manifest records → inventory must be empty")
+        #expect(snap.hlcFloor == .zero, "no manifest records → floor must be HLC.zero")
+        #expect(snap.nonManifestRecordCount == 3, "all 3 slot records must be counted")
     }
 }
