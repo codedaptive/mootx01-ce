@@ -463,6 +463,14 @@ public enum AriaResident {
                             now: now)
                         return (report.proposed.count, report.borderline.count)
                     },
+                    // Live anomaly cycle (P3 wiring completion): without this
+                    // closure the AnomalySweepSignal registers its no-op
+                    // defaultSpec and drawer bit 26 is never set in a resident
+                    // estate. Threshold stays the sweep default; the signal's
+                    // scheduler clock is the deterministic `now` it passes.
+                    anomalyCycle: { now in
+                        try await kit.anomalyFlagSweep(handle: handle, now: now)
+                    },
                     now: Date()
                 )
                 Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults)")
