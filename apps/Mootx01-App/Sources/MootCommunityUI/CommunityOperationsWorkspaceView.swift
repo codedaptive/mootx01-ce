@@ -188,6 +188,8 @@ public struct CommunityOperationsWorkspaceView: View {
         } detail: {
             detailView
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(String(localized: "Community operations"))
         .accessibilityIdentifier(workspaceModel.accessibilityIdentifier)
     }
 
@@ -209,6 +211,7 @@ public struct CommunityOperationsWorkspaceView: View {
                 systemImage: section.systemImage
             )
             .tag(section.id)
+            .accessibilityElement(children: .ignore)
             // Each row carries an explicit accessibility label (the localized
             // display name) and an identifier (the stable section ID) so
             // accessibility tools and UI tests can locate rows without relying
@@ -233,19 +236,27 @@ public struct CommunityOperationsWorkspaceView: View {
             // into session views within the review feature is handled by the
             // feature view's own NavigationStack.
             ReviewCenterView(model: workspaceModel.reviewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("community.operations.review")
 
         case "workspace.obsidian":
             // ObsidianSyncView is macOS-only (guarded by #if os(macOS) in its
             // own file); this view is also macOS-only so the guard is satisfied.
             ObsidianSyncView(model: workspaceModel.obsidianModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("community.operations.obsidian")
 
         case "workspace.transfer":
             // TransferView is macOS-only; same guard logic applies.
             TransferView(model: workspaceModel.transferModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("community.operations.transfer")
 
         case "workspace.lan":
             // LANControlView is macOS-only; same guard logic applies.
             LANControlView(model: workspaceModel.lanModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("community.operations.lan")
 
         default:
             // Fallback for any unexpected selection value — should never occur

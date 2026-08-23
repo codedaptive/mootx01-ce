@@ -43,6 +43,10 @@ public struct TransferView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Text(String(localized: "transfer.root.label"))
+                .font(.title2.bold())
+                .accessibilityAddTraits(.isHeader)
+                .padding([.top, .horizontal])
             modePicker
             Divider()
             Group {

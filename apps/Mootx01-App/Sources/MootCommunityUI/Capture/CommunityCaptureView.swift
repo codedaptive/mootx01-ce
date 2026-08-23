@@ -50,9 +50,11 @@ public struct CommunityCaptureView: View {
                     .accessibilityHint(model.sensitivityAccessibilityHint)
                     Toggle(String(localized: "Eligible for export"), isOn: $model.exportEligible)
                         .accessibilityIdentifier("community.capture.export-eligibility")
+                        .accessibilityLabel(String(localized: "Eligible for export"))
                         .accessibilityHint(String(localized: "Allows approved export workflows to include this capture."))
                     Toggle(String(localized: "Eligible for LAN sharing"), isOn: $model.lanEligible)
                         .accessibilityIdentifier("community.capture.lan-eligibility")
+                        .accessibilityLabel(String(localized: "Eligible for LAN sharing"))
                         .accessibilityHint(String(localized: "Allows the resident daemon to serve this capture when LAN sharing is active."))
                 }
 

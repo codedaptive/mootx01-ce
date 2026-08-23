@@ -37,19 +37,19 @@ final class CommunitySurfaceUITests: XCTestCase {
         )
 
         let destinations = [
-            ("workspace.review", "Reviews"),
-            ("workspace.obsidian", "Vault Authorization"),
-            ("workspace.transfer", "Community Import and Export"),
-            ("workspace.lan", "Sharing Policy"),
+            ("workspace.review", "community.operations.review"),
+            ("workspace.obsidian", "community.operations.obsidian"),
+            ("workspace.transfer", "community.operations.transfer"),
+            ("workspace.lan", "community.operations.lan"),
         ]
-        for (identifier, visibleHeading) in destinations {
+        for (identifier, surfaceIdentifier) in destinations {
             let row = element(identifier, in: app)
             XCTAssertTrue(row.exists, "Missing operations row \(identifier)")
             XCTAssertFalse(row.label.isEmpty, "Operations row \(identifier) has no accessible label")
             row.click()
             XCTAssertTrue(
-                app.staticTexts[visibleHeading].waitForExistence(timeout: 3),
-                "Operations row \(identifier) did not expose \(visibleHeading)"
+                element(surfaceIdentifier, in: app).waitForExistence(timeout: 3),
+                "Operations row \(identifier) did not expose \(surfaceIdentifier)"
             )
         }
     }
