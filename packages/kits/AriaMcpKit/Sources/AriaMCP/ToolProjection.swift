@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 import Foundation
 
 /// The AI-client-oriented MCP tool surface.

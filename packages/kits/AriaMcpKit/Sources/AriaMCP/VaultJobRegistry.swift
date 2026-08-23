@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // VaultJobRegistry.swift
 //
 // Actor-based registry of in-process vault import and export jobs.

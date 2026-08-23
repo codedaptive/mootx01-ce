@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 import Foundation
 import GeniusLocusKit
 import LocusKit

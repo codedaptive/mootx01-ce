@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 /// Inspects a completed tool call and returns a coaching hint when a
 /// suboptimal call pattern is detected.
 ///

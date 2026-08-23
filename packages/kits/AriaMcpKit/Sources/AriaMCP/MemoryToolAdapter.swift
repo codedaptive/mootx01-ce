@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // MemoryToolAdapter.swift
 //
 // M-MEMTOOL-1: Anthropic memory_20250818 tool adapter.
