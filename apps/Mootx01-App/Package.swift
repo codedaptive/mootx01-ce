@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "MootCommunityGateway", targets: ["MootCommunityGateway"]),
         .library(name: "MootCommunityUI", targets: ["MootCommunityUI"]),
+        .library(name: "MootCommunityUITestSupport", targets: ["MootCommunityUITestSupport"]),
     ],
     dependencies: [
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
@@ -24,6 +25,15 @@ let package = Package(
             name: "MootCommunityUI",
             dependencies: ["MootCommunityGateway"],
             path: "Sources/MootCommunityUI"
+        ),
+        .target(
+            name: "MootCommunityUITestSupport",
+            dependencies: [
+                "MootCommunityGateway",
+                "MootCommunityUI",
+                .product(name: "AriaMCPWire", package: "AriaMcpKit"),
+            ],
+            path: "Tests/MootCommunityUITestSupport"
         ),
         .testTarget(
             name: "CommunityBoundaryTests",

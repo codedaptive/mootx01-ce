@@ -4,6 +4,8 @@
   "destinationEdition": "community",
   "copy": [
     "apps/Mootx01-App/CommunityApp",
+    "apps/Mootx01-App/CommunityUITestHost",
+    "apps/Mootx01-App/CommunityUITests",
     "apps/Mootx01-App/community-export.json",
     "apps/Mootx01-App/Package.resolved",
     "apps/Mootx01-App/scripts/check-community-imports.py",
@@ -15,6 +17,7 @@
     "apps/Mootx01-App/Sources/MootCommunityGateway",
     "apps/Mootx01-App/Sources/MootCommunityUI",
     "apps/Mootx01-App/Tests/CommunityBoundaryTests",
+    "apps/Mootx01-App/Tests/MootCommunityUITestSupport",
     "apps/Mootx01-App/Assets.xcassets",
     "apps/Mootx01-App/App/PrivacyInfo.xcprivacy",
     "contracts/community/1.1",

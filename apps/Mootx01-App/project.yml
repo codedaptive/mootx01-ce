@@ -54,3 +54,46 @@ targets:
       properties:
         ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.productivity
+
+  Mootx01-Community-UITestHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: CommunityUITestHost
+    dependencies:
+      - package: Mootx01
+        product: MootCommunityUI
+      - package: Mootx01
+        product: MootCommunityUITestSupport
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.community.ui-test-host
+        PRODUCT_NAME: "Mootx01 Community UI Test Host"
+        SWIFT_VERSION: "6.0"
+        SKIP_INSTALL: YES
+
+  Mootx01-Community-UITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: CommunityUITests
+    dependencies:
+      - target: Mootx01-Community-UITestHost
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.community.ui-tests
+        PRODUCT_NAME: "Mootx01 Community UI Tests"
+        SWIFT_VERSION: "6.0"
+        TEST_TARGET_NAME: Mootx01-Community-UITestHost
+
+schemes:
+  Mootx01-Community-UI-Acceptance:
+    build:
+      targets:
+        Mootx01-Community-UITestHost: all
+        Mootx01-Community-UITests: [test]
+    test:
+      targets:
+        - name: Mootx01-Community-UITests

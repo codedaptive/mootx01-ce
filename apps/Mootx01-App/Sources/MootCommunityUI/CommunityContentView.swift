@@ -8,6 +8,9 @@ private enum CommunityDestination: String, CaseIterable, Identifiable {
     case engine = "Engine"
 
     var id: String { rawValue }
+    var accessibilityIdentifier: String {
+        "community.destination.\(rawValue.lowercased())"
+    }
     var symbol: String {
         switch self {
         case .capture: "tray.and.arrow.down"
@@ -31,6 +34,7 @@ public struct CommunityContentView: View {
                 Label(String(localized: String.LocalizationValue(destination.rawValue)),
                       systemImage: destination.symbol)
                     .tag(destination)
+                    .accessibilityIdentifier(destination.accessibilityIdentifier)
             }
             .navigationTitle(String(localized: "MOOTx01 Community"))
         } detail: {
