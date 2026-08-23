@@ -9,6 +9,7 @@
     "apps/Mootx01-App/scripts/check-community-imports.py",
     "apps/Mootx01-App/scripts/Community-DeveloperID-ExportOptions.plist",
     "apps/Mootx01-App/scripts/Community-DeveloperID-UploadOptions.plist",
+    "apps/Mootx01-App/scripts/release-community.sh",
     "apps/Mootx01-App/scripts/verify-community-artifact.sh",
     "apps/Mootx01-App/scripts/verify-community-boundary.sh",
     "apps/Mootx01-App/Sources/MootCommunityGateway",

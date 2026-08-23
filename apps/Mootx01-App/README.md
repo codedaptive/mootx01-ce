@@ -44,3 +44,18 @@ xcodebuild \
 
 `community-export.json` records the reviewed publication boundary that
 produced this tree. Paths in its `forbidden` list must remain absent.
+
+## Release artifact
+
+Run the release command from the projected public CE checkout. A full release
+requires a notarytool keychain profile and fails before notarization unless the
+embedded Developer ID profile authorizes the Community/daemon App Group:
+
+```sh
+apps/Mootx01-App/scripts/release-community.sh \
+  --output-root /absolute/external/build/path \
+  --notary-keychain-profile PROFILE
+```
+
+Use `--prepare-only` instead of `--notary-keychain-profile` to produce the
+verified notarization input without submitting it.
