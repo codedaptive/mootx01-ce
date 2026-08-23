@@ -1,0 +1,148 @@
+{
+  "family": "estate",
+  "cases": [
+    {
+      "id": "estate-fresh-install-needs-creation",
+      "covers": ["success"],
+      "method": "moot_community_estate_inspect",
+      "arguments": {},
+      "result": {"state": "needsCreation"}
+    },
+    {
+      "id": "estate-create-ready",
+      "covers": ["success"],
+      "method": "moot_community_estate_create",
+      "arguments": {"name": "My MOOT"},
+      "result": {
+        "state": "ready",
+        "receipt": {
+          "estate": {
+            "id": "20000000-0000-0000-0000-000000000001",
+            "name": "My MOOT",
+            "schemaVersion": "1.1"
+          },
+          "receiptID": "20000000-0000-0000-0000-000000000002"
+        }
+      }
+    },
+    {
+      "id": "estate-open-missing-key",
+      "covers": ["refusal"],
+      "method": "moot_community_estate_open",
+      "arguments": {"estateID": "20000000-0000-0000-0000-000000000003"},
+      "result": {
+        "state": "missingKey",
+        "estate": {
+          "id": "20000000-0000-0000-0000-000000000003",
+          "name": "Recovered estate",
+          "schemaVersion": "1.0"
+        },
+        "choices": [
+          {
+            "id": "supply-key",
+            "title": "Supply recovery key",
+            "consequence": "Reopens the existing estate without changing its records.",
+            "isDestructive": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "estate-corruption-diagnosed",
+      "covers": ["corruption", "refusal"],
+      "method": "moot_community_estate_inspect",
+      "arguments": {},
+      "result": {
+        "state": "corrupt",
+        "estate": {
+          "id": "20000000-0000-0000-0000-000000000004",
+          "name": "Damaged estate",
+          "schemaVersion": "1.0"
+        },
+        "diagnosis": "The canonical store failed its integrity check; no replacement estate was created.",
+        "choices": [
+          {
+            "id": "restore-last-good",
+            "title": "Restore last verified snapshot",
+            "consequence": "Replaces damaged canonical state with the last verified snapshot.",
+            "isDestructive": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "estate-migration-required",
+      "covers": ["migration"],
+      "method": "moot_community_estate_inspect",
+      "arguments": {},
+      "result": {
+        "state": "migrationRequired",
+        "plan": {
+          "id": "20000000-0000-0000-0000-000000000005",
+          "estate": {
+            "id": "20000000-0000-0000-0000-000000000006",
+            "name": "Existing estate",
+            "schemaVersion": "1.0"
+          },
+          "sourceVersion": "1.0",
+          "targetVersion": "1.1",
+          "expectedEffect": "Preserves canonical records while adding Community 1.1 policy metadata."
+        }
+      }
+    },
+    {
+      "id": "estate-migration-interrupted-progress",
+      "covers": ["migration", "interruption"],
+      "method": "moot_community_estate_migrate",
+      "arguments": {"planID": "20000000-0000-0000-0000-000000000005"},
+      "result": {
+        "state": "migrating",
+        "progress": {
+          "operationID": "20000000-0000-0000-0000-000000000007",
+          "plan": {
+            "id": "20000000-0000-0000-0000-000000000005",
+            "estate": {
+              "id": "20000000-0000-0000-0000-000000000006",
+              "name": "Existing estate",
+              "schemaVersion": "1.0"
+            },
+            "sourceVersion": "1.0",
+            "targetVersion": "1.1",
+            "expectedEffect": "Preserves canonical records while adding Community 1.1 policy metadata."
+          },
+          "completedUnits": 4,
+          "totalUnits": 10
+        }
+      }
+    },
+    {
+      "id": "estate-cancel-resumable",
+      "covers": ["cancellation", "interruption"],
+      "method": "moot_community_estate_cancel",
+      "arguments": {"operationID": "20000000-0000-0000-0000-000000000007"},
+      "result": {"state": "cancelled", "resumable": true}
+    },
+    {
+      "id": "estate-recovery-refused-without-authority",
+      "covers": ["refusal"],
+      "method": "moot_community_estate_recover",
+      "arguments": {"choiceID": "restore-last-good"},
+      "result": {"state": "blocked", "reason": "authority-insufficient"}
+    },
+    {
+      "id": "estate-incompatible",
+      "covers": ["refusal"],
+      "method": "moot_community_estate_open",
+      "arguments": {"estateID": "20000000-0000-0000-0000-000000000008"},
+      "result": {
+        "state": "incompatible",
+        "estate": {
+          "id": "20000000-0000-0000-0000-000000000008",
+          "name": "Future estate",
+          "schemaVersion": "2.0"
+        },
+        "reason": "estate-incompatible"
+      }
+    }
+  ]
+}

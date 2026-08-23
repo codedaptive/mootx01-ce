@@ -1,0 +1,80 @@
+{
+  "family": "lan",
+  "cases": [
+    {
+      "id": "lan-default-off",
+      "covers": ["success"],
+      "method": "moot_community_lan_status",
+      "arguments": {},
+      "result": {"state": "stopped"}
+    },
+    {
+      "id": "lan-policy-mixed-eligibility",
+      "covers": ["success", "privacy-exclusion"],
+      "method": "moot_community_lan_policy",
+      "arguments": {},
+      "result": {
+        "eligibleCount": 3,
+        "ineligibleCount": 7,
+        "policyDescription": "Only explicitly LAN-eligible and export-eligible records below restricted sensitivity are served."
+      }
+    },
+    {
+      "id": "lan-start-confirmed",
+      "covers": ["success"],
+      "method": "moot_community_lan_start",
+      "arguments": {},
+      "result": {
+        "outcome": "started",
+        "endpoint": "http://192.168.1.10:4243",
+        "authentication": "valid"
+      }
+    },
+    {
+      "id": "lan-start-refused-without-authority",
+      "covers": ["refusal"],
+      "method": "moot_community_lan_start",
+      "arguments": {},
+      "result": {"outcome": "denied", "reason": "lan-authority-missing"}
+    },
+    {
+      "id": "lan-network-interrupted",
+      "covers": ["interruption"],
+      "method": "moot_community_lan_status",
+      "arguments": {},
+      "result": {"state": "interrupted", "reason": "lan-network-unavailable"}
+    },
+    {
+      "id": "lan-expired-credential-visible",
+      "covers": ["refusal"],
+      "method": "moot_community_lan_status",
+      "arguments": {},
+      "result": {
+        "state": "active",
+        "endpoint": "http://192.168.1.10:4243",
+        "authentication": "expired"
+      }
+    },
+    {
+      "id": "lan-eligibility-refresh-confirmed",
+      "covers": ["retry", "privacy-exclusion", "success"],
+      "method": "moot_community_lan_refresh_eligibility",
+      "arguments": {},
+      "result": {"outcome": "updated", "eligibleCount": 2, "ineligibleCount": 8}
+    },
+    {
+      "id": "lan-eligibility-refresh-refused",
+      "covers": ["refusal"],
+      "method": "moot_community_lan_refresh_eligibility",
+      "arguments": {},
+      "result": {"outcome": "refused", "reason": "lan-policy-forbidden"}
+    },
+    {
+      "id": "lan-stop-confirmed",
+      "covers": ["success"],
+      "method": "moot_community_lan_stop",
+      "arguments": {},
+      "result": {"outcome": "stopped"}
+    }
+  ]
+}

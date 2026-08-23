@@ -1,0 +1,176 @@
+{
+  "family": "transfer",
+  "cases": [
+    {
+      "id": "transfer-import-source-recognized",
+      "covers": ["success"],
+      "method": "moot_community_transfer_import_source",
+      "arguments": {"bookmark": "Ym9va21hcms=", "displayName": "archive.json"},
+      "result": {"outcome": "selected", "format": {"name": "MOOT JSON", "recognized": true}}
+    },
+    {
+      "id": "transfer-import-plan-no-mutation",
+      "covers": ["success"],
+      "method": "moot_community_transfer_import_plan",
+      "arguments": {"bookmark": "Ym9va21hcms="},
+      "result": {
+        "outcome": "planned",
+        "plan": {
+          "format": {"name": "MOOT JSON", "recognized": true},
+          "candidateCount": 10,
+          "conflictCount": 1,
+          "invalidCount": 1,
+          "policyExclusionCount": 2,
+          "estimatedTransferCount": 6,
+          "executionPermitted": true,
+          "planToken": "import-plan-001"
+        }
+      }
+    },
+    {
+      "id": "transfer-unsupported-import-refused-plan",
+      "covers": ["refusal"],
+      "method": "moot_community_transfer_import_plan",
+      "arguments": {"bookmark": "YmFkLWJvb2ttYXJr"},
+      "result": {
+        "outcome": "planned",
+        "plan": {
+          "format": {"name": "Unknown", "recognized": false},
+          "candidateCount": 0,
+          "conflictCount": 0,
+          "invalidCount": 1,
+          "policyExclusionCount": 0,
+          "estimatedTransferCount": 0,
+          "executionPermitted": false,
+          "planToken": "import-plan-refused-001"
+        }
+      }
+    },
+    {
+      "id": "transfer-import-submitted",
+      "covers": ["success"],
+      "method": "moot_community_transfer_import_execute",
+      "arguments": {"planToken": "import-plan-001"},
+      "result": {"outcome": "submitted", "jobID": "import-job-001"}
+    },
+    {
+      "id": "transfer-stale-plan-denied",
+      "covers": ["stale-state", "refusal"],
+      "method": "moot_community_transfer_import_execute",
+      "arguments": {"planToken": "import-plan-stale"},
+      "result": {"outcome": "denied", "reason": "plan-stale"}
+    },
+    {
+      "id": "transfer-export-destination-authorized",
+      "covers": ["success"],
+      "method": "moot_community_transfer_export_destination",
+      "arguments": {"bookmark": "Ym9va21hcms=", "fileName": "community-export.json"},
+      "result": {"outcome": "selected"}
+    },
+    {
+      "id": "transfer-export-scopes-policy-owned",
+      "covers": ["success", "privacy-exclusion"],
+      "method": "moot_community_transfer_export_scopes",
+      "arguments": {},
+      "result": {
+        "scopes": [
+          {"scopeToken": "eligible-all", "candidateCount": 8, "description": "All currently export-eligible records"}
+        ]
+      }
+    },
+    {
+      "id": "transfer-export-plan-with-exclusions",
+      "covers": ["success", "privacy-exclusion"],
+      "method": "moot_community_transfer_export_plan",
+      "arguments": {
+        "bookmark": "Ym9va21hcms=",
+        "fileName": "community-export.json",
+        "scopeToken": "eligible-all"
+      },
+      "result": {
+        "outcome": "planned",
+        "plan": {
+          "format": {"name": "MOOT JSON", "recognized": true},
+          "candidateCount": 10,
+          "conflictCount": 0,
+          "invalidCount": 0,
+          "policyExclusionCount": 2,
+          "estimatedTransferCount": 8,
+          "executionPermitted": true,
+          "planToken": "export-plan-001"
+        }
+      }
+    },
+    {
+      "id": "transfer-export-submitted",
+      "covers": ["success"],
+      "method": "moot_community_transfer_export_execute",
+      "arguments": {"planToken": "export-plan-001"},
+      "result": {"outcome": "submitted", "jobID": "export-job-001"}
+    },
+    {
+      "id": "transfer-running-stable-job",
+      "covers": ["success"],
+      "method": "moot_community_transfer_job_status",
+      "arguments": {"jobID": "export-job-001"},
+      "result": {
+        "outcome": "status",
+        "jobID": "export-job-001",
+        "jobState": {"state": "running", "processed": 3, "total": 8}
+      }
+    },
+    {
+      "id": "transfer-interrupted-waiting-stable-job",
+      "covers": ["interruption"],
+      "method": "moot_community_transfer_job_status",
+      "arguments": {"jobID": "export-job-001"},
+      "result": {
+        "outcome": "status",
+        "jobID": "export-job-001",
+        "jobState": {"state": "waiting", "reason": "job-interrupted"}
+      }
+    },
+    {
+      "id": "transfer-exact-retry-same-completion",
+      "covers": ["retry", "success"],
+      "method": "moot_community_transfer_job_status",
+      "arguments": {"jobID": "export-job-001"},
+      "result": {
+        "outcome": "status",
+        "jobID": "export-job-001",
+        "jobState": {
+          "state": "completed",
+          "counts": {"transferred": 8, "skipped": 0, "conflicted": 0, "excluded": 2, "failed": 0},
+          "receipt": "export-receipt-001"
+        }
+      }
+    },
+    {
+      "id": "transfer-cancel-before-commit",
+      "covers": ["cancellation"],
+      "method": "moot_community_transfer_job_cancel",
+      "arguments": {"jobID": "import-job-002"},
+      "result": {"outcome": "cancelled", "stage": {"stage": "beforeCommit"}}
+    },
+    {
+      "id": "transfer-cancel-during-commit",
+      "covers": ["cancellation", "interruption"],
+      "method": "moot_community_transfer_job_cancel",
+      "arguments": {"jobID": "import-job-003"},
+      "result": {
+        "outcome": "cancelled",
+        "stage": {
+          "stage": "duringCommit",
+          "counts": {"transferred": 2, "skipped": 0, "conflicted": 0, "excluded": 0, "failed": 0}
+        }
+      }
+    },
+    {
+      "id": "transfer-permission-loss-at-execute",
+      "covers": ["refusal"],
+      "method": "moot_community_transfer_export_execute",
+      "arguments": {"planToken": "export-plan-permission-lost"},
+      "result": {"outcome": "denied", "reason": "permission-revoked"}
+    }
+  ]
+}

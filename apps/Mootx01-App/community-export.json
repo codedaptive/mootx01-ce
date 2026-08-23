@@ -1,0 +1,80 @@
+{
+  "schema": 3,
+  "sourceEdition": "enterprise",
+  "destinationEdition": "community",
+  "copy": [
+    "apps/Mootx01-App/CommunityApp",
+    "apps/Mootx01-App/community-export.json",
+    "apps/Mootx01-App/Package.resolved",
+    "apps/Mootx01-App/scripts/check-community-imports.py",
+    "apps/Mootx01-App/scripts/Community-DeveloperID-ExportOptions.plist",
+    "apps/Mootx01-App/scripts/Community-DeveloperID-UploadOptions.plist",
+    "apps/Mootx01-App/scripts/verify-community-artifact.sh",
+    "apps/Mootx01-App/scripts/verify-community-boundary.sh",
+    "apps/Mootx01-App/Sources/MootCommunityGateway",
+    "apps/Mootx01-App/Sources/MootCommunityUI",
+    "apps/Mootx01-App/Tests/CommunityBoundaryTests",
+    "apps/Mootx01-App/Assets.xcassets",
+    "apps/Mootx01-App/App/PrivacyInfo.xcprivacy",
+    "contracts/community/1.1",
+    "packages/apple/MootIntentKit/Package.resolved",
+    "packages/apple/MootIntentKit/Sources/MootIntentCore",
+    "packages/apple/MootIntentKit/Tests/MootIntentCoreTests"
+  ],
+  "rename": {
+    "apps/Mootx01-App/COMMUNITY_README.md": "apps/Mootx01-App/README.md",
+    "apps/Mootx01-App/Package.community.swift": "apps/Mootx01-App/Package.swift",
+    "apps/Mootx01-App/project.community.yml": "apps/Mootx01-App/project.yml",
+    "packages/apple/MootIntentKit/Package.community.swift": "packages/apple/MootIntentKit/Package.swift"
+  },
+  "replace": [
+    "apps/Mootx01-App",
+    "packages/apple/MootIntentKit"
+  ],
+  "remove": [
+    "packages/apple/MootFoundationModelsKit"
+  ],
+  "lockfileOriginHashes": {
+    "apps/Mootx01-App/Package.resolved": "05c4abbda5007ad3dc9d750acde27fe1699c8dfb15a99af772294d1741aa5816"
+  },
+  "ceGuardRequired": [
+    "packages/apple/MootIntentKit/Package.community.swift",
+    "packages/apple/MootIntentKit/Sources/MootIntentKit",
+    "packages/apple/MootIntentKit/Tests/MootIntentKitTests",
+    "packages/apple/MootFoundationModelsKit"
+  ],
+  "forbidden": [
+    "apps/Mootx01-App/App/Mootx01App.swift",
+    "apps/Mootx01-App/COMMUNITY_BACKPORT.md",
+    "apps/Mootx01-App/COMMUNITY_README.md",
+    "apps/Mootx01-App/Package.community.swift",
+    "apps/Mootx01-App/project.community.yml",
+    "apps/Mootx01-App/RecallWidget",
+    "apps/Mootx01-App/ShareExtension",
+    "apps/Mootx01-App/Sources/MootProGateway",
+    "apps/Mootx01-App/Sources/MootProUI",
+    "apps/Mootx01-App/Sources/MootGateway",
+    "apps/Mootx01-App/Sources/MootEnterpriseGateway",
+    "apps/Mootx01-App/Sources/MootEnterpriseUI",
+    "apps/Mootx01-App/Tests/MootCommunityGatewayTests",
+    "apps/Mootx01-App/Tests/MootGatewayTestSupport",
+    "apps/Mootx01-App/Tests/MootGatewayTests",
+    "apps/Mootx01-App/Tests/MootProUITests",
+    "packages/apple/MootIntentKit/Package.community.swift",
+    "packages/apple/MootIntentKit/Sources/MootIntentKit",
+    "packages/apple/MootIntentKit/Tests/MootIntentKitTests",
+    "packages/apple/MootFoundationModelsKit",
+    "apps/Mootx01-App/App/Mootx01-iOS.entitlements",
+    "apps/Mootx01-App/App/Mootx01Shortcuts.swift",
+    "apps/Mootx01-App/CustodyProof",
+    "apps/Mootx01-App/DaemonHelper",
+    "apps/Mootx01-App/DaemonProofHost",
+    "apps/Mootx01-App/docs",
+    "apps/Mootx01-App/LEXICON_TO_APPLE_MAPPING.md",
+    "apps/Mootx01-App/UITests",
+    "apps/Mootx01-App/scripts/export-community.sh",
+    "apps/Mootx01-App/scripts/prove-macos-cross-install-custody.sh",
+    "apps/Mootx01-App/scripts/prove-macos-daemon-helper.sh",
+    "packages/apple/MootIntentKit/README.md"
+  ]
+}

@@ -1,0 +1,871 @@
+{
+  "contractID": "com.simple-machines.mootx01.community",
+  "contractVersion": "1.1.0",
+  "transport": "authenticated-first-party-mcp-tools-call",
+  "serialization": "json-utf8",
+  "fixtureDigestAlgorithm": "sha256",
+  "identityMethod": "moot_community_contract_identity",
+  "readiness": {
+    "carrier": "signed-first-party-daemon-descriptor-and-authenticated-mcp-ceremony",
+    "states": [
+      "unavailable",
+      "starting",
+      "ready",
+      "migrating",
+      "recovering",
+      "blocked",
+      "shuttingDown",
+      "incompatible"
+    ],
+    "readyRequires": [
+      "compatible-signed-descriptor",
+      "authenticated-session",
+      "matching-initialize-identity",
+      "initialized-notification",
+      "successful-ping",
+      "matching-community-contract-identity"
+    ]
+  },
+  "reasonCodes": [
+    "action-conflict",
+    "action-refused",
+    "authority-insufficient",
+    "capture-content-invalid",
+    "daemon-blocked",
+    "destination-forbidden",
+    "destination-stale",
+    "estate-corrupt",
+    "estate-incompatible",
+    "estate-key-missing",
+    "estate-missing",
+    "format-unsupported",
+    "input-malformed",
+    "job-interrupted",
+    "job-not-found",
+    "lan-authority-missing",
+    "lan-credential-expired",
+    "lan-network-unavailable",
+    "lan-policy-forbidden",
+    "migration-interrupted",
+    "migration-required",
+    "operation-cancelled",
+    "permission-revoked",
+    "plan-stale",
+    "policy-refused",
+    "privacy-escalation",
+    "request-conflict",
+    "review-session-stale",
+    "sync-not-retryable",
+    "unexpected-failure",
+    "vault-access-revoked",
+    "vault-authorization-missing",
+    "vault-content-malformed"
+  ],
+  "types": {
+    "Empty": {
+      "kind": "record",
+      "fields": {}
+    },
+    "ContractIdentity": {
+      "kind": "record",
+      "fields": {
+        "contractID": "contract-id",
+        "contractVersion": "contract-version",
+        "fixtureDigestAlgorithm": "sha256-algorithm",
+        "fixtureDigest": "sha256",
+        "daemonInstanceID": "uuid",
+        "estateID": "uuid"
+      }
+    },
+    "EstateSummary": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "name": "nonempty-string",
+        "schemaVersion": "nonempty-string"
+      }
+    },
+    "EstateReceipt": {
+      "kind": "record",
+      "fields": {
+        "estate": "EstateSummary",
+        "receiptID": "uuid"
+      }
+    },
+    "RecoveryChoice": {
+      "kind": "record",
+      "fields": {
+        "id": "nonempty-string",
+        "title": "nonempty-string",
+        "consequence": "nonempty-string",
+        "isDestructive": "boolean"
+      }
+    },
+    "MigrationPlan": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "estate": "EstateSummary",
+        "sourceVersion": "nonempty-string",
+        "targetVersion": "nonempty-string",
+        "expectedEffect": "nonempty-string"
+      }
+    },
+    "MigrationProgress": {
+      "kind": "record",
+      "fields": {
+        "operationID": "uuid",
+        "plan": "MigrationPlan",
+        "completedUnits": "nonnegative-integer",
+        "totalUnits": "nonnegative-integer"
+      }
+    },
+    "EstateLifecycleState": {
+      "kind": "union",
+      "discriminator": "state",
+      "variants": {
+        "checking": {},
+        "needsCreation": {},
+        "chooseExisting": {
+          "estates": "EstateSummary[]"
+        },
+        "missingKey": {
+          "estate": "EstateSummary",
+          "choices": "RecoveryChoice[]"
+        },
+        "corrupt": {
+          "estate": "EstateSummary",
+          "diagnosis": "nonempty-string",
+          "choices": "RecoveryChoice[]"
+        },
+        "incompatible": {
+          "estate": "EstateSummary",
+          "reason": "reason-code"
+        },
+        "migrationRequired": {
+          "plan": "MigrationPlan"
+        },
+        "migrating": {
+          "progress": "MigrationProgress"
+        },
+        "ready": {
+          "receipt": "EstateReceipt"
+        },
+        "cancelled": {
+          "resumable": "boolean"
+        },
+        "blocked": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "CaptureSensitivity": {
+      "kind": "enum",
+      "values": ["normal", "elevated", "restricted", "secret"]
+    },
+    "CaptureDestination": {
+      "kind": "record",
+      "fields": {
+        "id": "nonempty-string",
+        "title": "nonempty-string",
+        "detail": "string"
+      }
+    },
+    "CapturePolicy": {
+      "kind": "record",
+      "fields": {
+        "destination": "CaptureDestination",
+        "sensitivity": "CaptureSensitivity",
+        "exportEligible": "boolean",
+        "lanEligible": "boolean"
+      }
+    },
+    "CaptureDefaultPolicy": {
+      "kind": "record",
+      "fields": {
+        "destinationID": "nonempty-string",
+        "sensitivity": "CaptureSensitivity",
+        "exportEligible": "boolean",
+        "lanEligible": "boolean"
+      }
+    },
+    "CaptureChoices": {
+      "kind": "record",
+      "fields": {
+        "destinations": "CaptureDestination[]",
+        "sensitivities": "CaptureSensitivity[]",
+        "defaultPolicy": "CaptureDefaultPolicy"
+      }
+    },
+    "CaptureArguments": {
+      "kind": "record",
+      "fields": {
+        "requestID": "uuid",
+        "subject": "string",
+        "content": "nonempty-string",
+        "destinationID": "nonempty-string",
+        "sensitivity": "CaptureSensitivity",
+        "exportEligible": "boolean",
+        "lanEligible": "boolean"
+      }
+    },
+    "CaptureOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "applied": {
+          "recordID": "uuid",
+          "effectivePolicy": "CapturePolicy"
+        },
+        "refused": {
+          "field": "CaptureRefusedField",
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "CaptureRefusedField": {
+      "kind": "enum",
+      "values": [
+        "destination",
+        "sensitivity",
+        "export-eligibility",
+        "lan-eligibility",
+        "content",
+        "daemon"
+      ]
+    },
+    "ReviewKind": {
+      "kind": "enum",
+      "values": ["morning", "endOfDay", "weekly"]
+    },
+    "ReviewCompletionReceipt": {
+      "kind": "record",
+      "fields": {
+        "sessionID": "uuid",
+        "completedAt": "date-time",
+        "summary": "nonempty-string"
+      }
+    },
+    "ReviewMode": {
+      "kind": "union",
+      "discriminator": "status",
+      "commonFields": {
+        "kind": "ReviewKind"
+      },
+      "variants": {
+        "available": {},
+        "due": {},
+        "inProgress": {
+          "sessionID": "uuid"
+        },
+        "completed": {
+          "receipt": "ReviewCompletionReceipt"
+        },
+        "blocked": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ReviewDashboard": {
+      "kind": "record",
+      "fields": {
+        "modes": "ReviewMode[]"
+      }
+    },
+    "ReviewItem": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "subject": "nonempty-string",
+        "detail": "string"
+      }
+    },
+    "ReviewSection": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "title": "nonempty-string",
+        "items": "ReviewItem[]"
+      }
+    },
+    "ReviewAction": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "expectedEffect": "nonempty-string",
+        "isReversible": "boolean",
+        "reversalAvailable": "boolean"
+      }
+    },
+    "DuplicateResolutionChoice": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "description": "nonempty-string"
+      }
+    },
+    "DuplicateGroup": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "reason": "nonempty-string",
+        "recordIDs": "uuid[]",
+        "choices": "DuplicateResolutionChoice[]"
+      }
+    },
+    "ReviewCompletionStatus": {
+      "kind": "union",
+      "discriminator": "state",
+      "variants": {
+        "notStarted": {},
+        "inProgress": {},
+        "completed": {
+          "receipt": "ReviewCompletionReceipt"
+        }
+      }
+    },
+    "ReviewSession": {
+      "kind": "record",
+      "fields": {
+        "id": "uuid",
+        "kind": "ReviewKind",
+        "generatedAt": "date-time",
+        "sourceEstateState": "nonempty-string",
+        "sections": "ReviewSection[]",
+        "actions": "ReviewAction[]",
+        "duplicateGroups": "DuplicateGroup[]",
+        "completionStatus": "ReviewCompletionStatus"
+      }
+    },
+    "ReviewSessionOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "session": {
+          "session": "ReviewSession"
+        },
+        "blocked": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ReviewActionOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "applied": {},
+        "alreadyApplied": {},
+        "staleSession": {},
+        "conflict": {
+          "reason": "reason-code"
+        },
+        "refused": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ReviewCompleteOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "completed": {
+          "receipt": "ReviewCompletionReceipt"
+        },
+        "refused": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ObsidianAuthorization": {
+      "kind": "union",
+      "discriminator": "state",
+      "variants": {
+        "missing": {},
+        "valid": {
+          "vaultURL": "url",
+          "displayName": "nonempty-string"
+        },
+        "needsRenewal": {
+          "vaultURL": "url",
+          "displayName": "nonempty-string",
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ObsidianStatus": {
+      "kind": "union",
+      "discriminator": "state",
+      "commonFields": {
+        "checkpointAt?": "date-time",
+        "recordCount?": "nonnegative-integer"
+      },
+      "variants": {
+        "starting": {},
+        "scanning": {},
+        "synchronizing": {
+          "pendingCount?": "nonnegative-integer",
+          "totalCount?": "nonnegative-integer"
+        },
+        "idle": {},
+        "waiting": {
+          "until?": "date-time"
+        },
+        "paused": {},
+        "interrupted": {
+          "reason": "reason-code",
+          "retryable": "boolean"
+        },
+        "blocked": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code",
+          "retryable": "boolean"
+        }
+      }
+    },
+    "VaultSelectionArguments": {
+      "kind": "record",
+      "fields": {
+        "bookmark": "base64",
+        "displayName": "nonempty-string"
+      }
+    },
+    "VaultSelectionOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "selected": {
+          "vaultURL": "url",
+          "displayName": "nonempty-string"
+        },
+        "denied": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ObsidianEnableOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "enabled": {},
+        "refused": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ObsidianDisableOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "disabledOnly": {},
+        "disabledAndRemoved": {},
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ObsidianRetryOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "restarted": {},
+        "refused": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "TransferFormat": {
+      "kind": "record",
+      "fields": {
+        "name": "nonempty-string",
+        "recognized": "boolean"
+      }
+    },
+    "TransferPlan": {
+      "kind": "record",
+      "fields": {
+        "format": "TransferFormat",
+        "candidateCount": "nonnegative-integer",
+        "conflictCount": "nonnegative-integer",
+        "invalidCount": "nonnegative-integer",
+        "policyExclusionCount": "nonnegative-integer",
+        "estimatedTransferCount": "nonnegative-integer",
+        "executionPermitted": "boolean",
+        "planToken": "nonempty-string"
+      }
+    },
+    "TransferCounts": {
+      "kind": "record",
+      "fields": {
+        "transferred": "nonnegative-integer",
+        "skipped": "nonnegative-integer",
+        "conflicted": "nonnegative-integer",
+        "excluded": "nonnegative-integer",
+        "failed": "nonnegative-integer"
+      }
+    },
+    "CancellationStage": {
+      "kind": "union",
+      "discriminator": "stage",
+      "variants": {
+        "beforeCommit": {},
+        "duringCommit": {
+          "counts": "TransferCounts"
+        },
+        "afterCommit": {
+          "counts": "TransferCounts"
+        }
+      }
+    },
+    "TransferJobState": {
+      "kind": "union",
+      "discriminator": "state",
+      "variants": {
+        "queued": {},
+        "running": {
+          "processed?": "nonnegative-integer",
+          "total?": "nonnegative-integer"
+        },
+        "waiting": {
+          "reason": "reason-code"
+        },
+        "completed": {
+          "counts": "TransferCounts",
+          "receipt": "nonempty-string"
+        },
+        "failed": {
+          "reason": "reason-code",
+          "partial?": "TransferCounts"
+        },
+        "cancelled": {
+          "stage": "CancellationStage"
+        }
+      }
+    },
+    "SourceSelectionArguments": {
+      "kind": "record",
+      "fields": {
+        "bookmark": "base64",
+        "displayName": "nonempty-string"
+      }
+    },
+    "SourceSelectionOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "selected": {
+          "format": "TransferFormat"
+        },
+        "denied": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "BookmarkArguments": {
+      "kind": "record",
+      "fields": {
+        "bookmark": "base64"
+      }
+    },
+    "TransferPlanOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "planned": {
+          "plan": "TransferPlan"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "PlanTokenArguments": {
+      "kind": "record",
+      "fields": {
+        "planToken": "nonempty-string"
+      }
+    },
+    "TransferExecutionOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "submitted": {
+          "jobID": "nonempty-string"
+        },
+        "denied": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ExportDestinationArguments": {
+      "kind": "record",
+      "fields": {
+        "bookmark": "base64",
+        "fileName": "nonempty-string"
+      }
+    },
+    "ExportDestinationOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "selected": {},
+        "denied": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "ExportScope": {
+      "kind": "record",
+      "fields": {
+        "scopeToken": "nonempty-string",
+        "candidateCount": "nonnegative-integer",
+        "description": "nonempty-string"
+      }
+    },
+    "ExportScopes": {
+      "kind": "record",
+      "fields": {
+        "scopes": "ExportScope[]"
+      }
+    },
+    "ExportPlanArguments": {
+      "kind": "record",
+      "fields": {
+        "bookmark": "base64",
+        "fileName": "nonempty-string",
+        "scopeToken": "nonempty-string"
+      }
+    },
+    "JobArguments": {
+      "kind": "record",
+      "fields": {
+        "jobID": "nonempty-string"
+      }
+    },
+    "JobStatusOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "status": {
+          "jobID": "nonempty-string",
+          "jobState": "TransferJobState"
+        },
+        "notFound": {},
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "JobCancelOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "cancelled": {
+          "stage": "CancellationStage"
+        },
+        "notFound": {},
+        "alreadyComplete": {},
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "LANAuthentication": {
+      "kind": "enum",
+      "values": ["valid", "expired", "notObtained"]
+    },
+    "LANStatus": {
+      "kind": "union",
+      "discriminator": "state",
+      "variants": {
+        "stopped": {},
+        "starting": {},
+        "active": {
+          "endpoint": "nonempty-string",
+          "authentication": "LANAuthentication"
+        },
+        "interrupted": {
+          "reason": "reason-code"
+        },
+        "blocked": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "LANPolicy": {
+      "kind": "record",
+      "fields": {
+        "eligibleCount": "nonnegative-integer",
+        "ineligibleCount": "nonnegative-integer",
+        "policyDescription": "nonempty-string"
+      }
+    },
+    "LANStartOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "started": {
+          "endpoint": "nonempty-string",
+          "authentication": "LANAuthentication"
+        },
+        "denied": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "LANStopOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "stopped": {},
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "LANEligibilityOutcome": {
+      "kind": "union",
+      "discriminator": "outcome",
+      "variants": {
+        "updated": {
+          "eligibleCount": "nonnegative-integer",
+          "ineligibleCount": "nonnegative-integer"
+        },
+        "refused": {
+          "reason": "reason-code"
+        },
+        "failed": {
+          "reason": "reason-code"
+        }
+      }
+    },
+    "NameArguments": {
+      "kind": "record",
+      "fields": {
+        "name": "nonempty-string"
+      }
+    },
+    "EstateIDArguments": {
+      "kind": "record",
+      "fields": {
+        "estateID": "uuid"
+      }
+    },
+    "PlanIDArguments": {
+      "kind": "record",
+      "fields": {
+        "planID": "uuid"
+      }
+    },
+    "ChoiceIDArguments": {
+      "kind": "record",
+      "fields": {
+        "choiceID": "nonempty-string"
+      }
+    },
+    "OperationIDArguments": {
+      "kind": "record",
+      "fields": {
+        "operationID": "uuid"
+      }
+    },
+    "ReviewKindArguments": {
+      "kind": "record",
+      "fields": {
+        "kind": "ReviewKind"
+      }
+    },
+    "ReviewActionArguments": {
+      "kind": "record",
+      "fields": {
+        "actionID": "uuid",
+        "sessionID": "uuid"
+      }
+    },
+    "DuplicateResolutionArguments": {
+      "kind": "record",
+      "fields": {
+        "groupID": "uuid",
+        "choiceID": "uuid",
+        "sessionID": "uuid"
+      }
+    },
+    "SessionIDArguments": {
+      "kind": "record",
+      "fields": {
+        "sessionID": "uuid"
+      }
+    }
+  },
+  "endpoints": [
+    {"name": "moot_community_contract_identity", "family": "identity", "mutation": false, "arguments": "Empty", "result": "ContractIdentity"},
+    {"name": "moot_community_estate_inspect", "family": "estate", "mutation": false, "arguments": "Empty", "result": "EstateLifecycleState"},
+    {"name": "moot_community_estate_create", "family": "estate", "mutation": true, "arguments": "NameArguments", "result": "EstateLifecycleState"},
+    {"name": "moot_community_estate_open", "family": "estate", "mutation": true, "arguments": "EstateIDArguments", "result": "EstateLifecycleState"},
+    {"name": "moot_community_estate_migrate", "family": "estate", "mutation": true, "arguments": "PlanIDArguments", "result": "EstateLifecycleState"},
+    {"name": "moot_community_estate_recover", "family": "estate", "mutation": true, "arguments": "ChoiceIDArguments", "result": "EstateLifecycleState"},
+    {"name": "moot_community_estate_cancel", "family": "estate", "mutation": true, "arguments": "OperationIDArguments", "result": "EstateLifecycleState"},
+    {"name": "moot_community_capture_choices", "family": "capture", "mutation": false, "arguments": "Empty", "result": "CaptureChoices"},
+    {"name": "moot_community_capture", "family": "capture", "mutation": true, "arguments": "CaptureArguments", "result": "CaptureOutcome"},
+    {"name": "moot_community_review_dashboard", "family": "review", "mutation": false, "arguments": "Empty", "result": "ReviewDashboard"},
+    {"name": "moot_community_review_session", "family": "review", "mutation": false, "arguments": "ReviewKindArguments", "result": "ReviewSessionOutcome"},
+    {"name": "moot_community_review_apply", "family": "review", "mutation": true, "arguments": "ReviewActionArguments", "result": "ReviewActionOutcome"},
+    {"name": "moot_community_review_reverse", "family": "review", "mutation": true, "arguments": "ReviewActionArguments", "result": "ReviewActionOutcome"},
+    {"name": "moot_community_review_resolve_duplicate", "family": "review", "mutation": true, "arguments": "DuplicateResolutionArguments", "result": "ReviewActionOutcome"},
+    {"name": "moot_community_review_complete", "family": "review", "mutation": true, "arguments": "SessionIDArguments", "result": "ReviewCompleteOutcome"},
+    {"name": "moot_community_obsidian_status", "family": "obsidian", "mutation": false, "arguments": "Empty", "result": "ObsidianStatus"},
+    {"name": "moot_community_obsidian_authorization", "family": "obsidian", "mutation": false, "arguments": "Empty", "result": "ObsidianAuthorization"},
+    {"name": "moot_community_obsidian_select_vault", "family": "obsidian", "mutation": true, "arguments": "VaultSelectionArguments", "result": "VaultSelectionOutcome"},
+    {"name": "moot_community_obsidian_enable", "family": "obsidian", "mutation": true, "arguments": "Empty", "result": "ObsidianEnableOutcome"},
+    {"name": "moot_community_obsidian_disable", "family": "obsidian", "mutation": true, "arguments": "Empty", "result": "ObsidianDisableOutcome"},
+    {"name": "moot_community_obsidian_retry", "family": "obsidian", "mutation": true, "arguments": "Empty", "result": "ObsidianRetryOutcome"},
+    {"name": "moot_community_transfer_import_source", "family": "transfer", "mutation": false, "arguments": "SourceSelectionArguments", "result": "SourceSelectionOutcome"},
+    {"name": "moot_community_transfer_import_plan", "family": "transfer", "mutation": false, "arguments": "BookmarkArguments", "result": "TransferPlanOutcome"},
+    {"name": "moot_community_transfer_import_execute", "family": "transfer", "mutation": true, "arguments": "PlanTokenArguments", "result": "TransferExecutionOutcome"},
+    {"name": "moot_community_transfer_export_destination", "family": "transfer", "mutation": false, "arguments": "ExportDestinationArguments", "result": "ExportDestinationOutcome"},
+    {"name": "moot_community_transfer_export_scopes", "family": "transfer", "mutation": false, "arguments": "Empty", "result": "ExportScopes"},
+    {"name": "moot_community_transfer_export_plan", "family": "transfer", "mutation": false, "arguments": "ExportPlanArguments", "result": "TransferPlanOutcome"},
+    {"name": "moot_community_transfer_export_execute", "family": "transfer", "mutation": true, "arguments": "PlanTokenArguments", "result": "TransferExecutionOutcome"},
+    {"name": "moot_community_transfer_job_status", "family": "transfer", "mutation": false, "arguments": "JobArguments", "result": "JobStatusOutcome"},
+    {"name": "moot_community_transfer_job_cancel", "family": "transfer", "mutation": true, "arguments": "JobArguments", "result": "JobCancelOutcome"},
+    {"name": "moot_community_lan_status", "family": "lan", "mutation": false, "arguments": "Empty", "result": "LANStatus"},
+    {"name": "moot_community_lan_policy", "family": "lan", "mutation": false, "arguments": "Empty", "result": "LANPolicy"},
+    {"name": "moot_community_lan_start", "family": "lan", "mutation": true, "arguments": "Empty", "result": "LANStartOutcome"},
+    {"name": "moot_community_lan_stop", "family": "lan", "mutation": true, "arguments": "Empty", "result": "LANStopOutcome"},
+    {"name": "moot_community_lan_refresh_eligibility", "family": "lan", "mutation": true, "arguments": "Empty", "result": "LANEligibilityOutcome"}
+  ],
+  "requiredScenarioCoverage": {
+    "identity": ["success", "incompatible"],
+    "estate": ["success", "refusal", "migration", "corruption", "interruption", "cancellation"],
+    "capture": ["success", "refusal", "stale-state", "retry", "privacy-exclusion"],
+    "review": ["success", "refusal", "stale-state", "interruption", "retry", "duplicate", "conflict"],
+    "obsidian": ["success", "refusal", "interruption", "retry", "privacy-exclusion"],
+    "transfer": ["success", "refusal", "stale-state", "interruption", "retry", "cancellation", "privacy-exclusion"],
+    "lan": ["success", "refusal", "interruption", "retry", "privacy-exclusion"]
+  }
+}
