@@ -158,6 +158,245 @@ public enum LaunchAgent {
         )
     }
 
+    // MARK: - CORE-09 — ENABLED bundle plist (resident mode is real, Wave A1b)
+
+    /// The ENABLED bundle-form daemon plist: identical to the disabled variant
+    /// except `RunAtLoad` and `KeepAlive` are both true, so launchd starts
+    /// the provider at login and restarts it on unexpected exit (documented
+    /// restart policy).
+    ///
+    /// Now that resident mode is real (Wave A1b shipped
+    /// `CommunityResidentMain.run`), the installer writes this variant.
+    /// The DISABLED path (`makeDaemonBundlePlist` / `installDaemonBundleDisabled`)
+    /// is preserved for rollback and audit purposes.
+    ///
+    /// Pure — unit-testable without launchd.
+    public static func makeDaemonBundlePlistEnabled(homeDirectory: URL) -> String {
+        let logsDir = MootPaths.logsDirURL(homeDirectory: homeDirectory)
+        return makePlist(
+            label: DaemonBundle.launchAgentLabel,
+            programArguments: DaemonBundle.programArguments(homeDirectory: homeDirectory),
+            stdoutPath: logsDir.appendingPathComponent("mootx01-provider.out.log").path,
+            stderrPath: logsDir.appendingPathComponent("mootx01-provider.err.log").path,
+            runAtLoad: true,   // ENABLED: start at login
+            keepAlive: true    // ENABLED: restart on unexpected exit
+        )
+    }
+
+    // MARK: - CORE-09 — enabled install + preservation reporting
+
+    /// Write the ENABLED bundle-form daemon plist, verify it by readback, and
+    /// confirm the service identity (label) and executable path are present.
+    ///
+    /// This is the CORE-09 successor to `installDaemonBundleDisabled`: now
+    /// that resident mode is real, the installer activates the service with
+    /// RunAtLoad=true/KeepAlive=true.  The launchctl bootstrap side effect is
+    /// physical evidence — it stays behind the existing physical boundary and
+    /// is NOT performed here.  This function's contract is:
+    ///   1. Write the enabled plist (deterministic bytes from the generator).
+    ///   2. Read it back: the on-disk bytes must equal the generator's output.
+    ///   3. Parse the readback to confirm the service identity (label) matches
+    ///      `DaemonBundle.launchAgentLabel` and the executable path is the one
+    ///      the generator produced.
+    ///
+    /// "Installation reports success only when the expected service identity
+    /// and executable are registered" — CORE-09 acceptance criteria.
+    ///
+    /// Returns `.installed(plistPath:dashboardURL:)` on success or
+    /// `.launchctlFailed` when any step refuses.
+    public static func installDaemonBundleEnabled(homeDirectory: URL) -> Status {
+        let fm = FileManager.default
+        let plistURL = DaemonBundle.launchAgentPlistURL(homeDirectory: homeDirectory)
+        let expected = makeDaemonBundlePlistEnabled(homeDirectory: homeDirectory)
+
+        // Write the enabled plist, creating parent directories as needed.
+        do {
+            try fm.createDirectory(
+                at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try expected.write(to: plistURL, atomically: true, encoding: .utf8)
+        } catch {
+            return .launchctlFailed("could not write daemon bundle enabled plist: \(error)")
+        }
+
+        // Readback: the on-disk bytes must BE the generator's — a partial
+        // write or interference is reported, never silently accepted.
+        guard let onDisk = try? String(contentsOf: plistURL, encoding: .utf8),
+              onDisk == expected else {
+            return .launchctlFailed(
+                "daemon bundle enabled plist readback mismatch at \(plistURL.path)"
+            )
+        }
+
+        // Service-identity readback: parse the plist and confirm the label
+        // and executable path are what the generator prescribed (CORE-09:
+        // "installation reports success only when service identity and
+        // executable are registered").
+        guard let plistData = onDisk.data(using: .utf8),
+              let obj = try? PropertyListSerialization.propertyList(from: plistData, format: nil),
+              let dict = obj as? [String: Any],
+              let label = dict["Label"] as? String,
+              label == DaemonBundle.launchAgentLabel,
+              let args = dict["ProgramArguments"] as? [String],
+              let executablePath = args.first,
+              executablePath == DaemonBundle.bundleExecutableURL(homeDirectory: homeDirectory).path
+        else {
+            return .launchctlFailed(
+                "daemon bundle plist identity or executable path did not verify at \(plistURL.path)"
+            )
+        }
+
+        // The dashboard URL for the provider is the resident daemon's
+        // loopback endpoint (not the moot-mgr dashboard port).
+        return .installed(
+            plistPath: plistURL.path,
+            dashboardURL: MootPaths.residentEndpointURL
+        )
+    }
+
+    // MARK: - CORE-09 — typed blocked state assessment
+
+    /// What the status surface observed about the daemon provider bundle
+    /// installation — pure path/plist inspection, no launchd query.
+    ///
+    /// Used by CORE-09 to produce a typed blocked state when an installation
+    /// is present but broken, so the application surface can distinguish a
+    /// healthy installation from an incompatible or corrupted one without
+    /// crashing or lying.
+    public enum InstallationAssessment: Sendable, Equatable {
+        /// The installation is consistent: plist exists, executable is present
+        /// and executable, and the plist content matches the enabled generator's
+        /// expected output for this home directory.
+        case ok(plistPath: String, executablePath: String)
+        /// The installation is present but broken — a typed blocked state
+        /// rather than a crash or a silent success lie.
+        case blocked(reason: InstallationBlockedReason)
+    }
+
+    /// The reason an installation is blocked. Each case is a distinct,
+    /// diagnosable failure mode; no case conflates two problems (CORE-09:
+    /// "a broken or incompatible installation produces a typed blocked state").
+    public enum InstallationBlockedReason: String, Sendable, Equatable {
+        /// No plist file at the expected location.
+        case missingPlist
+        /// Plist present, but its content does not match the enabled
+        /// generator's canonical output for this home directory — written by a
+        /// different version, manually edited, or partially written.
+        case plistContentMismatch
+        /// Plist content matches, but the executable path it names is absent.
+        case missingExecutable
+        /// Plist and executable present, but the file at the executable
+        /// path is not executable (wrong permissions, not a regular file,
+        /// or a directory in place of it).
+        case executableNotExecutable
+    }
+
+    /// Assess the daemon-bundle installation — pure filesystem inspection,
+    /// no launchctl, no process interaction.
+    ///
+    /// Readiness (descriptor published + identity endpoint answering) is NOT
+    /// assessed here. This function answers ONLY whether the installation
+    /// artifacts are present and self-consistent: a healthy installation may
+    /// still be starting, and a blocked one needs operator attention.
+    ///
+    /// - Parameter homeDirectory: the user's home directory.
+    /// - Returns: `.ok` when plist and executable are present and consistent;
+    ///   `.blocked` with a typed reason when any check fails.
+    public static func assessDaemonBundleInstallation(homeDirectory: URL) -> InstallationAssessment {
+        let plistURL = DaemonBundle.launchAgentPlistURL(homeDirectory: homeDirectory)
+        let executableURL = DaemonBundle.bundleExecutableURL(homeDirectory: homeDirectory)
+
+        // 1. Plist must exist at the expected location.
+        guard FileManager.default.fileExists(atPath: plistURL.path) else {
+            return .blocked(reason: .missingPlist)
+        }
+        // 2. Plist content must match the ENABLED generator's canonical bytes.
+        //    The disabled plist is no longer valid after a CORE-09 install.
+        guard let onDisk = try? String(contentsOf: plistURL, encoding: .utf8),
+              onDisk == makeDaemonBundlePlistEnabled(homeDirectory: homeDirectory) else {
+            return .blocked(reason: .plistContentMismatch)
+        }
+        // 3. Executable path named in the plist must exist.
+        guard FileManager.default.fileExists(atPath: executableURL.path) else {
+            return .blocked(reason: .missingExecutable)
+        }
+        // 4. The file at that path must be executable — a non-executable file
+        //    would make launchd fail on every launch attempt, thrashing.
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            return .blocked(reason: .executableNotExecutable)
+        }
+        return .ok(plistPath: plistURL.path, executablePath: executableURL.path)
+    }
+
+    // MARK: - CORE-09 — uninstall preservation reporting
+
+    /// What the uninstall surface reports about one class of artifacts
+    /// (CORE-09: "removal reports whether daemon configuration and estate
+    /// data are retained or removed").
+    public enum UninstallPreservation: String, Sendable, Equatable {
+        /// No artifact of this class was present — nothing to retain or remove.
+        case absent
+        /// The artifact is present and will be / was retained (user data;
+        /// requires an explicit purge command to remove).
+        case retained
+        /// The artifact was removed as part of this uninstall operation.
+        case removed
+    }
+
+    /// The two-class uninstall preservation report.
+    public struct UninstallReport: Sendable, Equatable {
+        /// The LaunchAgent plist and bundle binaries (service registration
+        /// artifacts, not user data — removed by a standard uninstall).
+        public let daemonConfiguration: UninstallPreservation
+        /// The estate database in Application Support (user data — NEVER
+        /// touched by a standard uninstall; explicit purge only).
+        public let estateData: UninstallPreservation
+
+        public init(
+            daemonConfiguration: UninstallPreservation,
+            estateData: UninstallPreservation
+        ) {
+            self.daemonConfiguration = daemonConfiguration
+            self.estateData = estateData
+        }
+    }
+
+    /// Observe the preservation status of daemon configuration and estate data
+    /// — pure filesystem inspection, no removal performed.
+    ///
+    /// Two artifact classes are deliberately distinct (CORE-09):
+    /// - **Daemon configuration**: service artifacts (plist, bundle) — removed
+    ///   on uninstall; `.retained` when still present after a dry-run or before
+    ///   the physical launchctl step runs.
+    /// - **Estate data**: Application Support database — user data; retained
+    ///   across every uninstall; never removed here.
+    ///
+    /// - Parameters:
+    ///   - homeDirectory: the user's home directory.
+    ///   - dataDirectory: the resolved Application Support data directory
+    ///     (e.g. `MootPaths.resolveDataDirectory(environment:homeDirectory:)`).
+    /// - Returns: an `UninstallReport` naming what was observed.
+    public static func reportUninstallPreservation(
+        homeDirectory: URL,
+        dataDirectory: URL
+    ) -> UninstallReport {
+        let fm = FileManager.default
+        // Daemon configuration: any owned artifact present means the config
+        // class is present (retained until the physical removal step runs).
+        let ownedPaths = DaemonBundle.ownedArtifactPaths(homeDirectory: homeDirectory)
+        let configPresent = ownedPaths.contains { fm.fileExists(atPath: $0) }
+        let configStatus: UninstallPreservation = configPresent ? .retained : .absent
+
+        // Estate data: estate.sqlite plus its SQLite WAL sidecar files.
+        let estateFile = MootPaths.estateURL(in: dataDirectory)
+        let estatePresent = fm.fileExists(atPath: estateFile.path)
+            || fm.fileExists(atPath: estateFile.path + "-wal")
+            || fm.fileExists(atPath: estateFile.path + "-shm")
+        let estateStatus: UninstallPreservation = estatePresent ? .retained : .absent
+
+        return UninstallReport(daemonConfiguration: configStatus, estateData: estateStatus)
+    }
+
     // MARK: - MACD-2c2 — honest status vocabulary (P-c2-10)
 
     /// What the status surface observed about the bundle registration.
