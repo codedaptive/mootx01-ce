@@ -131,8 +131,8 @@ from activating before the old fd is closed.
    bundle (or run `mootx01 upgrade` if the upgrade path is wired).
 2. Observe via `launchctl print` that only one PID is live at all times.
 3. Inspect the generation store file
-   (`~/Library/Group Containers/<group>/mootx01/daemon/generations.v1`) before
-   and after: `provider` counter must increase by exactly 1, never reset.
+   (`~/Library/Group Containers/<team>.group.com.codedaptive.mootx01/Library/Application Support/MOOTx01/provider/generations.v1`)
+   before and after: `provider` counter must increase by exactly 1, never reset.
 4. Confirm no "lock unavailable" error in logs from the new binary — it must
    acquire on first attempt (old binary has released before new binary runs).
 
@@ -150,8 +150,11 @@ logout/login cycle.
 **Manual procedure:**
 1. After installation (P-01), log out of the macOS account.
 2. Log back in.
-3. Within 10 seconds, poll `http://127.0.0.1:4242/mcp-first-party-descriptor`.
-4. A successful response confirms the daemon started automatically at login.
+3. Within 10 seconds, wait for
+   `~/Library/Group Containers/<team>.group.com.codedaptive.mootx01/Library/Application Support/MOOTx01/daemon-descriptor.v2.json`.
+4. Read the authenticated endpoint from that descriptor and complete an MCP
+   `initialize` request using its advertised credential. An unauthenticated
+   GET is not a readiness check and must not be expected to succeed.
 5. Check `launchctl print gui/$(id -u)/com.codedaptive.mootx01.daemon` to
    confirm `state = running`.
 
@@ -220,8 +223,8 @@ real entitlements.
 1. Install Community edition daemon.
 2. Install Pro edition daemon alongside it.
 3. Observe that only one PID holds the lock (use `lsof` on the lock file).
-4. Confirm the descriptor endpoint returns the Pro descriptor (higher authority
-   wins per the policy).
+4. Confirm the authenticated descriptor readback identifies Pro as the active
+   provider (higher authority wins per the policy).
 5. Remove Pro; confirm Community re-activates automatically (launchd restart
    path, P-03).
 
@@ -234,7 +237,7 @@ real entitlements.
 | P-01: launchctl bootstrap | PASS 2026-08-25 — install exit 0; expected label, bundle executable, and running PID observed |
 | P-02: Readiness vs launch | RERUN REQUIRED — 2026-08-25 exposed and corrected a stale nonexistent HTTP descriptor URL |
 | P-03: Unexpected exit / restart | PASS 2026-08-25 — SIGKILL produced a new PID with the same estate identifier and rebound port 4242 |
-| P-04: Upgrade (no concurrent writers) | Physical — requires two binary versions |
+| P-04: Upgrade (no concurrent writers) | RERUN REQUIRED — 2026-08-25 package replacement succeeded, but readback exposed that postinstall restarted only the legacy service and omitted the Community provider; corrected in source and awaiting a rebuilt two-version physical run |
 | P-05: Login launch | Physical — requires logout/login cycle |
 | P-06: Removal report | RERUN REQUIRED — 2026-08-25 exposed and corrected the nonexistent `--keep-estate` option |
 | P-07: Blocked state app surface | Physical — requires running app |

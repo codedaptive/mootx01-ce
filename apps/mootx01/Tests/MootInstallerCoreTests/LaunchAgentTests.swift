@@ -383,6 +383,14 @@ struct DistributionParityTests {
         #expect(script.contains(DaemonBundle.executableName))
     }
 
+    @Test("pkg upgrade restarts both Community provider and legacy resident services")
+    func postinstallRestartParity() throws {
+        let script = try contents("distribution/macos/scripts/postinstall")
+        #expect(script.contains("gui/$REAL_UID/\(DaemonBundle.launchAgentLabel)"))
+        #expect(script.contains("gui/$REAL_UID/\(MootPaths.daemonLabel)"))
+        #expect(script.contains("gui/$REAL_UID/\(MootPaths.launchAgentLabel)"))
+    }
+
     @Test("the Makefile pkg recipe builds and passes the daemon shell artifact")
     func makefileParity() throws {
         let makefile = try contents("Makefile")
