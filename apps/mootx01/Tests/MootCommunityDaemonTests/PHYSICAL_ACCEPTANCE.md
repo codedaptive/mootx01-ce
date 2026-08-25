@@ -2,7 +2,7 @@
 version: v0.1
 wave: CORE-09 (Community 1.1 Core, Wave E1)
 scope: Automated subset complete; physical scenarios enumerated below.
-last-updated: 2026-08-24
+last-updated: 2026-08-25
 ---
 
 # CORE-09: Physical Evidence Ledger
@@ -65,20 +65,27 @@ requires a live launchd session.
 
 **CORE-09 claim:** Readiness is distinguishable from mere process launch.
 
-**Why physical:** Readiness is the moment the daemon publishes its
-`FirstPartyDescriptor` to the descriptor endpoint (port 4242). Automated tests
-confirm the descriptor publication preconditions (lock proof, estate proof, bind
-proof) but cannot observe the actual network-level publication to a live socket.
+**Why physical:** Readiness is the moment the daemon atomically publishes its
+`FirstPartyDescriptor` beside the App Group provider directory after lock,
+estate, and loopback-bind proofs have all succeeded. The descriptor names the
+authenticated first-party HTTP route. It is not itself exposed through an
+unauthenticated HTTP GET endpoint.
 
 **Manual procedure:**
-1. After `launchctl bootstrap` (P-01), immediately poll
-   `http://127.0.0.1:4242/mcp-first-party-descriptor` in a tight loop.
-2. The first non-404 response is readiness. The process is running (observable
-   via `ps`) before the first successful poll.
+1. After `launchctl bootstrap` (P-01), immediately poll the signed provider's
+   App Group descriptor file:
+   `~/Library/Group Containers/<team>.group.com.codedaptive.mootx01/Library/Application Support/MOOTx01/daemon-descriptor.v2.json`.
+2. The first complete, parseable descriptor is readiness. Record the process
+   PID before the descriptor appears so process launch and readiness remain
+   distinguishable observations.
 3. Confirm the descriptor JSON contains `estateIdentifier`, `binaryVersion`,
-   and `capabilities` matching the installed binary's expected values.
-4. Timing delta (process start → descriptor available) must be visible in logs
-   under `~/Library/Logs/mootx01-provider.out.log`.
+   `capabilities`, and the endpoint
+   `http://127.0.0.1:4242/mcp/first-party`.
+4. Exercise that route with the first-party authenticated handshake. A plain
+   unauthenticated GET may refuse or return 404 and is not a readiness probe.
+5. Record process-start and descriptor-publication timestamps in the physical
+   evidence packet. The provider stdout log is
+   `~/.mootx01/logs/mootx01-provider.out.log`.
 
 ---
 
@@ -162,9 +169,13 @@ the removal sequence is correct: bootout before plist removal, and that the
 estate database is retained (unless explicitly opted out).
 
 **Manual procedure:**
-1. With the daemon running, run `mootx01 uninstall --keep-estate`.
-2. Confirm exit 0 and output reports `daemonConfiguration: removed`,
-   `estateData: retained`.
+1. With the daemon running, run `mootx01 uninstall --yes` with no `--target`
+   and without `--purge`. Estate retention is the default; there is no
+   `--keep-estate` option.
+2. Confirm exit 0 and output includes removal of the management console,
+   resident daemon, and Community provider plus the explicit statement that
+   estate data, migration receipts, backups, and Keychain credentials are
+   preserved.
 3. Confirm `launchctl print gui/$(id -u) | grep com.codedaptive.mootx01.daemon`
    returns empty (service unregistered).
 4. Confirm `~/Library/LaunchAgents/com.codedaptive.mootx01.daemon.plist` is
@@ -220,12 +231,12 @@ real entitlements.
 
 | Scenario | Status |
 |---|---|
-| P-01: launchctl bootstrap | Physical — requires live launchd |
-| P-02: Readiness vs launch | Physical — requires live socket |
-| P-03: Unexpected exit / restart | Physical — requires live launchd |
+| P-01: launchctl bootstrap | PASS 2026-08-25 — install exit 0; expected label, bundle executable, and running PID observed |
+| P-02: Readiness vs launch | RERUN REQUIRED — 2026-08-25 exposed and corrected a stale nonexistent HTTP descriptor URL |
+| P-03: Unexpected exit / restart | PASS 2026-08-25 — SIGKILL produced a new PID with the same estate identifier and rebound port 4242 |
 | P-04: Upgrade (no concurrent writers) | Physical — requires two binary versions |
 | P-05: Login launch | Physical — requires logout/login cycle |
-| P-06: Removal report | Physical — requires live session |
+| P-06: Removal report | RERUN REQUIRED — 2026-08-25 exposed and corrected the nonexistent `--keep-estate` option |
 | P-07: Blocked state app surface | Physical — requires running app |
 | P-08: Community/Pro cross-install | Physical — requires two editions |
 
