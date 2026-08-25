@@ -92,6 +92,7 @@ jobs:
 
       - name: Build release binaries
         run: |
+          # mootx01-daemon is wrapped as Mootx01DaemonProvider.app by the pkg step.
           # mootx01 = MCP server + management CLI; moot-mgr = the management
           # console (resident host + loopback dashboard). The macOS moot-mgr is a
           # SwiftUI app (built here and on x86_64); Linux and Windows ship the
@@ -100,6 +101,7 @@ jobs:
           # SPM dependencies are public github.com packages and build without
           # auth injection (verified: candidate.yml omits this step and builds fine).
           swift build -c release --package-path apps/mootx01 --product mootx01
+          swift build -c release --package-path apps/mootx01 --product mootx01-daemon
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
       - name: Import Developer ID Certificate
@@ -142,6 +144,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
           echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
+          echo "DAEMON_BIN=apps/mootx01/.build/arm64-apple-macosx/release/mootx01-daemon" >> "$GITHUB_ENV"
 
       - name: Notarize binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
@@ -266,9 +269,16 @@ jobs:
           # Application identity seals the bundled Mootx01Setup.app (hardened
           # runtime) inside the .pkg so the package passes notarization.
           APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          DAEMON_PROFILE_BASE64: ${{ secrets.APPLE_DAEMON_PROVISIONING_PROFILE }}
           # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
           REQUIRE_SIGNING: "1"
         run: |
+          if [ -z "$DAEMON_PROFILE_BASE64" ]; then
+            echo "Daemon provider provisioning profile secret is missing" >&2
+            exit 1
+          fi
+          export DAEMON_PROVISIONING_PROFILE="$RUNNER_TEMP/daemon-provider.provisionprofile"
+          echo "$DAEMON_PROFILE_BASE64" | base64 --decode > "$DAEMON_PROVISIONING_PROFILE"
           # Strip leading 'v' from tag (build-pkg.sh uses version in filename).
           VERSION_NUM="${VERSION#v}"
           bash distribution/macos/build-pkg.sh \
@@ -276,7 +286,8 @@ jobs:
             arm64 \
             "${MOOT_BIN}" \
             "${MGR_BIN}" \
-            "${SETUP_BIN}"
+            "${SETUP_BIN}" \
+            "${DAEMON_BIN}"
           PKG_ASSET="mootx01-${VERSION_NUM}-macos-arm64.pkg"
           echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
 
@@ -345,9 +356,11 @@ jobs:
 
       - name: Build release binaries (cross-compile to x86_64)
         run: |
+          # mootx01-daemon is wrapped as Mootx01DaemonProvider.app by the pkg step.
           # Both binaries cross-compiled to x86_64; see the arm64 job for the
           # mootx01/moot-mgr split rationale (macOS moot-mgr = SwiftUI app).
           swift build -c release --package-path apps/mootx01 --product mootx01 --arch x86_64
+          swift build -c release --package-path apps/mootx01 --product mootx01-daemon --arch x86_64
           swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
 
       - name: Import Developer ID Certificate
@@ -390,6 +403,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
           echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
+          echo "DAEMON_BIN=apps/mootx01/.build/x86_64-apple-macosx/release/mootx01-daemon" >> "$GITHUB_ENV"
 
       - name: Notarize binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
@@ -491,16 +505,24 @@ jobs:
           # Application identity seals the bundled Mootx01Setup.app (hardened
           # runtime) inside the .pkg so the package passes notarization.
           APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
+          DAEMON_PROFILE_BASE64: ${{ secrets.APPLE_DAEMON_PROVISIONING_PROFILE }}
           # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
           REQUIRE_SIGNING: "1"
         run: |
+          if [ -z "$DAEMON_PROFILE_BASE64" ]; then
+            echo "Daemon provider provisioning profile secret is missing" >&2
+            exit 1
+          fi
+          export DAEMON_PROVISIONING_PROFILE="$RUNNER_TEMP/daemon-provider.provisionprofile"
+          echo "$DAEMON_PROFILE_BASE64" | base64 --decode > "$DAEMON_PROVISIONING_PROFILE"
           VERSION_NUM="${VERSION#v}"
           bash distribution/macos/build-pkg.sh \
             "${VERSION_NUM}" \
             x86_64 \
             "${MOOT_BIN}" \
             "${MGR_BIN}" \
-            "${SETUP_BIN}"
+            "${SETUP_BIN}" \
+            "${DAEMON_BIN}"
           PKG_ASSET="mootx01-${VERSION_NUM}-macos-x86_64.pkg"
           echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
 

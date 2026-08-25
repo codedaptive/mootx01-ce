@@ -98,6 +98,20 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✓ Stopped and removed the management console (launchd).")
             LaunchAgent.uninstallDaemon(homeDirectory: home)
             print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
+            LaunchAgent.uninstallDaemonBundle(homeDirectory: home)
+            print("  ✓ Stopped and removed the Community daemon provider (launchd).")
+
+            // MACD-2c2 preservation contract: uninstall removes ONLY the
+            // artifacts this installation OWNS (DaemonBundle.ownedArtifactPaths
+            // — the disabled bundle registration plist here, and the bundle
+            // itself via removePlacedBinary's ~/.mootx01 teardown below).
+            // The estate databases, migration receipts, backups, and the
+            // Keychain credential authority (K_install, estate keys) are NOT
+            // owned artifacts and survive every uninstall; the separate
+            // explicit data-removal flow below is the only thing that may
+            // touch estate data, and even it never touches non-owned census
+            // candidates (other editions' default estates).
+            print("  ⓘ Estate data, migration receipts, backups, and Keychain credentials are preserved.")
             #endif
 
             // Tear down Harness Memory Mode state BEFORE removing the binary —

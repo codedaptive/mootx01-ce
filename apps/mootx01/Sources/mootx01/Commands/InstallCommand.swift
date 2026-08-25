@@ -488,6 +488,10 @@ struct InstallCommand: AsyncParsableCommand {
                     print("")
                     print("  ✗ Could not start the management console via launchd: \(message)")
                     print("    Start it manually any time with:  moot-mgr serve")
+                case .installedDisabled:
+                    // install() never returns this case (it belongs to the
+                    // daemon-bundle flow below); the vocabulary is one enum.
+                    break
                 case .binaryNotFound:
                     print("")
                     print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
@@ -509,6 +513,14 @@ struct InstallCommand: AsyncParsableCommand {
         // so the console observes it out of the box. macOS-only (launchd).
         #if os(macOS)
         if !noDaemon {
+            let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+            if FileManager.default.isExecutableFile(atPath: bundleExecutable.path) {
+                // The signed provider bundle is the Community 1.1 production
+                // daemon. Remove the legacy raw-serve registration before
+                // starting it so two launchd jobs can never race for custody.
+                LaunchAgent.uninstallDaemon(homeDirectory: home)
+                installDaemonBundleIfPresent(home: home)
+            } else {
             let dataDir = MootPaths.resolveDataDirectory(
                 environment: ProcessInfo.processInfo.environment,
                 homeDirectory: home
@@ -546,9 +558,15 @@ struct InstallCommand: AsyncParsableCommand {
                 print("")
                 print("  ✗ Could not start the resident daemon via launchd: \(message)")
                 print("    Start it manually any time with:  mootx01 serve --http 4242")
+            case .installedDisabled:
+                // installDaemon() never returns this case (it belongs to the
+                // daemon-bundle flow below); the vocabulary is one enum.
+                break
             case .binaryNotFound:
                 print("")
                 print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
+            }
+
             }
         }
         #endif
@@ -717,4 +735,48 @@ struct InstallCommand: AsyncParsableCommand {
         LaunchAgent.uninstall(homeDirectory: home)
         #endif
     }
+
+    // MARK: - MACD-2c2 daemon bundle (macOS)
+
+    #if os(macOS)
+    /// Register and start the enabled daemon provider bundle, then run its
+    /// read-only census. Honest skips otherwise:
+    /// the census requires the SIGNED provider (only it can observe the
+    /// canonical App Group tier), so no bundle means no census — never a
+    /// CLI-side imitation of it.
+    private func installDaemonBundleIfPresent(home: URL) {
+        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
+            print("")
+            print("  ⓘ Daemon provider bundle not present — using the legacy resident service.")
+            return
+        }
+        switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
+        case let .installed(plistPath, endpointURL):
+            print("")
+            print("  ✓ Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    MCP endpoint: \(endpointURL)")
+            print("    LaunchAgent: \(plistPath)")
+        case let .launchctlFailed(message):
+            print("")
+            print("  ✗ Could not start the daemon provider bundle: \(message)")
+            return
+        case .binaryNotFound:
+            print("")
+            print("  ✗ Daemon provider bundle executable is missing.")
+            return
+        case .installedDisabled:
+            return
+        }
+        // Read-only census through the signed provider. Classifications and
+        // digests only — the provider prints no raw paths.
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  ⓘ Census unavailable (provider exit \(census.code)).")
+        }
+    }
+    #endif
 }

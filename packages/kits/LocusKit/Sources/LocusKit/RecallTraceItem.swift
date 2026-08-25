@@ -51,6 +51,33 @@ public struct RecallTraceItem: Equatable, Hashable, Codable, Sendable {
     /// Defaults to 0 (unused).
     public let operationalBitmap: Int64
 
+    // MARK: - Lane attribution (W2.5 Track R(a), schema v15)
+    //
+    // The three columns that make trace rows attributable to the recall
+    // machinery that produced them. All nullable TEXT: rows written before
+    // v15, and rows written by callers below the RecallDirector (the plain
+    // LocusKit recall verb has no door identity), carry NULL. No query
+    // text is ever stored (privacy ruling, 2026-08-20).
+
+    /// Door identity — the tool or recipe that issued the recall
+    /// (e.g. "memory_search", "recall_precise", "recall_temporal").
+    /// `nil` when the writer has no door identity (pre-v15 rows, plain
+    /// locus-verb traces).
+    public let door: String?
+
+    /// Composition identity — the lane composition active at trace time
+    /// (e.g. "unionBest/matrixAware", a shaped preset name). `nil` when
+    /// unknown.
+    public let composition: String?
+
+    /// Per-lane rank of `target` at trace time, packed as a JSON object
+    /// in fixed lane order, e.g. `{"locus":3,"bm25":1,"hamming":7,"dense":2}`.
+    /// 1-based rank within each lane's candidate list; an absent key means
+    /// that lane did not surface the target. Built by
+    /// `RecallTraceItem.packLaneRanks` so both ports emit byte-identical
+    /// strings. `nil` when the writer had no lane candidate lists.
+    public let laneRanks: String?
+
     // MARK: - Computed Bool accessor (bitmap-backed, never stored)
 
     /// True when the two-source reward path has consumed this trace row.
@@ -62,18 +89,55 @@ public struct RecallTraceItem: Equatable, Hashable, Codable, Sendable {
 
     // MARK: - Initializer
 
-    /// Designated initializer.
+    /// Designated initializer. The three attribution fields default to
+    /// `nil` so pre-v15 construction sites are source-compatible; the
+    /// RecallDirector is the writer that fills them.
     public init(
         id: String = UUID().uuidString,
         target: String,
         recalledAt: Date,
         score: Double? = nil,
-        operationalBitmap: Int64 = 0
+        operationalBitmap: Int64 = 0,
+        door: String? = nil,
+        composition: String? = nil,
+        laneRanks: String? = nil
     ) {
         self.id = id
         self.target = target
         self.recalledAt = recalledAt
         self.score = score
         self.operationalBitmap = operationalBitmap
+        self.door = door
+        self.composition = composition
+        self.laneRanks = laneRanks
+    }
+
+    // MARK: - Lane-rank packing
+
+    /// The fixed lane-key emission order for `laneRanks`. Packing iterates
+    /// this order (skipping absent lanes) so the JSON string is
+    /// deterministic and byte-identical across ports — the Rust twin
+    /// carries the same array. Order is the union-pipeline lane order:
+    /// locus scan, BM25 lexical, binary Hamming, dense float.
+    public static let laneRankOrder = ["locus", "bm25", "hamming", "dense"]
+
+    /// Pack per-lane 1-based ranks into the canonical `laneRanks` JSON
+    /// string. Keys are emitted in `laneRankOrder`; lanes absent from
+    /// `ranks` are skipped; an empty map returns `nil` (no column value).
+    ///
+    /// Built by hand rather than JSONEncoder because the column is a
+    /// cross-port conformance surface: both ports must emit byte-identical
+    /// strings for the same ranks, and JSONEncoder's key order is not
+    /// contractual. Keys are drawn from `laneRankOrder` only, so no
+    /// escaping is required.
+    public static func packLaneRanks(_ ranks: [String: Int]) -> String? {
+        var parts: [String] = []
+        for lane in laneRankOrder {
+            if let rank = ranks[lane] {
+                parts.append("\"\(lane)\":\(rank)")
+            }
+        }
+        guard !parts.isEmpty else { return nil }
+        return "{" + parts.joined(separator: ",") + "}"
     }
 }

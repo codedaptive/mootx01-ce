@@ -231,7 +231,14 @@ public actor DrawerStore {
 
         let defaults: [(String, String)] = [
             ("manifest_version", "1.0"),
-            ("schema_version", "1.0"),
+            // 1.1 since 2026-08-17. The value names the estate FORMAT, and
+            // the format moved twice after v1.0 ratification without this
+            // string following: the shared-content cutover retired the legacy
+            // `chunks` copy lane, and the shadow-generation swap (2026-08-15)
+            // added vector generations. An estate built by this binary has
+            // neither the copy lane nor the pre-generation vector table, so
+            // "1.0" named a shape it no longer had.
+            ("schema_version", "1.1"),
             ("estate_uuid", estateUUID),
             ("estate_name", ""),
             ("owner_identifier", ""),
@@ -1007,7 +1014,14 @@ public actor DrawerStore {
 
         // Pre-compute HLC stamps and row UUIDs outside the @Sendable transaction
         // closure (both access actor-isolated state: hlc and UUID parsing).
-        let stamps = drawers.map { _ in hlc.send(now: nowMillis) }
+        // Each drawer's stamp derives from its own filedAt (not a single batch
+        // nowMillis) so that per-record capture_date values (schema v1.2) produce
+        // distinct HLC physical times. For batches where all drawers share the
+        // same filedAt (no capture_date on any record), every stamp derives from
+        // the same millisecond — byte-identical to the prior single-nowMillis path.
+        let stamps = drawers.map { d in
+            hlc.send(now: Int64(d.filedAt.timeIntervalSince1970 * 1000))
+        }
         let rowUuids = try drawers.map { d in try Self.requireUuid(d.id, label: "id") }
         // One families instance for the whole batch (same estate); computed
         // once per drawer, outside the @Sendable closure. See gatedCaptureBody
@@ -2041,6 +2055,15 @@ public actor DrawerStore {
         try await storage.auditLog.eventsForRow(rowID).count
     }
 
+    /// Estate-wide audit-log page in HLC order, starting strictly after
+    /// `after` (nil = from the beginning), capped at `limit` events. Thin
+    /// pass-through to PersistenceKit's `AuditLog.iterate` — the C3/A6
+    /// timing derivation pages the log through this seam with a persisted
+    /// watermark instead of rescanning an append-only log from zero.
+    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await storage.auditLog.iterate(after: after, rowID: nil, limit: limit)
+    }
+
     /// Read a single bitmap column for a drawer inside a transaction,
     /// throwing drawerNotFound when the row is absent. Centralizes
     /// the prior-value read shared by every mutation path.
@@ -2228,12 +2251,96 @@ public actor DrawerStore {
     ///
     /// Mirrors Rust `DrawerStore::all_active_tunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
-        // Load all non-tombstoned tunnels and filter in-memory: PersistenceKit's
-        // predicate DSL does not expose bit-mask comparisons, so the client-side
-        // filter is the correct approach (consistent with recall_trace bitmap
-        // filtering elsewhere in this file).
-        let all = try await allTunnels()
-        return all.filter { !$0.isRetired && $0.lifecycle == .active }
+        // Push both the lifecycle (bits 3–5 = 0) and the retirement (bit 13 = 0)
+        // filters into SQL. `bitwiseEq` compiles to ("operationalBitmap" & mask) = 0,
+        // which is evaluated inside SQLite — no rows are hydrated that fail either
+        // condition. `tombstonedAt IS NULL` is the hard-delete guard, matching
+        // what `allTunnels` already applies. Together these three predicates
+        // replace the previous full-scan + in-memory retain.
+        //
+        // Bit constants per TunnelOperational.swift layout:
+        //   bits 3–5 = TunnelLifecycle; `.active` rawValue 0 → all three bits clear
+        //   bit   13 = is_retired flag (Tunnel.isRetiredBit)
+        let lifecycleMask: Int64 = 0x38         // bits 3–5
+        let retiredBit: Int64 = Tunnel.isRetiredBit // bit 13
+        let activeMask: Int64 = lifecycleMask | retiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` matches `drawerId`.
+    ///
+    /// Pushes three predicates into SQL so that SQLite evaluates them before
+    /// any row is decoded into a Swift `Tunnel`:
+    ///   • `sourceDrawerId = drawerId`  (equality; the primary filter)
+    ///   • `tombstonedAt IS NULL`       (hard-delete guard)
+    ///   • `(operationalBitmap & activeMask) = 0`  (lifecycle active + not retired)
+    ///
+    /// The `idx_tunnels_kind_source_drawer` compound index has `sourceDrawerId`
+    /// as the trailing column; SQLite may use it for the equality filter when
+    /// the result-set fraction is small (MCP connection queries typically match
+    /// far fewer than 1 % of the tunnels table).
+    ///
+    /// Callers that need the full sensitivity gate (`adjectiveSensitivity.isBulkExportable`)
+    /// apply it in memory on the (now small) returned slice.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        // Bitmap mask covering lifecycle (bits 3–5) and the retired flag (bit 13).
+        // Both fields must be 0 for an active, non-retired tunnel.
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "sourceDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` matches `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming-edge direction.
+    /// Same three SQL predicates; `idx_tunnels_kind_target_drawer` is the
+    /// candidate index for `targetDrawerId`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "targetDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
     }
 
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
@@ -2956,6 +3063,48 @@ public actor DrawerStore {
         return result
     }
 
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality filters
+    /// pushed into SQL.
+    ///
+    /// When `subjectEq` or `sourceDrawerIDEq` are non-nil their equality predicates
+    /// are compiled into the SQL WHERE clause alongside the active-cluster guard
+    /// (`g_state_cluster < 16`). This lets the engine use `idx_kg_facts_subject`
+    /// and `idx_kg_facts_sourceDrawer` rather than loading the whole table and
+    /// filtering in Swift. When both are nil the query is equivalent to `allKGFacts`.
+    ///
+    /// Callers that need only the `g_state_cluster` guard should use `allKGFacts`
+    /// directly; this method is for fact-search paths that carry exact-match filters.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        // Build the predicate list. The active-cluster guard is always present;
+        // equality terms are added only when the caller supplies a value.
+        var predicates: [StoragePredicate] = [
+            .lt(Column(table: "kg_facts", name: "g_state_cluster"),
+                .int(Int64(RowState.activeClusterUpperBoundRaw))),
+        ]
+        if let subject = subjectEq {
+            // idx_kg_facts_subject covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "subject"), .text(subject)))
+        }
+        if let sourceID = sourceDrawerIDEq {
+            // idx_kg_facts_sourceDrawer covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "kg_facts",
+            where: .and(predicates),
+            orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        let result = try rows.map(Self.kgFactFromRow)
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "filtered"
+        )
+        return result
+    }
+
     /// All kg-facts estate-wide regardless of state — active AND retired
     /// (withdrawn, expired, decayed, superseded, rejected, tombstoned).
     ///
@@ -3155,7 +3304,10 @@ public actor DrawerStore {
             target: item.target,
             recalledAt: item.recalledAt,
             score: item.score,
-            operationalBitmap: newBitmap)
+            operationalBitmap: newBitmap,
+            door: item.door,
+            composition: item.composition,
+            laneRanks: item.laneRanks)
         try await storage.rowStore.update(
             table: "recall_trace",
             values: Self.recallTraceValues(updated),
@@ -3213,7 +3365,10 @@ public actor DrawerStore {
                 target: item.target,
                 recalledAt: item.recalledAt,
                 score: item.score,
-                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed
+                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed,
+                door: item.door,
+                composition: item.composition,
+                laneRanks: item.laneRanks
             )
             try await storage.rowStore.update(
                 table: "recall_trace",
@@ -3766,7 +3921,13 @@ public actor DrawerStore {
             // score is REAL (float) nullable: TypedValue.float for Double,
             // .null when the recall did not produce a score.
             "score": item.score.map { TypedValue.float($0) } ?? .null,
-            "operationalBitmap": .bitmap(item.operationalBitmap)
+            "operationalBitmap": .bitmap(item.operationalBitmap),
+            // Lane-attribution trio (v15, W2.5 Track R(a)). TEXT nullable:
+            // NULL when the writer has no attribution (plain locus-verb
+            // traces); the RecallDirector fills all three.
+            "door": item.door.map { TypedValue.text($0) } ?? .null,
+            "composition": item.composition.map { TypedValue.text($0) } ?? .null,
+            "laneRanks": item.laneRanks.map { TypedValue.text($0) } ?? .null
         ]
     }
 
@@ -3776,7 +3937,10 @@ public actor DrawerStore {
             target: string(row["target"]),
             recalledAt: try date(table: "recall_traces", column: "recalledAt", row["recalledAt"]),
             score: optDouble(row["score"]),
-            operationalBitmap: int64(row["operationalBitmap"])
+            operationalBitmap: int64(row["operationalBitmap"]),
+            door: optString(row["door"]),
+            composition: optString(row["composition"]),
+            laneRanks: optString(row["laneRanks"])
         )
     }
 
@@ -4998,6 +5162,57 @@ public actor DrawerStore {
         }
     }
 
+    // ── Anomalous flag write (§11.18 anomalous-flag recall prefilter) ────────
+
+    /// Set or clear bit 26 (`isAnomalous`) on one drawer's `operationalBitmap`.
+    ///
+    /// This is a DERIVED SIGNAL write — it carries no audit event, no
+    /// supersession cascade, no lifecycle or lineage field touched, and no
+    /// content digest or revision bump. The anomaly flag is computed by
+    /// GeniusLocusKit's room-cohesion sweep, not asserted by a user or
+    /// belief-state change.
+    ///
+    /// Implemented as a read-modify-write within a single serializable
+    /// transaction, matching the `setDistilledRepresentation` pattern for
+    /// bitmap-bit changes: the read and the write are atomic so two
+    /// concurrent sweep iterations on the same drawer cannot interleave.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose bit should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+            )
+            guard let row = rows.first else { return 0 }
+            let currentOp = Self.int64(row["operationalBitmap"])
+            let updatedOp: Int64
+            if anomalous {
+                // Set bit 26 — drawer is a low-cohesion outlier.
+                updatedOp = currentOp | DrawerFeatureFlags.isAnomalous.rawValue
+            } else {
+                // Clear bit 26 — drawer is not anomalous (or room too small).
+                updatedOp = currentOp & ~DrawerFeatureFlags.isAnomalous.rawValue
+            }
+            // Skip the write if the bitmap is unchanged — avoids spurious
+            // UPDATE traffic when the sweep re-runs on a stable estate.
+            guard updatedOp != currentOp else { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers",
+                values: ["operationalBitmap": .bitmap(updatedOp)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
+    }
+
     /// Write the subject line of one drawer — all three columns in ONE
     /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
     /// NULL together or populated together) PLUS a sealed `"setSubject"`
@@ -5131,6 +5346,165 @@ public actor DrawerStore {
     /// and as the regeneration lever (SPEC B-19). Shared by both legs
     /// (Rust `SUBJECT_PIPELINE_AI_V1`).
     public static let subjectPipelineAIV1 = "ai-v1"
+
+    /// Append an encode-completion audit marker: one event per encode drain
+    /// unit, anchored on the unit's first drawer, recording when that unit's
+    /// background encode work finished (A2, benchmark reset 2026-08-13).
+    ///
+    /// This closes the gap named in finding P2: capture supplies a start
+    /// timestamp but nothing supplied an end, so INGEST time (write-ack to
+    /// encode-idle) could not be derived from the audit log. A production
+    /// single write is its own drain unit, so the marker is exact per-row;
+    /// a bulk pass emits ONE marker carrying `rows=N`, giving throughput.
+    ///
+    /// Shape follows the `setSubject` precedent exactly: an informational
+    /// event with `beforeBitmaps == afterBitmaps`, appended directly to the
+    /// audit log WITHOUT `AuditGate.admit` — the gate governs bitmap
+    /// mutations, and this event mutates nothing. The `reason` column
+    /// carries the machine-parseable payload (`session=<id> rows=<n>`),
+    /// which needs no schema change and propagates through observer sync
+    /// like every other audit row (G-Set CRDT).
+    ///
+    /// An absent drawer row is a silent no-op (mirrors setSubject's
+    /// historical contract): the drawer may have been expunged between
+    /// encode completion and the marker write, and a marker must never
+    /// fail the drain worker.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The FIRST drawer id of the drain unit — the event's
+    ///     row anchor. The remaining rows of the unit are represented by
+    ///     the count, not by per-row events.
+    ///   - rowCount: Number of rows the drain unit encoded (`rows=N`).
+    ///   - unitSessionID: The queue session id that tagged the drain unit's
+    ///     batch claim (`session=<id>`), bracketing the unit end-to-end.
+    ///   - completedAt: Wall-clock completion time, passed in by the drain
+    ///     worker (the process boundary where "now" legitimately enters).
+    public func appendEncodeCompleteMarker(
+        drawerId: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: Self.encodeCompleteVerb,
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: Self.encodeWorkerActor,
+                reason: "session=\(unitSessionID) rows=\(rowCount)")
+            try await txn.auditLog.append(event)
+        }
+    }
+
+    /// Audit verb for encode-completion markers (A2). Sits beside the
+    /// mutation verbs (`capture`, `mutate.*`, `withdraw`, `expunge`,
+    /// `setSubject`) but is informational: it never changes a bitmap.
+    /// Shared by both legs (Rust `ENCODE_COMPLETE_VERB`).
+    public static let encodeCompleteVerb = "encodeComplete"
+
+    /// Audit actor for encode-completion markers: the background encode
+    /// drain worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`.
+    /// Shared by both legs (Rust `ENCODE_WORKER_ACTOR`).
+    public static let encodeWorkerActor = "encode_worker"
+
+    /// Append a reindex-completion marker (C3, benchmark reset 2026-08-13):
+    /// an informational estate-anchored audit event sealing when a
+    /// full-corpus basis retrain FINISHED — the CYCLE tier-3 boundary (a
+    /// row's own novel vocabulary becomes semantically findable only after
+    /// the first retrain that follows it). Verb `reindexComplete`, actor
+    /// `reindex_worker`, reason `session=<id> rows=<n>`. Same no-gate,
+    /// before==after shape as the other markers.
+    /// Mirrors Rust `append_reindex_complete_marker`.
+    public func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: "reindexComplete",
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "reindex_worker",
+            reason: "session=\(unitSessionID) rows=\(rowCount)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
+
+    /// Dream-cycle bracket phase (A3, benchmark reset 2026-08-13). A dream
+    /// cycle emits one `dreamStart` marker when it begins and one `dreamEnd`
+    /// when it completes, both carrying the same session id, so CYCLE-dreamt
+    /// time can be attributed from the audit log alone.
+    public enum DreamCyclePhase: String, Sendable {
+        case start = "dreamStart"
+        case end   = "dreamEnd"
+    }
+
+    /// Append a dream-cycle bracket marker (A3): an informational audit
+    /// event anchored on the ESTATE itself (`rowId == estateUuid` — a dream
+    /// cycle belongs to no single drawer), with zero bitmaps, the
+    /// unclassified lattice anchor, actor `dreaming_daemon`, and
+    /// `reason: "session=<id>"`. Same no-gate rationale as
+    /// `appendEncodeCompleteMarker`: nothing mutates, the gate governs
+    /// bitmap writes. Mirrors Rust `append_dream_cycle_marker`.
+    public func appendDreamCycleMarker(
+        phase: DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(markedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: phase.rawValue,
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "dreaming_daemon",
+            reason: "session=\(unitSessionID)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
 
     /// Count of active drawers still awaiting a subject line — the
     /// backfill-eligibility predicate as an aggregate (PR-01): not

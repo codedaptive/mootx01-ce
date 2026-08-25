@@ -36,7 +36,8 @@ import SubstrateLib
 /// bits 12–23  feature_flags          (bitset, 11 named bits 12…23)
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
-/// bits 26–63  reserved
+/// bit  26     isAnomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
+/// bits 27–63  reserved
 /// ```
 ///
 /// F12 cascade (2026-05-27): bumped from v0.35's 4-bit fields to
@@ -193,6 +194,26 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     // the `Drawer.vagueLevel` computed property using
     // `BitField.extractField(operationalBitmap, shift: 22, width: 2)`.
     // Mask for the entire sub-field: 0xC00000.
+
+    // ── Anomalous flag (§11.18 anomalous-flag recall prefilter, 2026-08-20) ──
+
+    /// Bit 26 — drawer is a low-cohesion outlier in its room, computed by
+    /// the anomaly-flag maintenance sweep in GeniusLocusKit (§11.18).
+    ///
+    /// Set/cleared by `Estate.setAnomalousFlag` during the room-cohesion
+    /// sweep: drawers whose shingle-similarity z-score against room peers
+    /// falls below the anomaly threshold get this bit set; all others are
+    /// cleared. Requires ≥ 3 drawers in the room for z-score stability.
+    ///
+    /// This is a DERIVED signal — the maintenance sweep owns it. Do NOT
+    /// set this flag through belief-state or manual edit paths.
+    ///
+    /// NOTE: bit 26 is above the 12-bit feature-flags region (bits 12–23).
+    /// `hasFeatureFlag(.isAnomalous)` will always return false. Use the
+    /// `Drawer.isAnomalous` computed property to test this bit.
+    ///
+    /// Wire value: 1 << 26 = 67108864 (0x4000000).
+    public static let isAnomalous = DrawerFeatureFlags(rawValue: 1 << 26)
 }
 
 // MARK: - Drawer accessors
@@ -312,5 +333,28 @@ public extension Drawer {
     var lineageClusteringActive: Bool {
         // Cookbook §2.4 bit 25: lineage_clustering flag.
         BitField.extractFlag(operationalBitmap, bit: 25)
+    }
+
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// True when bit 26 of `operationalBitmap` is set, indicating this
+    /// drawer is a low-cohesion outlier in its room (cookbook §2.4, §11.18).
+    ///
+    /// Computed and maintained by GeniusLocusKit's anomaly-flag sweep:
+    /// the sweep scores each drawer's mean shingle-similarity to its room
+    /// peers, computes z-scores, and sets this flag on negative-z-score
+    /// outliers. Rooms with fewer than 3 drawers are skipped.
+    ///
+    /// Callers filtering on anomaly status should use this accessor
+    /// rather than `featureFlags.contains(.isAnomalous)` — bit 26 is
+    /// above the 12-bit feature-flags region (bits 12–23) and will not
+    /// appear in the `featureFlags` OptionSet.
+    ///
+    /// Wire: `operationalBitmap & (1 << 26) != 0`. Mirrors Rust
+    /// `Drawer::is_anomalous()`.
+    var isAnomalous: Bool {
+        // Cookbook §2.4 bit 26: anomalous flag (§11.18). Reads the raw
+        // bitmap directly because bit 26 is outside the featureFlags region.
+        operationalBitmap & DrawerFeatureFlags.isAnomalous.rawValue != 0
     }
 }

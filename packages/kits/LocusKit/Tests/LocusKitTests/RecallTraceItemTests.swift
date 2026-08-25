@@ -356,4 +356,74 @@ struct RecallTraceItemTests {
         let results = try await store.recentRecallTraces(since: t(1_000), now: t(2_000))
         #expect(results.isEmpty)
     }
+
+    // MARK: - Lane attribution (v15, W2.5 Track R(a))
+
+    @Test("packLaneRanks emits the cross-port golden pin string")
+    func packLaneRanksGoldenPin() {
+        // CROSS-PORT PIN: the Rust twin asserts the identical string for
+        // the identical map. Lane order is laneRankOrder regardless of
+        // dictionary iteration order.
+        let packed = RecallTraceItem.packLaneRanks(
+            ["dense": 2, "locus": 3, "hamming": 7, "bm25": 1])
+        #expect(packed == "{\"locus\":3,\"bm25\":1,\"hamming\":7,\"dense\":2}")
+    }
+
+    @Test("packLaneRanks skips absent lanes and returns nil for empty")
+    func packLaneRanksPartialAndEmpty() {
+        #expect(RecallTraceItem.packLaneRanks(["dense": 2, "bm25": 1])
+            == "{\"bm25\":1,\"dense\":2}")
+        #expect(RecallTraceItem.packLaneRanks([:]) == nil)
+    }
+
+    @Test("attribution trio persists and rounds through the store")
+    func attributionRoundTrip() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        let item = RecallTraceItem(
+            id: "r-attr", target: "d-attr", recalledAt: t(1_000), score: 0.5,
+            door: "memory_search",
+            composition: "unionBest/matrixAware",
+            laneRanks: RecallTraceItem.packLaneRanks(["locus": 1, "bm25": 4]))
+        try await store.insertRecallTrace(item)
+
+        let loaded = try #require(try await store.getRecallTrace(id: "r-attr"))
+        #expect(loaded.door == "memory_search")
+        #expect(loaded.composition == "unionBest/matrixAware")
+        #expect(loaded.laneRanks == "{\"locus\":1,\"bm25\":4}")
+    }
+
+    @Test("attribution survives markRecallTracesUsed rebuild")
+    func attributionSurvivesUsedMark() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        try await store.insertRecallTrace(RecallTraceItem(
+            id: "r-mark", target: "d-mark", recalledAt: t(1_000),
+            door: "recall_precise", composition: "text",
+            laneRanks: "{\"locus\":2}"))
+        let touched = try await store.markRecallTracesUsed(
+            target: "d-mark", since: t(0), now: t(2_000))
+        #expect(touched == 1)
+
+        let loaded = try #require(try await store.getRecallTrace(id: "r-mark"))
+        #expect(loaded.used)
+        #expect(loaded.door == "recall_precise")
+        #expect(loaded.composition == "text")
+        #expect(loaded.laneRanks == "{\"locus\":2}")
+    }
+
+    @Test("pre-v15 rows decode with nil attribution")
+    func nilAttributionDecodes() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        try await store.insertRecallTrace(
+            RecallTraceItem(id: "r-plain", target: "d", recalledAt: t(1_000)))
+        let loaded = try #require(try await store.getRecallTrace(id: "r-plain"))
+        #expect(loaded.door == nil)
+        #expect(loaded.composition == nil)
+        #expect(loaded.laneRanks == nil)
+    }
 }

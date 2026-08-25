@@ -80,6 +80,60 @@ struct EnabledPlistContractTests {
 @Suite("CORE-09: installDaemonBundleEnabled — service identity + readback")
 struct InstallDaemonBundleEnabledTests {
 
+    @Test("production activation bootstraps the readback-verified enabled plist")
+    func activationBootstrapsEnabledPlist() throws {
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let executable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: executable.path
+        )
+
+        var observedPlist: URL?
+        var observedLabel: String?
+        let status = LaunchAgent.activateDaemonBundleEnabled(
+            homeDirectory: home,
+            bootstrap: { plistURL, label in
+                observedPlist = plistURL
+                observedLabel = label
+                return (true, "")
+            }
+        )
+
+        guard case .installed = status else {
+            Issue.record("expected .installed, got \(status)")
+            return
+        }
+        #expect(observedPlist == DaemonBundle.launchAgentPlistURL(homeDirectory: home))
+        #expect(observedLabel == DaemonBundle.launchAgentLabel)
+        let onDisk = try String(contentsOf: observedPlist!, encoding: .utf8)
+        #expect(onDisk == LaunchAgent.makeDaemonBundlePlistEnabled(homeDirectory: home))
+    }
+
+    @Test("production activation propagates launchd bootstrap refusal")
+    func activationPropagatesBootstrapFailure() throws {
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let executable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        #expect(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: executable.path
+        )
+
+        let status = LaunchAgent.activateDaemonBundleEnabled(
+            homeDirectory: home,
+            bootstrap: { _, _ in (false, "bootstrap refused") }
+        )
+        #expect(status == .launchctlFailed("bootstrap refused"))
+    }
+
     @Test("writes plist, verifies by readback, and returns .installed")
     func happyPath() throws {
         let home = try makeTempHome()

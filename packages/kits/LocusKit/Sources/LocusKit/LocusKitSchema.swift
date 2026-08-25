@@ -116,7 +116,15 @@ public enum LocusKitSchema {
     /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
     /// (NT-L1). v2 added keys.ext. Populated estates exist; every
     /// schema change from v13 on ships a ladder entry.
-    public static let version = 13
+    /// v14 added idx_drawers_filedAt (ORDER BY filedAt DESC LIMIT 256 on
+    /// the Director recall path ran a full-table sort without this index).
+    /// v15 adds the recall_trace lane-attribution trio (`door`,
+    /// `composition`, `laneRanks`, all TEXT nullable) — W2.5 Track R(a).
+    /// NULL on pre-v15 rows and on rows written without door identity;
+    /// no query text is stored (privacy ruling 2026-08-20). Delivered to
+    /// populated estates through `mootx01 upgrade` (the only migration
+    /// vehicle), which opens each estate and replays this ladder.
+    public static let version = 15
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -227,6 +235,28 @@ public enum LocusKitSchema {
                         name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text(""))),
                     .addColumn(table: "kg_facts", column: ColumnDeclaration(
                         name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text(""))),
+                ]),
+                // v14: idx_drawers_filedAt — the Director recall path sorts by
+                // `filedAt DESC LIMIT 256` without an index, forcing SQLite to
+                // sort all ~53,000 rows before truncating. One index turns the
+                // sort into a 256-entry index walk.
+                Migration(fromVersion: 13, toVersion: 14, operations: [
+                    .addIndex(IndexDeclaration(
+                        name: "idx_drawers_filedAt",
+                        table: "drawers",
+                        columns: ["filedAt"])),
+                ]),
+                // v14 → v15: recall_trace lane-attribution trio (W2.5 Track
+                // R(a)). All three nullable TEXT, no backfill — NULL IS the
+                // honest value for rows written before attribution existed,
+                // and the optimizer's trace aggregation skips NULL-attribution
+                // rows. Without the addColumns, a pre-v15 estate hits
+                // "no such column" on the first attributed trace write after
+                // the daemon binary upgrades (same failure mode as v8 → v9).
+                Migration(fromVersion: 14, toVersion: 15, operations: [
+                    .addColumn(table: "recall_trace", column: .text("door", nullable: true)),
+                    .addColumn(table: "recall_trace", column: .text("composition", nullable: true)),
+                    .addColumn(table: "recall_trace", column: .text("laneRanks", nullable: true)),
                 ]),
             ]
         )
@@ -774,6 +804,13 @@ public enum LocusKitSchema {
     // `score` is REAL nullable: the recall may not produce a score for
     // every row (e.g. ordered-by-capture-time queries).
     // `recalledAt` is TEXT ISO8601 (fleet date-storage rule).
+    //
+    // Lane-attribution trio (v15, W2.5 Track R(a)): `door` names the
+    // tool/recipe that issued the recall, `composition` the lane
+    // composition active at trace time, `laneRanks` the target's 1-based
+    // per-lane rank packed as JSON (RecallTraceItem.packLaneRanks). All
+    // nullable TEXT; NULL = written without attribution (pre-v15 rows,
+    // plain locus-verb traces). No query text is stored (privacy ruling).
     static let recallTraceTable = TableDeclaration(
         name: "recall_trace",
         columns: [
@@ -784,6 +821,9 @@ public enum LocusKitSchema {
             // exposes Double precision via the .float column type.
             .float("score", nullable: true),
             .bitmap("operationalBitmap"),
+            .text("door", nullable: true),
+            .text("composition", nullable: true),
+            .text("laneRanks", nullable: true),
             .json("ext", nullable: true)
         ],
         primaryKey: ["id"]
@@ -868,6 +908,10 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_drawers_tombstoned", table: "drawers", columns: ["tombstonedAt"]),
         IndexDeclaration(name: "idx_drawers_lineageID", table: "drawers", columns: ["lineageID"]),
         IndexDeclaration(name: "idx_drawers_udcCode", table: "drawers", columns: ["udcCode"]),
+        // filedAt — ORDER BY filedAt DESC LIMIT 256 on the Director recall path
+        // scanned all ~53,000 rows without this index. With it, SQLite walks the
+        // index in reverse order and stops after 256 entries.
+        IndexDeclaration(name: "idx_drawers_filedAt", table: "drawers", columns: ["filedAt"]),
         // bit-range functional indices, now on generated columns
         IndexDeclaration(name: "idx_drawers_provenance_source", table: "drawers", columns: ["g_provenance_source"]),
         IndexDeclaration(name: "idx_drawers_provenance_confirmation", table: "drawers", columns: ["g_provenance_confirmation"]),

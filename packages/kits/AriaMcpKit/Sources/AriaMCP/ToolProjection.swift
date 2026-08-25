@@ -43,6 +43,8 @@ public enum ToolProvenance: Sendable, Equatable {
     case recipe
     /// A VaultKit control-surface tool.
     case vault
+    /// A Community 1.1 contract tool dispatched by the daemon-owned handler.
+    case community
 }
 
 /// A single tool advertised in `tools/list`.

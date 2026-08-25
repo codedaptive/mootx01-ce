@@ -123,6 +123,60 @@ pub(crate) mod recall_stage {
     pub const TRACE_WRITE_FAILED: &str = "recall.trace_write_failed";
 }
 
+/// Defined verb sets for the two Rust write paths that accept a
+/// caller-supplied free-form verb string (AV-01, Codex finding, commit
+/// `dc0f362`). Every other audit-write path either threads a typed
+/// `RowVerb` through `substrate_lib::audit_gate::admit` (row-mutation
+/// verbs: capture/mutate/withdraw/... — never a bare string, already
+/// constrained by the type system) or hardcodes its own verb literal
+/// internally (`append_encode_complete_marker` → `"encodeComplete"`,
+/// `append_reindex_complete_marker` → `"reindexComplete"` — not
+/// caller-reachable). These two are the exception: `verb: &str` is a
+/// public parameter, so nothing before this module stopped a caller from
+/// writing an arbitrary string into the estate's evidence surface.
+///
+/// Centralised here (not duplicated ad hoc at each call site) so the two
+/// write boundaries that key off them — `Estate::append_dream_cycle_marker`
+/// / `Estate::append_supplementary_audit` below, and
+/// `DrawerStoreCore::append_dream_cycle_marker` in
+/// `drawer_store_inmemory.rs` (the actual storage boundary shared by the
+/// SQLite, in-memory, and Postgres backends) — cannot drift apart.
+pub(crate) mod audit_verbs {
+    /// Accepted verbs for `append_dream_cycle_marker` (A3). Byte-identical
+    /// to the two raw values of the Swift port's
+    /// `DrawerStore.DreamCyclePhase: String` enum
+    /// (`start = "dreamStart"`, `end = "dreamEnd"`) — Swift enforces this
+    /// set at compile time via the enum's type; Rust has no enum threaded
+    /// through the GLK → LocusKit seam (`coordinator.rs` passes a bare
+    /// `&str`), so this constant plus `validate` is the Rust-side mirror
+    /// of that Swift type constraint.
+    pub const DREAM_CYCLE: [&str; 2] = ["dreamStart", "dreamEnd"];
+
+    /// Accepted verbs for `append_supplementary_audit`. Currently exactly
+    /// one value: GLK's dataset-handle expunge path
+    /// (`VerbSurface.expunge` / Rust `coordinator.rs` ~5548) appends a
+    /// `"datasetTableDrop"` side-channel event when a `.dataset`-kind
+    /// handle's cross-kit table-drop succeeds. A genuine new supplementary
+    /// verb is a deliberate addition to this list — never a caller-supplied
+    /// free string.
+    pub const SUPPLEMENTARY: [&str; 1] = ["datasetTableDrop"];
+
+    /// Reject a verb that is not a member of `allowed`. Returns a typed
+    /// error (never a silent drop, never a substituted default) per the
+    /// mission's discipline: a silently-dropped or silently-substituted
+    /// audit entry is worse than a rejected write, because the evidence
+    /// surface would then lie by omission.
+    pub fn validate(verb: &str, allowed: &[&str]) -> Result<(), crate::error::LocusKitError> {
+        if allowed.contains(&verb) {
+            Ok(())
+        } else {
+            Err(crate::error::LocusKitError::InvalidContent(format!(
+                "unknown audit verb {verb:?}; expected one of {allowed:?}"
+            )))
+        }
+    }
+}
+
 impl Estate {
     // -----------------------------------------------------------------------
     // node-name resolution
@@ -539,12 +593,17 @@ impl Estate {
 
             let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
             let drawer_id = Uuid::new_v4().to_string();
+            // Per-record capture timestamp (schema v1.2): when set on the
+            // frame, use it as filed_at and HLC physical-time seed for this
+            // drawer. When absent, fall back to the batch `now` — identical
+            // to all pre-v1.2 behavior where every drawer uses the batch clock.
+            let drawer_filed_at = frame.capture_date.unwrap_or(now);
             let mut drawer = Drawer::new(
                 drawer_id,
                 frame.content,
                 room_node.id.to_string(),
                 frame.added_by,
-                now,
+                drawer_filed_at,
                 frame.embedding_model_id,
             );
             drawer.adjective_bitmap = adj_bitmap;
@@ -556,12 +615,13 @@ impl Estate {
             drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
             drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
             // Subject trio at birth — identical translation to capture().
+            // subject_at uses drawer_filed_at for consistency with filedAt.
             if let Some(subject) = frame.subject {
                 drawer.subject = Some(subject);
                 drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
-                drawer.subject_at = Some(now);
+                drawer.subject_at = Some(drawer_filed_at);
             }
-            drawer.event_time = frame.event_time.unwrap_or(now);
+            drawer.event_time = frame.event_time.unwrap_or(drawer_filed_at);
 
             // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
             // that O(N²) call is the root cause of the moot_palace_import hang (NT_R1).
@@ -1428,6 +1488,29 @@ impl Estate {
         self.store.count_undistilled(pipeline_version)
     }
 
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's
+    /// `operational_bitmap`. Estate-level pass-through over
+    /// `DrawerStore::set_anomalous_flag` — the write seam for
+    /// GeniusLocusKit's room-cohesion anomaly sweep (`anomaly_flag_sweep`).
+    ///
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched. `now` is accepted for
+    /// call-site determinism but is not used by the write itself (bit 26
+    /// carries no timestamp). Returns 0 when the drawer is not found or
+    /// the bit is already in the requested state; 1 on success. Mirrors
+    /// Swift `Estate.setAnomalousFlag(drawerId:anomalous:now:)`.
+    pub fn set_anomalous_flag(
+        &self,
+        drawer_id: &str,
+        anomalous: bool,
+        _now: i64,
+    ) -> Result<usize, LocusKitError> {
+        // `_now` is accepted for call-site determinism discipline (mirrors
+        // Swift Estate.setAnomalousFlag) but is not used by the write itself
+        // — the anomalous bit carries no timestamp.
+        self.store.set_anomalous_flag(drawer_id, anomalous)
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore::set_subject_representation` — the seam the
     /// filing surface, backfill, and the (future) subject rider write
@@ -1451,6 +1534,68 @@ impl Estate {
             &self.changed_by_or_estate(),
             None,
         )
+    }
+
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// on_encoded hook; delegates to
+    /// `DrawerStore::append_encode_complete_marker`, which seals an
+    /// informational audit event (verb `encodeComplete`, actor
+    /// `encode_worker`, reason `session=<id> rows=<n>`) with no bitmap
+    /// change. Mirrors Swift `Estate.appendEncodeCompleteMarker`.
+    pub fn append_encode_complete_marker(
+        &self,
+        first_drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.append_encode_complete_marker(
+            first_drawer_id,
+            row_count,
+            unit_session_id,
+            completed_at,
+        )
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Swift `Estate.appendReindexCompleteMarker`.
+    pub fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store
+            .append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Swift `Estate.auditEvents(after:limit:)`.
+    pub fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.store.audit_events(after, limit)
+    }
+
+    /// Append a dream-cycle bracket marker (A3). `verb` is `dreamStart` or
+    /// `dreamEnd`; both ends of a cycle carry the same session id so
+    /// CYCLE-dreamt time is attributable from the audit log alone.
+    /// Mirrors Swift `Estate.appendDreamCycleMarker`.
+    pub fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        // AV-01: reject before ever opening a transaction — no caller
+        // (dream markers included) writes an arbitrary verb. Mirrors the
+        // Swift port's compile-time `DreamCyclePhase` enum constraint.
+        audit_verbs::validate(verb, &audit_verbs::DREAM_CYCLE)?;
+        self.store.append_dream_cycle_marker(verb, unit_session_id, marked_at)
     }
 
     /// Count of active drawers still awaiting a subject line (PR-01
@@ -2137,6 +2282,10 @@ impl Estate {
         verb: &str,
         reason: &str,
     ) -> Result<(), LocusKitError> {
+        // AV-01: same free-string defect shape as append_dream_cycle_marker
+        // above — reject before computing the content-ID or constructing
+        // the event.
+        audit_verbs::validate(verb, &audit_verbs::SUPPLEMENTARY)?;
         let event_id = substrate_lib::audit_gate::content_id(
             from.estate_uuid,
             from.row_id,
@@ -5904,5 +6053,73 @@ mod tests {
             events[1].hlc.physical_time,
             events[0].hlc.physical_time
         );
+    }
+
+    // --- AV-01: estate-layer audit verb validation (Codex finding, dc0f362) ---
+    //
+    // These exercise the `Estate` API boundary (estate_verbs.rs), which is
+    // the seam GLK's coordinator actually calls through. The store-layer
+    // boundary (the same validator, reached from
+    // `DrawerStoreCore::append_dream_cycle_marker`) is covered separately
+    // in `drawer_store_inmemory.rs`'s test module — together the two
+    // suites prove the in-memory backend (the only backend these
+    // integration-style Estate tests can reach) is not more permissive
+    // than the shared store-layer boundary that also backs SQLite.
+
+    #[test]
+    fn dream_cycle_marker_every_defined_verb_writes() {
+        let estate = make_estate();
+        for verb in audit_verbs::DREAM_CYCLE {
+            estate
+                .append_dream_cycle_marker(verb, "estate-cycle-ok", 1_700_000_002_000)
+                .unwrap_or_else(|e| panic!("defined verb {verb:?} was rejected: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn dream_cycle_marker_rejects_undefined_verb() {
+        let estate = make_estate();
+        let err = estate
+            .append_dream_cycle_marker("dreamSideload", "estate-cycle-bad", 1_700_000_002_000)
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn supplementary_audit_defined_verb_writes() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("capture must have produced a sealed audit event to build `from`");
+        estate
+            .append_supplementary_audit(&from, "datasetTableDrop", "dataset table dropped")
+            .expect("the one currently-defined supplementary verb must be accepted");
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().any(|e| e.verb == "datasetTableDrop"));
+    }
+
+    #[test]
+    fn supplementary_audit_rejects_undefined_verb() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let err = estate
+            .append_supplementary_audit(&from, "datasetTableForge", "attempted forgery")
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+        // The forged verb must not appear anywhere in the row's audit trail.
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().all(|e| e.verb != "datasetTableForge"));
     }
 }

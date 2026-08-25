@@ -350,12 +350,12 @@ public enum AriaResident {
             StatsStoreMonitoringControl(store: store)
         }
         let residentDispatcher: ARIA_MCPDispatcher
-        if let monitoringControl {
+        if let monitoringControl, let existingTooling = dispatcher.tooling {
             // Re-wrap the dispatcher with the monitoring seam wired. ToolDispatcher
             // is a value type, so this copies all fields and overwrites only
             // monitoringControl. ARIA_MCPDispatcher.init re-invokes ToolProjection
             // to regenerate the projected-tool list — idempotent and cheap.
-            let updatedTooling = dispatcher.tooling.withMonitoringControl(monitoringControl)
+            let updatedTooling = existingTooling.withMonitoringControl(monitoringControl)
             residentDispatcher = ARIA_MCPDispatcher(info: dispatcher.info, tooling: updatedTooling)
         } else {
             residentDispatcher = dispatcher

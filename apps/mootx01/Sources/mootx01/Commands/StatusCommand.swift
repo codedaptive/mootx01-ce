@@ -1,8 +1,10 @@
 // StatusCommand.swift
 //
-// Show current serve state: running PID (if any), active estate name,
-// wired MCP clients, and a brief estate summary (file size as proxy for
-// content since a full estate open requires the macOS MCP stack).
+// Show current serve state with the HONEST vocabulary (MACD-2c2, P-c2-10):
+// registration, PID, and port answers are reported as the observations they
+// are — never equated with a running/ready server. Also shows the active
+// estate name, wired MCP clients, and a brief estate summary (file size as
+// proxy for content since a full estate open requires the macOS MCP stack).
 
 import ArgumentParser
 import Foundation
@@ -22,24 +24,46 @@ struct StatusCommand: AsyncParsableCommand {
         print("mootx01 status")
         print("─────────────────────────────────")
 
-        // Server liveness. Prefer the PID file, but the launchd resident daemon
-        // serves the HTTP port WITHOUT owning that PID file — so fall back to a
-        // direct TCP connection to the resident endpoint, the transport-level
-        // truth. Without this, `status` reported "not running" while the daemon
-        // was live on 4242, which read as a broken install.
+        // Server state — HONEST vocabulary (MACD-2c2, P-c2-10): a PID file, a
+        // launchd registration, or an answering TCP port is NEVER equated
+        // with a running/ready server. Readiness belongs exclusively to the
+        // signed provider's OWN authenticated report; port liveness never
+        // elects (Kong). This command reports OBSERVATIONS, classified:
+        //   - registration: does a daemon LaunchAgent plist exist (legacy
+        //     raw-serve label or the bundle label)?
+        //   - port: does something accept a TCP connection (identity
+        //     unverified — could be any process)?
+        //   - provider report: the descriptor/authenticated readiness surface
+        //     remains authoritative; a registration or open port alone is not.
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
         let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
+        #if os(macOS)
+        let legacyRegistered = FileManager.default.fileExists(
+            atPath: MootPaths.daemonPlistURL(homeDirectory: home).path
+        )
+        let bundleRegistered = FileManager.default.fileExists(
+            atPath: DaemonBundle.launchAgentPlistURL(homeDirectory: home).path
+        )
+        let registration: LaunchAgent.DaemonRegistrationObservation =
+            (legacyRegistered || bundleRegistered) ? .registered : .none
+        let port: LaunchAgent.DaemonPortObservation =
+            portIsListening(port: residentPort) ? .answering : .unbound
+        print("Server: \(LaunchAgent.honestServerStatus(registration: registration, port: port, providerReportedState: nil))")
+        if bundleRegistered {
+            print("Daemon provider bundle: enabled registration present (launchd: \(DaemonBundle.launchAgentLabel))")
+        }
+        #else
+        print("Server: \(portIsListening(port: residentPort) ? "port answering (unverified — not proof of readiness)" : "not running")")
+        #endif
+        // A PID file whose process is verifiably a live mootx01 binary is an
+        // OBSERVATION worth surfacing (identity-verified, still not
+        // readiness); a stale one is removed.
         if let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidString),
-           processIsRunning(pid: pid) {
-            print("Server: running (PID \(pid))")
-        } else if portIsListening(port: residentPort) {
-            print("Server: running (HTTP on 127.0.0.1:\(residentPort))")
-        } else {
-            print("Server: not running")
-            // Remove stale PID file if the process is gone.
-            if FileManager.default.fileExists(atPath: pidURL.path) {
+           let pid = Int32(pidString) {
+            if processIsRunning(pid: pid) {
+                print("Foreground serve process: PID \(pid) (identity-verified mootx01; not proof of resident readiness)")
+            } else if FileManager.default.fileExists(atPath: pidURL.path) {
                 try? FileManager.default.removeItem(at: pidURL)
             }
         }

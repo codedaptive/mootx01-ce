@@ -136,6 +136,40 @@ struct DrawerOperationalTests {
         #expect(!drawer.lineageClusteringActive)
     }
 
+    // MARK: - isAnomalous flag (bit 26, cookbook §2.4, §11.18)
+
+    @Test("isAnomalous is true when bit 26 is set (cookbook §2.4 §11.18)")
+    func isAnomalousFlagTrue() {
+        // Wire value for bit 26: 1 << 26 = 67108864 (0x4000000).
+        let drawer = makeDrawer(operationalBitmap: 1 << 26)
+        #expect(drawer.isAnomalous)
+    }
+
+    @Test("isAnomalous is false when bit 26 is clear")
+    func isAnomalousFlagFalse() {
+        let drawer = makeDrawer(operationalBitmap: 0x14042)
+        #expect(!drawer.isAnomalous)
+    }
+
+    @Test("isAnomalous does not alias bits 24 or 25")
+    func isAnomalousBitIsolation() {
+        // Bit 24 (stateExtension) and bit 25 (lineageClustering) must NOT trigger isAnomalous.
+        let drawer24 = makeDrawer(operationalBitmap: 1 << 24)
+        let drawer25 = makeDrawer(operationalBitmap: 1 << 25)
+        #expect(!drawer24.isAnomalous)
+        #expect(!drawer25.isAnomalous)
+        // Bit 26 must NOT trigger stateExtensionActive or lineageClusteringActive.
+        let drawer26 = makeDrawer(operationalBitmap: 1 << 26)
+        #expect(!drawer26.stateExtensionActive)
+        #expect(!drawer26.lineageClusteringActive)
+    }
+
+    @Test("DrawerFeatureFlags.isAnomalous rawValue is 1<<26")
+    func isAnomalousFlagWireValue() {
+        // Conformance gate: wire value must be exactly 1 << 26 = 67108864.
+        #expect(DrawerFeatureFlags.isAnomalous.rawValue == (1 << 26))
+    }
+
     // MARK: - Default-zero behavior
 
     /// A Drawer constructed without `operationalBitmap` carries the zero
@@ -163,6 +197,7 @@ struct DrawerOperationalTests {
         #expect(!drawer.hasFeatureFlag(.isLockedZone))
         #expect(!drawer.stateExtensionActive)
         #expect(!drawer.lineageClusteringActive)
+        #expect(!drawer.isAnomalous)
     }
 
     // MARK: - Helpers

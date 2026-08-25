@@ -200,6 +200,57 @@ fn lineage_clustering_active_at_bit_25() {
 }
 
 // ============================================================
+// Anomalous flag (cookbook §2.4 bit 26, §11.18, 2026-08-20)
+// ============================================================
+
+/// Mirrors Swift `isAnomalousFlagTrue()`: bit 26 sets `is_anomalous`,
+/// does NOT fire `state_extension_active` or `lineage_clustering_active`.
+/// Cookbook §2.4 bit 26.
+#[test]
+fn is_anomalous_at_bit_26() {
+    let d = conformance_drawer(1 << 26);
+    assert!(
+        d.is_anomalous(),
+        "bit 26 must set is_anomalous"
+    );
+    assert!(
+        !d.state_extension_active(),
+        "bit 26 must not trigger state_extension_active"
+    );
+    assert!(
+        !d.lineage_clustering_active(),
+        "bit 26 must not trigger lineage_clustering_active"
+    );
+}
+
+/// Wire-value conformance gate: `IS_ANOMALOUS` must be exactly `1 << 26`.
+/// Fails immediately if the constant drifts from the cookbook spec.
+#[test]
+fn is_anomalous_wire_value_matches_cookbook() {
+    assert_eq!(
+        locus_kit::drawer_operational::DrawerFeatureFlags::IS_ANOMALOUS,
+        1_i64 << 26,
+        "IS_ANOMALOUS expected bit 26 (={}), got {}",
+        1_i64 << 26,
+        locus_kit::drawer_operational::DrawerFeatureFlags::IS_ANOMALOUS
+    );
+}
+
+/// Isolation: bit 26 must NOT alias bits 24 or 25.
+/// Mirrors Swift `isAnomalousBitIsolation()`.
+#[test]
+fn is_anomalous_does_not_alias_bits_24_or_25() {
+    let d24 = conformance_drawer(1 << 24);
+    let d25 = conformance_drawer(1 << 25);
+    assert!(!d24.is_anomalous(), "bit 24 must not set is_anomalous");
+    assert!(!d25.is_anomalous(), "bit 25 must not set is_anomalous");
+    // Bit 26 must not alias the neighbouring state flags.
+    let d26 = conformance_drawer(1 << 26);
+    assert!(!d26.state_extension_active(), "bit 26 must not trigger state_extension_active");
+    assert!(!d26.lineage_clustering_active(), "bit 26 must not trigger lineage_clustering_active");
+}
+
+// ============================================================
 // Full composite — all axes simultaneously
 // ============================================================
 
