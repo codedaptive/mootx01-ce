@@ -235,7 +235,7 @@ real entitlements.
 | Scenario | Status |
 |---|---|
 | P-01: launchctl bootstrap | PASS 2026-08-25 — install exit 0; expected label, bundle executable, and running PID observed |
-| P-02: Readiness vs launch | RERUN REQUIRED — 2026-08-25 exposed and corrected a stale nonexistent HTTP descriptor URL |
+| P-02: Readiness vs launch | RERUN REQUIRED — 2026-08-25 corrected the stale descriptor procedure, then the signed app exposed an `ARIA_MCP` vs canonical `mootx01` `serverInfo.name` mismatch after authentication; the shared-identity correction is in source and awaits signed-app readback |
 | P-03: Unexpected exit / restart | PASS 2026-08-25 — SIGKILL produced a new PID with the same estate identifier and rebound port 4242 |
 | P-04: Upgrade (no concurrent writers) | RERUN REQUIRED — 2026-08-25 package replacement succeeded, but readback exposed that postinstall restarted only the legacy service and omitted the Community provider; corrected in source and awaiting a rebuilt two-version physical run |
 | P-05: Login launch | Physical — requires logout/login cycle |

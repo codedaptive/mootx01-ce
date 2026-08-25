@@ -420,7 +420,7 @@ private actor LifecycleFixture: CommunityEstateLifecycleServicing {
 }
 
 private actor FeatureCallerFixture: MootEstateCalling {
-    nonisolated let serverName = "ARIA_MCP"
+    nonisolated let serverName = DaemonContract.serverName
     nonisolated let estateIdentity = EstateIdentity.daemon(
         estate: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
         service: "com.mootx01.daemon"

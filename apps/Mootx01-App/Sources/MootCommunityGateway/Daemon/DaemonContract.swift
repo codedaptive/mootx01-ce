@@ -1,3 +1,4 @@
+import AriaMCPWire
 import Foundation
 
 // MARK: - Resident daemon contract
@@ -51,10 +52,10 @@ public enum DaemonContract {
     public static let serviceIdentifier = "com.mootx01.daemon"
 
     /// The `serverInfo.name` the daemon's dispatcher reports at `initialize`.
-    /// The resident daemon runs the `aria-mcp` dispatcher, which advertises
-    /// "ARIA_MCP" (see `AriaMCPMain`). A handshake that reports any other name
-    /// is not the daemon this client contracted with.
-    public static let serverName = "ARIA_MCP"
+    /// This is the product's canonical MCP name, shared with the authenticated
+    /// wire contract. A handshake that reports any other name is not the daemon
+    /// this client contracted with.
+    public static let serverName = FirstPartyAuthProtocol.serverName
 
     /// The descriptor wire-schema this client can parse. Bumped only when the
     /// descriptor's own field set changes, independently of `contractRevision`.

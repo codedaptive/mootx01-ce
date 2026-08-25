@@ -95,6 +95,12 @@ public enum FirstPartyAuthProtocol {
     /// The resident daemon service that owns the estate.
     public static let serviceIdentifier = "com.mootx01.daemon"
 
+    /// The canonical MCP `serverInfo.name` for the resident product daemon.
+    /// Clients compare this exact value during authenticated readiness; keeping
+    /// it beside the provider and service identities prevents the app and
+    /// daemon from silently choosing different product names.
+    public static let serverName = "mootx01"
+
     /// The authentication scheme this contract implements. A descriptor naming
     /// any other scheme is refused rather than negotiated: security properties
     /// do not downgrade.

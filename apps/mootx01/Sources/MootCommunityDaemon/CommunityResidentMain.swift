@@ -227,7 +227,7 @@ public enum CommunityResidentMain {
 
         let dispatcher = ARIA_MCPDispatcher(
             info: ARIA_MCPDispatcher.ServerInfo(
-                name: "mootx01",
+                name: FirstPartyAuthProtocol.serverName,
                 version: activation.descriptor.binaryVersion
             ),
             communityHandler: communityDispatch
@@ -243,7 +243,7 @@ public enum CommunityResidentMain {
         let authServer = FirstPartyAuthServer(
             rootProvider: rootProvider,
             descriptor: activation.descriptor,
-            serverName: "mootx01",
+            serverName: FirstPartyAuthProtocol.serverName,
             now: { UInt64(Date().timeIntervalSince1970) },
             randomBytes: ProductionRandomness.secRandomBytes
         )

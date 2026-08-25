@@ -185,12 +185,15 @@ func runContractHost() async -> Int32 {
     let authServer = FirstPartyAuthServer(
         rootProvider: rootProvider,
         descriptor: descriptor,
-        serverName: "mootx01",
+        serverName: FirstPartyAuthProtocol.serverName,
         now: { UInt64(Date().timeIntervalSince1970) },
         randomBytes: ProductionRandomness.secRandomBytes
     )
     let dispatcher = ARIA_MCPDispatcher(
-        info: ARIA_MCPDispatcher.ServerInfo(name: "mootx01", version: "1.1.0"),
+        info: ARIA_MCPDispatcher.ServerInfo(
+            name: FirstPartyAuthProtocol.serverName,
+            version: "1.1.0"
+        ),
         communityHandler: communityDispatch
     )
     let server = HTTPServer(

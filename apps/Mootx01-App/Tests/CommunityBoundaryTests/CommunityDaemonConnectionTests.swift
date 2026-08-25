@@ -141,6 +141,26 @@ struct CommunityDaemonConnectionTests {
         #expect(verdict == .accepted)
     }
 
+    @Test("authenticated readiness accepts the canonical product server identity")
+    func canonicalServerIdentityReachesReady() async throws {
+        #expect(FirstPartyAuthProtocol.serverName == "mootx01")
+        #expect(DaemonContract.serverName == FirstPartyAuthProtocol.serverName)
+
+        let descriptor = try #require(CommunityDaemonDescriptorFile.decode(try descriptorData()))
+        let transport = CanonicalReadinessTransport(descriptor: descriptor)
+        let readiness = DaemonReadiness(
+            loadDescriptor: { descriptor },
+            authenticate: { _ in
+                AuthenticatedDaemonTransport(
+                    transport: transport,
+                    sessionIdentifier: "authenticated-session"
+                )
+            }
+        )
+
+        #expect(await readiness.connect() == .ready(descriptor))
+    }
+
     @Test("contract mismatch and widened identity both fail closed")
     func incompatibleOrWidenedCommunityContractIdentityIsRefused() async throws {
         let descriptor = try #require(CommunityDaemonDescriptorFile.decode(try descriptorData()))
@@ -221,7 +241,7 @@ struct CommunityDaemonConnectionTests {
 }
 
 private actor ContractIdentityCaller: MootEstateCalling {
-    nonisolated let serverName = "ARIA_MCP"
+    nonisolated let serverName = DaemonContract.serverName
     nonisolated let estateIdentity: EstateIdentity
     private let structured: JSONValue
 
@@ -258,5 +278,37 @@ private actor ContractIdentityCaller: MootEstateCalling {
             structured: nil,
             isError: true
         )
+    }
+}
+
+private actor CanonicalReadinessTransport: GatewayTransport {
+    private let descriptor: DaemonDescriptor
+
+    init(descriptor: DaemonDescriptor) {
+        self.descriptor = descriptor
+    }
+
+    func send(_ request: JSONRPCRequest) async throws -> JSONRPCResponse? {
+        switch request.method {
+        case "initialize":
+            guard let id = request.id else { return nil }
+            return .ok(id, .object([
+                "protocolVersion": .string(descriptor.mcpProtocolVersion),
+                "capabilities": .object(["tools": .object([:])]),
+                "serverInfo": .object([
+                    "name": .string(FirstPartyAuthProtocol.serverName),
+                    "version": .string(descriptor.binaryVersion),
+                    "instanceIdentifier": .string(descriptor.instanceIdentifier.uuidString),
+                    "estateIdentifier": .string(descriptor.estateIdentifier.uuidString),
+                ]),
+            ]))
+        case "notifications/initialized":
+            return nil
+        case "ping":
+            guard let id = request.id else { return nil }
+            return .ok(id, .object([:]))
+        default:
+            return nil
+        }
     }
 }
