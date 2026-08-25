@@ -1,0 +1,46 @@
+{
+  "description": "Morning session with a single active drawer. The session has one section (First priorities), one item, one action, and no duplicate groups.",
+  "drawers": [
+    {
+      "content": "Confirm the community daemon contract lane before the release cut.",
+      "filedAt": "2026-08-23T08:00:00.000Z",
+      "id": "d1000000-0000-0000-0000-000000000001",
+      "subject": "Community release",
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark 'Community release' as reviewed.",
+        "id": "0b8e8a53-20a9-550c-91fd-93c21f300c34",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [],
+    "generatedAt": "2026-08-23T09:00:00.000Z",
+    "id": "68450a7d-0df3-55c0-b6ac-6f6a1826af5a",
+    "kind": "morning",
+    "sections": [
+      {
+        "id": "9babb91b-afad-5e35-8f1c-44a81d40b106",
+        "items": [
+          {
+            "detail": "Confirm the community daemon contract lane before the release cut.",
+            "id": "35673e8b-8dff-5bc9-b6b2-66b2dc778535",
+            "subject": "Community release"
+          }
+        ],
+        "title": "First priorities"
+      }
+    ],
+    "sourceEstateState": "sha256:88b343f61a9a4ebe4c31e08360ce8521:1"
+  },
+  "kind": "morning",
+  "now": "2026-08-23T09:00:00.000Z",
+  "vectorID": "morning-single-drawer"
+}

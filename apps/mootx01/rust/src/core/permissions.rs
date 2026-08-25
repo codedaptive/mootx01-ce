@@ -71,11 +71,18 @@ pub fn permission_entries() -> Vec<String> {
 /// Reads: no estate content is created, changed, or removed.
 const READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_ping", "moot_drain_status",
+    // C3/A6: audit-derived timing metrics — pure audit-log read.
+    "moot_timing_report",
     "moot_list_lenses", "moot_list_recipes",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",
     "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped", "moot_recall_distilled",
     "moot_recall_vague",
+    // Walk (breadth-first traversal) and temporal (time-ordered recall) are
+    // pure read operations — no estate content is created, changed, or removed.
+    // Added here when aria-mcp shipped the two new recall endpoints; mirrors
+    // the Swift PermissionsWriter.readTools parity requirement.
+    "moot_recall_walk", "moot_recall_temporal",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
     "moot_estate_map", "moot_read_journal", "moot_federated_search",

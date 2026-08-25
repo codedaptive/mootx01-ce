@@ -1,0 +1,46 @@
+{
+  "description": "End-of-day session with a single active drawer. Section title is 'Today's items'.",
+  "drawers": [
+    {
+      "content": "Confirm the community daemon contract lane before the release cut.",
+      "filedAt": "2026-08-23T08:00:00.000Z",
+      "id": "d1000000-0000-0000-0000-000000000001",
+      "subject": "Community release",
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark 'Community release' as reviewed.",
+        "id": "e5b43cd5-8048-5bde-8acb-0855f4103f5a",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [],
+    "generatedAt": "2026-08-23T17:00:00.000Z",
+    "id": "6ef2953a-2849-5212-a8b4-4bb85c87f941",
+    "kind": "endOfDay",
+    "sections": [
+      {
+        "id": "3d5105aa-8d20-5291-8d25-88e1e27f2e29",
+        "items": [
+          {
+            "detail": "Confirm the community daemon contract lane before the release cut.",
+            "id": "80e4e58a-4de7-57dd-8c01-d54868641c9b",
+            "subject": "Community release"
+          }
+        ],
+        "title": "Today's items"
+      }
+    ],
+    "sourceEstateState": "sha256:88b343f61a9a4ebe4c31e08360ce8521:1"
+  },
+  "kind": "endOfDay",
+  "now": "2026-08-23T17:00:00.000Z",
+  "vectorID": "endofday-single-drawer"
+}

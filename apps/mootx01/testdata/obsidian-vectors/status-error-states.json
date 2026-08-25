@@ -1,0 +1,37 @@
+[
+  {
+    "_comment": "Vault directory removed mid-run — retryable interruption",
+    "state": "interrupted",
+    "reason": "vault-access-revoked",
+    "retryable": true,
+    "checkpointAt": "2026-08-23T14:00:00Z",
+    "recordCount": 8
+  },
+  {
+    "_comment": "Authorization token expired — retryable after re-authorization",
+    "state": "interrupted",
+    "reason": "vault-access-revoked",
+    "retryable": true
+  },
+  {
+    "_comment": "Non-retryable failure — corrupted sidecar state; requires manual repair",
+    "state": "failed",
+    "reason": "internal-error",
+    "retryable": false
+  },
+  {
+    "_comment": "Daemon blocked — no estate handle available at startup",
+    "state": "blocked",
+    "reason": "daemon-blocked"
+  },
+  {
+    "_comment": "Synchronizing interrupted mid-batch — retryable",
+    "state": "interrupted",
+    "reason": "vault-access-revoked",
+    "retryable": true,
+    "pendingCount": 3,
+    "totalCount": 10,
+    "checkpointAt": "2026-08-23T13:58:00Z",
+    "recordCount": 7
+  }
+]

@@ -1,0 +1,83 @@
+{
+  "description": "Two drawers with subject 'hello\\nworld' (embedded newline). Swift .whitespaces does NOT split on newline; both get key 'hello\\nworld' and form a duplicate group. Rust split_whitespace() would incorrectly split on \\n.",
+  "drawers": [
+    {
+      "content": "content A",
+      "filedAt": "2026-08-24T08:01:00.000Z",
+      "id": "d4000000-0000-0000-0000-000000000001",
+      "subject": "hello\nworld",
+      "tombstonedAt": null
+    },
+    {
+      "content": "content B",
+      "filedAt": "2026-08-24T08:00:00.000Z",
+      "id": "d4000000-0000-0000-0000-000000000002",
+      "subject": "hello\nworld",
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark 'hello\nworld' as reviewed.",
+        "id": "aeab2afb-e56a-53c5-a55c-07c8f4947ce2",
+        "isReversible": true,
+        "reversalAvailable": false
+      },
+      {
+        "expectedEffect": "Mark 'hello\nworld' as reviewed.",
+        "id": "78af115e-480f-573e-93f5-e2ff4dfcb629",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [
+      {
+        "choices": [
+          {
+            "description": "Keep the newer record and archive the older one.",
+            "id": "aa4b657e-047f-5861-a34e-0a29be3aa965"
+          },
+          {
+            "description": "Merge content into the newer record and archive the older one.",
+            "id": "b90cb5d2-37a9-5975-bd09-41712df5d6d0"
+          }
+        ],
+        "id": "b57a014e-2f21-5953-bb18-b04c4f7e782a",
+        "reason": "Records share the same canonical subject.",
+        "recordIDs": [
+          "d4000000-0000-0000-0000-000000000001",
+          "d4000000-0000-0000-0000-000000000002"
+        ]
+      }
+    ],
+    "generatedAt": "2026-08-24T09:00:00.000Z",
+    "id": "80a7914b-a2a1-58ed-aad5-e5f3498b108b",
+    "kind": "morning",
+    "sections": [
+      {
+        "id": "ed16366c-6b1a-5ba3-b141-fd835d6b1683",
+        "items": [
+          {
+            "detail": "content A",
+            "id": "e1acad7b-6e87-545b-9b80-8234988d53a8",
+            "subject": "hello\nworld"
+          },
+          {
+            "detail": "content B",
+            "id": "10a296ab-e411-5b71-ab0d-dfc18db04b16",
+            "subject": "hello\nworld"
+          }
+        ],
+        "title": "First priorities"
+      }
+    ],
+    "sourceEstateState": "sha256:a81b23274bdaf8f6fffd5b8bdfc2eb7c:2"
+  },
+  "kind": "morning",
+  "now": "2026-08-24T09:00:00.000Z",
+  "vectorID": "non-ascii-newline-subject"
+}

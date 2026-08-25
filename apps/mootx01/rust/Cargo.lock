@@ -500,6 +500,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "estate-encryption"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,6 +644,7 @@ dependencies = [
  "serde",
  "serde_json",
  "substrate-kernel",
+ "substrate-lib",
  "substrate-ml",
  "substrate-types",
  "uuid",
@@ -958,6 +966,7 @@ name = "mootx01-cli"
 version = "1.1.0-beta-19"
 dependencies = [
  "aria-mcp",
+ "corpus-kit",
  "genius-locus-kit",
  "genius-locus-kit-migrations",
  "libc",
@@ -970,6 +979,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "trash",
+ "unicode-normalization",
  "uuid",
  "vault-kit",
 ]
@@ -1192,6 +1202,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chrono",
+ "estate-encryption",
  "intellectus-lib",
  "libc",
  "native-tls",

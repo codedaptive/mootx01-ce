@@ -82,6 +82,20 @@ vault-kit = { path = "../../../packages/kits/VaultKit/rust" }
 # keeps the upgrade wiring honest and removable.
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/rust-migrations" }
+# corpus-kit: `mootx01 upgrade` corpus-counts migration (CORPUS-COUNTS-01).
+# Owns the reindex latch (reindex_required) called at the tail of the
+# vocab-table clear + counts-blob zeroing step. Already in the product graph
+# via aria-mcp; naming it directly keeps the upgrade wiring honest and
+# removable (same rationale as persistence-kit above).
+corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
+
+# unicode-normalization: NFC normalization for the review engine's normalize_subject.
+# Required for F9 parity: Swift uses precomposedStringWithCanonicalMapping (NFC) to
+# normalize subject strings before duplicate-detection comparison. Without NFC, a
+# decomposed Unicode subject (e.g. "e" + U+0301 combining acute) would not match the
+# precomposed form ("é") in the Rust engine, causing divergence from Swift's output.
+# Authorized by the mission orchestrator as a correctness dependency (2026-08-24).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.
