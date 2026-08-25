@@ -185,16 +185,26 @@ ENTITLEMENTS
                 echo "       $DAEMON_PROVISIONING_PROFILE" >&2
                 exit 1
             fi
-            /usr/bin/grep -q "${DAEMON_TEAM_ID}.group.com.codedaptive.mootx01" "$PROFILE_PLIST.txt" \
-                || { echo "ERROR: the provisioning profile does not grant the App Group" >&2
-                     echo "       ${DAEMON_TEAM_ID}.group.com.codedaptive.mootx01 — refusing." >&2
-                     exit 1; }
-            /usr/bin/grep -q "${DAEMON_TEAM_ID}.com.codedaptive.mootx01.shared" "$PROFILE_PLIST.txt" \
-                || { echo "ERROR: the provisioning profile does not grant the team Keychain" >&2
-                     echo "       group ${DAEMON_TEAM_ID}.com.codedaptive.mootx01.shared — refusing." >&2
-                     exit 1; }
+            /usr/bin/python3 - "$PROFILE_PLIST" "$DAEMON_TEAM_ID" <<'PY'
+import plistlib
+import sys
+
+path, team = sys.argv[1:]
+with open(path, "rb") as stream:
+    profile = plistlib.load(stream)
+entitlements = profile.get("Entitlements", {})
+expected_app = f"{team}.com.codedaptive.mootx01.macos.daemonprovider"
+if entitlements.get("com.apple.application-identifier") != expected_app:
+    raise SystemExit(f"profile application identifier must be {expected_app}")
+groups = entitlements.get("com.apple.security.application-groups", [])
+if "group.com.codedaptive.mootx01" not in groups:
+    raise SystemExit("profile does not grant group.com.codedaptive.mootx01")
+keychain = entitlements.get("keychain-access-groups", [])
+if f"{team}.com.codedaptive.mootx01.shared" not in keychain and f"{team}.*" not in keychain:
+    raise SystemExit("profile does not authorize the daemon Keychain access group")
+PY
             cp "$DAEMON_PROVISIONING_PROFILE" "$DAEMON_APP/Contents/embedded.provisionprofile"
-            echo "Embedded provisioning profile (content validated: CMS + plist + both groups)"
+            echo "Embedded provisioning profile (content validated: identifier + App Group + Keychain)"
         elif [ -n "${REQUIRE_SIGNING:-}" ]; then
             echo "ERROR: the daemon provider bundle is signed with App Group and Keychain" >&2
             echo "       entitlements, but DAEMON_PROVISIONING_PROFILE is empty. Without an" >&2
