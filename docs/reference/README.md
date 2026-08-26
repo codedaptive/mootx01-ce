@@ -70,7 +70,7 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 |---|---|---|---|
 | aria-mcp | [SPEC](ARIA_MCP_SPEC.md) | [INTERFACE](ARIA_MCP_INTERFACE.md) | The external access surface — the ARIA language projected onto MCP primitives (tools, resources, prompts, sampling, elicitation). |
 | moot-mgr | [SPEC](MOOT_MGR_SPEC.md) | — | The GUI control and monitor surface for the headless mootx01 daemon. |
-| MOOTx01-App | [SPEC](MOOTX01_APP_SPEC.md) | [Developer guide](../../apps/Mootx01-App/README.md) | The native macOS, iOS, and iPadOS presentation layer: embedded estate, Apple intelligence and automation, opt-in sync, LAN serving, and on-demand federation. |
+| MOOTx01-App | — | [Developer guide](../../apps/Mootx01-App/README.md) | The native macOS, iOS, and iPadOS presentation layer: embedded estate, Apple intelligence and automation, opt-in sync, LAN serving, and on-demand federation. |
 | mootx01 CLI | — | [INTERFACE](INSTALLER_INTERFACE.md) | The Swift CLI / host that installs and runs a MOOTx01 estate. |
 
 ## Cross-cutting specifications
