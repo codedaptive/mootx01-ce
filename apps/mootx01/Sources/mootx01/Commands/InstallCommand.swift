@@ -41,6 +41,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Use direct stdio client wiring (`mootx01 serve`) and skip registering the resident HTTP daemon as a background service. Stop an already-running resident for socket-free MCP operation.")
     var noDaemon: Bool = false
 
+    @Flag(name: .long, help: "Converge client configuration and integration payloads without changing estate posture or restarting already-installed resident services.")
+    var clientsOnly: Bool = false
+
     @Flag(name: .long, help: "Enable Vault MCP tools (moot_vault_*): expose export/import/status/reconcile/job on the MCP surface. Default behavior when neither --vault-on nor --vault-off is specified.")
     var vaultOn: Bool = false
 
@@ -64,13 +67,19 @@ struct InstallCommand: AsyncParsableCommand {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let local = location == "local"
 
+        guard !clientsOnly || !(noManager || noDaemon || noEncrypt || subjectRiderOff || reuseDb || replaceDb) else {
+            throw ValidationError(
+                "--clients-only cannot be combined with resident-service or estate-posture flags."
+            )
+        }
         guard !(reuseDb && replaceDb) else {
             throw ValidationError("--reuse-db and --replace-db are mutually exclusive.")
         }
-        // Existing-database disposition (reinstall contract): resolved BEFORE
-        // any wiring so a 'replace' that cannot proceed (daemon running,
-        // trash failure) aborts the install with nothing half-done.
-        try handleExistingDatabase(homeDirectory: home)
+        if !clientsOnly {
+            // Existing-database disposition (reinstall contract): resolved BEFORE
+            // any wiring so a 'replace' that cannot proceed (daemon running,
+            // trash failure) aborts the install with nothing half-done.
+            try handleExistingDatabase(homeDirectory: home)
 
         // At-rest encryption posture for the DEFAULT estate.
         //
@@ -142,6 +151,7 @@ struct InstallCommand: AsyncParsableCommand {
                         "could not remove a stale --no-encrypt marker at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path): \(error). Remove it manually, or pass --no-encrypt if plaintext was intended.")
                 }
             }
+        }
         }
 
         // Resolve the SOURCE binary (the running executable). We never
@@ -457,7 +467,7 @@ struct InstallCommand: AsyncParsableCommand {
         // release archive, so its source is the sibling of the running binary.
         // macOS-only: launchd is the service manager and moot-mgr is macOS-only.
         #if os(macOS)
-        if !noManager {
+        if !noManager && !clientsOnly {
             let mgrSource = URL(fileURLWithPath: sourcePath)
                 .resolvingSymlinksInPath()
                 .deletingLastPathComponent()
@@ -512,7 +522,7 @@ struct InstallCommand: AsyncParsableCommand {
         // (MOOTX01_HTTP_PORT=4242) and points telemetry at moot-mgr's stats store
         // so the console observes it out of the box. macOS-only (launchd).
         #if os(macOS)
-        if !noDaemon {
+        if !noDaemon && !clientsOnly {
             let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
             if FileManager.default.isExecutableFile(atPath: bundleExecutable.path) {
                 // The signed provider bundle is the Community 1.1 production

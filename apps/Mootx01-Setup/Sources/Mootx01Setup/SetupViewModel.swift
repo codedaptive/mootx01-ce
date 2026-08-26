@@ -164,7 +164,13 @@ final class SetupViewModel {
         let vaultOff = Self.readDaemonVaultPosture(home: home)
         Task {
             let (converged, failed) = await Self.runInstall(
-                launchPath: launchPath, ids: ids.joined(separator: ","), mode: mode, names: displayNames, vaultOff: vaultOff)
+                launchPath: launchPath,
+                ids: ids.joined(separator: ","),
+                mode: mode,
+                names: displayNames,
+                vaultOff: vaultOff,
+                clientsOnly: true
+            )
             if failed.isEmpty {
                 self.convergenceOutcome = "converged: \(converged.joined(separator: ", "))"
             } else {
@@ -235,13 +241,21 @@ final class SetupViewModel {
     }
 
     private nonisolated static func runInstall(
-        launchPath: String, ids: String, mode: String, names: [String], vaultOff: Bool = false
+        launchPath: String,
+        ids: String,
+        mode: String,
+        names: [String],
+        vaultOff: Bool = false,
+        clientsOnly: Bool = false
     ) async -> ([String], [String]) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
-        var args = ["install", "--target", ids, "--mode", mode, "--yes"]
-        if vaultOff { args.append("--vault-off") }
-        proc.arguments = args
+        proc.arguments = installArguments(
+            ids: ids,
+            mode: mode,
+            vaultOff: vaultOff,
+            clientsOnly: clientsOnly
+        )
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
@@ -261,5 +275,24 @@ final class SetupViewModel {
         } catch {
             return ([], ["Could not run mootx01 install: \(error.localizedDescription)"])
         }
+    }
+
+    /// Build the CLI invocation independently of process execution so the
+    /// package-upgrade boundary is regression-testable. The setup assistant's
+    /// automatic convergence runs after the package postinstall has already
+    /// activated the newly installed resident services. That path must update
+    /// client/plugin payloads without restarting those services a second time.
+    nonisolated static func installArguments(
+        ids: String,
+        mode: String,
+        vaultOff: Bool = false,
+        clientsOnly: Bool = false
+    ) -> [String] {
+        var args = ["install", "--target", ids, "--mode", mode, "--yes"]
+        if vaultOff { args.append("--vault-off") }
+        if clientsOnly {
+            args.append(contentsOf: ["--clients-only", "--no-place"])
+        }
+        return args
     }
 }

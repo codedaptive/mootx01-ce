@@ -80,6 +80,40 @@ struct EnabledPlistContractTests {
 @Suite("CORE-09: installDaemonBundleEnabled — service identity + readback")
 struct InstallDaemonBundleEnabledTests {
 
+    @Test("verified RunAtLoad bootstrap does not kill and restart the fresh job")
+    func bootstrapDoesNotDoubleStartRunAtLoadJob() {
+        let plist = URL(fileURLWithPath: "/Users/test/Library/LaunchAgents/provider.plist")
+        var commands: [[String]] = []
+
+        let result = LaunchAgent.bootstrapJob(
+            plistURL: plist,
+            label: DaemonBundle.launchAgentLabel,
+            runner: { arguments in
+                commands.append(arguments)
+                switch arguments.first {
+                case "bootout":
+                    return (0, "")
+                case "print":
+                    // First print proves teardown; second proves bootstrap.
+                    return (commands.filter { $0.first == "print" }.count == 1 ? 1 : 0, "")
+                case "bootstrap":
+                    return (0, "")
+                default:
+                    return (1, "unexpected command")
+                }
+            }
+        )
+
+        #expect(result.ok)
+        #expect(commands == [
+            ["bootout", "gui/\(getuid())/\(DaemonBundle.launchAgentLabel)"],
+            ["print", "gui/\(getuid())/\(DaemonBundle.launchAgentLabel)"],
+            ["bootstrap", "gui/\(getuid())", plist.path],
+            ["print", "gui/\(getuid())/\(DaemonBundle.launchAgentLabel)"],
+        ])
+        #expect(!commands.contains { $0.first == "kickstart" })
+    }
+
     @Test("production activation bootstraps the readback-verified enabled plist")
     func activationBootstrapsEnabledPlist() throws {
         let home = try makeTempHome()

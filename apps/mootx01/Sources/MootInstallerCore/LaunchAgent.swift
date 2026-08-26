@@ -594,14 +594,30 @@ public enum LaunchAgent {
         }
     }
 
-    /// bootout → bootstrap (legacy load fallback) → kickstart for a written
-    /// plist. Shared by `install` and `installDaemon` so both agents load
-    /// identically.
+    /// bootout → bootstrap (legacy load fallback) for a written plist. Shared
+    /// by `install` and `installDaemon` so both agents load identically.
+    ///
+    /// Every plist passed here is `RunAtLoad=true`, so a successful bootstrap
+    /// starts the job. Do not follow bootstrap with `kickstart -k`: that kills
+    /// the just-started process and creates a second activation. For the
+    /// Community provider, each activation durably advances its generations;
+    /// the redundant kickstart therefore made one package upgrade advance the
+    /// provider and descriptor counters twice.
     private static func bootstrapJob(plistURL: URL, label: String) -> (ok: Bool, detail: String) {
+        bootstrapJob(plistURL: plistURL, label: label, runner: runLaunchctl)
+    }
+
+    /// Injectable command runner used by the focused launchd sequencing test.
+    /// Production always enters through the private wrapper above.
+    static func bootstrapJob(
+        plistURL: URL,
+        label: String,
+        runner: ([String]) -> (code: Int32, output: String)
+    ) -> (ok: Bool, detail: String) {
         let domain = "gui/\(getuid())"
         let target = "\(domain)/\(label)"
         // Tear down any prior instance so bootstrap doesn't fail "already loaded".
-        _ = runLaunchctl(["bootout", target])
+        _ = runner(["bootout", target])
         // bootout is ASYNCHRONOUS — and worse than a failed bootstrap: a
         // bootout completing late can tear down the freshly bootstrapped
         // replacement job (observed live: install verified the job loaded,
@@ -609,7 +625,7 @@ public enum LaunchAgent {
         // reports the job gone before bootstrapping the new one.
         var teardownDone = false
         for _ in 1...20 {
-            if runLaunchctl(["print", target]).code != 0 {
+            if runner(["print", target]).code != 0 {
                 teardownDone = true
                 break
             }
@@ -619,9 +635,9 @@ public enum LaunchAgent {
         // Without this, bootstrap fails on "already loaded" and the verify
         // step sees the STALE job, falsely reporting success.
         if !teardownDone {
-            _ = runLaunchctl(["bootout", target])
+            _ = runner(["bootout", target])
             usleep(500_000)
-            teardownDone = runLaunchctl(["print", target]).code != 0
+            teardownDone = runner(["print", target]).code != 0
         }
         if !teardownDone {
             return (false, "prior job still registered after bootout; launchd teardown timed out")
@@ -633,11 +649,11 @@ public enum LaunchAgent {
         var lastDetail = ""
         for attempt in 1...5 {
             var loaded = false
-            let boot = runLaunchctl(["bootstrap", domain, plistURL.path])
+            let boot = runner(["bootstrap", domain, plistURL.path])
             if boot.code == 0 {
                 loaded = true
             } else {
-                let legacy = runLaunchctl(["load", "-w", plistURL.path])
+                let legacy = runner(["load", "-w", plistURL.path])
                 if legacy.code == 0 {
                     loaded = true
                 } else {
@@ -646,9 +662,9 @@ public enum LaunchAgent {
                 }
             }
             // Verify: bootstrap/load succeeded AND launchd sees the job.
-            if loaded, runLaunchctl(["print", target]).code == 0 {
-                // RunAtLoad already started it; kickstart makes "running now" explicit.
-                _ = runLaunchctl(["kickstart", "-k", target])
+            if loaded, runner(["print", target]).code == 0 {
+                // RunAtLoad already started the job. A second explicit start is
+                // destructive for activation-counted services.
                 return (true, "")
             }
             if attempt < 5 { usleep(300_000) }  // 300 ms before retrying
