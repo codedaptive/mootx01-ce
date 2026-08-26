@@ -656,37 +656,37 @@ struct CensusSiteGateSourceTests {
                 "gate call must precede census call in UpgradeCommand source order")
     }
 
-    @Test("InstallCommand skips plist staging on .unverified (no disabled plist for impostor binary)")
+    @Test("InstallCommand skips bundle activation on .unverified (no plist for impostor binary)")
     func installCommandSkipsPlistOnUnverified() throws {
         let source = try Self.commandSource("InstallCommand")
-        // The .unverified branch must return before installDaemonBundleDisabled is called.
+        // The .unverified branch must return before the enabled bundle is activated.
         let unverifiedRange = try #require(
             source.range(of: "case .unverified"),
             ".unverified case not found in InstallCommand"
         )
-        let plistRange = try #require(
-            source.range(of: "installDaemonBundleDisabled"),
-            "plist install call not found in InstallCommand"
+        let activationRange = try #require(
+            source.range(of: "activateDaemonBundleEnabled"),
+            "bundle activation call not found in InstallCommand"
         )
-        // .unverified branch must appear before installDaemonBundleDisabled in source
+        // .unverified branch must appear before activation in source
         // AND the .unverified case must contain a `return` before reaching it.
-        #expect(unverifiedRange.lowerBound < plistRange.lowerBound,
-                ".unverified case must appear before plist staging in source order")
+        #expect(unverifiedRange.lowerBound < activationRange.lowerBound,
+                ".unverified case must appear before bundle activation in source order")
     }
 
-    @Test("UpgradeCommand skips plist staging on .unverified (no disabled plist for impostor binary)")
+    @Test("UpgradeCommand skips bundle activation on .unverified (no plist for impostor binary)")
     func upgradeCommandSkipsPlistOnUnverified() throws {
         let source = try Self.commandSource("UpgradeCommand")
         let unverifiedRange = try #require(
             source.range(of: "case .unverified"),
             ".unverified case not found in UpgradeCommand"
         )
-        let plistRange = try #require(
-            source.range(of: "installDaemonBundleDisabled"),
-            "plist install call not found in UpgradeCommand"
+        let activationRange = try #require(
+            source.range(of: "activateDaemonBundleEnabled"),
+            "bundle activation call not found in UpgradeCommand"
         )
-        #expect(unverifiedRange.lowerBound < plistRange.lowerBound,
-                ".unverified case must appear before plist staging in UpgradeCommand source order")
+        #expect(unverifiedRange.lowerBound < activationRange.lowerBound,
+                ".unverified case must appear before bundle activation in UpgradeCommand source order")
     }
 }
 
