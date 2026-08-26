@@ -9,9 +9,7 @@ This directory is the development app on `develop/1.1.x`. It is distinct from
 [`moot-mgr`](../moot-mgr/README.md), which operates and observes the resident
 headless daemon.
 
-Start with this guide for building and using the app. Use the
-[`MOOTx01-App specification`](../../docs/reference/MOOTX01_APP_SPEC.md) for
-the complete behavioral contract and the
+Start with this guide for building and using the app, and the
 [`ARIA-to-Apple mapping`](LEXICON_TO_APPLE_MAPPING.md) for every verb and
 system surface.
 
@@ -220,7 +218,6 @@ are covered by the
 
 ## Further documentation
 
-- [`MOOTx01-App specification`](../../docs/reference/MOOTX01_APP_SPEC.md)
 - [`ARIA lexicon to Apple mapping`](LEXICON_TO_APPLE_MAPPING.md)
 - [`Portable LAN server decision`](../../docs/decisions/DECISION_MOOTX01_APP_PORTABLE_LAN_SERVER_2026-07-11.md)
 - [`On-demand federation decision`](../../docs/decisions/DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18.md)
