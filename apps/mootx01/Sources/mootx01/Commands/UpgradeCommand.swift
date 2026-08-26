@@ -488,10 +488,23 @@ struct UpgradeCommand: AsyncParsableCommand {
             // the public half to the manifest, and drop the private half at
             // process exit -- permanently disabling grant/federation signing for
             // any estate whose identity had not yet been established.
+            //
+            // EXCEPT under the declared throwaway posture: with
+            // MOOTX01_ESTATE_LIFETIME=ephemeral the identity key lives in an
+            // in-memory store, same contract as ServeCommand. Without this,
+            // every bulk-upgrade sweep over benchmark estates minted one
+            // Keychain identity item per estate and never deleted it —
+            // 247 accumulated items by 2026-08-26 (keychain pollution,
+            // ACTION D5 recurrence). Benchmark estates have no federation
+            // signing to lose; the marker is a declaration, never inferred.
+            let upgradeLifetimeIsEphemeral =
+                (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                    .lowercased() == "ephemeral"
             let handle = try await kit.open(
                 storage: storage,
                 owner: owner,
-                identityKeyStore: nil
+                identityKeyStore: upgradeLifetimeIsEphemeral
+                    ? InMemoryEstateIdentityKeyStore() : nil
             )
             let report = try await kit.completeSharedContentReclaim(
                 handle: handle, now: Date())
