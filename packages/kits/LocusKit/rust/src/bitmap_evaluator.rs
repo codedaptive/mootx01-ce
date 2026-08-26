@@ -25,7 +25,8 @@
 //!    `AuditLogFold::project_state_at` (cookbook § 5.3) when
 //!    `frame.as_of` is `Some`; state is keyed on HLC.
 //! 3. **Structured tier** (§ 7.9.4 step 3) — `InRoom`, `InWing`,
-//!    `LineageID`, `CreatedAfter`, `CreatedBefore`, `LatticeAnchor`,
+//!    `LineageID`, `CreatedAfter`, `CreatedBefore`, `EventAfter`,
+//!    `EventBefore`, `LatticeAnchor`,
 //!    `LatticeUnder`, `WikidataConcept`.
 //! 4. **Content tier** (§ 7.9.4 step 4) — `ContentMatches` via a
 //!    case-insensitive substring fold.
@@ -602,6 +603,8 @@ impl BitmapEvaluator {
             | Filter::LineageID(_)
             | Filter::CreatedAfter(_)
             | Filter::CreatedBefore(_)
+            | Filter::EventAfter(_)
+            | Filter::EventBefore(_)
             | Filter::LatticeAnchor(_)
             | Filter::LatticeUnder(_)
             | Filter::WikidataConcept(_) => true,
@@ -627,6 +630,11 @@ impl BitmapEvaluator {
             Filter::LineageID(l) => drawer.lineage_id == *l,
             Filter::CreatedAfter(d) => drawer.filed_at > *d,
             Filter::CreatedBefore(d) => drawer.filed_at < *d,
+            // Event-time bounds are INCLUSIVE (window semantics), unlike the
+            // strict CreatedAfter/Before pair: a drawer whose event_time
+            // equals a window edge is inside the window.
+            Filter::EventAfter(d) => drawer.event_time >= *d,
+            Filter::EventBefore(d) => drawer.event_time <= *d,
             Filter::LatticeAnchor(a) => drawer.udc_code == a.udc_code,
             Filter::LatticeUnder(p) => drawer.udc_code.starts_with(p),
             Filter::WikidataConcept(q) => {
@@ -1262,6 +1270,28 @@ mod tests {
         let result = BitmapEvaluator::evaluate(&frame, &[a, b], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
+    }
+
+    #[test]
+    fn event_after_and_before_inclusive() {
+        let store = make_store();
+        let mut early = base_drawer("early");
+        early.event_time = NOW + 1;
+        let mut edge = base_drawer("edge");
+        edge.event_time = NOW + 50;
+        let mut late = base_drawer("late");
+        late.event_time = NOW + 100;
+        // [NOW+10, NOW+50] — the edge drawer sits exactly on the upper
+        // bound and must be INSIDE (inclusive window semantics, unlike
+        // the strict created* pair).
+        let frame = make_frame(vec![Filter::All(vec![
+            Filter::EventAfter(NOW + 10),
+            Filter::EventBefore(NOW + 50),
+        ])]);
+        let result = BitmapEvaluator::evaluate(
+            &frame, &[early, edge, late], store.as_ref(), &BTreeMap::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "edge");
     }
 
     #[test]

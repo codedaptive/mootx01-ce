@@ -1,0 +1,19 @@
+{
+  "description": "Morning session with an empty estate (no active drawers). The session has empty sections, actions, and duplicate groups. sourceEstateState reflects the SHA-256 of an empty string.",
+  "drawers": [],
+  "expectedSession": {
+    "actions": [],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [],
+    "generatedAt": "2026-08-23T09:00:00.000Z",
+    "id": "ce11cbd5-eced-5338-abc5-e4c3cf7a9e59",
+    "kind": "morning",
+    "sections": [],
+    "sourceEstateState": "sha256:e3b0c44298fc1c149afbf4c8996fb924:0"
+  },
+  "kind": "morning",
+  "now": "2026-08-23T09:00:00.000Z",
+  "vectorID": "empty-estate"
+}

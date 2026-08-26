@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // DatasetTools.swift
 // AriaMcpKit
 //

@@ -70,7 +70,7 @@ public extension Estate {
     ///   requirement is invariant I-5.
     /// - Returns: the stored `Drawer` with its generated id and all
     ///   bitmap fields populated.
-    func capture(_ frame: CaptureFrame) async throws -> Drawer {
+    public func capture(_ frame: CaptureFrame) async throws -> Drawer {
         guard !frame.content.isEmpty else {
             throw LocusKitError.invalidContent("content must not be empty")
         }
@@ -365,12 +365,18 @@ public extension Estate {
                 shift: 30, width: 6
             )
 
+            // Per-record capture timestamp: when frame.captureDate is set
+            // (schema v1.2 import field), that instant is used as filedAt and
+            // as the HLC physical-time seed for this drawer. When absent, the
+            // batch wall-clock `now` is used — byte-identical to all existing
+            // capture paths where no captureDate is supplied.
+            let drawerFiledAt = frame.captureDate ?? now
             let drawer = Drawer(
                 content: frame.content,
                 parentNodeId: triple.roomNodeId.uuidString,
                 addedBy: frame.addedBy,
-                filedAt: now,
-                eventTime: frame.eventTime ?? now,
+                filedAt: drawerFiledAt,
+                eventTime: frame.eventTime ?? drawerFiledAt,
                 embeddingModelID: frame.embeddingModelID,
                 provenance: provenanceBitmap,
                 adjectiveBitmap: adjBitmap,
@@ -381,9 +387,11 @@ public extension Estate {
                 wikidataQID: frame.latticeAnchor.wikidataQID,
                 wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
                 // Subject trio at birth — identical translation to capture().
+                // subjectAt uses drawerFiledAt so the subject timestamp
+                // is consistent with the drawer's ingest clock.
                 subject: frame.subject,
                 subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
-                subjectAt: frame.subject == nil ? nil : now
+                subjectAt: frame.subject == nil ? nil : drawerFiledAt
             )
             prepared.append(PreparedItem(drawer: drawer, wing: triple.wing, room: triple.room))
         }
@@ -2221,6 +2229,102 @@ public extension Estate {
     /// tunnel. Delegates to DrawerStore.updateTunnelAdjBitmap. No audit event.
     public func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
         try await store.updateTunnelAdjBitmap(id: tunnelId, adjBitmap: adjBitmap)
+    }
+
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// onEncoded hook; delegates to `DrawerStore.appendEncodeCompleteMarker`,
+    /// which seals an informational audit event (verb `encodeComplete`,
+    /// actor `encode_worker`, `reason: "session=<id> rows=<n>"`) with no
+    /// bitmap change. Mirrors Rust `Estate::append_encode_complete_marker`.
+    public func appendEncodeCompleteMarker(
+        firstDrawerID: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendEncodeCompleteMarker(
+            drawerId: firstDrawerID,
+            rowCount: rowCount,
+            unitSessionID: unitSessionID,
+            at: completedAt
+        )
+    }
+
+    /// All audit events for one row, HLC-ascending. Public pass-through to
+    /// `DrawerStore.auditEventsForRow` so audit consumers (the A2/A3 marker
+    /// readers, the C3 timing derivation) read through the Estate seam
+    /// rather than reaching into the store.
+    public func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+        try await store.auditEventsForRow(rowID)
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (nil =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Rust `Estate::audit_events`.
+    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await store.auditEvents(after: after, limit: limit)
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Rust `Estate::append_reindex_complete_marker`.
+    public func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendReindexCompleteMarker(
+            rowCount: rowCount, unitSessionID: unitSessionID, at: completedAt)
+    }
+
+    /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13).
+    /// A cycle emits `.start` when it begins and `.end` when it completes,
+    /// both with the same session id, so CYCLE-dreamt time is attributable
+    /// from the audit log alone. Mirrors Rust
+    /// `Estate::append_dream_cycle_marker`.
+    public func appendDreamCycleMarker(
+        phase: DrawerStore.DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try await store.appendDreamCycleMarker(
+            phase: phase,
+            unitSessionID: unitSessionID,
+            at: markedAt
+        )
+    }
+
+    // MARK: - Archive (community review duplicate resolution — F4)
+
+    /// Archive a drawer by running the full expunge path (tombstones the row,
+    /// zeroes the content blob, records an erasure ledger entry, seals the
+    /// audit event). This is the estate effect that backs the community review
+    /// "archive the older duplicate" resolution choices.
+    ///
+    /// Semantics:
+    ///   - The drawer becomes invisible to any consumer that filters on
+    ///     `tombstonedAt == nil` (review sessions, recall, LAN eligibility).
+    ///   - The row is retained in the database with tombstonedAt stamped, so
+    ///     the erasure ledger and audit trail remain intact.
+    ///   - Content is zeroed to prevent retention of archived duplicates.
+    ///
+    /// Throws `LocusKitError.drawerNotFound` if the id does not resolve, or
+    /// `LocusKitError.invalidContent` if the gate refuses the transition
+    /// (e.g. the drawer is already accepted / S-3 protected).
+    ///
+    /// The `DrawerStore.ExpungeOutcome.refusedSiblingIDs` field names any
+    /// lineage siblings the gate refused; the caller receives the full outcome
+    /// so it can propagate partial refusals accurately rather than treating
+    /// a partial expunge as a complete success (SPEC B-8b, MXE-FA).
+    public func archiveDrawer(
+        id: String,
+        reason: String,
+        now: Date
+    ) async throws -> DrawerStore.ExpungeOutcome {
+        // Delegate to the internal expunge path: confirmation is always true
+        // because the community review coordinator is the decision authority —
+        // the caller has already confirmed via the choiceID it submitted.
+        try await expunge(rowID: id, reason: reason, confirmation: true, now: now)
     }
 
 }

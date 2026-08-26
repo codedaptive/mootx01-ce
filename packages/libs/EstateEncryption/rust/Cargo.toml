@@ -1,0 +1,18 @@
+[package]
+name = "estate-encryption"
+version = "0.1.0"
+edition = "2021"
+description = "Plaintext to SQLCipher estate conversion. Rust twin of the Swift EstateEncryption library; same names, same types, same failure semantics."
+
+[features]
+# The file-based install key is BENCHMARK HARNESS ONLY and is compiled out of
+# every production build. It mirrors the Swift port's MOOTX01_HARNESS_KEYFILE
+# compilation condition; no shipping target defines either.
+harness-keyfile = []
+
+[dependencies]
+# Same rusqlite configuration as PersistenceKit, which re-exports this crate.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }
+
+[dev-dependencies]
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl", "limits"] }

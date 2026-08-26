@@ -523,6 +523,40 @@ public actor Estate {
         try await store.countMissingSubject(pipelineVersion: pipelineVersion)
     }
 
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// Set or clear the `isAnomalous` flag (bit 26) on one drawer.
+    ///
+    /// Pass-through over `DrawerStore.setAnomalousFlag`. This is the
+    /// seam GeniusLocusKit's anomaly-flag sweep (§11.18) writes through
+    /// after computing per-room cohesion z-scores via SubstrateML.
+    ///
+    /// A derived-signal write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched, and no content digest bump.
+    /// The `now` parameter is accepted for deterministic call-site
+    /// discipline but is not used by the write itself (bit 26 carries no
+    /// timestamp). `rebuildAll` at estate reopen recomputes
+    /// `operationalAND` from scratch; the anomaly sweep owns bit 26 and
+    /// no fingerprint-store pre-computation is required for the recall
+    /// filter to work (filter is applied per-hit after hydration).
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose flag should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    ///   - now: Caller-supplied instant (deterministic clock discipline).
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    @discardableResult
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool,
+        now: Date
+    ) async throws -> Int {
+        // `now` is accepted for call-site determinism but not used by
+        // the write itself — the anomalous bit carries no timestamp.
+        _ = now
+        return try await store.setAnomalousFlag(drawerId: drawerId, anomalous: anomalous)
+    }
+
     /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
     /// lane's `pending`. See `DrawerStore.countSubjectDebt`.
     public func countSubjectDebt() async throws -> Int {
@@ -647,6 +681,18 @@ public actor Estate {
     /// Delegates to `store.drawersIn(wing:room:)`.
     public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
         try await store.drawersIn(wing: wing, room: room)
+    }
+
+    /// Enumerate rooms, optionally restricted to one wing.
+    ///
+    /// When `wing` is nil, returns every non-tombstoned room across all wings,
+    /// sorted by `"wing\0room"`. When `wing` is non-nil, returns only rooms in
+    /// that wing. Delegates to `store.listRooms(in:)`.
+    ///
+    /// Used by the community-daemon capture endpoint to derive the set of valid
+    /// `CaptureDestination` values from the current canonical estate state.
+    public func listRooms(in wing: String? = nil) async throws -> [RoomSummary] {
+        try await store.listRooms(in: wing)
     }
 
     /// Batch by-id drawer load. Returns the drawers matching `ids` in
@@ -861,6 +907,23 @@ public actor Estate {
         try await store.allActiveTunnels()
     }
 
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` equals `drawerId`.
+    ///
+    /// Pushes source-drawer equality, tombstone guard, and lifecycle/retirement
+    /// bitmap predicates into SQL so that SQLite evaluates them before any row
+    /// is allocated in Swift. Delegates to `DrawerStore.activeTunnelsFrom`.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsFrom(drawerId: drawerId)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` equals `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming direction.
+    /// Delegates to `DrawerStore.activeTunnelsTo`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsTo(drawerId: drawerId)
+    }
+
     /// Insert a tunnel directly into the estate store.
     ///
     /// Delegates to `DrawerStore.addTunnel`. Conflicting IDs surface as
@@ -1005,6 +1068,13 @@ public actor Estate {
     /// Peer of the Rust `Estate::all_kg_facts`.
     public func allKGFacts() async throws -> [KGFact] {
         try await store.allKGFacts()
+    }
+
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality predicates
+    /// pushed into SQL. When both parameters are nil this is equivalent to
+    /// `allKGFacts()`. Delegates to `DrawerStore.kgFacts(subjectEq:sourceDrawerIDEq:)`.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        try await store.kgFacts(subjectEq: subjectEq, sourceDrawerIDEq: sourceDrawerIDEq)
     }
 
     /// All kg-facts estate-wide regardless of lifecycle state — active AND

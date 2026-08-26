@@ -126,6 +126,16 @@ pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 /// `DrawerStore.subjectPipelineAIV1`.
 pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
 
+/// Audit verb for encode-completion markers (A2, benchmark reset
+/// 2026-08-13). Sits beside the mutation verbs but is informational —
+/// it never changes a bitmap. Twin of Swift `DrawerStore.encodeCompleteVerb`.
+pub const ENCODE_COMPLETE_VERB: &str = "encodeComplete";
+
+/// Audit actor for encode-completion markers: the background encode drain
+/// worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`. Twin of
+/// Swift `DrawerStore.encodeWorkerActor`.
+pub const ENCODE_WORKER_ACTOR: &str = "encode_worker";
+
 /// Pipeline-version tag for subjects produced by the on-device miniLLM
 /// rider (PR-10's producer; the Rust lane stays DARK until a model
 /// exists — seam compiled, gated off). Trust ladder (highest first):
@@ -704,6 +714,30 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
+    ///
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade, no
+    /// lifecycle or lineage field touched, and no content digest or revision
+    /// bump. The anomaly flag is computed by GeniusLocusKit's room-cohesion
+    /// sweep (`anomaly_flag_sweep`), not asserted by a user or belief-state
+    /// change. Implemented as a read-modify-write: read the current bitmap,
+    /// set or clear bit 26, write if changed. Returns 0 when the drawer is
+    /// not found; 1 on success; 0 if the bit was already in the requested
+    /// state (idempotent skip-write). Mirrors Swift
+    /// `DrawerStore.setAnomalousFlag(drawerId:anomalous:)`.
+    ///
+    /// - `drawer_id`: target drawer identifier.
+    /// - `anomalous`: `true` sets bit 26; `false` clears it.
+    fn set_anomalous_flag(
+        &self,
+        _drawer_id: &str,
+        _anomalous: bool,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_anomalous_flag not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Count of active drawers still awaiting distillation — the §7.1
     /// eligibility predicate as an aggregate (not tombstoned, non-empty
     /// content, `distilled` NULL or stale pipeline version). The
@@ -742,6 +776,50 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "set_subject_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append an encode-completion audit marker: one informational event per
+    /// encode drain unit, anchored on the unit's first drawer, carrying
+    /// `session=<id> rows=<n>` in the reason column (A2). Mirrors Swift
+    /// `DrawerStore.appendEncodeCompleteMarker`. Absent row = silent no-op.
+    fn append_encode_complete_marker(
+        &self,
+        _drawer_id: &str,
+        _row_count: usize,
+        _unit_session_id: &str,
+        _completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_encode_complete_marker not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append a reindex-completion marker (C3): estate-anchored, verb
+    /// `reindexComplete`, the CYCLE tier-3 boundary. Mirrors Swift
+    /// `DrawerStore.appendReindexCompleteMarker`.
+    fn append_reindex_complete_marker(
+        &self,
+        _row_count: usize,
+        _unit_session_id: &str,
+        _completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_reindex_complete_marker not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append a dream-cycle bracket marker (A3): estate-anchored
+    /// informational event, verb `dreamStart`/`dreamEnd`, reason
+    /// `session=<id>`. Mirrors Swift `DrawerStore.appendDreamCycleMarker`.
+    fn append_dream_cycle_marker(
+        &self,
+        _verb: &str,
+        _unit_session_id: &str,
+        _marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_dream_cycle_marker not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -1672,6 +1750,20 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Same fail-loud default rationale as
+    /// `audit_events_for_row`. Mirrors Swift `DrawerStore.auditEvents`.
+    fn audit_events(
+        &self,
+        _after: Option<substrate_types::hlc::HLC>,
+        _limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "audit_events not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Tombstoned drawers that have NO sealed "tombstone" or "expungeOrphan"
     /// audit event — the integrity-sweep input set.
     ///
@@ -2256,6 +2348,34 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             reason,
         )
     }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_missing_subject(pipeline_version)
     }
@@ -2454,6 +2574,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         row_id: &str,
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         self.as_ref().audit_events_for_row(row_id)
+    }
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.as_ref().audit_events(after, limit)
     }
     fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.as_ref().tombstoned_rows_without_expunge_audit()

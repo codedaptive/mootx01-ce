@@ -1,0 +1,102 @@
+{
+  "family": "capture",
+  "cases": [
+    {
+      "id": "capture-daemon-choices-private-default",
+      "covers": ["success", "privacy-exclusion"],
+      "method": "moot_community_capture_choices",
+      "arguments": {},
+      "result": {
+        "destinations": [
+          {"id": "personal/capture", "title": "Personal capture", "detail": "Private inbox"},
+          {"id": "work/inbox", "title": "Work inbox", "detail": "Work review queue"}
+        ],
+        "sensitivities": ["normal", "elevated", "restricted", "secret"],
+        "defaultPolicy": {
+          "destinationID": "personal/capture",
+          "sensitivity": "restricted",
+          "exportEligible": false,
+          "lanEligible": false
+        }
+      }
+    },
+    {
+      "id": "capture-applied-with-effective-policy",
+      "covers": ["success"],
+      "method": "moot_community_capture",
+      "arguments": {
+        "requestID": "30000000-0000-0000-0000-000000000001",
+        "subject": "Meeting note",
+        "content": "Follow up on the Community release.",
+        "destinationID": "work/inbox",
+        "sensitivity": "elevated",
+        "exportEligible": true,
+        "lanEligible": false
+      },
+      "result": {
+        "outcome": "applied",
+        "recordID": "30000000-0000-0000-0000-000000000002",
+        "effectivePolicy": {
+          "destination": {"id": "work/inbox", "title": "Work inbox", "detail": "Work review queue"},
+          "sensitivity": "elevated",
+          "exportEligible": true,
+          "lanEligible": false
+        }
+      }
+    },
+    {
+      "id": "capture-exact-retry-original-receipt",
+      "covers": ["retry", "success"],
+      "method": "moot_community_capture",
+      "arguments": {
+        "requestID": "30000000-0000-0000-0000-000000000001",
+        "subject": "Meeting note",
+        "content": "Follow up on the Community release.",
+        "destinationID": "work/inbox",
+        "sensitivity": "elevated",
+        "exportEligible": true,
+        "lanEligible": false
+      },
+      "result": {
+        "outcome": "applied",
+        "recordID": "30000000-0000-0000-0000-000000000002",
+        "effectivePolicy": {
+          "destination": {"id": "work/inbox", "title": "Work inbox", "detail": "Work review queue"},
+          "sensitivity": "elevated",
+          "exportEligible": true,
+          "lanEligible": false
+        }
+      }
+    },
+    {
+      "id": "capture-stale-destination-refused",
+      "covers": ["refusal", "stale-state"],
+      "method": "moot_community_capture",
+      "arguments": {
+        "requestID": "30000000-0000-0000-0000-000000000003",
+        "subject": "Stale destination",
+        "content": "Keep this draft for correction.",
+        "destinationID": "removed/inbox",
+        "sensitivity": "normal",
+        "exportEligible": false,
+        "lanEligible": false
+      },
+      "result": {"outcome": "refused", "field": "destination", "reason": "destination-stale"}
+    },
+    {
+      "id": "capture-lan-privacy-escalation-refused",
+      "covers": ["refusal", "privacy-exclusion"],
+      "method": "moot_community_capture",
+      "arguments": {
+        "requestID": "30000000-0000-0000-0000-000000000004",
+        "subject": "Secret",
+        "content": "Never leave the machine.",
+        "destinationID": "personal/capture",
+        "sensitivity": "secret",
+        "exportEligible": false,
+        "lanEligible": true
+      },
+      "result": {"outcome": "refused", "field": "lan-eligibility", "reason": "privacy-escalation"}
+    }
+  ]
+}

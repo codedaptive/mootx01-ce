@@ -239,15 +239,18 @@ fi
 # daemon and management console keep executing the OLD image until they are
 # restarted — an upgrade otherwise looks like it "didn't take" (stale
 # dashboard, stale daemon) until reboot. `kickstart -k` kills and restarts a
-# job only if it is loaded, so on a fresh install (nothing loaded yet) both
-# calls are silent no-ops. Daemon first, console second, matching
-# LaunchAgent.restart() so the console reconnects to the fresh daemon.
-# Labels mirror MootPaths.daemonLabel / MootPaths.launchAgentLabel in
-# apps/mootx01/Sources/MootInstallerCore/Paths.swift — keep in sync.
+# job only if it is loaded, so on a fresh install (nothing loaded yet) these
+# calls are silent no-ops. Both daemon registrations must be restarted: the
+# bundle provider is the Community 1.1 production service, while the legacy
+# raw-serve registration remains supported during migration. Daemons first,
+# console second, so the console reconnects to the fresh service.
+# Labels mirror DaemonBundle.launchAgentLabel / MootPaths.daemonLabel /
+# MootPaths.launchAgentLabel in apps/mootx01/Sources/MootInstallerCore/Paths.swift.
 # Best-effort: never fails the install.
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
     if [ -n "$REAL_UID" ]; then
+        launchctl kickstart -k "gui/$REAL_UID/com.codedaptive.mootx01.daemon" 2>/dev/null
         launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon" 2>/dev/null
         launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"    2>/dev/null
     fi

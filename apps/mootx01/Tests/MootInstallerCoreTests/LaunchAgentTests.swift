@@ -176,3 +176,232 @@ struct LaunchAgentTests {
         return base
     }
 }
+
+// MARK: - MACD-2c2 — daemon bundle installer parity (BRR §3.7-3.12)
+//
+// The signed app-like daemon bundle contract: one Swift constant surface
+// (DaemonBundle) that the LaunchAgent plist, the pkg payload, the Makefile,
+// build-pkg.sh, and release.yml all spell identically — verified here so
+// generated and manual sources cannot diverge (KONG-4). Status honesty
+// (P-c2-10): registration, PID, or an answering port is NEVER reported as a
+// running/ready server.
+
+@Suite("Daemon bundle constants and LaunchAgent contract (MACD-2c2)")
+struct DaemonBundleContractTests {
+
+    @Test("the constant surface spells the bundle artifact exactly once")
+    func constantSurface() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        #expect(DaemonBundle.bundleName == "Mootx01DaemonProvider.app")
+        #expect(DaemonBundle.executableName == "Mootx01DaemonProvider")
+        #expect(DaemonBundle.launchAgentLabel == "com.codedaptive.mootx01.daemon")
+        #expect(DaemonBundle.residentModeArgument == "resident")
+        #expect(
+            DaemonBundle.installedBundleURL(homeDirectory: home).path ==
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app"
+        )
+        #expect(
+            DaemonBundle.bundleExecutableURL(homeDirectory: home).path ==
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider"
+        )
+        #expect(
+            DaemonBundle.launchAgentPlistURL(homeDirectory: home).path ==
+            "/Users/test/Library/LaunchAgents/com.codedaptive.mootx01.daemon.plist"
+        )
+        // The new label never collides with the legacy raw-serve label — the
+        // legacy artifact is retained until authenticated readiness.
+        #expect(DaemonBundle.launchAgentLabel != MootPaths.daemonLabel)
+    }
+
+    @Test("ProgramArguments point INSIDE the bundle Contents/MacOS, never at a raw binary")
+    func programArgumentsInsideBundle() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let arguments = DaemonBundle.programArguments(homeDirectory: home)
+        #expect(arguments == [
+            "/Users/test/.mootx01/bin/Mootx01DaemonProvider.app/Contents/MacOS/Mootx01DaemonProvider",
+            "resident",
+        ])
+        #expect(arguments[0].contains("/Contents/MacOS/"))
+        // The forbidden raw form: a bare CLI binary with "serve".
+        #expect(!arguments.contains("serve"))
+    }
+
+    @Test("the bundle plist is the DISABLED-install variant: no RunAtLoad, no KeepAlive")
+    func disabledInstallVariant() throws {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let plist = LaunchAgent.makeDaemonBundlePlist(homeDirectory: home)
+        let object = try PropertyListSerialization.propertyList(
+            from: Data(plist.utf8), format: nil
+        )
+        let dict = try #require(object as? [String: Any])
+        #expect(dict["Label"] as? String == DaemonBundle.launchAgentLabel)
+        #expect(dict["RunAtLoad"] as? Bool == false)
+        #expect(dict["KeepAlive"] as? Bool == false)
+        let arguments = try #require(dict["ProgramArguments"] as? [String])
+        #expect(arguments == DaemonBundle.programArguments(homeDirectory: home))
+    }
+
+    @Test("installDaemonBundleDisabled writes the plist, verifies it by readback, and never bootstraps")
+    func disabledInstallWritesAndVerifies() throws {
+        let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("bundle-test-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: home) }
+        let status = LaunchAgent.installDaemonBundleDisabled(homeDirectory: home)
+        guard case .installedDisabled(let plistPath) = status else {
+            Issue.record("expected installedDisabled, got \(status)")
+            return
+        }
+        #expect(plistPath == DaemonBundle.launchAgentPlistURL(homeDirectory: home).path)
+        // Readback validation (P-c2-10): the on-disk bytes ARE the generator's.
+        let onDisk = try String(contentsOfFile: plistPath, encoding: .utf8)
+        #expect(onDisk == LaunchAgent.makeDaemonBundlePlist(homeDirectory: home))
+    }
+
+    @Test("a corrupted post-write readback is reported, not ignored")
+    func readbackMismatchReported() throws {
+        let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("bundle-test-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: home) }
+        // Pre-create the plist path as a DIRECTORY so the write fails.
+        let plistURL = DaemonBundle.launchAgentPlistURL(homeDirectory: home)
+        try fm.createDirectory(at: plistURL, withIntermediateDirectories: true)
+        let status = LaunchAgent.installDaemonBundleDisabled(homeDirectory: home)
+        guard case .launchctlFailed = status else {
+            Issue.record("expected a reported failure, got \(status)")
+            return
+        }
+    }
+}
+
+@Suite("Honest status vocabulary (MACD-2c2, P-c2-10)")
+struct HonestStatusTests {
+
+    @Test("an answering port alone is an unverified holder, never a running server")
+    func portAloneNeverRunning() {
+        let line = LaunchAgent.honestServerStatus(
+            registration: .none, port: .answering, providerReportedState: nil
+        )
+        #expect(!line.lowercased().contains("running"))
+        #expect(line.contains("unverified"))
+    }
+
+    @Test("registration alone is registered-not-started, never running")
+    func registrationAloneNeverRunning() {
+        let line = LaunchAgent.honestServerStatus(
+            registration: .registered, port: .unbound, providerReportedState: nil
+        )
+        #expect(!line.lowercased().contains("running"))
+        #expect(line.contains("registered"))
+    }
+
+    @Test("registration plus an answering port is still not readiness")
+    func registrationPlusPortNeverRunning() {
+        let line = LaunchAgent.honestServerStatus(
+            registration: .registered, port: .answering, providerReportedState: nil
+        )
+        #expect(!line.lowercased().contains("running"))
+    }
+
+    @Test("only the provider's OWN authenticated report carries its state, verbatim")
+    func providerReportVerbatim() {
+        let line = LaunchAgent.honestServerStatus(
+            registration: .registered, port: .answering, providerReportedState: "ready"
+        )
+        #expect(line.contains("ready"))
+        // The provider's spelling is passed through, not re-derived — the
+        // status surface owns no second copy of the arbiter vocabulary.
+        let conflicted = LaunchAgent.honestServerStatus(
+            registration: .none, port: .unbound, providerReportedState: "conflicted"
+        )
+        #expect(conflicted.contains("conflicted"))
+    }
+
+    @Test("nothing observed reports not installed")
+    func nothingObserved() {
+        let line = LaunchAgent.honestServerStatus(
+            registration: .none, port: .unbound, providerReportedState: nil
+        )
+        #expect(line.contains("not installed"))
+    }
+}
+
+@Suite("Uninstall preservation contract (MACD-2c2)")
+struct UninstallPreservationTests {
+
+    @Test("owned artifacts are only registrations and placed binaries — never estate, receipts, or backups")
+    func ownedArtifactsNeverTouchEstate() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let owned = DaemonBundle.ownedArtifactPaths(homeDirectory: home)
+        #expect(!owned.isEmpty)
+        for path in owned {
+            #expect(
+                path.hasPrefix("/Users/test/Library/LaunchAgents/")
+                    || path.hasPrefix("/Users/test/.mootx01/")
+                    || path.hasPrefix("/Users/test/.local/bin/"),
+                "owned artifact escapes the owned roots: \(path)"
+            )
+            #expect(!path.contains("Application Support"))
+            #expect(!path.contains("estate.sqlite"))
+            #expect(!path.contains("mootx01.sqlite"))
+            #expect(!path.contains("receipt"))
+            #expect(!path.contains("backup"))
+        }
+        // The bundle and both plists are owned.
+        #expect(owned.contains(DaemonBundle.installedBundleURL(homeDirectory: home).path))
+        #expect(owned.contains(DaemonBundle.launchAgentPlistURL(homeDirectory: home).path))
+    }
+}
+
+@Suite("Distribution parity — one constant surface, three spellings (MACD-2c2)")
+struct DistributionParityTests {
+
+    /// Repo root, located from this file's path:
+    /// apps/mootx01/Tests/MootInstallerCoreTests/LaunchAgentTests.swift.
+    private var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // MootInstallerCoreTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // mootx01
+            .deletingLastPathComponent()  // apps
+            .deletingLastPathComponent()  // repo root
+    }
+
+    private func contents(_ relativePath: String) throws -> String {
+        try String(
+            contentsOf: repoRoot.appendingPathComponent(relativePath), encoding: .utf8
+        )
+    }
+
+    @Test("build-pkg.sh stages the daemon bundle under the constant's name")
+    func buildPkgParity() throws {
+        let script = try contents("distribution/macos/build-pkg.sh")
+        #expect(script.contains(DaemonBundle.bundleName))
+        #expect(script.contains(DaemonBundle.executableName))
+    }
+
+    @Test("pkg upgrade restarts both Community provider and legacy resident services")
+    func postinstallRestartParity() throws {
+        let script = try contents("distribution/macos/scripts/postinstall")
+        #expect(script.contains("gui/$REAL_UID/\(DaemonBundle.launchAgentLabel)"))
+        #expect(script.contains("gui/$REAL_UID/\(MootPaths.daemonLabel)"))
+        #expect(script.contains("gui/$REAL_UID/\(MootPaths.launchAgentLabel)"))
+    }
+
+    @Test("the Makefile pkg recipe builds and passes the daemon shell artifact")
+    func makefileParity() throws {
+        let makefile = try contents("Makefile")
+        #expect(makefile.contains("mootx01-daemon"))
+        #expect(makefile.contains(DaemonBundle.bundleName))
+    }
+
+    @Test("release.yml builds and stages the same artifact spellings")
+    func releaseParity() throws {
+        let workflow = try contents(".github/workflows/release.yml")
+        #expect(workflow.contains("mootx01-daemon"))
+        #expect(workflow.contains(DaemonBundle.bundleName))
+    }
+}

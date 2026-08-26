@@ -94,4 +94,27 @@ struct SetupViewModelTests {
     func emptyClientListConvergesNothing() {
         #expect(SetupViewModel.convergenceTargetIDs(for: []).isEmpty)
     }
+
+    @Test("automatic convergence updates clients without reactivating package-owned services")
+    func automaticConvergenceUsesClientsOnlyInstall() {
+        #expect(SetupViewModel.installArguments(
+            ids: "claude-code,codex",
+            mode: "plugin",
+            vaultOff: true,
+            clientsOnly: true
+        ) == [
+            "install", "--target", "claude-code,codex", "--mode", "plugin", "--yes",
+            "--vault-off", "--clients-only", "--no-place",
+        ])
+    }
+
+    @Test("interactive setup retains the complete install ceremony")
+    func interactiveInstallDoesNotUseClientsOnlyScope() {
+        let arguments = SetupViewModel.installArguments(
+            ids: "cursor",
+            mode: "skills"
+        )
+        #expect(!arguments.contains("--clients-only"))
+        #expect(!arguments.contains("--no-place"))
+    }
 }

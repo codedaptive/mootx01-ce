@@ -1,0 +1,39 @@
+[
+  {
+    "_comment": "No sync performed yet — both checkpoint fields absent",
+    "state": "paused"
+  },
+  {
+    "_comment": "First sync completed — both fields present",
+    "state": "idle",
+    "checkpointAt": "2026-08-22T09:00:00Z",
+    "recordCount": 0
+  },
+  {
+    "_comment": "Sync with one record",
+    "state": "idle",
+    "checkpointAt": "2026-08-22T10:00:00Z",
+    "recordCount": 1
+  },
+  {
+    "_comment": "Idle with large record count",
+    "state": "idle",
+    "checkpointAt": "2026-08-23T08:00:00Z",
+    "recordCount": 1500
+  },
+  {
+    "_comment": "Waiting with checkpoint from last sync",
+    "state": "waiting",
+    "until": "2026-08-23T08:05:00Z",
+    "checkpointAt": "2026-08-23T08:00:00Z",
+    "recordCount": 1500
+  },
+  {
+    "_comment": "Interrupted but checkpoint preserved from last successful sync",
+    "state": "interrupted",
+    "reason": "vault-access-revoked",
+    "retryable": true,
+    "checkpointAt": "2026-08-23T07:55:00Z",
+    "recordCount": 1495
+  }
+]

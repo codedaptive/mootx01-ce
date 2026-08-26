@@ -288,17 +288,21 @@ release:
 # and INSTALLER_IDENTITY are exported (build-pkg.sh warns and proceeds —
 # fine for local layout testing, not distributable). Version defaults to
 # the newest CHANGELOG.md entry; override with make pkg PKG_VERSION=X.Y.Z.
+# The release package carries `Mootx01DaemonProvider.app` alongside the CLI and
+# setup assistant; build-pkg.sh refuses a signed release without it.
 PKG_VERSION ?= $(shell sed -n 's/^\#\# v\([^ ]*\) .*/\1/p' CHANGELOG.md | head -1)
 pkg:
 	@mkdir -p "$(DIST)"
 	swift build -c release --package-path apps/mootx01 --product mootx01
+	swift build -c release --package-path apps/mootx01 --product mootx01-daemon
 	swift build -c release --package-path apps/moot-mgr --product moot-mgr
 	swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup
 	@arch=$$(uname -m); \
 	 distribution/macos/build-pkg.sh "$(PKG_VERSION)" "$$arch" \
 	   apps/mootx01/.build/release/mootx01 \
 	   apps/moot-mgr/.build/release/moot-mgr \
-	   apps/Mootx01-Setup/.build/release/Mootx01Setup && \
+	   apps/Mootx01-Setup/.build/release/Mootx01Setup \
+	   apps/mootx01/.build/release/mootx01-daemon && \
 	 mv "mootx01-$(PKG_VERSION)-macos-$$arch.pkg" "$(DIST)/" && \
 	 echo "✓ .pkg written to $(DIST)/mootx01-$(PKG_VERSION)-macos-$$arch.pkg"
 

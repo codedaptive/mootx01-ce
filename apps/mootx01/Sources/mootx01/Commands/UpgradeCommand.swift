@@ -241,6 +241,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 await runKGFactIdentityBackfill(home: home)
                 await runSharedContentReclaimIfPending(home: home)
                 updatePluginManifestIfNeeded(home: home)
+                convergeDaemonBundle(home: home)
                 restartAgents(home: home)
                 offerEstateEncryptionIfNeeded(home: home)
                 return
@@ -709,7 +710,43 @@ struct UpgradeCommand: AsyncParsableCommand {
         removeRedundantCodexDirectEntry(home: home)
         await runKGFactIdentityBackfill(home: home)
         await runSharedContentReclaimIfPending(home: home)
+        convergeDaemonBundle(home: home)
         restartAgents(home: home)
+    }
+
+    /// Converge the signed Community daemon provider on upgrade. The bundle
+    /// supersedes the legacy raw-serve job; booting that job out first prevents
+    /// concurrent writers during takeover.
+    private func convergeDaemonBundle(home: URL) {
+        #if os(macOS)
+        let bundleExecutable = DaemonBundle.bundleExecutableURL(homeDirectory: home)
+        guard FileManager.default.isExecutableFile(atPath: bundleExecutable.path) else {
+            return
+        }
+        print("\nConverging the daemon provider bundle\u{2026}")
+        LaunchAgent.uninstallDaemon(homeDirectory: home)
+        switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
+        case let .installed(plistPath, endpointURL):
+            print("  \u{2713} Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    MCP endpoint: \(endpointURL)")
+            print("    LaunchAgent: \(plistPath)")
+        case let .launchctlFailed(message):
+            print("  \u{2717} Could not start the daemon provider bundle: \(message)")
+            return
+        case .binaryNotFound:
+            print("  \u{2717} Daemon provider bundle executable is missing.")
+            return
+        case .installedDisabled:
+            return
+        }
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  \u{24D8} Census unavailable (provider exit \(census.code)).")
+        }
+        #endif
     }
 
     /// Re-execute the freshly installed binary to run `runConvergence` in the NEW
@@ -865,6 +902,8 @@ struct UpgradeCommand: AsyncParsableCommand {
         case .installed(_, let dashboardURL):
             print("  \u{2713} Daemon and management console restarted.")
             print("  \u{2713} Dashboard: \(dashboardURL)")
+        case .installedDisabled:
+            print("  \u{24D8} A disabled legacy bundle registration was observed; run `mootx01 install` to converge it.")
         case let .launchctlFailed(msg):
             print("  \u{2717} launchctl error: \(msg)")
             print("    Restart manually: launchctl kickstart -k gui/$(id -u)/com.mootx01.daemon")

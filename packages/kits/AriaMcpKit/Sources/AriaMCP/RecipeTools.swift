@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // RecipeTools.swift
 //
 // The CognitionKit behaviour-recipe surface on ARIA_MCP. These tools sit

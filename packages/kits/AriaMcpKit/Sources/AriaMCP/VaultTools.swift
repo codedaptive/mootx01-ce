@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // VaultTools.swift
 //
 // The VaultKit control surface on ARIA_MCP — the `moot_vault_*` tool

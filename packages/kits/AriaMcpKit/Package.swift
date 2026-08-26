@@ -34,6 +34,7 @@ let package = Package(
         .iOS(.v26),
     ],
     products: [
+        .library(name: "AriaMCPWire", targets: ["AriaMCPWire"]),
         .library(name: "AriaMCP", targets: ["AriaMCP"]),
         // AriaResident: the resident-daemon composition layer (telemetry + Brain
         // pump + monitoring gate + HTTP transport), shared by both the product
@@ -121,8 +122,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "AriaMCPWire",
+            path: "Sources/AriaMCPWire"
+        ),
+        .target(
             name: "AriaMCP",
             dependencies: [
+                "AriaMCPWire",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),

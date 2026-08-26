@@ -66,7 +66,7 @@ struct ManifestTests {
         let store = try await DrawerStore(storage: TestStorage.sqlite(url))
 
         #expect(try await store.getMeta(key: "manifest_version") == "1.0")
-        #expect(try await store.getMeta(key: "schema_version") == "1.0")
+        #expect(try await store.getMeta(key: "schema_version") == "1.1")
         #expect(try await store.getMeta(key: "estate_name") == "")
         #expect(try await store.getMeta(key: "owner_identifier") == "")
         #expect(try await store.getMeta(key: "lattice_citation") == "UDC:2024+Wikidata:2024-Q3")
@@ -152,7 +152,10 @@ struct ManifestTests {
         let values = try await store.readManifest()
 
         #expect(values.manifestVersion == "1.0")
-        #expect(values.schemaVersion == "1.0")
+        // Schema 1.1 since 2026-08-17: the estate format moved (shared-content
+        // cutover, then vector generations) while this string stayed at the
+        // ratification value. manifest_version is unrelated and still 1.0.
+        #expect(values.schemaVersion == "1.1")
         #expect(UUID(uuidString: values.estateUUID) != nil)
         #expect(values.estateName == "")
         #expect(values.ownerIdentifier == "")

@@ -1,0 +1,40 @@
+[
+  {
+    "_comment": "Synchronizing: equal pending and total (all pending)",
+    "state": "synchronizing",
+    "pendingCount": 10,
+    "totalCount": 10
+  },
+  {
+    "_comment": "Synchronizing: half done",
+    "state": "synchronizing",
+    "pendingCount": 5,
+    "totalCount": 10
+  },
+  {
+    "_comment": "Synchronizing: one remaining",
+    "state": "synchronizing",
+    "pendingCount": 1,
+    "totalCount": 10
+  },
+  {
+    "_comment": "Synchronizing: zero pending of 10 (all resolved, about to become idle)",
+    "state": "synchronizing",
+    "pendingCount": 0,
+    "totalCount": 10
+  },
+  {
+    "_comment": "Synchronizing with checkpoint from prior sync run",
+    "state": "synchronizing",
+    "pendingCount": 3,
+    "totalCount": 7,
+    "checkpointAt": "2026-08-23T12:00:00Z",
+    "recordCount": 4
+  },
+  {
+    "_comment": "Synchronizing: large batch",
+    "state": "synchronizing",
+    "pendingCount": 250,
+    "totalCount": 1000
+  }
+]

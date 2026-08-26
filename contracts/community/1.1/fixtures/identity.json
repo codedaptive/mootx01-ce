@@ -1,0 +1,35 @@
+{
+  "family": "identity",
+  "cases": [
+    {
+      "id": "identity-exact-match",
+      "covers": ["success"],
+      "method": "moot_community_contract_identity",
+      "arguments": {},
+      "result": {
+        "contractID": "com.simple-machines.mootx01.community",
+        "contractVersion": "1.1.0",
+        "fixtureDigestAlgorithm": "sha256",
+        "fixtureDigest": "@fixture-bundle.sha256",
+        "daemonInstanceID": "10000000-0000-0000-0000-000000000001",
+        "estateID": "10000000-0000-0000-0000-000000000002"
+      },
+      "expectation": "accept"
+    },
+    {
+      "id": "identity-digest-mismatch",
+      "covers": ["incompatible"],
+      "method": "moot_community_contract_identity",
+      "arguments": {},
+      "result": {
+        "contractID": "com.simple-machines.mootx01.community",
+        "contractVersion": "1.1.0",
+        "fixtureDigestAlgorithm": "sha256",
+        "fixtureDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "daemonInstanceID": "10000000-0000-0000-0000-000000000001",
+        "estateID": "10000000-0000-0000-0000-000000000002"
+      },
+      "expectation": "client-refuses"
+    }
+  ]
+}

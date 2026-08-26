@@ -180,6 +180,22 @@ public enum MootPaths {
             .appendingPathComponent("mootx01-proxy", isDirectory: false)
     }
 
+    /// Absolute path of the same-directory botLink symlink (BL-1). Sits
+    /// beside the placed binary in `~/.mootx01/bin/` for the same
+    /// `Bundle.main` reasons as the proxy symlink above. Cloud agents exec
+    /// `mootx01-botLink <subcommand>` by this name; the argv0 name triggers
+    /// `ArgvDispatch` to prepend the `botlink` subcommand automatically.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin/mootx01-botLink` (capital L — must
+    ///   match `ArgvDispatch.botLinkInvocationName`). Does not touch the
+    ///   filesystem.
+    public static func botLinkSymlinkURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01-botLink", isDirectory: false)
+    }
+
     /// URL of the project-local Claude Code settings file.
     ///
     /// When `--local` is used during install, Claude Code is wired to
@@ -318,5 +334,137 @@ public enum MootPaths {
             return port
         }
         return defaultResidentPort
+    }
+}
+
+// MARK: - MACD-2c2 — the signed app-like daemon bundle (KONG-4)
+//
+// The SINGLE constant surface for the daemon-bundle artifact. Every spelling
+// of the bundle's name, executable, label, plist location, and LaunchAgent
+// ProgramArguments comes from here; the Makefile, build-pkg.sh, and
+// release.yml text artifacts are verified against these constants by a
+// parity test (LaunchAgentTests §Distribution parity), so generated and
+// manual sources cannot diverge.
+
+/// Constants and path math for the signed app-like daemon provider bundle
+/// (the packaged form of the `mootx01-daemon` thin shell over
+/// MootDaemonProvider). Pure path math — no filesystem touching.
+public enum DaemonBundle {
+
+    /// The bundle's on-disk name. The pkg payload, the Makefile recipe, and
+    /// release.yml all stage exactly this name.
+    public static let bundleName = "Mootx01DaemonProvider.app"
+
+    /// The executable inside `Contents/MacOS`.
+    public static let executableName = "Mootx01DaemonProvider"
+
+    /// The bundle identifier of the direct-install daemon provider bundle.
+    /// Distinct from the SANDBOXED nested helper
+    /// (`com.codedaptive.mootx01.macos.daemonproviderhelper` in project.yml)
+    /// — same provider module, different packaging and registration channel.
+    public static let bundleIdentifier = "com.codedaptive.mootx01.macos.daemonprovider"
+
+    /// The LaunchAgent label for the BUNDLE-form daemon registration.
+    /// Deliberately NOT `MootPaths.daemonLabel` (`com.mootx01.daemon`, the
+    /// legacy raw-serve plist): the legacy artifact is retained — plist,
+    /// label, and running job untouched — until the bundle provider proves
+    /// authenticated readiness (MACD-3), so the two registrations coexist
+    /// under the arbiter rather than replacing each other blindly.
+    public static let launchAgentLabel = "com.codedaptive.mootx01.daemon"
+
+    /// The shell mode the LaunchAgent invokes. Until MACD-3 activates
+    /// estate hosting, the mode fail-closes honestly (exit 4) and the plist
+    /// installs DISABLED — the arguments are the FINAL contract so upgrade
+    /// never has to rewrite the plist when activation lands.
+    public static let residentModeArgument = "resident"
+
+    /// The installed bundle location:
+    /// `<home>/.mootx01/bin/Mootx01DaemonProvider.app`. It lives inside the
+    /// `bin/` payload tree deliberately: the pkg postinstall relocates the
+    /// staged `bin/` directory wholesale, so the bundle rides the SAME
+    /// validated placement path as the CLI binaries — one relocation
+    /// contract, no second placement rule.
+    public static func installedBundleURL(homeDirectory: URL) -> URL {
+        MootPaths.installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent(bundleName, isDirectory: true)
+    }
+
+    /// The bundle's executable: `.../Contents/MacOS/Mootx01DaemonProvider`.
+    /// This is the path the LaunchAgent ProgramArguments carry — always
+    /// inside the bundle, never a raw binary (mission hard rule).
+    public static func bundleExecutableURL(homeDirectory: URL) -> URL {
+        installedBundleURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent(executableName, isDirectory: false)
+    }
+
+    /// The bundle-form LaunchAgent plist location.
+    public static func launchAgentPlistURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
+    }
+
+    /// The exact ProgramArguments the bundle plist carries.
+    public static func programArguments(homeDirectory: URL) -> [String] {
+        [bundleExecutableURL(homeDirectory: homeDirectory).path, residentModeArgument]
+    }
+
+    /// Run one READ-ONLY mode of the installed daemon bundle executable and
+    /// capture its single-line JSON report. Shared by `install` and `upgrade`
+    /// so the two commands cannot drift (and so the drain/wait ordering is
+    /// correct in exactly one place).
+    ///
+    /// stdout AND stderr are drained to EOF BEFORE `waitUntilExit()`: a child
+    /// that fills a pipe buffer blocks forever if the parent waits first, and
+    /// a census report on a machine with many candidates is not guaranteed to
+    /// be small.
+    ///
+    /// - Parameters:
+    ///   - mode: A read-only shell mode (`census`, `self-report`). Never a
+    ///     mode with side effects.
+    ///   - homeDirectory: The user's home directory.
+    /// - Returns: The exit code and the trimmed stdout line (nil when empty).
+    public static func runReadOnlyMode(
+        _ mode: String, homeDirectory: URL
+    ) -> (code: Int32, output: String?) {
+        let executable = bundleExecutableURL(homeDirectory: homeDirectory)
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            return (-1, nil)
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [mode]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return (-1, nil)
+        }
+        // Drain both pipes to EOF first; only then wait for the child.
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: outData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (process.terminationStatus, (text?.isEmpty ?? true) ? nil : text)
+    }
+
+    /// Every artifact the daemon-bundle installation OWNS — the only things
+    /// uninstall may remove. Estate databases, migration receipts, backups,
+    /// key material, and every census candidate are NOT here and are NEVER
+    /// touched by uninstall (mission preservation contract; explicit
+    /// Delete All Data has its own separate, estate-owned flow and even that
+    /// never touches non-owned census candidates).
+    public static func ownedArtifactPaths(homeDirectory: URL) -> [String] {
+        [
+            installedBundleURL(homeDirectory: homeDirectory).path,
+            launchAgentPlistURL(homeDirectory: homeDirectory).path,
+        ]
     }
 }

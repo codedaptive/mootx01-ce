@@ -348,6 +348,34 @@ impl DrawerStore for PostgresDrawerStore {
             reason,
         )
     }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_missing_subject(pipeline_version)
     }
@@ -369,6 +397,9 @@ impl DrawerStore for PostgresDrawerStore {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)
+    }
+    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
+        self.0.set_anomalous_flag(drawer_id, anomalous)
     }
     fn seal_expunge_audit(
         &self,
@@ -694,6 +725,13 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.count_kg_fact_rows()
     }
 
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.0.audit_events(after, limit)
+    }
     fn audit_events_for_row(
         &self,
         row_id: &str,
