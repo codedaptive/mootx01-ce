@@ -216,7 +216,7 @@ struct AuthenticatedBundledOwnerFormatTests {
 
     @Test("absent → nil (falls through to registration/port observation)")
     func absentReturnsNil() {
-        // .absent means no authenticated owner; honestServerStatus should use
+        // .absent means no authenticated owner; observedServerStatus should use
         // the registration/port observation, not a provider-reported string.
         let result = LaunchAgent.authenticatedBundledOwner(outcome: .absent)
         #expect(result == nil)
@@ -274,15 +274,15 @@ struct AuthenticatedBundledOwnerFormatTests {
         #expect(result!.contains("authentication failed") || result!.contains("unauthenticated"))
     }
 
-    @Test("honestServerStatus receives authenticatedBundledOwner result verbatim")
-    func honestServerStatusPassthrough() {
-        // Verify the two-call chain: authenticatedBundledOwner → honestServerStatus.
-        // honestServerStatus prefixes the string with "provider: "; the rest is
+    @Test("observedServerStatus receives authenticatedBundledOwner result verbatim")
+    func observedServerStatusPassthrough() {
+        // Verify the two-call chain: authenticatedBundledOwner → observedServerStatus.
+        // observedServerStatus prefixes the string with "provider: "; the rest is
         // verbatim (no second interpretation).
         let formattedState = LaunchAgent.authenticatedBundledOwner(
             outcome: .healthy(kind: .bundled, preferredKind: .bundled)
         )!
-        let statusLine = LaunchAgent.honestServerStatus(
+        let statusLine = LaunchAgent.observedServerStatus(
             registration: .registered,
             port: .answering,
             providerReportedState: formattedState
@@ -340,11 +340,11 @@ struct AppFirstInstallOrderTests {
         ]))
         let outcome = p.detect(homeDirectory: fakeHome)
         // StatusCommand passes authenticatedBundledOwner(outcome:) into
-        // honestServerStatus; verify the chain produces a non-nil state.
+        // observedServerStatus; verify the chain produces a non-nil state.
         let formattedState = LaunchAgent.authenticatedBundledOwner(outcome: outcome)
         #expect(formattedState != nil)
         // The status line must lead with "provider: " (C5 requirement).
-        let statusLine = LaunchAgent.honestServerStatus(
+        let statusLine = LaunchAgent.observedServerStatus(
             registration: .registered,
             port: .answering,
             providerReportedState: formattedState
@@ -416,8 +416,8 @@ struct AppFirstInstallOrderTests {
         }
     }
 
-    // Interrupted-handover: unauthenticated → honest conflict state, no kill.
-    @Test("interrupted handover: unauthenticated → honest conflict, no kill (C3)")
+    // Interrupted-handover: unauthenticated → reported conflict state, no kill.
+    @Test("interrupted handover: unauthenticated → reported conflict, no kill (C3)")
     func interruptedHandoverUnauthenticated() {
         let p = probe(returning: (1, nil)) // non-zero, non-64 → .unauthenticated
         let outcome = p.detect(homeDirectory: fakeHome)

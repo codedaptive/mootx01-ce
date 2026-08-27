@@ -3,13 +3,12 @@ import Foundation
 // RawMCPBackend.swift — a raw, verbatim, id-preserving stdio JSON-RPC forwarder
 // to one MCP backend.
 //
-// Carried over (our code) from the proven benchmarker ProxyServer.swift. The
-// bridge must preserve the client's exact request ids on the primary path and pass
-// arbitrary methods (initialize, tools/list, tools/call, notifications) through
-// untouched, so it needs this lower-level forwarder rather than a verb-scoped
-// client. The actor serializes calls, so a response is matched to its request by
-// ORDERING on the single transport — the bridge issues one request at a time per
-// backend.
+// The bridge must preserve the client's exact request ids on the primary path
+// and pass arbitrary methods (initialize, tools/list, tools/call, notifications)
+// through untouched, so it needs this lower-level forwarder rather than a
+// verb-scoped client. The actor serializes calls, so a response is matched to
+// its request by ORDERING on the single transport — the bridge issues one
+// request at a time per backend.
 
 /// Raw, verbatim, id-preserving stdio JSON-RPC forwarder to one MCP backend.
 actor RawMCPBackend {

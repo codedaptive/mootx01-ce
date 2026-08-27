@@ -1,128 +1,97 @@
 ---
 title: aria-mcp Interface
-version: 1.49.0
+version: 2.4.0
 status: accepted-1.1-target
-date: 2026-08-18
-description: Public API surface for aria-mcp in both the Swift and Rust ports.
+date: 2026-08-26
+description: "Public API surface for aria-mcp in both the Swift and Rust ports. 2.0.0: consolidated reorganization (adopted from the ARIA_PROPOSED pair) — full result-format grammar catalog with Samples, structured base-row-plus-extensions schemas, zero/one/many active-adornment composition and structured minter provenance. Full history: ARIA_MCP_INTERFACE_CHANGELOG.md. 2.3.0: per-operation entry template across the six-family catalog."
 spec_type: protocol
 authors: MOOTx01 maintainers
 relates_to:
-  - ARIA_MCP_SPEC.md  (the behavioral contract; §11 covers the AI-client surface)
-  - GENIUSLOCUSKIT_SPEC.md  (the estate verb surface tools dispatch to)
-purpose: |
-  Public API surface of aria-mcp — the MCP server that exposes
-  GeniusLocusKit estates over Model Context Protocol. Documents the JSON-RPC
-  transport, the JSONValue wire type, the five-tier AI-client tool surface, the
-  multi-estate tool dispatcher, the teachme guide engine, the coaching hint
-  engine, and the server loop. The interface provides an AI-client-oriented
-  tool surface, per-tool usage guides and coaching hints, a static protocol
-  block on estate_status, and the full cognition menu on moot_list_lenses.
-  The companion SPEC carries the behavioral contracts.
-
-  TRANSPORT NOTE: two transports are implemented behind the same
-  `ARIA_MCPDispatcher`.
-  **Fallback:** `StdioServer` + the newline-delimited JSON-RPC loop (PoC,
-  testing, migrations). **Primary:** `HTTPServer`
-  (`Sources/AriaMCP/HTTPServer.swift`; Rust `rust/src/http_server.rs`) — a
-  loopback Streamable-HTTP transport (POST JSON-RPC → `application/json`)
-  bound to `127.0.0.1`, selected when `MOOTX01_HTTP_PORT` is set (default
-  4242; `AriaMCPMain`/`main.rs` branch), with a per-request body cap from
-  `MOOTX01_HTTP_MAX_BODY_BYTES` (default 4 MiB). It consumes the shared
-  `LoopbackHTTP` lib (Swift) / hand-rolled `std::net` (Rust), wire-identical
-  across both. SSE server-push (`LoopbackHTTP.SSEStream`) is ready but unused
-  until there are notifications to push (autonomic governor phase). Still
-  pending: the resident autonomic governor (dream trigger) and telemetry
-  self-report, and launchd resident-mode wiring — documented in the SPEC,
-  wired in the resident executable, not in the `AriaMcpKit` JSON-RPC library.
+  - ARIA_MCP_SPEC.md (the behavioral contract)
+  - GENIUSLOCUSKIT_SPEC.md (the estate verb surface tools dispatch to)
+  - LOCUSKIT_SPEC.md (drawer, adornment-store, and lifecycle semantics)
 ---
 
 # aria-mcp Interface
 
-## § 1 — Package layout
+This document defines how clients and implementations address ARIA: transports,
+methods, tools, arguments, public types, wire shapes, endpoints, package
+locations, and conformance entry points. Behavioral meaning and invariants live
+in [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md). This 2.0.0 revision is the adopted
+consolidation of the pre-2.0.0 document (history preserved in
+[ARIA_MCP_INTERFACE_CHANGELOG.md](ARIA_MCP_INTERFACE_CHANGELOG.md)); the
+drafting record lives in the archived ARIA_PROPOSED pair (docs/archive/).
 
-**Swift:** `packages/kits/AriaMcpKit/`
+## Contents
 
-- `Sources/AriaMCP/` — the `AriaMCP` library: JSON-RPC envelope + error
-  codes (`JSONRPC.swift`), the `JSONValue` wire type (`JSONValue.swift`),
-  OSLog/stderr logging (`Logging.swift`), the server dispatcher + stdio
-  loop (`Server.swift`), the loopback HTTP transport (`HTTPServer.swift`,
-  consuming `LoopbackHTTP`), the resident autonomic governor (`BrainPump.swift`),
-  the five-tier tool projection (`ToolProjection.swift`),
-  the estate dispatcher + interface runners (`ToolDispatch.swift`),
-  per-tool usage guide strings (`TeachmeGuides.swift`),
-  coaching-hint trigger logic (`CoachingEngine.swift`),
-  CognitionKit recipe tools (`RecipeTools.swift`), reasoning-lens tools
-  (`LensTools.swift`), vault control tools (`VaultTools.swift`),
-  tabular dataset tools (`DatasetTools.swift`),
-  recall discrimination helper (`RecallDiscrimination.swift`),
-  Anthropic memory_20250818 adapter (`MemoryToolAdapter.swift`; Rust: `memory_adapter.rs`),
-  monitoring-control injection seam (`MonitoringControl.swift`).
-- `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
-  opens an estate and runs the selected transport — stdio by default, the
-  resident loopback HTTP transport when `MOOTX01_HTTP_PORT` is set.
-- `Tests/AriaMCPTests/`
-- `Package.swift` — depends on GeniusLocusKit, LocusKit, PersistenceKit,
-  NeuronKit, CognitionKit (path deps under `../../packages/`).
+1. [Interface boundary](#1-interface-boundary)
+2. [Transport and protocol](#2-transport-and-protocol)
+3. [Common tool contract](#3-common-tool-contract)
+4. [Tool surface and provenance](#4-tool-surface-and-provenance)
+5. [Recall family](#5-recall-family)
+6. [Capture family](#6-capture-family)
+7. [Lifecycle family](#7-lifecycle-family)
+8. [Lenses family](#8-lenses-family)
+9. [Maintenance family](#9-maintenance-family)
+10. [Utility family](#10-utility-family)
+11. [Shared result formats](#11-shared-result-formats)
+12. [Session interface](#12-session-interface)
+13. [Auxiliary HTTP endpoints](#13-auxiliary-http-endpoints)
+14. [Public implementation types](#14-public-implementation-types)
+15. [Package and dispatch map](#15-package-and-dispatch-map)
+16. [Errors and conformance](#16-errors-and-conformance)
+17. [Source reconciliation](#17-source-reconciliation)
+18. [Changelog](#changelog)
 
-**Rust:** `packages/kits/AriaMcpKit/rust/` — a wire-contract peer of the Swift server.
-The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
-the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
-`AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
-The Rust binary links a 74-tool surface (67 vault-off) — the Swift surface
-minus the four Swift-side packet tools (FAB5-I2) — backed by the Rust kit stack
-(genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
-Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
-`MOOTX01_MEMORY_TOOL=1`, raising the count to 75/68 — same gate as the Swift port
-(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 74/67 baseline. All five
-`moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
-(`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
-manifest owned by the ARIA layer. The fifth vault
-tool, `moot_vault_job`, exists for tool-surface parity: the Rust backend is
-synchronous, so the tool returns completed-job
-records from an in-process `VaultJobLedger` (bounded to 100 entries).
-Cargo.toml path deps: `vault-kit` (new), `sha2` (new), plus existing kit deps.
+## 1. Interface boundary
 
-**`apps/mootx01/Sources/mootx01/Commands/ProxyCommand.swift`** — the stdio→HTTP bridge for Claude Desktop. Reads newline-delimited JSON-RPC frames from stdin, POSTs each to the resident daemon over loopback HTTP, and writes the response to stdout. Pure logic (disposition decision, id extraction) lives in `MootInstallerCore/ProxyDispositionLogic.swift` so it can be exercised without importing the executable target.
+### 1.1 Audience
 
-Bridge failure-response invariant (enforced at this surface): every id-bearing frame produces exactly one outbound frame with the same id. Failure conditions:
+This reference serves:
 
-- **Transport error** (`URLSession` throws) → synthesized -32603 error echoing the request id
-- **HTTP status 0** (daemon mid-restart; `post_frame` yields 0 on unparseable status line) → synthesized error
-- **Non-2xx with empty body** (daemon crash after TCP accept) → synthesized error  
-- **Non-2xx with non-empty body** (HTML/plain-text error page) → synthesized error; body is NOT relayed
-- **Notification (no id) on any failure** → silent; servers must not reply to notifications per MCP spec
+- MCP clients discovering and calling the `moot_*` surface;
+- SDK implementers maintaining the Swift and Rust ports;
+- test authors pinning schemas and byte-exact response forms; and
+- operators connecting local clients to the resident daemon.
 
-`MootInstallerCore.proxyDisposition(statusCode:bodyEmpty:) -> ProxyDisposition` is the pure decision function.  
-`MootInstallerCore.proxyRequestID(of:) -> String?` extracts the id as a JSON literal; returns nil for notifications, `id:null`, boolean ids, and unparseable frames.
+### 1.2 Ownership
 
-Bridge input limits (security findings 012/036, pc stream): the bridge enforces two admission limits on inbound frames. Both are implemented in `ProxyCommand.run()` using primitives from `MootInstallerCore/ProxyAdmissionGate.swift`, and are byte-identical across the Swift and Rust ports:
+This Interface owns:
 
-- **Frame-size cap — 4 MB (`proxyMaxFrameBytes = 4 * 1024 * 1024`).** Frames exceeding this limit are dropped without forwarding and without a synthesized error. Logged to stderr as `mootx01 proxy: frame exceeds 4194304 byte limit, dropped`. The stdin accumulation buffer is also bounded at the same cap to prevent memory exhaustion from newline-less streams.
-- **Concurrency cap — 16 frames (`ProxyConcurrencyGate(maxConcurrent: 16)`).** At most 16 frames are forwarded simultaneously. A 17th waits in `gate.acquire()` until a running frame calls `gate.release()`; it is never dropped.
+- method, tool, argument, field, endpoint, and public-type names;
+- required/optional status, types, default representation, and legal values;
+- JSON-RPC, JSON, and text response forms;
+- package and symbol locations; and
+- conformance commands and fixtures.
 
-`MootInstallerCore.proxyMaxFrameBytes: Int` — the 4 MB frame-size cap constant.  
-`MootInstallerCore.ProxyConcurrencyGate` — the actor-based counting gate; `acquire()` suspends when all slots are occupied, `release()` hands the slot to the next waiter or decrements the count. Tested in `MootInstallerCoreTests/ProxyAdmissionTests.swift`.
+The Spec owns semantics, invariants, state transitions, release profiles, and
+behavioral failure rules.
 
-This is the external access surface above the substrate; it is not
-imported by any other package, so it is documented single-tier (its full
-public API) rather than consumed-vs-broader tiers.
+### 1.3 Surface discovery
 
-**Cloud-agent access (BL-1).** `mootx01-botLink` (also `mootx01 botlink`)
-is the explicit one-shot data path for cloud agents: `ping` / `list` /
-`call` / `rpc`, machine-JSON stdout, loopback-only HTTP with a serve-
-subprocess fallback, exit codes 0 (success) / 2 (tool `isError`) / 1
-(transport failure) / 64 (usage or non-loopback `--http`). The adapter
-policy for such agents is:
+The generated `tools/list` response is the authoritative census for a running
+build. Counts recorded in the source documents are snapshots from different
+versions and port configurations. This reference therefore organizes tools by
+stable family and provenance rather than maintaining one prose total.
 
-> If you are a cloud agent that cannot reach `127.0.0.1` on the user's
-> machine and MCP `moot_*` tools are absent, use `mootx01-botLink` on the
-> user's computer. Do not use `mootx01 query`. Do not open a remote MCP
-> URL. If `moot_*` MCP tools exist (Cursor on the Mac), use those and
-> stop.
+## 2. Transport and protocol
 
-## § 2 — Public types
+### 2.1 Server methods
 
-### Transport — JSON-RPC
+The transport-neutral dispatcher handles:
+
+| Method | Interface |
+|---|---|
+| `initialize` | Echo negotiated protocol version and advertise capabilities |
+| `ping` | Return protocol-level liveness |
+| `tools/list` | Return generated tool descriptors |
+| `tools/call` | Dispatch one named tool with one argument object |
+| notifications | No response frame |
+
+Resources, prompts, completions, sampling, elicitation, and tasks follow the
+release profiles in the Spec.
+
+### 2.2 JSON-RPC envelope
 
 ```swift
 public enum JSONRPCErrorCode {
@@ -131,7 +100,7 @@ public enum JSONRPCErrorCode {
     public static let methodNotFound: Int      // -32601
     public static let invalidParams: Int       // -32602
     public static let internalError: Int       // -32603
-    public static let toolDispatchFailure: Int // -32010 (server-defined)
+    public static let toolDispatchFailure: Int // -32010, internal marker
 }
 
 public struct JSONRPCRequest: Sendable, Equatable {
@@ -139,8 +108,7 @@ public struct JSONRPCRequest: Sendable, Equatable {
     public let id: JSONValue?
     public let method: String
     public let params: JSONValue?
-    public init(jsonrpc: String, id: JSONValue?, method: String, params: JSONValue?)
-    public var isNotification: Bool { get }           // id == nil
+    public var isNotification: Bool { get }
     public static func decode(_ value: JSONValue) -> JSONRPCRequest?
 }
 
@@ -148,8 +116,10 @@ public struct JSONRPCResponse: Sendable, Equatable {
     public let jsonrpc: String
     public let id: JSONValue
     public let payload: Payload
-    public enum Payload: Sendable, Equatable { case result(JSONValue), error(JSONRPCError) }
-    public init(id: JSONValue, payload: Payload)
+    public enum Payload: Sendable, Equatable {
+        case result(JSONValue)
+        case error(JSONRPCError)
+    }
     public static func ok(_ id: JSONValue, _ result: JSONValue) -> JSONRPCResponse
     public static func failure(_ id: JSONValue, _ error: JSONRPCError) -> JSONRPCResponse
     public var asJSONValue: JSONValue { get }
@@ -161,14 +131,12 @@ public struct JSONRPCError: Sendable, Equatable, Error {
 }
 ```
 
-### Wire value — `JSONValue`
-
-A hand-rolled JSON value (no Foundation `Codable` on the wire).
+### 2.3 JSON wire value
 
 ```swift
 public enum JSONValue: Sendable, Equatable {
-    // null / bool / integer / double / string / array / object cases
-    public static func from(_ any: Any) throws -> JSONValue        // throws JSONValueError
+    // null, bool, integer, double, string, array, object
+    public static func from(_ any: Any) throws -> JSONValue
     public static func parse(_ data: Data) throws -> JSONValue
     public func encoded() throws -> Data
     public var foundationObject: Any { get }
@@ -178,437 +146,1473 @@ public enum JSONValue: Sendable, Equatable {
     public var boolValue: Bool? { get }
     public var arrayValue: [JSONValue]? { get }
 }
-public enum JSONValueError: Error, Equatable { /* unsupported value, etc. */ }
+
+public enum JSONValueError: Error, Equatable {}
 ```
 
-### Tool projection — `ToolProjection` / `ProjectedTool` / `ToolProvenance`
+### 2.4 Stdio
 
-The lexicon-projected surface was replaced with a five-tier
-AI-client-oriented interface. `ToolProjection.tools()` assembles all
-68 tools across four provenance tiers (including the maintenance tools
-`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`, and
-`moot_palace_import`).
+Stdio uses one newline-delimited JSON-RPC frame per input and output line.
+Protocol output uses stdout; diagnostics use stderr.
+
+### 2.5 Loopback HTTP
+
+The resident transport accepts JSON-RPC POSTs on loopback. The default port is
+4242 and the default request-body cap is 4 MiB. A non-loopback Origin is
+rejected by the CSRF/DNS-rebinding guard.
+
+### 2.6 Stdio-to-HTTP proxy
+
+`mootx01 proxy` adapts stdio frames to independent loopback POSTs. The shared
+admission surface exposes:
+
+```swift
+MootInstallerCore.proxyMaxFrameBytes       // 4 * 1024 * 1024
+MootInstallerCore.proxyDisposition(statusCode:bodyEmpty:)
+MootInstallerCore.proxyRequestID(of:)
+MootInstallerCore.ProxyConcurrencyGate     // maximum 16 in flight
+```
+
+### 2.7 Cloud-agent adapter
+
+`mootx01-botLink` and `mootx01 botlink` provide the explicit one-shot path for
+agents that cannot reach the user's loopback daemon. Subcommands are `ping`,
+`list`, `call`, and `rpc`. Stdout is machine JSON. Exit codes are:
+
+| Code | Meaning |
+|---:|---|
+| 0 | success |
+| 1 | transport failure |
+| 2 | tool returned `isError` |
+| 64 | usage error or non-loopback `--http` |
+
+When native `moot_*` tools are present, an agent uses them instead of botLink.
+
+## 3. Common tool contract
+
+### 3.1 Call shape
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "moot_memory_search",
+    "arguments": {
+      "query": "example"
+    }
+  }
+}
+```
+
+### 3.2 Common arguments
+
+| Argument | Type | Default | Contract |
+|---|---|---|---|
+| `estateID` | UUID string | default estate | Direct estate routing where permitted |
+| `teachme` | boolean | `false` | Return the tool guide instead of executing |
+| `mode` | string | absent | Advisory `Mode` or `Mode=Variant` declaration |
+
+The dispatcher injects `mode` into every generated input schema. Interface
+tools expose `estateID` and `teachme` where their surface permits them.
+
+### 3.3 Optional arguments
+
+Optional primitive keys use omit-to-default. Unless a tool row says otherwise,
+present JSON `null` is invalid for values such as `estateID`, `teachme`,
+`filter`, `limit`, `scoring`, `ordering`, `sensitivity`, `exportability`,
+`kind`, `impatient`, and `agent`.
+
+### 3.4 Server-owned fields
+
+The server owns infrastructure values including storage lattice plumbing,
+embedding model identity, actor identity, and capture channel. Client schemas
+expose subject-matter fields and only those infrastructure selectors explicitly
+listed by a tool.
+
+### 3.5 Tool result shape
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "..." }
+  ],
+  "isError": false
+}
+```
+
+Recall tools that declare `outputSchema` also include `structuredContent` as
+defined in §11.3.
+
+## 4. Tool surface and provenance
+
+### 4.1 Projected tool
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
-    case interface     // 30 tools: 22 five-tier AI-client tools + moot_monitoring_status + 4 maintenance + 3 dataset
-    case federation    // 1 federated-search tool (moot_federated_search)
-    case recipe        // 12 recipe + 23 lens tools via CognitionKit/LensTools
-    case vault         // 5 vault control tools (export, import, status, reconcile, job)
+    case interface
+    case federation
+    case recipe
+    case vault
 }
+
 public struct ProjectedTool: Sendable, Equatable {
     public let name: String
     public let description: String
     public let inputSchema: JSONValue
     public let provenance: ToolProvenance
-    public let outputSchema: JSONValue?  // MXE-SS: nil for text-only tools (key omitted on the wire); the recall family declares the shared recall-results schema
+    public let outputSchema: JSONValue?
 }
+
 public enum ToolProjection {
-    public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
-    public static func tools() -> [ProjectedTool]   // vault-on: 78 tools; vault-off: 71 tools (interface+federation+recipe+lens+vault+maintenance+dataset+packet)
-    public static func memoryToolEnabled(environment: [String: String]) -> Bool  // opt-in memory_20250818 adapter (MOOTX01_MEMORY_TOOL=1); default OFF
+    public static let toolNamePrefix: String  // "moot_"
+    public static func tools() -> [ProjectedTool]
+    public static func memoryToolEnabled(environment: [String: String]) -> Bool
     public static var memoryToolEnabled: Bool
     public static func federationTool() -> ProjectedTool
-    static func recallResultsOutputSchema() -> JSONValue  // the ONE schema the recall family shares; Rust twin: tool_list.rs::recall_results_output_schema()
+    static func recallResultsOutputSchema() -> JSONValue
 }
 ```
 
-`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`, and
-`moot_recall_precise` declare `recallResultsOutputSchema()` and return
-`structuredContent` (`{"results": [{id, room, content, subject}]}`) on every
-success alongside the unchanged text block, via
-`ToolDispatcher.structuredTextResult` (Rust
-`interface_tools::structured_text_result`). Redaction parity is a SPEC
-invariant (ARIA_MCP_SPEC § 11 "Structured recall results"): the structured
-block withholds exactly what the text block withholds.
+### 4.2 Provenance buckets
 
-#### Five-tier AI-client interface (`.interface` provenance, 22 five-tier tools)
+| Provenance | Contents |
+|---|---|
+| `.interface` | Core memory, connection, fact, journal, estate, maintenance, monitoring, dataset, and packet tools |
+| `.federation` | `moot_federated_search` |
+| `.recipe` | Cognition recipes and the 23 `moot_lens_*` tools |
+| `.vault` | Vault export, import, status, reconcile, and job tools |
 
-| Tier | Tools |
-|------|-------|
-| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_memory_list`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
-| 2 — Connections | `moot_link_memories`, `moot_review_tunnel`, `moot_connection_search`, `moot_connection_map` |
-| 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` |
-| 4 — Journal | `moot_write_journal`, `moot_read_journal` |
-| 5 — Estate | `moot_estate_status`, `moot_estate_map`, `moot_estate_ping` |
+`MOOTX01_MEMORY_TOOL=1` adds the opt-in Anthropic `memory_20250818`
+compatibility tool. Vault-off mode hides the vault tools and local-file import
+surfaces identified by the generated projection.
 
-All interface tools accept an optional `estateID` (UUID string) to address a
-registered non-default estate and an optional `teachme` (boolean) to request a
-usage guide instead of executing. Infrastructure fields (`latticeAnchor`,
-`embeddingModelID`, `addedBy`, `channel`) are server-owned and never exposed
-to AI clients. Required caller fields: `content` + `subject` + `location` for
-`moot_file_memory` (the subject is one sentence ≤120 chars in the AI-facing
-register — telegraphic, entities and claims front-loaded; returned in recall
-rows, never searched — LocusKit SPEC § 14); `query` for `moot_memory_search`; `id` for
-`moot_memory_get` (drawer UUID — no `query`, this tool fetches an exact row,
-not a ranked set); `subject`, `predicate`,
-`object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
-not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `query`
-for `moot_fact_search` (substring match across subject, predicate, and object;
-omit to return all active facts); `tunnel_id` + `verdict` (`"accept"` |
-`"reject"` | `"endorse"`, optional `reviewed_by` — reviewer identity, default
-`"user"` — and optional `reason`) for `moot_review_tunnel` (the review
-ladder: accept → active, USER-ONLY — `accept` with a model `reviewed_by` is
-`invalidParams`; user reject → withdrawn — durable, the pair is never
-re-proposed by the contradiction hunter; model reject → objection (withdraw
-when no model endorsement exists, otherwise stays proposed and is marked
-contested); endorse → records an endorsement vote without activating; only
-proposed-lifecycle tunnels are reviewable). `moot_link_memories` accepts an
-optional `proposed` (boolean,
-default `false`) that files the link in the PROPOSED lifecycle instead of
-active — the agent-adjudication path for borderline candidates returned by
-`moot_hunt_contradictions`.
+### 4.3 Family catalog format
 
-Optional MCP arguments use an omit-to-default contract. If a caller wants the
-default, it omits the key entirely. A present key with JSON `null` is invalid
-for semantic knobs such as `estateID`, `teachme`, `filter`, `limit`, `scoring`,
-`ordering`, `sensitivity`, `exportability`, `kind`, `impatient`, `agent`, and
-similar optional primitive fields. This keeps AI clients from forcing the server
-to guess whether `null` meant "default", "unset", or a bug in the caller.
+The next six sections list each public verb by progressive-discourse tier.
+Every tool entry uses one fixed per-operation template:
 
-`moot_update_memory` accepts `mutation=setSubject` with a dedicated `subject`
-argument (same register and 120-char contract as capture) — the
-backfill/correction write path for subject-debt rows. `moot_memory_list`
-accepts an optional `filter=missing_subject` — the subject-debt enumerator:
-only live drawers with no subject line, listed id-only (no content preview),
-sized for a consent-gated interactive backfill walk.
+- **Purpose:** what the tool does.
+- **Input:** arguments and their contract.
+- **Behavior:** execution rules recorded at the interface level.
+- **Output:** the reply form.
+- **Errors:** failure surface beyond the common boundary (§16.1).
+- **Sample:** a literal reply sample or the section that carries one.
+- **Conformance:** the suite that pins the entry.
 
-`moot_file_memory` also accepts an optional `classificationScheme` (string,
-default `"udc"`) that identifies the classification scheme of the supplied
-`latticeAnchor` code. Valid values: `"udc"` (Universal Decimal Classification)
-and `"mdcc"` (MOOTx01 Decimal Content Classification). An unknown string returns
-`invalidParams`. Absent defaults to `"udc"`, preserving prior bare-UDC behavior.
-See `ClassificationScheme` in §2 for the type declaration.
+Exact JSON Schema remains generated by `ToolProjection.tools()`; these
+entries are the human-readable index. A section with nothing
+tool-specific to record carries the minimal factual line.
 
-`moot_file_memory` also accepts an optional `impatient: bool` (default `false`)
-— the Dual-Path Intake write-mode execution option. It is an option on the
-write verb (threaded MCP arg → GLK verb param `mode`), NOT a `CaptureFrame`
-field; it mirrors how `scoring` is an option on `moot_memory_search`. When
-`true`, the canonical Drawer is indexed for semantic search (BM25 + provider
-embeddings under that same Drawer ID) INLINE
-before the write returns, so it is immediately recallable by the BM25/vector
-lanes — at the cost of a slower write. When `false` (default), the write returns
-as soon as the drawer row lands and encoding happens asynchronously: in the
-Swift resident, the estate's dedicated background drain Task (EncodeIntake P4,
-15 ms poll cadence) ingests it; in the Rust resident, the Autonomic Governor
-tick (default 5 000 ms, override via `MOOTX01_BRAIN_TICK_MS`) drives
-`drain_encode_queue_once`. The content becomes semantically searchable once
-that drain fires. Before this wiring, normally-captured content was found only
-via the Locus structured lane — the BM25/vector lanes were dark for it.
+## 5. Recall family
 
-`moot_memory_search` response always includes a `recall_provenance:` status line
-as the final line of the text payload. The line carries two space-separated tokens:
+Recall turns a question, anchor, date, or structure into remembered content.
 
-- `dense_lane:<status>` — whether the dense float lane (Lane D) contributed to
-  ranking. `dense_lane:active` means Lane D ran and returned hits;
-  `dense_lane:dark:<reason>` means it did not (the reason matches the
-  `GLKRecallResult.denseLaneStatus` vocabulary: `providerOptOut`, `noFloatRows`,
-  `storeError`, `emptyQuery`). The default provider is `deterministic` (FNV-1a
-  tokenization + FloatSimHash projection — permanent federation-grade vector,
-  surface/lexical signal). An optional host-supplied learned semantic lane
-  (MiniLM/MPNet/Gemma, per CORPUSKIT_SPEC §9.2) is additive; when wired it
-  contributes a richer signal but does not replace the deterministic lane.
-  Callers use `dense_lane` to distinguish a result that included vector scoring
-  from a structural/BM25-only result.
+### 5.1 Tier 1 — Survey
 
-- `degraded_stages:<list>` — pipeline stages that encountered a recoverable error
-  and were skipped. `degraded_stages:none` means every stage succeeded (happy
-  path). A non-none value lists stage names separated by commas inside brackets,
-  e.g. `degraded_stages:[vectorHamming.findNearest,corpus.embed]`. Stage names
-  mirror the `GLKRecallResult.degradedStages` vocabulary.
+#### `moot_memory_search`
 
-The `recall_provenance:` line is always present — it is not conditional on hit
-count, lane state, or error condition. The format is identical in both the Swift
-and Rust dispatch ports.
+- **Purpose:** Hybrid recall.
+- **Input:** Exactly one of `query` or `near`; optional `limit`, `filter`,
+  `wing`, `media_type`, `door`, `scoring`, `ordering`, `frontier_k`,
+  `anomalous_filter`, `answer`, `explain`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+  The tool's `tools/list` description carries the sensitivity advisory
+  (§11.12). Recorded follow-ups: `moot_memory_get`, another `near`, or
+  precise recall.
+- **Output:** Canonical candidate rows plus applicable deviation-only
+  control, tie, answer, and coaching lines (§11).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Canonical candidate grammar in §11.2; behavioral Sample in
+  Spec § 8.3.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-`moot_memory_search` accepts an optional `scoring` argument with valid values
-`raw`, `rrf`, and `matrixAware`. **Decode is fail-closed:** an absent
-`scoring` keeps the documented default `matrixAware`; `scoring: null`, a
-non-string value, or an unknown string returns `invalidParams` rather than
-silently coercing to `matrixAware` (which would run a different scoring mode
-than the caller asked and hide a typo). This mirrors the strict `ordering`
-decode. Identical in both ports (`runMemorySearch` / `decode in
-run_memory_search`).
+#### `moot_recall_vague`
 
-`moot_memory_search` accepts an optional `filter` argument with valid values
-`unconfirmed`, `userConfirmed`, `exportable`, and `contained` (lenses/recipes
-also accept `currentlyBelieve`). Omitting `filter` means ordinary recall:
-LocusKit applies the state/trust/sensitivity defaults (`currentlyBelieve`,
-`trustworthy`, `sensitivityAtMost(.elevated)`) but does **not** add a
-confirmation filter. Fresh unconfirmed captures are therefore recallable by
-default. Callers that want only retention/user-vouched rows must explicitly send
-`filter: "userConfirmed"`; callers that want only public/exportable rows must
-explicitly send `filter: "exportable"`. `filter: null`, non-string filters, and
-unknown strings return `invalidParams`.
+- **Purpose:** Two-hop vague-tier recall.
+- **Input:** `query`, `hit_limit`, `constituents_per_hit`,
+  `total_constituents`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Vague-hit rows followed by original rows (§11.2 two-section
+  form).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Two-section grammar in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-`moot_file_fact` also accepts optional `source_id` — the row identifier of the
-drawer this fact was extracted from; omit for agent-asserted freestanding triples.
-`filedAt` is server-assigned and immutable; callers cannot supply it. There are no
-temporal validity window fields (`valid_from`/`valid_to`) — facts are active until
-retired via `moot_retire_fact`, which transitions the adjective state bitmap to
-`withdrawn` and removes the fact from active recall.
+#### `moot_federated_search`
 
-`moot_fact_timeline` returns ALL facts ever filed — active and retired — in
-`filedAt` ascending order. Each row's lifecycle tag is derived from the canonical
-`RowStateAutomaton` cluster, not a raw-value boundary: the state raw in bits 0–5
-of `adjective_bitmap` (`adjective_bitmap & 0x3F`) is classified by
-`RowState.cluster` / `RowState.cluster(ofRawState:)` using the substrate's
-`cluster(s) = (s>>4)&0x3` partition. Cluster A (active, pending, contested,
-accepted) tags as `active`; Cluster B (superseded, decayed, withdrawn, expired)
-and Cluster C (rejected, tombstoned) tag as `retired(B)` / `retired(C)`. A state
-raw that is not one of the ten defined states tags as
-`unknown(<raw>)`. Optional `entity` parameter (string) filters results to facts
-whose `subject` or `object` contains the given value (case-insensitive substring
-match). Rows are capped at 200. Output format:
-`<ISO8601>  <lifecycle>  <id>  [<subject>] <predicate> [<object>]`. This tool is
-distinct from `moot_fact_search`, which returns active-only facts and is not
-affected by this change.
+- **Purpose:** Grant-authorized search across locally open estates.
+- **Input:** `filter`, `hydrationLevel`, `ordering`, `limit`,
+  optional/validated `requesterEstateID`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+  Provenance bucket `.federation` (§4.2).
+- **Output:** One section per contributing estate.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Per-estate section grammar in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-Both the Swift and Rust dispatch ports implement identical semantics: the same
-`entity` filter parameter, the same lifecycle tags, the same ISO8601 timestamps,
-the same 200-row cap, and the same `retired(<cluster>)` format for retired facts.
+#### `moot_memory_list`
 
-#### Federation tool (`.federation` provenance, 1 tool)
+- **Purpose:** Structural wing/room enumeration.
+- **Input:** `wing`, optional `room`, optional `filter`.
+- **Behavior:** Capped at 200. `filter: missing_subject` returns ID-only
+  debt rows.
+- **Output:** Unranked S2 memory rows in filing order (§11.5); debt mode
+  renders IDs only.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** S2 grammars in §11.5.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-```swift
-ToolDispatcher.federatedSearchToolName   // "moot_federated_search"
-```
+#### `moot_fact_timeline`
 
-Fans across locally-open estates the requester is authorized to read.
-Required caller field: `requesterEstateID` (UUID string of the requesting estate).
+- **Purpose:** Fact history in filing-time order.
+- **Input:** Optional `entity`, `limit`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Dated active/retired fact lines, capped at 200 (§11.7
+  time-major variant).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Timeline grammar and cap line in §11.7.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### Recipe and lens tools (`.recipe` provenance, 35 tools)
+#### `moot_recall_temporal`
 
-The `.recipe` provenance bucket holds 35 tools: 12 CognitionKit recipe tools plus
-the 23 reasoning-lens tools below.
+- **Purpose:** Date-aware recall.
+- **Input:** Includes query or explicit window, temporal window mode, grab
+  mode, and limit.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Candidate rows plus temporal narration (§11.2, §11.3).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Temporal control-line grammar in §11.3.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-- `moot_list_lenses`, `moot_list_recipes`, `moot_synthesize`, `moot_recall_precise`,
-  `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`,
-  `moot_distill`, `moot_recall_distilled`, `moot_recall_vague`,
-  `moot_hunt_contradictions`
-  (12 CognitionKit recipe tools)
-  - `moot_synthesize` — run the GroundedSynthesis recipe: hybrid-recall and
-    synthesize the recalled set into a grounded context document (summary,
-    patterns, success rate, recommendations, key insights). Optional `query`
-    grounds the synthesis: distinctive terms are extracted (stopwords and
-    <3-char fragments drop unless digit-bearing; lowercased; deduped; capped
-    at 12) and matched case-insensitively (OR) against memory content,
-    AND-composed with the optional `filter` kind, so only cue-relevant
-    memories feed the document; the response carries a `query:` line naming
-    the cue. A query whose every token is a stopword is rejected
-    (invalidParams) rather than silently degraded to an unscoped digest.
-    Omit `query` for the whole-estate digest (previous behavior, unchanged).
-  - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
-    required capabilities per entry. No estate args required.
-  - `moot_recall_precise` — coarse-grab a generous candidate pool then re-rank by
-    query-specific precision (distinctive number/proper-noun match) to surface the
-    exact answer above near-duplicates. Returns the same shape as `moot_memory_search`.
-  - `moot_recall_shaped` — run recall with a named `RecallShape` preset applied
-    (one preset from the GLK roster, picked by name) that forwards, excludes,
-    suppresses, or inverts individual fusion lanes and bounds the candidate
-    frontier. The discoverable `preset` enum lists the roster; `balanced` (or an
-    omitted preset) is the unsteered default; an unknown preset is rejected. The
-    four ARIA filtering adjectives compose orthogonally (the preset ranks, the
-    `filter` arg filters). Returns the same shape as `moot_memory_search`.
-  - `moot_dream` — rebuild the co-occurrence/temporal matrix tier (the Brain's
-    association layer the matrix recall lane scores against), run one dreaming
-    cycle (latent-alignment proposals + cycle diary), run one
-    contradiction-hunt sweep (content screen over lexically-near memory
-    pairs; strong conflicts persist as PROPOSED contradicts links for review),
-    file tier-labeled conflict-tunnel candidates at all three contradiction
-    tiers (GLK `proposeConflictTunnels`; decline-matrix suppression applies,
-    filing never activates), and append the tiered synthesis digest (topK 5)
-    via the same shared renderer `moot_hunt_contradictions` uses.
-    The matrix is built by dreaming, not by capture, so a freshly-loaded estate
-    has an empty matrix until this runs. Returns a cycle summary including
-    contradiction counts plus a `conflictTunnelsFiled: tier1 N, tier2 N,
-    tier3 N (suppressed: N, ceilingSkipped: N)` line and the digest.
-  - `moot_hunt_contradictions` — one bounded on-demand contradiction-hunt
-    sweep: BM25 lexical candidate pairs from the corpus's inverted index
-    (drawer-keyed Hamming kNN on the bespoke lane), screened by the
-    SubstrateML conflict cue (negation asymmetry, same-template value
-    divergence, revision markers). Strong findings persist as PROPOSED
-    `contradicts` tunnels (settle via `moot_review_tunnel`); borderline pairs
-    return with content snippets for the calling agent to adjudicate via
-    `moot_link_memories kind=contradicts proposed=true`. Optional
-    `probe_limit` (default 500, max 10000) and `now` (ISO8601). Optional
-    `tier` (integer 1|2|3 or `"all"`, default `"all"`) and `top_k` (integer
-    1...50, default 5): the default mode appends a tiered synthesis digest
-    (`TIER 1 — CONTRADICTION (proven)` / `TIER 2 — CONFLICT CANDIDATE` /
-    `TIER 3 — DIVERGENCE` sections with per-lane counts and dispatch-layer
-    elapsed seconds) after the unchanged legacy report; a single tier is a
-    read-only purpose search of that lane alone (nothing filed).
-    Out-of-domain `tier`/`top_k` values are `invalidParams` naming the valid
-    domain. Requires the
-    vector index (`moot_reindex` after bulk import). Dedup against ALL
-    existing contradicts tunnels (any lifecycle) is durable — rejected pairs
-    never re-propose. The same core pass runs inside `moot_dream` and hourly
-    in the resident daemon's contradiction-scout signal.
-- 23 `moot_lens_*` tools: `moot_lens_keystones`, `moot_lens_constellation`,
-  `moot_lens_free_association`, `moot_lens_theme_weather`, `moot_lens_latent_themes`,
-  `moot_lens_bias`, `moot_lens_drift`, `moot_lens_node_motion`,
-  `moot_lens_cohesion`, `moot_lens_contradiction`,
-  `moot_lens_trust_synthesis`, `moot_lens_partial_cue`, `moot_lens_anticipate`,
-  `moot_lens_successors`, `moot_lens_overlap`, `moot_lens_divergence`,
-  `moot_lens_associations`, `moot_lens_concepts`,
-  `moot_lens_apriori`, `moot_lens_moment`, `moot_lens_rhythm`,
-  `moot_lens_precedence`, `moot_lens_complexity`
+### 5.2 Tier 2 — Focus
 
-**Lens evidence addresses.** Every lens finding that names memories cites
-them as dense rows (the PR-03 five-field form), so each finding is a
-hydratable address: seven memory-listing lens arms (`keystones`,
-`free_association`, `cohesion`, `contradiction`, `trust_synthesis`,
-`partial_cue`, `successors`) render their cited memories through the shared
-dense-row renderer byte-identically in both ports. `moot_lens_concepts`
-lists up to 20 member drawer ids per concept (extent cap, Swift
-`lensExtentIDCap` ↔ Rust `LENS_EXTENT_ID_CAP`), and
-`moot_lens_associations` carries `exemplarDrawerIDs` (cap 5) on each rule
-so a rule's evidence is directly fetchable via `moot_memory_get`.
+#### `moot_recall_precise`
 
-`moot_lens_contradiction` reports two lifecycle tiers on its contradicts-tunnel
-output: confirmed (active) edges, and PROPOSED edges flagged
-`proposed (agent-derived, unreviewed)` — shown by default so hunter findings
-surface without an extra flag. Withdrawn (rejected) and superseded edges never
-appear.
+- **Purpose:** Coarse candidate grab followed by precision reranking.
+- **Input:** `query`, `limit`, `pool`, `composition`, `filter`, `wing`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Canonical candidate rows (§11.2).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Canonical candidate grammar in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-**Advanced lens tools:**
+#### `moot_recall_shaped`
 
-- `moot_lens_apriori` — mine multi-antecedent Apriori association rules from bitmap
-  fingerprints. Optional: `minSupport`, `minConfidence`, `minLift` (floats), `maxK` (int).
-  Returns `apriori_rules: N rule(s)` with antecedent/consequent as `field:value` pairs,
-  support, confidence, and lift per rule.
+- **Purpose:** Recall under a named `RecallShape`.
+- **Input:** `query` or `near`, `preset`, `limit`, `filter`, `wing`,
+  `frontier_k`.
+- **Behavior:** Unknown preset is invalid.
+- **Output:** Canonical candidate rows (§11.2).
+- **Errors:** Unknown preset is invalid; otherwise standard JSON-RPC errors
+  only (§16.1).
+- **Sample:** Canonical candidate grammar in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-- `moot_lens_moment` — OR-reduce the primary window's fingerprints into a temporal
-  signature and rank comparison windows by Hamming proximity.
-  Required: `windowStart`, `windowEnd` (ISO8601 strings).
-  Optional: `comparisonWindows` (array of `{windowStart, windowEnd}` objects).
-  Returns `moment: N fingerprint(s), N comparison(s) ranked` with Hamming distances.
+#### `moot_recall_connected`
 
-- `moot_lens_rhythm` — FFT over a time-bucketed fingerprint bit series to surface
-  dominant periodic activity patterns.
-  Required: `bit` (int 0–255), `bucketSeconds` (int), `bucketCount` (int),
-  `endingAt` (ISO8601). Optional: `topK` (int, default 3).
-  Returns `rhythm (bucketCount=N): period=Xs magnitude=Y` per dominant period.
+- **Purpose:** Connection-aware recall using the shared candidate renderer.
+- **Input:** Args and exact schema are generated by the recipe catalog.
+- **Behavior:** Renders no text control line; per-result provenance is
+  structured (§11.10 `retrievalSource`).
+- **Output:** Canonical candidate rows (§11.2).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Canonical candidate grammar in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-- `moot_lens_precedence` — fold the estate's audit trail into T-matrix deltas and rank
-  antecedents most predictive of a target field-value coordinate.
-  Required: `windowStart`, `windowEnd` (ISO8601), `targetField` (e.g. `"room"`),
-  `targetValue` (e.g. `"string:study"`). Optional: `k` (int, default 5).
-  Returns `precedence (entryCount=N): field=value lag=Xmin count=N` per antecedent.
+#### `moot_recall_distilled`
 
-- `moot_lens_complexity` — Shannon entropy (and optional mutual information) over the
-  distribution of a label field across the recalled set.
-  Required: `fieldA` (label field: `room`, `wing`, `addedBy`, `embeddingModelID`).
-  Optional: `fieldB` (second field for mutual information), `filter`.
-  Returns `complexity: totalCount=N, entropyA=X` and optionally entropyB, mutualInformation.
+- **Purpose:** Candidate rows with distilled continuations.
+- **Input:** `query`, `limit`, `filter`, `echo_query`.
+- **Behavior:** Verbatim fallback carries its marker when distillate is
+  absent (§11.2).
+- **Output:** Candidate row plus unlabeled distilled continuation (§11.2).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Distilled-form Sample in §11.2.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### Vault tools (`.vault` provenance, 5 tools)
+#### `moot_recall_walk`
 
-`moot_vault_export`, `moot_vault_import`, `moot_vault_status`, `moot_vault_reconcile`,
-`moot_vault_job`
+- **Purpose:** Two-stage escalation: shaped recall, then precise recall
+  when confidence is insufficient.
+- **Input:** `query`, `limit` 1–50, `filter`, `wing`, `now`, `estateID`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Candidate rows, optional discrimination, and `walk:` metadata
+  (§11.2, §11.3).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** `walk:` control-line grammar in §11.3.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-`moot_vault_job` — poll the status and result of a vault job by ID. Required:
-`job_id` (string, returned by `moot_vault_import` or `moot_vault_export`). Returns
-status (`running` / `complete` / `failed`), `elapsed_s`, and on completion the
-result counts (import: `drawersWritten`, `drawersUpdated`, `itemsSkipped`,
-`tunnelsCreated`, `fdcClassified`, `fdcUnclassified`; export: `noteCount`,
-`exportedAt`) or an error description. Unknown `job_id` returns an error result
-(`isError:true`) with text `"unknown job_id: <id>"`. The Rust backend records
-completed jobs in a bounded in-process `VaultJobLedger` (last 100 jobs) — jobs
-are always `complete` when polled because the Rust vault ops are synchronous.
+#### `moot_fact_search`
 
-**Vault job concurrency cap and slot-release invariant (availability hardening).**
-The Swift port caps concurrent vault import + export jobs at 4 (`maxConcurrentVaultJobs`).
-`moot_vault_import` acquires a slot via `checkAndRegister` BEFORE running `hashAllNotes`
-so the cap bounds the expensive preflight (filesystem traversal + full-file reads +
-SHA-256 hashing). Running `hashAllNotes` outside the cap allowed up to the HTTP transport
-concurrency limit worth of parallel hashing before the cap was consulted.
-If `hashAllNotes` throws after the slot is acquired (e.g. permission-denied on a regular
-`.md` file), `fail(jobID:)` releases the slot immediately so the error never permanently
-consumes cap capacity. Non-regular `.md` entries (directories, symlinks) are silently
-skipped in `hashAllNotes` rather than causing a fatal error — a caller-controlled vault
-may contain a directory or symlink named `something.md`. `moot_vault_export` has no
-throwable preflight between `checkAndRegister` and the background Task. Slot-release
-invariant: every successful `checkAndRegister` is matched by exactly one terminal `fail()`
-or `complete()` on every code path — the pre-Task catch handles preflight throws; the
-Task's catch handles bridge throws. The Rust backend has no "running" ledger state —
-`run_import` records the job only after the bridge completes, and `collect_and_hash`
-checks `file_type.is_file()` before reading so a directory named `directory.md` is
-recursed (not hashed) and a broken symlink is skipped. The `Dispatcher` `Arc<Mutex<>>`
-serializes all dispatch calls so at most one import runs at a time — no concurrent
-preflight fan-out is possible and no slot can leak in the Rust port.
-
-### Dataset tools (`.interface` provenance, 3 tools, MX-TAB-7)
-
-Three tools expose user-owned tabular datasets (`moot_file_dataset`,
-`moot_dataset_query`, `moot_dataset_stats`). They carry `.interface` provenance
-and accept the standard optional `estateID`. They are always present — not
-vault-gated — and are inserted after vault tools in `ToolProjection.tools()`.
-
-Both legs (Swift `DatasetTools.swift`, Rust `dataset_tools.rs`) are at parity;
-the dispatch contracts are identical. The `DatasetTools` enum is internal; its
-tools reach callers solely through `ToolProjection.tools()` and
-`ToolDispatcher.dispatch`.
-
-#### `moot_file_dataset`
-
-Create a dataset handle (a Drawer in the estate) plus its backend storage
-table, then bulk-load rows. Returns the dataset UUID and handle metadata.
-Inline rows or a CSV file path (not both). CSV imports are confined to the
-home directory by component-wise prefix match after symlink resolution (path
-security gate MX-TAB-SEC-1 A1). The CSV size cap is 100 MiB.
-
-Required args: `name` (dataset label), `location` (room for the estate
-handle). Either `rows` (JSON array of objects) or `csv_path` (string) must be
-supplied, never both. When using `rows`, `columns` (array of `{name, type}`
-objects) is also required; types are `"text"`, `"int"`, `"float"`, `"bool"`.
-When using `csv_path`, column types are inferred from the CSV header. Optional:
-`wing` (estate wing, default `"Agentic Memory"`).
-
-Column names must be valid identifiers (ASCII letter or `_` start, ASCII
-alphanumeric or `_` body only) — SQL-injection names are rejected before any
-DDL.
-
-Tier-1 (table) and tier-2 (column) signatures are computed on bulk load
-(MX-TAB-5) and stored in the drawer's `ContentSignature`; they travel with
-the handle in vault round-trips.
+- **Purpose:** Active fact search.
+- **Input:** Optional `query` or exact subject/predicate/object/source
+  filters, `limit`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Fact rows (§11.7).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Fact-row grammar in §11.7.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
 #### `moot_dataset_query`
 
-Predicate query over a dataset's rows. Refuses withdrawn handles.
+- **Purpose:** Typed dataset predicate query.
+- **Input:** Dataset `id`, optional `where`, `order_by`, `limit`.
+  Predicates use `{col, op, val}` leaves composed with `{and:[...]}` or
+  `{or:[...]}`. Operators are `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+  `contains`, `starts_with`, `ends_with`, `is_null`, and `not_null`.
+  `order_by` contains `{col, dir}` items. Default limit is 1,000; maximum
+  is 10,000.
+- **Behavior:** The total-matching count `of M` is optional: when computing
+  it would require a separate full scan it is omitted, never silently paid.
+- **Output:** Tabular rows with lossless value encoding (§11.9); structured
+  tabular results per §11.10.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Tabular grammar in §11.9.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-Required: `id` (UUID string from `moot_file_dataset`). Optional: `where`
-(predicate tree: `{col, op, val}` leaves composed with `{and: [...]}` /
-`{or: [...]}` nodes; supported ops: `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
-`contains`, `starts_with`, `ends_with`, `is_null`, `not_null`), `order_by`
-(array of `{col, dir}` objects, `dir` is `"asc"` or `"desc"`), `limit`
-(integer ≥ 1, default 1000). The `limit` is capped at 10 000.
+#### `moot_synthesize`
+
+- **Purpose:** Grounded context synthesis.
+- **Input:** Optional `query`, `filter`, `limit`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Answer/digest fields plus canonical candidate citations
+  (§11.4).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Synthesis document grammar in §11.4.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 5.3 Tier 3 — Pinpoint
+
+#### `moot_memory_get`
+
+- **Purpose:** Exact drawer hydration.
+- **Input:** Exactly one of `id` or `ids`; `depth` is `subject`,
+  `distilled`, or `full` (default).
+- **Behavior:** Batch shallow depths winnow a shortlist. The tool's
+  `tools/list` description carries the sensitivity advisory (§11.12).
+- **Output:** S2 batch rows in request order (§11.5) or the S3 full record
+  (§11.6).
+- **Errors:** A gated or absent single id returns the standard not-found
+  tool error (§11.6).
+- **Sample:** Full-record Sample in §11.6.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_connection_search`
+
+- **Purpose:** Outgoing edges from a memory.
+- **Input:** `from_id`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Edge rows carrying tunnel ID, label, and endpoint citation
+  (§11.8).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Edge-row grammar in §11.8.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_connection_map`
+
+- **Purpose:** Incoming edges to a memory; mirror of connection search.
+- **Input:** `to_id`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Edge rows with the header word `incoming` (§11.8).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Edge-row grammar in §11.8.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+## 6. Capture family
+
+Capture admits memories, facts, links, datasets, packets, and imports.
+
+### 6.1 Tier 1 — Intake
+
+#### `moot_palace_import`
+
+- **Purpose:** Import a palace SQLite export.
+- **Input:** `path`, `mode` and import options.
+- **Behavior:** Vault-gated.
+- **Output:** Import report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_json_import`
+
+- **Purpose:** Import the versioned JSON seed schema.
+- **Input:** The versioned JSON seed schema, including optional UTC
+  `event_time` and `capture_date` fields.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Import report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_vault_import`
+
+- **Purpose:** Start or execute a vault restore/import.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Swift caps concurrent import/export jobs at four and
+  acquires a slot before hashing preflight. Every acquired slot terminates
+  in exactly one failure or completion path. Rust records completed jobs in
+  a bounded in-process ledger because its vault operations are synchronous.
+- **Output:** Reply includes a job ID for `moot_vault_job`.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_file_dataset`
+
+- **Purpose:** Create a dataset handle and bulk-load rows.
+- **Input:** Required: `name`, `location`, and exactly one data source —
+  either inline `rows` or `csv_path`, never both. Inline rows require a
+  `columns` array whose types are `text`, `int`, `float`, or `bool`.
+  Column names are ASCII identifiers.
+- **Behavior:** CSV paths are resolved and confined to the allowed home
+  subtree; size is capped at 100 MiB.
+- **Output:** Dataset handle acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_file_packet`
+
+- **Purpose:** Store a structured packet with lineage.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Packet ID/acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 6.2 Tier 2 — Filing
+
+#### `moot_file_memory`
+
+- **Purpose:** File one memory.
+- **Input:** Required: `content`; `subject`, one sentence no longer than
+  120 characters; and `location`. Optional fields include wing,
+  sensitivity, exportability, kind, event time, `impatient`, and
+  `classificationScheme` (`udc` default or `mdcc`).
+- **Behavior:** `impatient: true` requests inline semantic indexing;
+  omitted/false uses the background encode path.
+- **Output:** Reply begins `filed memory <uuid>` and carries
+  location/lineage details.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 6.3 Tier 3 — Assertion
+
+#### `moot_file_fact`
+
+- **Purpose:** File one structured fact.
+- **Input:** Required: `subject`, `predicate`, `object`; optional
+  `source_id`.
+- **Behavior:** Filing time is server-assigned.
+- **Output:** Filing acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_link_memories`
+
+- **Purpose:** Link two memories with a labeled tunnel.
+- **Input:** Required endpoint IDs and link label/kind; optional `proposed`
+  defaults false.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Reply identifies the tunnel.
+- **Errors:** Unresolved IDs trigger the coaching hint (§12.5); otherwise
+  standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+## 7. Lifecycle family
+
+### 7.1 Tier 1 — Circulation
+
+#### `moot_withdraw_memory`
+
+- **Purpose:** Soft-remove a memory from active circulation.
+- **Input:** `id`, `reason`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Withdrawal acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_move_memory`
+
+- **Purpose:** Reanchor the drawer.
+- **Input:** `id`, `location`, optional `wing`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Move acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 7.2 Tier 2 — Belief
+
+#### `moot_update_memory`
+
+- **Purpose:** Apply one belief mutation to a memory.
+- **Input:** `id`, `mutation`, optional `note`, optional dedicated
+  `subject`. Mutations include confirm, reject, contest, resolve,
+  supersede, revive, accept, exportability correction, and `setSubject`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Mutation acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_confirm_memory`
+
+- **Purpose:** Shortcut for the confirm mutation.
+- **Input:** `id`, optional `note`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Confirmation acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 7.3 Tier 3 — Disposition
+
+#### `moot_erase_memory`
+
+- **Purpose:** Erase a memory and its lineage where permitted.
+- **Input:** Required: `id`, `reason`, `confirmed: true`.
+- **Behavior:** Confirmation absent or false triggers the coaching hint
+  (§12.5).
+- **Output:** Reply distinguishes full and partial lineage erasure
+  (§11.11).
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Erasure result grammars in §11.11.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_retire_fact`
+
+- **Purpose:** End an assertion's active standing.
+- **Input:** Fact ID and reason.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Retirement acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_review_tunnel`
+
+- **Purpose:** Review a proposed tunnel.
+- **Input:** `tunnel_id`, `verdict` (`accept`, `reject`, `endorse`),
+  optional `reviewed_by` (default `user`), optional `reason`.
+- **Behavior:** Only proposed tunnels are accepted.
+- **Output:** Review acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+## 8. Lenses family
+
+Every lens is read-only. Findings that name memories use canonical candidate
+citations or directly hydratable drawer IDs. Zero results trigger the lens
+coaching hint (§12.5). Unless an entry says otherwise, each lens carries
+the same four template values. Behavior: read-only, with the behavioral
+contract in [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md). Errors: standard
+JSON-RPC errors only (§16.1). Sample: none recorded in this document.
+Conformance: covered by the §16.2 and §16.3 suites. Per-lens entries
+below record the Purpose, Input, and Output facts.
+
+### 8.1 Tier 1 — Climate
+
+#### `moot_lens_theme_weather`
+
+- **Purpose:** Rising and fading themes.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_drift`
+
+- **Purpose:** Structural change over time.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_rhythm`
+
+- **Purpose:** Temporal cadence and FFT-derived periods.
+- **Input:** Required `bit` (0–255), `bucketSeconds`, `bucketCount`,
+  `endingAt`; optional `topK`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_constellation`
+
+- **Purpose:** Cluster structure.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_keystones`
+
+- **Purpose:** Load-bearing memories.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_bias`
+
+- **Purpose:** Source and confirmation skew.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_divergence`
+
+- **Purpose:** Difference between two estates.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_overlap`
+
+- **Purpose:** Shared structure between two estates.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+### 8.2 Tier 2 — Frame
+
+#### `moot_lens_latent_themes`
+
+- **Purpose:** Themes latent in a recalled set.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_cohesion`
+
+- **Purpose:** Cohesion of a set.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_complexity`
+
+- **Purpose:** Entropy and optional mutual information.
+- **Input:** Required `fieldA`; optional `fieldB` and `filter`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_concepts`
+
+- **Purpose:** Formal concepts.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Extents capped at 20 IDs plus overflow in the text preview;
+  the structured `extent` arrays are complete (§11.10).
+
+#### `moot_lens_associations`
+
+- **Purpose:** Association rules.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Exemplars capped at 5 IDs in the text preview; the
+  structured `exemplars` arrays are complete (§11.10).
+
+#### `moot_lens_apriori`
+
+- **Purpose:** Multi-antecedent Apriori rules.
+- **Input:** Optional `minSupport`, `minConfidence`, `minLift`, and `maxK`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_contradiction`
+
+- **Purpose:** Active and proposed contradiction edges.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_trust_synthesis`
+
+- **Purpose:** Trust-weighted reading of a set.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+### 8.3 Tier 3 — Anchor
+
+#### `moot_lens_partial_cue`
+
+- **Purpose:** Completion from a fragment.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_free_association`
+
+- **Purpose:** Associative neighborhood of one memory.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_successors`
+
+- **Purpose:** Likely successors.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_node_motion`
+
+- **Purpose:** Structural movement of one node.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_moment`
+
+- **Purpose:** Similar temporal windows.
+- **Input:** Required `windowStart`, `windowEnd`; optional array of
+  comparison windows.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_precedence`
+
+- **Purpose:** Audit-derived antecedents.
+- **Input:** Required window, `targetField`, and `targetValue`; optional
+  `k`.
+- **Output:** Lens reading per the family rule above.
+
+#### `moot_lens_anticipate`
+
+- **Purpose:** Suggested next developments.
+- **Input:** Common arguments only (§3.2); exact schema is generated by
+  `ToolProjection.tools()`.
+- **Output:** Lens reading per the family rule above.
+
+## 9. Maintenance family
+
+### 9.1 Tier 1 — Renewal
+
+#### `moot_dream`
+
+- **Purpose:** One dreaming/contradiction cycle.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Rebuilds matrix state, runs one dreaming/contradiction
+  cycle, and files proposed conflict candidates.
+- **Output:** The cycle report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_reindex`
+
+- **Purpose:** Rebuild recall indexes.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Rebuild report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 9.2 Tier 2 — Sweeps
+
+#### `moot_distill`
+
+- **Purpose:** Bounded distillation pass.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Result reports work and debt.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_hunt_contradictions`
+
+- **Purpose:** Contradiction hunt pass.
+- **Input:** Includes `probe_limit`, deterministic `now`, `tier` (`1`,
+  `2`, `3`, `all`), and `top_k` 1–50.
+- **Behavior:** Default mode may file proposed edges; single-tier mode is
+  read-only.
+- **Output:** Hunt report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_reclassify_fdc`
+
+- **Purpose:** Audit/repair stored classification anchors.
+- **Input:** Explicit mode/apply gate.
+- **Behavior:** The mode/apply gate controls writes.
+- **Output:** Audit/repair report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_run_adornment_pass`
+
+- **Purpose:** Dark benchmark/maintenance adornment pass.
+- **Input:** Harness-only maximum-length override; `batch_size` bounds
+  (drawer, minter) pairs per call.
+- **Behavior:** Dispatched by name but omitted from `tools/list`.
+- **Output:** Pass report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_register_adornment_minter`
+
+- **Purpose:** Dark benchmark/maintenance minter registration.
+- **Input:** One full minter descriptor: `minter_id`, `minter_name`,
+  `minter_family`, `minter_model_id`, `minter_model_version`,
+  `minter_prompt_digest`, optional string-map `minter_parameters`.
+- **Behavior:** Dispatched by name but omitted from `tools/list`.
+  Registers the descriptor through the product surface and atomically
+  replaces the active set with exactly that minter.
+- **Output:** Registration report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 9.3 Tier 3 — Surgery
+
+#### `moot_run_migration`
+
+- **Purpose:** Derive and benchmark migration branches.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Migration/benchmark report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_confirm_migration`
+
+- **Purpose:** Promote exactly one eligible benchmarked branch.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** A disqualified branch result triggers the coaching hint
+  (§12.5).
+- **Output:** Promotion report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+## 10. Utility family
+
+### 10.1 Tier 1 — Presence
+
+#### `moot_estate_ping`
+
+- **Purpose:** Resolve the open estate.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Never carries the sensitivity advisory (§11.12).
+- **Output:** Estate identity and build serial, with optional version-skew
+  and update-available lines.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+### 10.2 Tier 2 — Orientation
+
+#### `moot_estate_status`
+
+- **Purpose:** The composite estate condition surface.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`;
+  `teachme: true` returns the full orientation guide.
+- **Behavior:** The body carries the sensitivity advisory when a grant is
+  in effect (§11.12); presence depends only on grant state, never on
+  estate contents. The body appends the drain report and the rebuild line
+  (Bob rulings 2026-08-26); the narrow tools `moot_drain_status` and
+  `moot_rebuild_status` remain the cheap machine-polling surfaces.
+- **Output:** Estate counts, subject debt, sync, trace,
+  migration/recalculation, modes, protocol, and optional advisory fields,
+  plus the appended drain report and rebuild line. Protocol block per
+  §12.1; sync vocabulary per §12.2; optional advisories per §12.3.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Protocol-block grammar in §12.1.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_estate_map`
+
+- **Purpose:** Wings and rooms with sensitivity-filtered counts.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Wing/room map with counts.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_list_lenses`
+
+- **Purpose:** Cognition catalog.
+- **Input:** Terse by default; `verbose: true` for full descriptions and
+  required arguments.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Lens catalog listing.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_list_recipes`
+
+- **Purpose:** Recipe catalog.
+- **Input:** Same terse/verbose convention as `moot_list_lenses`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Recipe catalog listing.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_monitoring_status`
+
+- **Purpose:** Read or set monitoring.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Operates through the injected control seam
+  (`MonitoringControl`, §14.3).
+- **Output:** Monitoring state.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
 #### `moot_dataset_stats`
 
-Per-column aggregate statistics for a dataset. Refuses withdrawn handles.
+- **Purpose:** Per-column dataset statistics.
+- **Input:** Required dataset `id` and optionally one `column`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Count, null count, distinct count, and numeric
+  min/max/mean/stddev per the §11.9 stats grammar.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** Stats grammar in §11.9.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-Required: `id` (UUID string). Optional: `column` (single column name; omit
-to get stats for all columns). Returns count, null count, distinct count, and
-for numeric columns: min, max, mean, stddev.
+#### `moot_vault_status`
 
-### `moot_estate_status` — sync field vocabulary
+- **Purpose:** Vault configuration and posture.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Vault configuration and posture report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-The `moot_estate_status` response includes a `sync:` field on its own line
-reporting the real ConvergenceKit backend state. The field is always present.
-The vocabulary is identical in both the Swift port (`runEstateStatus` in
-`ToolDispatch.swift`) and the Rust port (`run_estate_status` in
-`interface_tools.rs`).
+### 10.3 Tier 3 — Operations
 
-**Vocabulary table** — tokens are literal strings, not format strings:
+#### `moot_drain_status`
+
+- **Purpose:** Poll registered drains without claiming work.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Distinguishes no drain from an idle drain. Lanes include
+  `dreaming` (the recall-event dreaming queue — a genuine queue drain,
+  paid down out-of-band; the benchmarker's encode barrier denylists it).
+  A rebuild is not a drain, so it never appears here (see
+  `moot_rebuild_status`).
+- **Output:** Drain report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_rebuild_status`
+
+- **Purpose:** The derived-state rebuild operation status.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Covers reindex backfill and basis retrain plus re-embed,
+  whoever triggered it. A rebuild is not a drain, so it never appears in
+  `moot_drain_status`.
+- **Output:** `rebuild: running | idle`.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_vault_export`
+
+- **Purpose:** Start/execute a vault export.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Concurrency and completion rules per the
+  `moot_vault_import` entry (§6.1).
+- **Output:** Job identity.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_vault_job`
+
+- **Purpose:** Poll a vault job.
+- **Input:** `job_id`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Running/complete/failed, elapsed time, counts, or error.
+- **Errors:** Unknown `job_id` returns `isError: true`.
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_vault_reconcile`
+
+- **Purpose:** Reconcile vault state against the estate.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Reconciliation report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_packet_get`
+
+- **Purpose:** Fetch one packet by ID.
+- **Input:** Packet ID.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** The packet.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_packet_list`
+
+- **Purpose:** List/filter packets.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Packet listing.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_packet_lineage`
+
+- **Purpose:** Return one packet's derivation thread.
+- **Input:** Packet ID.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Derivation thread.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_read_journal`
+
+- **Purpose:** Read recent diary entries.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Recent diary entries.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_write_journal`
+
+- **Purpose:** Append one session-continuity entry.
+- **Input:** Required `entry`.
+- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+- **Output:** Append acknowledgment.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_timing_report`
+
+- **Purpose:** Report timing/benchmark instrumentation.
+- **Input:** Exact schema is generated by `ToolProjection.tools()`.
+- **Behavior:** Present where the generated surface includes it.
+- **Output:** Timing/benchmark report.
+- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+## 11. Shared result formats
+
+Decision basis: RETRIEVAL_SHAPE_OPTIMIZATION_2026-08-25 (register R1–R16).
+Behavioral semantics: Spec § 8. This section owns every literal grammar.
+
+### 11.1 Row-grammar rules
+
+These rules apply to S1 (ranked candidate), S2 (unranked memory), S4
+(fact), and S5 (edge) rows and make them stable presentation. Machine
+parsing uses `structuredContent` (§ 11.10); the text is the AI surface and
+audit fallback.
+
+1. **Separator.** The three-character sequence ` · ` (space, U+00B7,
+   space). The renderer guarantees it never occurs inside a value: each
+   value is normalized — embedded newlines become one space, whitespace
+   runs collapse, leading/trailing whitespace is trimmed, and any literal
+   `·` inside a value is replaced with `-`. (S6 tabular values are exempt —
+   § 11.9.)
+2. **Fixed columns.** Every row shape has a fixed column count. An absent
+   optional value renders `-` occupying its whole column: on the S1 row, a
+   first sentence byte-identical to the subject, an absent SSC (Semantic
+   Search Candle), and an
+   absent active-adornment projection each render `-`. A literal `-` inside a real value is
+   unambiguous because the placeholder only ever occupies a whole column.
+3. **Truncation.** First sentence: hard cut at 120 characters, no
+   ellipsis. Subject: ≤120 by capture contract. Each adornment: ≤280 by mint
+   contract. One active adornment renders unchanged. Multiple active
+   adornments render in ascending minter-ID order, joined by ` || ` inside the
+   same column; a literal ` || ` inside an adornment is normalized to ` / `.
+4. **Timestamps** are ISO-8601 with trailing `Z`. **Scores** are `%.4f`,
+   never absent on a ranked row, never zero for a genuinely ranked hit.
+5. **Ordering.** S1: score-descending under the tie-group contract. S2
+   memory list: filing order. S2 batch get: request order — exactly one
+   line per requested id in its request position; duplicate ids produce
+   duplicate lines. S4: filing-time order. S5: edge filing order.
+6. **Caps** append one line ONLY when hit, naming the cap and the
+   narrowing argument (e.g. `listing capped at 200 — narrow with room`).
+7. **Empty results** render the surface's zero-count header plus at most
+   one actionable `hint:` line; never diagnostics.
+
+### 11.2 Canonical candidate text (S1)
+
+```text
+found N candidate memories, one per line
+<uuid> · <subject> · <first sentence | -> · <SSC facts | -> · <active adornment text(s) | -> · <event time> · <score %.4f>
+```
+
+Singular header: `found 1 candidate memory, one per line`. Behavioral
+contract and Sample: Spec § 8.3. Emitted identically by memory search and
+precise, shaped, connected, temporal, and walk recall — steering is
+scoring, never shape. Federated search renders one section per estate:
+
+```text
+estate: <name> [<uuid>]
+found N candidate memories, one per line
+<rows>
+```
+
+Vague recall renders two S1 sections:
+
+```text
+found N vague summaries, one per line
+<rows>
+found M hydrated originals, one per line
+<rows>
+```
+
+Distilled recall follows each row with its distilled text as a four-space
+indented unlabeled continuation; a row still owing a distillate carries the
+fallback marker then the verbatim content:
+
+```text
+found 2 candidate memories, one per line
+30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687
+    Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.
+E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · Sarah; Google; TechFest; 2026-01-01; three weeks ago · 2026-01-01T00:07:48Z · 0.5562
+    source: content (not yet distilled)
+    I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago.
+```
+
+No acknowledgment or contract-change notice ever precedes results.
+
+### 11.3 Control lines (deviation-only, fixed grammar, after the rows)
+
+```text
+discrimination: low — top results within epsilon.
+discrimination: medium — partial separation.
+temporal: <window-mode> (<source>, <grab>) window <from>..<to>[ ±Nd]
+temporal: loose date-seeking — real-dated memories first; read the answer from each row's event_time
+walk: stage=<stage> stoppedEarly=<yes|no>
+retrieval: degraded — one or more ranking stages unavailable
+```
+
+The discrimination line renders only at low/medium. The degradation line
+renders when the dense lane did not contribute for a reason other than an
+empty query OR any pipeline stage was skipped — at most once; stage names
+and lane vocabulary never render (they are log-side). Connected recall
+renders NO text control line — per-result provenance is structured
+(§ 11.10).
+
+**Total trailing-line order** (each line optional, this order absolute):
+
+```text
+<rows>
+discrimination: …
+temporal: … | walk: …        (tool-specific; at most one exists per tool)
+retrieval: degraded — …
+note: additional results share this score …
+hint: …
+```
+
+The non-determinate-tie line is unchanged:
+
+```text
+note: additional results share this score on a non-deterministic tie; refine the query
+```
+
+### 11.4 Synthesis document
+
+```text
+grounded_synthesis: N drawer(s)
+query: <normalized cue terms, comma-separated>
+<composed summary paragraph — plain prose, no label>
+found N candidate memories, one per line
+<rows>
+```
+
+The `query:` line carries the normalized extracted cues and is absent in
+the whole-estate form. No `summary:`, `patterns:`, `successRate:`, or
+`recommendations:` fields exist.
+
+### 11.5 Unranked memory rows (S2)
+
+memory list:
+
+```text
+listing N memories in <wing> / <room> — filing order, unranked
+<uuid> · <subject | -> · <first sentence | -> · <SSC | -> · <active adornment text(s) | -> · <event time>
+```
+
+Debt mode (`filter: missing_subject`):
+
+```text
+listing N memories missing subjects — ids only
+<uuid>
+```
+
+Batch memory get (`ids` + `depth: subject | distilled`):
+
+```text
+resolved N of M requested memories, in request order
+<S2 row>
+not found: <uuid>
+```
+
+The header counts resolved-of-requested; exactly one line per requested id
+in request position. `depth: distilled` adds the indented continuation per
+§ 11.2. The header verb `listing`/`resolved` versus `found … candidate` is
+how a consumer tells enumeration from ranking.
+
+### 11.6 Full record (S3) — single-id memory get, `depth: full`
+
+Base field spellings are pinned by renderer readback (`fullRecordLines`,
+2026-08-25). The `subject:` line appears only when the drawer carries one;
+the active `adornments:` block follows it when present. Tunnel lines are
+confirmed-active edges only, arrow gives direction, cap 50; verbatim content
+follows the `content:` label untruncated.
+
+```text
+memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543
+room: recruiting  wing: Agentic Memory
+subject: Entelo follow-up decided at TechFest
+adornments: 2
+  TechFest; Entelo evaluation; recruitment workflow; user follow-up
+  Entelo; sourcing tool review; TechFest recommendation; next action
+filed_at: 2026-01-02T10:15:00Z
+event_time: 2026-01-01T00:07:52Z
+state: active
+trust: verbatim
+sensitivity: normal
+exportability: exportable
+confirmation: unconfirmed
+lineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60
+tunnels: 2
+  → E70A5761-152D-4ABB-B16A-964B06A09404  [relates]
+  ← 931F2411-95B7-4DE9-9B96-CF96DF66175E  [precedes]
+content:
+user: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed.
+```
+
+The `adornments:` block is omitted when no active stored adornment exists. Its
+unlabeled indented values appear in ascending minter-ID order; structured
+content carries the IDs. One active minter renders `adornments: 1` and one
+value.
+
+A gated or absent single id returns the standard not-found tool error.
+
+### 11.7 Fact rows (S4)
+
+fact search — fixed six columns, `-` for a freestanding assertion's
+absent source:
+
+```text
+found N facts, one per line
+<fact ID> · <subject> · <predicate> · <object> · <source drawer UUID | -> · <filedAt>
+```
+
+fact timeline — the time-major variant, fixed seven columns:
+
+```text
+fact timeline: N facts in filing order (active and retired)
+<filedAt> · <lifecycle> · <fact ID> · <subject> · <predicate> · <object> · <source drawer UUID | ->
+```
+
+Lifecycle values: `active`, `retired(B)`, `retired(C)`, `unknown(<raw>)`.
+Cap line when hit: `timeline capped at 200 rows — narrow with entity`.
+
+### 11.8 Edge rows (S5)
+
+```text
+found N outgoing connections, one per line
+<tunnel ID> · <kind/label[ (lifecycle)]> · <far endpoint: uuid · subject · first sentence | - · SSC | - · active adornment text(s) | - · event time>
+```
+
+connection map is identical with the header word `incoming`. The far
+endpoint renders the S2 pick fields (no score); lifecycle renders only
+when not active.
+
+### 11.9 Tabular rows (S6)
+
+dataset query:
+
+```text
+dataset <uuid> "<name>": returned N of M matching rows (limit N, ordered by <col> <dir>)
+<col> · <col> · <col>
+<value rows in caller order>
+```
+
+dataset stats:
+
+```text
+dataset <uuid> "<name>": N rows, M columns
+<col> · count=N · nulls=N · distinct=N[ · min=… · max=… · mean=… · stddev=…]
+```
+
+Lossless encoding — S6 values are user-owned data and round-trip exactly;
+the § 11.1 `·`→`-` replacement never applies:
+
+- a value containing the separator sequence, a quote, a newline, or
+  leading/trailing whitespace renders double-quoted with `""` as the
+  embedded-quote escape;
+- embedded newlines render as the two-character escape `\n` inside quotes
+  (one result row is always one presentation line);
+- NULL = empty unquoted field; empty string = `""`; booleans =
+  `true`/`false`; numerics = shortest exact decimal; timestamps =
+  ISO-8601 `Z`.
+
+The total-matching count `of M` is optional: when computing it would
+require a separate full scan it is omitted, never silently paid.
+
+### 11.10 Structured recall — base schema plus surface extensions
+
+Every S1 surface declares the shared output schema. Base row schema:
+
+```json
+{
+  "type": "object",
+  "required": ["results"],
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "subject": { "type": "string" },
+          "firstSentence": { "type": "string" },
+          "ssc": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string" },
+              "entities": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "adornment": { "type": "string" },
+          "adornments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["minterID", "text"],
+              "properties": {
+                "minterID": { "type": "string" },
+                "text": { "type": "string" }
+              }
+            }
+          },
+          "eventTime": { "type": "string" },
+          "score": { "type": "number" },
+          "room": { "type": "string" },
+          "content": { "type": "string" }
+        }
+      }
+    },
+    "capabilities": { "type": "object" }
+  }
+}
+```
+
+Before rendering, the shared composer calls GLK `activeAdornments` once with
+all result Drawer IDs. `adornment` is the exact text projected into the fifth
+column. `adornments` preserves the same contributing values as ordered
+`{minterID, text}` entries. Both properties are absent when no active stored
+adornment exists for that Drawer.
+
+Surface extensions (additional per-row properties):
+
+| Surface | Extension properties |
+|---|---|
+| connected recall | `retrievalSource`: `"anchor"` \| `"walk"` \| `"both"` |
+| distilled recall | `distilled` (string), `representation`: `"distilled"` \| `"contentFallback"` |
+| vague recall | `tier`: `"summary"` \| `"original"` |
+| federated search | `estateID` (string) |
+| memory get | `content` at the depths where the text carries it |
+| lens concepts / associations | `extent` / `exemplars`: full drawer-UUID arrays (the text preview caps at count + first 3; the structured arrays are complete) |
+
+Top-level `capabilities` object mirrors the control lines — keys:
+`discrimination` (`"low"` \| `"medium"`), `walk` (`{ "stage": string,
+"stoppedEarly": boolean }`), `temporal` (`{ "mode": string, "source":
+string, "grab": string, "from": string, "to": string, "widenedDays":
+integer }`), `degraded` (`true`). Each key is ABSENT when its control line
+does not render. Synthesis adds top-level `cues` (string array, the
+normalized terms) and `summary` (string).
+
+Structured tabular results (S6): `columns` (array of `{ "name": string,
+"type": "text" | "int" | "float" | "bool" }`) and `rows` (array of arrays
+of typed values, null for NULL) — values travel typed and exact.
+
+Contract rules: one entry per rendered text row, same order, same cap; an
+optional field is ABSENT when the text column renders `-` — never null,
+never empty-string; `score` is absent on S2; redaction parity per Spec
+§ 8.9; consumption rule per Spec § 8.9 (machine MUST structured; AI and
+presentation-shape experiments MAY text).
+
+### 11.11 Erasure results
+
+```text
+erased memory <id>
+```
+
+or:
+
+```text
+partially erased memory <id>: <N> accepted lineage sibling(s) refused erasure and remain readable: <ids>
+```
+
+### 11.12 Sensitivity advisory placement
+
+The advisory does NOT render in search/get payloads. Its text lives in:
+
+- the `moot_memory_search` and `moot_memory_get` tool descriptions in
+  `tools/list`;
+- the `moot_estate_status` body and its teachme orientation guide; and
+- onboarding documentation.
+
+The sentence (search form):
+
+```text
+sensitivity_advisory: a sensitivity tier gate is in effect — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.
+```
+
+The estate-status form inserts `on this estate` after `in effect`.
+`moot_estate_ping` never carries it. Presence in estate_status depends only
+on grant state, never on estate contents.
+
+## 12. Session interface
+
+### 12.1 Status protocol block
+
+Every `moot_estate_status` response includes:
+
+```text
+protocol:
+  — Call moot_estate_status with teachme:true for a full orientation guide.
+  — Call moot_list_lenses to see available cognition tools.
+  — Add teachme:true to any tool to learn it before using it.
+  — Watch for hint: lines in responses — they contain coaching for better results.
+  — File memories: moot_file_memory (content + subject + location required).
+  — Search memories: moot_memory_search (query required).
+  — Write journal entries: moot_write_journal after meaningful sessions.
+  — Store structured facts: moot_file_fact (subject + predicate + object).
+```
+
+### 12.2 Sync vocabulary
 
 | Backend | State | Token |
-|---------|-------|-------|
-| — (no engine registered) | — | `local-only` |
-| None (NoSyncEngine) | disabled | `none (idle)` |
-| None (NoSyncEngine) | enabled | `none (enabled, zone: <zone>)` |
-| None (NoSyncEngine) | syncing | `none (syncing, direction: <d>)` |
-| None (NoSyncEngine) | error | `none (error: <e>)` |
+|---|---|---|
+| no engine | — | `local-only` |
+| none | disabled | `none (idle)` |
+| none | enabled | `none (enabled, zone: <zone>)` |
+| none | syncing | `none (syncing, direction: <d>)` |
+| none | error | `none (error: <e>)` |
 | CloudKit | disabled | `cloudkit (idle)` |
 | CloudKit | enabled | `cloudkit (enabled, zone: <zone>)` |
 | CloudKit | syncing | `cloudkit (syncing, direction: <d>)` |
@@ -618,641 +1622,351 @@ The vocabulary is identical in both the Swift port (`runEstateStatus` in
 | Federation | syncing | `federation (syncing, direction: <d>)` |
 | Federation | error | `federation (error: <e>)` |
 
-**Rules:**
-- The token `"connected"` is **never** valid. If you see it, the code is stale.
-- The field key is `sync:`, not `status:`. The fabricated `status: connected`
-  literal must not appear in any response.
-- Federation v1.0 is in-process (no network transport). The `enabled` token
-  therefore says `in-process`, not `connected`, to accurately describe the
-  transport topology.
-- When no engine is registered (the default for all v1.0 deployments), the
-  token is `local-only` — the estate operates locally with no sync backend.
-- Both ports read from `GeniusLocusKit.syncStateToken(for:)` (Swift) /
-  `EstateCoordinator.sync_state_token(handle)` (Rust). The accessor path is
-  ARIA → GLK → ConvergenceKit; no layering inversion.
+The field key is `sync:`. `status: connected` is not part of this vocabulary.
+Trace-read failure renders `trace_rows: unavailable`, not zero. Drawer-derived
+aggregates use the bulk-exportable sensitivity ceiling.
 
-**`trace_rows:` field — fail-closed read:** the `moot_estate_status`
-response includes a `trace_rows:` line reporting the reward-pipeline read-log
-depth. On a successful read it is the integer count. On a `countRecallTraces`
-read **failure** the field reads the literal token `unavailable` — NOT a
-fabricated `0`, which would be indistinguishable from a genuinely empty trace
-table and would lie about reward-pipeline depth. The read failure does not
-break the rest of the status response (the other fields are still returned).
-Both ports identical (`runEstateStatus`, `run_estate_status`).
+### 12.3 Optional advisories
 
-**Drawer-derived aggregates — the sensitivity ceiling:** every value in the
-`moot_estate_status` body that is computed from a drawer set is computed from
-the *sensitivity-filtered* set — restricted and secret rows contribute to none
-of them. That is `memories: N active (M total)`, `subjects: N/M (K missing)`,
-and `wings:`. The predicate is `AdjectiveSensitivity.isBulkExportable` (Swift)
-/ `AdjectiveSensitivity::is_bulk_exportable` (Rust): true for `normal` and
-`elevated`, false for `restricted` and `secret`. It matches the ceiling
-`moot_estate_map` applies to its per-location counts and the one
-`moot_memory_list` applies before enumerating, so the subject-debt counter and
-the `filter:missing_subject` enumerator it directs the AI at report one
-population. `moot_estate_status` carries no sensitivity-grant plumbing, so
-every caller is an ungranted one and these counts never rise with a grant.
+`version_skew:` appears only when injected plugin/binary mismatch text exists.
+`update_available:` appears only when the host's cached provider reports a newer
+release. A resident provider uses a 24-hour cache, bounds a probe to roughly
+four seconds, caches failures as silence, and respects
+`MOOTX01_NO_UPDATE_CHECK`.
 
-The remaining fields count no drawer set and are therefore unfiltered:
-`kg facts:` (KGFact rows, whose sensitivity axis is their own), `trace_rows:`
-(recall-trace rows), `sync:`, `fdc_recalculation*`,
-`shared_content_migration:`, `version_skew:`, `update_available:`.
-
-An aggregate added to this response inherits the ceiling: derive it from the
-filtered set, or its magnitude discloses the size of a population the caller
-cannot see. Both ports identical.
-
-### Version-skew advisory (the connection-ownership contract §5)
-
-Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
-`version_skew: <text>` line — present only when the host detected a mismatch
-between an installed plugin and this running binary's version; absent
-entirely otherwise (not a fixed empty slot).
-
-**Detection:** the host reads `~/.claude/plugins/installed_plugins.json` for
-the `mootx01@mootx01` entry's `version` field and compares it against the
-running binary's own version. Checking at runtime (rather than only at
-install time) catches skew regardless of install order.
-
-**Field text:** ``plugin <pluginVersion> expects binary ≥ <pluginVersion>; binary is <binaryVersion> — run `mootx01 upgrade` ``.
-
-**Threading (mirrors the build-serial pattern exactly):**
-- Swift: `ToolDispatcher.versionSkewAdvisory: String?`, computed once by
-  `ServeCommand` via `MootInstallerCore.VersionSkewAdvisory.compute(pluginID:binaryVersion:homeDirectory:)`
-  and injected at construction. `nil` ⇒ no line appended.
-- Rust: `Dispatcher.version_skew: String`, computed once by
-  `commands::serve::run` via `core::mcp_ownership::version_skew_advisory(plugin_id, binary_version, home)`
-  and threaded through `dispatch_tool_with_vault_ledger` → `dispatch_tool_with_vault_ledger_and_flag`
-  → `interface_tools::dispatch` → `run_estate_ping` / `run_estate_status`.
-  Empty string ⇒ no line appended.
-- `aria-mcp-server` (both ports) has no plugin concept — always constructs
-  with the nil/empty default, so its responses never carry the field.
-
-This kit never reads `~/.claude/plugins/` or knows a product version
-itself — the host binary computes the advisory string and injects it,
-same separation of concerns as `buildSerial`/`serverIdentity`.
-
-### Upstream-release advisory (`update_available`)
-
-Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
-`update_available: <text>` line — present only when a newer product release
-exists on the release feed than the running binary; absent entirely
-otherwise. Sibling of `version_skew` (which reports LOCAL plugin/binary
-skew) and confined to the same two session-orientation tools on purpose:
-MCP clients orient with ping/status at session start, so one line there
-informs every client once without nagging on the other tools.
-
-**Field text:** ``v<latest> is available (installed <current>) — upgrade with `mootx01 upgrade` ``.
-
-**Threading — a provider, NOT a startup-computed string:** the resident
-daemon is long-lived and releases ship while it is running, so unlike
-`version_skew` the value cannot be computed once at startup. The host
-injects a closure the two tools evaluate lazily:
-- Swift: `ToolDispatcher.updateAdvisoryProvider: (@Sendable () async -> String?)?`,
-  wired by `ServeCommand` from `MootInstallerCore.UpdateAdvisor` (an actor
-  wrapping `ReleaseDownloader.latestTag()`).
-- Rust: `Dispatcher.update_advisory: Option<UpdateAdvisoryProvider>` via the
-  `with_update_advisory` builder, wired by `commands::serve::run` from
-  `core::update_advisor::UpdateAdvisor` (wrapping
-  `release::latest_version_within(Some(4))`).
-
-**Non-annoying / non-blocking contract (host-owned):** the advisor caches
-the probe result behind a 24h TTL (one release-feed hit per day per daemon,
-and only when ping/status is actually called), bounds a single probe to ~4s
-(a hung feed host cannot hold a ping), and collapses failures to silence
-AND caches them (an offline machine probes once per TTL window, not once
-per ping). `MOOTX01_NO_UPDATE_CHECK` disables the surface entirely — the
-same kill switch honored by the Claude Code plugin's SessionStart update
-hook (`moot_update_check.py`), so one documented variable turns off every
-update phone-home surface.
-
-**Scope:** resident daemons only. stdio one-shot serves and
-`aria-mcp-server` (both ports) never wire a provider — ping is documented
-as returning immediately, and plugin-capable hosts reach the resident over
-HTTP anyway (the connection-ownership contract §2).
-
-### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
-
-Static string constant appended unconditionally to every
-`moot_estate_status` response. Defined in `SessionProtocol.swift` as an
-extension on `ToolDispatcher`. Identical across every call and estate state.
+### 12.4 Modes public types
 
 ```swift
-extension ToolDispatcher {
-    static let ARIASessionProtocol: String
-    // Appended after the stats block in runEstateStatus.
-    // Contains the protocol: section with the eight surface-entry hints.
+public enum MootMode: String, CaseIterable, Sendable {
+    case recall = "Recall"
+    case filing = "Filing"
+    case lenses = "Lenses"
+    case vault = "Vault"
+    case curator = "Curator"
+}
+
+public enum RecallVariant {
+    case auto, rows, answer
+}
+
+public struct ModeDeclaration {
+    public let modeName: String
+    public let variant: String?
+    public static func parse(_ raw: String) -> ModeDeclaration
+}
+
+public actor ModeSessionState: Sendable {
+    public var stickyEnabled: Bool
+    public var coachingCallsX: Int
+    public func recordCall(toolName: String, mode: ModeDeclaration?) -> Int
+    public func shouldCoach() -> Bool
+    public var snapshot: CoachingSnapshot { get }
 }
 ```
 
-### Teachme guides — `TeachmeGuides`
+Coaching snapshots carry total calls, per-tool counts, bigram counts, and mode
+attribution. `PeriodicCoach` renders the deterministic block pinned by
+`Tests/Conformance/modes_coaching_fixture.json`.
 
-Static per-tool usage guides. Called by `ToolDispatcher.dispatch` when
-`teachme: true` is present. No instances; no estate access.
+### 12.5 Coaching triggers
 
-```swift
-enum TeachmeGuides {
-    static func guide(for toolName: String) -> String
-    // Per-tool guide for all 20 Tier 1–5 tools and moot_federated_search.
-    // moot_estate_status returns the ten-tier orientation guide.
-    // Generic guide for lens, recipe, migration, and vault tools.
-    // Fallback for unknown names: "Unknown tool '…'. Call moot_estate_status…"
+| Tool | Trigger |
+|---|---|
+| `moot_memory_search` | no query, query over 200 characters, or zero memories |
+| `moot_file_memory` | content over 4,000 characters or duplicate result |
+| `moot_erase_memory` | confirmation absent or false |
+| `moot_confirm_migration` | disqualified branch result |
+| `moot_link_memories` | unresolved IDs |
+| any lens | zero results |
+
+Hints never attach to error results. The first matching trigger wins.
+
+## 13. Auxiliary HTTP endpoints
+
+### 13.1 Read endpoints
+
+```text
+GET /api/graph
+GET /api/lattice
+GET /api/admin/estates
+```
+
+All accept no body and ignore query strings for routing.
+
+**Graph response**
+
+```json
+{
+  "nodes": [
+    {
+      "id": "<drawer UUID>",
+      "nounType": 0,
+      "communityId": 3,
+      "centrality": 0.42,
+      "anomaly": false,
+      "lastActiveTs": "<ISO-8601>",
+      "createdTs": "<ISO-8601>",
+      "tombstonedTs": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "<drawer UUID>",
+      "target": "<drawer UUID>",
+      "edgeType": "tunnel",
+      "weight": 1.0,
+      "decayedWeight": 1.0,
+      "createdTs": "<ISO-8601>",
+      "tombstonedTs": null
+    }
+  ],
+  "structurePending": false,
+  "communities": [
+    { "id": 3, "size": 17, "dominantUdcCode": "652" }
+  ],
+  "generatedTs": "<ISO-8601>"
 }
 ```
 
-### Coaching engine — `CoachingEngine`
+`edgeType` is `tunnel`, `kgFact`, or `lattice`. A pending response has empty
+arrays and omits `generatedTs`.
 
-Inspects completed tool calls and returns a hint string when a suboptimal
-call pattern is detected. Called by `ToolDispatcher.dispatch` after the
-runner returns, before the result is sent. Nil means no hint warranted.
-Hints are never appended to error results (`isError: true`).
+**Lattice response**
 
-```swift
-enum CoachingEngine {
-    static func hint(
-        name: String,
-        args: [String: JSONValue],
-        resultText: String
-    ) -> String?
+```json
+{
+  "addresses": [
+    { "code": "006.6", "count": 12 }
+  ]
 }
 ```
 
-Coaching triggers (see SPEC §12 for the full table):
-`moot_memory_search` — long query, no query, zero results;
-`moot_file_memory` — content over 4000 chars, duplicate content;
-`moot_erase_memory` — confirmed absent or false;
-`moot_confirm_migration` — disqualified branch;
-`moot_link_memories` — IDs not found;
-any lens tool — zero results.
+A lattice read failure is HTTP 503 with
+`{"error":"lattice read failed","degraded":true}`.
 
-`moot_erase_memory` response contract (MXE-FA): full erasure returns
-`erased memory <id>`; a lineage expunge the audit gate refused for accepted
-siblings returns `partially erased memory <id>: <N> accepted lineage
-sibling(s) refused erasure and remain readable: <ids>` (`isError: false` —
-completed operation, partial outcome; SPEC § Partial-erase honesty). Both
-ports emit the same text; the teachme guide documents both shapes.
+**Hosted-estates response**
 
-### Dispatch — `ToolDispatcher`
+```json
+{
+  "hosted": [
+    {
+      "estateUUID": "<UUID>",
+      "estateName": "<name>",
+      "kind": "GLK",
+      "backend": "SQLite",
+      "mountState": "mounted"
+    }
+  ]
+}
+```
 
-Routes a `tools/call` against one or more locally-open GeniusLocusKit
-estates (by optional `estateID`; absent ⇒ default). Dispatch order:
-teachme pre-check → federation → recipe → lens → vault → interface →
-methodNotFound → hint injection.
+Backend is `SQLite`, `PostgreSQL`, or `InMemory`. Unknown GET paths return
+HTTP 404 `{"error":"not_found"}`.
+
+### 13.2 Sensitivity control
+
+```text
+POST /api/control/unlock
+POST /api/control/lock
+```
+
+Unlock request:
+
+```json
+{ "tier": "restricted", "proof": { "ts": 1787670000000 } }
+```
+
+Legal tiers are `restricted` and `secret`. The user-facing CLI alias `private`
+maps to `restricted`.
+
+The legacy source documents record this success shape:
+
+```json
+{ "granted": true, "expires_at": "<ISO-8601>" }
+```
+
+Lock accepts `{}` and records:
+
+```json
+{ "locked": true }
+```
+
+Error statuses are 400 for unknown tier, 403 for stale proof, and 500 for other
+server errors. These shapes remain unreconciled inputs pending reconciliation with
+the generated/implemented endpoint fixtures; see §17.
+
+## 14. Public implementation types
+
+### 14.1 Dispatcher and servers
 
 ```swift
 public struct ToolDispatcher: Sendable {
     public let kit: GeniusLocusKit
     public let handle: EstateHandle
     public init(kit: GeniusLocusKit, handle: EstateHandle)
-    public func registering(_ additional: EstateHandle) -> ToolDispatcher   // value-semantic add
+    public func registering(_ additional: EstateHandle) -> ToolDispatcher
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
-    public static let federatedSearchToolName: String   // "moot_federated_search"
-    public static func textResult(_ text: String) -> JSONValue   // MCP success, isError:false
-    public static func errorResult(_ text: String) -> JSONValue  // MCP result, isError:true
+    public static func textResult(_ text: String) -> JSONValue
+    public static func errorResult(_ text: String) -> JSONValue
 }
-```
 
-### Server — `ARIA_MCPDispatcher` / `StdioServer` / `HTTPServer`
-
-The transport-neutral method router and the two transports that drive it: the
-newline-delimited stdio loop and the loopback HTTP (Streamable-HTTP) transport.
-
-```swift
 public struct ARIA_MCPDispatcher: Sendable {
-    public struct ServerInfo: Sendable { public let name: String; public let version: String
-                                         public init(name: String, version: String) }
+    public struct ServerInfo: Sendable {
+        public let name: String
+        public let version: String
+    }
     public let info: ServerInfo
     public let tools: [ProjectedTool]
     public let tooling: ToolDispatcher
-    public init(info: ServerInfo, tooling: ToolDispatcher)
-    // Handles initialize / ping / tools/list / tools/call; nil for notifications.
     public func handle(_ request: JSONRPCRequest) async -> JSONRPCResponse?
 }
 
 public struct StdioServer {
     public let dispatcher: ARIA_MCPDispatcher
-    public init(dispatcher: ARIA_MCPDispatcher)
-    public func run(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) async
-    public func handleFrame(_ frame: Data, output: FileHandle) async
-    public func write(_ response: JSONRPCResponse, to output: FileHandle)
+    public func run(input: FileHandle, output: FileHandle) async
 }
 
-// Loopback Streamable-HTTP transport (v1.0). POST JSON-RPC -> application/json
-// via the same dispatcher; loopback-only bind; no auth (CE) but a CSRF/DNS-rebinding
-// Origin guard (non-loopback Origin -> 403). Rust mirror: rust/src/http_server.rs.
 public struct HTTPServer: Sendable {
     public let dispatcher: ARIA_MCPDispatcher
-    public let port: UInt16            // default 4242; 0 = OS-assigned (tests)
-    public let maxBodyBytes: Int       // default 4 MiB
-    public init(dispatcher: ARIA_MCPDispatcher, port: UInt16 = 4242, maxBodyBytes: Int = 4 * 1024 * 1024)
-    public func run() async throws     // resident; returns only on bind failure
-    public func bind() throws -> (fd: Int32, port: UInt16)   // bind without accepting (tests)
-}
-
-// Resident autonomic governor. Drives dreaming + maintenance (NeuronKit) and
-// the standing-signal scheduler (GLK) on each daemon's own cadence; `now` is
-// injected once per tick (the loop is the only scheduler; daemons never read the
-// clock). Spawned alongside HTTPServer in resident mode; stdio does not pump.
-// In-memory cadence policy in P2 (manifest store is P3). Base tick env
-// MOOTX01_BRAIN_TICK_MS (default 5000ms).
-public actor BrainPump {
-    public init(kit: GeniusLocusKit, handle: EstateHandle,
-                baseTickMs: Int = 5000, clock: @escaping @Sendable () -> Date = { Date() })
-    public func run() async                 // loops until the task is cancelled (shutdown)
-    public struct TickReport: Sendable {
-        public let dreamingFired: Bool; public let maintenanceFired: Bool; public let signalsTicked: Bool
-    }
-    @discardableResult public func tick(now: Date) async -> TickReport   // one iteration (tests)
+    public let port: UInt16
+    public let maxBodyBytes: Int
+    public func run() async throws
+    public func bind() throws -> (fd: Int32, port: UInt16)
 }
 ```
 
-#### Rust governor — standing-signal harness
-
-The Rust `AutonomicGovernor` (`rust/src/autonomic_governor.rs`) OWNS this
-estate's standing-signal scheduler (a GLK `SerialLaneScheduler<CoordinatorDispatcher>`)
-and ticks it each iteration, mirroring the Swift governor's
-`kit.signalTick(in:handle:now:)`. The scheduler lives in the governor (not the
-GLK coordinator) because the production dispatcher holds an
-`Arc<Mutex<EstateCoordinator>>`; a coordinator-owned scheduler would close a
-reference cycle. The scheduler drives propose/associate/diagnostic emissions
-only; the recall-cache PRODUCERS are governor DUTIES (the scheduler emission model
-cannot register a cache). The graph-centrality producer duty
-(`graph_centrality_duty`, fired on a cadence inside `tick`) reads the estate
-structure graph, computes per-drawer eigenvalue centrality via
-`neuron_kit::keystones`, and registers a `GraphCache` on the coordinator —
-`GovernorReport` gains `pub graph_centrality_fired: bool`. The Swift mirror is
-`AutonomicGovernor.graphCentralityScan` with `GovernorReport.graphCentralityFired`.
-The standing-signal registration methods remain the scheduler seam:
-
-```rust
-impl AutonomicGovernor {
-    // Register the architecture-spec §11.2 default standing signals. Reads the
-    // live VectorStore via EstateCoordinator::vector_store_for; returns Err when
-    // none is registered so the caller log-and-skips (no fabricated store).
-    // model_id matches the Swift resident default ("minilm-v6").
-    pub fn register_default_standing_signals(
-        &mut self, model_id: impl Into<String>, now: SystemTime,
-    ) -> Result<Vec<(String, SchedulerSignalID)>, String>;
-    // Register one custom signal; lazily mints the scheduler on first call.
-    pub fn register_standing_signal(
-        &mut self, spec: SchedulerSignalSpec, now: SystemTime,
-    ) -> SchedulerSignalID;
-    pub fn signal_status(&self) -> Vec<SchedulerSignalReport>;   // empty when no scheduler
-    pub fn open_signal_count(&self) -> usize;                    // 0 when no scheduler
-    pub fn signal_request_fire(                                  // event/condition triggers
-        &mut self, id: &SchedulerSignalID, now: SystemTime,
-    ) -> Result<(), SchedulerError>;
-}
-// GovernorReport gains `pub signals_ticked: bool` — true once a scheduler is
-// registered and ticks; false on the benign no-scheduler skip (parity with the
-// Swift TickReport.signalsTicked). The resident HTTP bootstrap (rust/src/runtime.rs)
-// calls register_default_standing_signals once at startup; stdio mode does not.
-```
-```
-
-### Logging
+### 14.2 Governor
 
 ```swift
-public enum Logging {
-    public static let osLog: Logger          // subsystem "com.mootx01.kit", category "AriaMCP"
-    public static let stderr: StderrLogger
+public actor BrainPump {
+    public init(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        baseTickMs: Int = 5000,
+        clock: @escaping @Sendable () -> Date = { Date() }
+    )
+    public func run() async
+    @discardableResult public func tick(now: Date) async -> TickReport
 }
-public struct StderrLogger: Sendable { public init(); public func log(_ message: String) }
 ```
 
-### Recall discrimination — `DiscriminationLevel` / `RecallDiscrimination`
+The Rust `AutonomicGovernor` owns its serial-lane standing-signal scheduler and
+exposes registration, status, open-count, and request-fire operations. Resident
+bootstrap registers the default signals once; stdio does not.
 
-A relative-gap confidence estimate appended to ranked recall results. Classifies
-how well the top hit separates from the rest of the list using a relative gap
-ratio (scale-independent), composed with a saturation discount when the semantic
-vector lane is dark (dense-lane-dark cap). Applied by `moot_memory_search`,
-`moot_recall_precise`, and `moot_recall_shaped`. This is a confidence estimate
-of relative separation — it says nothing about whether the leading result is
-the correct answer. Swift and Rust thresholds are named constants mirrored
-verbatim; any change must update both ports simultaneously.
-
-A second signal, `DistilledDiscriminationLevel`, is used by `moot_recall_distilled`
-and maps to the same wire prefix (`discrimination: `) — both signals share the
-`high/medium/low/n/a` ladder but classify different rank geometry (exact-search
-originals vs distilled representations). See `moot_recall_distilled` output
-format for the distilled variant.
+### 14.3 Supporting types
 
 ```swift
 public enum DiscriminationLevel: Sendable, Equatable {
-    case single    // fewer than two results — nothing to compare
-    case high      // top result clearly separated (topGap >= HIGH_MARGIN = 0.25)
-    case medium    // partial separation
-    case low       // top results within epsilon — effectively unranked
-    case notFound  // distinctive query tokens with zero candidate matches
+    case single, high, medium, low, notFound
 }
+
 public enum RecallDiscrimination {
     public static func classify(_ scores: [Double]) -> DiscriminationLevel
-    // Returns a result-line string for the given level. When denseLaneDark is
-    // true the classification is capped at .medium (saturation discount applied)
-    // and a caveat is appended.
-    public static func resultLine(for level: DiscriminationLevel, denseLaneDark: Bool = false) -> String
+    public static func resultLine(
+        for level: DiscriminationLevel,
+        denseLaneDark: Bool = false
+    ) -> String
 }
-```
 
-### Monitoring control — `MonitoringControl`
-
-Injection seam for daemon telemetry monitoring state. Defined in AriaMcpKit;
-the concrete implementation (`StatsStoreMonitoringControl`) lives in the serve
-host layer (AriaResident in Swift, `http_server.rs` in Rust), keeping AriaMcpKit
-free of ObserverSink / IntellectusLib. The `moot_monitoring_status` tool reads
-and optionally writes through this seam. `nil` from `read()` means a transient
-store error or no store wired — reports `"monitoring: unavailable"`, never
-fabricates a state.
-
-```swift
 public protocol MonitoringControl: Sendable {
-    func read() async -> Bool?      // nil on transient error or no store
-    func set(_ enabled: Bool) async // best-effort; errors logged by implementation
+    func read() async -> Bool?
+    func set(_ enabled: Bool) async
 }
-```
 
-### Sensitivity tiers — `SensitivityTier`
-
-The two lockable sensitivity tiers governed by the sensitivity-unlock policy. Used as the
-`tier` discriminator in the `/api/control/unlock` POST body and in
-`SensitivityGrantLedger` method signatures (§4.6). Raw string values
-match the JSON wire values accepted by the unlock endpoint.
-
-```swift
 public enum SensitivityTier: String, Sendable, Equatable, CaseIterable {
-    case restricted   // raw: "restricted" — expires at next local midnight
-    case secret       // raw: "secret"    — expires 30 min after grant (fixed, non-sliding)
+    case restricted
+    case secret
 }
-```
 
-Rust mirror: `pub enum SensitivityTier` in `sensitivity_grant_ledger.rs`, same
-two cases and raw-string wire values.
-
-### Classification scheme — `ClassificationScheme`
-
-The lattice-anchor classification scheme discriminator. Accepted by
-`moot_file_memory` (and other capture paths) as the optional
-`classificationScheme` argument. Absent defaults to `.udc`, preserving
-prior bare-UDC behavior. The substrate's `LatticeAnchor` does not yet carry
-a scheme tag — this type validates and echoes the scheme at the ARIA boundary.
-
-```swift
 public enum ClassificationScheme: String, Sendable, CaseIterable {
-    case udc    // raw: "udc"  — Universal Decimal Classification (default)
-    case mdcc   // raw: "mdcc" — MOOTx01 Decimal Content Classification
+    case udc
+    case mdcc
+}
+
+public enum Logging {
+    public static let osLog: Logger
+    public static let stderr: StderrLogger
 }
 ```
 
-Rust mirror: `pub enum ClassificationScheme` in `ToolDispatch` module,
-same two cases and raw-string values.
+## 15. Package and dispatch map
 
-## § 3 — Public functions
+### 15.1 Swift
 
-MCP methods are routed by `ARIA_MCPDispatcher.handle(_:)`:
-`initialize` (echoes `protocolVersion`, advertises the `tools`
-capability), `ping`, `tools/list` (from `ToolProjection.tools()`),
-`tools/call` (→ `ToolDispatcher.dispatch(name:arguments:)`). The
-`aria-mcp` executable wires a `GeniusLocusKit` estate into a
-`ToolDispatcher`, builds an `ARIA_MCPDispatcher`, and runs the selected
-transport: `StdioServer.run()` by default, or `HTTPServer.run()` when
-`MOOTX01_HTTP_PORT` is set. Behavioral contracts: SPEC.
+`packages/kits/AriaMcpKit/` contains:
 
-## § 4 — Errors
+| Location | Responsibility |
+|---|---|
+| `Sources/AriaMCP/JSONRPC.swift` | envelopes and error codes |
+| `Sources/AriaMCP/JSONValue.swift` | wire JSON value |
+| `Sources/AriaMCP/Server.swift` | dispatcher and stdio server |
+| `Sources/AriaMCP/HTTPServer.swift` | loopback HTTP and auxiliary endpoints |
+| `Sources/AriaMCP/BrainPump.swift` | resident governor |
+| `Sources/AriaMCP/ToolProjection.swift` | generated tool descriptors |
+| `Sources/AriaMCP/ToolDispatch.swift` | estate routing and interface runners |
+| `Sources/AriaMCP/RecipeTools.swift` | recipe tools |
+| `Sources/AriaMCP/LensTools.swift` | reasoning lenses |
+| `Sources/AriaMCP/VaultTools.swift` | vault tools |
+| `Sources/AriaMCP/DatasetTools.swift` | dataset tools |
+| `Sources/AriaMCP/TeachmeGuides.swift` | static guides |
+| `Sources/AriaMCP/CoachingEngine.swift` | deterministic hints |
+| `Sources/AriaMCP/MemoryToolAdapter.swift` | optional Anthropic adapter |
+| `Sources/aria-mcp/AriaMCPMain.swift` | executable entry point |
+| `Tests/AriaMCPTests/` | Swift conformance and integration tests |
 
-```swift
-public struct JSONRPCError: Sendable, Equatable, Error { public let code: Int; public let message: String }
-public enum JSONValueError: Error, Equatable
-```
-Protocol faults (unknown tool, malformed arguments, unknown
-`estateID`) surface as JSON-RPC errors. Every failure of a call that
-reached its runner — substrate refusals (`VerbError`,
-`GeniusLocusKitError`) and unexpected runner errors (filesystem,
-adapter) alike — comes back as a `tools/call` result with
-`isError: true` so the client keeps the call id and the model sees the
-failure description (clients render a thrown JSON-RPC error as a bare
-"failed to call tool" and discard the message). The server also mirrors
-unexpected runner errors to stderr for daemon-side diagnosis.
-`toolDispatchFailure` (-32010) remains defined but is an internal
-marker on the Rust leg, never emitted on the wire. See SPEC § 6.
+The shipped macOS runtime is the `mootx01` executable under `apps/mootx01`.
+`ProxyCommand.swift` implements the stdio-to-HTTP bridge.
 
-## § 4.5 — Side-channel GET endpoints (HTTP transport only)
+### 15.2 Rust
 
-Three read-only GET endpoints are available on both the Swift and Rust HTTP
-transports. They share the CSRF/DNS-rebinding Origin guard. The stdio transport
-does not expose these endpoints. See SPEC §18 for behavioral contracts.
+`packages/kits/AriaMcpKit/rust/` is the wire-contract peer. Important modules
+include `dispatcher.rs`, `tool_list.rs`, `interface_tools.rs`,
+`recipe_tools.rs`, `dataset_tools.rs`, `memory_adapter.rs`, `http_server.rs`,
+and `autonomic_governor.rs`.
 
-```
-GET /api/graph
-GET /api/lattice
-GET /api/admin/estates
-```
+### 15.3 Dispatch order
 
-### Swift
-
-Implemented as `latticeSnapshot(dispatcher:)`, `graphSnapshot(topologyReader:)`,
-and `adminEstatesSnapshot(dispatcher:)` in `HTTPServer.swift`, called from the
-`route(_:)` function before the POST guard.
-
-### Rust
-
-Implemented as `get_lattice_snapshot`, `get_graph_snapshot`, and
-`get_admin_estates_snapshot` in `rust/src/http_server.rs`, called from `route()`
-before the POST guard. Both ports access `EstateRegistry.default.store` directly
-via `all_drawers()` and `all_tunnels()` (synchronous in Rust; async via LocusEstate
-in Swift).
-
-### Request shape
-
-All three endpoints accept `GET <path> HTTP/1.1` with no body. Query strings are
-stripped from the path before routing; no query parameters are consumed.
-
-### Response shapes
-
-**`GET /api/graph` → 200 `application/json`**
-```json
-{
-  "nodes": [
-    { "id": "string (drawer UUID)",
-      "nounType": 0,
-      "communityId": 3,
-      "centrality": 0.42,
-      "anomaly": false,
-      "lastActiveTs": "ISO8601",
-      "createdTs": "ISO8601",
-      "tombstonedTs": "ISO8601 | null" }
-  ],
-  "edges": [
-    { "source": "string (drawer UUID)",
-      "target": "string (drawer UUID)",
-      "edgeType": "tunnel | kgFact | lattice",
-      "weight": 1.0,
-      "decayedWeight": 1.0,
-      "createdTs": "ISO8601 | null",
-      "tombstonedTs": "ISO8601 | null" }
-  ],
-  "structurePending": false,
-  "communities": [
-    { "id": 3, "size": 17, "dominantUdcCode": "652" }
-  ],
-  "generatedTs": "ISO8601"
-}
-```
-Serving model: the handler reads the materialized topology snapshot from
-`topology_snapshots` in the ObserverSink stats store (one row per estate,
-written by the autonomic governor on its cadence). Target latency <50 ms
-(SQLite read). `structurePending: true` (with empty `nodes`/`edges`/
-`communities`) is returned before the governor's first duty cycle completes —
-the honest pending state, not a fallback compute. No inline compute path exists.
-`generatedTs` carries the ISO-8601 instant the governor produced the snapshot.
-Tombstoned drawers and tunnels ARE included in the stored payload, carrying
-`tombstonedTs` (alive entities carry an explicit `null`); all Louvain/centrality
-math in the governor runs over live entities only. kgFact edges (shared-subject
-bonds, weight 0.3) ship with null timestamps. Full field semantics:
-ARIA_MCP_SPEC.md § response shapes;
-analysis contract: NEURONKIT_SPEC.md § TOPOLOGY_ANALYSIS.
-
-**`GET /api/lattice` → 200 `application/json`**
-```json
-{
-  "addresses": [
-    { "code": "string (UDC/MDCC code)", "count": 3 }
-  ]
-}
-```
-Sorted by `count` descending; ties broken by `code` ascending for determinism.
-Tombstoned drawers excluded. Unanchored drawers (empty `udc_code`) excluded.
-A genuinely empty estate (read succeeds, zero anchored drawers) returns
-`200 {"addresses":[]}`. A store **read failure** returns
-`503 {"error":"lattice read failed","degraded":true}` — NOT a fabricated
-empty-200, which would be indistinguishable from a genuinely empty estate.
-Both ports identical (`latticeSnapshot`, `get_lattice_snapshot`).
-
-**`GET /api/admin/estates` → 200 `application/json`**
-```json
-{
-  "hosted": [
-    { "estateUUID": "string (UUID)",
-      "estateName": "string",
-      "kind": "GLK",
-      "backend": "SQLite | PostgreSQL | InMemory",
-      "mountState": "mounted" }
-  ]
-}
-```
-`estateName` is the human-readable name in Swift (from GeniusLocusKit); the UUID
-string in Rust (Rust EstateRegistry stores no separate name). `backend` inferred
-from env vars (`ARIA_MCP_POSTGRES_URL` / `ARIA_MCP_SQLITE_PATH` / neither →
-`InMemory`). `mountState` is always `"mounted"`. Empty `{"hosted":[]}` on
-serialization failure.
-
-### Unknown path
-
-`GET <anything-else>` returns HTTP 404 `{"error":"not_found"}`.
-
-## § 4.6 — Sensitivity control POST endpoints (HTTP transport only, the sensitivity-grant contract)
-
-Two write-only POST endpoints accept out-of-band sensitivity grants and revocations.
-Both ports (Swift + Rust) share the same CSRF/DNS-rebinding Origin guard as the
-MCP JSON-RPC endpoint. The stdio transport does not expose these endpoints. See
-ARIA_MCP_SPEC.md §19 for the full behavioral contract.
-
-```
-POST /api/control/unlock
-POST /api/control/lock
+```text
+teachme pre-check
+  → federation
+  → recipe
+  → lens
+  → vault
+  → interface
+  → methodNotFound
+  → hint and mode/coaching decoration
 ```
 
-### Swift implementation
+## 16. Errors and conformance
 
-```swift
-// HTTPServer.swift — route(_ request:) dispatch
-case .unlock: return try await handleUnlock(request)
-case .lock:   return await handleLock()
+### 16.1 Error boundary
 
-// SensitivityGrantLedger.swift
-struct SensitivityGrantLedger: Sendable {
-    func ceiling_sensitivity(now: Date) -> AdjectiveSensitivity?
-    func grant(tier: SensitivityTier, expiresAt: Date) async
-    func revokeAll() async
-}
-```
+Protocol faults are JSON-RPC errors. Runner failures are `tools/call` results
+with `isError: true`. `toolDispatchFailure` remains an internal marker and is
+not a public wire code.
 
-CLI entry point (macOS only): `UnlockCommand.swift` / `LockCommand.swift`
-(`apps/mootx01/Sources/mootx01/Commands/`). Uses `LocalAuthenticationAuthority`
-(`LAContext.evaluatePolicy(.deviceOwnerAuthentication)`).
+### 16.2 Swift
 
-### Rust implementation
-
-```rust
-// http_server.rs — route() dispatch
-"/api/control/unlock" => handle_unlock(&body, &state),
-"/api/control/lock"   => handle_lock(&state),
-
-// sensitivity_grant_ledger.rs
-pub fn ceiling_sensitivity(&self, now_ms: i64) -> Option<AdjectiveSensitivity>
-pub fn grant(&self, tier: SensitivityTier, expires_at_ms: i64)
-pub fn revoke_all(&self)
-```
-
-CLI entry point: `commands::unlock::{run_unlock, run_lock}`. Uses
-`core::unlock_authority::authenticate_and_grant` — reads `sensitivity_hashes.json`
-sidecar, prompts for password (echo-off), verifies PBKDF2-HMAC-SHA256.
-
-### Request/response shapes
-
-**`POST /api/control/unlock`**
-
-Request:
-```json
-{ "tier": "restricted" | "secret", "proof": { "ts": <unix_ms as integer> } }
-```
-
-Success (HTTP 200):
-```json
-{ "granted": true, "expires_at": "ISO-8601" }
-```
-
-**`POST /api/control/lock`**
-
-Request: `{}`
-
-Success (HTTP 200):
-```json
-{ "locked": true }
-```
-
-**Error responses (both endpoints):**
-
-| HTTP | Body | Condition |
-|------|------|-----------|
-| 400 | `{"error":"unknown tier"}` | `tier` is not `"restricted"` or `"secret"` |
-| 403 | `{"error":"proof stale"}` | `|now_ms - proof.ts| > 10_000` |
-| 500 | `{"error":"<message>"}` | Any other server error |
-
-## § 5 — Conformance test entry points
-
-```
+```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   swift test --package-path packages/kits/AriaMcpKit
 ```
 
-(Targets: `AriaMCPTests` — JSON-RPC, stdio framing, HTTP transport
-(`HTTPServerTests`, loopback round-trips), server, five-tier
-tool projection, connection dispatch, file-memory validation, KG and
-journal dispatch, multi-estate routing, recipe/lens tools, vault tools,
-teachme guides and coaching hints.)
+Coverage includes JSON-RPC, framing, HTTP, projection, dispatch, memory, facts,
+journal, multi-estate routing, recipes, lenses, vault, datasets, teachme,
+coaching, modes, structured recall, and resident behavior.
 
-```
+### 16.3 Rust
+
+```sh
 cargo test --manifest-path packages/kits/AriaMcpKit/rust/Cargo.toml
 ```
 
-(Rust test targets: `dispatch_tests`, `jsonrpc_tests`, `persistence_tests`,
-`stdio_framing_tests`, `http_transport_tests`, `autonomic_governor_tests`,
-`dataset_tools` coverage in `dispatch_tests`, and additional integration
-test modules. Tool census: 74 vault-on, 67 vault-off on the Rust wire
-surface; the Swift surface carries 4 additional packet tools (FAB5-I2) —
-78/71. Run `cargo test` for the current pass count.)
+Coverage includes JSON-RPC, framing, dispatch, persistence, HTTP transport,
+governor, dataset, structured recall, modes, and integration modules.
 
-## § 6 — Examples
+### 16.4 Construction example
 
 ```swift
 import AriaMCP
@@ -1262,801 +1976,142 @@ let dispatcher = ARIA_MCPDispatcher(
     info: .init(name: "aria-mcp", version: "1.0.0"),
     tooling: ToolDispatcher(kit: kit, handle: estate)
 )
-await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC over stdio
+
+await StdioServer(dispatcher: dispatcher).run()
 ```
 
----
+## 17. Source reconciliation
 
-*End of aria-mcp Interface.*
+Transition record of the 2.0.0 consolidation: source material was
+preserved without silently selecting among
+conflicting snapshots:
+
+| Source difference | Treatment |
+|---|---|
+| Tool counts differ across interface prose, verb taxonomy, changelogs, ports, and feature gates | Generated `tools/list` is the release census; prose is organized without a fixed total |
+| `ARIA_VERB_FAMILIES.md` predates temporal, connected, walk, and later maintenance tools | Later additions are placed in the nearest ratified family/tier and remain explicitly named |
+| Older dense-row vocabulary has five fields; later candidate-row contract has seven components | §11 carries the decided seven-column canonical row (fixed columns, R16); superseded renderings are conformance-backlog defects per Spec §13.3, not documented variants |
+| Spec and Interface both describe endpoint behavior and wire forms | Behavioral rules moved to Spec §12; serialization stays here in §13 |
+| Spec and Interface both describe tool semantics | Behavioral invariants moved to Spec; names/args/replies/follow-ups remain in §§5–10 |
+| Main documents contain large historical changelogs | Histories externalized: ARIA_MCP_SPEC_CHANGELOG.md and ARIA_MCP_INTERFACE_CHANGELOG.md carry the full ladders |
+| Source unlock response examples and implementation fixtures require reconciliation | Legacy shapes are labeled unreconciled inputs rather than silently asserted as resolved (conformance-backlog item) |
+
+Names found only in legacy or supporting prose are retained here rather than
+misrepresented as current projected tools:
+
+- `moot_estate_reconnect` is the retired name whose rationale is captured by
+  `moot_estate_ping` in Spec §14.1;
+- `moot_recollect` is a retired notice-only stub queued for removal at the next
+  major version;
+- `moot_update_check.py` is an update-check hook, not an MCP tool; and
+- `moot_vault_*` is prose shorthand for the five explicitly listed vault tools,
+  not an additional tool name.
 
 ## Changelog
 
-### 1.49.0 -- 2026-08-18
-
-- **`ProviderPreference` record (MACD-3B2, dark Wave 1).** New public value
-  type in `MootDaemonProvider`.  Fields (P1 exact set): `preferredKind:
-  ProviderKind`, `preferenceGeneration: UInt64`, `issuingIdentity:
-  SigningIdentityDescriptor`, `issuedAt: UInt64`,
-  `lastCompletedHandoverGeneration: UInt64`, `preferenceMAC: [UInt8]`.  No
-  estate key, bearer credential, capability inventory, or migration bookmark.
-  Static `preferenceKey(installationRoot:)` derives K_preference via
-  HKDF-SHA256 with domain `"MOOTX01-PROVIDER-PREFERENCE-v1"` and zero salt
-  (both legitimate writers derive independently from K_install — no per-write
-  challenge to bind).  `macInput()` encodes all five fields via
-  `CanonicalEncoder`.  `signing(installationRoot:)` and
-  `verifyMAC(installationRoot:)` (constant-time).  `encoded()` produces
-  canonical sorted-key JSON with 8 exact keys.  `decode(_:)` uses
-  `strictJSONObject(expected:)` — extra or missing keys return nil (fail-closed).
-
-- **`ProviderPreferenceObservation` enum (MACD-3B2).** Arbiter-facing summary:
-  `.none` / `.verified(preferredKind: ProviderKind, preferenceGeneration:
-  UInt64)` / `.invalid`.  Never carries raw MAC bytes.
-
-- **`ProviderPreferenceStore` (MACD-3B2).** Durable store: atomic replace via
-  `SecureFiles.atomicReplace`, fail-closed reads (unreadable / malformed /
-  MAC-invalid / monotonic rollback → `.none` or `.invalid`, never permissive),
-  monotonic generation enforcement on write (equal-or-lower generation refused
-  with `DaemonProviderError.generationFault(.overflow)`) and on read
-  (`minimumExpectedGeneration` parameter).  Lock-free: no provider lock required
-  (the preference sits below the lock in the authority hierarchy).
-
-- **`ArbiterObservation` extended (MACD-3B2).** Gains `preference:
-  ProviderPreferenceObservation` (default `.none`) and six explicit repair-gate
-  Bool inputs (all default `false`, fail-closed): `noAuthenticatedLockOwner`,
-  `noHandoverInProgress`, `bundledArtifactAbsentOrUnusable`, `unambiguousCensus`,
-  `directProviderSchemaCompatible`, `generationRollbackChecksPassed`.  All
-  existing call sites compile unchanged (keyword-only, all-defaults init).
-
-- **`ProviderArbiter.arbitrate(_:)` authority-level-4 branch (MACD-3B2).**
-  After the dual-registration conflict check, when ALL six repair conditions
-  are `true` AND preference is `.verified(.standalone)`, the dual-registration
-  conflict is resolved to `.standaloneRegistered`.  A `.bundled` preference can
-  never satisfy the repair gate: `bundledArtifactAbsentOrUnusable` is a
-  required condition, proving the bundled artifact absent, so a `.bundled`
-  preference falls through to `.conflicted(.dualRegistrationUnproven)` —
-  `.bundledRegistered` is not a possible output of the authority-level-4
-  branch.  A preference NEVER overrides a live owner, a handover, a
-  recovery state, a compatibility failure, or an ambiguous census.  No new
-  `ProviderArbiterState` wire encoding — the twelve frozen states are
-  sufficient; `allWireEncodings` unchanged.
-
-- **`ProviderRootLayout.preferenceFile` (MACD-3B2).** New computed var
-  returning `"provider-preference.v1.json"` in `supportDirectory` beside the
-  descriptor (same custody namespace as `migrationGrantFile` /
-  `migrationChallengeFile` — NOT inside `providerDirectory`).
-
-- **`ProviderSelfReport.digestInput` + `canonicalReport` (MACD-3B2).**
-  `digestInput()` appends, after the MACD-3B1 schema-3 tail, the preference
-  MAC domain constant and each of the 7 `ProviderPreference.macTranscriptFields`
-  names (a transcript-field rename changes the module digest).
-  `canonicalReport()` gains `"preferenceDomain"` and
-  `"preferenceTranscriptFields"` keys.  Module digest changes
-  by construction; both shells compute the same new digest.
-
-### 1.48.0 -- 2026-08-18
-
-- **`ProviderVersionVector` (MACD-3B1, dark Wave 1).** New public value type
-  in `MootDaemonProvider`.  Fields: `providerReleaseGeneration: UInt64`,
-  `managementRevisionMinimum/Maximum: UInt64`, `dataPlaneRevisionMinimum/Maximum: UInt64`,
-  `estateSchemaMinimum/Maximum: UInt64`, `migrationTargetSchema: UInt64?`,
-  `capabilityRevisions: [String:UInt64]`.  Static `.current` carries module
-  compile-time constants.  `hasEncodableFieldWidths` safety gate.
-  `appendWire1Fields` (fixed frozen MAC order for schema-3 MAC extension).
-  `schema3MAC(descriptor:vector:installationRoot:)` computes schema-3 MAC.
-  `isLegacyDescriptor(_:)` classifies schema-2 16-key records (R4 fail-closed
-  legacy path).
-
-- **`VersionCompatibilityVerdict` + `VersionVectorEvaluator` (MACD-3B1).**
-  Pure-function evaluator implementing the design's 7-step deterministic
-  coexistence policy.  Verdicts: `compatible`, `generationDowngrade`,
-  `keepOwnerNoOverlap`, `candidateCannotReadEstate`,
-  `legacyNotEligibleForAutomatedTakeover`, `updateApp`, `updateCliService`.
-
-- **`DescriptorPublisher` schema-3 API (MACD-3B1).**  `fieldNames` now 23
-  keys (16 + 7 new vector fields).  `encode(_ descriptor:, vector:)` and
-  `decode(_ data:) -> (descriptor:, vector:)?` carry `ProviderVersionVector`
-  companion.  `publish(_ descriptor:, vector:, lockProof:, estateReady:,
-  bind:, authenticator:)` gains `vector` parameter.  Schema-2 records decode
-  as `nil` (fail-closed).
-
-- **`DaemonProviderConfiguration` + `ProviderActivation` (MACD-3B1).**
-  Both gain `versionVector: ProviderVersionVector` (defaulted to `.current`
-  in configuration, preserving existing call sites).
-
-- **`CanonicalEncoder.appendSortedMap` (MACD-3B1).** Additive deterministic
-  sorted-key map primitive (`[String:UInt64]`, UInt32-length-prefixed,
-  lexicographic key order).  Consistent with `appendCapabilities` encoding.
-
-- **`ProviderSelfReport.digestInput` + `canonicalReport` (MACD-3B1).**
-  MACD-3B1 additive tail: `ProviderVersionVector.releaseGeneration` (UInt64)
-  plus 7 frozen schema-3 wire field-identifier strings.  Module digest
-  changes by construction; both shells compute the same new digest.
-
-### 1.47.0 -- 2026-08-17
-
-- **`MootDaemonProvider` estate-convergence surface (MACD-2c2).** New public
-  types in the shared provider module (apps/mootx01, linked identically by
-  the direct daemon shell and the sandboxed helper): `DefaultEstateCensus`
-  (pure disposition judge + file-level observation), `CensusCandidateRecord`
-  / `CensusObservation` / `CensusIdentity` / `CensusDisposition` /
-  `EstateCandidateClass`; `MigrationChallenge` / `MigrationGrantEnvelope` /
-  `MigrationGrantAuthority` / `ConsumedGrant` (challenge-bound MAC,
-  journal-first one-use consumption); `GrantResolutionPolicy` (production
-  stale policy with F4 denial classification); `EscrowRules` /
-  `KeyEscrowAuthority` (structurally mint-free); `DefaultEstateMigrator` /
-  `MigrationReceipt` / `MigrationReceiptStore` / `MigrationTransaction` /
-  `MigrationStep` (staged-before-rename receipts, idempotent resume);
-  `SourceEstateAccess` / `FileMigrationAuthority` (injected seams — no
-  production SQLite conformer in this module; arrives with MACD-3);
-  `ProductionRandomness` (SecRandomCopyBytes, fail-closed);
-  `ProviderLayoutContext` + layout-context-bound `ProviderLock.acquire(at:context:)`
-  and the `ProductionCredentialAuthority` marker (a production Keychain
-  authority refuses under any non-production lock proof or proof context).
-  `ProviderRootLayout` gains `grantJournal`, `migrationReceiptFile`,
-  `migrationChallengeFile`, `migrationGrantFile`.
-
-- **Shell modes.** `DaemonShellMain` adds `census` (read-only file-level
-  census; one JSON line of class labels, digests, and the conservative
-  disposition — never a raw path) and `resident` (the LaunchAgent contract
-  entry point; exits 4 `resident-unavailable` until MACD-3). The canonical
-  self-report adds `grantDomain`, `receiptDomain`, `censusDispositions`,
-  `migrationSteps`; the module digest changes accordingly (additive tail,
-  both shells identical).
-
-
-### 1.46.0 -- 2026-08-16
-
-- **`ARIA_MCPDispatcher.firstPartyIdentity` is not an initializer
-  parameter.** It is `public internal(set)` and is set only by the
-  authenticated router, from the live `FirstPartyAuthServer`'s identity.
-  Correcting 1.45.0, which documented an `init` parameter that would
-  have let the unauthenticated lane advertise the capability.
-
-- **`serverInfo.descriptorGeneration` and `serverInfo.credentialGeneration`
-  are DECIMAL STRINGS, not JSON numbers.** They are `UInt64`; `Int64` and
-  JSON's safe-integer range are both too small to carry the full range
-  without trapping or losing exactness.
-
-- **`FirstPartyAuthServer.identity` is actor-isolated and computed** from
-  the descriptor currently in force, so `republish(descriptor:)` cannot
-  leave a stale generation advertised. New
-  `FirstPartyAuthServer.republish(descriptor:)`.
-
-- **New on `FirstPartyAuthProtocol`:** `handshakeMaxBodyBytes`,
-  `isExactContentType(_:)`, `strictJSONObject(_:expected:maxBytes:)`,
-  `topLevelJSONKeys(_:)`, `exactUInt64(_:)`. New on
-  `FirstPartyDescriptor`: `hasEncodableFieldWidths`.
-
-- **`HTTPServer.legacyCollapsedRequest(_:maxBodyBytes:)`** reproduces
-  `LoopbackHTTP.HTTPRequest.parse` for the public lane; the strict parser
-  applies only under `/mcp/first-party`.
-
-- **`MootGateway`:** `FirstPartyDaemonAuthenticator`'s handshake-exchange
-  seam is now `internal`. The module's public surface offers exactly one
-  initializer, which always uses the pinned, no-redirect, size-capped
-  loopback exchange.
-
-### 1.45.0 -- 2026-08-16
-
-- **First-party authenticated wire surface (MACD-2b), dark.** New
-  public types in `AriaMCP`:
-
-  - `FirstPartyAuthProtocol` — the frozen constants, canonical
-    encodings, HKDF/HMAC derivations, proofs, request/response MAC
-    builders, base64url codec, canonical sequence parsing, and
-    constant-time comparison.
-  - `CanonicalEncoder` — length-prefixed, big-endian, fixed-order.
-    `appendString`, `appendBytes`, `appendUInt16/32/64`, `appendUUID`,
-    `appendCapabilities`.
-  - `FirstPartyDescriptor` — descriptor schema 2, with `macInput()`,
-    `canonicalBytes()`, `digest()`, and `verifyMAC(installationRoot:)`.
-  - `ReplayWindow` — highest-seen plus a 128-bit history; `admit(_:)`,
-    `isExhausted`.
-  - `FirstPartyRootProviding`, `FixedFirstPartyRootProvider`,
-    `FailingFirstPartyRootProvider`,
-    `DataProtectionKeychainRootProvider` — the read-only root contract.
-    No production root is minted in this revision.
-  - `StrictHTTPRequest`, `StrictHeaderField`, `StrictHTTPParser` — a
-    lossless, duplicate-preserving request parser for the
-    authenticated lane only.
-  - `FirstPartyServerIdentity`, `FirstPartyAuthServer`,
-    `FirstPartyAuthenticatedRequest`, `FirstPartyAuthError`.
-
-- **`HTTPServer.init` gains `firstPartyAuth:`, defaulted `nil`.**
-  `HTTPServer.serve` gains the same parameter, likewise defaulted.
-  With `nil` the entire `/mcp/first-party` subtree returns 404 and the
-  request-reading path is unchanged. Existing call sites are source-
-  and behaviour-compatible.
-
-- **`ARIA_MCPDispatcher` gains `firstPartyIdentity`, `public internal(set)`.**
-  It is NOT an initializer parameter and cannot be set by a caller: the
-  authenticated router populates it from the live authenticator's own
-  identity for the duration of one dispatch. With it `nil` — which is
-  every third-party dispatcher — `initialize` output is byte-identical
-  to revision 1.44.0.
-
-- **`MootGateway` (macOS app) additions:** `DaemonDescriptor` gains the
-  six schema-2 fields; `DaemonDescriptorDefect` gains
-  `unsupportedAuthProtocol`, `unknownAuthKeyIdentifier`,
-  `wrongEndpoint`, `unparseableBinaryVersion`,
-  `malformedDescriptorMAC`, and `staleGeneration`;
-  `DaemonCompatibility` gains `updateDaemonRequired` and
-  `updateAppRequired`; `DaemonReadinessState` gains the matching two
-  cases; new `SemanticVersion`, `FirstPartyDaemonAuthenticator`,
-  `FirstPartyInstallationRootProviding`, and
-  `FirstPartyAuthenticationError`.
-
-- **`HTTPTransport.init` gains `verifyResponse:` and
-  `redirectPolicy:`, both defaulted** to the pre-existing behaviour
-  (`nil` and `.follow`). New `GatewayResponseVerification` typealias
-  and `GatewayRedirectPolicy` enum; new
-  `GatewayTransportError.responseVerificationFailed` and
-  `.redirectRefused`.
-
-- **Rust:** no interface change. The port gains a golden-vector test
-  only and must not advertise `authenticated-first-party` until a
-  separate parity mission implements the full wire.
-
-### 1.44.0 -- 2026-08-15
-
-- `moot_timing_report` window is bounded at the call level (AT-01,
-  Codex Finding A): each call collects at most 262,144 audit events
-  (64 full pages of 4,096; ~1.6× the largest real estate's audit log,
-  measured 2026-08-15 at 162,860 events / 33 MB / ~216 B per row). A
-  clamped call derives over what it collected and appends a final line
-  `window: truncated at 262144 events — pass watermark_ms back as
-  since_ms to continue`; untruncated reports keep the previous shape
-  byte-identical. Clamp, not reject — the existing `watermark_ms`
-  paging contract continues the scan. Both ports; tool descriptions
-  updated to drop the unbounded "full-history scan" promise. The Rust
-  port additionally seeds its paging cursor from `since_ms` (it
-  previously re-paged the whole log from epoch on every call —
-  same-symbol parity fix; the A6 exactly-once derivation contract is
-  unchanged).
-- Hint appenders preserve multi-block results (AT-01, Codex Finding B,
-  Swift only): `appendUnknownArgsHint` and `applyHint` previously
-  collapsed any result to its first content block, destroying
-  `moot_json_import`'s `id_map` block whenever a hint fired. Both now
-  append the hint to the first block's text and carry all trailing
-  blocks through unchanged, matching the Rust `inject_hint` /
-  `inject_unknown_args_hint` in-place behavior (Rust never had the
-  defect). Error results remain untouched by the hint path.
-- New tests: Swift `MultiBlockHintAndTimingWindowTests` (4); Rust
-  `interface_tools::timing_window_tests` (2) plus `dispatch_tests`
-  `timing_report_small_estate_has_watermark_and_no_truncation_line` and
-  `json_import_id_map_block_survives_unknown_arg_hint`.
-
-### 1.43.0 -- 2026-08-14
-
-- Additive (mission BL-1 — botLink one-shot CLI transport, Swift port;
-  Rust twin lands in BL-2): documented the cloud-agent access path in
-  §1 — `mootx01-botLink` / `mootx01 botlink` (`ping`/`list`/`call`/
-  `rpc`, machine-JSON stdout, loopback-only `--http` guard, exit codes
-  0/1/2/64) — with the verbatim adapter-policy paragraph redirecting
-  cloud agents away from `mootx01 query`. No wire-surface change; no
-  client wiring change (`mcp.json` stays `http://127.0.0.1:4242`,
-  `mootx01-proxy` stays the Desktop stdio face).
-
-### 1.42.2 -- 2026-08-13
-
-- Two more stale tool-count lines corrected (§1 memory-adapter baseline
-  "71/65" → "74/67"; §5 Rust test census "71/71 / 65/65, Rust matches
-  Swift exactly" → per-port truth 74/67 wire vs Swift 78/71 with the
-  FAB5-I2 packet tools). Non-changelog current-state count claims now
-  swept file-wide.
-
-### 1.42.1 -- 2026-08-13
-
-- Tool-count corrections: Swift `ToolProjection.tools()` is 78 vault-on /
-  71 vault-off; the Rust wire surface is 74/67 (75/68 with the opt-in
-  memory adapter) — the Swift surface minus the four Swift-side packet
-  tools (FAB5-I2). The previous 71/65 and 72/66 figures had drifted
-  across several tool additions.
-
-### 1.42.0 -- 2026-08-13
-
-- `moot_timing_report` (maintenance, both ports): argument `since_ms`
-  (optional integer — a previous call's `watermark_ms`; omit or 0 for a
-  full-history scan). Text report lines: `ingest_exact` /
-  `cycle_vector` / `cycle_novel` / `cycle_dreamt` each as
-  `n=<count>, p50=<ms>, p95=<ms>` (novel/dreamt add `unbounded=<count>`),
-  `ingest_bulk` as `n=<units>, rows=<total>, rows_per_sec=<rate>`, and a
-  final `watermark_ms: <ms>`. Line shapes are byte-compatible across
-  ports so harness parsers read either. Registered in the maintenance
-  tool family (now 6 tools).
-
-### 1.41.0 -- 2026-08-12
-
-- `moot_json_import` gains `return_id_map` (boolean, optional, default `false`; explicit `null` is invalidParams on both ports, message `"return_id_map must be a boolean; omit it to use the default"`). When true the reply carries a SECOND text block — `{"id_map":{"<record id>":"<drawer id>"}}`, one entry per seeded record, keys sorted so the bytes are identical across runs of the same seed. The prose receipt is block 0 and is unchanged, so every existing caller is unaffected.
-- Why the argument exists: a record's lineage is deterministic (FNV-1a-128 of the record id), but the drawer id is minted fresh at insert and no recall surface addresses a drawer by lineage. A caller that must address what it just imported — cross-references, per-record reporting, or scoring retrieval against known records — otherwise has to re-discover each drawer by searching for its own content, which cannot be made exact because ranking decides what comes back.
-- New dispatch primitive: `ToolDispatcher.textResultBlocks(_ blocks: [String])` (Swift) / `text_result_blocks(blocks: &[String])` (Rust), the multi-block success envelope. Deliberately NOT an overload of `textResult(_:)` — overloading on `String` vs `[String]` made the Swift type-checker weigh both candidates at every call site and it exceeded its time budget on this file's `+`-chained receipt strings.
-- Backing field: `JsonImportReport.drawerIDByRecordID` / `drawer_id_by_record_id` (see VAULTKIT_INTERFACE 1.17.0), carried to in-process callers always; the argument gates only what the MCP reply renders.
-- New tests: Swift `JsonImportToolTests` `returnIDMapNamesRealDrawerIDs` + `idMapIsOptInAndNullRejected`; Rust `dispatch_tests.rs` `json_import_return_id_map_names_drawer_ids` + `json_import_id_map_is_opt_in_and_null_rejected`. Both ports assert the mapped id addresses the drawer holding that record's content, not merely that the map is the right size. Tool count is unchanged.
-
-### 1.40.0 -- 2026-08-11
-
-- Bridge input limits (pc stream, security findings 012/036). §1 gains the two admission caps for `ProxyCommand.swift` and their `MootInstallerCore` primitives: `proxyMaxFrameBytes` (4 MB frame-size cap) and `ProxyConcurrencyGate` (16-slot actor-based counting gate). Both are byte-identical across Swift and Rust. `ProxyAdmissionGate.swift` is new in MootInstallerCore; `ProxyAdmissionTests.swift` is the new test suite.
-
-### 1.39.0 -- 2026-08-11
-
-- Bridge failure-response invariant (px stream). §1 documents `ProxyCommand.swift` (the stdio→HTTP bridge), `ProxyDispositionLogic.swift` (pure disposition and id-extraction functions in MootInstallerCore), and the four failure conditions that yield a synthesized -32603 error with the original request id. `proxyDisposition(statusCode:bodyEmpty:)` and `proxyRequestID(of:)` are the testable public surface; both exercised in `MootInstallerCoreTests/ProxyDispositionTests.swift`.
-
-### 1.38.0 -- 2026-08-07
-
-- MXE-CT3 P3 tiered contradiction surface. `moot_hunt_contradictions`:
-  optional `tier` (1|2|3|"all", default "all") and `top_k` (1...50,
-  default 5); default mode appends the tiered synthesis digest, single
-  tier is a read-only purpose search. `moot_review_tunnel`: optional
-  `reviewed_by` (default "user"), `verdict` extended with `"endorse"`;
-  accept is user-only, a model reject is an objection. `moot_dream`:
-  files tier-labeled candidates after the hunt phase and appends the
-  tiered digest. Schemas declared identically in both ports.
-
-### 1.37.0 -- 2026-08-06
-
-- `moot_recall_connected` (recipe provenance, recall family, shares the
-  recall-results output schema): args query (required), wing, limit,
-  filter, estateID. Recipe tool roster 13.
-
-### 1.36.0 -- 2026-08-06
-
-- `moot_synthesize` grounding is now HYBRID: the raw query also drives a
-  scored BM25+vector lane (reaching memories that share no query words);
-  grounding becomes a ranking guarantee (term matches lead) rather than a
-  hard lexical exclusion. Dispatch passes the base frame + query + terms;
-  the recipe owns lanes and bounds.
-
-### 1.35.0 -- 2026-08-06
-Cue-ranking dispatch wiring for `moot_synthesize`:
-
-- `runGroundedSynthesis` (Swift) / `run_grounded_synthesis_tool` (Rust) compute
-  `frameLimit = max(userLimit, groundedSynthesisCuePoolBound=200)` and
-  `recipeCap = userLimit` when a query is present. Both are threaded through to
-  `GroundedSynthesis.Input` / `run_grounded_synthesis` so the cue-term reranker
-  sees the full matched pool before the user's limit caps the synthesis.
-- No change to the tool's public argument surface — this is an internal routing
-  contract change only.
-
-### 1.34.0 -- 2026-08-06
-
-- `moot_synthesize` gains optional `query`: grounding-term extraction
-  (stopword/short-fragment drop, digit exception, dedupe, cap 12) into an
-  OR of case-insensitive content predicates AND-composed with `filter`;
-  response names the cue with a `query:` line; all-stopword queries are
-  rejected as invalidParams. Both ports. Completes the GroundedSynthesis
-  recipe contract ("hybrid-recall a query and synthesize") at the ARIA
-  surface — previously the tool accepted no cue and always produced a
-  whole-estate recency digest.
-
-### 1.33.0 -- 2026-08-05
-
-- moot_dream `associates` argument (all|recent|off, default recent)
-  and the zero-gated `associationsWritten:` report line, both ports
-  (Swift step by the item-5 worker; Rust twin completes it).
-
-### 1.32.0 -- 2026-08-04
-
-- **Structured recall results (MXE-SS).** `ProjectedTool` gains an
-  optional `outputSchema` (nil → key omitted from the `tools/list` entry;
-  text-only tool entries byte-identical to before). The recall family
-  (`moot_memory_search`, `moot_memory_get`, `moot_recall_shaped`,
-  `moot_recall_precise`) declares the shared
-  `recallResultsOutputSchema()` (Rust
-  `tool_list.rs::recall_results_output_schema()`) and returns
-  `structuredContent` alongside the unchanged text block through the new
-  `structuredTextResult` envelope helper. Redaction parity per
-  ARIA_MCP_SPEC 1.28.0 § 11.
-
-### 1.31.0 -- 2026-08-04
-
-- **`moot_erase_memory` partial-response contract (MXE-FA).** Documents
-  the two response shapes: `erased memory <id>` (full) and
-  `partially erased memory <id>: <N> accepted lineage sibling(s) refused
-  erasure and remain readable: <ids>` (partial, `isError: false`). Backed
-  by GLK's new `ExpungeVerbOutcome` return
-  (GENIUSLOCUSKIT_INTERFACE 1.28.0). Teachme guides updated in both ports.
-
-### 1.30.0 -- 2026-08-03
-Observable output change on `moot_estate_status`: the `memories: N active
-(M total)` and `subjects: N/M (K missing)` numbers now exclude restricted and
-secret rows, as `wings:` already did. On an estate holding such rows both lines
-report smaller numbers than before; on an estate without them nothing changes.
-Field keys, field order, line count, and response shape are unchanged, so
-consumers that read the body by prefix need no change — no in-repo consumer
-parses these integers. Documents the drawer-aggregate ceiling and the
-unfiltered non-drawer fields in the `moot_estate_status` section above.
-Behavioural contract: `ARIA_MCP_SPEC.md` 1.26.0.
-
-### 1.29.0 -- 2026-08-03
-Observable output change on `moot_memory_search` and `moot_memory_get`: the
-trailing `sensitivity_advisory:` line is now emitted whenever no sensitivity
-grant is live, independent of what the estate contains. It previously also
-required the estate to hold at least one `restricted`/`secret` row, which made
-its presence an existence oracle for those rows. Both strings are reworded and
-are byte-identical across the Swift and Rust ports; search and get keep distinct
-phrasings. The `sensitivity_advisory: ` line prefix is unchanged, so consumers
-that strip or detect the line by prefix (e.g. `MootSpotlightRecord.parse`) need
-no change. Behavioural contract and the contents-independence invariant:
-`ARIA_MCP_SPEC.md` 1.25.0.
-
-### 1.28.0 -- 2026-08-03
-
-- Typed conflict projection section (DCP M4): the three contradiction
-  surfaces render the evaluator-backed section via one shared renderer
-  (Swift `RecipeTools.conflictProjectionSection` ↔ Rust
-  `conflict_projection_section`); GLK sweep verbs
-  `conflictProjectionSweep` ↔ `conflict_projection_sweep`.
-
-### 1.27.0 -- 2026-08-02
-
-- Lens evidence addresses (PR-05): memory-listing lens findings cite
-  memories as dense rows via the shared renderer (7 arms: keystones,
-  free_association, cohesion, contradiction, trust_synthesis,
-  partial_cue, successors); moot_lens_concepts lists member drawer ids
-  capped at 20 (`lensExtentIDCap` ↔ `LENS_EXTENT_ID_CAP`);
-  moot_lens_associations carries `exemplarDrawerIDs` (cap 5) per rule.
-  Byte-identical across ports, golden-tested against the renderer.
-
-### 1.26.0 -- 2026-08-02
-
-- PR-04 utility tier: documented the estate-status `subjects: N/M
-  (K missing)` line, the reserved `subject_backfill` drain-lane name
-  (Swift `ToolDispatcher.subjectBackfillLaneName` ↔ Rust
-  `SUBJECT_BACKFILL_LANE_NAME`), and the `verbose` flag on
-  moot_list_lenses / moot_list_recipes (terse default). Estate-status
-  teachme carries the consent-gated backfill standing behavior.
-
-### 1.25.0 -- 2026-08-02
-
-- Dense-row reply surface (PR-03): documented the five-field dense row
-  as the default hit/citation shape across the recall family, the
-  deviation-only narration contract, the `near:` anchor pivot on
-  moot_memory_search + moot_recall_shaped (query no longer
-  schema-required — exactly-one enforced at runtime), and
-  moot_memory_get `ids:`/`depth:` (subject|distilled|full). Teachme
-  guides for the recall family rewritten in both ports. Cross-port
-  byte-identical goldens: DenseRowGoldenTests.swift ↔
-  dense_row_golden.rs.
-
-### 1.24.0 -- 2026-08-02
-
-- Subject surface (progressive recall PR-02): documented the required
-  `subject` argument on `moot_file_memory` (AI-facing register, 120-char
-  contract), `moot_update_memory` `mutation=setSubject` + `subject`
-  argument, and `moot_memory_list` `filter=missing_subject` (id-only
-  subject-debt enumerator). Teachme guides for all three verbs updated in
-  both ports.
-
-### 1.23.0 -- 2026-07-20
-
-- Updated intake/search language for GLK shared content: impatient writes index
-  the canonical Drawer directly, and Corpus drain counts are Drawer-index
-  counts rather than chunk counts.
-- Confirmed that no ARIA/MOOTx01 surface enables CorpusKit passage chunking.
-
-### 1.11.0 -- 2026-06-28
-Security hardening — three ARIA tool gate changes (secfix/batch2-aria).
-
-(1) **`moot_erase_memory` AriaMcpKit gate** — `confirmed=true` check enforced at the
-AriaMcpKit boundary before the substrate is called. Schema unchanged; `confirmed` was
-already present in `required`. Error message updated to name `confirmed=true` explicitly
-and explain the owner-review intent. Both ports updated.
-
-(2) **`moot_federated_search` requester anti-spoof** — `requesterEstateID` changed from
-required to optional. When omitted the requester is the default estate. When supplied it
-must match the default estate's UUID. Schema: `required` array changed from
-`["requesterEstateID"]` to `[]`; property description updated to document the optional
-binding and the anti-spoof refusal. Both ports updated.
-
-### 1.10.1 -- 2026-06-28
-Security (HTTP transport — both ports, both surfaces):
-
-(1) **Origin-check hardening** — `isOriginAllowed` in `HTTPServer.swift` / `http_server.rs`
-and `HTTPReadAPI.swift` / `http_read_api.rs` now validate the suffix after the loopback host
-prefix instead of a bare prefix check, blocking DNS-rebinding prefix-spoof origins like
-`localhost.evil`. Tests added on all four files.
-
-(2) **`moot_palace_import` vault gate** — when `MOOTX01_VAULT=0`, `moot_palace_import` is
-absent from `tools/list` and returns a clear refusal at dispatch (same as vault tools). The
-tool reads arbitrary local SQLite files; gating it matches the vault-surface security posture.
-Vault-off surface count: 57 → 56. Both ports updated (`ToolProjection`, `ToolDispatch`,
-`tool_list.rs`, `dispatch.rs`).
-
-### 1.10.0 -- 2026-06-25
-Docs/guidance (T8 — teachme reconcile): the teachme `palace_import` guide no
-longer tells the AI that `moot_reindex` + `moot_dream` are a REQUIRED two-step
-finish — that contradicted the tool's own description (the import triggers its
-own background indexing; the resident dreams on cadence). Guides now say
-indexing is automatic, point at `moot_drain_status` to watch convergence, and
-note `moot_dream` is only needed manually when running without a resident.
-Residual `batch`/`non-batch` wording from the T1/T7 rename swept out of both
-ports' teachme and the `moot-agent-skills` HOW_TO. No surface change.
-
-### 1.9.0 -- 2026-06-25
-Changed (T7 — one ingest engine, many gates): `moot_vault_import` takes a `mode`
-(foreground/background encode SPEED) arg, replacing the Swift-only `batch` flag,
-and the Rust vault-import tool now exposes `mode` too (it previously had no such
-arg — a fixed Swift/Rust parity gap). All import gates (palace + vault/Obsidian/
-OKF) now share one policy: caller declares SPEED, write strategy is size-gated
-automatically. No new tool. Both ports.
-
-### 1.8.0 -- 2026-06-25
-Added (T5 — drain lifecycle): new internal CLI subcommand `mootx01 drain [--db]`
-— opens an estate, drains its encode queue to empty, then exits. It is the
-detached finisher a direct-open stdio `serve` spawns on exit (setsid/detached);
-rarely run by hand. Also: estate open now eager-mounts the corpus drain worker so
-a restarted daemon resumes a non-empty queue (daemon resume-on-restart). No
-`moot_*` tool-surface change. Both ports.
-
-### 1.7.0 -- 2026-06-25
-Changed (T4 — serve transport): an stdio `serve` forwards to a live resident
-serving the same estate (estate-marker match + `daemon.port` probe → the `proxy`
-stdin→HTTP bridge) instead of opening a second direct writer; falls back to a
-direct open when no resident answers. Resident writes a `mootx01.estate` marker
-(removed on exit). No tool-surface change; transport behavior only. Both ports.
-
-### 1.6.0 -- 2026-06-25
-Changed (T1 — encode mode): `moot_palace_import` replaces its `batch` (bool) arg
-with `mode` (string `"foreground"` | `"background"`, default `"foreground"`).
-`mode` selects the post-import encode SPEED (drain QoS) only — foreground drains
-the encode queue across all cores, background caps to ~a quarter for very large
-imports. The WRITE strategy (bulk transaction vs per-item stream) is now chosen
-AUTOMATICALLY by source size (≤250k rows → bulk; larger → stream), not by the
-caller. Unknown `mode` is rejected (fail-closed). Both ports.
-
-### 1.5.0 -- 2026-06-25
-Additive (T6 — drain status): new maintenance tool `moot_drain_status` (both
-ports) — a read-only, pollable report of every long-running background drain the
-estate runs. Today the only drain is `corpus_encode` (the encode/ingest queue);
-each drain reports pending + in-flight job counts, a draining/idle state, and
-optional drain-specific detail (the corpus drain reports its live encoded-chunk
-count). Unlike `moot_estate_status` it does NOT append the session-protocol
-block, so it is cheap to poll while a drain settles (e.g. after
-`moot_palace_import`). The report is list-shaped so additional drains surface
-automatically. The whole surface grows 55 → 56. Reachable from the CLI as
-`mootx01 query drain_status`. Also fixed a stale `moot_reindex` doc-comment that
-pointed callers at `moot_estate_status` for encode-queue depth (it never reported
-it) — now points at `moot_drain_status`. Conformance: dispatch tool-count/name-set
-gates (Swift `ToolProjection` / Rust `tool_list.rs`).
-
-### 1.3.0 -- 2026-06-17
-Additive (mission BRAIN-GRAPH-PRODUCER — graph-centrality producer, both ports).
-New `AutonomicGovernor` PRODUCER DUTY on both ports: Swift
-`AutonomicGovernor.graphCentralityScan(kit:handle:now:)` (a nonisolated static
-duty dispatched on the `graphCentralityIntervalMs` cadence, default 10 min) and
-Rust `graph_centrality_duty` (fired inside `tick` on the same cadence). The duty
-reads the estate structure graph, computes per-drawer eigenvalue centrality via
-the NeuronKit `keystones` oracle, and registers a `GraphCache`
-(`registerGraphCache` / `register_graph_cache`). `GovernorReport` /
-`GovernorReport` gains `graphCentralityFired` / `graph_centrality_fired`. Swift
-`AutonomicGovernor.init` gains a `graphCentralityIntervalMs` parameter; Rust adds
-the `set_graph_centrality_cadence_ms` test knob. This takes the
-`unionBest`/`matrixAware` recall `graph` column from dark to live in production on
-both ports. Corrects the prior text framing the recall-cache producers as
-standing-signal seam plug-ins: they are governor DUTIES.
-
-### 1.2.0 -- 2026-06-17
-Additive (#8 Track 1 — Brain orchestration harness, Rust side). The Rust
-`AutonomicGovernor` now OWNS this estate's standing-signal scheduler (a GLK
-`SerialLaneScheduler<CoordinatorDispatcher>`) and ticks it each iteration,
-mirroring the Swift governor's `kit.signalTick(in:handle:now:)` — previously the
-Rust governor ticked dreaming + maintenance only and documented "no
-standing-signal scheduler". New public Rust surface on `AutonomicGovernor`:
-`register_default_standing_signals(model_id, now)` (the architecture-spec §11.2
-bootstrap, reading the live VectorStore via `EstateCoordinator::vector_store_for`,
-now `pub`), `register_standing_signal(spec, now)`, `signal_status()`,
-`open_signal_count()`, `signal_request_fire(id, now)`; `GovernorReport` gains
-`pub signals_ticked: bool` (parity with the Swift `TickReport.signalsTicked`).
-The scheduler lives in the governor (not the GLK coordinator) to avoid a
-dispatcher reference cycle. The registration methods are the producer SEAM where
-Track 2 (graph-centrality) and Track 3 (Bradley-Terry) plug in — their outputs
-land in GLK `recall::{GraphCache, PreferenceStore}`; the producers themselves are
-NOT part of this harness. The resident HTTP bootstrap (`rust/src/runtime.rs`)
-registers the defaults once at startup, best-effort (a missing VectorStore logs
-and the governor benign-skips, parity with the Swift resident). Conformance:
-`tests/governor_standing_signals.rs` (benign skip / registered-defaults fire /
-queryable emission / interval cadence) over the existing GLK
-`tests/scheduler_parity.rs` engine gate. Swift behavior unchanged.
-
-### 1.13.0 -- 2026-06-29
-Vault cap ordering fix (secfix/c-vault-cap): corrected `moot_vault_import` preflight
-ordering in the Swift port. Previously `hashAllNotes` ran BEFORE `checkAndRegister`,
-allowing up to the HTTP transport concurrency limit worth of concurrent expensive
-filesystem/SHA-256 preflight work outside the cap. The cap now binds the preflight:
-`checkAndRegister` runs FIRST, then `hashAllNotes` runs while holding the slot. A new
-pre-Task do/catch releases the slot via `fail(jobID:)` when `hashAllNotes` throws, so a
-throwing preflight never permanently consumes a cap slot. §Vault job concurrency cap
-updated to reflect the new ordering. Rust port unchanged — `Dispatcher` `Arc<Mutex<>>`
-already serializes all calls (effective cap of 1, no concurrent preflight fan-out
-possible). New tests: `import_cap_enforced_before_expensive_preflight`,
-`import_throwing_preflight_releases_slot` (Swift). Supersedes/refines secfix/c-vault-jobslot
-(1.12.0) which established the slot-release invariant but placed the preflight before
-the cap acquisition.
-
-### 1.12.0 -- 2026-06-28
-Vault availability hardening (secfix/c-vault-jobslot): documented the vault job
-concurrency cap (4 slots, Swift port) and the slot-release invariant. In the Swift
-port, `moot_vault_import` ran `hashAllNotes` preflight BEFORE `checkAndRegister`
-so a preflight failure never consumed a slot. Non-regular `.md` entries (directories,
-symlinks) are skipped in `hashAllNotes` rather than causing a fatal throw. The Rust
-port is safe by construction (`run_import` records jobs only after bridge completion;
-`collect_and_hash` skips non-files). Both behaviors and the concurrency contract are
-described in §Vault tools above. New tests: `hashAllNotes_skips_directory_named_md`,
-`import_cap_not_exhausted_after_directory_md_vault` (Swift); `hash_all_notes_skips_directory_named_md`,
-`import_with_directory_md_vault_does_not_exhaust_ledger` (Rust). Note: the preflight-
-before-cap ordering in this version left `hashAllNotes` outside the cap — corrected in
-1.13.0 (secfix/c-vault-cap).
-
-### 1.4.0 -- 2026-06-19
-`moot_estate_ping` response now includes a build serial segment:
-`pong: estate <name> [<uuid>] is live — build <serial>`. The serial is derived
-once at `ToolDispatcher` (Swift) / `Dispatcher` (Rust) construction from the
-running executable's mtime and size; stored as `buildSerial` on the dispatcher;
-threaded to `runEstatePing` / `run_estate_ping` without per-call filesystem
-access. Override via `MOOTX01_BUILD_SERIAL` env var (non-empty value used
-verbatim). New tests: `testEstatePingIncludesBuildSerial`,
-`testEstatePingHonorsBuildSerialOverride` (Swift);
-`estate_ping_includes_injected_build_serial` (Rust). Spec companion: § 14 in
-ARIA_MCP_SPEC.md updated to document the derivation contract.
-
-### 1.1.0 -- 2026-06-17
-Additive (GLK-RECALL-SHAPE-PRESETS): new `moot_recall_shaped` recipe tool (both
-ports) — a single recall tool with a discoverable `preset` enum selecting a named
-`RecallShape` from the GLK roster (preferable to ~20 tools). The tool description
-embeds the full roster (each preset name + one-line emphasis); the preset enum is
-the GLK `presetNames` list. Validation is fail-CLOSED: an absent preset uses the
-unsteered `balanced` default, a present-but-unknown name is rejected with a tool
-error. Returns the same plain-text shape as `moot_memory_search`. The four ARIA
-filtering adjectives compose orthogonally (the preset ranks, the `filter` arg
-filters). The `.recipe` bucket grows to 29 tools and the whole surface to 55
-(census references updated to the current live count, which prior additions
-— `moot_reindex`, `moot_vault_job` — had left at the stale 53). Conformance:
-`RecipeToolsTests.swift` shaped-recall cases / `dispatch_tests.rs`
-`recall_shaped_*` + the tool-count/name-set gates.
-
-### 1.0.1 -- 2026-06-14
-Reconciled the `.recipe` provenance tool count: the §`Recipe and lens tools` body enumerated only 5 CognitionKit recipe tools (yielding 26 with the 21 lenses) while the heading, the `ToolProvenance` projection, and the 53-tool census all carry 28. Added the two missing recipe tools (`moot_recall_precise`, `moot_dream`) to the body so it lists all 7 recipe tools + 21 lenses = 28, consistent with the verified Swift/Rust surface (`ToolProjection.tools()` / `tool_list.rs`, both gated at 53).
-
-### 1.14.0 -- 2026-06-29
-Security fix (secfix/c-aria-minor, CAND-043): `GET /api/graph` now ignores the
-`?estate=` query parameter and always reads the **default estate's** topology
-snapshot. The Swift private function signature changed from
-`graphSnapshot(estate:topologyReader:)` to `graphSnapshot(topologyReader:)`;
-callers (the `route` function) no longer extract the `estate` query string or
-pass it to the reader. The `queryValue(_:in:)` helper was removed as it had no
-remaining callers. This matches the existing Rust posture where `get_graph_snapshot`
-always uses `registry.default` and explicitly documents that `?estate=` is ignored.
-The observable GET /api/graph response format is unchanged.
-
-### 1.15.0 -- 2026-07-04
-the connection-ownership contract §5: `moot_estate_ping` / `moot_estate_status` gain an opt-in
-`version_skew:` line (see the new "Version-skew advisory" subsection under
-§`moot_estate_status` — sync field vocabulary, below) when the host detects a
-mismatch between an installed plugin (currently Claude Code's
-`mootx01@mootx01`) and the running binary's version. `ToolDispatcher`
-(Swift) gains a `versionSkewAdvisory: String?` field, injected at
-construction the same way `buildSerial` already is; `Dispatcher` (Rust)
-gains a `version_skew: String` field (empty string ⇒ no advisory), threaded
-through `dispatch_tool_with_vault_ledger` / `interface_tools::dispatch`
-alongside `build_serial`. Computed once at server startup by the host binary
-— `MootInstallerCore.VersionSkewAdvisory.compute` (Swift) /
-`mootx01_cli::core::mcp_ownership::version_skew_advisory` (Rust) — never by
-the kit itself, which does not read `~/.claude/plugins/` or know a product
-version. `aria-mcp-server` (both ports) has no plugin concept and always
-passes the empty/nil default. Both ports at parity.
-
-### 1.22.0 -- 2026-07-16
-Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an
-opt-in `update_available:` line (see the "Upstream-release advisory"
-subsection beside the version-skew one) when a newer product release exists
-than the running binary. `ToolDispatcher` (Swift) gains
-`updateAdvisoryProvider: (@Sendable () async -> String?)?` (defaulted `nil`);
-`Dispatcher` (Rust) gains `update_advisory: Option<UpdateAdvisoryProvider>`
-via the `with_update_advisory` builder (the Rust equivalent of the defaulted
-Swift parameter — existing `Dispatcher::new` call sites unchanged), threaded
-through `dispatch_tool_with_ledgers` / `interface_tools::dispatch` alongside
-`version_skew`. Unlike `version_skew` the value is a lazily-evaluated
-provider, not a startup-computed string — the resident daemon outlives
-releases. Rate limiting (24h TTL), the 4s probe bound, failure caching, and
-the `MOOTX01_NO_UPDATE_CHECK` kill switch live in the host advisor
-(`MootInstallerCore.UpdateAdvisor` / `mootx01-cli::core::update_advisor`);
-the kit only renders the line. Resident daemons only; stdio one-shots and
-`aria-mcp-server` (both ports) never wire a provider. Both ports at parity.
-
-### 1.21.0 -- 2026-07-16
-Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): `memory_adapter.rs`
-implements all six commands (view, create, str_replace, insert, delete, rename),
-the `MOOTX01_MEMORY_TOOL=1` opt-in gate, the Normal-tier sensitivity filter (mirrors
-`isMemoryAdapterVisible` in Swift), and sensitivity-tier carry-forward on edits so
-elevated-tier drawers are not silently downgraded. `tool_list.rs` gains
-`memory_enabled()`, `build_tool_list_with_flags(vault_on, memory_on)`, and the
-`memory_adapter_tool()` schema; `build_tool_list()` and `build_tool_list_with_vault_flag()`
-delegate to it. When `memory_on=true` the `memory` tool is prepended (first in list,
-mirrors Swift `memoryAdapterTools()` prepend order), raising the count to 72/66.
-Existing dispatch and count tests updated to use `build_tool_list_with_flags(vault_enabled(), false)`
-for determinism (prevents racing with env-var mutations in memory-tool tests). New test
-file `tests/memory_adapter_tests.rs`: 19 tests covering env gate, tool-list projection,
-and per-command happy + error paths. Updated §1 Rust package layout and Rust binary
-description to document `memory_adapter.rs` and the opt-in gate.
-
-### 1.20.0 -- 2026-07-16
-Dataset tools (MX-TAB-7): three new tools `moot_file_dataset`,
-`moot_dataset_query`, `moot_dataset_stats` with `.interface` provenance —
-always visible, not vault-gated. Both ports (Swift `DatasetTools.swift`,
-Rust `dataset_tools.rs`) at parity. Tool count: 68 → 71 (vault-on), 62 → 65
-(vault-off). Adds new "Dataset tools" subsection in §2. Also adds previously
-undocumented public types: `DiscriminationLevel`, `RecallDiscrimination`
-(scale-independent recall confidence heuristic, both ports mirrored), and
-`MonitoringControl` protocol (the monitoring-control injection seam). Adds
-`memoryToolEnabled` to ToolProjection block (opt-in memory_20250818 adapter,
-MOOTX01_MEMORY_TOOL=1). Updates stale Rust tool census (55 → 71).
-Updates `DatasetTools.swift`, `RecallDiscrimination.swift`, and
-`MemoryToolAdapter.swift` / `MonitoringControl.swift` to §1 package layout.
-
-### 1.19.0 -- 2026-07-12
-Contradiction hunter MCP surface (both ports at parity, tool count 66 → 68):
-`moot_hunt_contradictions` (recipe — on-demand bounded content sweep; strong
-findings persist as PROPOSED `contradicts` tunnels, borderline pairs return
-with snippets for agent adjudication) and `moot_review_tunnel` (Tier 2 —
-accept/reject a proposed tunnel via `Estate.respondToTunnel`; rejection is
-durable). `moot_link_memories` gains optional `proposed: bool` (files the
-link in the PROPOSED lifecycle). `moot_dream` now runs the hunt sweep as its
-content-driven third phase and reports `contradictionsProposed` /
-`contradictionCandidatesBorderline`. `moot_lens_contradiction` output gains
-lifecycle tiers: proposed edges shown by default flagged
-`proposed (agent-derived, unreviewed)`; withdrawn/superseded excluded.
-Permission tier: both new tools `ask` (mutation table, both installer legs).
-Teachme guides for both tools plus updated dream/link guides. Contract tests
-updated: 68 total, 62 vault-off (Swift `ToolProjectionTests` /
-`V1ConformanceTests` / `VaultToolsTests`; Rust `dispatch_tests`;
-installer `PermissionsWriter` inventories both legs).
-
-### 1.18.0 -- 2026-07-05
-the sensitivity-grant contract wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —
-Estate tools, monitoring-control entry). Injection pattern: `MonitoringControl`
-protocol (Swift) / trait (Rust) defined in AriaMcpKit; concrete implementation
-(`StatsStoreMonitoringControl`) in AriaResident (Swift) and `http_server.rs`
-(Rust). Read path: absent `enabled` arg returns current flag state. Write path:
-present `enabled: bool` persists the flag via `StatsStore.setMonitoringEnabled` /
-`set_monitoring_enabled` (wave 8.1 API), echoes new state with
-`monitoring_source: user` line. No-store case: returns `monitoring: unavailable`
-— never fabricates state. Permission tier: `ask` in both namespace prefixes.
-Wave 8.3 smoke: `HTTPReadAPITests.freshStoreMonitoringDefaultIsEnabled` verifies
-fresh StatsStore seeds monitoring=ON (wave 8.1 regression gate). Tool count: 64
-(Swift and Rust at parity).
-
-### 1.17.0 -- 2026-07-05
-the sensitivity-grant contract sensitivity unlock/lock control endpoints (§4.6). Documents
-`POST /api/control/unlock` and `POST /api/control/lock` — platform-
-specific identity verification (macOS: LocalAuthentication; Linux/Windows:
-PBKDF2-HMAC-SHA256), request/response shapes, proof freshness gate,
-CLI surface (`mootx01 unlock private|secret`, `mootx01 lock`). Both
-Swift and Rust ports at parity. Redaction advisory
-(`sensitivity_advisory:` line) added to `moot_memory_search` and
-`moot_memory_get` output when no grant is active and estate has
-restricted/secret rows.
-
-### 1.16.0 -- 2026-07-04
-Added `moot_memory_get` (§2 Tool projection, Tier 1 — Core Memory table)
-— fetch-drawer-by-ID, build-now per Bob's ruling. Input: `id` (drawer UUID,
-required) plus the standard `estateID` every direct tool accepts.
-Output: verbatim content (hydration `.full`), room/wing, `filedAt`/
-`eventTime`, the five adjective-axis fields (state, trust, sensitivity,
-exportability, confirmation), lineage, and a linked-tunnel summary
-(same tunnel-scan pattern as `moot_connection_search`/
-`moot_connection_map`). Swift `ToolDispatcher.runMemoryGet` routes
-through `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`; Rust
-`interface_tools::run_memory_get` routes through the Rust twin
-`Estate::get_drawers_matching_frame` — both with an empty filter chain,
-so `moot_memory_search`'s default containment gate (see the `filter`
-argument section above) applies unchanged. A drawer that exists but
-fails the gate is reported with the same "Memory not found: `<id>`"
-error `moot_link_memories` already uses for an unresolvable id — the
-by-id door cannot confirm existence of content the gate would
-otherwise hide. Tool surface: 62 -> 63 (Tier 1: 7 -> 8; vault-on
-62 -> 63, vault-off 56 -> 57). teachme guide added on both ports. Both
-ports at parity. New tests: `MemoryGetTests.swift` (10 tests); Rust
-`dispatch_tests.rs` `memory_get_*` (7 tests) + 1 teachme test.
-
-### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+### 2.4.0 -- 2026-08-26
+Ladder merge. The develop/1.1.x stream and the benchmark stream each
+minted entries in the 1.4x-1.5x range for unrelated changes while this
+document was being reorganized to 2.x. The develop entries are preserved
+verbatim in the companion changelog under a repair heading; their
+self-labels are historical text and do not index into this ladder.
+No contract change in this entry.
+
+### 2.3.0 -- 2026-08-26
+Per-operation template pass (structural, no contract change). Every tool
+entry in the six-family catalog now uses one fixed template: Purpose,
+Input, Behavior, Output, Errors, Sample, Conformance. Compact family
+tables replaced by per-tool blocks; the shared dataset-schema and
+vault-job facts moved into the owning tool entries; the advanced lens
+arguments moved into each lens entry. The 2.1.0 maintenance-status
+entries are folded into the catalog: `moot_rebuild_status` now has a
+catalog entry, `moot_drain_status` records the `dreaming` lane and
+`moot_estate_status` records the composite condition surface. Payload
+samples unchanged byte for byte.
+
+### 2.2.0 -- 2026-08-26
+MINTCLI-78: NEW dark tool `moot_register_adornment_minter` (§ 9.2) —
+registers one full adornment-minter descriptor through the product
+surface and atomically replaces the active set with exactly that
+minter. Dark like `moot_run_adornment_pass`: dispatched by name,
+never in `tools/list`, so the advertised tool count is unchanged.
+The benchmark mint subcommand calls it once per restored estate
+before looping `moot_run_adornment_pass` (now called with an
+explicit `batch_size`) to debt exhaustion.
+
+### 2.1.1 -- 2026-08-26
+Vocabulary (mission SSC-RENAME): the S1 fourth column's acronym is
+defined at its first use — SSC = Semantic Search Candle. The typed
+intermediate renames to `SemanticSearchCandleData` in both ports
+(`renderSscText`/`render_ssc_text` → `renderSemanticSearchCandleText`/
+`render_semantic_search_candle_text`; row field `ssc` →
+`semanticSearchCandle`/`semantic_search_candle`). Wire shapes are
+unchanged: the structured `ssc` key, all row grammars, and every
+rendered payload are byte-identical.
+
+### 2.1.0 -- 2026-08-26
+Maintenance status surfaces (Bob rulings 2026-08-26): NEW tool
+`moot_rebuild_status` — the derived-state rebuild OPERATION status
+(`rebuild: running | idle`; reindex backfill / basis retrain +
+re-embed, whoever triggered it). A rebuild is not a drain, so it never
+appears in `moot_drain_status`. `moot_drain_status` gains the
+`dreaming` lane (the recall-event dreaming queue — a genuine queue
+drain, paid down out-of-band; the benchmarker's encode barrier
+denylists it). `moot_estate_status` becomes the composite condition
+surface: its body now appends the drain report and the rebuild line;
+the narrow tools remain the cheap machine-polling surfaces. Tool count
+80 → 81.
+
+The full entry ladder (1.0.0–1.59.0 and onward) lives in
+[ARIA_MCP_INTERFACE_CHANGELOG.md](ARIA_MCP_INTERFACE_CHANGELOG.md).
+Current entry:
+
+### 2.0.0 -- 2026-08-25
+
+Adopted consolidation (Bob approval 2026-08-25) replacing the 1.59.0
+document body: six-family tool catalog (§§ 5–10); § 11 full result-format
+grammar catalog with Samples (row-grammar rules, fixed-column canonical
+row, control-line grammars, S2–S6 shapes, lossless tabular encoding,
+structured base-row-plus-extensions schemas, zero/one/many
+active-adornment composition with the ordered structured `adornments`
+array); sensitivity-advisory relocation to tool descriptions +
+estate_status; `ack` removed from recall_distilled. History externalized
+to ARIA_MCP_INTERFACE_CHANGELOG.md; drafting record (0.1.0–0.3.0): the
+archived ARIA_PROPOSED pair.
+
+Proposal-draft ladder (retained verbatim for the record):
+
+### 0.3.0 -- 2026-08-25
+
+Specified the fifth-column grammar for zero, one, or many active adornments.
+Added the ordered structured `adornments` array with `minterID` and `text`,
+while retaining `adornment` as the exact composed text field for additive
+compatibility.
+
+### 0.2.0 -- 2026-08-25
+
+Integrated the decided retrieval return-shape contract
+(RETRIEVAL_SHAPE_OPTIMIZATION_2026-08-25, register R1–R16). § 11 rebuilt
+as the full grammar catalog: row-grammar rules (separator guarantee,
+fixed columns with `-` absence placeholders, truncation, per-surface
+ordering including request-order batch get with duplicate-id semantics,
+caps, empty states); the canonical S1 row and its federated/vague/
+distilled forms (ack ceremony deleted); the deviation-only control-line
+grammars including the degradation line (the always-on
+`recall_provenance:` line is removed — stage/lane vocabulary is
+log-side); the synthesis document form (scaffold fields removed;
+normalized-cue `query:` line); S2 enumeration grammars; the S3 full
+record pinned from renderer readback; S4 fact rows (search + time-major
+timeline); S5 edge rows; the S6 tabular grammar with lossless value
+encoding; the structured base-row schema with surface extensions, typed
+`ssc`, capability metadata, synthesis `cues`/`summary`, complete lens
+extents, and structured tabular results; sensitivity-advisory
+relocation to tool descriptions + estate_status (§ 11.12). § 5 reply
+cells updated; `ack` removed from recall_distilled's arguments.
+
+### 0.1.0 -- 2026-08-25
+
+Created the proposed consolidated interface reference from the four ARIA source
+documents. Integrated the six-family taxonomy, grouped shared schemas and wire
+formats, separated behavioral authority into the companion Spec, isolated
+source discrepancies, and retained the original documents unchanged.

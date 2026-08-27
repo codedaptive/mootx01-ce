@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Specification
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-07-16
+date: 2026-08-21
 description: "Behavioral specification for SubstrateTypes: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -85,9 +85,12 @@ This specification defines:
 - The hyperplane family (`Hyperplane`, `HyperplaneFamily`) used to
   generate stable SimHash projections per cookbook §17.
 - The algebra primitives over `Fingerprint256` and integers:
-  `Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `FNV`. These
-  carry the scalar arithmetic; the hardware-dispatched fast paths
-  live in SubstrateKernel.
+  `Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `FNV`,
+  `Jaccard`. These carry the scalar arithmetic; the
+  hardware-dispatched fast paths live in SubstrateKernel.
+  `Jaccard` computes set similarity over 256-bit fingerprints
+  (popcount(A AND B) / popcount(A OR B)) and is conformance-gated
+  at CRC `0x2fe8941e` (cookbook §8.21).
 - The content hash (`ContentHash`) — a typed 32-byte SHA-256 digest
   of a leaf payload, semantically distinct from `MerkleRoot`.
   the node-integrity contract §16.
@@ -167,8 +170,8 @@ canonical source; this section is a navigation aid.
   expire, contest, resolveContest, tombstone — cookbook §10) are the only
   legal mutation kinds. New mutation semantics require a cookbook
   amendment, not a kit-side extension.
-- **I-25.** Each algebra primitive (Hamming, SimHash, OR-reduce, FNV)
-  has one canonical implementation, one hard port. Multiple
+- **I-25.** Each algebra primitive (Hamming, SimHash, OR-reduce, FNV,
+  Jaccard) has one canonical implementation, one hard port. Multiple
   hardware-dispatched bodies are admitted; multiple algebraic
   definitions are not.
 - **I-28.** `HLCGenerator` is single-instance per estate. Two
@@ -269,14 +272,25 @@ new matrix.
 
 ### § 5.7 Algebra primitives (scalar reference)
 
-`Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `FNV` each
-provide a **scalar reference implementation** of their operation.
-The reference is the canonical oracle: hardware-dispatched
+`Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `FNV`, and
+`Jaccard` each provide a **scalar reference implementation** of their
+operation. The reference is the canonical oracle: hardware-dispatched
 implementations in SubstrateKernel must produce identical output on
 every input.
 
 The reference implementations are bit-identical across ports per
 I-7 and gated by conformance vectors (cookbook §17.6, M8).
+
+`Jaccard` computes Jaccard set similarity and distance over 256-bit
+fingerprints: `similarity(a, b) = popcount(a AND b) / popcount(a OR
+b)`, `distance(a, b) = 1 − similarity`. Both operands are integer
+popcounts (bit-identical across ports); only the final division is
+floating-point, making it IEEE-754-identical given the same small
+integer inputs. **Empty-union convention:** two all-zero fingerprints
+return similarity 0.0 (not 1.0) — no evidence must never read as
+perfect match. Lives in SubstrateTypes (Layer 1) because the
+underlying operations (AND, OR, popcount) are the same Fingerprint256
+algebra Hamming uses. Conformance CRC `0x2fe8941e` (cookbook §8.21).
 
 ### § 5.8 ContentHash
 
@@ -356,7 +370,9 @@ both pass:
 - **Algebra vectors:** Hamming distance over fixed pairs, SimHash
   signing of fixed inputs against a fixed hyperplane family,
   OR-reduce over fixed bit-arrays, FNV hashing over fixed strings,
-  bitwise rotations.
+  bitwise rotations, Jaccard similarity over fixed fingerprint pairs
+  (including the empty-union edge case; canonical test vector digest
+  `0x2fe8941e`).
 - **Audit log vectors:** G-Set merge idempotence, dedup on identical
   entries.
 
@@ -366,6 +382,9 @@ Rust output for the same input, or between either port and the
 shared expectation — fails the conformance gate.
 
 ## Changelog
+
+### 1.3.0 -- 2026-08-21
+Added `Jaccard` to the algebra-primitives surface (§ 2, § 5.7, § 7). Jaccard set similarity and distance over 256-bit fingerprints (cookbook §8.21, CRC `0x2fe8941e`): `similarity(a, b) = popcount(a AND b) / popcount(a OR b)`, `distance = 1 − similarity`. Empty-union convention: both-empty → 0.0. Lives in SubstrateTypes (not SubstrateML) because the underlying operations are the same `Fingerprint256` algebra Hamming uses. Conformance vectors pinned in the harness (`vectors/jaccard.json`); gated since W2.5 Track M1 activation. Updated I-25, §5.7 scalar-reference description, and §7 conformance vectors list.
 
 ### 1.2.0 -- 2026-07-16
 Corrected § 5.4: `RowVerb` has twelve verbs (capture, observe, mutate, retract, promote, reject, supersede, decay, expire, contest, resolveContest, tombstone), not nine, and the earlier list of verb names (reanchor, withdraw, expunge, recall, propose, associate, learn) did not match the shipped enum. Corrected `RowState` description from "the legal row states" to "the ten legal row states" for consistency with the scale-gapped raw-value layout.

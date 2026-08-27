@@ -104,19 +104,24 @@ enum DatasetTools {
     ///
     /// `serverIdentity` is the host's identity string, used as the `addedBy`
     /// parameter on captureDatasetHandle (parity with other capture calls).
+    /// `now` is the bench-clock instant threaded from `ToolDispatcher.dispatch()`.
+    /// Runners must not call `Date()` directly — use the `now` parameter for
+    /// all temporal writes (replay seam: `MOOT_BENCH_EPOCH_NOW`).
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        serverIdentity: String
+        serverIdentity: String,
+        now: Date
     ) async throws -> JSONValue {
         switch name {
         case "moot_file_dataset":
             return try await runFileDataset(
                 args: args, kit: kit,
                 handle: try resolveHandle(args),
-                serverIdentity: serverIdentity)
+                serverIdentity: serverIdentity,
+                now: now)
 
         case "moot_dataset_query":
             return try await runDatasetQuery(
@@ -267,7 +272,8 @@ enum DatasetTools {
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        serverIdentity: String
+        serverIdentity: String,
+        now: Date
     ) async throws -> JSONValue {
         // --- Parse parameters ---
 
@@ -441,7 +447,7 @@ enum DatasetTools {
                 columns: columnSummaries,
                 columnStats: stats,
                 sampledRows: sampledRows,
-                now: Date())
+                now: now)
         } catch {
             signatureStatus = "pending (\(error.localizedDescription))"
         }

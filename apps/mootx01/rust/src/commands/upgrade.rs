@@ -27,6 +27,7 @@ pub fn run(
     yes: bool,
     no_restart: bool,
     converge_only: bool,
+    backfill_only: bool,
 ) -> ExitCode {
     let home = super::install::home_dir();
 
@@ -34,6 +35,19 @@ pub fn run(
     // upgrade that placed us. Run the convergence steps and nothing else.
     if converge_only {
         run_convergence();
+        return ExitCode::from(exit::OK);
+    }
+
+    // --backfill-only: headless data-dir convergence for scripted and benchmark
+    // estates. Runs only the three data-directory migration steps (kg_facts identity,
+    // adornment store migration, shared-content reclaim) against the estate resolved via
+    // MOOTX01_DATA_DIR, then exits. No network, no service manager, no prompts.
+    // Ordering matches run_convergence: correctness migration → schema v17 + data
+    // move → VACUUM-backed reclaim.
+    if backfill_only {
+        run_kg_fact_identity_backfill();
+        run_adornment_store_migration();
+        run_shared_content_reclaim_if_pending();
         return ExitCode::from(exit::OK);
     }
 
@@ -75,8 +89,9 @@ pub fn run(
             println!("Already up to date (v{CURRENT_VERSION}).");
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
             // and it converges whether or not a new version is available — so
-            // the up-to-date early return still backfills and offers.
+            // the up-to-date early return still runs all migration steps and offers.
             run_kg_fact_identity_backfill();
+            run_adornment_store_migration();
             run_shared_content_reclaim_if_pending();
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
@@ -181,11 +196,12 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
     }
 }
 
-/// The convergence sequence itself, in order. The backfill and the reclaim both
-/// need a quiesced estate; the reclaim additionally repairs foreign SQLite
+/// The convergence sequence itself, in order. The migration steps and the reclaim
+/// both need a quiesced estate; the reclaim additionally repairs foreign SQLite
 /// geometry before its VACUUM.
 fn run_convergence() {
     run_kg_fact_identity_backfill();
+    run_adornment_store_migration();
     run_shared_content_reclaim_if_pending();
     run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
@@ -285,6 +301,159 @@ fn run_kg_fact_identity_backfill() {
                 "  ✗ kg_facts identity backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
             );
         }
+    }
+}
+
+/// ADORN-STORE-02 Part C: move legacy `drawers.adornment` TEXT rows into
+/// the normalized `adornments` table that landed in schema v17. Estates
+/// written before v17 carry per-drawer adornment text directly in the
+/// `drawers` table; the dream cycle reads only from `adornments` and never
+/// touches `drawers.adornment` on a v17+ estate. This migration closes the
+/// gap so existing adorned drawers remain visible after the upgrade.
+///
+/// Strategy:
+///   1. Open via `SqliteDrawerStore::from_path` — `DrawerStoreCore::new`
+///      calls `storage.open(schema())` which applies the v17 migration
+///      (creates `adornment_minters` + `adornments` tables) before any data
+///      is touched. Idempotent: a second run on a v17+ estate finds zero
+///      non-empty legacy rows and changes nothing.
+///   2. Access the underlying storage via `store.storage()` to scan the
+///      `drawers` table for rows where `adornment` TEXT is non-empty.
+///   3. Register a single "legacy-v16-adornment" minter (idempotent upsert)
+///      so that migrated adornment rows have a valid FK into
+///      `adornment_minters` and are returned by `active_adornments`.
+///   4. Write one `StoredAdornment` per legacy row via `put_adornment`
+///      (INSERT OR REPLACE on (drawer_id, minter_id) — idempotent).
+///
+/// Failure posture: each INSERT OR REPLACE is one row, so a crash mid-run
+/// leaves the estate in a valid partial state; the next `mootx01 upgrade`
+/// completes the rest.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Mirrors Swift `runAdornmentStoreMigration(home:)`.
+fn run_adornment_store_migration() {
+    use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+    use persistence_kit::types::TypedValue;
+    use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    // Absent estate means first run — new estates start on v17 and have
+    // no legacy adornment text; nothing to migrate.
+    if !estate.exists() {
+        return;
+    }
+
+    // Quiesce first (single-writer discipline): if the daemon will not
+    // stop, skip — nothing is half-done, and the next upgrade retries.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        println!(
+            "  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
+        );
+        return;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let result = (|| -> Result<usize, String> {
+        // SqliteDrawerStore::from_path calls DrawerStoreCore::new → schema.open(),
+        // which applies the v17 migration (creates adornment_minters + adornments
+        // tables) before any row is read or written. SqliteStorage::new adopts the
+        // sibling db.key on its own, so keyed and plaintext estates both open
+        // correctly.
+        let store = SqliteDrawerStore::from_path(
+            &estate.display().to_string(),
+            now_ms,
+            None,
+            5.0,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Access the underlying storage to read the legacy drawers.adornment
+        // column. The column is physically retained post-v17 but the dream cycle
+        // never writes to it; values present here pre-date schema v17.
+        let storage_arc = store
+            .storage()
+            .ok_or_else(|| "adornment store migration: storage handle unavailable".to_string())?;
+        let rows = storage_arc
+            .row_store()
+            .query("drawers", None, &[], None, None)
+            .map_err(|e| e.to_string())?;
+
+        let legacy_rows: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                // Only migrate rows with a non-empty adornment TEXT value.
+                let id = match row.get("id") {
+                    Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
+                    _ => return None,
+                };
+                let text = match row.get("adornment") {
+                    Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
+                    _ => return None,
+                };
+                Some((id, text))
+            })
+            .collect();
+
+        if legacy_rows.is_empty() {
+            return Ok(0);
+        }
+
+        // Register the single synthetic minter that owns all legacy text.
+        // register_adornment_minter is an upsert — running twice is idempotent.
+        // is_active = true so active_adornments() returns the migrated rows.
+        let legacy_minter = AdornmentMinterDescriptor::new(
+            "legacy-v16-adornment",
+            "Legacy v16 Adornment",
+            "legacy",
+            "unknown-v16",
+            "2026",
+            "legacy-pre-adornment-store",
+            BTreeMap::new(),
+            true,
+        );
+        store
+            .register_adornment_minter(&legacy_minter)
+            .map_err(|e| e.to_string())?;
+
+        // Move each legacy row. put_adornment is INSERT OR REPLACE on
+        // (drawer_id, minter_id), so a second run produces zero net writes.
+        let mut moved: usize = 0;
+        for (drawer_id, text) in &legacy_rows {
+            let adornment = StoredAdornment::new(
+                drawer_id.as_str(),
+                legacy_minter.id.as_str(),
+                text.as_str(),
+            );
+            store.put_adornment(&adornment).map_err(|e| e.to_string())?;
+            moved += 1;
+        }
+        Ok(moved)
+    })();
+
+    // Put the daemon back over the (possibly migrated) estate before
+    // reporting, mirroring the kg_facts identity backfill ordering.
+    if was_running {
+        let _ = daemon_start();
+    }
+
+    match result {
+        Ok(0) => println!("  ✓ adornment store migration: no legacy adornments to migrate"),
+        Ok(n) => println!(
+            "  ✓ adornment store migration: {n} legacy adornment(s) moved to normalized store"
+        ),
+        Err(e) => println!(
+            "  ✗ adornment store migration failed: {e}\n    Legacy adornments remain readable via drawers.adornment until resolved. Run `mootx01 upgrade` to retry."
+        ),
     }
 }
 
@@ -1744,5 +1913,164 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// REAL-PATH gate for --backfill-only (adornment store migration leg):
+    /// drives the core of `run_adornment_store_migration` against a real
+    /// SQLite estate seeded with legacy adornment text in `drawers.adornment`.
+    ///
+    /// Asserts:
+    ///  - one `StoredAdornment` row appears in the normalized store after migration
+    ///  - the migrated text matches the legacy value
+    ///  - a second `put_adornment` call on the same (drawer_id, minter_id) is
+    ///    idempotent — INSERT OR REPLACE keeps exactly one row
+    ///  - `active_adornments` returns the migrated row (is_active = true)
+    ///  - the daemon-quiesce/restart wrapper is deliberately excluded — a test
+    ///    must never stop the machine-global daemon; the wrapper is covered by
+    ///    the upgrade command itself
+    ///
+    /// Uses a real SQLite estate (tempfile) to exercise the legacy-column read
+    /// path. Mirrors Swift `adornmentStoreMigrationMovesLegacyText` in
+    /// UpgradeCommandTests.swift.
+    #[test]
+    fn backfill_only_migrates_legacy_adornment_to_store() {
+        use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
+        use locus_kit::drawer::Drawer;
+        use locus_kit::drawer_store::DrawerStore;
+        use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+        use persistence_kit::types::TypedValue;
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+
+        const NOW: i64 = 1_700_000_000_000; // ms
+        const TEST_PARENT: &str = "00000000-0000-4000-8000-000000000001";
+        const LEGACY_TEXT: &str = "A legacy adornment minted before schema v17.";
+
+        // Temporary SQLite file — deleted when the TempDir drops.
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tmpdir.path().join("estate.sqlite").display().to_string();
+
+        // Open via SqliteDrawerStore so the schema ladder runs (adds v17 tables).
+        let store =
+            SqliteDrawerStore::from_path(&db_path, NOW, None, 5.0).expect("store init");
+
+        // Seed one drawer and then write the legacy adornment column directly
+        // via the underlying storage — the pre-v17 shape the real upgrade reads.
+        let id = Uuid::new_v4().to_string();
+        let drawer = Drawer::new(
+            &id,
+            "Content for the adornment store migration test.",
+            TEST_PARENT,
+            "bilby",
+            NOW,
+            "minilm-v6",
+        );
+        store.add_drawer(&drawer, NOW).expect("seed drawer");
+
+        // Write legacy adornment text directly into drawers.adornment via
+        // storage.row_store().update() — the column is physically retained
+        // post-v17 exactly so this migration can read it.
+        {
+            use persistence_kit::predicate::StoragePredicate;
+            use persistence_kit::types::Column;
+            use std::collections::BTreeMap as SBTreeMap;
+            let storage_arc = store.storage().expect("storage arc for seed");
+            let mut values: SBTreeMap<String, TypedValue> = SBTreeMap::new();
+            values.insert("adornment".to_string(), TypedValue::Text(LEGACY_TEXT.to_string()));
+            storage_arc
+                .row_store()
+                .update(
+                    "drawers",
+                    values,
+                    &StoragePredicate::Eq(
+                        Column::new("drawers", "id"),
+                        TypedValue::Text(id.clone()),
+                    ),
+                )
+                .expect("seed legacy adornment column");
+        }
+
+        // Confirm pre-state: normalized adornments table is empty.
+        let pre_adornments = store.adornments(&id).expect("pre-state adornments");
+        assert!(
+            pre_adornments.is_empty(),
+            "adornments table must be empty before migration"
+        );
+
+        // Run the migration core — the same operations run_adornment_store_migration
+        // executes (minus the daemon quiesce/restore and path resolution):
+        // 1. Read legacy column  2. register minter  3. put_adornment
+        let storage_arc = store.storage().expect("storage arc for read");
+        let rows = storage_arc
+            .row_store()
+            .query("drawers", None, &[], None, None)
+            .expect("legacy read query");
+        let legacy_rows: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                let row_id = match row.get("id") {
+                    Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
+                    _ => return None,
+                };
+                let text = match row.get("adornment") {
+                    Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
+                    _ => return None,
+                };
+                Some((row_id, text))
+            })
+            .collect();
+        assert_eq!(legacy_rows.len(), 1, "one legacy adornment row must be found");
+        assert_eq!(legacy_rows[0].0, id);
+        assert_eq!(legacy_rows[0].1, LEGACY_TEXT);
+
+        let legacy_minter = AdornmentMinterDescriptor::new(
+            "legacy-v16-adornment",
+            "Legacy v16 Adornment",
+            "legacy",
+            "unknown-v16",
+            "2026",
+            "legacy-pre-adornment-store",
+            BTreeMap::new(),
+            true,
+        );
+        store
+            .register_adornment_minter(&legacy_minter)
+            .expect("register legacy minter");
+
+        let adornment = StoredAdornment::new(&id, &legacy_minter.id, LEGACY_TEXT);
+        let rows_written = store.put_adornment(&adornment).expect("put_adornment");
+        assert_eq!(rows_written, 1, "put_adornment must write exactly one row");
+
+        // Verify post-state: normalized store has the migrated adornment.
+        let post_adornments = store.adornments(&id).expect("post-state adornments");
+        assert_eq!(
+            post_adornments.len(),
+            1,
+            "one adornment must be in the normalized store"
+        );
+        assert_eq!(post_adornments[0].text, LEGACY_TEXT, "text must match the legacy value");
+        assert_eq!(post_adornments[0].minter_id, "legacy-v16-adornment");
+
+        // Second put_adornment: idempotent — INSERT OR REPLACE on (drawer_id, minter_id)
+        // keeps exactly one row.
+        let _ = store.put_adornment(&adornment).expect("second put_adornment");
+        let idempotent = store.adornments(&id).expect("idempotent check");
+        assert_eq!(
+            idempotent.len(),
+            1,
+            "a second put_adornment must not duplicate the row"
+        );
+        assert_eq!(idempotent[0].text, LEGACY_TEXT, "text must be unchanged after second run");
+
+        // active_adornments returns the migrated row because is_active = true.
+        let active = store
+            .active_adornments(&[id.as_str()])
+            .expect("active_adornments");
+        assert!(
+            active.contains_key(&id),
+            "active_adornments must include the migrated drawer"
+        );
+        assert_eq!(active[&id].len(), 1, "exactly one active adornment must be returned");
+        assert_eq!(active[&id][0].text, LEGACY_TEXT);
     }
 }

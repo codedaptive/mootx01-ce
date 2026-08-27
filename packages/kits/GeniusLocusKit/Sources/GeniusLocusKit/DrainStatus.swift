@@ -76,6 +76,17 @@ public struct DrainStatus: Sendable, Equatable {
     /// and `encodeSettled` both key on it.
     public static let corpusEncodeName = "corpus_encode"
 
+    /// Canonical name of the dreaming-queue drain lane (2026-08-26). A
+    /// GENUINE queue drain: `pending` is the persistent `dreaming` stream's
+    /// job depth (recall-event dreaming debt), worked down out-of-band by
+    /// the dreamer (in-session, resident daemon, or the T10 detached
+    /// finisher). NON-GATING for the benchmarker's encode barrier — the
+    /// debt is paid outside the measured session, so a gating lane would
+    /// hang every encode barrier on healthy estates
+    /// (`barrierNonGatingLanes` gained this name in the same change; the
+    /// distillation-lane precedent).
+    public static let dreamingName = "dreaming"
+
     /// Canonical name of the subject-backfill drain lane (PR-09). The
     /// lane renders ONLY while a subject producer is registered for the
     /// estate (PR-10's Apple miniLLM rider; test stubs) — an
@@ -161,7 +172,21 @@ extension GeniusLocusKit {
             detail: "pipeline: \(DistillationPipelineVersion.current)"
         ))
 
-        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
+        // the queue is MOUNTED (a fresh estate with no external-origin recall
+        // has no queue — absent ≠ 0, same honesty rule as the corpus lane).
+        // `in_flight` is 0: the queue's claim window is inside the dreamer's
+        // own drain call, not observable from a non-claiming peek.
+        if let dreamingPending = await dreamingQueuePendingCount(for: handle) {
+            statuses.append(DrainStatus(
+                name: DrainStatus.dreamingName,
+                pending: dreamingPending,
+                inFlight: 0,
+                detail: "stream: dreaming"
+            ))
+        }
+
+        // Drain 4 of N: subject backfill (PR-09). Rendered ONLY while a
         // subject producer is registered (rider-gated — see
         // `subjectBackfillName`). `pending` is the NULL-only presence
         // debt (`countSubjectDebt`), a row-level eligibility count like

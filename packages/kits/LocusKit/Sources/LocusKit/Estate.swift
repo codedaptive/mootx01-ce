@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import PersistenceKit
+import AdornmentLib
 
 /// Top-level handle to a single GeniusLocus estate.
 ///
@@ -523,6 +524,40 @@ public actor Estate {
         try await store.countMissingSubject(pipelineVersion: pipelineVersion)
     }
 
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// Set or clear the `isAnomalous` flag (bit 26) on one drawer.
+    ///
+    /// Pass-through over `DrawerStore.setAnomalousFlag`. This is the
+    /// seam GeniusLocusKit's anomaly-flag sweep (§11.18) writes through
+    /// after computing per-room cohesion z-scores via SubstrateML.
+    ///
+    /// A derived-signal write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched, and no content digest bump.
+    /// The `now` parameter is accepted for deterministic call-site
+    /// discipline but is not used by the write itself (bit 26 carries no
+    /// timestamp). `rebuildAll` at estate reopen recomputes
+    /// `operationalAND` from scratch; the anomaly sweep owns bit 26 and
+    /// no fingerprint-store pre-computation is required for the recall
+    /// filter to work (filter is applied per-hit after hydration).
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose flag should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    ///   - now: Caller-supplied instant (deterministic clock discipline).
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    @discardableResult
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool,
+        now: Date
+    ) async throws -> Int {
+        // `now` is accepted for call-site determinism but not used by
+        // the write itself — the anomalous bit carries no timestamp.
+        _ = now
+        return try await store.setAnomalousFlag(drawerId: drawerId, anomalous: anomalous)
+    }
+
     /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
     /// lane's `pending`. See `DrawerStore.countSubjectDebt`.
     public func countSubjectDebt() async throws -> Int {
@@ -544,6 +579,65 @@ public actor Estate {
         limit: Int, includingPipelines pipelines: [String]
     ) async throws -> [Drawer] {
         try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines)
+    }
+
+    // MARK: - Normalized adornment store pass-throughs (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17)
+
+    /// Return all registered adornment minters ordered by name.
+    /// Exposes `DrawerStore.listAdornmentMinters()` through the `Estate` boundary.
+    public func listAdornmentMinters() async throws -> [AdornmentMinterDescriptor] {
+        try await store.listAdornmentMinters()
+    }
+
+    /// Register or replace one adornment minter.
+    /// Exposes `DrawerStore.registerAdornmentMinter(_:)` through the `Estate` boundary.
+    public func registerAdornmentMinter(_ minter: AdornmentMinterDescriptor) async throws {
+        try await store.registerAdornmentMinter(minter)
+    }
+
+    /// Set the active flag for one minter. Returns row count (0 or 1).
+    /// Exposes `DrawerStore.setAdornmentMinterActive(id:active:)` through the `Estate` boundary.
+    @discardableResult
+    public func setAdornmentMinterActive(id: String, active: Bool) async throws -> Int {
+        try await store.setAdornmentMinterActive(id: id, active: active)
+    }
+
+    /// Atomically replace the active minter set.
+    /// Exposes `DrawerStore.setActiveAdornmentMinters(ids:)` through the `Estate` boundary.
+    @discardableResult
+    public func setActiveAdornmentMinters(ids: Set<String>) async throws -> Int {
+        try await store.setActiveAdornmentMinters(ids: ids)
+    }
+
+    /// Bounded batch of (drawer, minter) pairs without an adornment row.
+    /// Exposes `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)` through
+    /// the `Estate` boundary so `AdornmentPass` (GeniusLocusKit Brain) can fetch
+    /// the work queue without reaching the store directly.
+    public func adornmentDebtBatch(
+        limit: Int,
+        afterDrawerID: String? = nil
+    ) async throws -> [AdornmentDebt] {
+        try await store.adornmentDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
+    }
+
+    /// Write one (drawer, minter) adornment row, inserting or replacing.
+    /// Returns count of rows inserted or updated (always 1 on success).
+    /// Exposes `DrawerStore.putAdornment(_:)` through the `Estate` boundary.
+    @discardableResult
+    public func putAdornment(_ adornment: StoredAdornment) async throws -> Int {
+        try await store.putAdornment(adornment)
+    }
+
+    /// Return all adornment rows for one drawer, ordered by minter_id.
+    /// Exposes `DrawerStore.adornments(drawerID:)` through the `Estate` boundary.
+    public func adornments(drawerID: String) async throws -> [StoredAdornment] {
+        try await store.adornments(drawerID: drawerID)
+    }
+
+    /// Return the active adornments for a batch of drawers.
+    /// Exposes `DrawerStore.activeAdornments(drawerIDs:)` through the `Estate` boundary.
+    public func activeAdornments(drawerIDs: [String]) async throws -> [String: [StoredAdornment]] {
+        try await store.activeAdornments(drawerIDs: drawerIDs)
     }
 
     // MARK: - Drawer enumeration
@@ -647,6 +741,18 @@ public actor Estate {
     /// Delegates to `store.drawersIn(wing:room:)`.
     public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
         try await store.drawersIn(wing: wing, room: room)
+    }
+
+    /// Enumerate rooms, optionally restricted to one wing.
+    ///
+    /// When `wing` is nil, returns every non-tombstoned room across all wings,
+    /// sorted by `"wing\0room"`. When `wing` is non-nil, returns only rooms in
+    /// that wing. Delegates to `store.listRooms(in:)`.
+    ///
+    /// Used by the community-daemon capture endpoint to derive the set of valid
+    /// `CaptureDestination` values from the current canonical estate state.
+    public func listRooms(in wing: String? = nil) async throws -> [RoomSummary] {
+        try await store.listRooms(in: wing)
     }
 
     /// Batch by-id drawer load. Returns the drawers matching `ids` in

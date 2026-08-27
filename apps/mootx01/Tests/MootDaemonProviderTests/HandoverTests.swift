@@ -146,6 +146,45 @@ struct HandoverLeaseTests {
         }
     }
 
+    @Test("concurrent consumers resolve one lease exactly once")
+    func concurrentSingleUse() async throws {
+        let scratch = ScratchDirectory()
+        let authority = makeLeaseAuthority(scratch: scratch)
+        let lease = issuedLease(authority: authority)
+
+        let outcomes = await withTaskGroup(of: Int.self, returning: [Int].self) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    await Task.yield()
+                    do {
+                        _ = try authority.consume(
+                            lease, installationRoot: leaseRoot, asTarget: targetIdentity,
+                            targetInstance: targetInstance, currentGenerations: leaseGenerations
+                        )
+                        return 1
+                    } catch DaemonProviderError.leaseInvalid(.consumed) {
+                        return 0
+                    } catch {
+                        return -1
+                    }
+                }
+            }
+            var values: [Int] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+
+        #expect(outcomes.filter { $0 == 1 }.count == 1)
+        #expect(outcomes.filter { $0 == 0 }.count == 63)
+        #expect(!outcomes.contains(-1))
+
+        let journalText = try String(
+            contentsOf: scratch.url.appendingPathComponent("lease.journal"),
+            encoding: .utf8
+        )
+        #expect(journalText.split(separator: "\n").count == 1)
+    }
+
     @Test("an expired lease refuses on the injected clock")
     func expiry() {
         let scratch = ScratchDirectory()

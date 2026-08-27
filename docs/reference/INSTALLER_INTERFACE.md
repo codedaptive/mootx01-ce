@@ -1,8 +1,8 @@
 ---
 title: Installer Interface
 status: active
-version: 1.4.0
-date: 2026-08-18
+version: 1.5.0
+date: 2026-08-27
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -484,6 +484,22 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 
 ## Changelog
 
+### 1.5.0 -- 2026-08-27
+Renamed one public entrypoint. `LaunchAgent.honestServerStatus(registration:port:providerReportedState:)`
+is now `LaunchAgent.observedServerStatus(registration:port:providerReportedState:)`.
+
+Behaviour is unchanged: a registration, PID, or answering port is still
+never reported as a running or ready server, and the provider's own
+reported arbiter state still passes through verbatim. The new name states
+what the function does — it reports observations and never infers
+readiness from them — where the old one described the intent behind that
+rule rather than the behaviour.
+
+MINOR rather than PATCH because the public symbol changed. There is no
+deprecated alias: the callers are `mootx01 status` and this repository's
+own tests, all migrated in the same change, and a forwarding shim would
+be the bridge pattern the house rules prohibit.
+
 ### 1.4.0 -- 2026-08-18
 Added MACD-3B3 authenticated coexistence surface.  New public types and
 entrypoints in `MootInstallerCore`:
@@ -498,7 +514,7 @@ entrypoints in `MootInstallerCore`:
 
 - **`LaunchAgent.authenticatedBundledOwner(outcome:) -> String?` (C5).**
   The single authoritative format point mapping a `ProviderOwnershipProbe`
-  outcome into the `providerReportedState` string for `honestServerStatus`.
+  outcome into the `providerReportedState` string for `observedServerStatus`.
   `.absent` returns `nil` (fall through to registration/port observation).
   Healthy, incompatible, and unauthenticated outcomes produce non-nil strings
   carrying the provider's own wire vocabulary verbatim — no second copy of the
@@ -521,7 +537,7 @@ entrypoints in `MootInstallerCore`:
 - **`mootx01 status` provider-verbatim wire (C5).**
   `StatusCommand` calls `ProviderOwnershipProbe().detect()` and threads its
   result through `LaunchAgent.authenticatedBundledOwner(outcome:)` into
-  `honestServerStatus`.  The `providerReportedState: nil` placeholder (MACD-2c2)
+  `observedServerStatus`.  The `providerReportedState: nil` placeholder (MACD-2c2)
   is replaced with the live probe result.  Status never equates
   registration/port/PID with readiness.
 
@@ -556,7 +572,7 @@ Minor-version bump: additive surface; all existing signatures unchanged.
   Upgrade retains the legacy artifact (plist, label, and running job
   untouched) until the bundle provider proves authenticated readiness.
 
-- **Honest status vocabulary.** `LaunchAgent.honestServerStatus(registration:port:providerReportedState:)`
+- **Observed status vocabulary.** `LaunchAgent.observedServerStatus(registration:port:providerReportedState:)`
   plus `DaemonRegistrationObservation` / `DaemonPortObservation`: a
   registration, PID, or answering port is NEVER reported as a running/ready
   server; the provider's own reported arbiter state passes through verbatim

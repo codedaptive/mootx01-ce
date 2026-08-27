@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "description": "GLKResultsPackager cross-port golden pins. Read by both the Swift twin (GLKResultsPackagerParityTests.swift) and the Rust twin (packager_parity.rs). Identical level/confidence/has_answer_block/row_count assertions per gate branch in both ports. Values match the numeric seeds in GLKResultsPackagerTests.swift (pins A-D).",
+  "thresholds": {
+    "t1": 0.25,
+    "t2": 0.50,
+    "t1_prime": 0.05,
+    "t3_prime": 0.10,
+    "c": 0.20,
+    "k_min": 3,
+    "k_max": 20
+  },
+  "pins": [
+    {
+      "id": "pin-A",
+      "name": "never mode returns rowsOnly with all hits",
+      "mode": "never",
+      "composed_answer": null,
+      "signal_agreement": 0.0,
+      "hits": [
+        {"id": "h-A1", "final_score": 0.9, "dense_score": 0.9, "drawer_content": null},
+        {"id": "h-A2", "final_score": 0.7, "dense_score": 0.7, "drawer_content": null},
+        {"id": "h-A3", "final_score": 0.5, "dense_score": 0.5, "drawer_content": null},
+        {"id": "h-A4", "final_score": 0.3, "dense_score": 0.3, "drawer_content": null},
+        {"id": "h-A5", "final_score": 0.1, "dense_score": 0.1, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "rowsOnly",
+        "confidence": null,
+        "has_answer_block": false,
+        "row_count": 5,
+        "total_count": 5
+      }
+    },
+    {
+      "id": "pin-B",
+      "name": "CONFIDENT gate: auto mode → l0AnswerOnly (m1≥t1, m2≥t2, m4=true)",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "signal_agreement": 0.80,
+      "hits": [
+        {"id": "h-B1", "final_score": 0.90, "dense_score": 0.90, "drawer_content": "fruit banana mango recall content test paragraph information"},
+        {"id": "h-B2", "final_score": 0.30, "dense_score": 0.50, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "l0AnswerOnly",
+        "confidence": "confident",
+        "has_answer_block": true,
+        "row_count": 0,
+        "total_count": 2
+      }
+    },
+    {
+      "id": "pin-C",
+      "name": "INTERMEDIATE gate: auto mode → l1Full (m2<t2 so CONFIDENT fails; not WEAK)",
+      "mode": "auto",
+      "composed_answer": "moderate recall result intermediate",
+      "signal_agreement": 0.30,
+      "hits": [
+        {"id": "h-C1", "final_score": 0.70, "dense_score": 0.80, "drawer_content": null},
+        {"id": "h-C2", "final_score": 0.40, "dense_score": 0.50, "drawer_content": null},
+        {"id": "h-C3", "final_score": 0.30, "dense_score": 0.30, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "l1Full",
+        "confidence": "intermediate",
+        "has_answer_block": true,
+        "row_count": 3,
+        "total_count": 3
+      }
+    },
+    {
+      "id": "pin-D",
+      "name": "WEAK gate: m1<t1_prime → rowsOnly, no answer block (spec §5: WEAK never carries answer block)",
+      "mode": "auto",
+      "composed_answer": "some answer text",
+      "signal_agreement": 0.80,
+      "hits": [
+        {"id": "h-D1", "final_score": 0.520, "dense_score": 0.50, "drawer_content": null},
+        {"id": "h-D2", "final_score": 0.500, "dense_score": 0.50, "drawer_content": null},
+        {"id": "h-D3", "final_score": 0.480, "dense_score": 0.50, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "rowsOnly",
+        "confidence": null,
+        "has_answer_block": false,
+        "row_count": 3,
+        "total_count": 3
+      }
+    },
+    {
+      "id": "pin-E",
+      "name": "round-2 boundary: raw m1=0.245 rounds to 0.25=t1 in both ports → CONFIDENT (not INTERMEDIATE without rounding)",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "signal_agreement": 0.80,
+      "hits": [
+        {"id": "h-E1", "final_score": 0.80, "dense_score": 0.85, "drawer_content": "fruit banana mango recall content test paragraph information"},
+        {"id": "h-E2", "final_score": 0.604, "dense_score": 0.55, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "l0AnswerOnly",
+        "confidence": "confident",
+        "has_answer_block": true,
+        "row_count": 0,
+        "total_count": 2
+      }
+    },
+    {
+      "id": "pin-F",
+      "name": "m4 parity: hyphenated token treated as one word by Swift delimiter set — state-of-the-art found in citation",
+      "mode": "auto",
+      "composed_answer": "state-of-the-art deep-learning approach",
+      "signal_agreement": 0.80,
+      "hits": [
+        {"id": "h-F1", "final_score": 0.90, "dense_score": 0.80, "drawer_content": "state-of-the-art deep-learning methodology approach analysis evaluation"},
+        {"id": "h-F2", "final_score": 0.35, "dense_score": 0.45, "drawer_content": null}
+      ],
+      "expected": {
+        "level": "l0AnswerOnly",
+        "confidence": "confident",
+        "has_answer_block": true,
+        "row_count": 0,
+        "total_count": 2
+      }
+    }
+  ]
+}

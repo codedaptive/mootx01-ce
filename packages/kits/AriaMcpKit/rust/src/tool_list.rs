@@ -13,9 +13,9 @@
 //!                       moot_timing_report, and vault-gated
 //!                       moot_palace_import + moot_json_import
 //!   Federation (1) — moot_federated_search
-//!   Recipe (13) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
+//!   Recipe (14) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_connected, recall_shaped, recall_vague,
-//!                 dream, distill, recall_distilled, hunt_contradictions
+//!                 dream, distill, recall_distilled, hunt_contradictions, recall_walk
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!   Dataset (3) — moot_file_dataset, moot_dataset_query, moot_dataset_stats (MX-TAB-7b)
@@ -23,18 +23,18 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 74 tools (out-of-band sensitivity grants added moot_monitoring_status;
+//! Vault-on (default): 75 tools (out-of-band sensitivity grants added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
 //! moot_hunt_contradictions + moot_review_tunnel; MX-TAB-7 added 3 dataset
 //! tools moot_file_dataset/query/stats; the C3+A6 benchmark reset added
-//! moot_timing_report).
+//! moot_timing_report; D10 added moot_recall_walk).
 //! Vault-off (MOOTX01_VAULT=0): the five moot_vault_* tools,
 //! moot_palace_import, and moot_json_import are hidden together because all
 //! open local files (filesystem import/export vector).
 //! Dataset tools are always present (not vault-gated).
 //! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
-//! base count — 75 vault-on or 68 vault-off when enabled. Default (absent / ≠ "1")
-//! is OFF, preserving the 74/67 counts unchanged.
+//! base count — 76 vault-on or 69 vault-off when enabled. Default (absent / ≠ "1")
+//! is OFF, preserving the 75/68 counts unchanged.
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -73,7 +73,7 @@ pub fn memory_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 74 tools when vault is enabled (the default) or 67 tools when
+/// Produces 75 tools when vault is enabled (the default) or 68 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
 /// `moot_palace_import` and `moot_json_import` tools are hidden with the vault
@@ -82,7 +82,8 @@ pub fn memory_enabled() -> bool {
 /// Out-of-band sensitivity grants added `moot_monitoring_status`; the FDC
 /// reset tool added `moot_reclassify_fdc`; the contradiction hunter added
 /// `moot_hunt_contradictions` + `moot_review_tunnel`; MX-TAB-7 added 3
-/// dataset tools; the C3+A6 benchmark reset added `moot_timing_report`.
+/// dataset tools; the C3+A6 benchmark reset added `moot_timing_report`;
+/// D10 added `moot_recall_walk`.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_flags(vault_enabled(), memory_enabled())
 }
@@ -103,12 +104,12 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
 /// The single implementation all entry points delegate to. Tests that need
 /// fully deterministic behaviour (no env-var reads) call this directly —
 /// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
-/// baseline 74/67 count without racing against memory-tool env mutations.
+/// baseline 75/68 count without racing against memory-tool env mutations.
 pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
-    // Vault-on: 74 tools. Vault-off: 67 tools (palace_import + json_import
+    // Vault-on: 75 tools. Vault-off: 68 tools (palace_import + json_import
     // + 5 vault_* hidden). Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1.
     // Dataset tools (3) are always present regardless of vault flag.
-    let capacity = if vault_on { 74 } else { 67 } + if memory_on { 1 } else { 0 };
+    let capacity = if vault_on { 75 } else { 68 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when
@@ -160,6 +161,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // files, so both are gated with the vault import/export surface.
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
+    tools.push(rebuild_status_tool());
     tools.push(reclassify_fdc_tool());
     tools.push(timing_report_tool());
     if vault_on {
@@ -170,13 +172,14 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // Federation (1)
     tools.push(federated_search_tool());
 
-    // Recipe (13)
+    // Recipe (14)
     tools.push(list_lenses_tool());
     tools.push(list_recipes_catalog_tool());
     tools.push(synthesize_tool());
     tools.push(run_migration_tool());
     tools.push(confirm_migration_tool());
     tools.push(recall_precise_tool());
+    tools.push(recall_temporal_tool());
     tools.push(recall_connected_tool());
     tools.push(recall_shaped_tool());
     // moot_dream: matrix rebuild + dreaming cycle. Schema mirrors Swift
@@ -196,9 +199,13 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
     // same core pass that runs inside moot_dream and the resident scout
     // signal, surfaced as its own tool per Bob's ruling ("it also has to be
-    // an on demand item the user can call"). Appended last to mirror the
-    // Swift RecipeTools.tools() ordering.
+    // an on demand item the user can call").
     tools.push(hunt_contradictions_tool());
+    // moot_recall_walk: escalation-ladder recall (D10) — Stage 1 (session_hybrid,
+    // cheap, pool 20) stops when the top-gap is confident (≥ 0.25); Stage 2
+    // (PreciseRecall / hamming+text) fires only when Stage 1 is insufficient.
+    // Appended last in the recipe block to mirror Swift RecipeTools.tools() ordering.
+    tools.push(recall_walk_tool());
 
     // Lens (23)
     for lens_name in crate::lens_tools::LENS_TOOLS {
@@ -297,17 +304,34 @@ fn file_memory_tool() -> serde_json::Value {
 fn memory_search_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_search",
-        "description": "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
+        "description": "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked S1 rows — uuid · subject · firstSentence · SSC · adornments · eventTime · score — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision); absence means a clear, nominal result. Sensitivity: a sensitivity tier gate is in effect by default — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Natural-language search query. Provide query OR near — exactly one."),
                 "near": string_schema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
-                "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
+                "limit": integer_schema("Relevance floor, not an exact row count (default 20). Equal-scored results at the boundary are all returned, so the actual count may exceed this value — or fall below it when an unresolved score tie is disclosed instead of arbitrarily cut. Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                 "explain": boolean_schema("Include scoring explanation (default false). Omit to use the default; null is invalid."),
-                "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
-                "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
+                "door": string_schema(concat!(
+                    "Optional retrieval door — the front-door family adjective. Overrides scoring when both are present. ",
+                    "Valid values: ",
+                    "guess — use the per-estate A1 config the quality optimizer provisioned (best automatic choice; falls back to matrixAware when no config is set); ",
+                    "rrf — reciprocal rank fusion (benchmark winner on every full-coverage lane: lme, locomo, lmeb, membench); ",
+                    "matrixAware — full weighted pipeline (matrix + temporal + fieldFit + graph + preference signals; prior default); ",
+                    "raw — lane order, no reranking; ",
+                    "discriminative — rrf composite scaled by dense-lane saturation discount. ",
+                    "Pick by question shape: single-fact lookups → guess/rrf; ",
+                    "temporal (when/before/after) → keep default and use ordering:byRelevanceDesc; ",
+                    "aggregative (how many/all the…) or comparative (which is more…) → rrf or thorough (future); ",
+                    "knowledge-update (what is it NOW) → rrf; ",
+                    "noisy/partial-cue → raw or rrf. ",
+                    "Omit to use the A1 provisioned config (or matrixAware for un-provisioned estates). null is invalid."
+                )),
+                "scoring": string_schema("Scoring strategy: raw, rrf, matrixAware, discriminative. Overridden by door when both are supplied. Omit to use the door selection (see door arg). null is invalid."),
+                "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
+                "frontier_k": integer_schema("Optional candidate-pool depth override (integer, clamped to [64, 256] by the recall engine). Controls how many candidates each lane fetches before fusion. When absent the engine formula is used (min(max(limit × 4, 64), 256)). Omit to use the default; null is invalid."),
+                "answer": string_schema("Response shape adjective: \"never\" (default) — dense rows only, byte-identical to today; \"always\" — compose an answer block summarising the top citations plus rows; \"auto\" — server picks the response level (L0/L1/rows) by confidence gate. Omit or pass \"never\" to preserve existing behaviour. null is invalid.")
             }),
             json!([])
         ))),
@@ -333,7 +357,7 @@ fn memory_list_tool() -> serde_json::Value {
 fn memory_get_tool() -> serde_json::Value {
     json!({
         "name": "moot_memory_get",
-        "description": "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
+        "description": "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record. Sensitivity: a sensitivity tier gate is in effect by default — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "id": string_schema("Memory row identifier (drawer UUID). Provide id or ids."),
@@ -659,7 +683,19 @@ fn reindex_tool() -> serde_json::Value {
 fn drain_status_tool() -> serde_json::Value {
     json!({
         "name": "moot_drain_status",
-        "description": "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
+        "description": "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state. Lanes: corpus_encode (the encode/ingest queue, with its live encoded-chunk count), distillation (row-level representation debt), dreaming (the recall-event dreaming queue, paid down out-of-band), and subject_backfill (only while a subject producer is registered). Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Rebuild OPERATIONS are not drains — poll moot_rebuild_status for those.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+    })
+}
+
+// Maintenance / admin tool — NOT one of the nine ARIA grammar verbs. Reports
+// the derived-state rebuild OPERATION (reindex backfill / basis retrain +
+// re-embed); a rebuild is not a drain, so it never appears in
+// moot_drain_status (Bob ruling 2026-08-26). Mirrors Swift ToolProjection.
+fn rebuild_status_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_rebuild_status",
+        "description": "Maintenance: report whether a derived-state rebuild (reindex backfill or embedding-basis retrain + re-embed) is currently running for the estate — 'rebuild: running' or 'rebuild: idle'. Read-only and lightweight — safe to poll while waiting for a rebuild triggered by moot_reindex or a large import to finish. moot_estate_status includes this line in its condition report.",
         "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     })
 }
@@ -862,6 +898,31 @@ fn recall_precise_tool() -> serde_json::Value {
     })
 }
 
+/// The temporal-recall tool — the query-date window recipe. Mirrors Swift
+/// `RecipeTools.temporalRecallTool()` (description parity); declares the
+/// SHARED recall-results output schema (recall-family member).
+fn recall_temporal_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_temporal",
+        "description": "Temporal recall: reads the date stated in the query (\"on 8 May 2023\", \"in July\", \"in 2023\" — absolute dates only) and matches it against each memory's event_time. window=loose (default) ranks in-window memories first and keeps everything; window=tight returns ONLY in-window memories — use tight as the retry when an ordinary search of a date-anchored question came back weak. Pass from/to (YYYY-MM-DD or full ISO) to supply the window explicitly; explicit beats parsing. Month-only dates match that month in every year the estate covers. When the stated window holds fewer matches than limit, it widens \u{00b1}1 day at a time (up to \u{00b1}10) and each row is ranked by date proximity first, text affinity second. grab=dated additionally pulls memories BY DATE from the store so date-matched evidence appears even when no text lane finds it. Date-SEEKING questions with no stated date (\"When did X happen?\") rank real-dated memories first — read the answer from each row's event_time. Returns dense rows in the same shape as moot_memory_search plus a temporal: line naming the applied window, grab arm, and any widening.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The search query text — drives the coarse recall and, absent from/to, the date parse."),
+                "window": string_schema("Window mode: loose (boost — in-window first, nothing dropped; default) or tight (hard filter — in-window only; errors when no window is stated or parsed). Omit for loose; null is invalid."),
+                "from": string_schema("Optional explicit window start, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ. Explicit windows override the query parse. Omit to parse the query; null is invalid."),
+                "to": string_schema("Optional explicit window end, same forms as from. Omit to parse the query; null is invalid."),
+                "limit": integer_schema("Max ranked matches to return. Default 20."),
+                "pool": integer_schema("Coarse candidate-pool size grabbed before the window applies. Default 120 (wider than moot_recall_precise — the window is the discriminator)."),
+                "grab": string_schema("Candidate-grab arm: pool (lexical coarse grab only; default) or dated (lexical grab UNIONED with a date-indexed fetch of memories whose event_time falls in the window — reaches evidence no text lane surfaces). Omit for pool; null is invalid."),
+                "filter": filter_schema(),
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. null is invalid.")
+            }),
+            json!(["query"])
+        ))),
+        "outputSchema": recall_results_output_schema()
+    })
+}
+
 /// The connected-recall tool — multi-hop retrieval by graph diffusion.
 /// Mirrors Swift `RecipeTools.connectedRecallTool()` (description parity).
 fn recall_connected_tool() -> serde_json::Value {
@@ -940,7 +1001,8 @@ fn recall_shaped_tool() -> serde_json::Value {
                 },
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "filter": filter_schema(),
-                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                "frontier_k": integer_schema("Optional candidate-pool depth override (integer, clamped to [64, 256] by the recall engine). Controls how many candidates each lane fetches before fusion. When absent the engine formula is used (min(max(limit × 4, 64), 256)). Omit to use the default; null is invalid.")
             }),
             json!([])
         ))),
@@ -989,6 +1051,28 @@ fn hunt_contradictions_tool() -> serde_json::Value {
     })
 }
 
+/// Walk-recall escalation-ladder tool — mirrors Swift
+/// `RecipeTools.walkRecallTool()`. Stage 1 (ShapedRecall / session_hybrid,
+/// cheap, pool 20) stops when the top-gap is confident (≥ 0.25); Stage 2
+/// (PreciseRecall / hamming+text) fires only when Stage 1 is insufficient.
+/// Returns the same dense-row shape as moot_memory_search plus a `walk:` line.
+fn recall_walk_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_recall_walk",
+        "description": "Walk-recall: run a cheap session_hybrid shaped-recall stage first and return immediately when the top-gap is confident (\u{2265} 0.25); escalate to a precise hamming+text re-rank only when Stage 1 is insufficient. Faster than plain precise recall for the common case (most queries stop at Stage 1); falls back gracefully when the estate needs more precision. Returns dense rows in the same shape as moot_memory_search; a `walk:` line reports which stage was used and whether it stopped early.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "query": string_schema("The search query text \u{2014} drives BM25 + vector recall for both stages."),
+                "limit": integer_schema("Max ranked matches to return. Default 20."),
+                "filter": filter_schema(),
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings."),
+                "now": string_schema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock.")
+            }),
+            json!(["query"])
+        )))
+    })
+}
+
 /// Distillation sweep tool — mirrors Swift `RecipeTools.distillTool()`
 /// (SPEC_DISTILLATION_STORAGE §3/§7.1). Populates the on-row distilled
 /// representation of every eligible drawer; no factoid drawers, no
@@ -1013,20 +1097,19 @@ fn distill_tool() -> serde_json::Value {
 /// payloads; per-hit token counts.
 /// Distilled-payload recall descriptor.
 ///
-/// ACK-GATED: Wave 1 changed the contract (v2 semantics — exact-search geometry
-/// + distilled hydration, not a separate distilled tier). Calls without
-/// ack: "recall_distilled/v2" return a CONTRACT CHANGE NOTICE and do not execute.
+/// Runs unconditionally (ARIA_MCP_SPEC 2.0.0 § 8.6: no acknowledgment
+/// ceremony precedes any result). v2 semantics: exact-search geometry +
+/// distilled hydration, not a separate distilled tier.
 fn recall_distilled_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_distilled",
-        "description": "Distilled recall (v2): normal search over originals, hydrated with each hit's DISTILLED representation (token-economical prose) instead of the full content — identical ranking to moot_memory_search, smaller payloads, per-hit token counts for context budgeting. Hits are the source memories themselves; call moot_memory_get with a returned id for the full verbatim body. Rows not yet distilled fall back to full content and are marked served_from_content (run moot_distill to populate them). CONTRACT CHANGE (Wave 1): v2 no longer queries a separate distilled tier; pass ack: \"recall_distilled/v2\" to confirm you want the new behavior.",
+        "description": "Distilled recall (v2): normal search over originals, hydrated with each hit's DISTILLED representation (token-economical prose) instead of the full content — identical ranking to moot_memory_search, smaller payloads, per-hit token counts for context budgeting. Hits are the source memories themselves; call moot_memory_get with a returned id for the full verbatim body. Rows not yet distilled fall back to full content and are marked served_from_content (run moot_distill to populate them). v2 semantics: exact-search geometry with distilled hydration — there is no separate distilled tier.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("The search query text — drives BM25 + vector recall (same geometry as moot_memory_search)."),
-                "limit": integer_schema("Max results to return (default 20)."),
+                "limit": integer_schema("Relevance floor, not an exact row count (default 20). Equal-scored results at the boundary are all returned, so the actual count may exceed this value — or fall below it when an unresolved score tie is disclosed instead of arbitrarily cut. Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
                 "echo_query": boolean_schema("Optional. When true, appends the query text to the response header. Default false. Omit to use the default; null is invalid."),
-                "ack": string_schema("Contract-change acknowledgment token. This tool's behavior changed in Wave 1 (v2 semantics). Pass ack: \"recall_distilled/v2\" to confirm you want v2 behavior (normal exact-search geometry + distilled hydration). Without this token the call returns a CONTRACT CHANGE NOTICE and does not execute.")
             }),
             json!(["query"])
         )))
@@ -1057,7 +1140,10 @@ fn confirm_migration_tool() -> serde_json::Value {
 
 fn lens_tool(name: &str) -> serde_json::Value {
     let description = lens_description(name);
-    let schema = lens_schema(name);
+    // Inject mode arg into the schema (parallel to `with_teachme` for non-lens tools).
+    // Lens tools build their own schemas (they don't go through with_teachme), so we
+    // apply with_mode_arg here at the tool-entry level.
+    let schema = with_mode_arg(lens_schema(name));
     json!({
         "name": name,
         "description": description,
@@ -1592,15 +1678,41 @@ pub fn with_estate_id(mut schema: serde_json::Value) -> serde_json::Value {
     schema
 }
 
-/// Wrap a schema with an optional `teachme` boolean field. Mirrors Swift
-/// `ToolProjection.withTeachme(_:)`. When `teachme:true` is set,
-/// `dispatch.rs` intercepts the call and returns the tool's usage guide
-/// without touching the estate.
-pub fn with_teachme(mut schema: serde_json::Value) -> serde_json::Value {
+/// Wrap a schema with an optional `teachme` boolean field and the `mode` field.
+/// Mirrors Swift `ToolProjection.withTeachme(withModeArg(_:))`.
+///
+/// When `teachme:true` is set, `dispatch.rs` intercepts the call and returns
+/// the tool's usage guide without touching the estate.
+///
+/// The `mode` field is injected on every tool (mirrors Swift's
+/// `tools()` map: `inputSchema: withTeachme(withModeArg(tool.inputSchema))`).
+/// Modes are advisory and fail-open — unknown values accepted with a hint.
+pub fn with_teachme(schema: serde_json::Value) -> serde_json::Value {
+    // Apply mode arg first, then teachme, matching Swift injection order.
+    let mut schema = with_mode_arg(schema);
     if let Some(props) = schema["properties"].as_object_mut() {
         props.insert(
             "teachme".to_owned(),
             teachme_schema(),
+        );
+    }
+    schema
+}
+
+/// Wrap a schema with an optional `mode` string field. Mirrors Swift
+/// `ToolProjection.withModeArg(_:)`.
+///
+/// The `mode` argument accepts a mode declaration string (e.g. "Recall=Auto").
+/// Modes are advisory and fail-open: unknown names and variants are accepted with
+/// a hint, never invalidParams. Declare a mode to set the session default behavior.
+pub fn with_mode_arg(mut schema: serde_json::Value) -> serde_json::Value {
+    if let Some(props) = schema["properties"].as_object_mut() {
+        props.insert(
+            "mode".to_owned(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Optional mode declaration: \"Recall\", \"Recall=Auto\", \"Recall=Rows\", \"Recall=Answer\", \"Filing\", \"Lenses\", \"Vault\", \"Curator\". Sets the session default for this and future calls. Unknown values accepted with a hint (fail-open). Recall variants change the answer default on moot_memory_search."
+            }),
         );
     }
     schema

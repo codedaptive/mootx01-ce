@@ -22,7 +22,7 @@ use std::sync::Arc;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
 use persistence_kit::Storage;
 use uuid::Uuid;
-use vectorkit::{VectorPayload, VectorStore};
+use vectorkit::{engine::metric::FloatMetric, VectorPayload, VectorStore};
 
 const MODEL_ID: &str = "hnsw-persist-model";
 // HNSW threshold lowered to 10 so tests activate the HNSW path without 5,000 vectors.
@@ -156,7 +156,7 @@ fn hca1_deleted_vector_not_returned_after_rebuild() {
     let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
 
     let results: Vec<String> = store
-        .find_nearest_float(&probe, MODEL_ID, N)
+        .find_nearest_float(&probe, MODEL_ID, N, FloatMetric::Cosine)
         .expect("find nearest")
         .into_iter()
         .map(|m| m.item_id)
@@ -226,7 +226,7 @@ fn hca2_destroy_all_vectors_leaves_no_graph() {
     let mut rng = SplitMix64HP::new(111);
     let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
     let results = store
-        .find_nearest_float(&probe, MODEL_ID, N)
+        .find_nearest_float(&probe, MODEL_ID, N, FloatMetric::Cosine)
         .expect("find nearest after destroy");
 
     assert!(
@@ -791,7 +791,7 @@ fn hcf3_store_layer_corrupt_row_falls_back_to_exact_scan() {
     let probe: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
 
     let results = store
-        .find_nearest_float(&probe, MODEL_ID, N)
+        .find_nearest_float(&probe, MODEL_ID, N, FloatMetric::Cosine)
         .expect("find nearest");
 
     // Post-fix F3: poison row → return Ok(Vec::new()) → load abandoned →
@@ -1024,7 +1024,7 @@ fn hp1_persist_and_restart_proof() {
         let q: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
         query_floats = q.clone();
         results_a = store_a
-            .find_nearest_float(&q, MODEL_ID, 3)
+            .find_nearest_float(&q, MODEL_ID, 3, FloatMetric::Cosine)
             .expect("find nearest store_a")
             .into_iter()
             .map(|m| m.item_id)
@@ -1045,7 +1045,7 @@ fn hp1_persist_and_restart_proof() {
 
         // Results from store_b must match store_a.
         let results_b: Vec<String> = store_b
-            .find_nearest_float(&query_floats, MODEL_ID, 3)
+            .find_nearest_float(&query_floats, MODEL_ID, 3, FloatMetric::Cosine)
             .expect("find nearest store_b")
             .into_iter()
             .map(|m| m.item_id)
@@ -1086,7 +1086,7 @@ fn hp2_absent_graph_fallback_proof() {
     let mut rng = SplitMix64HP::new(888);
     let q: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
     let results = store
-        .find_nearest_float(&q, MODEL_ID, 3)
+        .find_nearest_float(&q, MODEL_ID, 3, FloatMetric::Cosine)
         .expect("find nearest (fallback path)");
     assert!(!results.is_empty(), "HP-2: exact-scan fallback should return results");
 
@@ -1136,7 +1136,7 @@ fn hp3_delete_resurrection_proof() {
         let mut rng = SplitMix64HP::new(777);
         let q: Vec<f32> = (0..4).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
         let results: Vec<String> = store_b
-            .find_nearest_float(&q, MODEL_ID, N)
+            .find_nearest_float(&q, MODEL_ID, N, FloatMetric::Cosine)
             .expect("find nearest store_b")
             .into_iter()
             .map(|m| m.item_id)

@@ -101,6 +101,54 @@ pub fn ancestors(qid: &str) -> Vec<String> {
     result
 }
 
+/// The reverse (parent → direct children) index over the pinned edges, built
+/// once per process on first use. Pure over the pinned artifact, so the lazy
+/// build is deterministic. Mirrors the Swift `QIDClosure.childIndex`.
+static CHILD_INDEX: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+
+fn child_index() -> &'static HashMap<String, Vec<String>> {
+    CHILD_INDEX.get_or_init(|| {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+        if let Some(g) = graph() {
+            for (child, parents) in &g.edges {
+                for parent in parents {
+                    index.entry(parent.clone()).or_default().push(child.clone());
+                }
+            }
+        }
+        index
+    })
+}
+
+/// The DIRECT neighbors of `qid` over the pinned P31/P279 edge graph, in BOTH
+/// directions: its direct parents plus every Q-ID that lists `qid` as a direct
+/// parent (its children). Undirected adjacency is what a graph-distance BFS
+/// needs — the path between two entities routes through a common ancestor,
+/// which requires walking up AND down the taxonomy (W2.5 Track S: this is the
+/// vendored adjacency behind SubstrateML's `WikidataAdjacencyProvider` for
+/// LatticeDistance §8.3). Empty/unknown qid (or unavailable artifact) → empty.
+/// `qid` itself is never a member of its own neighbor set (self-loops are
+/// dropped). Mirrors the Swift `QIDClosure.neighbors(of:)` exactly.
+pub fn neighbors(qid: &str) -> BTreeSet<String> {
+    if qid.is_empty() {
+        return BTreeSet::new();
+    }
+    let graph = match graph() {
+        Some(g) => g,
+        None => return BTreeSet::new(),
+    };
+    let mut result: BTreeSet<String> = graph
+        .edges
+        .get(qid)
+        .map(|parents| parents.iter().cloned().collect())
+        .unwrap_or_default();
+    if let Some(children) = child_index().get(qid) {
+        result.extend(children.iter().cloned());
+    }
+    result.remove(qid);
+    result
+}
+
 /// True when the bundled edge graph loaded and the surface is ready.
 pub fn is_available() -> bool {
     graph().is_some()
@@ -144,7 +192,10 @@ fn compute_closure(qid: &str, edges: &HashMap<String, Vec<String>>) -> Vec<Strin
 /// The integer part of a Q-ID ("Q146" → 146). Returns 0 when the value has no
 /// parseable trailing integer (defensive; not present in the artifact).
 /// Mirrors the Swift `qidInt`.
-fn qid_int(qid: &str) -> u64 {
+/// The integer part of a Q-ID ("Q146" → 146). Returns 0 when the value has
+/// no parseable trailing integer or is empty — 0 is the null Q-ID at the
+/// SubstrateML lattice-anchor boundary. Mirrors Swift `QIDClosure.qidInt`.
+pub fn qid_int(qid: &str) -> u64 {
     let digits: String = qid.chars().skip_while(|c| !c.is_ascii_digit()).collect();
     digits.parse::<u64>().unwrap_or(0)
 }
@@ -162,6 +213,25 @@ mod tests {
     fn unknown_qid_returns_empty() {
         // A Q-ID absent from the pinned graph has no ancestors.
         assert!(ancestors("Q999999999").is_empty());
+    }
+
+    #[test]
+    fn neighbors_both_directions_excluding_self() {
+        // Pinned artifact: Q1's only direct parent is Q36906466 — so Q1's
+        // neighbor set contains it, and Q36906466's neighbor set contains
+        // Q1 back (the reverse child edge). Mirrors the Swift pin.
+        let q1 = neighbors("Q1");
+        assert!(q1.contains("Q36906466"));
+        assert!(!q1.contains("Q1"));
+        let parent = neighbors("Q36906466");
+        assert!(parent.contains("Q1"));
+        assert!(!parent.contains("Q36906466"));
+    }
+
+    #[test]
+    fn neighbors_empty_unknown_is_empty() {
+        assert!(neighbors("").is_empty());
+        assert!(neighbors("Q999999999").is_empty());
     }
 
     #[test]

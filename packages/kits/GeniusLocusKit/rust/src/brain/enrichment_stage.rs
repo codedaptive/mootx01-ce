@@ -9,12 +9,12 @@ use corpus_kit::trailer_lexical_supplement::{TRAILER_CLOSE, TRAILER_OPEN};
 pub const ENRICHMENT_MAX_FACTS: usize = 6;
 
 /// Nouns shorter than this never anchor (Swift `minNounLength`).
-const MIN_NOUN_LENGTH: usize = 3;
+pub(crate) const MIN_NOUN_LENGTH: usize = 3;
 
 /// Function words and fillers the word-class baseline sometimes admits as
 /// nouns. Pinned identically to the Swift twin; extending it bumps the
 /// pipeline version.
-const STOPWORDS: [&str; 48] = [
+pub(crate) const STOPWORDS: [&str; 48] = [
     "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
 ];
 
@@ -33,7 +33,7 @@ fn grammar_safe(label: &str) -> String {
 /// Builds the grammar-v1 trailer for an item's verbatim content, or ""
 /// when no noun anchors. Twin of Swift `EnrichmentStage.trailer(forContent:)`.
 /// Longest phrase length attempted by the multi-word pre-pass.
-const MAX_PHRASE_WORDS: usize = 5;
+pub(crate) const MAX_PHRASE_WORDS: usize = 5;
 
 pub fn enrichment_trailer(content: &str) -> String {
     let mut facts: Vec<(&'static str, String)> = Vec::new();
@@ -115,7 +115,7 @@ pub fn enrichment_trailer(content: &str) -> String {
         if token.chars().count() < MIN_NOUN_LENGTH
             || STOPWORDS.contains(&token.as_str())
             || seen_nouns.contains(&token)
-            || lattice_lib::word_class_table::word_class(&token) != lattice_lib::WordClass::Noun
+            || lattice_lib::word_class_table::word_class_no_record(&token) != lattice_lib::WordClass::Noun
         {
             continue;
         }
@@ -192,7 +192,55 @@ pub fn enrichment_trailer(content: &str) -> String {
     format!(" {TRAILER_OPEN} {body} {TRAILER_CLOSE}")
 }
 
+
+/// Query-side lattice anchoring (W2.5 Track S): derives the ONE §8.3 lattice
+/// anchor a recall query is "about", using the SAME selection rules as
+/// `enrichment_trailer` (multi-word phrase pre-pass, then the first anchoring
+/// noun) so the query and the drawer sides anchor in the same code space.
+/// Returns `(udc_code, qid)` — udc_code is the drawer-side FDC code ("" for
+/// phrase anchors, which carry no FDC code); qid is "" when the anchoring
+/// term has none. Unanchorable query → ("", "") and the lattice reduction
+/// signal stays neutral. Mirrors Swift `QueryLatticeAnchor.derive(from:)`.
+pub fn query_anchor(text: &str) -> (String, String) {
+    let tokens: Vec<String> = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    // Multi-word phrase pass — the first phrase hit anchors the query.
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let mut n = MAX_PHRASE_WORDS.min(tokens.len() - i);
+        while n >= 2 {
+            let phrase = tokens[i..i + n].join(" ");
+            if let Some(qid) = lattice_lib::qid_facts::qid_for_phrase(&phrase) {
+                return (String::new(), qid.to_string());
+            }
+            n -= 1;
+        }
+        i += 1;
+    }
+
+    // Single-token pass — the first anchoring noun wins.
+    for token in &tokens {
+        if token.chars().count() < MIN_NOUN_LENGTH
+            || STOPWORDS.contains(&token.as_str())
+            || lattice_lib::word_class_table::word_class_no_record(token) != lattice_lib::WordClass::Noun
+        {
+            continue;
+        }
+        let anchor = eidetic_lib::lookup(token);
+        if anchor.code.is_empty() || anchor.code == "000" {
+            continue;
+        }
+        return (anchor.code, anchor.wikidata_qid.unwrap_or_default());
+    }
+    (String::new(), String::new())
+}
+
 #[cfg(test)]
+
 mod tests {
     use super::*;
 
@@ -215,6 +263,70 @@ mod tests {
                 "");
         }
         assert_eq!(t, enrichment_trailer(content));
+    }
+
+    #[test]
+    fn query_anchor_phrase_first() {
+        // Mirrors the Swift QueryLatticeAnchor pins.
+        let (udc, qid) = query_anchor("Where is Rio de Janeiro?");
+        assert_eq!(qid, "Q8678");
+        assert_eq!(udc, "");
+    }
+
+    /// GOLDEN PIN (M4 — cross-port conformance vector).
+    ///
+    /// Same input/output asserted in both ports:
+    ///   Swift: `EnrichmentStageTests.QueryLatticeAnchorTests.m4GoldenPin()`
+    ///   Rust:  this test — `query_anchor_golden_pin_m4`
+    ///
+    /// "Where is Rio de Janeiro?" → QID Q8678, no FDC code.
+    /// The phrase "rio de janeiro" is in QIDFacts and anchors via the
+    /// phrase-first pass before any single-noun pass is attempted.
+    /// Neither port may change this output without cross-port re-pinning.
+    #[test]
+    fn query_anchor_golden_pin_m4() {
+        let (udc, qid) = query_anchor("Where is Rio de Janeiro?");
+        assert_eq!(qid, "Q8678", "M4 golden pin: expected QID Q8678 for 'rio de janeiro'");
+        assert_eq!(udc, "", "M4 golden pin: phrase-anchored query carries no FDC code");
+        // Verify the anchor is non-empty (would be caught above, but explicit for clarity).
+        assert!(!qid.is_empty(), "M4 golden pin: QID must be non-empty");
+    }
+
+    #[test]
+    fn query_anchor_first_noun() {
+        // Selection-logic pin without pinning HMM word classes: compute the
+        // first token that satisfies the categorizer's own predicate chain,
+        // then assert query_anchor picked exactly that token's anchor.
+        // Mirrors the Swift QueryLatticeAnchor pin.
+        let text = "tell me about the painting guitar camera";
+        let tokens: Vec<String> = text
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_lowercase())
+            .collect();
+        let expected = tokens
+            .iter()
+            .filter(|t| t.chars().count() >= MIN_NOUN_LENGTH && !STOPWORDS.contains(&t.as_str()))
+            .filter(|t| lattice_lib::word_class_table::word_class_no_record(t) == lattice_lib::WordClass::Noun)
+            .map(|t| eidetic_lib::lookup(t))
+            .find(|a| !a.code.is_empty() && a.code != "000");
+        let (udc, qid) = query_anchor(text);
+        match &expected {
+            Some(a) => {
+                assert_eq!(udc, a.code);
+                assert_eq!(qid, a.wikidata_qid.clone().unwrap_or_default());
+            }
+            None => assert!(udc.is_empty() && qid.is_empty()),
+        }
+        // The fixture is chosen so at least one noun anchors — if the canon
+        // ever stops anchoring all three, this pin must be re-fixtured.
+        assert!(expected.is_some());
+    }
+
+    #[test]
+    fn query_anchor_unanchorable_is_empty() {
+        let (udc, qid) = query_anchor("the and was were yeah okay");
+        assert!(udc.is_empty() && qid.is_empty());
     }
 
     #[test]

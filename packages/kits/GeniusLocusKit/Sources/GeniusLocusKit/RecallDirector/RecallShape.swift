@@ -114,6 +114,37 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// persisted before this field decode with the default.
     public let binaryMetric: String
 
+    /// Float-lane metric selector: `"cosine"` (default), `"l2"`, or `"dot"`.
+    ///
+    /// Selects the distance function used by the dense float embedding lane
+    /// (Lane D: `FloatBruteForceIndex` / `HNSW`). All three metrics are
+    /// implemented in `FloatBruteForceIndex` and produce well-formed rankings:
+    ///
+    /// - `"cosine"` — cosine distance `1 − cos(a,b)`. Scale-invariant;
+    ///   the default and the only metric used before this field existed.
+    ///   Byte-identical to the pre-field behaviour when absent or "cosine".
+    /// - `"l2"` — Euclidean L2 distance `√Σ(aᵢ−bᵢ)²`. Useful when
+    ///   absolute magnitude differences matter. Results comparable to
+    ///   cosine when vectors are unit-normalised.
+    /// - `"dot"` — Negative dot product `−Σ(aᵢbᵢ)`. Maximises inner
+    ///   product; useful for embeddings trained with a dot-product
+    ///   objective (e.g. some MRL/JM variants).
+    ///
+    /// Unknown values degrade to `"cosine"` per the shape contract — a
+    /// shape must degrade, never fail. Codable-additive: payloads persisted
+    /// before this field decode with the `"cosine"` default, preserving
+    /// byte-identical behaviour.
+    ///
+    /// ONLY the float lane is affected; the binary lane keeps `binaryMetric`.
+    public let floatMetric: String
+
+    /// Matrix-signal weighting selector (W2.5 S4-C): "counts" (default —
+    /// the canonical Int64 count matrices) or "decayed" (the §8.13
+    /// exp-decayed projections computed each maintenance pass). Unknown
+    /// values degrade to counts (shape contract). Arm surface: defaults
+    /// never read the decayed maps.
+    public let matrixWeighting: String
+
     /// The inclusive lower bound for any `frontierK` override. Mirrors the
     /// RecallDirector's `frontierK` floor so a shape cannot request a pool
     /// narrower than the engine's own minimum.
@@ -136,31 +167,40 @@ public struct RecallShape: Sendable, Codable, Equatable {
     ///     `[frontierKFloor, frontierKCeiling]` when read via `effectiveFrontierK`.
     ///     Defaults to `nil` (the engine's computed default).
     private enum CodingKeys: String, CodingKey {
-        case laneWeights, antiSimilarLanes, frontierK, binaryMetric
+        case laneWeights, antiSimilarLanes, frontierK, binaryMetric, floatMetric, matrixWeighting
     }
 
-    /// Custom decode so payloads persisted BEFORE `binaryMetric` existed
-    /// (and any future additive field) decode with their defaults instead
-    /// of failing on a missing key — the additive-Codable contract the
-    /// field documentation promises.
+    /// Custom decode so payloads persisted BEFORE any additive field existed
+    /// decode with their defaults instead of failing on a missing key — the
+    /// additive-Codable contract the field documentation promises.
+    ///
+    /// Fields added in document order, each with a `decodeIfPresent` fallback
+    /// to the stated default. Never use `decode(_:forKey:)` here — that throws
+    /// on a missing key and breaks the additive contract.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.laneWeights = try c.decodeIfPresent([String: Float].self, forKey: .laneWeights) ?? [:]
         self.antiSimilarLanes = try c.decodeIfPresent(Set<String>.self, forKey: .antiSimilarLanes) ?? []
         self.frontierK = try c.decodeIfPresent(Int.self, forKey: .frontierK)
         self.binaryMetric = try c.decodeIfPresent(String.self, forKey: .binaryMetric) ?? "hamming"
+        self.floatMetric = try c.decodeIfPresent(String.self, forKey: .floatMetric) ?? "cosine"
+        self.matrixWeighting = try c.decodeIfPresent(String.self, forKey: .matrixWeighting) ?? "counts"
     }
 
     public init(
         laneWeights: [String: Float] = [:],
         antiSimilarLanes: Set<String> = [],
         frontierK: Int? = nil,
-        binaryMetric: String = "hamming"
+        binaryMetric: String = "hamming",
+        floatMetric: String = "cosine",
+        matrixWeighting: String = "counts"
     ) {
         self.laneWeights = laneWeights
         self.antiSimilarLanes = antiSimilarLanes
         self.binaryMetric = binaryMetric
+        self.floatMetric = floatMetric
         self.frontierK = frontierK
+        self.matrixWeighting = matrixWeighting
     }
 
     /// Whether the given dense lane key inverts its objective to FARTHEST
@@ -248,13 +288,30 @@ public struct RecallShape: Sendable, Codable, Equatable {
         "nmf_forward",
         "fast",
         "jaccard",
+        // Float-lane metric presets: identical fusion to balanced, but the
+        // dense float embedding lane uses L2 or dot-product distance instead
+        // of the default cosine. Mirrors the binaryMetric/jaccard pattern.
+        "float-l2",
+        "float-dot",
+        "matrix_decayed",
         "structural",
         "temporal",
         "connection",
         "field",
         "preference",
         "anti_redundant",
+        // Per-signal anti-similarity variants: same suppression shape as
+        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
+        // inverts a different per-signal dense lane to FARTHEST so callers
+        // can target diversity in the RI, LSA, or NMF semantic space.
+        "anti_redundant_ri",
+        "anti_redundant_lsa",
+        "anti_redundant_nmf",
         "session_hybrid",
+        // Multi-column matrix presets: each amplifies two matrixAware columns
+        // simultaneously so both signals strengthen each other's ranking.
+        "temporal_connection",
+        "field_preference",
     ]
 
     /// Resolve a named preset to its documented signed-weight shape.
@@ -343,6 +400,24 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // not penalized for having few bits.
         case "jaccard":
             return RecallShape(binaryMetric: "jaccard")
+
+        // Float-lane metric presets: identical fusion to balanced, but the
+        // dense float embedding lane uses L2 or dot-product distance instead
+        // of the default cosine. Mirrors the jaccard/binaryMetric pattern:
+        // only the distance function changes; all lane weights remain neutral.
+        case "float-l2":
+            return RecallShape(floatMetric: "l2")
+
+        // Negative dot product (−Σaᵢbᵢ) as the float-lane distance. Useful
+        // for embeddings trained with a dot-product objective where larger
+        // inner products indicate higher relevance.
+        case "float-dot":
+            return RecallShape(floatMetric: "dot")
+
+        // W2.5 S4-C arm: identical fusion, but the matrixAware O/T signals
+        // read the §8.13 exp-decayed projections instead of the counts.
+        case "matrix_decayed":
+            return RecallShape(matrixWeighting: "decayed")
 
         // Suppress the literal lanes: ZERO bm25 + fdc so only the distributional
         // and structural lanes decide. The complement of `lexical`.
@@ -438,6 +513,30 @@ public struct RecallShape: Sendable, Codable, Equatable {
                 antiSimilarLanes: [DenseSignal.fdc],
                 frontierK: frontierKFloor)
 
+        // Per-signal anti-similarity: same suppression shape as anti_redundant
+        // (bm25/hamming at -0.5, frontier narrowed to the floor) but inverts
+        // the RI, LSA, or NMF dense lane to FARTHEST instead of FDC. Each
+        // variant targets diversity in the corresponding distributional
+        // semantic space — useful when the query is already well-covered by
+        // FDC structural coding and the caller wants distributional diversity.
+        case "anti_redundant_ri":
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                antiSimilarLanes: [DenseSignal.randomIndexing],
+                frontierK: frontierKFloor)
+
+        case "anti_redundant_lsa":
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                antiSimilarLanes: [DenseSignal.lsa],
+                frontierK: frontierKFloor)
+
+        case "anti_redundant_nmf":
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                antiSimilarLanes: [DenseSignal.nmf],
+                frontierK: frontierKFloor)
+
         // Session-granularity hybrid recall: amplify bm25 (keyword match for
         // conversation fragments), dense (semantic similarity within the
         // session context), and temporal (recency within the session window).
@@ -454,6 +553,34 @@ public struct RecallShape: Sendable, Codable, Equatable {
                     "bm25": 1.3,
                     "dense": 1.2,
                     "temporal": 1.2,
+                ])
+
+        // Multi-column matrix presets: each amplifies two matrixAware columns
+        // simultaneously. The two columns reinforce each other in the
+        // matrixAware scoring path (SPEC § unionBest weighted-column score).
+        // These presets are a no-op under .raw/.rrf (the matrix columns are
+        // dark under those scoring strategies).
+
+        // Temporal + co-occurrence: surfaces memories that are BOTH recently
+        // relevant AND frequently filed together with the query's neighbourhood.
+        // The two matrix signals compound: a drawer that is both recent and
+        // frequently co-filed rises ahead of one that is merely one or the other.
+        case "temporal_connection":
+            return RecallShape(
+                laneWeights: [
+                    "temporal": 1.5,
+                    "coOccurrence": 1.5,
+                ])
+
+        // Field-fit + preference: surfaces memories that BOTH match the query's
+        // filing facets (FDC field-fit column) AND have been historically favoured
+        // by the user (learned-preference column). The compound signal favours
+        // drawers the user has reinforced within the query's own filing context.
+        case "field_preference":
+            return RecallShape(
+                laneWeights: [
+                    "fieldFit": 1.5,
+                    "preference": 1.5,
                 ])
 
         default:
@@ -482,6 +609,12 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes."
         case "jaccard":
             return "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity."
+        case "float-l2":
+            return "L2 float metric — the dense float embedding lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter."
+        case "float-dot":
+            return "Dot-product float metric — the dense float embedding lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective."
+        case "matrix_decayed":
+            return "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts."
         case "not_lexical":
             return "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide."
         case "associative":
@@ -510,8 +643,18 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
         case "anti_redundant":
             return "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64."
+        case "anti_redundant_ri":
+            return "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space."
+        case "anti_redundant_lsa":
+            return "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space."
+        case "anti_redundant_nmf":
+            return "Diversity (NMF space) — invert the NMF dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the NMF topic space."
         case "session_hybrid":
             return "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal."
+        case "temporal_connection":
+            return "Recent + co-filed — amplify temporal (recency) + coOccurrence (shared filing neighbourhood) together; matrixAware scoring only."
+        case "field_preference":
+            return "Filed + preferred — amplify fieldFit (FDC facet match) + preference (learned user preference) together; matrixAware scoring only."
         default:
             return ""
         }

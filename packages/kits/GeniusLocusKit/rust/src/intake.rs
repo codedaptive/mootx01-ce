@@ -104,7 +104,16 @@ impl CorpusContentSource for LocusDrawerContentSource {
     }
 
     fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
-        let mut ids: Vec<String> = Vec::new();
+        // Collect (filed_at, content, id) tuples so the final sort uses stable
+        // keys rather than the random drawer UUID. UUID sort is non-deterministic
+        // across fresh estates — different random UUIDs per run → different
+        // encounter order in TermDocumentCounts → different vocabulary indices →
+        // different model weights → drifting recall scores between replay runs.
+        // Sort by (filed_at ascending, content ascending) instead: filed_at is
+        // seed-derived when MOOT_BENCH_EPOCH_NOW is active, and content is a
+        // pure function of the corpus. Swift twin: activeContentIDs() in
+        // LocusDrawerCorpusContentSource.swift.
+        let mut entries: Vec<(i64, String, String)> = Vec::new(); // (filed_at_ms, content, id)
         let mut cursor: Option<String> = None;
         let page_size = 2_000usize;
         loop {
@@ -121,15 +130,18 @@ impl CorpusContentSource for LocusDrawerContentSource {
                     && drawer.content_kind() != ContentKind::Dataset
                     && drawer.embedding_model_id != DATASET_HANDLE_EMBEDDING_MODEL_ID
                 {
-                    ids.push(drawer.id.clone());
+                    entries.push((drawer.filed_at, drawer.content.clone(), drawer.id.clone()));
                 }
             }
             if page.len() < page_size {
                 break;
             }
         }
-        ids.sort();
-        Ok(ids)
+        // filed_at ascending, content ascending as stable tiebreak for same-instant
+        // records (e.g. contradiction pairs sharing an event_time). Content
+        // comparison only fires for the rare same-filed_at case.
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        Ok(entries.into_iter().map(|(_, _, id)| id).collect())
     }
 }
 use locus_kit::drawer::Drawer;

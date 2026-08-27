@@ -37,6 +37,11 @@ pub struct ReductionCandidate {
     pub score: RecallScoreVector,
     /// The candidate's UDC lattice code (`""` when unanchored).
     pub udc_code: String,
+    /// The candidate's Wikidata Q-ID (`""` when the drawer carries none).
+    /// The second half of the §8.3 lattice anchor — the `lattice` signal
+    /// measures Q-ID graph distance over the pinned QIDClosure edges.
+    /// Mirrors Swift `ReductionCandidate.qid`.
+    pub qid: String,
     /// The candidate's optional UDC facet expression.
     pub udc_facets: Option<String>,
     /// The candidate's 0-based rank in the coarse-grab pool. The deterministic
@@ -45,6 +50,11 @@ pub struct ReductionCandidate {
     /// The candidate's event time (epoch seconds), or `None` when the hit
     /// carried no structured drawer. Read body-free.
     pub event_time: Option<i64>,
+    /// The drawer's filed-at instant (epoch ms). Paired with `event_time`
+    /// so date-seeking recall can distinguish REAL-dated memories
+    /// (event_time != filed_at) from streaming captures. None when
+    /// unhydrated.
+    pub filed_at: Option<i64>,
     /// Whether the candidate is in a currently-believed state (drawer state
     /// Cluster A). Read body-free from the adjective state bitmap.
     pub is_currently_believed: bool,
@@ -70,7 +80,7 @@ impl ReductionCandidate {
         // Bits 0–5 of the adjective bitmap hold the state axis (cookbook §2.3).
         // Decode to a State and ask the Cluster-A predicate — the same
         // body-free currency read the Swift port does via `drawer.state.isClusterA`.
-        let (content, room, udc_code, udc_facets, event_time, is_currently_believed) =
+        let (content, room, udc_code, qid, udc_facets, event_time, filed_at, is_currently_believed) =
             match &hit.drawer {
                 Some(d) => {
                     let state = State::from_raw(d.adjective_bitmap & 0x3F);
@@ -85,12 +95,17 @@ impl ReductionCandidate {
                         d.content.clone(),
                         room,
                         d.udc_code.clone(),
+                        d.wikidata_qid.clone().unwrap_or_default(),
                         d.udc_facets.clone(),
                         Some(d.event_time),
+                        Some(d.filed_at),
                         state.is_cluster_a(),
                     )
                 }
-                None => (String::new(), String::new(), String::new(), None, None, true),
+                None => (
+                    String::new(), String::new(), String::new(), String::new(),
+                    None, None, None, true,
+                ),
             };
         ReductionCandidate {
             id: hit.id.clone(),
@@ -98,9 +113,11 @@ impl ReductionCandidate {
             room,
             score: hit.score,
             udc_code,
+            qid,
             udc_facets,
             coarse_rank,
             event_time,
+            filed_at,
             is_currently_believed,
             // precision_score is populated by the composition fold; zero here
             // because from_hit builds pre-fold candidates.
@@ -117,6 +134,10 @@ pub struct ReductionQuery {
     pub text: String,
     /// The query's UDC lattice code, or `""` when unanchored.
     pub udc_code: String,
+    /// The query's Wikidata Q-ID, or `""` when the query carries none.
+    /// Together with `udc_code` this is the query's §8.3 lattice anchor.
+    /// Mirrors Swift `ReductionQuery.qid`.
+    pub qid: String,
 }
 
 impl ReductionQuery {
@@ -125,6 +146,7 @@ impl ReductionQuery {
         ReductionQuery {
             text: text.into(),
             udc_code: String::new(),
+            qid: String::new(),
         }
     }
 }
@@ -224,7 +246,8 @@ pub fn reduction_score(
         }
         ReductionSignal::Hamming => hamming_similarity(candidate.score.hamming_distance()),
         ReductionSignal::Matrix => clamp01(candidate.score.co_occurrence as f64),
-        ReductionSignal::Lattice => lattice_proximity(&query.udc_code, &candidate.udc_code),
+        ReductionSignal::Lattice => lattice_anchor_similarity(
+            &query.udc_code, &query.qid, &candidate.udc_code, &candidate.qid),
         ReductionSignal::Bm25 => squash(candidate.score.bm25 as f64),
         ReductionSignal::Vector => clamp01(candidate.score.vector as f64),
         ReductionSignal::Dense => clamp01(candidate.score.dense as f64),
@@ -252,32 +275,51 @@ pub fn hamming_similarity(distance: i32) -> f64 {
     (256 - d) as f64 / 256.0
 }
 
-/// Lattice proximity of a candidate UDC code to the query's UDC region, in
-/// `[0, 1]`: the shared leading-prefix length over the longer of the two codes.
-/// Unanchored query → neutral 0.5; anchored query, unanchored candidate → 0.
-/// Mirrors Swift `latticeProximity`.
-pub fn lattice_proximity(query_code: &str, candidate_code: &str) -> f64 {
-    if query_code.is_empty() {
+/// Lattice anchor similarity in `[0, 1]`: `1 − LatticeDistance` per cookbook
+/// §8.3 (W2.5 Track S activation — the designed anchor distance replaces the
+/// earlier prefix-share approximation). The distance is
+/// αU·UDC-tree-distance + αQ·Wikidata-graph-distance with the reference
+/// alphas (0.5/0.5); the Wikidata half runs a depth-4 BFS over the pinned
+/// QIDClosure P31/P279 edges (vendored, offline — deterministic and
+/// byte-identical across ports). §8.3 semantics that differ from a naive
+/// prefix measure, on purpose: a missing Q-ID on either side = maximally far
+/// ON THAT AXIS (so identical UDC codes without Q-IDs score 0.5, not 1.0);
+/// the QUERY carrying no anchor at all (no UDC code AND no Q-ID) is NEUTRAL
+/// (0.5). Mirrors Swift `latticeAnchorSimilarity`.
+pub fn lattice_anchor_similarity(
+    query_udc: &str,
+    query_qid: &str,
+    candidate_udc: &str,
+    candidate_qid: &str,
+) -> f64 {
+    if query_udc.is_empty() && query_qid.is_empty() {
         return 0.5; // unanchored query → neutral
     }
-    if candidate_code.is_empty() {
-        return 0.0; // anchored query, unanchored candidate → far
+    let distance = substrate_ml::lattice_distance::LatticeDistance::distance(
+        &substrate_ml::lattice_distance::LatticeAnchorStr::new(
+            query_udc, lattice_lib::qid_closure::qid_int(query_qid)),
+        &substrate_ml::lattice_distance::LatticeAnchorStr::new(
+            candidate_udc, lattice_lib::qid_closure::qid_int(candidate_qid)),
+        &QIDClosureAdjacency,
+        substrate_ml::lattice_distance::LatticeDistance::DEFAULT_ALPHA_UDC,
+        substrate_ml::lattice_distance::LatticeDistance::DEFAULT_ALPHA_QID,
+    );
+    (1.0 - distance).clamp(0.0, 1.0)
+}
+
+/// The QIDClosure-backed adjacency for §8.3's Wikidata graph distance:
+/// direct P31/P279 neighbors in both directions over the pinned edge
+/// artifact. Numeric Q-IDs at the SubstrateML boundary map to the closure's
+/// "Q<n>" string form here. Mirrors Swift `QIDClosureAdjacency`.
+pub struct QIDClosureAdjacency;
+
+impl substrate_ml::lattice_distance::WikidataAdjacencyProvider for QIDClosureAdjacency {
+    fn neighbors(&self, qid: u64) -> std::collections::HashSet<u64> {
+        lattice_lib::qid_closure::neighbors(&format!("Q{qid}"))
+            .iter()
+            .map(|q| lattice_lib::qid_closure::qid_int(q))
+            .collect()
     }
-    if query_code == candidate_code {
-        return 1.0;
-    }
-    let q: Vec<char> = query_code.chars().collect();
-    let c: Vec<char> = candidate_code.chars().collect();
-    let mut shared = 0usize;
-    let bound = q.len().min(c.len());
-    while shared < bound && q[shared] == c[shared] {
-        shared += 1;
-    }
-    let longer = q.len().max(c.len());
-    if longer == 0 {
-        return 0.0;
-    }
-    shared as f64 / longer as f64
 }
 
 /// Monotonic squash of a non-negative raw score into `[0, 1)`: `x / (1 + x)`.
@@ -393,12 +435,21 @@ mod tests {
     }
 
     #[test]
-    fn lattice_proximity_cases() {
-        assert_eq!(lattice_proximity("", "53"), 0.5); // unanchored query
-        assert_eq!(lattice_proximity("53", ""), 0.0); // anchored query, unanchored candidate
-        assert_eq!(lattice_proximity("53", "53"), 1.0); // exact
+    fn lattice_anchor_similarity_cases() {
+        // Unanchored query (no UDC, no Q-ID) → neutral.
+        assert_eq!(lattice_anchor_similarity("", "", "53", ""), 0.5);
+        // Anchored query, fully unanchored candidate → far on both §8.3
+        // axes (UDC distance clamps to 1, null Q-ID = 1) → similarity 0.
+        assert_eq!(lattice_anchor_similarity("53", "", "", ""), 0.0);
+        // Identical UDC without Q-IDs: UDC axis 0, Q-ID axis 1 (null
+        // evidence never reads as closeness) → 0.5·0 + 0.5·1 → sim 0.5.
+        assert_eq!(lattice_anchor_similarity("53", "", "53", ""), 0.5);
+        // Identical Q-ID (empty UDC on both = equal → UDC axis 0) → sim 1.
+        assert_eq!(lattice_anchor_similarity("", "Q146", "", "Q146"), 1.0);
         // "53" vs "54": shared prefix 1 over longer 2 = 0.5
-        assert!((lattice_proximity("53", "54") - 0.5).abs() < 1e-9);
+        // "53" vs "534": UDC raw (0 + 1)/3, Q-ID axis 1
+        // → distance 0.5·(1/3) + 0.5·1 = 2/3 → similarity 1/3.
+        assert!((lattice_anchor_similarity("53", "", "534", "") - 1.0 / 3.0).abs() < 1e-9);
     }
 
     #[test]

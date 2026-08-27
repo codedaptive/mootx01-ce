@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use uuid::Uuid;
-use vectorkit::{EmbeddingProvider, FloatSimHashEmbeddingProvider, VectorPayload, VectorStore};
+use vectorkit::{engine::metric::FloatMetric, EmbeddingProvider, FloatSimHashEmbeddingProvider, VectorPayload, VectorStore};
 
 const FILED_AT: i64 = 1_700_000_000;
 
@@ -112,7 +112,7 @@ fn float_round_trips_through_store_and_ranks_by_cosine() {
     add_float(&store, "far", &[0.0, 1.0, 0.0], "m");
 
     let matches = store
-        .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2)
+        .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2, FloatMetric::Cosine)
         .expect("find_nearest_float");
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].item_id, "near");
@@ -135,7 +135,7 @@ fn find_nearest_float_exactness_hand_computed() {
     add_float(&store, "c", &[0.0, 0.0, 1.0], "m");
 
     let matches = store
-        .find_nearest_float(&[3.0, 4.0, 0.0], "m", 3)
+        .find_nearest_float(&[3.0, 4.0, 0.0], "m", 3, FloatMetric::Cosine)
         .expect("find_nearest_float");
     let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
     assert_eq!(ids, vec!["a", "b", "c"]);
@@ -150,7 +150,7 @@ fn find_nearest_float_is_model_scoped() {
     add_float(&store, "in", &[1.0, 0.0], "model-a");
     add_float(&store, "out", &[1.0, 0.0], "model-b"); // same vector, other model
     let matches = store
-        .find_nearest_float(&[1.0, 0.0], "model-a", 5)
+        .find_nearest_float(&[1.0, 0.0], "model-a", 5, FloatMetric::Cosine)
         .expect("find_nearest_float");
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].item_id, "in");
@@ -172,7 +172,7 @@ fn float_index_rebuilds_on_fresh_store_over_same_storage() {
     // store2 starts with float_index_built = false → lazy rebuild from table.
     let store2 = VectorStore::new(storage, None);
     let matches = store2
-        .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2)
+        .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2, FloatMetric::Cosine)
         .expect("find_nearest_float after reopen");
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].item_id, "near");
@@ -188,7 +188,7 @@ fn rank_fixture_rust_order() {
         add_float(&store, id, &v, RANK_MODEL);
     }
     let matches = store
-        .find_nearest_float(&RANK_PROBE, RANK_MODEL, 5)
+        .find_nearest_float(&RANK_PROBE, RANK_MODEL, 5, FloatMetric::Cosine)
         .expect("find_nearest_float");
     let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
     assert_eq!(ids, RANK_EXPECTED_ORDER.to_vec());
@@ -203,7 +203,7 @@ fn farthest_rank_fixture_rust_order() {
         add_float(&store, id, &v, RANK_MODEL);
     }
     let matches = store
-        .find_farthest_float(&RANK_PROBE, RANK_MODEL, 5)
+        .find_farthest_float(&RANK_PROBE, RANK_MODEL, 5, FloatMetric::Cosine)
         .expect("find_farthest_float");
     let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
     assert_eq!(ids, RANK_EXPECTED_FARTHEST_ORDER.to_vec());
@@ -256,14 +256,14 @@ fn float_index_survives_reopen_sqlite() {
         // Nearest: probe aligned with `near`. near (cos 1.0) ranks above far
         // (cos 0.0).
         let nearest = store
-            .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2)
+            .find_nearest_float(&[1.0, 0.0, 0.0], "m", 2, FloatMetric::Cosine)
             .expect("find_nearest_float reopen");
         let near_ids: Vec<&str> = nearest.iter().map(|m| m.item_id.as_str()).collect();
         assert_eq!(near_ids, vec!["near", "far"]);
 
         // Farthest: the most dissimilar first — the exact reverse, no ties.
         let farthest = store
-            .find_farthest_float(&[1.0, 0.0, 0.0], "m", 2)
+            .find_farthest_float(&[1.0, 0.0, 0.0], "m", 2, FloatMetric::Cosine)
             .expect("find_farthest_float reopen");
         let far_ids: Vec<&str> = farthest.iter().map(|m| m.item_id.as_str()).collect();
         assert_eq!(far_ids, vec!["far", "near"]);

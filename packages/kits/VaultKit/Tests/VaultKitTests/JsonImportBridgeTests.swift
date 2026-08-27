@@ -29,7 +29,7 @@ struct JsonImportBridgeTests {
         _ json: String,
         limits: JsonImportLimits = .default
     ) throws -> JsonSeedFile {
-        try JsonSeedFile.parse(data: Data(json.utf8), limits: limits)
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: limits, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
     /// Expect `parse` to throw `VaultKitError.adapterError` whose message
@@ -79,7 +79,7 @@ struct JsonImportBridgeTests {
     @Test("valid fixture seed parses with defaults applied and file order kept")
     func validFixtureParses() throws {
         let data = try Data(contentsOf: Self.fixtureSeedURL)
-        let file = try JsonSeedFile.parse(data: data, limits: .default)
+        let file = try JsonSeedFile.parse(data: data, limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
 
         #expect(file.formatVersion == 1)
         #expect(file.name == "fixture-valid-seed")
@@ -366,7 +366,7 @@ struct JsonImportPipelineTests {
 
     private func fixtureFile() throws -> JsonSeedFile {
         let data = try Data(contentsOf: JsonImportBridgeTests.fixtureSeedURL)
-        return try JsonSeedFile.parse(data: data, limits: .default)
+        return try JsonSeedFile.parse(data: data, limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
     // MARK: - Phase 3: strict append
@@ -841,7 +841,7 @@ struct JsonImportSubjectTests {
     }
 
     private func parse(_ json: String) throws -> JsonSeedFile {
-        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default)
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
     private func tempSeedFile(_ json: String) throws -> URL {
@@ -1101,5 +1101,316 @@ struct JsonImportSubjectTests {
                 "receipt must carry subjectsProvided; got: \(receipt.entry)")
         #expect(receipt.entry.contains(#""subjectsDebt":1"#),
                 "receipt must carry subjectsDebt; got: \(receipt.entry)")
+    }
+}
+
+// Part 6 — schema v1.2: optional per-record capture_date field.
+//
+// Each import record may carry an optional "capture_date" (UTC ISO8601
+// instant). When present, that record's capture path receives it as the
+// ingest clock: the resulting drawer's `filedAt` equals the per-record
+// date, and the capture HLC physical time derives from it. Records
+// without "capture_date" keep the batch `now` — byte-identical legacy
+// behavior. Validates strictly: malformed value → tool error naming the
+// record index and id.
+@Suite("JsonImportBridge schema v1.2 — capture_date field")
+struct JsonImportCaptureDateTests {
+
+    // MARK: — Helpers
+
+    private func parse(_ json: String) throws -> JsonSeedFile {
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
+    }
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimport-capturedate-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jsonimport-cd-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    // MARK: — Parser tests (pure, no estate)
+
+    @Test("capture_date present and valid populates captureDate on JsonSeedRecord")
+    func captureDateParsed() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        let fmt = ISO8601DateFormatter()
+        let expected = fmt.date(from: "2026-01-15T10:00:00Z")
+        let parsed = try #require(file.records[0].captureDate,
+                                  "captureDate must be non-nil when capture_date is present")
+        #expect(abs(parsed.timeIntervalSince(expected!)) < 0.001,
+                "captureDate must equal the capture_date instant; got \(parsed)")
+    }
+
+    @Test("fractional-second capture_date parses to the exact instant")
+    func captureDateFractionalSeconds() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-frac","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-06-20T14:30:00.750Z"}
+        ]}
+        """)
+        let base = ISO8601DateFormatter().date(from: "2026-06-20T14:30:00Z")!
+        let expected = base.addingTimeInterval(0.750)
+        let parsed = try #require(file.records[0].captureDate)
+        #expect(abs(parsed.timeIntervalSince(expected)) < 0.001,
+                "fractional capture_date must carry the fractional second; got \(parsed)")
+    }
+
+    @Test("capture_date absent leaves captureDate nil — no legacy regression")
+    func captureDateAbsentIsNil() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-absent","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm"}
+        ]}
+        """)
+        #expect(file.records[0].captureDate == nil,
+                "captureDate must be nil when capture_date is absent")
+    }
+
+    @Test("malformed capture_date is a hard error naming the record index and id")
+    func malformedCaptureDateError() {
+        // "not-a-date" is not UTC ISO8601 — must throw adapterError
+        // naming both the record and the field.
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-bad","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"not-a-date"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for malformed capture_date")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("capture_date"), "got: \(message)")
+            #expect(message.contains("cd-bad"), "error must name the record id; got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    @Test("offset capture_date is rejected — UTC only for cross-port parity")
+    func offsetCaptureDateRejected() {
+        // Offset forms produce ambiguous milliseconds across time zones;
+        // the UTC-only rule (matching event_time) ensures the Rust twin
+        // can use an identical byte-for-byte parser without a TZ library.
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-offset","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00+05:30"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected adapterError for offset capture_date")
+        } catch let VaultKitError.adapterError(message) {
+            #expect(message.contains("capture_date"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.adapterError; got \(error)")
+        }
+    }
+
+    @Test("capture_date is in the allowed record-key set — no unknown-key error")
+    func captureDateInAllowedKeys() throws {
+        // If capture_date were not in recordKeys the schema validator
+        // would throw "unknown key" before even attempting to parse the
+        // value. This test confirms the key is admitted, so the value
+        // path is exercised rather than the key-rejection path.
+        #expect(throws: Never.self) {
+            _ = try parse("""
+            {"format_version":1,"name":"t","records":[
+              {"id":"cd-key","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+               "capture_date":"2026-01-15T10:00:00Z"}
+            ]}
+            """)
+        }
+    }
+
+    // MARK: — Pipeline tests (require estate + bridge)
+
+    @Test("record with capture_date: drawer filedAt equals the capture_date instant")
+    func captureDateSetsFiled() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Use a batch now that is definitely different from capture_date
+        // so we can distinguish per-record vs batch clock. The batch now is
+        // AFTER the capture instant: capture_date is a historical capture
+        // time by contract, and the future-skew gate (codex 2026-08-26)
+        // rejects capture dates beyond now + 24h.
+        let batchNow = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let captureInstant = ISO8601DateFormatter().date(from: "2026-01-15T10:00:00Z")!
+
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-pipeline","records":[
+          {"id":"cdp1","content":"Has capture date.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: batchNow)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "Has capture date." })
+        #expect(abs(drawer.filedAt.timeIntervalSince(captureInstant)) < 0.001,
+                "filedAt must equal capture_date; got \(drawer.filedAt)")
+    }
+
+    @Test("capture_date more than 24h in the future is a hard error — HLC poison gate")
+    func futureCaptureDateRejected() throws {
+        // codex finding 2026-08-26: a far-future capture_date becomes the
+        // HLC physical time and permanently advances the estate clock.
+        // Rejected in total validation; historical dates pass untouched.
+        let now = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let json = """
+        {"format_version":1,"name":"cd-future","records":[
+          {"id":"f1","content":"Future.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"9999-12-31T23:59:59Z"}
+        ]}
+        """
+        #expect(throws: (any Error).self) {
+            try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: now)
+        }
+        // Within-skew (same day) passes.
+        let ok = """
+        {"format_version":1,"name":"cd-ok","records":[
+          {"id":"f2","content":"Past.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-05-31T10:00:00Z"}
+        ]}
+        """
+        _ = try JsonSeedFile.parse(data: Data(ok.utf8), limits: .default, now: now)
+    }
+
+    @Test("record without capture_date: filedAt uses captureBatch wall clock — legacy behavior pinned")
+    func legacyAbsentCaptureDateUsesWallClock() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Bracket the import time to confirm captureBatch uses wall-clock
+        // `Date()` for filedAt — the pre-existing behavior before schema v1.2.
+        // `capture_date` absent means no change to filedAt semantics.
+        let beforeImport = Date()
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-legacy","records":[
+          {"id":"leg1","content":"No capture date.","event_time":"2025-06-15T12:00:00Z","room":"rm"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+        let afterImport = Date()
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "No capture date." })
+        // filedAt must fall within [beforeImport, afterImport] — the wall-clock
+        // window of the captureBatch call. A per-record capture_date would
+        // override this to an arbitrary historical instant; absent it is unchanged.
+        #expect(drawer.filedAt >= beforeImport && drawer.filedAt <= afterImport,
+                "filedAt must equal the captureBatch wall-clock time when capture_date is absent; got \(drawer.filedAt)")
+    }
+
+    @Test("mixed batch: per-record capture_dates override wall-clock only where set")
+    func mixedBatchCaptureDates() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let t1 = ISO8601DateFormatter().date(from: "2024-02-10T08:00:00Z")!
+        let t2 = ISO8601DateFormatter().date(from: "2024-08-20T16:30:00Z")!
+
+        // Bracket the import to verify mx2 (no capture_date) uses wall-clock.
+        let beforeImport = Date()
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-mixed","records":[
+          {"id":"mx1","content":"Stale item.","event_time":"2024-02-10T08:00:00Z","room":"rm",
+           "capture_date":"2024-02-10T08:00:00Z"},
+          {"id":"mx2","content":"Batch-clock item.","event_time":"2025-09-01T00:00:00Z","room":"rm"},
+          {"id":"mx3","content":"Fresh item.","event_time":"2024-08-20T16:30:00Z","room":"rm",
+           "capture_date":"2024-08-20T16:30:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+        let afterImport = Date()
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+
+        let mx1 = try #require(drawers.first { $0.content == "Stale item." })
+        let mx2 = try #require(drawers.first { $0.content == "Batch-clock item." })
+        let mx3 = try #require(drawers.first { $0.content == "Fresh item." })
+
+        // Per-record capture_date: exact pinned instant.
+        #expect(abs(mx1.filedAt.timeIntervalSince(t1)) < 0.001,
+                "mx1 filedAt must equal capture_date 2024-02-10; got \(mx1.filedAt)")
+        #expect(abs(mx3.filedAt.timeIntervalSince(t2)) < 0.001,
+                "mx3 filedAt must equal capture_date 2024-08-20; got \(mx3.filedAt)")
+        // No capture_date: wall-clock inside the import window (legacy behavior).
+        #expect(mx2.filedAt >= beforeImport && mx2.filedAt <= afterImport,
+                "mx2 filedAt (no capture_date) must be wall-clock time inside the import window; got \(mx2.filedAt)")
+    }
+
+    // MARK: — Golden pin (BOTH ports must agree on this exact value)
+    //
+    // Fixed inputs → fixed output. The Rust twin in
+    // packages/kits/VaultKit/rust/src/json_import_bridge.rs must
+    // assert the same filedAt millisecond value for the same seed.
+    // Canonical seed: one record, capture_date "2026-01-15T10:00:00Z".
+    // Expected filedAt: 2026-01-15T10:00:00Z
+    //   = 1767225600 (2026-01-01 epoch s) + 14*86400 (Jan days) + 10*3600 (hours)
+    //   = 1767225600 + 1209600 + 36000
+    //   = 1768471200 Unix seconds
+    //   = 1768471200000 milliseconds.
+
+    @Test("golden-pin: capture_date '2026-01-15T10:00:00Z' → filedAt exactly that instant")
+    func goldenPinCaptureDateFiledAt() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Batch now is a far-future value so any accidental fall-through
+        // to batchNow would produce a clearly wrong filedAt.
+        let batchNow = ISO8601DateFormatter().date(from: "2030-12-31T23:59:59Z")!
+
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"golden-pin","records":[
+          {"id":"gp1","content":"Golden pin record.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: batchNow)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "Golden pin record." })
+
+        // 2026-01-15T10:00:00Z in milliseconds since Unix epoch.
+        // Derivation: 2026-01-01 = 1767225600 s; +14 days = 1768435200 s;
+        // +10 h = 1768471200 s = 1768471200000 ms.
+        // This value is the cross-port golden pin — the Rust twin must
+        // produce the same filed_at from the same capture_date.
+        let expectedMs: Int64 = 1_768_471_200_000
+        let actualMs = Int64(drawer.filedAt.timeIntervalSince1970 * 1000)
+        #expect(actualMs == expectedMs,
+                "golden-pin: filedAt must be 2026-01-15T10:00:00Z (1768384800000 ms); got \(actualMs)")
     }
 }

@@ -37,6 +37,9 @@ struct DrawerStoreTests {
         chunkIndex: Int? = nil,
         filedAt: Date? = nil
     ) -> Drawer {
+        // operationalBitmap is 0 by default. Round-trip tests compare the constructed
+        // struct against getDrawer() results; drawerValues stores operationalBitmap
+        // as-is, so both sides agree at 0. Bits 27-30 are FREE (ADORN-STORE-02 v17).
         Drawer(
             id: TestStorage.tid(id),
             content: "content-\(id)",
@@ -45,7 +48,8 @@ struct DrawerStoreTests {
             chunkIndex: chunkIndex,
             addedBy: "bilby",
             filedAt: filedAt ?? t(1_700_000_000),
-            embeddingModelID: "minilm-v6"
+            embeddingModelID: "minilm-v6",
+            operationalBitmap: 0
         )
     }
 
@@ -556,7 +560,9 @@ struct DrawerStoreTests {
     /// Round-trip a non-trivial operational bitmap value through insert
     /// and fetch. `0x42` is the canonical mission test bitmap:
     /// captureChannel=ocr(2) | contentKind=code(1<<6) = 0x42.
-    /// (The earlier 0x1412 set capture_channel to 18 — illegal: legal [0..5].)
+    /// drawerValues uses the struct's operationalBitmap directly (no OR-in of
+    /// bit 27); EstateVerbs.capture() sets bit 27 on the struct before calling
+    /// addDrawer. Tests that call addDrawer directly get exactly what they pass.
     @Test("addDrawer persists operationalBitmap and fetch returns it byte-for-byte")
     func operationalBitmapRoundTrip() async throws {
         let (store, url) = try await makeStore()
@@ -568,17 +574,21 @@ struct DrawerStoreTests {
         )
         try await store.addDrawer(d)
         let loaded = try await store.getDrawer(id: TestStorage.tid("ob-1"))
+        // Stored value is exactly what was passed in the struct; bit 27 is not
+        // ORed in by drawerValues — that was the removed OR-at-persist hack.
         #expect(loaded?.operationalBitmap == 0x42)
     }
 
-    /// A drawer constructed without an explicit `operationalBitmap`
-    /// argument round-trips with the column-default value of 0.
+    /// A drawer constructed without an explicit `operationalBitmap` argument
+    /// is stored with whatever is in the struct (default = 0). Bits 27-30 are
+    /// FREE (ADORN-STORE-02 v17); adornment state lives in the adornments table.
     @Test("addDrawer persists default operationalBitmap = 0")
     func operationalBitmapDefaultZero() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         try await store.addDrawer(sampleDrawer(id: "ob-default"))
         let loaded = try await store.getDrawer(id: TestStorage.tid("ob-default"))
+        // Struct has operationalBitmap = 0; drawerValues stores it as-is.
         #expect(loaded?.operationalBitmap == 0)
     }
 

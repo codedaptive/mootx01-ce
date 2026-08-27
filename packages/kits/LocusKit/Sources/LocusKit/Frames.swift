@@ -121,6 +121,14 @@ public struct CaptureFrame: Sendable {
     /// version `ai-v1` and `subject_at = now`, enforcing the 120-char
     /// contract (B-18) before the row exists.
     public var subject: String?
+    /// Per-record capture timestamp (schema v1.2 import seam). When
+    /// non-nil, `captureBatch` uses this as the ingest clock for the
+    /// resulting drawer (`filedAt`) and derives the capture HLC
+    /// physical time from it, enabling spread-capture benchmark
+    /// estates where distinct records simulate filing at distinct
+    /// instants. Absent (nil) → the batch-level `now` is used,
+    /// preserving byte-identical legacy behavior for all existing callers.
+    public var captureDate: Date?
 
     public init(
         content: String,
@@ -141,7 +149,8 @@ public struct CaptureFrame: Sendable {
         featureFlags: DrawerFeatureFlags = [],
         exportability: AdjectiveExportability = .private_,
         wing: String? = nil,
-        subject: String? = nil
+        subject: String? = nil,
+        captureDate: Date? = nil
     ) {
         self.content = content
         self.channel = channel
@@ -162,6 +171,7 @@ public struct CaptureFrame: Sendable {
         self.exportability = exportability
         self.wing = wing
         self.subject = subject
+        self.captureDate = captureDate
     }
 }
 

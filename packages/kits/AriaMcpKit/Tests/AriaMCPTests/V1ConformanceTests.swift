@@ -203,7 +203,9 @@ struct V1ConformanceTests {
         // +1 (MXE-JI-1): moot_json_import — seed-file JSON lane, vault-gated.
         // +1 (C3+A6): moot_timing_report — audit-derived timing metrics.
         // +1: moot_recall_temporal — query-date window recipe.
-        #expect(tools.count == 79, "tools/list must return exactly 79 tools; got \(tools.count)")
+        // +1 (D10): moot_recall_walk — walk-recall escalation ladder.
+        // +1: moot_rebuild_status — derived-state rebuild status (2026-08-26).
+        #expect(tools.count == 81, "tools/list must return exactly 81 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

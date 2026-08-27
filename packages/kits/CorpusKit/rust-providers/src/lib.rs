@@ -61,6 +61,11 @@ pub mod fdc_provider;
 // Constructs the five honest signals (RI/PPMI/LSA/NMF/FDC) fresh per call.
 // Mirrors Swift's CorpusEnsemble.defaultEnsemble() in CorpusKitProviders.
 pub mod default_ensemble;
+// Candle-backed in-process ML inference provider (all-MiniLM-L6-v2).
+// Compiled only when the `candle` Cargo feature is enabled.
+// See src/candle_provider.rs for the gate-8 throughput disposition and
+// the critical tokenizer-padding override note.
+pub mod candle_provider;
 
 pub use basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 pub use deterministic_tokenizer::DeterministicTokenizer;
@@ -83,3 +88,8 @@ pub use fdc_provider::{
     fdc_node_vector, fdc_embedding_vector,
 };
 pub use default_ensemble::default_ensemble;
+#[cfg(feature = "candle")]
+pub use candle_provider::{
+    CandleNLProvider, CANDLE_NL_DIMENSION, CANDLE_NL_MODEL_ID, CANDLE_NL_MODEL_VERSION,
+    CANDLE_NL_PROJECTION_SEED,
+};

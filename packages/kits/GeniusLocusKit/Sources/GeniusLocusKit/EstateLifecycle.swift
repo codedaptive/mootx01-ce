@@ -1,3 +1,4 @@
+import Darwin   // Darwin.getenv — live env read for the charter-skip seam
 import Foundation
 import IntellectusLib
 import OSLog
@@ -299,6 +300,17 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
     ///   substrate errors if a `seedWing` write fails.
     func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
+        // Benchmark-only bypass (MOOTX01_SKIP_CHARTERS): skip charter seeding
+        // entirely so measured estates contain exactly the imported corpus.
+        // Charter drawers are outside the benchmark spec, and their presence
+        // occupies candidate-pool slots in every recall (2026-08-24 ruling).
+        // Env-only seam — never on the MCP surface, never set by product code.
+        // Production estates always seed charters. Darwin.getenv (live) rather
+        // than ProcessInfo (a launch-time snapshot) so tests can toggle via
+        // setenv in-process. Twin of the Rust guard in `seed_default_wings`.
+        if Darwin.getenv("MOOTX01_SKIP_CHARTERS") != nil {
+            return
+        }
         let locusEstate = try estate(for: handle)
 
         // Read the existing drawers once — `allDrawers()` is a full corpus scan
@@ -453,6 +465,13 @@ public extension GeniusLocusKit {
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            // Read the provisioned embedding_provider manifest key and augment the
+            // ensemble with the matching float/dense provider. Absent key or unknown
+            // ID → caller-supplied ensemble unchanged (byte-identical to today's
+            // default). Apple NL providers are Swift-only; the Rust coordinator
+            // reads the key for provenance but selects nothing.
+            let resolvedModels = await applyProvisionedEmbeddingProvider(
+                baseModels: embeddingModels, for: handle)
             // Full composition: the attached-mode CorpusContentEngine (BM25 +
             // internal vectors, Drawer-ID keyed) + standalone VectorStore.
             // EVERY GLK Corpus is constructed attached + .wholeContent — the
@@ -464,7 +483,7 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: embeddingModels)
+                models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
@@ -494,6 +513,11 @@ public extension GeniusLocusKit {
 
         case .corpusOnly:
             try await EstateFormatStore(storage: backingStorage).requireCurrent()
+            // Read the provisioned embedding_provider manifest key and augment the
+            // ensemble with the matching float/dense provider. Same policy as the
+            // .glk case: absent key or unknown ID → caller-supplied ensemble unchanged.
+            let resolvedModels = await applyProvisionedEmbeddingProvider(
+                baseModels: embeddingModels, for: handle)
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
@@ -502,7 +526,7 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: embeddingModels)
+                models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: mount the
@@ -807,5 +831,94 @@ public extension GeniusLocusKit {
         case .cloudKit:   return 1
         case .federation: return 2
         }
+    }
+
+    /// Read the provisioned `embedding_provider` manifest key and augment
+    /// `baseModels` with the matching float/dense provider.
+    ///
+    /// Called from `wireSubstores` for `.glk` and `.corpusOnly` kinds before
+    /// `CorpusContentEngine` is constructed. `.locusOnly` has no Corpus so
+    /// this helper is never called for it.
+    ///
+    /// ## Selection policy
+    ///
+    ///   - **Absent key (nil or empty string):** return `baseModels` unchanged.
+    ///     The result is byte-identical to today's default — no estate migration
+    ///     is required and no existing caller is affected.
+    ///   - **`"apple-nl-v1"`:** append `.nlEmbedding(provider: AppleNLProvider())`
+    ///     to `baseModels`. The Apple NL provider opts out gracefully (returns `[]`)
+    ///     when the OS has no sentence-embedding model for the configured language.
+    ///   - **`"neural-embed-v1"`:** append `.nlEmbedding(provider: NeuralEmbedProvider())`
+    ///     — the engine-neutral provider (Swift twin of the Rust `tools/neural-embed`
+    ///     backend). Same graceful opt-out contract.
+    ///   - **Unknown ID:** emit one OSLog warning on the `GeniusLocusKit` category
+    ///     (routes to stderr via `os_log` on macOS/iOS) so a silently-ignored
+    ///     selection cannot mislabel benchmark arms. Return `baseModels` unchanged.
+    ///
+    /// ## Swift-only selection
+    ///
+    /// Apple NL providers are gated `#if canImport(NaturalLanguage)`. Rust reads
+    /// the same manifest key for provenance recording but never instantiates
+    /// providers — see `coordinator.rs apply_provisioned_embedding_provider` and
+    /// the parity ruling in GENIUSLOCUSKIT_INTERFACE.md §1.53.
+    ///
+    /// - Parameters:
+    ///   - baseModels: The caller-supplied ensemble (default: five-signal default).
+    ///   - handle: The open estate handle; used to read the manifest.
+    /// - Returns: The (possibly augmented) ensemble to pass to `CorpusContentEngine`.
+    private func applyProvisionedEmbeddingProvider(
+        baseModels: [EmbeddingModel],
+        for handle: EstateHandle
+    ) async -> [EmbeddingModel] {
+        // Read the provisioned model ID. Absent key (nil) and empty string both
+        // mean "use the caller-supplied ensemble unchanged." try? suppresses any
+        // estate-not-found error (stale handle) — the Corpus construction that
+        // follows will also fail if the handle is stale, producing the correct error.
+        guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
+              !provisionedID.isEmpty else {
+            // Absent key → byte-identical to the caller-supplied ensemble. No log.
+            return baseModels
+        }
+
+#if canImport(NaturalLanguage)
+        switch provisionedID {
+        case "apple-nl-v1":
+            // Apple NL unnormalized provider: adds the raw-magnitude float lane on
+            // top of the distributional ensemble. ITEM-LOCAL: the vector is a pure
+            // function of the text computed at write time; no training step is required.
+            // AppleNLProvider.embedFloat opts out gracefully (returns []) when the OS
+            // has no sentence-embedding model for the configured language (absent-lane
+            // contract), so the lane is dark rather than crashing on systems without
+            // the OS asset. The distributional providers in baseModels are always
+            // wired alongside it.
+            return baseModels + [.nlEmbedding(provider: AppleNLProvider())]
+        case "neural-embed-v1":
+            // Engine-neutral provider (RENAME-EMBED #72): NLTagger word tokens
+            // mean-pooled over NLEmbedding word vectors, UNNORMALIZED — the Swift
+            // twin of the Rust tools/neural-embed backend. Same opt-in-only policy
+            // as apple-nl-v1: NEVER part of the default ensemble; joins only when
+            // provisioned. Opts out gracefully (returns []) when the OS has no
+            // word-embedding model for the language, so the lane goes dark rather
+            // than crashing. The distributional providers in baseModels are always
+            // wired alongside it.
+            return baseModels + [.nlEmbedding(provider: NeuralEmbedProvider())]
+        default:
+            // Unknown provisioned ID — fall back to the caller-supplied ensemble.
+            // One warning per open so a silently-ignored selection cannot mislabel
+            // benchmark arms. The estate UUID is included for log correlation.
+            Self.lifecycleLog.warning(
+                "wireSubstores: unknown provisioned embedding_provider '\(provisionedID, privacy: .public)' falling back to default ensemble (estate: \(handle.estateUUID, privacy: .public))"
+            )
+            return baseModels
+        }
+#else
+        // NaturalLanguage is unavailable on this platform. Any provisioned model ID
+        // requiring it is treated as unknown. Emit one warning so the caller can
+        // diagnose unexpected ensemble fallbacks in logs.
+        Self.lifecycleLog.warning(
+            "wireSubstores: provisioned embedding_provider '\(provisionedID, privacy: .public)' cannot be selected (NaturalLanguage unavailable on this platform) falling back to default ensemble (estate: \(handle.estateUUID, privacy: .public))"
+        )
+        return baseModels
+#endif
     }
 }

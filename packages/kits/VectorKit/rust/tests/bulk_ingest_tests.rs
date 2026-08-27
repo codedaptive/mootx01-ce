@@ -18,7 +18,7 @@ use persistence_kit::{
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 use vectorkit::engine::payload::VectorPayload;
-use vectorkit::{VectorPayloadInput, VectorStore};
+use vectorkit::{engine::metric::FloatMetric, VectorPayloadInput, VectorStore};
 
 const FILED_AT: i64 = 1_700_000_000;
 
@@ -321,7 +321,7 @@ fn mixed_binary_and_float_batch() {
     let bin = store.find_nearest(&engram(3), "minilm", 1).expect("find");
     assert_eq!(bin.first().map(|m| m.item_id.as_str()), Some("chunk-3"));
 
-    let fl = store.find_nearest_float(&float_vec(3), "minilm", 3).expect("find float");
+    let fl = store.find_nearest_float(&float_vec(3), "minilm", 3, FloatMetric::Cosine).expect("find float");
     assert!(!fl.is_empty());
     assert_eq!(fl.first().map(|m| m.item_id.as_str()), Some("chunk-3"));
 }

@@ -81,6 +81,7 @@ fn candidate(spec: &CandidateSpec) -> ReductionCandidate {
         dense: spec.dense,
     };
     ReductionCandidate {
+        qid: String::new(),
         id: spec.id.clone(),
         content: spec.content.clone(),
         room: spec.room.clone(),

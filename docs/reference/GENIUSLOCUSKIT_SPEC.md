@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.32.0
+version: 2.2.2
 status: accepted-1.1-target
-date: 2026-08-20
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.23.0: VectorSimilaritySignal probe window parameterized."
+date: 2026-08-26
+description: "Behavioral specification for GeniusLocusKit. 2.0.0 makes dreaming and result composition consume the runtime-active minter set over LocusKit's permanent normalized adornment store; 2.2.0 adds the engine-neutral neural-embed-v1 provisioned provider."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -227,7 +227,7 @@ are immutable; two replicas producing the same logical mutation produce
 identical IDs and dedupe on merge. Ingress (`add`, and therefore every
 path that routes through it) unconditionally rejects an entry whose
 stored id does not match its recomputed content hash — never re-admits
-it, never overwrites an honest entry with the same id (codex a477800,
+it, never overwrites a valid entry with the same id (codex a477800,
 secfix ce-audit-content-id 5101e112). The rejection is counted
 (`rejectedEntryCount` / Rust `rejected_count()`), monotonic and excluded
 from structural equality, so a log's ingress history is observable
@@ -334,7 +334,7 @@ Step 1 (LocusKit storage; Swift `estate.expungeReturningUnsealedEvent(...)`,
 Rust `estate.expunge(..., seal_audit: false)`): validates the confirmation
 flag and S-3 state gate, tombstones the gate-admitted lineage members, and
 zeroes their content blobs — atomically. The gate produces an `AuditEvent`
-(substrate truth) but does NOT append it to the audit log yet. The call
+(the substrate record) but does NOT append it to the audit log yet. The call
 returns the full `ExpungeOutcome` (LOCUSKIT_SPEC B-8b): the unsealed event
 plus `refusedSiblingIDs` — the accepted lineage members the gate refused and
 preserved byte-identical.
@@ -357,12 +357,12 @@ state (a row readable by id but invisible to search).
 Step 3 (audit seal):
 - **On success (steps 1+2 both complete):** GLK calls
   `estate.sealExpungeAudit(event)`, which appends the gate-produced event
-  to the substrate audit log as `verb = "tombstone"`. The audit record is
-  honest: the full expunge (storage + cross-kit delete) succeeded.
+  to the substrate audit log as `verb = "tombstone"`. The audit record states the
+  actual outcome: the full expunge (storage + cross-kit delete) succeeded.
 - **On step-2 failure:** GLK calls `estate.sealExpungeOrphanAudit(...)`,
   which appends an `"expungeOrphan"` event to the substrate audit log, then
-  throws `VerbError.crossKitVectorDeleteFailed`. The audit record is honest:
-  the storage half succeeded but the cross-kit vector delete did not. The
+  throws `VerbError.crossKitVectorDeleteFailed`. The audit record states the
+  actual outcome: the storage half succeeded but the cross-kit vector delete did not. The
   caller must NOT report the row as fully deleted.
 
 The `"tombstone"` and `"expungeOrphan"` substrate verb strings both map to
@@ -995,9 +995,11 @@ standing-signal set.
 ### Standing-signal inventory update (§11.2)
 
 The six v1 standing signals documented in §11.2 of the architecture spec have
-been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
-(8, DG5), `TrainingSignal` (9, the brain-layer ownership contract F1), and `ContradictionScoutSignal`
-(10, the contradiction hunter's background half):
+been extended to twelve — `TemporalCausalitySignal` (7), `DistillationSignal`
+(8, DG5), `TrainingSignal` (9, the brain-layer ownership contract F1),
+`ContradictionScoutSignal` (10, the contradiction hunter's background half),
+`ConsolidationSignal` (11, Wave-2 D9 cadence), and `AnomalySweepSignal`
+(12, P3a room-cohesion anomaly-flag sweep):
 
 | # | Signal name | Cadence | Purpose |
 |---|------------|---------|---------|
@@ -1009,8 +1011,10 @@ been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
 | 6 | byReference-validity | 604 800 s (weekly) | Broken reference detection |
 | 7 | end-of-day-tournament | 86 400 s (daily) | Bradley-Terry reward signal |
 | 8 | temporal-causality-fold | 3 600 s (hourly) | T-matrix population pass |
-| 9 | distillation | 3 600 s (hourly) | Per-item factoid distillation sweep |
+| 9 | distillation-sweep | 3 600 s (hourly) | Per-item factoid distillation sweep |
 | 10 | training-daemon | 3 600 s (hourly) | Training daemon tick (threshold-gated) |
+| 11 | consolidation-sweep | 86 400 s (daily) | Wave-2 D9 consolidation pass |
+| 12 | anomaly-flag-sweep | 3 600 s (hourly) | Room-cohesion anomaly sweep: sets/clears bit 26 (isAnomalous) via char-3-shingle Jaccard z-scores |
 
 (Table rows are ordered as `registerDefaultStandingSignals` registers them;
 the # column is registration order, not the historical signal number.)
@@ -1023,7 +1027,14 @@ corpus lane (drawer-keyed Hamming kNN on lane 1), SubstrateML
 `ConflictCue` screen, strong cues captured as `contradicts` tunnels with
 lifecycle `.proposed` / originClass `.derived`, borderline pairs returned
 for BYOAI adjudication, durable dedup against every existing contradicts
-tunnel including withdrawn ones).
+tunnel including withdrawn ones). `AnomalySweepSignal` (signal 12, P3a) is
+wired via its live `spec(anomalyCycle:)` factory; the `anomalyCycle` closure
+wraps `kit.anomalyFlagSweep(handle:threshold:now:)` with the estate handle
+and surfaces the changed-drawer count as a diagnostic. The no-op `defaultSpec()`
+is appropriate for `registerDefaultStandingSignals` when no live sweep context
+is yet available; production callers re-register with the live factory at daemon
+wiring time (same pattern as `DistillationSignal`). Both Swift and Rust ports
+have a tested sweep implementation.
 
 ### Cadence decision
 
@@ -1044,7 +1055,7 @@ See `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#54-matrix-t`.
 
 `lagBucket(forMinutes:)` on MatrixTier now delegates to
 `TemporalCausalityFold.lagBucket(forMinutes:)` so the canonical bucket
-function lives in SubstrateML (single source of truth for conformance vectors).
+function lives in SubstrateML (the single authoritative definition for conformance vectors).
 
 ### Package dependency
 
@@ -1075,13 +1086,40 @@ adapter over the open LocusKit Estate and injects it into CorpusKit's attached
 constructor with `.wholeContent`. The storage supplied to CorpusKit contains
 only derived retrieval state; it does not contain another copy of Drawer
 content. The default recall ensemble is the canonical
-five honest signals (RI/PPMI/LSA/NMF/FDC) — `CorpusEnsemble.defaultEnsemble()`
+five production signals (RI/PPMI/LSA/NMF/FDC) — `CorpusEnsemble.defaultEnsemble()`
 in Swift / `corpus_kit_providers::default_ensemble()` in Rust — wired at
 every production provision site (`provision`, the ARIA_MCP estate
 constructors, `EstateAdmin`). None require a model bundle: the trainable
 distributional/matrix signals train and persist on first ingest/reindex;
 FDC is stateless. A caller may pass an explicit single-element list (e.g.
 `[.deterministic]`) when one signal is specifically wanted.
+
+**Embedding-provider augmentation (EMBED-PROV-E2):** `wireSubstores`
+reads the `embedding_provider` manifest key at wire time. When the key
+names a known model ID, the corresponding provider is appended to the
+base ensemble. Currently defined model IDs:
+
+| Model ID | Provider | Port | Condition |
+|---|---|---|---|
+| `"apple-nl-v1"` | `AppleNLProvider` — raw `NLEmbedding.sentenceEmbedding` float output, unnormalized | Swift only | `#if canImport(NaturalLanguage)` |
+| `"neural-embed-v1"` | `NeuralEmbedProvider` — engine-neutral; `NLTagger` word tokens mean-pooled over `NLEmbedding.wordEmbedding` vectors, unnormalized. Rust backend: standalone `tools/neural-embed` crate (not wired into GLK; provenance-only ruling applies) | Swift only | `#if canImport(NaturalLanguage)` |
+
+**Absent-key guarantee:** if the estate has no `embedding_provider` key
+(or the value is nil/empty), the ensemble is byte-identical to the
+pre-EMBED-PROV-E2 default. No migration required; no side effects.
+
+**Unknown-ID fallback:** if the stored model ID is not in the
+recognized set, an `OSLog.warning` is emitted (message includes the
+unrecognised ID and estate UUID) and the ensemble is returned unchanged.
+This prevents a silently-ignored selection from mislabeling benchmark arms.
+
+**Rust divergence:** the Rust port reads the key and emits a provenance
+line to stderr (one per estate open) but does not select a provider
+in-process. NaturalLanguage is unavailable on Linux/Windows. The
+engine-neutral Rust backend for `"neural-embed-v1"` exists as the
+standalone `tools/neural-embed` crate, reached as an external subprocess
+seam; it is not linked into any product crate, so GLK's provenance-only
+behavior stands.
 
 **Import domain:** `ExternalCorpus.swift` imports `CorpusKit`. RAG
 retrieval always routes through CorpusKit per the kit-roles doctrine.
@@ -1681,8 +1719,10 @@ the active lane, so the director applied a simpler combiner. The query
 succeeds; the stage is recorded so the caller can tell the requested scoring
 was not the one applied (replacing what was previously a silent downgrade).
 The genuinely-implemented combos record nothing: `unionBest` + `matrixAware`
-is the full weighted pipeline; `hybrid` / `corpusOnly` + `rrf` is real RRF
-fusion; `locusOnly` / `hybrid` / `corpusOnly` + `raw` is the raw merge.
+is the full weighted pipeline; `unionBest` + `discriminative` is RRF scaled
+by the dense saturation discount (a real implementation); `hybrid` /
+`corpusOnly` + `rrf` is real RRF fusion; `locusOnly` / `hybrid` /
+`corpusOnly` + `raw` is the raw merge.
 
 | Stage identifier | Trigger | Applied fallback |
 |---|---|---|
@@ -1690,13 +1730,18 @@ fusion; `locusOnly` / `hybrid` / `corpusOnly` + `raw` is the raw merge.
 | `corpusOnly.matrixAware` | `matrixAware` requested on `corpusOnly` (no matrix pass) | RRF fusion of BM25 + vector |
 | `hybrid.matrixAware` | `matrixAware` requested on `hybrid` (no matrix pass) | three-way RRF fusion |
 | `unionBest.rrf` | `rrf` requested on `unionBest` (no distinct RRF fusion across lane scores) | raw (`buffer.final`) lane-normalised score |
+| `locusOnly.discriminative` | `discriminative` requested on `locusOnly` (no dense lane) | raw bitmap-evaluator ordering |
+| `corpusOnly.discriminative` | `discriminative` requested on `corpusOnly` (no discrimination pass) | RRF fusion of BM25 + vector |
+| `hybrid.discriminative` | `discriminative` requested on `hybrid` (no discrimination pass) | three-way RRF fusion |
 
 Both ports emit the identical stage strings. The no-corpus collapse path
 (Hybrid/CorpusOnly with no corpus/vector registered) keeps the requested
 mode's stage name so the vocabulary is stable regardless of which internal
 path served the query. `unionBest` + `matrixAware` never records a fallback
 even on an estate with no corpus/vector — the weighted pipeline runs with zero
-matrix columns, a real path, not a degrade.
+matrix columns, a real path, not a degrade. `unionBest` + `discriminative`
+is also a real implementation: when no dense lane runs the factor is 1.0 and
+the result is byte-identical to `rrf`, but no fallback stage is recorded.
 
 #### Signed-weight fusion steering (RecallShape — 6b-modifiers)
 
@@ -1755,6 +1800,52 @@ conformance on both ports). `RecallShape` may also override the candidate-pool
 depth via `frontierK`, clamped to the engine's `[64, 256]` envelope. Both ports
 implement the identical signed formula and clamp.
 
+#### Per-call frontier-K override (`GLKRecallRequest.frontierK`)
+
+`GLKRecallRequest.frontierK` (Swift `Int?` / Rust `Option<usize>`) is a
+per-call candidate-pool depth override with the HIGHEST precedence in the
+three-level resolution order:
+
+  1. `request.frontierK` — per-call, set directly on the request (highest).
+  2. `recallShape.frontierK` — shape-level pool override (6b-modifiers).
+  3. Engine formula — `min(max(limit × 4, 64), 256)` (lowest).
+
+Like the shape-level override, the per-call value is clamped to
+`[RecallShape.frontierKFloor, RecallShape.frontierKCeiling]` = `[64, 256]`
+before the plan is built; a value outside the envelope degrades to the
+nearest bound rather than failing. A `nil` value (the default) falls through
+to the shape or engine formula. Use this when a recipe drives the pool size
+from a runtime parameter but does not need to steer lane weights.
+
+Both ports apply the same three-level resolution in the same order.
+
+#### Anomalous-flag admission gate (`GLKRecallRequest.anomalousFilter` — §11.18)
+
+`GLKRecallRequest.anomalousFilter` (Swift `Bool?` / Rust `Option<bool>`) is an
+optional admission filter applied to recall hits BEFORE scoring:
+
+- `nil` (default) — no filter; all hits pass through (passthrough gate).
+- `true` — admit only hits whose hydrated drawer has `isAnomalous == true`
+  (bit 26 of `operationalBitmap` set). Hits without a hydrated drawer
+  (`hit.drawer == nil`, e.g. bitmapOnly hydration) pass through unconditionally.
+- `false` — exclude hits whose hydrated drawer has `isAnomalous == true`.
+  Same nil-drawer passthrough as above.
+
+The gate is applied centrally in `recall(_:_:)` / `recall_scored` after all
+lane results are collected, before trace writes and the dreaming enqueue. A
+new `GLKRecallResult` is built with the filtered hit list; `laneRanks` and
+all other result fields are preserved verbatim.
+
+`anomalousFilter` does NOT interact with `frontierK`, `recallShape`, scoring,
+or any other request parameter. It is purely an admission gate on the final
+pre-scoring candidate list.
+
+Rust: `with_anomalous_filter(filter: bool) -> Self` builder method.
+
+**Behavioral contract:** when `anomalousFilter == nil`, the result is
+byte-identical to an identical request with no filter set — the code path
+skips the filter block entirely. Tests must verify this passthrough property.
+
 #### Anti-similarity steering (`antiSimilarLanes` — 6b-modifiers-antisim)
 
 `RecallShape.antiSimilarLanes` (Swift) / `anti_similar_lanes` (Rust) is a set of
@@ -1783,7 +1874,7 @@ nearest+negative — is conformance-gated on both ports.
 `RecallShape.preset(_:)` (Swift) / `RecallShape::preset` (Rust) resolves a roster
 NAME to a documented signed-weight shape, so a recipe or an AI can pick a
 deterministic steering vector by name instead of constructing one. `presetNames` /
-`PRESET_NAMES` (19 entries) is the discoverable roster; `presetDescription` /
+`PRESET_NAMES` (29 entries) is the discoverable roster; `presetDescription` /
 `preset_description` is the one-line emphasis text the ARIA tool surfaces.
 
 A preset is a WEIGHT VECTOR over the existing fusion — it introduces NO new
@@ -1803,10 +1894,25 @@ of an unknown name are deliberately the same (run with no steering). The roster:
 - `ri_forward` / `ppmi_forward` / `lsa_forward` / `nmf_forward` — one dense lane up,
   the distributional siblings excluded.
 - `fast` — hamming only, dense excluded.
+- `jaccard` — binary lane scores Jaccard set-overlap/union instead of Hamming
+  (length-normalized); all other lanes neutral.
+- `float-l2` — float lane scores Euclidean L2 distance instead of cosine; all other
+  lanes neutral. Mirrors the `jaccard` pattern for the dense float lane.
+- `float-dot` — float lane scores negative dot product instead of cosine; useful for
+  embeddings trained with a dot-product objective. All other lanes neutral.
 - `structural` — locus up.
 - `temporal` / `connection` / `field` / `preference` — the matrix/graph/preference
   column up (matrixAware scoring only).
 - `anti_redundant` — the FDC dense lane inverted to farthest (anti-similarity).
+- `anti_redundant_ri` / `anti_redundant_lsa` / `anti_redundant_nmf` — same
+  suppression pattern as `anti_redundant` (bm25/hamming at -0.5, narrow frontier)
+  but inverts the RI, LSA, or NMF dense lane to farthest instead of FDC.
+- `session_hybrid` — hybridRecall scoredLane path with temporal-window + speaker-
+  aware post-processing; bm25 + dense + temporal amplified.
+- `temporal_connection` — temporal 1.5 + coOccurrence 1.5; both matrix columns
+  amplified together (matrixAware scoring only).
+- `field_preference` — fieldFit 1.5 + preference 1.5; field match and user
+  preference compound (matrixAware scoring only).
 
 The weights are SENSIBLE, DEFENSIBLE starting points the quality optimizer tunes
 later — they are NOT canon. A preset's contract is its DIRECTION (which lanes it
@@ -1838,6 +1944,9 @@ Scoring-fallback counters (same `estate_id` tag):
 - `glk.recall.corpusOnly.matrixAware_degraded`
 - `glk.recall.hybrid.matrixAware_degraded`
 - `glk.recall.unionBest.rrf_degraded`
+- `glk.recall.locusOnly.discriminative_degraded`
+- `glk.recall.corpusOnly.discriminative_degraded`
+- `glk.recall.hybrid.discriminative_degraded`
 
 ### Test seam protocol
 
@@ -1918,6 +2027,79 @@ and Rust (`rust/src/dataset_signatures.rs`); cross-leg anchor hash
 vectors are locked in both test suites. See
 `GENIUSLOCUSKIT_INTERFACE.md § Dataset store access` for the full API
 surface.
+
+## § 16: Active-minter adornment orchestration
+
+GeniusLocusKit owns adornment generation policy and the active-adornment read
+seam. LocusKit owns the permanent tables. AdornmentLib owns generator and value
+contracts. No benchmark component owns a parallel adornment store.
+
+### 16.1 Dreaming
+
+At the start of each AdornmentPass, GLK reads the current active minter rows
+from LocusKit. The pass requests a bounded batch of missing `(live Drawer,
+active minter)` pairs. Batch size counts pairs, not Drawers. For each pair it:
+
+1. resolves the runnable generator from the minter descriptor;
+2. sends the complete Drawer content and event time through that generator;
+3. applies the common length/content contract; and
+4. writes `StoredAdornment(drawerID, minterID, text)` through LocusKit.
+
+A failure leaves only that pair missing. It neither disables the minter nor
+blocks other active minters from adorning the same Drawer. A repeated pass may
+retry it. The pass never overwrites a different minter's row.
+
+Apple, Candle, port names, and seat counts are not branches in AdornmentPass.
+They are registered minter rows plus runtime generator availability. A Swift
+runtime can therefore activate Apple and Candle together, while a runtime with
+only Candle registered can activate only Candle. Zero active minters is valid
+and makes the pass a no-op.
+
+Current deployment state, not a schema default: Swift can register
+`apple-mint` and `candle-1.5b` and may activate both; runtimes without the Apple
+model register `candle-1.5b` only.
+
+Activation is read at each pass boundary. A configuration change is installed
+as a new minter identity; activation of the old and new identities is toggled
+in the minter master table. Multi-minter activation sets are replaced in one
+transaction, so composition observes the complete old or new set. Existing
+inactive adornments are retained.
+
+### 16.2 Result composition and synthesis
+
+Before the shared ARIA result composer renders candidate rows, it sends all
+result Drawer IDs to GLK in one `activeAdornments` call. GLK delegates to
+LocusKit's joined batch read. The returned mapping contains every stored
+adornment whose minter is active at that call, ordered by minter ID. It can
+contain no entry, one value, or many values for each Drawer.
+
+LocusKit's read additionally withholds every row belonging to a
+Restricted/Secret drawer (LOCUSKIT_SPEC § ADORNMENT_STORE sensitivity
+gate, 2.2.0): adornment text is content-derived and inherits the
+drawer's access posture, so redacted rows never carry an adornment
+column.
+
+The composer uses all values in that active projection and ignores retained
+rows belonging to inactive minters. It does not select by a hard-coded family,
+read a Drawer bitmask, or invoke a model. Grounded synthesis consumes the same
+active projection as candidate rendering. Activation changes therefore affect
+the next composition call without rewriting Drawers or adornment rows.
+
+The activation lookup is call-scoped. A process MUST NOT cache an active set
+across result-composition calls unless it has an invalidation mechanism tied
+to minter-table mutation.
+
+### 16.3 Conformance pins
+
+- With no active minter, AdornmentPass is a no-op and composition returns no
+  adornments.
+- With Apple and Candle active on Swift, one missing Drawer produces two
+  independent generator calls and two stored rows.
+- A runtime with only Candle registered never attempts an Apple call.
+- Deactivating one of two minters changes the next composition result without
+  deleting either stored row.
+- One active-adornment batch read serves the complete result set; per-row
+  minter-table reads fail conformance.
 
 *End of GeniusLocusKit Specification.*
 
@@ -2022,6 +2204,218 @@ State lives on the tunnel (LocusKit): operational bits 14/15 and the
 
 ## Changelog
 
+### 2.2.2 -- 2026-08-26
+
+§16.2 records the LocusKit sensitivity gate on the active-adornment
+read: Restricted/Secret drawers contribute no adornments to
+composition (codex finding 2026-08-26). No GLK code change — the gate
+lives in LocusKit's joined batch read.
+
+### 2.2.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.2.0 -- 2026-08-26
+
+RENAME-EMBED (#72): the provisioned embedding-provider model-ID table gains
+`"neural-embed-v1"` → `NeuralEmbedProvider` (engine-neutral; NLTagger word
+tokens mean-pooled over NLEmbedding word vectors, unnormalized; Swift only,
+`#if canImport(NaturalLanguage)`; opt-in only — the default ensemble and the
+absent/unknown-key guarantees are unchanged). Rust-divergence prose updated:
+the engine-neutral backend now exists as the standalone `tools/neural-embed`
+crate (renamed from the engine-leaking `candle-spike`); GLK Rust remains
+provenance-only. Engine names removed from spec prose — the inference engine
+is an invisible backend detail. Additive (MINOR).
+
+### 2.0.0 -- 2026-08-25
+
+Replaced the scalar, bitmask-selected AdornmentPass with per-active-minter debt
+processing over LocusKit's normalized store. Defined zero/one/many runtime
+activation, failure isolation by pair, batched active-adornment projection for
+the ARIA result composer, and identical active-set use by synthesis.
+
+### 1.50.0 -- 2026-08-24
+
+Additive (Score-Transparent Ordering — SCORE-ORDERING mission):
+
+`recallUnionBest` now implements a **windowed tie-resolution algorithm** at
+the MMR presentation boundary. The algorithm operates in two phases:
+
+- **Phase 1** — select 2N candidates via MMR, sort by `(score DESC, subject ASC)`.
+- **Phase 2** — if a tie straddles the cut at position N, continue MMR to 4N:
+  - If a score break is found within 4N: return the group above the break.
+  - If the pool is **fully exhausted** before 4N: return the whole pool (honest
+    expansion; pool-exhaustion is a deterministic answer, not a degradation).
+  - If no break and pool has more items: return the **determinate prefix** (items
+    unambiguously above the tie group) and append `"tie.nonDeterminate"` to
+    `GLKRecallResult.degradedStages`.
+
+`recallCorpusOnly` applies `(score DESC, subject ASC)` sort to its output before
+returning, matching the unionBest presentation order.
+
+Both the Swift and Rust ports implement the algorithm. The `tie.nonDeterminate`
+sentinel is a string in `degradedStages` (no new struct field) so the AriaMCP
+layer can surface the steering message without a breaking API change.
+
+The `limit` parameter now specifies a **relevance floor**, not an exact count:
+equal-scored results at the boundary are all returned, so the actual count may
+exceed `limit` (pool-exhaustion case) or be below `limit` (non-determinate case).
+
+### 1.47.0 -- 2026-08-22
+
+Additive (front-door family — DoorManifest + door-config manifest key):
+
+`DoorManifest` is the fourth optimizer-owned manifest key in the estate
+config family, joining `lane_weights`, `recall_tuning`, and
+`embedding_provider`. The manifest key is `"door_config"` and the value is
+a JSON object `{"scoring":"<rawValue>"}`.
+
+`GeniusLocusKit` actor gains two public methods:
+- `provisionDoorConfig(_:for:)` — stores the `DoorManifest` emitted by
+  the quality optimizer after a full-coverage arm comparison.
+- `provisionedDoorConfig(for:)` — reads back the config, or `DoorManifest.default`
+  (scoring = `matrixAware`) when absent. Fail-quiet: unknown scoring strings in
+  stored JSON also return `.default`.
+
+`RecallDirector` gains the `doorConfigMetaKey` static constant and a
+`provisionedDoorConfig(estate:)` method (called by VerbSurface on every
+`moot_memory_search` when neither `door` nor `scoring` is explicit).
+
+Rust `EstateCoordinator` gains `DOOR_CONFIG_META_KEY`, `provision_door_config`,
+and `provisioned_door_config` (after `apply_provisioned_embedding_provider`).
+`DoorManifest` struct with custom serde helpers (GLKRecallScoring has no serde
+derive; the helpers use `raw_value()`/string-match round-trip).
+
+No estate migration required — absent key degrades to `matrixAware`.
+The product never computes or overrides the selection (benchmarker/optimizer
+split). ARIA_MCP 1.49/1.54 documents the `door` argument that consumes this.
+
+
+### 1.46.0 -- 2026-08-21
+
+Float-metric presets: two new named presets added to the `RecallShape` roster on
+both ports. `float-l2` sets `floatMetric = "l2"`; `float-dot` sets
+`floatMetric = "dot"`; all lane weights remain neutral (identical fusion to
+`balanced` except for the float-lane distance function). Mirrors the
+`jaccard`/`binaryMetric` pattern: only the distance function changes.
+
+`presetNames` / `PRESET_NAMES` grows from 27 to 29 entries. The `moot_recall_shaped`
+MCP tool picks up the two new names automatically (the tool description embeds the
+roster at construction time from `RecallShape.presetNames`). Conformance gated on
+both ports: `RecallShapePresetTests.swift` (count now 29) and
+`recall_shape_presets.rs` (count now 29). MCP acceptance tested in
+`RecipeToolsTests.swift` (`testShapedRecallFloatMetricPresetsAccepted`) and
+`dispatch_tests.rs` (`recall_shaped_float_l2_preset_is_accepted`,
+`recall_shaped_float_dot_preset_is_accepted`).
+
+### 1.45.0 -- 2026-08-21
+
+W2.5 M1 float unlock: `RecallShape` gains `floatMetric` (string, default `"cosine"`,
+accepted values `"cosine"` | `"l2"` | `"dot"`; unknown values degrade silently to
+cosine; Codable-additive — absent key decodes to `"cosine"`, never throws).
+
+The metric is threaded through the full float/dense-lane query chain:
+`RecallDirector.floatMetric(for:)` → `CorpusContentEngine.floatNearestPerSignal` /
+`floatFarthestPerSignal` / `floatNearestPerSignalWithDiscrimination` →
+`VectorStore.findNearestFloat` / `findFarthestFloat` → both code paths
+(ramResident `FloatBruteForceIndex.search(metric:)` and diskBacked
+`_floatScanFromTable` with inline per-metric distance dispatch).
+
+Rust twin: `RecallShape.float_metric: String` field, `with_float_metric` builder,
+`float_metric_for(shape:)` mapping fn in `coordinator.rs` that routes to
+`FloatMetric::Cosine` / `L2` / `Dot`; threaded into `CorpusContentEngine` and
+`VectorStore` float lane functions.
+
+Conformance gated on both ports:
+- Swift: `RecallShapeFloatMetricTests.swift` (12 tests) — GOLDEN PIN (absent key
+  and explicit "cosine" produce byte-identical top-1), unknown degradation, l2/dot
+  selectability with rank-divergence fixture.
+- Rust: `recall_shape_float_metric_parity.rs` (8 tests) — same three gates.
+
+Additive. `floatMetric` absent → `"cosine"` → behaviour byte-identical to pre-1.45.0.
+
+### 1.44.0 -- 2026-08-21
+
+EMBED-PROV-E2: embedding-provider manifest key consumption at wire time.
+
+`wireSubstores` now reads the `embedding_provider` manifest key (written by
+`provisionEmbeddingProvider`) at estate-open time and augments the embedding
+ensemble. The single seam call site covers both `provision` and the serve
+entry paths (`wireGLKSubstores`).
+
+- `"apple-nl-v1"` → appends `.nlEmbedding(provider: AppleNLProvider())` to the
+  base ensemble (Swift, `#if canImport(NaturalLanguage)` gate; no-op on
+  non-Apple platforms).
+- Absent key / empty value → ensemble unchanged (byte-identical to pre-EMBED-PROV-E2
+  behavior; no side effects for every existing estate).
+- Unknown model ID → `OSLog.warning` (ID + estate UUID), ensemble unchanged.
+
+Rust: `apply_provisioned_embedding_provider` added to `EstateCoordinator`.
+Reads the key; emits one provenance line to stderr when the key is non-empty;
+returns without modifying any ensemble. Called from `EstateCoordinator::provision`
+after wiring. Sanctioned divergence: Rust never selects an ML provider
+(NaturalLanguage unavailable on Linux/Windows target platforms).
+
+Additive. Zero existing callers affected.
+
+### 1.43.0 -- 2026-08-20
+
+- P3a: `AnomalySweepSignal` wired as signal 12 in the default standing-signal
+  set, both ports. `registerDefaultStandingSignals` gains an `anomalyCycle`
+  parameter (default no-op) that is forwarded to `AnomalySweepSignal.spec`.
+  The standing-signal inventory table updated to 12 rows. Rust: new
+  `brain/signals/anomaly_sweep.rs` and `brain/anomaly_flag_sweep.rs`; Rust
+  `EstateCoordinator::anomaly_flag_sweep` implements the O(n²) per-room
+  cohesion sweep over char-3-shingle Jaccard z-scores, mirroring the Swift
+  twin. LocusKit Rust gained `Estate::set_anomalous_flag` (trait + InMemory,
+  SQLite, PostgreSQL impls). `§11.18` now "Swift-only" note removed — both
+  ports are parity-tested via `standing_signals_parity.rs` (23 tests) and
+  `AnomalySweepSignalTests.swift` (7 tests).
+
+### 1.42.0 -- 2026-08-20
+
+- M4 single-derivation: the recall director is now the sole site that calls
+  `QueryLatticeAnchor.derive(from:)` / `query_anchor()`. The result is stored
+  on `GLKRecallResult.queryLatticeAnchor` / `query_lattice_anchor`. Callers
+  MUST NOT re-derive the anchor from the query text; they read it off the
+  result. This closes the two-path duplication between the GLK sketch
+  compilation and the CognitionKit recipe layer. `locusOnly` and unanchorable
+  queries carry `nil`/`None`.
+
+### 1.40.0 -- 2026-08-20
+
+- §11.18 anomalous-flag recall prefilter. Two new surfaces:
+  1. `GLKRecallRequest.anomalousFilter: Bool?` (nil = passthrough, true =
+     anomalous-only, false = exclude-anomalous) — admission gate applied
+     centrally in `recall`/`recall_scored` BEFORE scoring, after all lane
+     results are collected. Hits without a hydrated drawer pass through
+     unconditionally. Rust: `with_anomalous_filter(filter: bool) -> Self` builder.
+  2. `GeniusLocusKit.anomalyFlagSweep(handle:threshold:now:) async throws -> Int` —
+     room-cohesion maintenance sweep that computes each drawer's mean
+     char-4-shingle Jaccard similarity to its room peers (SubstrateML
+     `ShingleSimilarity.similarity`), derives z-scores
+     (`AnomalyDetection.zScore`), and sets/clears bit 26 (`isAnomalous`) on
+     each drawer. Rooms below `anomalySweepMinRoomSize` (3) have bit 26
+     cleared on all members. Default threshold 2.0 (≈ −2σ). Returns count
+     of changed drawers. O(n²) per room; idempotent (skip-write when bit
+     already correct). Deterministic: `now` threaded from the caller.
+
+### 1.38.0 -- 2026-08-20
+
+- W2.5 Track R(a) — attributed reward-cycle traces. The recall-trace
+  write moves from the inner locus frame to the director's central
+  writer in `recall`/`recall_scored`: for external-origin requests the
+  director writes one trace row per SURFACED hit (capped by
+  `traceLimit ?? limit`) carrying the fused score, `door` (from the
+  request), `composition` (request's, else "<mode>/<scoring>"), and
+  `laneRanks` (the target's 1-based rank in each lane's final
+  pre-fusion candidate list, packed via
+  `RecallTraceItem.packLaneRanks`). Pre-R(a), fused lanes traced the
+  locus scan's leading rows, which need not match the fused result —
+  the re-homing is a fidelity fix. Internal-origin behavior unchanged
+  (zero trace rows, B-10a). A trace-write fault stays fail-closed and
+  surfaces as degraded stage "recall.trace_write_failed".
+
 ### 1.28.0 -- 2026-08-13
 GLK supplies `EstateThetaBasisRetrainHook` to NeuronKit's `AutonomicGovernor` at
 composition time. The hook's `retrain(now:)` implementation calls
@@ -2066,6 +2460,25 @@ and the decline matrix, the review ladder
 `objectToTunnel`; endorse never activates — user-only activation),
 and `ReviewQueueRanking`.
 
+### 2.1.0 -- 2026-08-26
+
+Associate-sweep ladder cut (Bob ruling): each probe's kNN neighbour
+list is truncated only on a DISTANCE BOUNDARY, never inside a tie
+group. Rungs with `units` = the neighbour budget: fetch units×3 and
+cut at the first boundary at or after `units`; else fetch units×6 and
+look again; else cut at the last boundary INSIDE `units` (the longest
+determinate prefix); else — the whole pool is one tie group — the
+probe contributes ZERO pairs and the sweep report's new
+`nonUniqueProbes` count records it (surfaced on the dream association
+line). An exhausted pool (store returned fewer rows than requested) is
+complete and returned whole. Rationale: candidates with byte-identical
+vectors tie on distance AND content hash, so a mid-group cut falls to
+the per-run random UUID — per-run stable but not cross-run stable
+(REPLAY_DRIFT_RCA 2026-08-26); the ladder makes the association pair
+set identical across independent provisionings of the same content.
+`AssociateSweepReport` gains `nonUniqueProbes` ↔ `non_unique_probes`
+(both ports). Behavioral (MINOR).
+
 ### 1.24.0 -- 2026-08-05
 
 Dream associate step: the vector-similarity pairing runs as an
@@ -2079,6 +2492,16 @@ Probe order is recency with id tiebreak, so same-seed estates write
 the same associations.
 
 ### 1.23.0 -- 2026-08-05
+
+- **1.37.0 (2026-08-20)** — W2.5 S4 Option C (Bob's ruling): MatrixTier gains DECAYED O/T projections (§8.13) beside the canonical Int64 counts — per-contribution exp(−age·ln2/τ) at the maintenance pass clock (τ_O 60d co-activation, τ_T 30d temporal, §6.8), recomputed IN FULL every rebuildDerivedAccelerators (exp-factor composition is not fp-associative, so no incremental merge). Codable/snapshot additive; encoded only when computed. RecallShape.matrixWeighting ("counts" default | "decayed") switches the matrixAware read — arm surface only, defaults byte-identical. Rust twin mirrors (projections in-RAM, recomputed on load path; binary snapshot carries counts only). The Rust-only dead MatrixTier::apply_decay (zero call sites, O 365d/T 90d contradicting §6.8) is REMOVED — superseded by this design.
+
+- **1.36.0 (2026-08-20)** — Pipeline p2.3-det — coreference stage A (W2.2, accepted design A1): the per-item sweep resolves THIRD-PERSON pronouns in the distilled rendering against a session antecedent pool (anchored entities of up to 5 preceding same-room items within 30 min, categorizer selection rules). Substitution fires only when the pool holds exactly one compatible-class candidate (thing vs person via Q5 ancestry); "her" is excluded (object/possessive ambiguity); the verbatim body and trailer facts are untouched. Single-item distill callers pass an empty pool (identity); the version bump retroactively re-distills via the bit-19/version sweep.
+
+- **1.35.0 (2026-08-20)** — Provisioned lane weights (W2.5 Track R(b)): the estate manifest key `lane_weights` carries OPTIMIZER-OWNED default per-lane weights (JSON, lane key → signed float). The recall path resolves every lane-weight read with shape-explicit > provisioned > neutral-1.0 precedence — fixed RRF lanes, dense per-model modifiers, and union column multipliers alike. Absent/malformed provision fails quiet to today's neutral fusion. The product only consumes; the quality optimizer emits (benchmarker/optimizer split).
+
+- **1.34.0 (2026-08-20)** — Consolidation composeAndDistill threads per-sentence constituent timestamps (offset-mapped over the joined cluster text) into DistillationInput, activating the pipeline's TypedDecayWeighting branch for cross-item clusters (W2.5 S6, DISTILLATION_MATH_DIFFUSION §2). The per-item sweep keeps nil timestamps on purpose — one item's sentences share a single timestamp, so equal ages cancel (wdf ≡ df). Sentence segmentation is unchanged; unlocatable sentences fail quiet to the uniform branch.
+
+- **1.33.0 (2026-08-20)** — QueryLatticeAnchor (W2.5 Track S): public query-side §8.3 lattice-anchor derivation using the categorizer's own selection rules (multi-word phrase pre-pass over the vendored labels, then the first anchoring noun — same pinned stopwords, min length, and root-class skip). Returns the drawer-space FDC code + Wikidata Q-ID; unanchorable queries return the empty anchor. Rust twin brain::enrichment_stage::query_anchor.
 
 - **1.32.0 (2026-08-20)** — RecallShape gains `binaryMetric` ("hamming" default | "jaccard"; unknown degrades to hamming; Codable-additive via custom decoder) applied to the engram and distillation-fingerprint lanes of the scored path. New shaped preset "jaccard" (21st): identical fusion, Jaccard set-overlap scoring on the binary lanes.
 
@@ -2402,6 +2825,19 @@ signal still does. A nil/all-1.0 shape stays byte-identical to the pre-steer
 unionBest output. No public API change — wires the already-public dense weights
 that 6b-modifiers-core left inert in unionBest.
 
+### 1.39.0 -- 2026-08-20
+W3 additive selector registrations (both ports). (a) Five new named presets:
+`anti_redundant_ri`, `anti_redundant_lsa`, `anti_redundant_nmf` — per-signal
+anti-similarity variants with the same bm25/hamming suppression pattern as
+`anti_redundant` but inverting RI, LSA, or NMF to FARTHEST respectively;
+`temporal_connection` — temporal 1.5 + coOccurrence 1.5 for matrixAware scoring;
+`field_preference` — fieldFit 1.5 + preference 1.5 for matrixAware scoring.
+`PRESET_NAMES`/`presetNames` grows from 22 to 27 entries. (b) Per-call
+`GLKRecallRequest.frontierK` (Swift `Int?` / Rust `Option<usize>`) per-call
+candidate-pool depth override with three-level precedence: request > shape >
+engine formula, clamped to `[64, 256]`. Both ports implement the same resolution
+order. Tests added for all new presets and for the per-call override.
+
 ### 1.1.0 -- 2026-06-17
 Additive (6b-modifiers-core): documented the signed-weight fusion steering
 contract (`RecallShape`). The RRF combiner gains a per-lane signed weight
@@ -2415,3 +2851,71 @@ override `[64, 256]`. Anti-similarity (true farthest-K) is deferred to
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.49.0 -- 2026-08-23
+
+ADORNMENT mission: dream-time AdornmentPass (SPEC_ADORNMENT).
+
+**§11.2 standing signals — signal 13:**
+`AdornmentPassSignal` (signal 13, `.single` concurrency, hourly schedule)
+drives `AdornmentPass.run` over the default estate. The third governor
+closure `adornmentCycle` is re-added in both ports so
+`registerDefaultStandingSignals` now takes three Option closures (hunt,
+anomaly, adornmentCycle) in the same commit as the signal registration.
+
+**AdornmentPass §:**
+- Fetches active drawers with `adornmentRequired` (bit 27) set, up to
+  `defaultBatchSize` (50) per invocation.
+- Invokes `invokeAdornmentCommand` (AdornmentLib MOOT_MINT_CMD seam) for
+  each drawer's content.
+- Validates via `AdornmentValidators.validateDate` (AV-6/AV-7: year-token
+  containment gate). Over-length output (> `ADORNMENT_MAX_LENGTH`) is a
+  validation failure — never truncate.
+- On success: writes `adornment` field + bitmask code (0b001 = apple gen-1)
+  and clears bit 27 via `setAdornment(drawerId:adornment:bitmaskCode:)`.
+
+**Staleness semantics:**
+- Body-mutating verbs (`capture`, `update`, `forget`) set `adornmentRequired`.
+- Engine-family mismatch at dream time sets `adornmentRequired` for rolling
+  regeneration (new family uses different bitmask codes).
+
+**GLK harness API:**
+`runAdornmentPass(handle:batchSize:maxAdornmentLength?:now:)` — harness-only
+overload that threads an optional length ceiling override through the minter
+closure (nil = product default). Used by `moot_run_adornment_pass` dark tool.
+
+### 1.48.0 -- 2026-08-22
+PACKAGER mission: `GLKResultsPackager` — post-recall, pre-presentation packager.
+
+**New types (Swift + Rust, both ports):**
+- `PackagerAnswerMode` — `never` (default, byte-identical) / `always` / `auto`.
+- `PackagerConfidenceLevel` — `CONFIDENT` / `INTERMEDIATE` / `WEAK`.
+- `GLKResponseLevel` — `L0AnswerOnly` / `L1Full` / `RowsOnly`.
+- `GLKConfidenceSignals` — four gate signals: m1 (top-margin), m2 (lane agreement),
+  m3 (dense spread), m4 (word-boundary containment ≥60%).
+- `GLKAnswerBlock` — answer text, confidence label/level, citation ids, signals.
+- `GLKPackagedResult` — level, optional answer block, rows, total count.
+- `PackagerThresholds` — seven tunable gate parameters with spec defaults
+  (t1=0.25, t2=0.50, t1′=0.05, t3′=0.10, c=0.20, k_min=3, k_max=20).
+- `GLKResultsPackager` — `package(result:mode:composedAnswer:thresholds:)` entry point.
+
+**Gate decision (order is load-bearing):**
+1. `answer:never` → fast path, all hits as rows, no gate computation.
+2. WEAK if m1 < t1′ OR m3 < t3′.
+3. CONFIDENT if m1 ≥ t1 AND m2 ≥ t2 AND m4 = true.
+4. INTERMEDIATE otherwise.
+
+**Score-cliff row cutoff:** Walk from index k_min to k_max; stop when
+`gap[i] ≥ c × stddev(scores[0..k_max])`.
+
+**`RecallTuningManifest` additions:**
+Seven new packager threshold fields (`packager_t1`, `packager_t2`,
+`packager_t1_prime`, `packager_t3_prime`, `packager_c`, `packager_k_min`,
+`packager_k_max`) with fail-quiet serde defaults. No estate migration required.
+`packager_thresholds()` accessor returns a `PackagerThresholds` value.
+
+**Dependency:** `GLKResultsPackager` takes `composedAnswer: String?` injected
+by the ARIA layer (AriaMcpKit). It does NOT import CognitionKit.
+
+### 1.41.0 -- 2026-08-20
+M3: `GLKRecallScoring` gains a fourth variant `discriminative`. The mode computes RRF fusion identically to `.rrf`, then scales every composite score by `denseDiscriminationFactor` ∈ [0, 1] — the mean relative spread of nearest cosines across all dense signals, clamped via the 0.15 saturation threshold. No matrix steer, fieldFit, graph, or preference signals are applied. `unionBest + discriminative` is a genuine implementation; the three non-`unionBest` modes surface named degradation stages (`locusOnly.discriminative`, `corpusOnly.discriminative`, `hybrid.discriminative`) and fall back to their existing combiner. Scoring-fallback table extended with three new rows; three new telemetry metric names added.

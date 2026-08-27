@@ -54,6 +54,7 @@ pub type ContentOnEncoded = Box<dyn Fn(&[String], &str) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
 use vectorkit::{
+    engine::metric::FloatMetric,
     EmbeddingProvider, VectorExactKey, VectorPayload, VectorPayloadInput,
     VectorRepresentationClaims, VectorRepresentationKey, VectorStore,
 };
@@ -819,21 +820,29 @@ impl CorpusContentEngine {
     }
 
     /// Per-signal dense float NEAREST recall — content-ID keyed.
+    /// Per-signal dense float NEAREST recall.
+    ///
+    /// - `metric`: the float distance function. Defaults to `FloatMetric::Cosine`
+    ///   so callers that do not pass a metric see byte-identical behaviour.
     pub fn float_nearest_per_signal(
         &self,
         query: &str,
         limit: usize,
+        metric: FloatMetric,
     ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, true)
+        self.float_per_signal(query, limit, true, metric)
     }
 
     /// Per-signal dense float FARTHEST (anti-similarity) recall.
+    ///
+    /// - `metric`: the float distance function. Defaults to `FloatMetric::Cosine`.
     pub fn float_farthest_per_signal(
         &self,
         query: &str,
         limit: usize,
+        metric: FloatMetric,
     ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, false)
+        self.float_per_signal(query, limit, false, metric)
     }
 
     /// Per-signal dense float nearest recall WITH per-query discrimination signal.
@@ -848,12 +857,15 @@ impl CorpusContentEngine {
     /// when the lane self-reports degeneracy.
     ///
     /// See `FloatDiscriminationSignal` for the statistic definition.
+    ///
+    /// - `metric`: the float distance function; propagated to `float_nearest_per_signal`.
     pub fn float_nearest_per_signal_with_discrimination(
         &self,
         query: &str,
         limit: usize,
+        metric: FloatMetric,
     ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
-        self.float_nearest_per_signal(query, limit)
+        self.float_nearest_per_signal(query, limit, metric)
             .into_iter()
             .map(|(model_id, outcome)| {
                 let disc = discrimination_signal_from_outcome(&outcome);
@@ -862,9 +874,9 @@ impl CorpusContentEngine {
             .collect()
     }
 
-    /// Single-signal convenience: the DEFAULT slot's nearest outcome.
+    /// Single-signal convenience: the DEFAULT slot's nearest outcome (cosine metric).
     pub fn float_nearest(&self, query: &str, limit: usize) -> FloatLaneOutcome {
-        self.float_nearest_per_signal(query, limit)
+        self.float_nearest_per_signal(query, limit, FloatMetric::Cosine)
             .into_iter()
             .next()
             .map(|(_, o)| o)
@@ -876,6 +888,7 @@ impl CorpusContentEngine {
         query: &str,
         limit: usize,
         nearest: bool,
+        metric: FloatMetric,
     ) -> Vec<(String, FloatLaneOutcome)> {
         if limit == 0 || query.is_empty() {
             return self
@@ -935,10 +948,10 @@ impl CorpusContentEngine {
             };
             let matches = if nearest {
                 self.vector_store
-                    .find_nearest_float(&probe, &model_id, limit * 4)
+                    .find_nearest_float(&probe, &model_id, limit * 4, metric)
             } else {
                 self.vector_store
-                    .find_farthest_float(&probe, &model_id, limit * 4)
+                    .find_farthest_float(&probe, &model_id, limit * 4, metric)
             };
             let matches = match matches {
                 Ok(m) => m,
@@ -3674,6 +3687,13 @@ impl CorpusContentEngine {
                     EmbeddingModelConfig::EmbeddingGemma { .. } => (
                         "embedding-gemma-300m".to_string(),
                         "1.0.0".to_string(),
+                        false,
+                    ),
+                    // CandleNL: the provider carries its own model identity;
+                    // read it from the provider box (same as Fdc).
+                    EmbeddingModelConfig::CandleNL { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
                         false,
                     ),
                 };

@@ -71,7 +71,7 @@ use crate::engine::hnsw_index::{
     GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD, HNSW_M0, HNSW_MAX_PERSISTED_LAYER,
 };
 use crate::engine::key::VectorRecordKey;
-use crate::engine::metric::DenseMetric;
+use crate::engine::metric::{DenseMetric, FloatMetric};
 use crate::engine::mih::{MIHBandCount, MIHIndex};
 use crate::engine::payload::{VectorKind, VectorPayload};
 use crate::engine::resident_store::ResidentArrayStore;
@@ -1197,6 +1197,11 @@ impl VectorStore {
                 *state.live_float_counts.entry(model_id.to_string()).or_insert(0) += 1;
                 // Mirror into the HNSW index if it is already active for this model,
                 // and mark the partition dirty so flush() persists the change.
+                // Incremental inserts keep ARRIVAL order (SPEC 1.10.0): only
+                // bulk rebuilds (rebuild_hnsw_index, compact) apply the
+                // content-stable (vec_hash, key) build order, so cross-run
+                // graph identity is guaranteed for bulk-built graphs only;
+                // the next THETA rebuild converges an incrementally-grown graph.
                 if let Some(hnsw_idx) = state.hnsw_indices.get_mut(model_id) {
                     if let Ok(floats) = payload.as_f32_vec() {
                         hnsw_idx.insert(item_id.to_string(), model_id.to_string(), floats);
@@ -1246,7 +1251,7 @@ impl VectorStore {
     /// calls `build` once, so it is bounded too — no per-row array clone.
     ///
     /// Search output is identical to inserting the same rows one-by-one (the
-    /// (distance ASC, item_id ASC) total order is applied at query time).
+    /// (distance ASC, vec_hash ASC, item_id ASC) total order is applied at query time).
     pub fn add_payloads(&self, batch: &[VectorPayloadInput]) -> Result<(), VectorKitError> {
         if batch.is_empty() {
             return Ok(());
@@ -1946,7 +1951,7 @@ impl VectorStore {
     /// All Hamming arithmetic routes through BruteForceIndex →
     /// EngramLib → SubstrateKernel (I-7 absolute, arch spec §3.4).
     ///
-    /// Returns up to `k` matches sorted by (distance ASC, item_id ASC)
+    /// Returns up to `k` matches sorted by (distance ASC, vec_hash ASC, item_id ASC)
     /// — the universal tie-break rule (retrieval algorithms reference §0.3).
     ///
     /// Telemetry: emits `vectorkit.search.latency_ms` and
@@ -1999,7 +2004,7 @@ impl VectorStore {
         };
 
         // Map DenseHit → VectorMatch. BruteForceIndex already enforces
-        // (distance ASC, item_id ASC) per the oracle contract (§0.3).
+        // (distance ASC, vec_hash ASC, item_id ASC) per the oracle contract (SPEC 1.9.0).
         // Rows in the resident binary index are built from serving-generation rows
         // only; generation is the model's serving generation (absent row = 0).
         let serving_gen_for_binary = state.serving_generations.get(model_id).copied().unwrap_or(0);
@@ -2095,11 +2100,17 @@ impl VectorStore {
     ///
     /// Both paths compute the same cosine distance formula; results are
     /// reproducible-within-config but not four-way bit-identical (arch spec §6).
+    /// k-NEAREST neighbours over the float32 (Lane D) vectors.
+    ///
+    /// Both ramResident (FloatBruteForceIndex / HNSW) and diskBacked (table scan)
+    /// paths respect the `metric` parameter. Callers that do not need metric
+    /// selection may pass `FloatMetric::Cosine` to preserve the historical behaviour.
     pub fn find_nearest_float(
         &self,
         probe: &[f32],
         model_id: &str,
         k: usize,
+        metric: FloatMetric,
     ) -> Result<Vec<VectorMatch>, VectorKitError> {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
@@ -2153,7 +2164,8 @@ impl VectorStore {
                 let index = state.float_indices.get(model_id)
                     .expect("ensure_float_index_built_locked returned true but entry is absent");
                 let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
-                let hits = index.search(&probe_payload, DenseMetric::COSINE, k, None)?;
+                // Wrap FloatMetric in DenseMetric::Float for the index API.
+                let hits = index.search(&probe_payload, DenseMetric::Float(metric), k, None)?;
                 // Record which generation answered — Gate 3/5 probe. The float
                 // brute-force path is used when live_count < hnsw_threshold; the
                 // gate asserts the generation matches regardless of which path fired.
@@ -2175,7 +2187,7 @@ impl VectorStore {
         // Reached for a diskBacked estate, for a ramResident estate with no rows yet,
         // and for a ramResident estate whose float index was refused admission.
         // Table scan filters to serving generation, so generation = serving gen (0 pre-swap).
-        let scored = self.float_scan_from_table(probe, model_id, k, true)?;
+        let scored = self.float_scan_from_table(probe, model_id, k, true, metric)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
@@ -2206,11 +2218,20 @@ impl VectorStore {
     ///
     /// Returns up to `k` matches, FARTHEST (most dissimilar) first. Empty if
     /// `k` is 0, the probe is empty, or no float rows exist for the model.
+    /// k-FARTHEST neighbours over the float32 (Lane D) vectors.
+    ///
+    /// Identical to `find_nearest_float` except it ranks FARTHEST first (most
+    /// dissimilar). HNSW is not used regardless of threshold — HNSW is a
+    /// nearest-only structure; anti-similarity requires a full scan.
+    ///
+    /// The `metric` parameter selects the distance function. Pass
+    /// `FloatMetric::Cosine` for the historical behaviour.
     pub fn find_farthest_float(
         &self,
         probe: &[f32],
         model_id: &str,
         k: usize,
+        metric: FloatMetric,
     ) -> Result<Vec<VectorMatch>, VectorKitError> {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
@@ -2224,7 +2245,8 @@ impl VectorStore {
                 let index = state.float_indices.get(model_id)
                     .expect("ensure_float_index_built_locked returned true but entry is absent");
                 let serving_gen = state.serving_generations.get(model_id).copied().unwrap_or(0);
-                let hits = index.search_farthest(&probe_payload, DenseMetric::COSINE, k, None)?;
+                // Wrap FloatMetric in DenseMetric::Float for the index API.
+                let hits = index.search_farthest(&probe_payload, DenseMetric::Float(metric), k, None)?;
                 return Ok(hits.into_iter().map(|h| VectorMatch {
                     item_id: h.key.item_id,
                     distance: h.raw_distance,
@@ -2241,7 +2263,7 @@ impl VectorStore {
         }
         // Reached for a diskBacked estate, for a ramResident estate with no rows yet,
         // and for a ramResident estate whose float index was refused admission.
-        let scored = self.float_scan_from_table(probe, model_id, k, false)?;
+        let scored = self.float_scan_from_table(probe, model_id, k, false, metric)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
@@ -3135,12 +3157,23 @@ impl VectorStore {
     /// (DoS fix): memory is O(k) and cost O(n log k), instead of materializing
     /// and sorting a score entry for every row on every recall — a large
     /// estate could otherwise exhaust CPU/memory from a normal MCP search.
+    /// Table-scan float NN search. Dispatches the inline distance computation on
+    /// `metric`; all three metrics branch identically to Swift's `_floatScanFromTable`.
+    ///
+    /// - "cosine": 1 − cos(a,b). Scale-invariant; the historical default.
+    /// - "l2": Euclidean distance √Σ(aᵢ−bᵢ)². Magnitude-sensitive.
+    /// - "dot": −Σ(aᵢbᵢ). Lower value = higher dot product = "closer".
+    ///
+    /// The bounded top-k heap is metric-agnostic: all three produce a lower-is-
+    /// better distance scalar, so `better` (which picks the smaller distance for
+    /// nearest, the larger for farthest) works unchanged.
     fn float_scan_from_table(
         &self,
         probe: &[f32],
         model_id: &str,
         k: usize,
         nearest: bool,
+        metric: FloatMetric,
     ) -> Result<Vec<(f32, String)>, VectorKitError> {
         // Use serving_generation() (registry-aware) so the scan is scoped to
         // the serving generation even on a fresh process reopen where the state
@@ -3164,20 +3197,35 @@ impl VectorStore {
                 ]);
                 candidate.push(f32::from_bits(bits));
             }
-            // Cosine distance: 1 − dot(a,b)/(‖a‖·‖b‖).
-            let mut dot: f32 = 0.0;
-            let mut norm_a: f32 = 0.0;
-            let mut norm_b: f32 = 0.0;
-            for j in 0..dim {
-                dot += probe[j] * candidate[j];
-                norm_a += probe[j] * probe[j];
-                norm_b += candidate[j] * candidate[j];
-            }
-            let denom = norm_a.sqrt() * norm_b.sqrt();
-            let dist = if denom > 0.0 {
-                1.0 - (dot / denom).clamp(-1.0, 1.0)
-            } else {
-                1.0
+            // Dispatch on the selected float metric. All three branch inline so
+            // the diskBacked table-scan path mirrors FloatBruteForceIndex exactly.
+            // Lower value always means "closer" for all three metrics:
+            //   cosine: 1−cos(a,b) ∈ [0,2]
+            //   l2: √Σ(aᵢ−bᵢ)² ∈ [0,∞)
+            //   dot: −Σ(aᵢbᵢ) — negated so largest dot → smallest dist → ranks first
+            let dist = match metric {
+                FloatMetric::Cosine => {
+                    let mut dot: f32 = 0.0;
+                    let mut norm_a: f32 = 0.0;
+                    let mut norm_b: f32 = 0.0;
+                    for j in 0..dim {
+                        dot += probe[j] * candidate[j];
+                        norm_a += probe[j] * probe[j];
+                        norm_b += candidate[j] * candidate[j];
+                    }
+                    let denom = norm_a.sqrt() * norm_b.sqrt();
+                    if denom > 0.0 { 1.0 - (dot / denom).clamp(-1.0, 1.0) } else { 1.0 }
+                }
+                FloatMetric::L2 => {
+                    let mut sum_sq: f32 = 0.0;
+                    for j in 0..dim { let d = probe[j] - candidate[j]; sum_sq += d * d; }
+                    sum_sq.sqrt()
+                }
+                FloatMetric::Dot => {
+                    let mut dot: f32 = 0.0;
+                    for j in 0..dim { dot += probe[j] * candidate[j]; }
+                    -dot
+                }
             };
             // Bounded insert: skip if worse than the current worst and full.
             if k == 0 {
@@ -3294,7 +3342,21 @@ impl VectorStore {
             }
             let record_count = records.len() as u32;
             let mut hnsw = HNSWIndex::new_default();
-            for (key, payload) in &records {
+            // Content-stable bulk build order (SPEC 1.10.0): sort rows by
+            // (fnv1a64(payload bytes) ASC, key ASC) before insertion so
+            // identical content yields an identical graph across independent
+            // builds. fetch_float_records sorts by key alone, and keys ride
+            // per-run-random item UUIDs — that order is stable within one
+            // estate but NOT across provisionings of the same content
+            // (REPLAY_DRIFT_RCA). The key remains the final backstop for
+            // byte-identical vectors, which are interchangeable for every
+            // ordering consumer.
+            let mut build_order: Vec<(u64, &(VectorRecordKey, VectorPayload))> = records
+                .iter()
+                .map(|r| (crate::engine::fnv1a64(&r.1.bytes), r))
+                .collect();
+            build_order.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+            for (_, (key, payload)) in &build_order {
                 if let Ok(floats) = payload.as_f32_vec() {
                     hnsw.insert(key.item_id.clone(), model_id.to_string(), floats);
                 }

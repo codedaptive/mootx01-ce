@@ -1,12 +1,12 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.3.0
+version: 1.4.0
 status: accepted-1.1-target
-description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (23 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
+description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (31 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
 author: MOOTx01 maintainers
-date: 2026-07-20
+date: 2026-08-21
 relates_to:
-  - docs/engineering/HARNESS_REFERENCE.md (the 23 conformance-gated primitives, agentic discovery index)
+  - docs/engineering/HARNESS_REFERENCE.md (the 31 conformance-gated primitives, agentic discovery index)
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (cross-cutting system, identity, persistence, and federation rules)
   - docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md (measured backend and performance authority)
 ---
@@ -394,7 +394,13 @@ Drawer operational (empirical-dominant, 6-bit floor):
                                  bits 22–23 vague_level [2-bit field] (NEW §2.4.2)
   Bit  24     state_extension flag
   Bit  25     lineage_clustering flag
-  Bits 26–63  reserved
+  Bit  26     is_anomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
+              Set by GeniusLocusKit anomalyFlagSweep when the drawer's mean
+              char-4-shingle Jaccard similarity to its room peers has a z-score
+              ≤ −threshold (default 2.0). Cleared by the sweep for rooms with
+              fewer than 3 drawers. Derived-signal write: no audit event, no
+              lifecycle touch. Read via Drawer.isAnomalous / is_anomalous().
+  Bits 27–63  reserved
 ```
 
 #### §2.4.1. `has_current_representation` — bit 19 (NEW, 2026-07-28)
@@ -766,6 +772,7 @@ table.
 | 26 | Drawer.feature_flags.is_vague | bit 20 (0x100000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff this drawer is a Wave-2 consolidated vague item |
 | 27 | Drawer.feature_flags.represented_by_vague | bit 21 (0x200000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff absorbed into a vague item |
 | 28 | Drawer.feature_flags.vague_level | bits 22–23 (mask 0xC00000, shift 22, width 2) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; nesting depth 0–2 |
+| 29 | Drawer.operationalBitmap.isAnomalous | bit 26 (0x4000000) | DrawerOperational.swift / drawer_operational.rs | NEW 2026-08-20 §11.18; low-cohesion outlier flag — reads raw operationalBitmap, NOT featureFlags (bit 26 is above the feature-flags region 12–23) |
 
 Implementations MUST surface this table as an automated conformance
 test that fails when a source constant deviates from spec.
@@ -2476,6 +2483,96 @@ Specified in §5.3. See `project_state_at`.
 
 Specified in §12.2.
 
+### §8.17. Sampling primitives (continuous-distribution sampler)
+
+`Sampling.{sampleNormal,sampleGamma,sampleBeta}(rng:)` in SubstrateML
+(`packages/libs/SubstrateML/Sources/SubstrateML/Sampling.swift`;
+Rust: `packages/libs/SubstrateML/rust/src/sampling.rs`).
+
+Deterministic SplitMix64-threaded Normal (Box-Muller), Gamma
+(Marsaglia-Tsang), and Beta (ratio-of-gammas) samplers. All three are
+backed by the same RNG instance so each call advances the sequence
+consistently. This is the substrate-owned sampling math for
+Thompson-style dreaming-trigger selection; policy (how many triggers,
+when to fire) remains one layer up in NeuronKit. The sampler is
+deterministic given the same seed, making dream-sequence replay
+tractable in tests.
+
+Conformance: CRC `0xfc883023` (canonical vector `vectors/sampling.json`,
+32 seeded cases). Four-way gated (Swift gen × Swift validate, Swift gen
+× Rust validate, Rust gen × Swift validate, Rust gen × Rust validate).
+
+### §8.18. DP-OR temporal reduction
+
+`DPORReduction` in SubstrateML (`packages/libs/SubstrateML/Sources/
+SubstrateML/DPORReduction.swift`; Rust: `SubstrateML/rust/src/
+dp_or_reduction.rs`). Differential-privacy-style temporal OR-reduce:
+adds calibrated Laplace noise to individual epoch contribution counts
+before OR-folding, so the aggregate fingerprint satisfies (ε, δ)-DP.
+Used in the federation tier-contribution path (§12.6) to bound
+per-peer disclosure. Not currently conformance-gated with a vector
+file; tested by statistical tests in `tests/dp/`.
+
+### §8.19. LLM calibration curve
+
+`LLMCalibrationCurve` in SubstrateML (`packages/libs/SubstrateML/
+Sources/SubstrateML/LLMCalibrationCurve.swift`; Rust: `SubstrateML/
+rust/src/llm_calibration_curve.rs`). Confidence recalibration for
+external LLM outputs using isotonic regression over a binned
+validation set. The curve maps raw LLM confidence scores to
+calibrated probabilities; used by the dreaming daemon's LLM-sourced
+proposal path (§15.1 rule 5). Not currently conformance-gated with a
+vector file; tested by unit tests within SubstrateML.
+
+### §8.20. Shingle similarity
+
+`ShingleSimilarity.similarity(_:_:) -> Float32` in SubstrateML
+(`packages/libs/SubstrateML/Sources/SubstrateML/ShingleSimilarity.swift`;
+Rust: `packages/libs/SubstrateML/rust/src/shingle_similarity.rs`).
+
+Character 3-shingle Jaccard similarity over two strings: build the set
+of all length-3 substrings for each input, then compute
+|intersection| / |union|. Pure string-set math with no tokenizer, no
+clock, no randomness. Used by recall ranking diversity and
+MMR-style deduplication — in the CognitionKit layer it provides a
+fast text-overlap signal complementary to fingerprint Hamming distance.
+
+Conformance: CRC `0x8a5d8888` (canonical vector `vectors/
+shingle_similarity.json`). Four-way gated.
+
+### §8.21. Jaccard similarity (binary fingerprint set overlap)
+
+`Jaccard.{similarity,distance}(_:_:) -> Double` in SubstrateTypes
+(`packages/libs/SubstrateTypes/Sources/SubstrateTypes/Jaccard.swift`;
+Rust: `packages/libs/SubstrateTypes/rust/src/jaccard.rs`).
+
+Jaccard set similarity over 256-bit fingerprints:
+
+```
+Jaccard(a, b) = popcount(a AND b) / popcount(a OR b)
+distance(a, b) = 1 − similarity(a, b)
+```
+
+Both operands are integer popcounts over the same conformance-gated
+`zip4` + `popcount` path Hamming uses. The final division is the only
+floating-point step; integer operands make it bit-identical across
+ports (same IEEE-754 double division of exact small integers).
+
+**Empty-union convention:** two all-zero fingerprints → similarity 0.0
+(NOT 1.0). An all-zero fingerprint carries no evidence; "no evidence"
+must never read as a perfect match in a retrieval lane.
+
+Lives in SubstrateTypes (Layer 1) because it is algebraically equivalent
+to other Fingerprint256 arithmetic (AND, OR, popcount) — the metric
+is fingerprint-level set algebra, not a higher-order ML algorithm.
+Backs VectorKit's `BinaryMetric.jaccard` retrieval lane (W2.5 Track M1
+activation). Activated by the DenseMetric dark-computation audit
+2026-08-20.
+
+Conformance: CRC `0x2fe8941e` (canonical vector `vectors/jaccard.json`,
+34 cases: 32 seeded cycling identical/complement/subset/independent
+pairs plus two fixed empty-union edge cases). Four-way gated.
+
 ---
 
 ## §9. The row-state finite-state automaton
@@ -4111,16 +4208,18 @@ A v1.0-conforming implementation MUST:
 
 The v1.0 conformance gate is the cross-language test harness at
 `docs/validation/substrate_math_performance/test-harness/`. The
-gate pins 24 primitives (the 24 listed in HARNESS_REFERENCE §2)
-with four-way validation: Swift gen × Swift validate, Swift gen
-× Rust validate, Rust gen × Swift validate, Rust gen × Rust
-validate. A primitive is conforming when all four cells PASS at
-the same CRC.
+gate pins 31 primitives (see HARNESS_REFERENCE §2 for full API
+and file paths) with four-way validation: Swift gen × Swift
+validate, Swift gen × Rust validate, Rust gen × Swift validate,
+Rust gen × Rust validate. A primitive is conforming when all
+four cells PASS at the same CRC. Two hand-crafted primitives
+(`association_rule_mining`, `formal_concept_analysis`) have no
+generator path and are gated by Swift and Rust validation of
+their checked-in vector files.
 
 ```
-The 24 gated primitives (23 at v1.0 ratification + bit_field_masked_equals,
-the F18.2b post-v1.0 promotion; see HARNESS_REFERENCE.md for
-full API and file paths):
+The 31 gated primitives (24 at v1.0 ratification + 7 post-v1.0
+promotions; see HARNESS_REFERENCE.md for full API and file paths):
 
 Tier 1 (atomics):
   simhash               CRC 0xddd18e12   §3.6
@@ -4132,10 +4231,13 @@ Tier 1 (atomics):
   fnv                   CRC 0x275fd2bf   §3.3     [F5b promotion]
   bit_field_masked_equals
                         CRC 0x54f6c65f   §2.8     [F18.2b promotion]
+  jaccard               CRC 0x2fe8941e   §8.21    [W2.5 M1 promotion]
+  merkle_commitment     CRC 0x2476cee9   NT-P0    [NT-P0 promotion]
 
 Tier 2 (algorithmic):
   lattice (aka udc_tree_distance)
                         CRC 0x6c4e453f   §8.3
+  qid_adjacency         CRC 0x47efbb97   §8.3     [S8 promotion]
   info_theory           CRC 0x0cc08713   §8.11
   bradley_terry         CRC 0x601126c7   §8.12
   partial_state_recall  CRC 0xe8d3b221   §8.8
@@ -4145,6 +4247,8 @@ Tier 2 (algorithmic):
   moment_summary        CRC 0x6762440b   §8.7     [v1.0 promotion]
   field_presence_matrix_f
                         CRC 0x2a051f09   §6.1     [v1.0 promotion]
+  sampling              CRC 0xfc883023   §8.17    [post-v1.0 promotion]
+  shingle_similarity    CRC 0x8a5d8888   §8.20    [post-v1.0 promotion]
 
 Tier 3 (substrate-level):
   tier_contribution     CRC 0x4b67bcb5   §12.3
@@ -4154,6 +4258,10 @@ Tier 3 (substrate-level):
   nmf                   CRC 0x300bf633   §6.9
   eigenvalue_centrality CRC 0x1a9039ea   §7.2     [v1.0 promotion]
   audit_log_fold        CRC 0xa747722e   §5.3+§8.15
+  association_rule_mining
+                        CRC 0xdd61f0d0   §6.3     [hand-crafted vector]
+  formal_concept_analysis
+                        CRC 0xfeb1a9e9   §8       [hand-crafted vector]
 ```
 
 Additional non-harness tests carried from v0.36:
@@ -4462,6 +4570,22 @@ Sections trace back to designer artifacts as follows:
 | §19 (out of scope) | First and final math passes §5 | Roadmap |
 
 ## Changelog
+
+### 1.4.0 -- 2026-08-21
+
+- §18.2: Updated the harness gate count from 24 to 31 to match the
+  actual gated-primitive count in `HARNESS_REFERENCE.md` (seven
+  post-v1.0 promotions: `jaccard`, `merkle_commitment`,
+  `qid_adjacency`, `sampling`, `shingle_similarity`,
+  `association_rule_mining`, `formal_concept_analysis`). Added all
+  seven to the §18.2 ASCII table with their CRCs and section refs.
+- §8.17 (sampling), §8.18 (DP-OR temporal reduction), §8.19 (LLM
+  calibration curve), §8.20 (shingle similarity), §8.21 (Jaccard
+  fingerprint similarity) formalized as proper cookbook sections.
+  These sections were referenced by HARNESS_REFERENCE.md and the
+  harness primitive metadata but had no body in the cookbook.
+- Front-matter `relates_to` updated: "23" → "31" conformance-gated
+  primitives.
 
 ### 1.3.0 -- 2026-07-20
 

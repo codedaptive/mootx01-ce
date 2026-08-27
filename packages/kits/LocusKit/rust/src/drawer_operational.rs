@@ -20,7 +20,10 @@
 //! bits 12–23  feature_flags          (bitset, 11 named bits 12..23)
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
-//! bits 26–63  reserved
+//! bit  26     is_anomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
+//! bits 27–30  FREE — previously adornment_required (27) and adornment_bitmask (28-30);
+//!             retired by ADORN-STORE-02 v17 (normalized adornment store).
+//! bits 31–63  reserved
 //! ```
 //!
 //! ## Swift-to-Rust shape change
@@ -228,6 +231,29 @@ impl DrawerFeatureFlags {
     /// Mask covering the 12-bit feature region (bits 12–23). Matches
     /// the Swift `featureFlags` accessor's `0xFFF000` mask.
     pub const FIELD_MASK: i64 = 0xFFF000;
+
+    // ── Anomalous flag (§11.18 anomalous-flag recall prefilter, 2026-08-20) ──
+
+    /// Bit 26 — drawer is a low-cohesion outlier in its room, computed by
+    /// the anomaly-flag maintenance sweep in GeniusLocusKit (§11.18).
+    ///
+    /// Set/cleared by `Estate::set_anomalous_flag` during the room-cohesion
+    /// sweep: drawers whose shingle-similarity z-score against room peers
+    /// falls below the anomaly threshold get this flag set; all others are
+    /// cleared. Requires ≥ 3 drawers in the room for z-score stability.
+    ///
+    /// NOTE: bit 26 is above the 12-bit feature-flags region (bits 12–23).
+    /// `has_feature_flag(IS_ANOMALOUS)` works via direct bitwise AND, but
+    /// the `feature_flags()` masked accessor will NOT reflect this bit.
+    /// Use `is_anomalous()` to test this bit.
+    ///
+    /// Wire value: 1 << 26 = 67108864 (0x4000000).
+    /// Mirrors Swift `DrawerFeatureFlags.isAnomalous`.
+    pub const IS_ANOMALOUS: i64 = 1 << 26;
+
+    // Bits 27-30 are FREE as of ADORN-STORE-02 v17.
+    // Previously: ADORNMENT_REQUIRED (bit 27) and ADORNMENT_BITMASK_MASK/SHIFT (bits 28-30).
+    // Adornment state is now tracked in the normalized adornments table, not bitmap fields.
 }
 
 // MARK: - Drawer accessors
@@ -350,6 +376,26 @@ impl Drawer {
         // Cookbook §2.4 bit 25: lineage_clustering flag.
         bit_field::extract_flag(self.operational_bitmap, 25)
     }
+
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// True when bit 26 of `operational_bitmap` is set, indicating this
+    /// drawer is a low-cohesion outlier in its room (cookbook §2.4, §11.18).
+    ///
+    /// Computed and maintained by GeniusLocusKit's anomaly-flag sweep.
+    /// Bit 26 is above the feature-flags region (bits 12–23) so
+    /// `has_feature_flag(DrawerFeatureFlags::IS_ANOMALOUS)` also works,
+    /// but this named accessor is preferred for readability.
+    ///
+    /// Mirrors Swift `Drawer.isAnomalous`.
+    pub fn is_anomalous(&self) -> bool {
+        // Cookbook §2.4 bit 26: anomalous flag (§11.18). Reads the raw
+        // bitmap directly — bit 26 is outside the feature_flags() region.
+        (self.operational_bitmap & DrawerFeatureFlags::IS_ANOMALOUS) != 0
+    }
+
+    // Bits 27-30 accessors (adornment_required, adornment_bitmask) have been retired
+    // by ADORN-STORE-02 v17. Adornment state lives in the adornments table.
 
     // -------------------------------------------------------------------------
     // Adjective-bitmap axis accessors — mirrors the `Drawer` extension in

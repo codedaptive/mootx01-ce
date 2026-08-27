@@ -27,7 +27,7 @@
 //!   branch in milliseconds without allocating real multi-gigabyte estates.
 
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, ResidentIndexBudget, Storage};
-use vectorkit::{VectorPayload, VectorStore};
+use vectorkit::{engine::metric::FloatMetric, VectorPayload, VectorStore};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -101,7 +101,7 @@ fn over_cap_index_not_resident_refusal_bumped_results_correct() {
 
     // Trigger admission check by querying.
     let results = store
-        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 3)
+        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 3, FloatMetric::Cosine)
         .expect("find_nearest_float must return Ok even when index is refused");
 
     // Index must NOT be cached — refusal leaves residency false.
@@ -147,7 +147,7 @@ fn under_cap_index_is_resident_refusal_zero_results_identical() {
     add_floats(&store, &corpus(), MODEL);
 
     let results = store
-        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 3)
+        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 3, FloatMetric::Cosine)
         .expect("find_nearest_float must return Ok when admitted");
 
     // Index MUST be cached after a successful admission.
@@ -186,7 +186,7 @@ fn unbounded_admits_estate_that_tiny_bytes_would_refuse() {
     let refused_store = store_with_budget(ResidentIndexBudget::Bytes(1));
     add_floats(&refused_store, &corpus(), MODEL);
     refused_store
-        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 1)
+        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 1, FloatMetric::Cosine)
         .expect("find_nearest_float");
     assert!(
         !refused_store.float_index_resident(MODEL),
@@ -197,7 +197,7 @@ fn unbounded_admits_estate_that_tiny_bytes_would_refuse() {
     let admitted_store = store_with_budget(ResidentIndexBudget::Unbounded);
     add_floats(&admitted_store, &corpus(), MODEL);
     admitted_store
-        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 1)
+        .find_nearest_float(&[1.0_f32, 0.0], MODEL, 1, FloatMetric::Cosine)
         .expect("find_nearest_float under Unbounded");
 
     assert!(
@@ -268,7 +268,7 @@ fn projection_below_hnsw_threshold_10k_records_dim384_admitted_at_ceiling_40m() 
     // Trigger admission.
     let probe = vec![1.0_f32; DIM];
     store
-        .find_nearest_float(&probe, MODEL, 1)
+        .find_nearest_float(&probe, MODEL, 1, FloatMetric::Cosine)
         .expect("find_nearest_float");
 
     // Below-threshold projection 35_360_000 < ceiling 40_000_000 → admitted.
@@ -317,7 +317,7 @@ fn projection_above_hnsw_threshold_10k_records_dim384_refused_at_ceiling_40m() {
     // Trigger admission.
     let probe = vec![1.0_f32; DIM];
     let results = store
-        .find_nearest_float(&probe, MODEL, 1)
+        .find_nearest_float(&probe, MODEL, 1, FloatMetric::Cosine)
         .expect("find_nearest_float must return Ok even when index is refused");
 
     // Above-threshold projection 73_280_000 > ceiling 40_000_000 → refused.

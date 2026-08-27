@@ -198,7 +198,7 @@ struct AppFirstStep4ReportTests {
     /// Regression: if the status format were derived from CLI-side registration
     /// or port observations instead of the provider's own authenticated report,
     /// the design's "parallel copies fail" rule would be violated.
-    @Test("honestServerStatus with bundled-owner outcome leads with 'provider:' prefix")
+    @Test("observedServerStatus with bundled-owner outcome leads with 'provider:' prefix")
     func statusLeadsWithProviderPrefix() {
         let probe = bundledHealthyProbe()
         let outcome = probe.detect(homeDirectory: fakeHome)
@@ -207,7 +207,7 @@ struct AppFirstStep4ReportTests {
         #expect(ownerString != nil,
                 "healthy bundled owner must produce a non-nil status string")
 
-        let statusLine = LaunchAgent.honestServerStatus(
+        let statusLine = LaunchAgent.observedServerStatus(
             registration: .registered,
             port: .answering,
             providerReportedState: ownerString

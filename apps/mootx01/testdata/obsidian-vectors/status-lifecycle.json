@@ -1,0 +1,50 @@
+[
+  {
+    "_comment": "No vault authorization — initial state after daemon start",
+    "state": "blocked",
+    "reason": "vault-authorization-missing"
+  },
+  {
+    "_comment": "Vault selected, not yet enabled",
+    "state": "paused"
+  },
+  {
+    "_comment": "Service enabled; startup resync in progress — no checkpoint yet",
+    "state": "starting"
+  },
+  {
+    "_comment": "Active scan after enable — discovered 12 drawers to process",
+    "state": "scanning"
+  },
+  {
+    "_comment": "Synchronizing with pending/total — 5 drawers pending out of 12",
+    "state": "synchronizing",
+    "pendingCount": 5,
+    "totalCount": 12
+  },
+  {
+    "_comment": "Synchronizing: nearly done, 1 pending of 12",
+    "state": "synchronizing",
+    "pendingCount": 1,
+    "totalCount": 12
+  },
+  {
+    "_comment": "Idle after resync completes — checkpoint written",
+    "state": "idle",
+    "checkpointAt": "2026-08-23T14:00:00Z",
+    "recordCount": 12
+  },
+  {
+    "_comment": "Waiting for next scheduled poll — checkpoint preserved",
+    "state": "waiting",
+    "until": "2026-08-23T14:05:00Z",
+    "checkpointAt": "2026-08-23T14:00:00Z",
+    "recordCount": 12
+  },
+  {
+    "_comment": "Service disabled by user — checkpoint preserved, no active sync",
+    "state": "paused",
+    "checkpointAt": "2026-08-23T14:00:00Z",
+    "recordCount": 12
+  }
+]

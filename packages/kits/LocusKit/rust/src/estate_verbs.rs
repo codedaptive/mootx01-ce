@@ -44,9 +44,9 @@
 use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::default_wings::{
-    HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
-    DEFAULT_WING_NAME,
+    DEFAULT_WINGS, DEFAULT_WING_NAME, HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
 };
+use adornment_lib;
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
 use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
@@ -434,6 +434,9 @@ impl Estate {
             drawer.subject_at = Some(now);
         }
 
+        // New captures start bare — no adornment row. Adornment debt is
+        // discovered via adornmentDebtBatch (ADORN-STORE-02 v17); bits 27-30 FREE.
+
         // add_drawer atomically maintains the per-container OR aggregate
         // (spec § 11.5 Option B): coverage is now structurally guaranteed
         // inside the DrawerStore implementation — no separate
@@ -593,15 +596,22 @@ impl Estate {
 
             let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
             let drawer_id = Uuid::new_v4().to_string();
+            // Per-record capture timestamp (schema v1.2): when set on the
+            // frame, use it as filed_at and HLC physical-time seed for this
+            // drawer. When absent, fall back to the batch `now` — identical
+            // to all pre-v1.2 behavior where every drawer uses the batch clock.
+            let drawer_filed_at = frame.capture_date.unwrap_or(now);
             let mut drawer = Drawer::new(
                 drawer_id,
                 frame.content,
                 room_node.id.to_string(),
                 frame.added_by,
-                now,
+                drawer_filed_at,
                 frame.embedding_model_id,
             );
             drawer.adjective_bitmap = adj_bitmap;
+            // Superseding drawers start bare; adornment debt discovered via
+            // adornmentDebtBatch (ADORN-STORE-02 v17). Bits 27-30 FREE.
             drawer.operational_bitmap = op_bitmap;
             drawer.provenance = provenance_bitmap;
             drawer.lineage_id = lineage_id;
@@ -610,12 +620,13 @@ impl Estate {
             drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
             drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
             // Subject trio at birth — identical translation to capture().
+            // subject_at uses drawer_filed_at for consistency with filedAt.
             if let Some(subject) = frame.subject {
                 drawer.subject = Some(subject);
                 drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
-                drawer.subject_at = Some(now);
+                drawer.subject_at = Some(drawer_filed_at);
             }
-            drawer.event_time = frame.event_time.unwrap_or(now);
+            drawer.event_time = frame.event_time.unwrap_or(drawer_filed_at);
 
             // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
             // that O(N²) call is the root cause of the moot_palace_import hang (NT_R1).
@@ -691,14 +702,28 @@ impl Estate {
         let wing_node = node_store.create_node(wing_name, root.id, now)?;
         let room_node = node_store.create_node(HINT_ROOM, wing_node.id, now)?;
 
-        let drawer_id = Uuid::new_v4().to_string();
+        // Canonical charter identity: roster wings get a FIXED drawer id and
+        // the FIXED CHARTER_SEED_UNIX_MS filing instant (see default_wings.rs
+        // for the recency-exclusion and determinism rationale). Node creation
+        // above keeps the caller's `now` — only the drawer row is pinned. A
+        // wing not in the default roster falls back to random id + `now`.
+        // Twin of the Swift block in `seedWing`.
+        let roster_index = DEFAULT_WINGS.iter().position(|w| w.name == wing_name);
+        let drawer_id = roster_index
+            .map(crate::default_wings::charter_drawer_id)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let charter_stamp = if roster_index.is_some() {
+            crate::default_wings::CHARTER_SEED_UNIX_MS
+        } else {
+            now
+        };
         let lattice_anchor = LatticeAnchor::udc(HINT_UDC_CODE);
         let mut drawer = Drawer::new(
             drawer_id,
             hint.to_string(),
             room_node.id.to_string(),
             HINT_ADDED_BY.to_string(),
-            now,
+            charter_stamp,
             embedding_model_id.to_string(),
         );
         drawer.udc_code = lattice_anchor.udc_code;
@@ -715,7 +740,7 @@ impl Estate {
                 .collect(),
         );
         drawer.subject_pipeline_version = Some("seed-v1".to_string());
-        drawer.subject_at = Some(now);
+        drawer.subject_at = Some(charter_stamp);
         // add_drawer maintains the container fingerprint OR aggregate
         // (spec § 11.5), identical to the capture path. No separate
         // fingerprint call needed — coverage is structurally guaranteed.
@@ -1480,6 +1505,102 @@ impl Estate {
     /// drain-accounting observable. Mirrors Swift `Estate.countUndistilled`.
     pub fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.store.count_undistilled(pipeline_version)
+    }
+
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's
+    /// `operational_bitmap`. Estate-level pass-through over
+    /// `DrawerStore::set_anomalous_flag` — the write seam for
+    /// GeniusLocusKit's room-cohesion anomaly sweep (`anomaly_flag_sweep`).
+    ///
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched. `now` is accepted for
+    /// call-site determinism but is not used by the write itself (bit 26
+    /// carries no timestamp). Returns 0 when the drawer is not found or
+    /// the bit is already in the requested state; 1 on success. Mirrors
+    /// Swift `Estate.setAnomalousFlag(drawerId:anomalous:now:)`.
+    pub fn set_anomalous_flag(
+        &self,
+        drawer_id: &str,
+        anomalous: bool,
+        _now: i64,
+    ) -> Result<usize, LocusKitError> {
+        // `_now` is accepted for call-site determinism discipline (mirrors
+        // Swift Estate.setAnomalousFlag) but is not used by the write itself
+        // — the anomalous bit carries no timestamp.
+        self.store.set_anomalous_flag(drawer_id, anomalous)
+    }
+
+    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
+
+    /// Return all registered adornment minters, ordered by name.
+    /// Mirrors Swift `Estate.listAdornmentMinters()`.
+    pub fn list_adornment_minters(
+        &self,
+    ) -> Result<Vec<adornment_lib::AdornmentMinterDescriptor>, LocusKitError> {
+        self.store.list_adornment_minters()
+    }
+
+    /// Register or replace one adornment minter (upsert on `id`).
+    /// Mirrors Swift `Estate.registerAdornmentMinter(_:)`.
+    pub fn register_adornment_minter(
+        &self,
+        minter: &adornment_lib::AdornmentMinterDescriptor,
+    ) -> Result<(), LocusKitError> {
+        self.store.register_adornment_minter(minter)
+    }
+
+    /// Set the active flag for one minter. Returns 0 if not found, 1 if updated.
+    /// Mirrors Swift `Estate.setAdornmentMinterActive(id:active:)`.
+    pub fn set_adornment_minter_active(
+        &self,
+        id: &str,
+        active: bool,
+    ) -> Result<usize, LocusKitError> {
+        self.store.set_adornment_minter_active(id, active)
+    }
+
+    /// Atomically replace the active minter set. Fails on unknown id.
+    /// Mirrors Swift `Estate.setActiveAdornmentMinters(ids:)`.
+    pub fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
+        self.store.set_active_adornment_minters(ids)
+    }
+
+    /// Bounded batch of (drawer, minter) pairs without an adornment row.
+    /// Mirrors Swift `Estate.adornmentDebtBatch(limit:afterDrawerID:)`.
+    pub fn adornment_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<crate::drawer_store::AdornmentDebt>, LocusKitError> {
+        self.store.adornment_debt_batch(limit, after_drawer_id)
+    }
+
+    /// Insert or replace one (drawer, minter) adornment row.
+    /// Mirrors Swift `Estate.putAdornment(_:)`.
+    pub fn put_adornment(
+        &self,
+        adornment: &adornment_lib::StoredAdornment,
+    ) -> Result<usize, LocusKitError> {
+        self.store.put_adornment(adornment)
+    }
+
+    /// Return all adornment rows for one drawer, ordered by minter_id.
+    /// Mirrors Swift `Estate.adornments(drawerID:)`.
+    pub fn adornments(
+        &self,
+        drawer_id: &str,
+    ) -> Result<Vec<adornment_lib::StoredAdornment>, LocusKitError> {
+        self.store.adornments(drawer_id)
+    }
+
+    /// Return active adornments for a batch of drawers.
+    /// Mirrors Swift `Estate.activeAdornments(drawerIDs:)`.
+    pub fn active_adornments(
+        &self,
+        drawer_ids: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, Vec<adornment_lib::StoredAdornment>>, LocusKitError>
+    {
+        self.store.active_adornments(drawer_ids)
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
@@ -5948,6 +6069,34 @@ mod tests {
             "store must contain both hint drawers; got {}",
             stored_hints.len()
         );
+    }
+
+    /// Twin of Swift `chartersCarrySentinelIdentity`: roster-wing charters
+    /// must carry the fixed charter id and the fixed 2000-01-01 filing
+    /// instant. Failure mode this discriminates: with random UUIDs /
+    /// caller-now stamps restored, both assertions fail — the pre-fix
+    /// behavior that made same-recipe estates rank differently
+    /// (2026-08-24 replay-drift root cause). A non-roster wing keeps the
+    /// ordinary random id + caller now.
+    #[test]
+    fn roster_charters_carry_sentinel_identity() {
+        let estate = make_estate();
+        let now = 1_700_000_000_i64;
+
+        // Roster wing (index 0 in DEFAULT_WINGS): fixed identity.
+        let roster = &crate::default_wings::DEFAULT_WINGS[0];
+        let d = estate
+            .seed_wing(roster.name, roster.hint, "test-model", now)
+            .expect("seed roster wing");
+        assert_eq!(d.id, crate::default_wings::charter_drawer_id(0));
+        assert_eq!(d.filed_at, crate::default_wings::CHARTER_SEED_UNIX_MS);
+
+        // Non-roster wing: ordinary identity (random id, caller now).
+        let custom = estate
+            .seed_wing("Custom Wing", "Custom hint.", "test-model", now)
+            .expect("seed custom wing");
+        assert_ne!(custom.id, crate::default_wings::charter_drawer_id(0));
+        assert_eq!(custom.filed_at, now);
     }
 
     // --- Timestamp-unit guards (Codex 0e9d4e43e8cc8191ac913a3fddcad48c) ---

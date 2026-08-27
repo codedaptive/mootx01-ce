@@ -551,4 +551,44 @@ struct MatrixTierTests {
         #expect(a.w == b.w)
         #expect(a.h == b.h)
     }
+
+    // MARK: - S4-C decayed projections (§8.13)
+
+    @Test("decayed O: one bundle, two coords, one half-life age → weight exactly 0.5")
+    func decayedCoOccurrenceHalfLifePin() {
+        // One capture bundle at t=0 carrying two coordinates → exactly one
+        // O pair. Decay clock exactly one τ_O (60d) later → weight 0.5.
+        // Cross-port pin: the Rust twin asserts the identical literal.
+        let row = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        var log = UnifiedAuditLog()
+        log.add(captureEntry(row: row, field: "bm.x", value: .bitmap(1), at: hlc(0)))
+        log.add(captureEntry(row: row, field: "bm.y", value: .bitmap(2), at: hlc(0)))
+        let nowMs = Int64(60 * 86_400) * 1000
+        let projection = MatrixTier.decayedCoOccurrence(from: log, nowMs: nowMs)
+        #expect(projection.count == 1)
+        let key = MatrixCoOccurKey(
+            MatrixValueCoord(fieldPath: "bm.x", value: .bitmap(1)),
+            MatrixValueCoord(fieldPath: "bm.y", value: .bitmap(2)))
+        let weight = projection[key]
+        #expect(weight != nil && abs(weight! - 0.5) < 1e-12)
+    }
+
+    @Test("decayed T rides rebuildTemporal's decay clock and stamps decayedAsOfMs")
+    func decayedTemporalPin() {
+        let rowA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
+        let rowB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
+        var log = UnifiedAuditLog()
+        log.add(captureEntry(row: rowA, field: "bm.x", value: .bitmap(1), at: hlc(0)))
+        log.add(captureEntry(row: rowB, field: "bm.x", value: .bitmap(2), at: hlc(600_000)))
+        // Decay clock one τ_T (30d) after the pair's NEWER entry → 0.5.
+        let nowMs = 600_000 + Int64(30 * 86_400) * 1000
+        let tier = MatrixTier.rebuildTemporal(from: log, decayNowMs: nowMs)
+        #expect(tier.decayedAsOfMs == nowMs)
+        #expect(tier.temporalCausalityDecayed.count == 1)
+        let weight = tier.temporalCausalityDecayed.values.first
+        #expect(weight != nil && abs(weight! - 0.5) < 1e-12)
+        // No decay clock → projections stay empty (counts untouched flow).
+        let plain = MatrixTier.rebuildTemporal(from: log)
+        #expect(plain.temporalCausalityDecayed.isEmpty && plain.decayedAsOfMs == 0)
+    }
 }

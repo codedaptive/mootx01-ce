@@ -121,7 +121,7 @@ struct PluginPackageShapeTests {
 
     /// The constant the installer reads must be the key the packager writes.
     /// `MCPClients.pluginServerName` is a mirror of generated data; this is
-    /// the test that keeps the mirror honest. It is the direct tripwire for
+    /// the test that keeps the mirror faithful. It is the direct tripwire for
     /// a repeat of 7f64973aa, where the generated key moved and the
     /// installer's copy did not.
     @Test("MCPClients.pluginServerName matches the key the packager actually emits")

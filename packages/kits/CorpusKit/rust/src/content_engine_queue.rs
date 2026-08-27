@@ -282,7 +282,20 @@ impl CorpusContentEngine {
         // work. Mirrors Swift `drainIndexBatch` Phase 0 `batchTrainIfNeeded`.
         // Prevents a degenerate rank-1 basis from freezing when the queue drain
         // fires per-document (impatient inline encoding path).
-        let batch_now_millis = (drain_now() * 1000.0) as i64;
+        //
+        // The batch instant is DERIVED FROM THE JOBS, never from the wall
+        // clock: the MAX of the batch's submission HLC physical times (each
+        // job's capture instant). A wall-clock read here stamped drain-worker
+        // training with load-dependent times, breaking the pass-`now`-in
+        // determinism rule for every caller whose clock is pinned (the
+        // bench-clock seam rides tool calls; this background worker never
+        // sees it) — REPLAY_DRIFT_RCA 2026-08-26. Falls back to drain_now()
+        // only for an empty batch (nothing derived is stamped then anyway).
+        let batch_now_millis = batch
+            .iter()
+            .map(|job| job.submitted_at.physical_time)
+            .max()
+            .unwrap_or_else(|| (drain_now() * 1000.0) as i64);
         self.batch_train_if_needed(batch_now_millis)?;
 
         // Pre-scan upsert jobs and batch-fetch all source records in one WHERE…IN
@@ -713,7 +726,7 @@ mod tests {
         assert!(format!("{error:?}").contains("content reply batch"));
         assert_eq!(queue.in_flight().expect("in-flight").len(), 1);
         assert!(engine
-            .float_nearest_per_signal("completion failure remains durable", 5)
+            .float_nearest_per_signal("completion failure remains durable", 5, vectorkit::engine::metric::FloatMetric::Cosine)
             .iter()
             .any(|(model_id, outcome)| {
                 model_id == "corpus-deterministic-v1"

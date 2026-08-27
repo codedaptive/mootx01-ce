@@ -1,6 +1,7 @@
 import AriaMCPWire
 
 import Foundation
+import CognitionKit
 import EideticLib
 import GeniusLocusKit
 import GeniusLocusKitMigrations
@@ -150,6 +151,37 @@ public struct ToolDispatcher: Sendable {
     /// running suites under swift-testing's parallel executor.
     public let environment: [String: String]
 
+    /// Pinnable clock for the benchmark replay seam.
+    ///
+    /// When `MOOT_BENCH_EPOCH_NOW` is set in the process environment (or in the
+    /// injected `environment` dict), the clock returns a deterministic sequence
+    /// (`base + N seconds`, N incremented per tool call) instead of `Date()`.
+    /// Without the env var the behavior is byte-identical to calling `Date()`.
+    ///
+    /// Every request-path runner calls `benchClock.now()` once at the top of
+    /// the `dispatch()` call, then threads the result through to kit entry points.
+    /// Daemon and background clocks (dreaming, governor, HLC self-advance) do NOT
+    /// route through `benchClock` — they must remain wall-clock for correctness.
+    ///
+    /// See `BenchClock` for the full contract and `MOOT_BENCH_EPOCH_NOW` for the
+    /// env var specification.
+    let benchClock: BenchClock
+
+    /// Per-session mode sticky state and call counters for the modes coaching system.
+    ///
+    /// Actor-isolated (Sendable) — safe in the immutable Sendable struct.
+    /// Shared across dispatchers derived via `registering(_:)` and
+    /// `withMonitoringControl(_:)` so mode declarations and call counts
+    /// accumulate correctly across the full session regardless of which
+    /// derived dispatcher a call reaches.
+    ///
+    /// One instance per `ToolDispatcher` root: stdio = one per process lifetime,
+    /// HTTP = one per `mootx01 serve` process (shared across HTTP clients). For
+    /// per-client-id stickiness on HTTP, wrap the dispatcher per request with a
+    /// fresh `ModeSessionState` keyed by the client's session ID (see
+    /// `ModeSessionState` doc comment for the extension point description).
+    let modeSessionState: ModeSessionState
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -170,7 +202,8 @@ public struct ToolDispatcher: Sendable {
                 versionSkewAdvisory: String? = nil,
                 updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
                 monitoringControl: (any MonitoringControl)? = nil,
-                environment: [String: String] = ProcessInfo.processInfo.environment) {
+                environment: [String: String] = ProcessInfo.processInfo.environment,
+                modeSessionState: ModeSessionState = ModeSessionState()) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
@@ -183,6 +216,11 @@ public struct ToolDispatcher: Sendable {
         self.updateAdvisoryProvider = updateAdvisoryProvider
         self.monitoringControl = monitoringControl
         self.environment = environment
+        // Bench clock reads MOOT_BENCH_EPOCH_NOW from the injected environment dict.
+        // In production this is ProcessInfo.processInfo.environment; tests inject
+        // a custom dict with or without the pin key as needed.
+        self.benchClock = BenchClock(environment: environment)
+        self.modeSessionState = modeSessionState
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -203,7 +241,9 @@ public struct ToolDispatcher: Sendable {
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory,
                               updateAdvisoryProvider: updateAdvisoryProvider,
-                              environment: environment)
+                              environment: environment,
+                              benchClock: benchClock,
+                              modeSessionState: modeSessionState)
     }
 
     /// Return a copy of this dispatcher with `control` wired as the monitoring
@@ -219,13 +259,15 @@ public struct ToolDispatcher: Sendable {
                        buildSerial: buildSerial, serverIdentity: serverIdentity,
                        versionSkewAdvisory: versionSkewAdvisory,
                        updateAdvisoryProvider: updateAdvisoryProvider,
-                       environment: environment)
+                       environment: environment,
+                       benchClock: benchClock,
+                       modeSessionState: modeSessionState)
     }
 
     /// Private designated initializer carrying an explicit estate map,
     /// a shared job registry, a shared recall ledger, the build serial,
     /// the server identity, and the version-skew advisory. Used by
-    /// `registering(_:)`; the public
+    /// `registering(_:)` and `withMonitoringControl(_:)`; the public
     /// `init(kit:handle:buildSerial:serverIdentity:versionSkewAdvisory:)` is
     /// the only construction path external callers use.
     private init(
@@ -236,7 +278,9 @@ public struct ToolDispatcher: Sendable {
         monitoringControl: (any MonitoringControl)?,
         buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?,
         updateAdvisoryProvider: (@Sendable () async -> String?)?,
-        environment: [String: String]
+        environment: [String: String],
+        benchClock: BenchClock,
+        modeSessionState: ModeSessionState
     ) {
         self.kit = kit
         self.handle = handle
@@ -250,6 +294,8 @@ public struct ToolDispatcher: Sendable {
         self.versionSkewAdvisory = versionSkewAdvisory
         self.updateAdvisoryProvider = updateAdvisoryProvider
         self.environment = environment
+        self.benchClock = benchClock
+        self.modeSessionState = modeSessionState
     }
 
     // MARK: - Build serial derivation
@@ -383,15 +429,69 @@ public struct ToolDispatcher: Sendable {
     /// JSON-RPC error: the call did reach the substrate, the substrate
     /// said no, the client should see why.
     ///
-    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → dataset → interface → methodNotFound → hint injection.
+    /// Dispatch order: teachme pre-check → mode arg decode → federation →
+    /// recipe → lens → vault → dataset → interface → methodNotFound →
+    /// unknown-arg hint → per-call coaching hint → periodic coaching block.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
         let args = arguments.objectValue ?? [:]
+
+        // moot_drain_status is a pure-read polling call used by waitForEncodeDrain.
+        // It does not participate in temporal scoring and must NOT advance the bench
+        // clock counter — otherwise the counter offset when the actual memory-query
+        // runners execute depends on how many drain polls occurred, which is
+        // wall-clock-dependent (how fast the encode queue drains) and therefore
+        // non-deterministic across replay runs.  Early-return before the clock
+        // sample so the seam is never touched for this tool.
+        if name == "moot_drain_status" {
+            return try await runDrainStatus(args)
+        }
+
+        // Bench clock: sample once per tool-call dispatch and thread through every
+        // runner. In pinned mode (MOOT_BENCH_EPOCH_NOW set) this returns a
+        // deterministic base+N-seconds value; in wall-clock mode it returns Date().
+        // Runners MUST NOT call Date() directly — use the `now` parameter they receive.
+        // Background/daemon paths (dreaming, governor, HLC self-advance) are excluded
+        // from this seam; they remain on wall clock by design.
+        let now = benchClock.now()
         do {
             // teachme: true — return the usage guide without touching the estate.
             // Intercepted before any runner fires so no side effects occur.
             if try optionalBool(args["teachme"], argument: "teachme") == true {
                 return Self.textResult(TeachmeGuides.guide(for: name))
             }
+
+            // Decode the optional `mode` argument (modes are fail-open by spec).
+            //
+            // ## Fail-open vs. fail-closed contrast
+            //
+            // The `mode` argument is ADVISORY and accepts any string without
+            // invalidParams — unknown mode names and unknown variants are accepted
+            // but ignored, with a hint appended (fail-open). This is the OPPOSITE
+            // of the `answer` argument, which throws invalidParams on unknown values
+            // (fail-closed). The reason: an AI re-declaring a mode it discovered
+            // (via the echo tag) must never lose the call when the server has an
+            // older mode registry. Advisory modes must survive version skew gracefully.
+            let modeDeclaration: ModeDeclaration? = try {
+                guard let raw = try optionalString(args["mode"], argument: "mode") else { return nil }
+                return ModeDeclaration.parse(raw)
+            }()
+
+            // Apply estate-provisioned modes preferences on the first call.
+            // Guards itself: applyPreferences is a no-op if configuredFromEstate
+            // is already set (bitmap bit 1). Reading the manifest is a RAM-resident
+            // dictionary hit so the overhead is negligible, but we skip it after
+            // the first call for clarity.
+            if await !modeSessionState.configuredFromEstate {
+                if let config = try? await kit.provisionedModesConfig(for: handle) {
+                    await modeSessionState.applyPreferences(
+                        stickyEnabled: config.stickyEnabled,
+                        coachingCalls: config.coachingCalls)
+                }
+            }
+
+            // Record the call in the session state (updates sticky, counters, bigrams).
+            await modeSessionState.recordCall(toolName: name, mode: modeDeclaration)
+
             // Route to the appropriate runner and capture the result so
             // the coaching engine can inspect it before it is returned.
             var runnerResult: JSONValue
@@ -410,7 +510,8 @@ public struct ToolDispatcher: Sendable {
                 runnerResult = try await LensTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle,
-                    resolvePeer: resolveAnyRegistered)
+                    resolvePeer: resolveAnyRegistered,
+                    now: now)
             } else if VaultTools.isVaultTool(name) {
                 // VaultKit control-surface tools dispatched by name.
                 runnerResult = try await VaultTools.dispatch(
@@ -424,17 +525,19 @@ public struct ToolDispatcher: Sendable {
                 runnerResult = try await DatasetTools.dispatch(
                     name: name, args: args, kit: kit,
                     resolveHandle: resolveHandle,
-                    serverIdentity: serverIdentity)
+                    serverIdentity: serverIdentity,
+                    now: now)
             } else if PacketTools.isPacketTool(name) {
                 // Agentic work-packet tools (FAB5-I2): file, get, list, lineage.
                 // Packets are structuredJSON drawers; PacketTools wraps WorkPacketKit.
                 runnerResult = try await PacketTools.dispatch(
                     name: name, args: args, kit: kit,
-                    resolveHandle: resolveHandle)
+                    resolveHandle: resolveHandle,
+                    now: now)
             } else if InterfaceTools.isInterfaceTool(name) {
                 // Five-tier AI-client interface tools dispatched by name.
                 runnerResult = try await InterfaceTools.dispatch(
-                    name: name, args: args, dispatcher: self)
+                    name: name, args: args, dispatcher: self, now: now)
             } else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
@@ -445,8 +548,23 @@ public struct ToolDispatcher: Sendable {
             // Non-error results only. Also mirrors the hint to stderr so daemon logs
             // capture the ignored arg without the LLM client having to relay it.
             runnerResult = appendUnknownArgsHint(name: name, args: args, to: runnerResult)
-            // Append a coaching hint to non-error results when a trigger fires.
-            return applyHint(name: name, args: args, to: runnerResult)
+            // Append a mode-unknown hint when the declared mode or variant is not
+            // in the registry. Fail-open: the call succeeded; this is advisory only.
+            if let decl = modeDeclaration, let hint = decl.unknownHint {
+                runnerResult = Self.appendingHint(hint, to: runnerResult)
+            }
+            // Append a per-call coaching hint (CoachingEngine triggers) when applicable.
+            runnerResult = applyHint(name: name, args: args, to: runnerResult)
+            // Append the periodic coaching block when the session counter hits the
+            // configured cadence (default every 25 moot calls, 0 = off).
+            // The block rides on the first text block after all other hints so the
+            // caller sees the tool result first and the coaching after.
+            if await modeSessionState.shouldCoach() {
+                let snap = await modeSessionState.snapshot
+                let block = PeriodicCoach.renderBlock(for: snap)
+                runnerResult = Self.appendingHint(block, to: runnerResult)
+            }
+            return runnerResult
         } catch let error as JSONRPCError {
             throw error
         } catch let error as VerbError {
@@ -702,17 +820,55 @@ public struct ToolDispatcher: Sendable {
 
     /// Format one estate's authorized contribution for the federated response.
     /// Resolves drawer room names from the node tree for display preview.
+    /// Renders as S2 rows (unranked, no score) via the shared ResultComposer,
+    /// so the disclosure is assertions the source chose to write (subjects,
+    /// first sentences) rather than content previews.
     private static func renderContribution(
         source: EstateHandle, grant: Grant, drawers: [Drawer],
         estate: LocusKit.Estate
     ) async throws -> String {
-        // Dense-row reply (PR-03): federated hits travel as dense rows like
-        // every other recall surface — subjects instead of content previews,
-        // which also tightens the cross-estate disclosure to assertions the
-        // source chose to write (plus lattice metadata).
         let header = "estate \(source.estateName) [\(source.estateUUID)] — grant \(grant.id), \(drawers.count) row(s)"
-        let lines = drawers.prefix(50).map { DenseRow.render($0) }
-        return ([header] + lines).joined(separator: "\n")
+        // Build S2 rows (unranked, no score) for each drawer.
+        let candidateRows: [CandidateRowData] = drawers.prefix(50).map { drawer in
+            Self.federatedCandidateRow(
+                id: drawer.id, sensitivity: drawer.sensitivity,
+                subject: drawer.subject, content: drawer.content,
+                eventTime: ResultComposer.iso8601(drawer.eventTime))
+        }
+        let rows = candidateRows.map(ResultComposer.renderS2Row)
+        return ([header] + rows).joined(separator: "\n")
+    }
+
+    /// Maps one federated drawer to its S2 candidate row, applying
+    /// provenance redaction to BOTH content-derived columns. A subject-only
+    /// gate leaked a body-derived firstSentence preview for restricted and
+    /// secret rows while the subject claimed the row was redacted (codex
+    /// finding 2026-08-26); the Rust twin already nils first_sentence for
+    /// these sensitivities — this is its exact mirror. Internal (not
+    /// private) so the redaction mapping is pinned by a direct test.
+    internal static func federatedCandidateRow(
+        id: String, sensitivity: Sensitivity,
+        subject: String?, content: String, eventTime: String
+    ) -> CandidateRowData {
+        let rowSubject: String?
+        let rowFirstSentence: String?
+        switch sensitivity {
+        case .restricted:
+            rowSubject = ResultComposer.restrictedMarker
+            rowFirstSentence = nil
+        case .secret:
+            rowSubject = ResultComposer.secretMarker
+            rowFirstSentence = nil
+        case .normal, .elevated:
+            rowSubject = subject
+            rowFirstSentence = content.isEmpty ? nil : content
+        }
+        return CandidateRowData(
+            id: id,
+            subject: rowSubject,
+            firstSentence: rowFirstSentence,
+            activeAdornments: [],
+            eventTime: eventTime)
     }
 
     // MARK: - Argument decoders
@@ -1080,14 +1236,37 @@ public struct ToolDispatcher: Sendable {
         ])
     }
 
+    /// Wrap a `ComposedResult` from the shared `ResultComposer` into the MCP
+    /// `tools/call` result envelope: text in `content[0]`, the composer's
+    /// structured block in `structuredContent` (omitted when nil), and
+    /// `isError: false`. This is the single MCP-envelope conversion point for
+    /// all composer-rendered tools; callers supply a `ComposedResult` and never
+    /// build the content/isError/structuredContent envelope themselves.
+    ///
+    /// Mirrors Rust `dispatch.rs::composed_result`.
+    static func composedResult(_ result: ComposedResult) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(result.text),
+                ])
+            ]),
+            "isError": .bool(false),
+        ]
+        if let structured = result.structured {
+            obj["structuredContent"] = structured
+        }
+        return .object(obj)
+    }
+
     /// Build the structured row for a drawer the text path renders as a
-    /// dense row. The subject slot mirrors `DenseRow.render`'s priority
-    /// exactly (redaction marker → stored subject → absence marker), and the
-    /// SAME provenance redaction extends to the content field: a
-    /// restricted/secret row's body never enters the structured block —
-    /// both fields carry the marker the text shows. Content values in hand
-    /// at the recipe call sites (`PreciseMatch.content`) are PRE-redaction,
-    /// so they must pass through this switch, never straight into a row.
+    /// candidate row. The subject slot applies provenance-sensitivity redaction:
+    /// restricted/secret content is replaced by the redaction marker so the
+    /// body's access control cannot be bypassed through its summary. Content
+    /// values in hand at the recipe call sites (`PreciseMatch.content`) are
+    /// PRE-redaction, so they must pass through this switch, never straight
+    /// into a row. Mirrors the composer's CandidateRowData sensitivity handling.
     static func structuredRecallRow(
         id: String,
         room: String?,
@@ -1098,26 +1277,25 @@ public struct ToolDispatcher: Sendable {
         case .restricted:
             return StructuredRecallRow(
                 id: id, room: room,
-                content: content == nil ? nil : DenseRow.restrictedMarker,
-                subject: DenseRow.restrictedMarker)
+                content: content == nil ? nil : ResultComposer.restrictedMarker,
+                subject: ResultComposer.restrictedMarker)
         case .secret:
             return StructuredRecallRow(
                 id: id, room: room,
-                content: content == nil ? nil : DenseRow.secretMarker,
-                subject: DenseRow.secretMarker)
+                content: content == nil ? nil : ResultComposer.secretMarker,
+                subject: ResultComposer.secretMarker)
         case .normal, .elevated:
             return StructuredRecallRow(
                 id: id, room: room, content: content,
-                subject: drawer.subject ?? DenseRow.noSubjectMarker)
+                subject: drawer.subject ?? ResultComposer.noSubjectMarker)
         }
     }
 
-    /// The structured twin of `DenseRow.renderUnhydrated` — id plus the
-    /// absence marker only. Room and content stay absent even when values
-    /// are in hand at the call site: an id the text renders opaquely (gated
-    /// or unhydrated) must be exactly as opaque in the structured block.
+    /// Opaque structured row for an id the text path renders without a drawer
+    /// (gated or unhydrated). Id only; every other field is absent so the
+    /// structured block is as opaque as the text row.
     static func opaqueStructuredRow(id: String) -> StructuredRecallRow {
-        StructuredRecallRow(id: id, subject: DenseRow.noSubjectMarker)
+        StructuredRecallRow(id: id, subject: ResultComposer.noSubjectMarker)
     }
 
     private func describe(_ error: VerbError) -> String {
@@ -1317,7 +1495,8 @@ enum InterfaceTools {
         // Monitoring control — read/write daemon telemetry flag
         "moot_monitoring_status",
         // Maintenance / admin
-        "moot_reindex", "moot_drain_status", "moot_reclassify_fdc",
+        "moot_reindex", "moot_drain_status", "moot_rebuild_status",
+        "moot_reclassify_fdc",
         "moot_timing_report",
         // Direct palace import (bypass NoteIR)
         "moot_palace_import",
@@ -1329,19 +1508,27 @@ enum InterfaceTools {
         names.contains(name)
     }
 
+    /// Dispatch an interface-tier tool call.
+    ///
+    /// `now` is the bench-clock instant computed ONCE by the outer
+    /// `ToolDispatcher.dispatch()` call for this tool invocation. Runners
+    /// must use this `now` rather than calling `Date()` directly — the bench
+    /// clock seam (`MOOT_BENCH_EPOCH_NOW`) requires a single deterministic
+    /// instant per tool call.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
-        dispatcher: ToolDispatcher
+        dispatcher: ToolDispatcher,
+        now: Date
     ) async throws -> JSONValue {
         switch name {
         // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
         case "memory":                 return try await dispatcher.runMemoryTool(args)
         // Tier 1
         case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
-        case "moot_memory_search":     return try await dispatcher.runMemorySearch(args)
+        case "moot_memory_search":     return try await dispatcher.runMemorySearch(args, now: now)
         case "moot_memory_list":       return try await dispatcher.runMemoryList(args)
-        case "moot_memory_get":        return try await dispatcher.runMemoryGet(args)
+        case "moot_memory_get":        return try await dispatcher.runMemoryGet(args, now: now)
         case "moot_update_memory":     return try await dispatcher.runUpdateMemory(args)
         case "moot_withdraw_memory":   return try await dispatcher.runWithdrawMemory(args)
         case "moot_erase_memory":      return try await dispatcher.runEraseMemory(args)
@@ -1351,14 +1538,14 @@ enum InterfaceTools {
         case "moot_link_memories":     return try await dispatcher.runLinkMemories(args)
         case "moot_connection_search": return try await dispatcher.runConnectionSearch(args)
         case "moot_connection_map":    return try await dispatcher.runConnectionMap(args)
-        case "moot_review_tunnel":     return try await dispatcher.runReviewTunnel(args)
+        case "moot_review_tunnel":     return try await dispatcher.runReviewTunnel(args, now: now)
         // Tier 3
-        case "moot_file_fact":         return try await dispatcher.runFileFact(args, now: Date())
+        case "moot_file_fact":         return try await dispatcher.runFileFact(args, now: now)
         case "moot_fact_search":       return try await dispatcher.runFactSearch(args)
         case "moot_retire_fact":       return try await dispatcher.runRetireFact(args)
         case "moot_fact_timeline":     return try await dispatcher.runFactTimeline(args)
         // Tier 4
-        case "moot_write_journal":     return try await dispatcher.runWriteJournal(args, now: Date())
+        case "moot_write_journal":     return try await dispatcher.runWriteJournal(args, now: now)
         case "moot_read_journal":      return try await dispatcher.runReadJournal(args)
         // Tier 5
         case "moot_estate_status":      return try await dispatcher.runEstateStatus(args)
@@ -1367,14 +1554,15 @@ enum InterfaceTools {
         // Monitoring control
         case "moot_monitoring_status":  return try await dispatcher.runMonitoringStatus(args)
         // Maintenance / admin
-        case "moot_reindex":           return try await dispatcher.runReindex(args)
+        case "moot_reindex":           return try await dispatcher.runReindex(args, now: now)
+        case "moot_rebuild_status":    return try await dispatcher.runRebuildStatus(args)
         case "moot_drain_status":      return try await dispatcher.runDrainStatus(args)
-        case "moot_reclassify_fdc":    return try await dispatcher.runReclassifyFDC(args)
+        case "moot_reclassify_fdc":    return try await dispatcher.runReclassifyFDC(args, now: now)
         case "moot_timing_report":     return try await dispatcher.runTimingReport(args)
         // Direct palace import
-        case "moot_palace_import":     return try await dispatcher.runPalaceImport(args)
+        case "moot_palace_import":     return try await dispatcher.runPalaceImport(args, now: now)
         // Direct seed-file JSON import
-        case "moot_json_import":       return try await dispatcher.runJsonImport(args)
+        case "moot_json_import":       return try await dispatcher.runJsonImport(args, now: now)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -1504,7 +1692,11 @@ extension ToolDispatcher {
     /// the ONLY place that sets `.external` — internal callers (dreaming,
     /// lenses, recipes) must NOT. Full hydration is used (content blobs are
     /// needed for the content preview; `.structured` would strip them).
-    func runMemorySearch(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. In production this is
+    /// always provided by `InterfaceTools.dispatch` (which gets it from
+    /// `benchClock.now()`). The `Date()` default covers direct runner calls
+    /// in tests (wall-clock mode; determinism is not a test concern there).
+    func runMemorySearch(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         // Anchor pivot (PR-03): `near:<uuid>` is accepted as an ALTERNATIVE
         // to `query:` — "find memories similar to this one". Exactly one of
@@ -1575,12 +1767,9 @@ extension ToolDispatcher {
         // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
         let limit = try Self.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-        // Wall-clock time for this request. Hoisted to the top of the
-        // function (rather than the later `let now = Date()` this replaces)
-        // so the SAME instant gates both the out-of-band sensitivity grants grant check below and
-        // the surfaced-recall-ledger recording further down — one request,
-        // one `now`.
-        let now = Date()
+        // `now` is the bench-clock instant threaded from `InterfaceTools.dispatch`.
+        // The SAME instant gates both the sensitivity-grant check below and the
+        // surfaced-recall-ledger recording further down — one request, one `now`.
         // Build the base filter chain from the `filter` argument.
         var filterChain = try decodeFilterChain(args["filter"])
         // sensitivity unlock: when a restricted/secret grant is
@@ -1622,22 +1811,93 @@ extension ToolDispatcher {
             }
         }
         let explain = try optionalBool(args["explain"], argument: "explain") ?? false
-        // Decode optional `scoring`. Absent keeps the documented default
-        // (matrixAware). An unknown NON-EMPTY string is a client error and
-        // fails CLOSED with invalidParams — coercing it to matrixAware would
-        // silently run a different scoring mode than asked and hide the typo.
-        // Mirrors decodeOrdering (strict) and the Rust run_memory_search.
+        // Decode the answer shape adjective (spec §2). Defaults to "never"
+        // (byte-identical to pre-packager path when omitted) UNLESS a Recall
+        // variant is sticky from a prior mode declaration this session.
+        //
+        // Precedence (most-specific wins):
+        //   1. Per-call `answer` arg (explicit caller override — always wins)
+        //   2. Sticky Recall variant (Recall=Auto/Rows/Answer set earlier this session)
+        //   3. Spec default (.never / rows-only)
+        //
+        // Fail CLOSED on unknown `answer` values — a typo must never silently coerce
+        // to "never". This is the opposite of the `mode` arg's fail-open discipline:
+        // `answer` controls packager behavior that changes the response shape, so a
+        // bad value must surface immediately rather than silently defaulting.
+        let answerMode: PackagerAnswerMode
+        if let answerStr = try optionalString(args["answer"], argument: "answer") {
+            // Per-call explicit arg: fail closed on unknown values.
+            guard let decoded = PackagerAnswerMode(rawValue: answerStr) else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "Unknown answer: \(answerStr). Valid: never, always, auto"
+                )
+            }
+            answerMode = decoded
+        } else if let recallVariant = await modeSessionState.stickyDeclaration?.recognizedRecallVariant {
+            // Sticky Recall variant: maps Recall=Auto→.auto, Recall=Rows→.never,
+            // Recall=Answer→.always. This is the session-default that Recall variants
+            // set. Per-call `answer` above always overrides this for the current call.
+            let variantRaw = recallVariant.answerModeRawValue
+            // The rawValue is a known good value from RecallVariant; force-unwrap is safe.
+            answerMode = PackagerAnswerMode(rawValue: variantRaw) ?? .never
+        } else {
+            // Spec default: rows-only (byte-identical to pre-packager path).
+            answerMode = .never
+        }
+        // Decode scoring via the front-door precedence chain:
+        //   explicit door arg > explicit scoring arg > provisioned estate default (A1) > matrixAware
+        //
+        // `door` is an adjective on the recall verb (ARIA grammar: one verb, adjectives
+        // constrain). Valid values:
+        //   "guess"          — A1 per-corpus config (optimizer-provisioned DoorManifest).
+        //                      Falls back to .matrixAware when no config is provisioned.
+        //   <scoring rawValue> ("rrf", "matrixAware", "raw", "discriminative") — direct
+        //                      override of the scoring strategy, bypassing A1 config.
+        //
+        // "hedge" (top-two consensus) and "thorough" (full roster) are reserved names
+        // that require recipe-layer wiring not present in this build; they are unknown
+        // here and fail CLOSED. Fail-closed on any unknown door string so a typo is
+        // never silently coerced to a different door.
+        //
+        // When `door` is absent, fall through to the explicit `scoring` arg, then A1
+        // config, then .matrixAware. Mirrors Rust run_memory_search door decode.
         let scoring: GLKRecallScoring
-        if let scoringStr = try optionalString(args["scoring"], argument: "scoring") {
+        if let doorStr = try optionalString(args["door"], argument: "door") {
+            switch doorStr {
+            case "guess":
+                // A1 per-corpus static config: read the DoorManifest provisioned by
+                // the quality optimizer. Absent or malformed key → .matrixAware, which
+                // is the pre-front-door default (byte-identical behaviour).
+                let doorManifest = try await kit.provisionedDoorConfig(for: handle)
+                scoring = doorManifest.scoring
+            default:
+                // Attempt to parse as a direct GLKRecallScoring rawValue (e.g. "rrf").
+                // Unknown strings (including reserved "hedge", "thorough") fail CLOSED.
+                guard let decoded = GLKRecallScoring(rawValue: doorStr) else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "Unknown door: \(doorStr). Valid: guess, raw, rrf, matrixAware, discriminative"
+                    )
+                }
+                scoring = decoded
+            }
+        } else if let scoringStr = try optionalString(args["scoring"], argument: "scoring") {
+            // Explicit scoring arg (no door arg). Fail CLOSED on unknown values —
+            // silently coercing to matrixAware would hide a typo.
             guard let decoded = GLKRecallScoring(rawValue: scoringStr) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
-                    message: "Unknown scoring: \(scoringStr). Valid: raw, rrf, matrixAware"
+                    message: "Unknown scoring: \(scoringStr). Valid: raw, rrf, matrixAware, discriminative"
                 )
             }
             scoring = decoded
         } else {
-            scoring = .matrixAware
+            // Neither door nor scoring supplied: read the A1 per-corpus config.
+            // Falls back to .matrixAware when no config is provisioned —
+            // byte-identical to today's behaviour for un-provisioned estates.
+            let doorManifest = try await kit.provisionedDoorConfig(for: handle)
+            scoring = doorManifest.scoring
         }
         // Decode optional ordering. "byRelevanceDesc" is a compatibility spelling
         // that routes through the scored recall pipeline — the results ARE
@@ -1650,6 +1910,20 @@ extension ToolDispatcher {
         // hydration strips content blobs and would render every result as an
         // empty-content preview.
         let ordering = try decodeOrdering(args["ordering"])
+        // optional `anomalous_filter` argument (§11.18 anomalous-flag recall
+        // prefilter). Maps to GLKRecallRequest.anomalousFilter:
+        //   absent or null → nil (no filter; default)
+        //   true  → admit ONLY anomalous drawers (bit 26 set)
+        //   false → EXCLUDE anomalous drawers (bit 26 clear)
+        // Applied BEFORE scoring in RecallDirector.
+        let anomalousFilter = try optionalBool(args["anomalous_filter"], argument: "anomalous_filter")
+        // Optional per-call candidate-pool depth override. The GLK engine
+        // clamps to [RecallShape.frontierKFloor, RecallShape.frontierKCeiling]
+        // ([64, 256]), so out-of-range values are silently clamped rather than
+        // rejected at this boundary. Absent → nil → engine default formula
+        // min(max(limit × 4, 64), 256), byte-identical to today's behaviour.
+        // Mirrors Rust run_memory_search `frontier_k` decode.
+        let frontierK = try optionalInt(args["frontier_k"], argument: "frontier_k")
         let frame = RecallFrame(
             filterChain: filterChain,
             hydrationLevel: .full,
@@ -1667,7 +1941,14 @@ extension ToolDispatcher {
             limit: limit,
             fallback: .allowDegraded,
             queryText: query,
-            origin: .external  // B-10a: ARIA boundary is external origin
+            origin: .external,  // B-10a: ARIA boundary is external origin
+            // W2.5 Track R(a): door identity recorded on every reward-cycle
+            // trace row this recall writes. The director derives the
+            // composition ("unionBest/<scoring>") since no recipe-level
+            // composition exists on this direct search path.
+            door: "memory_search",
+            frontierK: frontierK,
+            anomalousFilter: anomalousFilter
         )
         let result = try await kit.recall(handle, request)
         // Anchor exclusion (PR-03): a near: pivot must not hand the anchor
@@ -1678,7 +1959,13 @@ extension ToolDispatcher {
         // can trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12
         // § session-ledger). Reuses the `now` hoisted at the top of this
         // function (one request, one wall-clock instant).
-        let surfacedIDs = hits.compactMap { $0.drawer?.id }
+        // Use hit.id (always non-optional) rather than hit.drawer?.id so
+        // unhydrated hits (drawer == nil, rendered via renderUnhydrated) are
+        // also tracked. A drawer can arrive unhydrated when the recall engine
+        // returns it but the hydration step cannot load the full record
+        // (e.g. vector-only hit on a cold index); the id is still valid and
+        // the reward path must fire if the caller later dereferences it.
+        let surfacedIDs = hits.map { $0.id }
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
         }
@@ -1714,84 +2001,226 @@ extension ToolDispatcher {
         // (which would violate the signal's trustworthiness contract).
         let denseLaneDark = result.denseLaneStatus != nil
 
-        // Dense-row reply (PR-03): UUID · subject · fdc · qid · event_time
-        // per hit — the address plus the assertion, no content hauling.
-        // Redaction (provenance sensitivity restricted/secret) replaces the
-        // subject field inside DenseRow.render — the body's access control
-        // must not be bypassable through its content-derived summary. The
-        // full text is one hop away via moot_memory_get depth:full.
-        var lines: [String] = ["found \(hits.count) memory(s)"]
-        // Structured twin (MXE-SS): room is resolved in ONE batched node-name
-        // read over the shown rows (the same resolution `fullRecordLines`
-        // uses per drawer) — disclosed in the BRR §Part 0 (2). Rows are built
-        // in the SAME loop as the text lines so the two blocks can never
-        // cover different sets.
-        let shownHits = Array(hits.prefix(50))
+        // answer:always|auto — compose an answer via GroundedSynthesis (the one-
+        // seam synthesis path shared with moot_synthesize), then route through
+        // GLKResultsPackager to select the response level (L0/L1/rowsOnly) and
+        // apply the score-cliff row cutoff (spec §2-6). answer:never is the fast
+        // path — byte-identical to the pre-packager dense-rows path; the packager
+        // still runs but the .never branch returns all hits unchanged with no gate
+        // computation.
+        //
+        // The recall_tuning manifest supplies the packager thresholds; absent key
+        // fills with spec defaults so an un-tuned estate behaves as documented.
+        let composedAnswer: String?
+        if answerMode != .never {
+            // Synthesize using the same GroundedSynthesis path as moot_synthesize.
+            // cueTerms is intentionally empty here — the scored second lane (query:)
+            // already grounds the synthesis on the query text without requiring a
+            // cue-term predicate filter on top.
+            let synthFrame = LocusKit.RecallFrame(
+                filterChain: filterChain,
+                hydrationLevel: .structured,
+                limit: limit,
+                ordering: ordering
+            )
+            let synthOut = try await GroundedSynthesis().run(
+                input: .init(
+                    frame: synthFrame,
+                    cueTerms: [],
+                    cap: limit,
+                    query: query,
+                    excludeProvenanceSensitive: true
+                ),
+                estate: handle,
+                kit: kit
+            )
+            composedAnswer = synthOut.context.summary
+        } else {
+            composedAnswer = nil
+        }
+        // Build the packaged result. Pass the post-anchor-exclusion hit list
+        // (`hits`, already anchor-filtered above) so gate signals (m1 top-margin,
+        // m3 dense spread) are computed on the same ranked set the caller receives.
+        // For near: queries where the anchor is rank-1, computing m1 on the
+        // pre-exclusion set would corrupt the margin signal — the anchor's self-
+        // comparison dominates rank-1 and inflates m1 artificially.
+        // The .never fast path returns all hits unchanged (byte-identical to today).
+        // The tuning manifest supplies the confidence thresholds; .default fills
+        // absent keys.
+        let tuning = try await kit.provisionedRecallTuning(for: handle)
+        let packagerResult: GLKRecallResult
+        if anchorID != nil {
+            // Rebuild the result with the anchor-excluded hit list so the packager's
+            // gate math operates on the post-filter ranked set.
+            packagerResult = GLKRecallResult(
+                request: result.request,
+                plan: result.plan,
+                unionProfile: result.unionProfile,
+                hits: hits,
+                denseLaneStatus: result.denseLaneStatus,
+                degradedStages: result.degradedStages,
+                laneRanks: result.laneRanks,
+                queryLatticeAnchor: result.queryLatticeAnchor
+            )
+        } else {
+            packagerResult = result
+        }
+        let packaged = GLKResultsPackager().package(
+            result: packagerResult,
+            mode: answerMode,
+            composedAnswer: composedAnswer,
+            thresholds: tuning.packagerThresholds
+        )
+        // The packager already received the anchor-excluded hit list, so its
+        // row output is already anchor-clean.
+        let packagedRows = packaged.rows
+
+        // Migrate to the shared ResultComposer (COMPOSER-02B). All text rendering
+        // goes through typed intermediates; the composer guarantees parity between
+        // the text payload and the structuredContent block.
+        //
+        // answer:never|rowsOnly → S1 rows only (existing path via composer).
+        // answer:always|auto + L0 → answer block only; no rows emitted.
+        // answer:always|auto + L1 → answer block then rows (via composer).
+        //
+        // recall_provenance removed from payload (logged only); the degradation
+        // signal is carried in the composer's ControlSignals.degraded flag.
+        // sensitivity_advisory removed from payload (moved to tool description).
+        // fdc/qid columns removed; scores and adornments now travel in S1 rows.
+        let shownHits = packaged.level == .l0AnswerOnly
+            ? []
+            : Array(packagedRows.prefix(50))
         let searchEstate = try await kit.estate(for: handle)
         let searchNodeNames = try await searchEstate.resolveNodeNames(
             parentNodeIds: shownHits.compactMap { $0.drawer?.parentNodeId })
-        var results: [StructuredRecallRow] = []
+        // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2):
+        // issued once per call over all shown drawer IDs before the render loop.
+        // Zero active minters → empty map → no adornment column in the row.
+        let adornmentMap = try await kit.activeAdornments(
+            in: handle, drawerIDs: shownHits.compactMap { $0.drawer?.id })
+
+        // Map hits → CandidateRowData typed intermediates for the composer.
+        var candidateRows: [CandidateRowData] = []
         for hit in shownHits {
             if let drawer = hit.drawer {
-                lines.append(DenseRow.render(drawer))
-                results.append(Self.structuredRecallRow(
+                // Provenance-sensitivity redaction: subject/firstSentence are
+                // content-derived; restricted/secret rows replace them with the
+                // redaction marker so the body's access control cannot be
+                // bypassed through the summary.
+                let (subject, firstSentence): (String?, String?)
+                switch drawer.sensitivity {
+                case .restricted:
+                    (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
+                case .secret:
+                    (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .normal, .elevated:
+                    subject = drawer.subject
+                    // Pass full content; composer truncates to 120 chars and
+                    // deduplicates against subject (§11.1 rules 2–3).
+                    firstSentence = drawer.content.isEmpty ? nil : drawer.content
+                }
+                // Adornments: ascending minter-ID order (caller's responsibility
+                // per composer contract; the composer never re-sorts).
+                let entries = (adornmentMap[drawer.id] ?? []).sorted { $0.minterID < $1.minterID }
+                let adornments = entries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+                candidateRows.append(CandidateRowData(
                     id: drawer.id,
-                    room: searchNodeNames[drawer.parentNodeId]?.room,
-                    content: drawer.content,
-                    drawer: drawer))
+                    subject: subject,
+                    firstSentence: firstSentence,
+                    semanticSearchCandle: nil,   // SSC not yet surfaced by GLK in this build; renders '-'
+                    activeAdornments: adornments,
+                    eventTime: ResultComposer.iso8601(drawer.eventTime),
+                    score: Double(hit.score.final),
+                    room: searchNodeNames[drawer.parentNodeId]?.room))
             } else {
-                lines.append(DenseRow.renderUnhydrated(id: hit.id))
-                results.append(Self.opaqueStructuredRow(id: hit.id))
+                // Unhydrated hit: id only; all columns render '-'.
+                candidateRows.append(CandidateRowData(
+                    id: hit.id,
+                    subject: nil,
+                    eventTime: "-",
+                    score: Double(hit.score.final)))
             }
-            if explain {
-                for line in hit.explanation { lines.append("  \(line)") }
-            }
+            // Explain lines follow the row they annotate (outside the composer row).
+            // The composer does not know about explain output; append after the
+            // loop below once the composed text is built.
         }
-        // Deviation-only narration (PR-03): the discrimination line appears
-        // ONLY when the EFFECTIVE signal is low or medium. A clear top
-        // result needs no commentary, and the single/zero "n/a" line is
-        // noise — the advisory paragraph lives in the tool description now.
-        // The dense-lane-dark cap is applied BEFORE the deviation check so a
-        // dark-capped high (→ medium + caveat) still surfaces.
+
+        // Build ControlSignals (deviation-only per §11.3 absolute trailing order).
+        // Discrimination: dense-lane-dark caps "high" → "medium" (same rule as before).
         let effectiveDiscrimination: DiscriminationLevel =
             (denseLaneDark && discriminationLevel == .high) ? .medium : discriminationLevel
-        if effectiveDiscrimination == .low || effectiveDiscrimination == .medium {
-            lines.append(RecallDiscrimination.resultLine(for: discriminationLevel, denseLaneDark: denseLaneDark))
+        let discriminationArg: String? = switch effectiveDiscrimination {
+            case .low:             "low"
+            case .medium:          "medium"
+            case .high, .notFound, .single: nil   // no discrimination line when high, not-found, or single result
         }
-        // Recall provenance — DEVIATION-ONLY (PR-03): the line appears only
-        // when something is off-nominal (dense lane dark, or degraded
-        // stages). The happy path ("dense_lane:active degraded_stages:none")
-        // is the norm and stating it every reply was pure noise; its absence
-        // now MEANS nominal. denseLaneStatus non-nil = the deterministic
-        // vector lane (Lane D, FNV-1a + FloatSimHash) did not contribute —
-        // ranking was structural/BM25 only. degradedStages lists pipeline
-        // stages skipped on recoverable errors. The response labels
-        // embedding provenance accurately whenever it deviates.
-        if result.denseLaneStatus != nil || !result.degradedStages.isEmpty {
-            let densePart = result.denseLaneStatus.map { "dense_lane:\($0)" } ?? "dense_lane:active"
-            let degradedPart = result.degradedStages.isEmpty
-                ? "degraded_stages:none"
-                : "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
-            lines.append("recall_provenance: \(densePart) \(degradedPart)")
+        // Degradation: true when any stage was skipped (replaces the old recall_provenance line;
+        // the detail is now logged server-side, not surfaced in the payload).
+        let degraded = !result.degradedStages.isEmpty
+        // Tie note: non-determinate tie window was exhausted — same wording as before.
+        let tieNote = result.degradedStages.contains("tie.nonDeterminate")
+        let control = ControlSignals(
+            discrimination: discriminationArg,
+            degraded: degraded,
+            tieNote: tieNote)
+
+        // Compose via the central renderer.
+        let composed: ComposedResult
+        if candidateRows.isEmpty {
+            composed = ResultComposer.renderEmptyS1(hint: nil)
+        } else {
+            composed = ResultComposer.renderS1Surface(rows: candidateRows, control: control)
         }
-        // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
-        // When no grant is live the gate is in effect, so the client is told
-        // the gate exists and which commands lift it. The message asserts
-        // NOTHING about what this estate holds: any condition that consulted
-        // estate contents would make advisory presence a disclosure channel
-        // for exactly the restricted/secret rows the gate protects, to a
-        // caller with no grant. Emitting on grant state alone discloses
-        // nothing — the caller is the party that did not unlock, so they
-        // already know it. Gated on `!sensitivityCeilingLifted`: under a live
-        // grant those rows are already included and no advisory applies.
-        if !sensitivityCeilingLifted {
-            lines.append(
-                "sensitivity_advisory: a sensitivity tier gate is in effect — " +
-                "run `mootx01 unlock private` to include restricted memories, " +
-                "`mootx01 unlock secret` for secret memories."
+
+        // Prepend the answer block (L0/L1) and, for the explain path, the explain
+        // lines after each row. Explain lines are not yet compositor-rendered —
+        // they are plain text that follow their row.
+        var finalText = composed.text
+        if explain {
+            // Interleave explain lines after each corresponding row in the text.
+            // The composed text is: header\nrow1\nrow2\n...\ncontrol-lines
+            // We need to insert explain lines after each row. Parse the text,
+            // find the row lines (skip header and control lines), and insert.
+            var textLines = finalText.components(separatedBy: "\n")
+            // Identify the header line (always first) and control lines (suffix).
+            // Rows are the middle section. We walk backward from candidateRows.
+            // Simple approach: rebuild from scratch to avoid parse fragility.
+            let n = candidateRows.count
+            var rebuilt: [String] = []
+            let rawLines = textLines
+            // Header is rawLines[0]; rows are rawLines[1..<1+n]; control lines follow.
+            if rawLines.count > 0 { rebuilt.append(rawLines[0]) }
+            for i in 0..<n {
+                let rowIdx = 1 + i
+                if rowIdx < rawLines.count { rebuilt.append(rawLines[rowIdx]) }
+                if i < shownHits.count {
+                    for line in shownHits[i].explanation { rebuilt.append("  \(line)") }
+                }
+            }
+            // Append remaining control lines.
+            let controlStart = 1 + n
+            if controlStart < rawLines.count {
+                rebuilt.append(contentsOf: rawLines[controlStart...])
+            }
+            finalText = rebuilt.joined(separator: "\n")
+        }
+        if let block = packaged.answerBlock {
+            var headerLines = [
+                "answer: \(block.text)",
+                "confidence: \(block.confidence.rawValue)",
+            ]
+            if !block.citationIDs.isEmpty {
+                headerLines.append("citations: \(block.citationIDs.prefix(5).joined(separator: ", "))")
+            }
+            headerLines.append(
+                "signals: margin=\(block.signals.margin) "
+                + "lane_agreement=\(block.signals.laneAgreement) "
+                + "dense_spread=\(block.signals.denseSpread) "
+                + "containment=\(block.signals.containment)"
             )
+            finalText = headerLines.joined(separator: "\n") + "\n" + finalText
         }
-        return Self.structuredTextResult(lines.joined(separator: "\n"), results: results)
+        return Self.composedResult(ComposedResult(text: finalText, structured: composed.structured))
     }
 
     /// `moot_memory_get` — fetch one memory drawer by id, in full.
@@ -1839,6 +2268,15 @@ extension ToolDispatcher {
     /// matching `moot_memory_search`'s unconditional preview redaction.
     /// Mirrors Rust `run_memory_get`.
     ///
+    /// B-10a reward wiring: after successfully resolving the drawer, `noteUsage`
+    /// is called for every returned drawer id. If that id appeared in a prior
+    /// `moot_memory_search` result in this session, `noteUsage` calls
+    /// `kit.markRecallUsed` so the dreaming daemon's reward sweep later assigns
+    /// reward=1.0 (the "used" bit is set on the drawer's recall-trace rows).
+    /// This closes the gap where a search-then-get workflow never fired the
+    /// reward because memory_get was not a registered dereference verb. Failure
+    /// is silenced — reward marking must not break the primary result.
+    ///
     /// An active sensitivity-unlock grant lifts the ADJECTIVE ceiling ONLY.
     /// Provenance `.restricted` and `.secret` remain CLOSED under grant in both
     /// verticals: the provenance gate below is unconditional and does not
@@ -1846,7 +2284,9 @@ extension ToolDispatcher {
     /// matching Swift to it is the conservative reading. If that ruling is
     /// revisited so a grant lifts provenance too, both verticals change
     /// together or the conformance parity breaks.
-    func runMemoryGet(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests (wall-clock mode; determinism not required there).
+    func runMemoryGet(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         // Hydration depth (PR-03): one verb, three tiers.
         //   subject   — dense row only (travel tier)
@@ -1900,7 +2340,7 @@ extension ToolDispatcher {
         // visible in search but still "not found" by id — an inconsistent,
         // confusing half-unlock.
         var filterChain: [Filter] = []
-        let now = Date()
+        // `now` is threaded from the bench clock seam — not Date() directly.
         var sensitivityCeilingLifted = false
         if let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
             filterChain.append(ceiling)
@@ -1934,82 +2374,145 @@ extension ToolDispatcher {
             )
         }
 
-        // Batch / shallow-depth rendering (PR-03). depth:full + single id
-        // falls through to the original full record below.
+        // Batch / shallow-depth rendering (COMPOSER-02B). All paths go through
+        // ResultComposer typed intermediates; sensitivity_advisory removed from
+        // payload (moved to tool description text per BRR §Part 1).
+        //
+        // depth:subject  → S2 rows via renderS2BatchGet (S2 row per drawer, no body)
+        // depth:distilled → S2 row + distilled continuation per drawer
+        // depth:full (batch) → S3 full record per drawer via renderS3Record
+        // depth:full (single) → S3 full record via renderS3Record (falls through)
         if !singleIDMode || depthName != "full" {
-            var lines: [String] = []
-            // Structured twin (MXE-SS): one batched node-name read for room
-            // over the admissible rows. Not-found ids are omitted from the
-            // structured block — the text's "not found:" line is the signal,
-            // and the row has no drawer fields to carry.
+            // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2):
+            // issued once per call over admissible drawer IDs before the render loop.
+            let adornmentMap = try await kit.activeAdornments(
+                in: handle, drawerIDs: rowIDs.compactMap { admissibleByID[$0]?.id })
+            // One batched node-name read for room over the admissible rows.
             let getNodeNames = try await estate.resolveNodeNames(
                 parentNodeIds: rowIDs.compactMap { admissibleByID[$0]?.parentNodeId })
-            var results: [StructuredRecallRow] = []
+
+            // depth:subject — S2 batch-get shape.
+            if depthName == "subject" {
+                var entries: [ResultComposer.BatchGetEntry] = []
+                for id in rowIDs {
+                    guard let d = admissibleByID[id] else {
+                        entries.append(.notFound(id)); continue
+                    }
+                    await noteUsage(id, handle: handle)
+                    if sensitivityCeilingLifted {
+                        switch d.adjectiveSensitivity {
+                        case .restricted, .secret:
+                            try? await kit.recordSensitivityReadUnderGrant(
+                                handle, tier: d.adjectiveSensitivity, drawerID: d.id, now: now)
+                        case .normal, .elevated: break
+                        }
+                    }
+                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
+                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+                    entries.append(.found(CandidateRowData(
+                        id: d.id,
+                        subject: d.subject,
+                        activeAdornments: adornments,
+                        eventTime: ResultComposer.iso8601(d.eventTime),
+                        room: getNodeNames[d.parentNodeId]?.room)))
+                }
+                let resolved = entries.filter { if case .found = $0 { true } else { false } }.count
+                let composed = ResultComposer.renderS2BatchGet(
+                    entries: entries, resolved: resolved, requested: rowIDs.count)
+                return Self.composedResult(composed)
+            }
+
+            // depth:distilled — S2 row + distilled continuation; depth:full in
+            // batch mode — one S3 record per drawer. Both render per-row.
+            var lines: [String] = []
             for id in rowIDs {
                 guard let d = admissibleByID[id] else {
-                    lines.append("not found: \(id)")
-                    continue
+                    lines.append("not found: \(id)"); continue
                 }
+                await noteUsage(id, handle: handle)
                 if sensitivityCeilingLifted {
                     switch d.adjectiveSensitivity {
                     case .restricted, .secret:
                         try? await kit.recordSensitivityReadUnderGrant(
                             handle, tier: d.adjectiveSensitivity, drawerID: d.id, now: now)
-                    case .normal, .elevated:
-                        break
+                    case .normal, .elevated: break
                     }
                 }
-                let room = getNodeNames[d.parentNodeId]?.room
-                switch depthName {
-                case "subject":
-                    lines.append(DenseRow.render(d))
-                    // Content stays ABSENT at the travel tier — the text
-                    // carries no body here, and the structured block must
-                    // not defeat the depth knob's token economy.
-                    results.append(Self.structuredRecallRow(
-                        id: d.id, room: room, content: nil, drawer: d))
-                case "distilled":
-                    lines.append(DenseRow.render(d))
+                if depthName == "distilled" {
+                    // S2 row header (no score column) + distilled continuation.
+                    // Deviation marker rendered only on fallback hits per deviation-only contract.
+                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
+                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+                    let row = CandidateRowData(
+                        id: d.id,
+                        subject: d.subject,
+                        firstSentence: d.content.isEmpty ? nil : d.content,
+                        activeAdornments: adornments,
+                        eventTime: ResultComposer.iso8601(d.eventTime),
+                        room: getNodeNames[d.parentNodeId]?.room)
+                    lines.append(ResultComposer.renderS2Row(row))
                     if let distilled = d.distilled, !distilled.isEmpty {
-                        lines.append(distilled)
-                        results.append(Self.structuredRecallRow(
-                            id: d.id, room: room, content: distilled, drawer: d))
+                        lines.append("    \(distilled)")
                     } else {
-                        // Fallback marker on fallback hits ONLY (PR-03
-                        // deviation-only contract): its presence tells the
-                        // AI this row still owes a distillate and the text
-                        // below is verbatim content.
-                        lines.append("source: content (not yet distilled)")
-                        lines.append(d.content)
-                        results.append(Self.structuredRecallRow(
-                            id: d.id, room: room, content: d.content, drawer: d))
+                        // Deviation marker: tells the AI this row still owes
+                        // a distillate; body is verbatim content.
+                        lines.append("    source: content (not yet distilled)")
+                        lines.append("    \(d.content)")
                     }
-                default: // "full" in batch mode: repeat the full record shape
-                    lines.append(contentsOf: try await fullRecordLines(
-                        for: d, estate: estate))
-                    // Full-record tier: subject mirrors the text's deviation
-                    // tolerance — the record omits the subject line when the
-                    // drawer has none, so the field is omitted too (no
-                    // absence marker at this tier). Provenance-gated rows
-                    // cannot reach here (admissibleByID excludes them), so
-                    // the row is built directly, not via the marker switch.
-                    results.append(StructuredRecallRow(
-                        id: d.id, room: room, content: d.content,
-                        subject: d.subject))
+                } else {
+                    // depth:full in batch mode — S3 full record per drawer.
+                    let names = getNodeNames[d.parentNodeId] ?? (wing: "", room: "")
+                    let allTunnels = try await estate.allTunnels()
+                    let linked = allTunnels.filter {
+                        ($0.sourceDrawerId == d.id || $0.targetDrawerId == d.id)
+                            && $0.tombstonedAt == nil && $0.lifecycle == .active
+                    }
+                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
+                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+                    let tunnels = linked.prefix(50).map { tunnel -> FullRecordTunnel in
+                        let outgoing = tunnel.sourceDrawerId == d.id
+                        let other = outgoing
+                            ? (tunnel.targetDrawerId ?? "\(tunnel.targetWing)/\(tunnel.targetRoom)")
+                            : (tunnel.sourceDrawerId ?? "\(tunnel.sourceWing)/\(tunnel.sourceRoom)")
+                        return FullRecordTunnel(isOutgoing: outgoing, otherID: other, label: tunnel.label)
+                    }
+                    let record = FullRecordData(
+                        id: d.id,
+                        room: names.room, wing: names.wing,
+                        subject: d.subject,
+                        activeAdornments: adornments,
+                        filedAt: ResultComposer.iso8601(d.filedAt),
+                        eventTime: ResultComposer.iso8601(d.eventTime),
+                        state: String(describing: d.state),
+                        trust: String(describing: d.trust),
+                        sensitivity: String(describing: d.adjectiveSensitivity),
+                        exportability: String(describing: d.exportability),
+                        confirmation: String(describing: d.confirmation),
+                        lineageID: d.lineageID.uuidString,
+                        tunnels: Array(tunnels),
+                        content: d.content)
+                    lines.append(contentsOf: ResultComposer.renderS3Record(record).text
+                        .components(separatedBy: "\n"))
                 }
-                lines.append("")
+                lines.append("")   // blank separator between multi-row replies
             }
             if lines.last == "" { lines.removeLast() }
-            return Self.structuredTextResult(
-                lines.joined(separator: "\n"), results: results)
+            return Self.composedResult(ComposedResult(text: lines.joined(separator: "\n")))
         }
 
+        // Single-id depth:full path — S3 full record via renderS3Record (absorbs fullRecordLines).
         let drawer = admissibleByID[rowID]!
 
-        // same read-under-grant audit recording as
-        // runMemorySearch — see that function's comment for why this is
-        // gated on BOTH the ceiling having been lifted AND the drawer's
-        // own sensitivity actually being restricted/secret.
+        // B-10a: memory_get is a dereference verb. If this drawer was surfaced
+        // by a prior moot_memory_search in this session, fire the reward path
+        // so the dreaming daemon assigns reward=1.0. Best-effort: noteUsage
+        // never throws to the caller. Same contract as the mutation verbs
+        // (moot_update_memory, moot_withdraw_memory, moot_confirm_memory, etc.).
+        await noteUsage(rowID, handle: handle)
+
+        // Same read-under-grant audit recording as runMemorySearch — gated on
+        // BOTH the ceiling having been lifted AND the drawer's own sensitivity
+        // actually being restricted/secret.
         if sensitivityCeilingLifted {
             switch drawer.adjectiveSensitivity {
             case .restricted, .secret:
@@ -2020,96 +2523,46 @@ extension ToolDispatcher {
             }
         }
 
-        var lines = try await fullRecordLines(for: drawer, estate: estate)
-        // Sensitivity-gate advisory — same rule as runMemorySearch: grant
-        // state alone, never estate contents. It matters more here than in
-        // search, because this reply follows a SUCCESSFUL fetch of a visible
-        // row; a contents-dependent advisory would attach an estate-wide
-        // existence signal to that reply, which is precisely what this
-        // function's containment contract (see its doc comment: gated rows
-        // must be indistinguishable from absent ones) forbids.
-        if !sensitivityCeilingLifted {
-            lines.append(
-                "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — " +
-                "run `mootx01 unlock private` to include restricted memories, " +
-                "`mootx01 unlock secret` for secret memories."
-            )
-        }
-        // Structured twin (MXE-SS) of the single-id full record. The node
-        // tree is consulted a second time here (fullRecordLines resolves
-        // internally but returns rendered lines); one extra by-id lookup on
-        // the in-memory node tree is preferred over widening
-        // fullRecordLines' signature. Subject is omitted when the drawer has
-        // none, mirroring the record's omitted subject line; provenance-
-        // gated rows cannot reach here (admissibleByID excludes them).
-        let getNodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: [drawer.parentNodeId])
-        let row = StructuredRecallRow(
-            id: drawer.id,
-            room: getNodeNames[drawer.parentNodeId]?.room,
-            content: drawer.content,
-            subject: drawer.subject)
-        return Self.structuredTextResult(
-            lines.joined(separator: "\n"), results: [row])
-    }
-
-    /// The full-record block for one drawer — the depth:full tier and the
-    /// original single-id moot_memory_get reply shape. Shared by the
-    /// single-id path and the batch depth:full path.
-    private func fullRecordLines(for drawer: Drawer, estate: Estate) async throws -> [String] {
-        // Drawer no longer carries stored wing/room; resolve via
-        // the node tree, same pattern as every other read tool in this file.
+        // Resolve node names, active tunnels, and adornments for the S3 record.
+        // sensitivity_advisory removed from payload (moved to tool description text).
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
         let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
-
-        // Linked tunnel summary: estate-wide scan filtered to confirmed-active,
-        // non-tombstoned tunnels touching this drawer on either end.
-        // Lifecycle gate (FIND4 residual): proposed, withdrawn, and superseded
-        // tunnels are excluded at the MCP boundary so AI clients see only
-        // confirmed edges — the same gate moot_connection_search/moot_connection_map
-        // enforce.
         let allTunnels = try await estate.allTunnels()
         let linked = allTunnels.filter {
             ($0.sourceDrawerId == drawer.id || $0.targetDrawerId == drawer.id)
-                && $0.tombstonedAt == nil
-                && $0.lifecycle == .active
+                && $0.tombstonedAt == nil && $0.lifecycle == .active
         }
-
-        let iso = ISO8601DateFormatter()
-        var lines: [String] = [
-            "memory \(drawer.id)",
-            "room: \(names.room)  wing: \(names.wing)",
-            // Subject line (PR-03): present only when the drawer carries
-            // one — the full record is deviation-tolerant, absence simply
-            // omits the line (the dense tiers show the absence marker).
-        ]
-        if let subject = drawer.subject {
-            lines.append("subject: \(subject)")
-        }
-        lines.append(contentsOf: [
-            "filed_at: \(iso.string(from: drawer.filedAt))",
-            "event_time: \(iso.string(from: drawer.eventTime))",
-            "state: \(String(describing: drawer.state))",
-            "trust: \(String(describing: drawer.trust))",
-            "sensitivity: \(String(describing: drawer.adjectiveSensitivity))",
-            "exportability: \(String(describing: drawer.exportability))",
-            "confirmation: \(String(describing: drawer.confirmation))",
-            "lineage: \(drawer.lineageID.uuidString)",
-            "tunnels: \(linked.count)",
-        ])
-        for tunnel in linked.prefix(50) {
+        // Two-step fetch prevents sorted-overload ambiguity (SortComparator vs Bool-closure)
+        // introduced in Swift 5.9+ when the element type is inferred across a multi-line
+        // subscript + nil-coalesce expression. Splitting into two let-bindings gives the
+        // compiler a clear [StoredAdornment] concrete type before the sorted call.
+        let adornmentByDrawer = try await kit.activeAdornments(in: handle, drawerIDs: [drawer.id])
+        let adornEntries = adornmentByDrawer[drawer.id] ?? []
+        let adornments = adornEntries.sorted(by: { $0.minterID < $1.minterID })
+            .map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+        let tunnels = linked.prefix(50).map { tunnel -> FullRecordTunnel in
             let outgoing = tunnel.sourceDrawerId == drawer.id
             let other = outgoing
                 ? (tunnel.targetDrawerId ?? "\(tunnel.targetWing)/\(tunnel.targetRoom)")
                 : (tunnel.sourceDrawerId ?? "\(tunnel.sourceWing)/\(tunnel.sourceRoom)")
-            lines.append("  \(outgoing ? "→" : "←") \(other)  [\(tunnel.label)]")
+            return FullRecordTunnel(isOutgoing: outgoing, otherID: other, label: tunnel.label)
         }
-        // Verbatim content, on its own trailing block — never truncated or
-        // previewed (that is moot_memory_search's job). This is the field the
-        // tool exists to return.
-        lines.append("content:")
-        lines.append(drawer.content)
-        return lines
+        let record = FullRecordData(
+            id: drawer.id,
+            room: names.room, wing: names.wing,
+            subject: drawer.subject,
+            activeAdornments: adornments,
+            filedAt: ResultComposer.iso8601(drawer.filedAt),
+            eventTime: ResultComposer.iso8601(drawer.eventTime),
+            state: String(describing: drawer.state),
+            trust: String(describing: drawer.trust),
+            sensitivity: String(describing: drawer.adjectiveSensitivity),
+            exportability: String(describing: drawer.exportability),
+            confirmation: String(describing: drawer.confirmation),
+            lineageID: drawer.lineageID.uuidString,
+            tunnels: Array(tunnels),
+            content: drawer.content)
+        return Self.composedResult(ResultComposer.renderS3Record(record))
     }
 
     /// Note that a drawer id was "used" (acted upon) by a dereference verb.
@@ -2125,14 +2578,19 @@ extension ToolDispatcher {
     /// Failures are silenced — a reward-marking failure must never break the
     /// dereference verb's primary result.
     private func noteUsage(_ rowID: String, handle: EstateHandle) async {
-        guard let entry = await recallLedger.entry(for: rowID) else { return }
-        // Use the surfaced-at time as `now` so the retention window is
-        // anchored to when the memory was shown, not when it was acted on.
-        // This matches the Rust note_usage which passes surfaced_at+1s.
-        // We use Date() here (current wall time) because the retention window
-        // is 30 days and a same-session dereference is always within that window.
+        guard await recallLedger.entry(for: rowID) != nil else { return }
+        // Use current wall time as `now` so the retention window is
+        // [Date() - 30 days, Date()]. The RecallDirector stamps trace rows with
+        // its own Date() call (inside kit.recall), which runs AFTER the ledger's
+        // surfacedAt is captured at the top of runMemorySearch. Under load the
+        // recall can take long enough that recalledAt > surfacedAt, which would
+        // push the row past the window upper bound and cause markRecallUsed to
+        // match 0 rows. Using current wall time guarantees the window covers
+        // any trace row written in this session (same-session dereferences are
+        // always within the 30-day retention window).
+        let now = Date()
         do {
-            _ = try await kit.markRecallUsed(handle, target: rowID, now: entry.surfacedAt)
+            _ = try await kit.markRecallUsed(handle, target: rowID, now: now)
         } catch {
             // Best-effort: reward marking must not break the primary verb.
         }
@@ -2434,7 +2892,9 @@ extension ToolDispatcher {
     ///
     /// Only tunnels in the proposed lifecycle are reviewable; a settled
     /// edge cannot be rewritten by a stale review.
-    func runReviewTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests.
+    func runReviewTunnel(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let tunnelID = try requireString(args, "tunnel_id")
         let verdict = try requireString(args, "verdict")
@@ -2465,10 +2925,8 @@ extension ToolDispatcher {
         // owns the not-found error (single validation source).
         let label = try await estate.getTunnel(id: tunnelID)?.label ?? ""
         let lens = Self.tierLens(forLabel: label)
-        // Review timestamps are wall-clock: this tool is a live I/O
-        // surface (no `now` argument), and the deterministic engines
-        // receive the instant from here, the I/O boundary.
-        let now = Date()
+        // `now` is the bench-clock instant threaded from `InterfaceTools.dispatch`,
+        // pinned for replay determinism. Review timestamps use this instead of Date().
 
         switch (verdict, reviewedBy) {
         case ("endorse", _):
@@ -2523,6 +2981,7 @@ extension ToolDispatcher {
     /// bitmap predicates into SQL via `activeTunnelsFrom(drawerId:)` so that
     /// SQLite evaluates them before any row is decoded. The sensitivity gate
     /// (`isBulkExportable`) is applied in-memory on the small returned slice.
+    /// Render path: COMPOSER-02B S5 edges via `ResultComposer.renderS5Edges`.
     func runConnectionSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let fromID = try requireString(args, "from_id")
@@ -2532,21 +2991,31 @@ extension ToolDispatcher {
         // filters move to the storage layer. Sensitivity ceiling (#58):
         // restricted/secret tunnels are excluded in the in-memory pass below.
         let candidates = try await estate.activeTunnelsFrom(drawerId: fromID)
-        let outgoing = candidates.filter {
-            $0.adjectiveSensitivity.isBulkExportable
-        }
-        // Dense-row citations (PR-03): each drawer endpoint is cited as a
-        // dense row so the AI can judge the neighbor without another call.
-        // Room-level endpoints (no drawer id) keep the wing/room text.
+        let outgoing = candidates.filter { $0.adjectiveSensitivity.isBulkExportable }
+        // Load far-endpoint drawers (structured hydration — no content blobs).
+        // Room-level endpoints (no targetDrawerId) synthesize a CandidateRowData
+        // from the wing/room text as the subject so the row is still meaningful.
         let endpointIDs = outgoing.prefix(50).compactMap { $0.targetDrawerId }
-        let dense = try await RecipeTools.denseRowsByID(ids: endpointIDs, estate: estate)
-        let lines = outgoing.prefix(50).map { t -> String in
-            let cite = t.targetDrawerId.map { dense[$0] ?? DenseRow.renderUnhydrated(id: $0) }
-                ?? "\(t.targetWing)/\(t.targetRoom)"
-            return "\(t.id)  [\(t.label)]  → \(cite)"
+        let drawers = try await RecipeTools.structuredDrawersByID(ids: endpointIDs, estate: estate)
+        let edges = outgoing.prefix(50).map { t -> EdgeRow in
+            let far: CandidateRowData
+            if let tid = t.targetDrawerId, let d = drawers[tid] {
+                far = CandidateRowData(
+                    id: d.id, subject: d.subject,
+                    firstSentence: d.content.isEmpty ? nil : d.content,
+                    eventTime: ResultComposer.iso8601(d.eventTime))
+            } else if let tid = t.targetDrawerId {
+                // Drawer ID referenced but not admissible (gated or missing).
+                far = CandidateRowData(id: tid, eventTime: "-")
+            } else {
+                // Room-level endpoint: no drawer ID; use wing/room as subject.
+                far = CandidateRowData(id: "-",
+                    subject: "\(t.targetWing)/\(t.targetRoom)", eventTime: "-")
+            }
+            return EdgeRow(tunnelID: t.id, kindLabel: t.label, farEndpoint: far)
         }
-        let header = "connections from \(fromID): \(outgoing.count)"
-        return Self.textResult(([header] + lines).joined(separator: "\n"))
+        return Self.composedResult(ResultComposer.renderS5Edges(
+            direction: "outgoing", edges: Array(edges)))
     }
 
     /// `moot_connection_map` — find connections pointing to a memory.
@@ -2555,6 +3024,7 @@ extension ToolDispatcher {
     /// bitmap predicates into SQL via `activeTunnelsTo(drawerId:)`. The sensitivity
     /// gate is applied in-memory on the small returned slice. Mirror of
     /// `runConnectionSearch` for the incoming-edge direction.
+    /// Render path: COMPOSER-02B S5 edges via `ResultComposer.renderS5Edges`.
     func runConnectionMap(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let toID = try requireString(args, "to_id")
@@ -2563,19 +3033,27 @@ extension ToolDispatcher {
         // (operationalBitmap & mask) = 0 into SQL. Sensitivity ceiling (#58):
         // same in-memory gate as connection_search.
         let candidates = try await estate.activeTunnelsTo(drawerId: toID)
-        let incoming = candidates.filter {
-            $0.adjectiveSensitivity.isBulkExportable
-        }
-        // Dense-row citations (PR-03) — mirror of connection_search.
+        let incoming = candidates.filter { $0.adjectiveSensitivity.isBulkExportable }
+        // Load source-endpoint drawers — mirror of connection_search pattern.
         let endpointIDs = incoming.prefix(50).compactMap { $0.sourceDrawerId }
-        let dense = try await RecipeTools.denseRowsByID(ids: endpointIDs, estate: estate)
-        let lines = incoming.prefix(50).map { t -> String in
-            let cite = t.sourceDrawerId.map { dense[$0] ?? DenseRow.renderUnhydrated(id: $0) }
-                ?? "\(t.sourceWing)/\(t.sourceRoom)"
-            return "\(t.id)  [\(t.label)]  ← \(cite)"
+        let drawers = try await RecipeTools.structuredDrawersByID(ids: endpointIDs, estate: estate)
+        let edges = incoming.prefix(50).map { t -> EdgeRow in
+            let far: CandidateRowData
+            if let sid = t.sourceDrawerId, let d = drawers[sid] {
+                far = CandidateRowData(
+                    id: d.id, subject: d.subject,
+                    firstSentence: d.content.isEmpty ? nil : d.content,
+                    eventTime: ResultComposer.iso8601(d.eventTime))
+            } else if let sid = t.sourceDrawerId {
+                far = CandidateRowData(id: sid, eventTime: "-")
+            } else {
+                far = CandidateRowData(id: "-",
+                    subject: "\(t.sourceWing)/\(t.sourceRoom)", eventTime: "-")
+            }
+            return EdgeRow(tunnelID: t.id, kindLabel: t.label, farEndpoint: far)
         }
-        let header = "connections to \(toID): \(incoming.count)"
-        return Self.textResult(([header] + lines).joined(separator: "\n"))
+        return Self.composedResult(ResultComposer.renderS5Edges(
+            direction: "incoming", edges: Array(edges)))
     }
 }
 
@@ -2618,11 +3096,10 @@ extension ToolDispatcher {
     /// supplies a query, matching is a case-insensitive substring scan across
     /// subject, predicate, and object.
     ///
-    /// When a query is present and the dense lane is dark, a `recall_provenance:`
-    /// hint is appended so the AI caller can distinguish "no lexical match" from
-    /// "semantic search was not consulted". This mirrors the honest-lane-state
-    /// reporting that `moot_memory_search` and `moot_recall_shaped` emit, keeping
-    /// the ARIA surface consistent.
+    /// When a query is present, a dark-lane probe runs to populate the log
+    /// with the dense-lane status. The probe result is NOT appended to the
+    /// payload (recall_provenance removed from payload per COMPOSER-02B;
+    /// log-side only). Fact search is purely lexical regardless of lane state.
     func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         // Optional query: substring match across subject, predicate, and object.
@@ -2687,48 +3164,32 @@ extension ToolDispatcher {
             let admissibleIDs = Set(result.admissible.map { $0.id })
             hiddenSourceIDs = result.loadedIDs.subtracting(admissibleIDs)
         }
-        // Include evaluation fields (filedAt, sourceDrawerID) so callers can
-        // reason about provenance and temporal ordering without a separate
-        // timeline call. ISO8601 for filedAt; sourceDrawerID gated on admissibility.
+        // Build S4 typed rows and render via ResultComposer.renderS4FactSearch
+        // (COMPOSER-02B). recall_provenance removed from payload (log-side only
+        // per BRR §Part 1); dark-lane probe still runs but the result is logged
+        // rather than appended to the payload.
         let formatter = ISO8601DateFormatter()
-        let lines = emittedFacts.map { f -> String in
+        let factRows = emittedFacts.map { f -> FactSearchRow in
             let filed = formatter.string(from: f.filedAt)
-            // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
-            // id or "", so a sourceless fact renders an empty source=.
-            let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
-                ? "source=<hidden>"
-                : "source=\(f.sourceDrawerID)"
-            // addedBy names the binary that filed the row — provenance about the
-            // writer, distinct from which drawer the fact was drawn from. Never
-            // gated: it is not a drawer id and carries no drawer's sensitivity.
-            return "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  filed=\(filed)  \(sourceField)  addedBy=\(f.addedBy)"
+            // Gate source-drawer ID on sensitivity: hide only when the drawer
+            // exists AND is Restricted/Secret. A sourceless fact (empty string)
+            // maps to nil → column renders '-'.
+            let sourceID: String? = hiddenSourceIDs.contains(f.sourceDrawerID)
+                ? nil
+                : (f.sourceDrawerID.isEmpty ? nil : f.sourceDrawerID)
+            return FactSearchRow(
+                factID: f.id,
+                subject: f.subject,
+                predicate: f.predicate,
+                object: f.object,
+                sourceDrawerID: sourceID,
+                filedAt: filed)
         }
-        let header = query != nil
-            ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
-            : "facts: \(facts.count)"
-        var outputLines = [header] + lines
-        // Dark-lane hint: when the caller supplied a query, probe the dense
-        // recall lane to determine its status. If dark, append a recall_provenance
-        // line so the AI caller knows the match was lexical-only (0 results means
-        // "no lexical match found", not "this fact does not exist in semantic
-        // space"). Reuses the same probe recall path as moot_memory_search to
-        // ensure wording/shape is consistent. The probe is minimal (limit=1, no
-        // filter, .unionBest mode) — we only need the denseLaneStatus, not hits.
+        // Dark-lane probe: runs as before for internal logging continuity; the
+        // denseLaneStatus result is NOT appended to the payload (recall_provenance
+        // removed from payload surface per BRR §Part 1 — moved to log side).
         if query != nil {
-            // Probe the dense lane state with a minimal recall request (limit=1,
-            // no filter, bitmapOnly hydration — no blob reads needed). We only
-            // use denseLaneStatus from the result, not the hits themselves.
-            // queryText is the raw (non-lowercased) form so the embedding path
-            // sees unaltered text.
-            // origin: .internal — this probe reads ONLY denseLaneStatus; it must
-            // NOT participate in the reward cycle. An external origin makes
-            // RecallDirector set traceLimit, so LocusKit would persist recall-trace
-            // rows for the probe's incidental locus hits — durable reward/audit
-            // pollution from an ostensibly read-only fact search (the Rust
-            // run_fact_search avoids this entirely by checking has_corpus instead
-            // of issuing a recall). Internal origin leaves traceLimit nil → zero
-            // trace writes, while denseLaneStatus is still populated.
+            // origin: .internal — no reward trace rows; only denseLaneStatus needed.
             let probeRequest = GLKRecallRequest(
                 frame: RecallFrame(filterChain: [], hydrationLevel: .bitmapOnly,
                                    limit: 1, ordering: .byCaptureTimeDesc),
@@ -2736,18 +3197,13 @@ extension ToolDispatcher {
                 scoring: .matrixAware,
                 limit: 1,
                 fallback: .allowDegraded,
-                queryText: queryRaw,  // pass original (not lowercased) for embedding
+                queryText: queryRaw,
                 origin: .internal
             )
-            let probeResult = try await kit.recall(handle, probeRequest)
-            if let darkReason = probeResult.denseLaneStatus {
-                // Dense lane was dark — the query above was lexical-only.
-                // Surface the same recall_provenance format as moot_memory_search
-                // so AI callers receive a consistent signal across all search tools.
-                outputLines.append("recall_provenance: dense_lane:\(darkReason) degraded_stages:none")
-            }
+            _ = try await kit.recall(handle, probeRequest)
+            // denseLaneStatus available on probeResult — log only; no payload append.
         }
-        return Self.textResult(outputLines.joined(separator: "\n"))
+        return Self.composedResult(ResultComposer.renderS4FactSearch(facts: factRows))
     }
 
     /// `moot_retire_fact` — invalidate a KG fact by row ID.
@@ -2846,28 +3302,26 @@ extension ToolDispatcher {
             let admissibleIDs = Set(result.admissible.map { $0.id })
             hiddenSourceIDs = result.loadedIDs.subtracting(admissibleIDs)
         }
+        // Build S4 typed rows and render via ResultComposer.renderS4FactTimeline
+        // (COMPOSER-02B). Source-drawer sensitivity gate preserved.
         let formatter = ISO8601DateFormatter()
-        // Include sourceDrawerID for provenance tracing, gated on source-drawer
-        // sensitivity. filedAt present for chronological ordering.
-        let lines = emittedFacts.map { f -> String in
+        let timelineRows = emittedFacts.map { f -> FactTimelineRow in
             let filed = formatter.string(from: f.filedAt)
             let lifecycleTag = Self.lifecycleTag(forAdjectiveBitmap: f.adjectiveBitmap)
-            // Gate source= on source-drawer sensitivity: hide only when the drawer
-            // exists AND is Restricted/Secret. sourceDrawerID holds a local drawer
-            // id or "", so a sourceless fact renders an empty source=.
-            let sourceField = hiddenSourceIDs.contains(f.sourceDrawerID)
-                ? "source=<hidden>"
-                : "source=\(f.sourceDrawerID)"
-            return "\(filed)  \(lifecycleTag)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]  \(sourceField)"
+            // Gate source-drawer ID on sensitivity: hide when restricted/secret.
+            let sourceID: String? = hiddenSourceIDs.contains(f.sourceDrawerID)
+                ? nil
+                : (f.sourceDrawerID.isEmpty ? nil : f.sourceDrawerID)
+            return FactTimelineRow(
+                filedAt: filed,
+                lifecycle: lifecycleTag,
+                factID: f.id,
+                subject: f.subject,
+                predicate: f.predicate,
+                object: f.object,
+                sourceDrawerID: sourceID)
         }
-        let count = facts.count
-        let header: String
-        if let entity = entity, !entity.isEmpty {
-            header = "fact timeline for \"\(entity)\": \(count)"
-        } else {
-            header = "fact timeline: \(count)"
-        }
-        return Self.textResult(([header] + lines).joined(separator: "\n"))
+        return Self.composedResult(ResultComposer.renderS4FactTimeline(facts: timelineRows))
     }
 }
 
@@ -3071,7 +3525,23 @@ extension ToolDispatcher {
         if let updateAdvisoryProvider, let update = await updateAdvisoryProvider() {
             stats.append("update_available: \(update)")
         }
-        return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol)
+        // Composite condition surface (Bob ruling 2026-08-26): estate_status
+        // folds in the drain report and the rebuild status so the AI reads
+        // the estate's condition in ONE call; the narrow moot_drain_status /
+        // moot_rebuild_status tools stay the cheap machine-polling surfaces.
+        let drains = try await kit.drainStatuses(handle)
+        if drains.isEmpty {
+            stats.append("drains: none")
+        } else {
+            stats.append("drains: \(drains.count)")
+            for d in drains {
+                stats.append("  \(d.name): \(d.isDraining ? "draining" : "idle") — pending: \(d.pending), in_flight: \(d.inFlight)")
+            }
+        }
+        let rebuildSpanOpen = await kit.derivedRebuildActive(for: handle)
+        let rebuildGuardBusy = await Self.reindexGuard.isBusy
+        stats.append("rebuild: \(rebuildSpanOpen || rebuildGuardBusy ? "running" : "idle")")
+        return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol + Self.modesStatusSection)
     }
 
     /// `moot_monitoring_status` — read or write the daemon's telemetry monitoring flag.
@@ -3176,23 +3646,40 @@ extension ToolDispatcher {
         }
 
         let capped = matches.prefix(200)
-        let filterSuffix = missingSubjectOnly ? " [filter: missing_subject]" : ""
-        var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")\(filterSuffix)"]
-        if matches.count > 200 {
-            lines.append("(showing first 200 of \(matches.count))")
-        }
-        for m in capped {
-            // Debt enumeration stays id-only by design (PR-02): the backfill
-            // walker fetches content per-row via moot_memory_get when it is
-            // ready to write a subject. Every other listing row is the
-            // dense row (PR-03) — address + assertion, no content preview.
-            if missingSubjectOnly {
-                lines.append("  \(m.drawer.id) [\(m.room)]")
-            } else {
-                lines.append("  \(DenseRow.render(m.drawer))")
+        if missingSubjectOnly {
+            // Missing-subject backfill path (PR-02): id-only structural inventory
+            // so the walker can call moot_update_memory=setSubject without
+            // hauling content. Not a semantic row surface — custom format retained.
+            let filterSuffix = " [filter: missing_subject]"
+            var lines: [String] = ["memory_list: \(capped.count) drawer(s) in \(wing)\(room.map { "/\($0)" } ?? "")\(filterSuffix)"]
+            if matches.count > 200 {
+                lines.append("(showing first 200 of \(matches.count))")
             }
+            for m in capped { lines.append("  \(m.drawer.id) [\(m.room)]") }
+            return Self.textResult(lines.joined(separator: "\n"))
         }
-        return Self.textResult(lines.joined(separator: "\n"))
+        // Normal listing: migrate to ResultComposer.renderS2Listing (COMPOSER-02B).
+        // One S2 row per drawer: uuid · subject · firstSentence · SSC · adornment · eventTime.
+        // Adornments not batch-read here (listing is a structural scan, not a
+        // recall surface; adornments are surfaced in search/get per spec §11.5).
+        let roomLabel = room ?? "(all)"
+        let candidateRows: [CandidateRowData] = capped.map { m in
+            CandidateRowData(
+                id: m.drawer.id,
+                subject: m.drawer.subject,
+                firstSentence: m.drawer.content.isEmpty ? nil : m.drawer.content,
+                eventTime: ResultComposer.iso8601(m.drawer.eventTime))
+        }
+        var composed = ResultComposer.renderS2Listing(wing: wing, room: roomLabel, rows: candidateRows)
+        if matches.count > 200 {
+            // Append cap notice after the header; splice before the rows.
+            let capNote = "(showing first 200 of \(matches.count))"
+            let lines = [composed.text.components(separatedBy: "\n").first ?? ""]
+                + [capNote]
+                + Array(composed.text.components(separatedBy: "\n").dropFirst())
+            composed = ComposedResult(text: lines.joined(separator: "\n"), structured: composed.structured)
+        }
+        return Self.composedResult(composed)
     }
 
     func runEstateMap(_ args: [String: JSONValue]) async throws -> JSONValue {
@@ -3314,9 +3801,10 @@ extension ToolDispatcher {
     /// CPU and can enqueue duplicate encode jobs.
     private static let reindexGuard = ReindexGuard()
 
-    func runReindex(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests.
+    func runReindex(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let now = Date()
         guard await Self.reindexGuard.tryStart() else {
             return Self.textResult("reindex already running — poll moot_drain_status to watch progress")
         }
@@ -3358,6 +3846,23 @@ extension ToolDispatcher {
     /// mission or the encode barrier hangs on healthy estates (the
     /// distillation-lane precedent). Twin: Rust `SUBJECT_BACKFILL_LANE_NAME`.
     static let subjectBackfillLaneName = "subject_backfill"
+
+    /// `moot_rebuild_status` — the derived-state rebuild operation status
+    /// (Bob ruling 2026-08-26: a rebuild is an OPERATION, never a drain
+    /// lane — drains are queues). Reports `rebuild: running` while either
+    /// (a) a GLK derived-rebuild span is open for the estate (reindexMissing
+    /// backfill / basis retrain + re-embed, whoever triggered it — the
+    /// moot_reindex detached task, a palace-import tail, or the dream
+    /// probe), or (b) this dispatcher's reindex guard is busy (the window
+    /// between "reindex started" and the detached task opening its span).
+    /// `moot_estate_status` composes this line into its condition report;
+    /// settle gates poll this tool directly.
+    func runRebuildStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let spanOpen = await kit.derivedRebuildActive(for: handle)
+        let guardBusy = await Self.reindexGuard.isBusy
+        return Self.textResult("rebuild: \(spanOpen || guardBusy ? "running" : "idle")")
+    }
 
     func runDrainStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
@@ -3540,7 +4045,9 @@ extension ToolDispatcher {
     /// without overwriting every curated non-sentinel code. `mode: all` is the
     /// explicit estate reset: every changed active drawer gets the current
     /// content-derived anchor.
-    func runReclassifyFDC(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests.
+    func runReclassifyFDC(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let apply = try optionalBool(args["apply"], argument: "apply") ?? false
         let mode = try FDCReclassifyMode.parse(
@@ -3580,7 +4087,7 @@ extension ToolDispatcher {
         var skippedNonCandidateChanges = 0
         var unclassifiedAfter = 0
         var examples: [FDCReclassifyChange] = []
-        let now = Date()
+        // `now` is threaded from the bench clock seam — not Date() directly.
 
         // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
         // function of its content and stored kind over the pinned FDC artifacts: the
@@ -3791,7 +4298,9 @@ extension ToolDispatcher {
     /// this tool opens arbitrary SQLite files from the local filesystem (a
     /// potential path-traversal vector if the caller is untrusted). Disabled
     /// installs (MOOTX01_VAULT=0) return a clear tool-level refusal.
-    func runPalaceImport(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests.
+    func runPalaceImport(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         guard ToolProjection.vaultEnabled(environment: environment) else {
             return Self.errorResult(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
@@ -3800,7 +4309,7 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let palacePath = try requireString(args, "palace_path")
         let palaceURL = URL(fileURLWithPath: palacePath, isDirectory: true)
-        let now = Date()
+        // `now` is the bench-clock instant threaded from `InterfaceTools.dispatch`.
 
         // mode (encode SPEED, default foreground): foreground drains the encode
         // queue hard on the performance cores; background yields for very large
@@ -3874,7 +4383,9 @@ extension ToolDispatcher {
     ///
     /// Gated behind `MOOTX01_VAULT` for the same reason as vault/palace
     /// import: this tool reads arbitrary files from the local filesystem.
-    func runJsonImport(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is threaded from the bench clock seam. Default `Date()` covers
+    /// direct runner calls in tests.
+    func runJsonImport(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         guard ToolProjection.vaultEnabled(environment: environment) else {
             return Self.errorResult(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
@@ -3883,7 +4394,7 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let path = try requireString(args, "path")
         let seedURL = URL(fileURLWithPath: path)
-        let now = Date()
+        // `now` is the bench-clock instant threaded from `InterfaceTools.dispatch`.
 
         // Optional default wing for records that omit `wing`. An explicit
         // empty string is invalid rather than silently ignored.
@@ -4085,6 +4596,9 @@ public enum ClassificationScheme: String, Sendable, CaseIterable {
 /// immediately with "already running" instead of spawning a duplicate.
 private actor ReindexGuard {
     private var running = false
+    /// True while the detached moot_reindex task holds the guard — the
+    /// window `moot_rebuild_status` reports before the GLK span opens.
+    var isBusy: Bool { running }
     func tryStart() -> Bool {
         if running { return false }
         running = true

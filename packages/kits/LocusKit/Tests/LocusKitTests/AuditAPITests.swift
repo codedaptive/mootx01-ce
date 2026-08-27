@@ -108,6 +108,10 @@ struct AuditAPITests {
         guard let capHLC = events.first?.hlc else { return }
         let state = try await estate.bitmapState(rowID: drawer.id, asOf: capHLC)
         #expect(state.adjectiveBitmap == drawer.adjectiveBitmap)
+        // AuditGate.admit includes all declared vocabulary slots in the capture
+        // event's afterBitmaps.operational. AuditLogFold reconstruction therefore
+        // matches live storage exactly — no masking required. Bits 27-30 are FREE
+        // as of ADORN-STORE-02 v17 (removed from vocabulary).
         #expect(state.operationalBitmap == drawer.operationalBitmap)
         #expect(state.provenanceBitmap == drawer.provenance)
     }

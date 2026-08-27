@@ -115,8 +115,8 @@ pub enum Command {
     /// (the detached background finisher an stdio serve spawns on startup/exit
     /// when the dreaming queue has pending items;  / recall-driven dreaming).
     Dream { db: Option<String> },
-    /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart]
-    Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool },
+    /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart] [--backfill-only]
+    Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool, backfill_only: bool },
     /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
     /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
     /// "private" maps to the restricted tier; "secret" to the secret tier.
@@ -772,7 +772,8 @@ fn parse_proxy(it: &mut Args) -> Result<Command, UsageError> {
 
 fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
     let mut from = None;
-    let (mut check, mut yes, mut no_restart, mut converge_only) = (false, false, false, false);
+    let (mut check, mut yes, mut no_restart, mut converge_only, mut backfill_only) =
+        (false, false, false, false, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--from" => from = Some(take_value(it, "--from")?),
@@ -783,11 +784,16 @@ fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
             // re-executes the binary it just installed with this flag so the
             // convergence steps run the NEW code. See `upgrade::run`.
             "--converge-only" => converge_only = true,
+            // Headless data-dir convergence for scripted and benchmark estates:
+            // run only the three migration steps (kg_facts identity, adornment
+            // store migration, shared-content reclaim) against MOOTX01_DATA_DIR,
+            // then exit. No network, no service manager, no prompts.
+            "--backfill-only" => backfill_only = true,
             "--help" | "-h" => return Ok(Command::HelpFor("upgrade")),
             other => return Err(unexpected(other, "upgrade")),
         }
     }
-    Ok(Command::Upgrade { from, check, yes, no_restart, converge_only })
+    Ok(Command::Upgrade { from, check, yes, no_restart, converge_only, backfill_only })
 }
 
 fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
@@ -1086,13 +1092,14 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --db <name>             Named estate to process dreaming jobs for. Default: active estate.".into(),
         "upgrade" => "Upgrade mootx01 to the latest release or a local build.\n\
             \n\
-            USAGE: mootx01 upgrade [--from <path>] [--check] [--yes] [--no-restart]\n\
+            USAGE: mootx01 upgrade [--from <path>] [--check] [--yes] [--no-restart] [--backfill-only]\n\
             \n\
             OPTIONS:\n\
             \x20 --from <path>           Path to the new binary to install (skips online check).\n\
             \x20 --check                 Print the latest available version and exit without downloading.\n\
             \x20 --yes                   Skip the confirmation prompt before downloading a new release.\n\
-            \x20 --no-restart            Copy the binary but skip restarting the background agents.".into(),
+            \x20 --no-restart            Copy the binary but skip restarting the background agents.\n\
+            \x20 --backfill-only         Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
         "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
             \n\
             USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
@@ -1426,7 +1433,8 @@ mod tests {
                 check: true,
                 yes: false,
                 no_restart: false,
-                converge_only: false
+                converge_only: false,
+                backfill_only: false,
             }
         );
     }
@@ -1442,9 +1450,42 @@ mod tests {
                 check: false,
                 yes: true,
                 no_restart: false,
-                converge_only: true
+                converge_only: true,
+                backfill_only: false,
             }
         );
+    }
+
+    /// Help text for `upgrade` must document `--backfill-only` so operators
+    /// and scripts can discover the flag.
+    #[test]
+    fn upgrade_help_mentions_backfill_only() {
+        let help = subcommand_usage("upgrade");
+        assert!(
+            help.contains("--backfill-only"),
+            "upgrade help must document --backfill-only; got: {help}"
+        );
+    }
+
+    /// `--backfill-only` runs only the three data-dir migration steps
+    /// (kg_facts identity, adornment store migration, shared-content reclaim);
+    /// no network, no service manager, no prompts. Used by scripted and
+    /// benchmark estates.
+    #[test]
+    fn upgrade_backfill_only_parses() {
+        assert_eq!(
+            p(&["upgrade", "--backfill-only"]).unwrap(),
+            Command::Upgrade {
+                from: None,
+                check: false,
+                yes: false,
+                no_restart: false,
+                converge_only: false,
+                backfill_only: true,
+            }
+        );
+        // Unknown flags still rejected.
+        assert!(p(&["upgrade", "--backfill-only", "--unknown"]).is_err());
     }
 
     #[test]

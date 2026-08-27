@@ -504,25 +504,27 @@ struct VectorStoreTests {
         }
     }
 
-    /// When two candidates have identical Hamming distance from the
-    /// probe, `findNearest` breaks the tie by `itemID` ascending.
-    ///
-    /// Engram(blocks: 1, 0, 0, 0) (popcount=1) and
-    /// Engram(blocks: 2, 0, 0, 0) (popcount=1) are both distance 1
-    /// from the zero probe. The item with the lexicographically
-    /// smaller ID ("aaa-drawer") must appear first.
-    @Test func findNearestTieBreakByItemIDIsStable() async throws {
+    /// When two candidates have identical Hamming distance from the probe,
+    /// `findNearest` breaks the tie by vecHash — the FNV-1a content hash of
+    /// the payload bytes (SPEC 1.9.0 B-6) — so the order is identical across
+    /// estate provisionings regardless of which item drew which UUID.
+    /// itemID remains the FINAL backstop for byte-identical payloads.
+    @Test func findNearestTieBreakByVecHashIsStable() async throws {
         try await GlobalTestLock.shared.withLock {
             let store = try await makeStore()
             let now = Date(timeIntervalSince1970: 1_700_000_000)
-            // Both engrams have popcount 1 — identical distance from zero probe.
+            let eA = Engram(blocks: 1, 0, 0, 0)   // popcount 1
+            let eB = Engram(blocks: 2, 0, 0, 0)   // popcount 1 — tied distance
+            // Deliberately file so that the itemID order OPPOSES the vecHash
+            // order for one of the two possible hash outcomes — the assertion
+            // below derives the expected winner from the hashes alone.
             try await store.addVector(itemID: "zzz-drawer",
-                                      engram: Engram(blocks: 1, 0, 0, 0),
+                                      engram: eA,
                                       modelID: "minilm",
                                       modelVersion: "1.0.0",
                                       filedAt: now)
             try await store.addVector(itemID: "aaa-drawer",
-                                      engram: Engram(blocks: 2, 0, 0, 0),
+                                      engram: eB,
                                       modelID: "minilm",
                                       modelVersion: "1.0.0",
                                       filedAt: now)
@@ -531,8 +533,10 @@ struct VectorStoreTests {
                                                       modelID: "minilm",
                                                       limit: 2)
             #expect(matches.count == 2)
-            #expect(matches[0].itemID == "aaa-drawer")
-            #expect(matches[1].itemID == "zzz-drawer")
+            let first = fnv1a64(eA.wireBytes) < fnv1a64(eB.wireBytes)
+                ? "zzz-drawer" : "aaa-drawer"
+            #expect(matches[0].itemID == first)
+            #expect(matches[1].itemID == (first == "zzz-drawer" ? "aaa-drawer" : "zzz-drawer"))
         }
     }
 
@@ -611,12 +615,13 @@ struct VectorStoreTests {
                         "distance diverged for \(m.itemID): MIH=\(m.distance) BF=\(b.distance)")
             }
 
-            // Sanity: results are sorted distance ASC, itemID ASC.
+            // Sanity: distances are monotone non-decreasing. Within a tied
+            // distance the order is (vecHash, itemID) — SPEC 1.9.0 — which
+            // the exact cross-engine identity above already pins; the itemID
+            // alone is no longer an ordering claim.
             for i in 1..<mihMatches.count {
-                let prev = mihMatches[i - 1], curr = mihMatches[i]
                 #expect(
-                    prev.distance < curr.distance ||
-                    (prev.distance == curr.distance && prev.itemID <= curr.itemID),
+                    mihMatches[i - 1].distance <= mihMatches[i].distance,
                     "MIH result ordering violated at index \(i)"
                 )
             }

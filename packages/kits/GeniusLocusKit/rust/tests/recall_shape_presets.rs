@@ -40,8 +40,8 @@ fn preset_names_are_discoverable_and_each_resolves() {
             );
         }
     }
-    // jaccard is the 21st preset (W2.5 M1 binary-metric unlock).
-    assert_eq!(RecallShape::PRESET_NAMES.len(), 21);
+    // 22 original + 3 anti_redundant_* + 2 multi-column + 2 float-metric = 29 presets.
+    assert_eq!(RecallShape::PRESET_NAMES.len(), 29);
 }
 
 #[test]
@@ -191,4 +191,180 @@ fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
     let ablated = RecallShape::new(weights, base.frontier_k);
     assert_eq!(ablated.weight(RecallShape::DENSE_LSA), 0.0);
     assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
+}
+
+// --- Per-signal anti-similarity presets (W3) ---
+
+#[test]
+fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
+    let s = RecallShape::preset("anti_redundant_ri").unwrap();
+    // RI lane is anti-similar (farthest-neighbour direction).
+    assert!(s.is_anti_similar(RecallShape::DENSE_RANDOM_INDEXING));
+    // Only RI — LSA, NMF, FDC stay nearest.
+    assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_NMF));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
+    // Anti-similar flag flips direction, not magnitude — RI weight stays at 1.0.
+    assert_eq!(s.weight(RecallShape::DENSE_RANDOM_INDEXING), 1.0);
+    // BM25 and Hamming suppressed.
+    assert!(s.weight("bm25") < 0.0);
+    assert!(s.weight("hamming") < 0.0);
+    // Frontier narrowed to the floor.
+    assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
+    // Catalog description is non-empty.
+    assert!(!RecallShape::preset_description("anti_redundant_ri").is_empty());
+}
+
+#[test]
+fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
+    let s = RecallShape::preset("anti_redundant_lsa").unwrap();
+    assert!(s.is_anti_similar(RecallShape::DENSE_LSA));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_RANDOM_INDEXING));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
+    assert_eq!(s.weight(RecallShape::DENSE_LSA), 1.0);
+    assert!(s.weight("bm25") < 0.0);
+    assert!(s.weight("hamming") < 0.0);
+    assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
+    assert!(!RecallShape::preset_description("anti_redundant_lsa").is_empty());
+}
+
+#[test]
+fn anti_redundant_nmf_inverts_nmf_and_suppresses_bm25_hamming() {
+    let s = RecallShape::preset("anti_redundant_nmf").unwrap();
+    assert!(s.is_anti_similar(RecallShape::DENSE_NMF));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
+    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
+    assert_eq!(s.weight(RecallShape::DENSE_NMF), 1.0);
+    assert!(s.weight("bm25") < 0.0);
+    assert!(s.weight("hamming") < 0.0);
+    assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
+    assert!(!RecallShape::preset_description("anti_redundant_nmf").is_empty());
+}
+
+// --- Multi-column matrix presets (W3) ---
+
+#[test]
+fn temporal_connection_amplifies_temporal_and_co_occurrence() {
+    let s = RecallShape::preset("temporal_connection").unwrap();
+    // Both matrix columns amplified above neutral.
+    assert!(s.weight("temporal") > 1.0);
+    assert!(s.weight("coOccurrence") > 1.0);
+    // No lanes excluded or anti-similar — purely additive over balanced.
+    assert_eq!(s.weight("locus"), 1.0);
+    assert_eq!(s.weight("bm25"), 1.0);
+    assert!(s.anti_similar_lanes.is_empty());
+    // No frontier override.
+    assert!(s.frontier_k.is_none());
+    assert!(!RecallShape::preset_description("temporal_connection").is_empty());
+}
+
+#[test]
+fn field_preference_amplifies_field_fit_and_preference() {
+    let s = RecallShape::preset("field_preference").unwrap();
+    // Both matrix columns amplified above neutral.
+    assert!(s.weight("fieldFit") > 1.0);
+    assert!(s.weight("preference") > 1.0);
+    // No lanes excluded or anti-similar.
+    assert_eq!(s.weight("locus"), 1.0);
+    assert_eq!(s.weight("temporal"), 1.0);
+    assert!(s.anti_similar_lanes.is_empty());
+    assert!(s.frontier_k.is_none());
+    assert!(!RecallShape::preset_description("field_preference").is_empty());
+}
+
+// --- GLKRecallRequest.frontier_k per-call override (W3) ---
+
+#[test]
+fn glk_recall_request_frontier_k_defaults_to_none() {
+    use genius_locus_kit::recall::{
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
+    };
+    use locus_kit::filter::RecallFrame;
+
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    );
+    assert!(req.frontier_k.is_none());
+}
+
+#[test]
+fn with_frontier_k_stores_midpoint_value() {
+    use genius_locus_kit::recall::{
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
+    };
+    use locus_kit::filter::RecallFrame;
+
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+    .with_frontier_k(128);
+    // 128 is the midpoint of [64, 256] — no clamping applied by the builder.
+    assert_eq!(req.frontier_k, Some(128));
+}
+
+#[test]
+fn frontier_k_out_of_range_is_clamped_by_effective_frontier_k() {
+    // The coordinator applies RecallShape::effective_frontier_k semantics to the
+    // request-level override. Verify the clamp contract via the shape helper,
+    // which encodes the same [FRONTIER_K_FLOOR, FRONTIER_K_CEILING] bounds.
+    let below_floor = RecallShape::new(std::collections::HashMap::new(), Some(1));
+    assert_eq!(
+        below_floor.effective_frontier_k(100),
+        RecallShape::FRONTIER_K_FLOOR
+    );
+
+    let above_ceiling = RecallShape::new(std::collections::HashMap::new(), Some(9999));
+    assert_eq!(
+        above_ceiling.effective_frontier_k(100),
+        RecallShape::FRONTIER_K_CEILING
+    );
+
+    let midpoint = RecallShape::new(std::collections::HashMap::new(), Some(128));
+    assert_eq!(midpoint.effective_frontier_k(100), 128);
+}
+
+// --- Float-lane metric presets ---
+
+#[test]
+fn float_l2_sets_float_metric_and_leaves_defaults() {
+    let s = RecallShape::preset("float-l2").unwrap();
+    // The ONLY change from balanced is the float-lane metric.
+    assert_eq!(s.float_metric, "l2");
+    // All lane weights stay neutral — no fusion steering.
+    assert!(s.lane_weights.is_empty());
+    // Anti-similar set stays empty — no direction inversion.
+    assert!(s.anti_similar_lanes.is_empty());
+    // No frontier override — engine default applies.
+    assert!(s.frontier_k.is_none());
+    // Binary metric unchanged from the default.
+    assert_eq!(s.binary_metric, "hamming");
+    // Description is present in the catalog.
+    assert!(!RecallShape::preset_description("float-l2").is_empty());
+}
+
+#[test]
+fn float_dot_sets_float_metric_and_leaves_defaults() {
+    let s = RecallShape::preset("float-dot").unwrap();
+    // The ONLY change from balanced is the float-lane metric.
+    assert_eq!(s.float_metric, "dot");
+    // All lane weights stay neutral — no fusion steering.
+    assert!(s.lane_weights.is_empty());
+    // Anti-similar set stays empty — no direction inversion.
+    assert!(s.anti_similar_lanes.is_empty());
+    // No frontier override — engine default applies.
+    assert!(s.frontier_k.is_none());
+    // Binary metric unchanged from the default.
+    assert_eq!(s.binary_metric, "hamming");
+    // Description is present in the catalog.
+    assert!(!RecallShape::preset_description("float-dot").is_empty());
 }

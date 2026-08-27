@@ -571,6 +571,43 @@ extension GeniusLocusKit {
     /// D6/D7 composition + distillation shared by the consolidation act and
     /// fold-in regeneration. Returns nil only for pathological all-empty
     /// input (a cluster of blank rows).
+    /// Maps each sentence of the joined cluster text back to the piece
+    /// (constituent) whose region it starts in, yielding the per-sentence
+    /// timestamp vector the distillation pipeline's TypedDecayWeighting
+    /// branch consumes (W2.5 S6). Piece start offsets are accumulated over
+    /// the join; sentences are located in order with a moving cursor (they
+    /// are contiguous substrings of the joined text). Returns nil if any
+    /// sentence cannot be located — fail-quiet to the pipeline's uniform
+    /// document-frequency branch, never a crash.
+    static func sentenceTimestamps(
+        sentences: [String],
+        pieces: [(text: String, timestamp: Date)],
+        separator: String,
+        combined: String
+    ) -> [Date]? {
+        guard !sentences.isEmpty, !pieces.isEmpty else { return nil }
+        var pieceStarts: [(start: Int, timestamp: Date)] = []
+        var offset = 0
+        for (index, piece) in pieces.enumerated() {
+            pieceStarts.append((start: offset, timestamp: piece.timestamp))
+            offset += piece.text.count
+            if index < pieces.count - 1 { offset += separator.count }
+        }
+        var result: [Date] = []
+        var cursor = combined.startIndex
+        for sentence in sentences {
+            guard let found = combined.range(
+                of: sentence, range: cursor..<combined.endIndex) else { return nil }
+            let startOffset = combined.distance(
+                from: combined.startIndex, to: found.lowerBound)
+            guard let timestamp = pieceStarts.last(
+                where: { $0.start <= startOffset })?.timestamp else { return nil }
+            result.append(timestamp)
+            cursor = found.upperBound
+        }
+        return result
+    }
+
     private func composeAndDistill(
         constituents: [Drawer],
         config: ConsolidationConfig,
@@ -580,21 +617,34 @@ extension GeniusLocusKit {
         // combination. Fallback (D7): oversized clusters merge the EXISTING
         // distillates (cheap — no matrix over a huge combined text); rows not
         // yet distilled contribute their content unchanged.
-        let combined: String
+        // Each piece keeps its constituent's event time so sentences can be
+        // mapped back to the memory they came from (W2.5 S6: the pipeline's
+        // TypedDecayWeighting branch needs per-sentence timestamps — cross-
+        // item clusters are exactly where type-specific decay reweights
+        // features, DISTILLATION_MATH_DIFFUSION §2).
+        let pieces: [(text: String, timestamp: Date)]
+        let separator: String
         if constituents.count > config.largeClusterFallback {
-            combined = constituents
-                .map { $0.distilled ?? $0.content }
-                .joined(separator: "\n")
+            separator = "\n"
+            pieces = constituents.map { ($0.distilled ?? $0.content, $0.eventTime) }
         } else {
-            combined = constituents.map(\.content).joined(separator: "\n\n")
+            separator = "\n\n"
+            pieces = constituents.map { ($0.content, $0.eventTime) }
         }
+        let combined = pieces.map(\.text).joined(separator: separator)
         let sentences = EideticLib.sentences(combined).map(String.init)
+        // Per-sentence timestamps by OFFSET mapping — the sentence array is
+        // segmented over the JOINED text (segmentation must not change), so
+        // each sentence takes the timestamp of the piece its start falls in.
+        let sentenceTimestamps = Self.sentenceTimestamps(
+            sentences: sentences, pieces: pieces,
+            separator: separator, combined: combined)
         let rendering: String
         let fingerprint: Fingerprint256
         if sentences.count >= 3 {
             let output = distillFn(DistillationInput(
                 memoryContents: sentences,
-                memoryTimestamps: nil,
+                memoryTimestamps: sentenceTimestamps,
                 clusterID: constituents[0].id,
                 sourceIDs: constituents.map(\.id)))
             rendering = output.distilledText.isEmpty

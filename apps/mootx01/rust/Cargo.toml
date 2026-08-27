@@ -88,6 +88,20 @@ genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/ru
 # via aria-mcp; naming it directly keeps the upgrade wiring honest and
 # removable (same rationale as persistence-kit above).
 corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
+# adornment-lib: AdornmentMinterDescriptor and StoredAdornment value types
+# used by run_adornment_store_migration to register legacy minter rows and
+# move drawers.adornment text to the normalized adornments table
+# (ADORN-STORE-02 Part C, schema v17). No layering inversion: adornment-lib
+# is upstream of locus-kit in the dependency graph.
+adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }
+
+# unicode-normalization: NFC normalization for the review engine's normalize_subject.
+# Required for F9 parity: Swift uses precomposedStringWithCanonicalMapping (NFC) to
+# normalize subject strings before duplicate-detection comparison. Without NFC, a
+# decomposed Unicode subject (e.g. "e" + U+0301 combining acute) would not match the
+# precomposed form ("é") in the Rust engine, causing divergence from Swift's output.
+# Authorized by the mission orchestrator as a correctness dependency (2026-08-24).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.

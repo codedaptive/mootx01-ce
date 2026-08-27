@@ -294,15 +294,47 @@ public struct LeaseConsumptionJournal: Sendable {
     /// BEFORE the lease is resolved into any capability, so a crash between
     /// record and resolution burns the lease rather than doubling it.
     public func recordConsumption(_ leaseIdentifier: UUID) throws {
-        // Validated append: the same hygiene matrix as every other state
-        // open, plus O_APPEND for the journal-first durable record.
+        _ = try recordConsumptionIfAbsent(leaseIdentifier)
+    }
+
+    /// Atomically check and durably record one consumption under a single
+    /// cross-process lock. Returns `false` when the identifier was already
+    /// present. All enforcement callers must use this operation rather than
+    /// composing `contains` and `recordConsumption`.
+    public func recordConsumptionIfAbsent(_ leaseIdentifier: UUID) throws -> Bool {
         let fd: Int32
         do {
-            fd = try SecureFiles.openValidated(fileURL, flags: O_WRONLY | O_APPEND, create: true)
+            fd = try SecureFiles.openValidated(fileURL, flags: O_RDWR | O_APPEND, create: true)
         } catch DaemonProviderError.hygieneViolation {
             throw DaemonProviderError.leaseInvalid(.journalUnavailable)
         }
         defer { close(fd) }
+
+        var lockResult = flock(fd, LOCK_EX)
+        while lockResult != 0 && errno == EINTR {
+            lockResult = flock(fd, LOCK_EX)
+        }
+        guard lockResult == 0 else {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        defer { _ = flock(fd, LOCK_UN) }
+
+        guard lseek(fd, 0, SEEK_SET) >= 0 else {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        let existing: [UInt8]
+        do {
+            existing = try SecureFiles.readAll(fd: fd)
+        } catch {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        let target = Substring(leaseIdentifier.uuidString)
+        if String(decoding: existing, as: UTF8.self)
+            .split(separator: "\n")
+            .contains(where: { $0 == target }) {
+            return false
+        }
+
         let line = [UInt8]((leaseIdentifier.uuidString + "\n").utf8)
         var written = 0
         while written < line.count {
@@ -317,6 +349,12 @@ public struct LeaseConsumptionJournal: Sendable {
         guard fsync(fd) == 0 else {
             throw DaemonProviderError.leaseInvalid(.journalUnavailable)
         }
+        do {
+            try SecureFiles.fsyncParentDirectory(of: fileURL)
+        } catch {
+            throw DaemonProviderError.leaseInvalid(.journalUnavailable)
+        }
+        return true
     }
 }
 
@@ -422,14 +460,12 @@ public struct LeaseAuthority: Sendable {
               lease.descriptorGeneration >= currentGenerations.descriptor else {
             throw DaemonProviderError.leaseInvalid(.staleGeneration)
         }
-        // 5. Replay: the durable journal, fail-closed.
-        guard try !journal.contains(lease.leaseIdentifier) else {
+        // 5–6. Replay check and durable burn are one locked operation. Once
+        // it returns true, the lease can never resolve again across threads,
+        // authority instances, or processes.
+        guard try journal.recordConsumptionIfAbsent(lease.leaseIdentifier) else {
             throw DaemonProviderError.leaseInvalid(.consumed)
         }
-        // 6. Burn BEFORE resolve (c0 journal-first): once this line returns,
-        //    the lease can never resolve again — even if we crash on the
-        //    very next instruction.
-        try journal.recordConsumption(lease.leaseIdentifier)
         // 7. Resolve.
         return EstateReadyProof(
             estateIdentifier: lease.estateIdentifier,

@@ -375,7 +375,7 @@ struct EstateEncryptionMigratorTests {
             "the encrypted estate is in place regardless of the restart failure")
         #expect(result.swap.daemonWasRunning)
         #expect(!result.swap.daemonRestarted,
-            "the restart failure must be visible to the caller for honest reporting")
+            "the restart failure must be visible to the caller for accurate reporting")
     }
 
     @Test("Migration declines to run on a non-plaintext source")

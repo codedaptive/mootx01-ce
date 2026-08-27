@@ -176,6 +176,14 @@ public enum RecipeCatalog {
         // to this file (Dc4 consolidation strategy).
         RecipeDescriptor(Distill()),
         RecipeDescriptor(DistilledRecall()),
+        // Escalation-ladder recall recipe (D10): runs cheap-first stages and
+        // stops at the first confident result. Stage 1 = session_hybrid preset,
+        // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.
+        RecipeDescriptor(
+            name: "walk_recall",
+            version: "1.0.0",
+            description: "Escalation-ladder recall: run a cheap session_hybrid stage first and stop when the top-gap is confident (≥ 0.25); escalate to a precise hamming+text re-rank only when Stage 1 is insufficient. Faster than precise recall for the common case; falls back gracefully when the estate needs the extra precision.",
+            requiredCapabilities: []),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

@@ -40,6 +40,54 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 
+# C-1 APPROVED: candle crates — Bob ruling 2026-08-21.
+# Gated behind the `candle` feature so the default build (and cargo test
+# without --features candle) stays dependency-free. Enable with
+# `--features candle` to compile CandleNLProvider.
+#
+# Version: 0.9.2 (proven by the tools/neural-embed backend crate; the C-1 audit
+# recommends 0.11.0 with tokenizers 0.22 — a version bump is a follow-up
+# mission that must re-run the §7.3 bench after changing versions).
+#
+# No hf-hub anywhere in this crate: model weights load exclusively from
+# local files; fetch-model.sh in tools/neural-embed is the only network
+# path (design doc §7.6 and §4 no-new-network requirement).
+[features]
+# Enable Candle-based in-process ML inference (CandleNLProvider).
+# Requires model assets on disk (see tools/neural-embed/fetch-model.sh).
+candle = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:serde_json",
+]
+
+[dependencies.candle-core]
+version = "=0.9.2"
+optional = true
+
+[dependencies.candle-nn]
+version = "=0.9.2"
+optional = true
+
+[dependencies.candle-transformers]
+version = "=0.9.2"
+optional = true
+
+[dependencies.tokenizers]
+version = "=0.21.4"
+default-features = false
+features = ["onig"]
+optional = true
+
+# serde_json for parsing BERT config.json in the candle feature path.
+# Named "serde_json-candle" in the feature list to avoid conflicts with the
+# dev-dependency serde_json (which is only for tests).
+[dependencies.serde_json]
+version = "1"
+optional = true
+
 [dev-dependencies]
 # B2-5: the embedding conformance test deserialises the shared canonical
 # vectors (Tests/SharedVectors/embedding_provider_vectors.json) that the

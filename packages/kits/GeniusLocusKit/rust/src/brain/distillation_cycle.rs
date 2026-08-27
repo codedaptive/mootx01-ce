@@ -65,12 +65,19 @@ pub fn compaction_rendering(content: &str) -> String {
 pub fn render_distillation(
     drawer_id: &str,
     content: &str,
+    coref_pool: &[crate::brain::coref_stage::Antecedent],
 ) -> (String, substrate_types::fingerprint256::Fingerprint256) {
     use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 
     let sentences: Vec<String> = eidetic_lib::segmenter::sentences(content);
     if item_is_distillable(sentences.len()) {
         // Matrix path (§7.4): intra-item M×|V| reduction.
+        // memory_timestamps stays None ON PURPOSE (W2.5 S6): the "memories"
+        // here are one item's sentences, which all share the item's single
+        // timestamp — equal ages make TypedDecayWeighting's weights cancel in
+        // the normalizer (wdf ≡ df), so threading the timestamp is a
+        // mathematical no-op. The decay branch is live in the CROSS-ITEM
+        // consolidation path (coordinator::compose_and_distill).
         let input = DistillationInput::new(
             sentences,
             None,
@@ -84,6 +91,11 @@ pub fn render_distillation(
         } else {
             output.distilled_text
         };
+        // Pipeline p2.3 stage A (W2.2, accepted design A1): resolve
+        // third-person pronouns against the session pool BEFORE the trailer
+        // weld — trailer facts stay verbatim-derived and the grammar block
+        // is never rewritten. Empty pool (single-item callers) → identity.
+        let rendering = super::coref_stage::resolve(&rendering, coref_pool);
         // Pipeline p2: weld the categorizer trailer (facts from the
         // VERBATIM content) onto the rendering. Twin of Swift distillItem.
         let rendering = format!(
@@ -97,7 +109,7 @@ pub fn render_distillation(
         (
             format!(
                 "{}{}",
-                compaction_rendering(content),
+                super::coref_stage::resolve(&compaction_rendering(content), coref_pool),
                 super::enrichment_stage::enrichment_trailer(content)
             ),
             DistillationPipeline::query_fingerprint(

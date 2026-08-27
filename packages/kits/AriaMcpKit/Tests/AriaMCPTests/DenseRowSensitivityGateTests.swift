@@ -1,6 +1,6 @@
 // DenseRowSensitivityGateTests.swift
 //
-// MXE-DM — the dense-row hydration boundary refuses stale-tunnel endpoints
+// MXE-DM — the S2-row hydration boundary refuses stale-tunnel endpoints
 // (Codex finding 9352f983dea081919f83885bdbf77d40).
 //
 // A tunnel inherits its endpoints' adjective sensitivity ONCE, at capture.
@@ -13,14 +13,14 @@
 // ONE test per behaviour at the HELPER, not one near-duplicate per arm.
 // All six lens arms in `LensTools`, the four recall arms in `RecipeTools`,
 // and the two tunnel-citation arms in `ToolDispatch` — twelve call sites —
-// route through `RecipeTools.denseRowsByID`, so proving the helper gates
+// route through `RecipeTools.s2RowsByID`, so proving the helper gates
 // covers every one of them by construction.
 // `lensArmInheritsTheHelperGate` then pins one real arm end-to-end so the
 // routing itself cannot silently change.
 //
-// The gate here is the empty `filterChain` in `denseRowsByID`, which
+// The gate here is the empty `filterChain` in `s2RowsByID`, which
 // `BitmapEvaluator.insertDefaults` turns into `.sensitivityAtMost(.elevated)`
-// on the adjective axis. Twin of the Rust `dense_row::rows_by_id` tests in
+// on the adjective axis. Twin of the Rust `s2_rows_by_id` tests in
 // dispatch_tests.rs (`dm_*`).
 
 import Testing
@@ -33,10 +33,10 @@ import PersistenceKitInMemory
 
 /// `.serialized`: every case opens a live in-memory estate — same
 /// discipline as LensToolsTests and RecipeToolsTests.
-@Suite("Dense-row sensitivity gate", .serialized)
+@Suite("S2-row sensitivity gate", .serialized)
 struct DenseRowSensitivityGateTests {
 
-    /// The canary lives in the SUBJECT, not the content: `DenseRow.render`
+    /// The canary lives in the SUBJECT, not the content: `ResultComposer.renderS2Row`
     /// renders `subject`, so a canary in the body would prove nothing.
     private static let canary = "dm stale-edge target SUBJECTCANARY"
 
@@ -90,7 +90,7 @@ struct DenseRowSensitivityGateTests {
     // MARK: - The helper gate (covers all twelve callers by construction)
 
     /// A drawer restricted AFTER its tunnels were created is absent from the
-    /// helper's map — so every caller's `renderUnhydrated` fallback fires.
+    /// helper's map — so every caller's S2-row fallback fires.
     /// Absent rather than substituted: the map is how a caller learns the row
     /// is gated, and substituting a redaction string here would hand every
     /// arm a second, unreviewed disclosure format.
@@ -101,7 +101,7 @@ struct DenseRowSensitivityGateTests {
         let ids = try await staleEdge(kit, handle, sensitivity: .restricted)
         let estate = try await kit.estate(for: handle)
 
-        let rows = try await RecipeTools.denseRowsByID(
+        let rows = try await RecipeTools.s2RowsByID(
             ids: [ids.src, ids.tgt], estate: estate)
 
         #expect(rows[ids.tgt] == nil,
@@ -120,7 +120,7 @@ struct DenseRowSensitivityGateTests {
         let ids = try await staleEdge(kit, handle, sensitivity: .secret)
         let estate = try await kit.estate(for: handle)
 
-        let rows = try await RecipeTools.denseRowsByID(
+        let rows = try await RecipeTools.s2RowsByID(
             ids: [ids.src, ids.tgt], estate: estate)
 
         #expect(rows[ids.tgt] == nil,
@@ -140,7 +140,7 @@ struct DenseRowSensitivityGateTests {
         let ids = try await staleEdge(kit, handle, sensitivity: sensitivity)
         let estate = try await kit.estate(for: handle)
 
-        let rows = try await RecipeTools.denseRowsByID(
+        let rows = try await RecipeTools.s2RowsByID(
             ids: [ids.src, ids.tgt], estate: estate)
 
         let row = try #require(rows[ids.tgt],
@@ -184,15 +184,16 @@ struct DenseRowSensitivityGateTests {
                 "it must keep its ranking value; got: \(body)")
         #expect(!body.contains("SUBJECTCANARY"),
                 "it must not render its subject; got: \(body)")
-        #expect(body.contains(DenseRow.renderUnhydrated(id: ids.tgt)),
-                "it must render the unhydrated row byte-for-byte; got: \(body)")
+        #expect(body.contains(ResultComposer.renderS2Row(CandidateRowData(id: ids.tgt, eventTime: "-"))),
+                "it must render the unhydrated S2 row byte-for-byte; got: \(body)")
     }
 
     /// INDISTINGUISHABILITY. A gated endpoint and an endpoint that does not
     /// exist at all must render through the SAME path, so the reply cannot be
     /// used as an existence oracle: someone who can link an id must not be
     /// able to tell "this drawer exists but is restricted" from "no such
-    /// drawer". Both reach `renderUnhydrated`, so the two bodies must be
+    /// drawer". Both fall through to `ResultComposer.renderS2Row` with an
+    /// unhydrated `CandidateRowData`, so the two bodies must be
     /// byte-identical once the id itself is substituted out.
     ///
     /// MXE-NQ established this property for the `near:` anchor surface; this

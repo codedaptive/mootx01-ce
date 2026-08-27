@@ -64,7 +64,12 @@
 //     bit  20    is_vague (Wave-2 consolidation)        ASSIGNED
 //     bit  21    represented_by_vague (Wave-2)          ASSIGNED
 //     bits 22-23 vague_level 2-bit sub-field (Wave-2)   ASSIGNED
-//     bits 24-63 FREE (40 bits headroom)
+//     bits 24-26 isAnomalous etc.                       ASSIGNED
+//     bits 27-30 FREE — previously adornment-required and adornment_bitmask;
+//                 retired by ADORN-STORE-02 (2026-08-25). Minter identity and
+//                 activation now live in the adornment_minters table. These
+//                 bits MUST be zero on all live rows after the upgrade.
+//     bits 31-63 FREE (33 bits headroom)
 //
 //   drawers.provenance
 //     bits 0-3   source type                            ASSIGNED
@@ -121,10 +126,25 @@ public enum LocusKitSchema {
     /// v15 adds the recall_trace lane-attribution trio (`door`,
     /// `composition`, `laneRanks`, all TEXT nullable) — W2.5 Track R(a).
     /// NULL on pre-v15 rows and on rows written without door identity;
-    /// no query text is stored (privacy ruling 2026-08-20). Delivered to
-    /// populated estates through `mootx01 upgrade` (the only migration
-    /// vehicle), which opens each estate and replays this ladder.
-    public static let version = 15
+    /// no query text is stored (privacy ruling 2026-08-20).
+    /// v16 added `adornment` TEXT nullable to `drawers`. That column is
+    /// retained physically in the drawers table for zero-downtime migration
+    /// safety (SQLite cannot DROP COLUMN in a single ALTER TABLE without
+    /// full table rebuild), but no LocusKit code reads or writes it — it
+    /// is a dead column from v17 onward. External callers (GeniusLocusKit,
+    /// AriaMcpKit) that previously read `Drawer.adornment` are updated in
+    /// Parts B/C of ADORN-STORE-02.
+    /// v17 (ADORN-STORE-02, 2026-08-25): normalised adornment storage.
+    /// Adds `adornment_minters` (id TEXT PK, name, family, model_id,
+    /// model_version, prompt_digest, parameters JSON, is_active INTEGER,
+    /// ext JSON NULL) and `adornments` (drawer_id, minter_id, text,
+    /// PRIMARY KEY (drawer_id, minter_id)). The upgrade step registers
+    /// legacy minter rows for each legacy family/generation bitmask code
+    /// that has stored text, moves legacy adornment text into adornments
+    /// rows, and clears bits 27-30 on all live drawers. Idempotent on
+    /// fresh AND already-migrated estates in both ports (the CREATE TABLE
+    /// IF NOT EXISTS DDL is used via custom migration).
+    public static let version = 17
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -153,6 +173,11 @@ public enum LocusKitSchema {
                 ErasureLedgerSchema.ledgerTable,
                 SnapshotSchema.registryTable,
                 SnapshotSchema.attestationsTable,
+                // Normalised adornment storage (ADORN-STORE-02, v17).
+                // adornment_minters: the minter master table.
+                // adornments: per-(drawer, minter) generated text.
+                adornmentMintersTable,
+                adornmentsTable,
             ],
             indices: indices,
             migrations: [
@@ -257,6 +282,90 @@ public enum LocusKitSchema {
                     .addColumn(table: "recall_trace", column: .text("door", nullable: true)),
                     .addColumn(table: "recall_trace", column: .text("composition", nullable: true)),
                     .addColumn(table: "recall_trace", column: .text("laneRanks", nullable: true)),
+                ]),
+                // v15 → v16: add adornment TEXT nullable to drawers.
+                // That column is retained physically in the drawers table from
+                // v17 onward — it is a dead column (no LocusKit code reads or
+                // writes it after ADORN-STORE-02). SQLite cannot DROP COLUMN
+                // without a full table rebuild, so the column is preserved and
+                // left NULL. Populated estates that had adornment text in this
+                // column have it migrated into the adornments table by the
+                // `mootx01 upgrade` step (the sole migration vehicle).
+                // PersistenceKit replay discipline: addColumn is idempotent —
+                // re-opening a pre-v16 estate replays this migration safely.
+                // Rust port: never replays addColumn by convention; the schema
+                // CREATE TABLE gains the column instead.
+                Migration(fromVersion: 15, toVersion: 16, operations: [
+                    .addColumn(table: "drawers", column: .text("adornment", nullable: true)),
+                ]),
+                // v16 → v17 (ADORN-STORE-02, 2026-08-25): create the normalised
+                // adornment tables.
+                //
+                // Implementation: CREATE TABLE IF NOT EXISTS via .custom SQL
+                // because PersistenceKit's SchemaDeclaration CREATE TABLE path
+                // is not idempotent for tables that did not exist at schema open
+                // time on an already-opened v16 estate. The IF NOT EXISTS guard
+                // is the idempotence contract — re-running on an already-migrated
+                // estate is a safe no-op.
+                //
+                // Rust port: schema.rs gains the CREATE TABLE directly in the
+                // fresh-estate path; the migration step uses the same IF NOT
+                // EXISTS guard so fresh estates and upgraded estates both end up
+                // with the tables present.
+                //
+                // INTENTIONALLY no FK enforcement at the SQL level: SQLite FK
+                // enforcement requires PRAGMA foreign_keys = ON per connection;
+                // the FK semantics are enforced at the LocusKit layer (expunge
+                // deletes adornment rows in the same transaction per the spec).
+                Migration(fromVersion: 16, toVersion: 17, operations: [
+                    .custom(
+                        sqlite: """
+                        CREATE TABLE IF NOT EXISTS "adornment_minters" (
+                            "id" TEXT NOT NULL,
+                            "name" TEXT NOT NULL,
+                            "family" TEXT NOT NULL,
+                            "model_id" TEXT NOT NULL,
+                            "model_version" TEXT NOT NULL,
+                            "prompt_digest" TEXT NOT NULL,
+                            "parameters" TEXT NOT NULL,
+                            "is_active" INTEGER NOT NULL,
+                            "ext" TEXT NULL,
+                            PRIMARY KEY ("id")
+                        )
+                        """,
+                        postgresql: """
+                        CREATE TABLE IF NOT EXISTS "adornment_minters" (
+                            "id" TEXT NOT NULL,
+                            "name" TEXT NOT NULL,
+                            "family" TEXT NOT NULL,
+                            "model_id" TEXT NOT NULL,
+                            "model_version" TEXT NOT NULL,
+                            "prompt_digest" TEXT NOT NULL,
+                            "parameters" TEXT NOT NULL,
+                            "is_active" INTEGER NOT NULL,
+                            "ext" TEXT NULL,
+                            PRIMARY KEY ("id")
+                        )
+                        """
+                    ),
+                    .custom(
+                        sqlite: """
+                        CREATE TABLE IF NOT EXISTS "adornments" (
+                            "drawer_id" TEXT NOT NULL,
+                            "minter_id" TEXT NOT NULL,
+                            "text" TEXT NOT NULL,
+                            PRIMARY KEY ("drawer_id", "minter_id")
+                        )
+                        """,
+                        postgresql: """
+                        CREATE TABLE IF NOT EXISTS "adornments" (
+                            "drawer_id" TEXT NOT NULL,
+                            "minter_id" TEXT NOT NULL,
+                            "text" TEXT NOT NULL,
+                            PRIMARY KEY ("drawer_id", "minter_id")
+                        )
+                        """
+                    ),
                 ]),
             ]
         )
@@ -376,7 +485,20 @@ public enum LocusKitSchema {
             // (~120 chars) at every producer boundary.
             .text("subject", nullable: true),
             .text("subject_pipeline_version", nullable: true),
-            .timestamp("subject_at", nullable: true)
+            .timestamp("subject_at", nullable: true),
+            // DEAD COLUMN (ADORN-STORE-02, v17): `adornment` is retained
+            // physically for zero-downtime migration safety. SQLite requires
+            // a full table rebuild to drop a column; the migration cost is
+            // not justified here because:
+            //   (a) The column is always NULL from v17 onward — no LocusKit
+            //       code reads or writes it.
+            //   (b) Legacy adornment text has been moved into the `adornments`
+            //       table by `mootx01 upgrade` before the v17 migration runs.
+            //   (c) Leaving it present costs ~0 bytes per row (NULL storage).
+            // External callers that previously read Drawer.adornment are
+            // updated in Parts B/C of ADORN-STORE-02. Bits 27-30 of
+            // operationalBitmap are likewise returned to the free pool.
+            .text("adornment", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [
@@ -962,6 +1084,88 @@ public enum LocusKitSchema {
         // (depth, lookup_name) for depth-scoped resolution.
         IndexDeclaration(name: "idx_nodes_parent_id", table: "nodes", columns: ["parent_id"]),
         IndexDeclaration(name: "idx_nodes_parent_lookup", table: "nodes", columns: ["parent_id", "lookup_name"]),
-        IndexDeclaration(name: "idx_nodes_depth_lookup", table: "nodes", columns: ["depth", "lookup_name"])
+        IndexDeclaration(name: "idx_nodes_depth_lookup", table: "nodes", columns: ["depth", "lookup_name"]),
+        // adornments — query paths (ADORN-STORE-02):
+        //   by minter_id: active-adornment projection (join active minters),
+        //   by drawer_id: per-drawer adornment reads.
+        // The primary key (drawer_id, minter_id) already covers the
+        // (drawer_id, minter_id) lookup path; the minter_id index accelerates
+        // the "give me all adornments from minter X" scan used by the composer.
+        IndexDeclaration(name: "idx_adornments_minter_id", table: "adornments", columns: ["minter_id"]),
+        // adornment_minters — query path: active minters (is_active = 1).
+        // The full-table scan is fine for small minter tables (≤ 16 rows in
+        // practice), but the index keeps explain-plan output predictable.
+        IndexDeclaration(name: "idx_adornment_minters_active", table: "adornment_minters", columns: ["is_active"])
     ]
+
+    // MARK: - adornment_minters (ADORN-STORE-02)
+
+    /// Minter master table (LOCUSKIT_SPEC § ADORNMENT_STORE).
+    ///
+    /// One row per registered adornment minter. The `id` is the opaque
+    /// stable identifier assigned by the caller at registration time.
+    /// `parameters` is a canonical JSON object with keys in lexical order
+    /// (serialized by the write path; read back and deserialized as-is).
+    /// `is_active` is the only mutable field — 1 = active, 0 = inactive.
+    /// `ext` is a forward-compat nullable JSON slot (fleet convention).
+    ///
+    /// A configuration change creates a NEW row; the existing row is never
+    /// overwritten (only `is_active` may be toggled). Zero, one, or many
+    /// rows MAY be active at runtime — the schema names no family seat count.
+    static let adornmentMintersTable = TableDeclaration(
+        name: "adornment_minters",
+        columns: [
+            .text("id"),
+            .text("name"),
+            .text("family"),
+            .text("model_id"),
+            .text("model_version"),
+            .text("prompt_digest"),
+            // Canonical JSON with keys in lexical order. TEXT type because
+            // SQLite's JSON1 extension is not universally present; the write
+            // path serializes and the read path deserializes as a plain string.
+            .text("parameters"),
+            // is_active: 1 = active, 0 = inactive. INTEGER per house-style
+            // (no Bool stored properties); decoded by computed accessors.
+            ColumnDeclaration(name: "is_active", type: .int, nullable: false,
+                              defaultValue: .int(0)),
+            // Forward-compat JSON slot (fleet convention).
+            .json("ext", nullable: true),
+        ],
+        primaryKey: ["id"]
+    )
+
+    // MARK: - adornments (ADORN-STORE-02)
+
+    /// Per-(drawer, minter) adornment text table (LOCUSKIT_SPEC § ADORNMENT_STORE).
+    ///
+    /// Composite primary key `(drawer_id, minter_id)` permits at most one
+    /// adornment per (Drawer, minter) pair and many minters per Drawer.
+    /// Only the two compact references and the generated text are stored;
+    /// Drawer content, subject, and minter metadata live in their owning
+    /// rows.
+    ///
+    /// Physical deletion policy (LOCUSKIT_SPEC § ADORNMENT_STORE active set
+    /// and debt):
+    ///   - Expunging a drawer deletes ALL its adornment rows in the same
+    ///     transaction (LocusKit layer enforcement; no DB-level cascade).
+    ///   - Deactivating a minter does NOT delete adornment rows — they remain
+    ///     readable via `adornments(drawerID:)` but excluded from the active
+    ///     projection `activeAdornments(drawerIDs:)`.
+    ///   - Superseding a drawer starts bare: the predecessor's adornment rows
+    ///     are deleted in the same transaction as the supersession capture.
+    static let adornmentsTable = TableDeclaration(
+        name: "adornments",
+        columns: [
+            // drawer_id is TEXT, not UUID, matching drawers.id which is
+            // stored as a UUID string (TEXT column per drawers table).
+            .text("drawer_id"),
+            // minter_id is TEXT, the opaque id from adornment_minters.id.
+            .text("minter_id"),
+            // The generated adornment text. Length-bounded by
+            // ADORNMENT_MAX_LENGTH at mint time; stored verbatim here.
+            .text("text"),
+        ],
+        primaryKey: ["drawer_id", "minter_id"]
+    )
 }

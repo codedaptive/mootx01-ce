@@ -33,8 +33,10 @@ enum CoachingEngine {
             }
         }
 
-        // Trigger 2: no results — moot_memory_search returned 0 hits
-        if name == "moot_memory_search", resultText.contains("found 0 memory") {
+        // Trigger 2: no results — moot_memory_search returned 0 hits.
+        // Matches the S1 empty-result header "found 0 candidate memories, one per line"
+        // (COMPOSER-02B format; §11.1 rule 7 in ARIA_MCP_INTERFACE.md).
+        if name == "moot_memory_search", resultText.contains("found 0 candidate memories") {
             return "no memories matched — try moot_estate_status to check estate contents, or broaden the query"
         }
 
@@ -53,14 +55,18 @@ enum CoachingEngine {
             return "no journal entries found — use moot_write_journal to record session notes"
         }
 
-        // Trigger 6: no outgoing connections — moot_connection_search returned 0
-        if name == "moot_connection_search", resultText.contains(": 0") {
+        // Trigger 6: no outgoing connections — moot_connection_search returned 0.
+        // Matches the S5 header "found 0 outgoing connections, one per line"
+        // (COMPOSER-02B format; §11.8 in ARIA_MCP_INTERFACE.md).
+        if name == "moot_connection_search", resultText.hasPrefix("found 0 outgoing") {
             return "no outgoing connections found — use moot_link_memories to create typed relationships between memories"
         }
 
-        // Trigger 7: empty fact store — moot_fact_search with no query returned 0
+        // Trigger 7: empty fact store — moot_fact_search with no query returned 0.
+        // Matches the S4 header "found 0 facts, one per line"
+        // (COMPOSER-02B format; §11.7 in ARIA_MCP_INTERFACE.md).
         if name == "moot_fact_search",
-           resultText.hasPrefix("facts: 0"),
+           resultText.hasPrefix("found 0 facts"),
            args["query"] == nil {
             return "no facts in this estate — use moot_file_fact to store subject-predicate-object knowledge"
         }
@@ -72,8 +78,10 @@ enum CoachingEngine {
             return "large fact timeline — consider using moot_retire_fact to remove outdated facts and keep the knowledge graph current"
         }
 
-        // Trigger 9: connection map empty — moot_connection_map returned 0
-        if name == "moot_connection_map", resultText.contains(": 0") {
+        // Trigger 9: connection map empty — moot_connection_map returned 0.
+        // Matches the S5 header "found 0 incoming connections, one per line"
+        // (COMPOSER-02B format; §11.8 in ARIA_MCP_INTERFACE.md).
+        if name == "moot_connection_map", resultText.hasPrefix("found 0 incoming") {
             return "no incoming connections found — use moot_link_memories to build the association graph"
         }
 

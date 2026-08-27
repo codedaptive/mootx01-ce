@@ -3,6 +3,8 @@ import Testing
 import AriaMCP
 @testable import MootDaemonProvider
 
+typealias ProviderVersionVector = MootDaemonProvider.ProviderVersionVector
+
 // MARK: - P8 descriptor publication
 
 /// A valid, MAC-sealed schema-3 (descriptor, vector) pair for tests.

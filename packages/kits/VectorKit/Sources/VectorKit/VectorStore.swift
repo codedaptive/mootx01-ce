@@ -1074,9 +1074,21 @@ public actor VectorStore {
             return
         }
         let hnsw = HNSWIndex()
-        for rec in records {
-            if let floats = try? rec.payload.asFloats() {
-                await hnsw.insert(itemID: rec.key.itemID, modelID: modelID, vector: floats)
+        // Content-stable bulk build order (SPEC 1.10.0): sort rows by
+        // (fnv1a64(payload bytes) ASC, key ASC) before insertion so identical
+        // content yields an identical graph across independent builds.
+        // _fetchFloatRecords sorts by key alone, and keys ride per-run-random
+        // item UUIDs — that order is stable within one estate but NOT across
+        // provisionings of the same content (REPLAY_DRIFT_RCA). The key remains
+        // the final backstop for byte-identical vectors, which are
+        // interchangeable for every ordering consumer.
+        var buildOrder = records.map { (hash: fnv1a64($0.payload.bytes), rec: $0) }
+        buildOrder.sort { a, b in
+            a.hash != b.hash ? a.hash < b.hash : a.rec.key < b.rec.key
+        }
+        for entry in buildOrder {
+            if let floats = try? entry.rec.payload.asFloats() {
+                await hnsw.insert(itemID: entry.rec.key.itemID, modelID: modelID, vector: floats)
             }
         }
         hnswIndices[modelID] = hnsw
@@ -1576,6 +1588,11 @@ public actor VectorStore {
                 // this is a no-op — the graph will be loaded from hnsw_graph rows
                 // on the first qualifying findNearestFloat call. Mark the
                 // partition dirty so flush() persists the updated topology.
+                // Incremental inserts keep ARRIVAL order (SPEC 1.10.0): only
+                // bulk rebuilds (rebuildHNSWIndex, compact) apply the
+                // content-stable (vecHash, key) build order, so cross-run graph
+                // identity is guaranteed for bulk-built graphs only; the next
+                // THETA rebuild converges an incrementally-grown graph.
                 if let hnswIdx = hnswIndices[modelID] {
                     if let floats = try? payload.asFloats() {
                         await hnswIdx.insert(itemID: itemID, modelID: modelID, vector: floats)
@@ -1618,7 +1635,7 @@ public actor VectorStore {
     /// array the batch is appended after existing slots; the partition index
     /// and search results remain correct because both indexes are rebuilt
     /// from the final array. Search output is identical to inserting the same
-    /// rows one-by-one (the (distance ASC, itemID ASC) total order is applied
+    /// rows one-by-one (the (distance ASC, vecHash ASC, itemID ASC) total order is applied
     /// at query time, not insert time).
     ///
     /// - Parameter batch: the payloads to upsert. Empty is a no-op.
@@ -2207,8 +2224,9 @@ public actor VectorStore {
     /// All Hamming arithmetic routes through the active DenseIndex →
     /// EngramLib → SubstrateKernel (I-7 absolute, arch spec §3.4).
     ///
-    /// Returns up to `limit` matches sorted by (distance ASC, itemID ASC)
-    /// — the universal tie-break rule (retrieval algorithms ref §0.3).
+    /// Returns up to `limit` matches sorted by (distance ASC, vecHash ASC,
+    /// itemID ASC) — the universal tie-break rule (SPEC 1.9.0 B-6; vecHash
+    /// is the FNV-1a content hash, stable across estate provisionings).
     ///
     /// Telemetry: emits `vectorkit.search.latency_ms` and
     /// `vectorkit.search.result_count` when monitoring is enabled.
@@ -2253,8 +2271,8 @@ public actor VectorStore {
             filter: filter
         )
 
-        // Both indexes apply (distance ASC, itemID ASC) sort per the oracle
-        // contract (retrieval algorithms ref §0.3).
+        // Both indexes apply the (distance ASC, vecHash ASC, itemID ASC)
+        // sort per the oracle contract (SPEC 1.9.0 B-6).
         // Map DenseHit → VectorMatch without re-sorting.
         // D5: tag with serving generation. The binary resident array is built from
         // serving-gen rows (_fetchAllBinaryRecords filters to servingGen), so all
@@ -2340,14 +2358,25 @@ public actor VectorStore {
     /// `residentIndexBudget` ceiling is exceeded or no rows exist — execution falls
     /// through to the same table-scan path that `.diskBacked` uses. The query always
     /// returns correct results; a refused index is a cache miss, not an error.
+    /// k-NEAREST neighbours over the float32 (Lane D) vectors.
+    ///
+    /// - Parameters:
+    ///   - probe: the query's pooled float vector.
+    ///   - modelID: restricts the scan to this model's partition.
+    ///   - limit: maximum number of matches to return.
+    ///   - metric: the distance function. Defaults to `.cosine` so callers that
+    ///     do not pass a metric see byte-identical behaviour (no silent change).
+    ///     The ramResident (brute-force / HNSW) and diskBacked (table-scan) paths
+    ///     both respect this parameter.
     public func findNearestFloat(
         probe: [Float],
         modelID: String,
-        limit: Int
+        limit: Int,
+        metric: FloatMetric = .cosine
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
         if storage.configuration.residencyHint == .ramResident,
-           let cached = try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit) {
+           let cached = try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit, metric: metric) {
             return cached
         }
         // Table-scan path: used for .diskBacked estates, after admission refusal,
@@ -2357,7 +2386,7 @@ public actor VectorStore {
         // hits the in-memory servingGenerations cache and costs nothing.
         let servingGen = try await _servingGeneration(for: modelID)
         let hits = try await _floatScanFromTable(
-            modelID: modelID, probe: probe, k: limit, direction: .nearest)
+            modelID: modelID, probe: probe, k: limit, direction: .nearest, metric: metric)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
@@ -2384,7 +2413,7 @@ public actor VectorStore {
     ///
     /// Farthest queries always use FloatBruteForceIndex regardless of threshold —
     /// HNSW is a nearest-only structure. See `_findFarthestFloatCached`.
-    private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]? {
+    private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int, metric: FloatMetric = .cosine) async throws -> [VectorMatch]? {
         // D4+D5 fix: resolve serving generation once at the top. Used for:
         //   (a) generation check on the HNSW graph (D4)
         //   (b) VectorMatch generation tag on exact-scan results (D5)
@@ -2453,7 +2482,9 @@ public actor VectorStore {
         guard let modelIndex = floatIndices[modelID] else { return nil }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
-        let hits = try await modelIndex.search(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
+        // Pass the caller-selected float metric. DenseMetric.float(_) wraps FloatMetric
+        // for the FloatBruteForceIndex.search API. Default is .cosine.
+        let hits = try await modelIndex.search(probe: probePayload, metric: .float(metric), k: limit, filter: filter)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
@@ -2464,7 +2495,7 @@ public actor VectorStore {
         }
     }
 
-    /// k-FARTHEST neighbours over the float32 (Lane D) vectors by cosine —
+    /// k-FARTHEST neighbours over the float32 (Lane D) vectors —
     /// the most DISSIMILAR rows first (anti-similarity retrieval, mission
     /// 6b-modifiers-antisim). The "find things UNLIKE this" objective.
     ///
@@ -2499,14 +2530,31 @@ public actor VectorStore {
     /// Always uses FloatBruteForceIndex regardless of HNSW threshold — HNSW is a
     /// nearest-only structure and anti-similarity retrieval requires a full scan
     /// that provides no speed benefit over brute-force. See `_findFarthestFloatCached`.
+    /// k-FARTHEST neighbours over the float32 (Lane D) vectors.
+    ///
+    /// Identical to `findNearestFloat` in every respect except it ranks by FARTHEST
+    /// (the most dissimilar rows first — anti-similarity retrieval). HNSW is not used
+    /// regardless of threshold: HNSW is nearest-only. Always delegates to
+    /// `FloatBruteForceIndex.searchFarthest` (ramResident) or `_floatScanFromTable`
+    /// in descending-distance order (diskBacked).
+    ///
+    /// - Parameters:
+    ///   - probe: the query's pooled float vector.
+    ///   - modelID: restricts the scan to this model's partition.
+    ///   - limit: maximum number of matches to return.
+    ///   - metric: the distance function. Defaults to `.cosine`. Both the
+    ///     ramResident (FloatBruteForceIndex) and diskBacked (table-scan) paths
+    ///     respect this parameter so the same metric is used for nearest and
+    ///     farthest queries on the same request.
     public func findFarthestFloat(
         probe: [Float],
         modelID: String,
-        limit: Int
+        limit: Int,
+        metric: FloatMetric = .cosine
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
         if storage.configuration.residencyHint == .ramResident,
-           let cached = try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit) {
+           let cached = try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit, metric: metric) {
             return cached
         }
         // Table-scan path: used for .diskBacked estates, after admission refusal,
@@ -2515,7 +2563,7 @@ public actor VectorStore {
         // _floatScanFromTable also fetches it (D1 fix) — second call hits cache.
         let servingGen = try await _servingGeneration(for: modelID)
         let hits = try await _floatScanFromTable(
-            modelID: modelID, probe: probe, k: limit, direction: .farthest)
+            modelID: modelID, probe: probe, k: limit, direction: .farthest, metric: metric)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
@@ -2539,7 +2587,7 @@ public actor VectorStore {
     /// float rows exist for the model. A `nil` return signals the public caller to fall
     /// through to the table-scan path. One seam: the table-scan path lives only in
     /// `findFarthestFloat`, not duplicated here.
-    private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]? {
+    private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int, metric: FloatMetric = .cosine) async throws -> [VectorMatch]? {
         // D5: resolve serving generation for VectorMatch generation tag.
         // FloatBruteForceIndex is built from serving rows (_fetchFloatRecords filters).
         let servingGen = try await _servingGeneration(for: modelID)
@@ -2554,7 +2602,9 @@ public actor VectorStore {
         guard let modelIndex = floatIndices[modelID] else { return nil }
         let probePayload = VectorPayload(floats: probe)
         let filter = MetadataFilter(modelID: modelID)
-        let hits = try await modelIndex.searchFarthest(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
+        // Pass the caller-selected float metric. DenseMetric.float(_) wraps FloatMetric
+        // for the FloatBruteForceIndex.searchFarthest API. Default is .cosine.
+        let hits = try await modelIndex.searchFarthest(probe: probePayload, metric: .float(metric), k: limit, filter: filter)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
@@ -3725,7 +3775,8 @@ public actor VectorStore {
         modelID: String,
         probe: [Float],
         k: Int,
-        direction: FloatSearchDirection
+        direction: FloatSearchDirection,
+        metric: FloatMetric = .cosine
     ) async throws -> [(distance: Float, key: VectorRecordKey)] {
         // D1 fix: filter to the serving generation so shadow rows are never mixed
         // into results. This is the DEFAULT diskBacked float query path and the
@@ -3797,18 +3848,39 @@ public actor VectorStore {
                 let bits = UInt32(b0) | (UInt32(b1) << 8) | (UInt32(b2) << 16) | (UInt32(b3) << 24)
                 candidate.append(Float(bitPattern: bits))
             }
-            // Cosine distance inline (1 − cos(a,b)). The only metric
-            // used by the product is cosine; l2/dot are test-only.
-            var dotP: Float = 0, normA: Float = 0, normB: Float = 0
-            for j in 0..<dim {
-                dotP  += probe[j] * candidate[j]
-                normA += probe[j] * probe[j]
-                normB += candidate[j] * candidate[j]
+            // Dispatch on the selected float metric. All three are inline here
+            // to avoid a FloatBruteForceIndex allocation on the diskBacked path.
+            // The ramResident path routes through FloatBruteForceIndex (which
+            // dispatches the same three branches), so the math is consistent.
+            //
+            // - cosine: 1 − cos(a,b) — scale-invariant; the historical default.
+            // - l2: Euclidean distance √Σ(aᵢ−bᵢ)² — magnitude-sensitive.
+            // - dot: negative dot product −Σ(aᵢbᵢ) — matches dot-product-trained embeddings.
+            //
+            // Lower is always "closer" for all three metrics, so the top-k heap
+            // (`consider`) is metric-agnostic. Cosine and l2 are distances;
+            // dot returns a NEGATIVE value (−similarity) so larger dot→ smaller
+            // value → ranks first in the heap, which is the correct nearest order.
+            let dist: Float
+            switch metric {
+            case .cosine:
+                var dotP: Float = 0, normA: Float = 0, normB: Float = 0
+                for j in 0..<dim {
+                    dotP  += probe[j] * candidate[j]
+                    normA += probe[j] * probe[j]
+                    normB += candidate[j] * candidate[j]
+                }
+                let denom = normA.squareRoot() * normB.squareRoot()
+                dist = denom > 0 ? 1.0 - min(max(dotP / denom, -1.0), 1.0) : 1.0
+            case .l2:
+                var sumSq: Float = 0
+                for j in 0..<dim { let d = probe[j] - candidate[j]; sumSq += d * d }
+                dist = sumSq.squareRoot()
+            case .dot:
+                var dotP: Float = 0
+                for j in 0..<dim { dotP += probe[j] * candidate[j] }
+                dist = -dotP
             }
-            let denom = normA.squareRoot() * normB.squareRoot()
-            let dist: Float = denom > 0
-                ? 1.0 - min(max(dotP / denom, -1.0), 1.0)
-                : 1.0
             let key = VectorRecordKey(
                 itemID: itemID,
                 vectorIndex: UInt32(vectorIndex),

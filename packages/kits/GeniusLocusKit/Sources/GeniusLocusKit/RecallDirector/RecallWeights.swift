@@ -76,4 +76,13 @@ public struct RecallPlan: Sendable {
     public let frontierK: Int
     /// Weights in effect for this plan.
     public let weights: RecallWeights
+
+    /// Public memberwise initializer so callers above GeniusLocusKit (e.g.
+    /// the AriaMcpKit packager wiring path) can construct synthetic plans
+    /// without going through the Recall Director.
+    public init(effectiveMode: GLKRecallMode, frontierK: Int, weights: RecallWeights) {
+        self.effectiveMode = effectiveMode
+        self.frontierK = frontierK
+        self.weights = weights
+    }
 }

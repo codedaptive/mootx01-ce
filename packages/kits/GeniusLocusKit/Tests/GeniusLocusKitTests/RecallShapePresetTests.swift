@@ -35,8 +35,8 @@ struct RecallShapePresetTests {
                 #expect(RecallShape.preset(name) != nil, "preset \(name) must resolve")
             }
         }
-        // session_hybrid is the 20th preset (added in W1-session-hybrid).
-        #expect(RecallShape.presetNames.count == 21)
+        // 22 original + 3 anti_redundant_* + 2 multi-column + 2 float-metric = 29 presets.
+        #expect(RecallShape.presetNames.count == 29)
     }
 
     @Test("precise amplifies lexical + field and narrows the frontier")
@@ -172,5 +172,120 @@ struct RecallShapePresetTests {
         let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
         #expect(ablated.weight(for: RecallShape.DenseSignal.lsa) == 0.0)
         #expect(ablated.weight(for: RecallShape.DenseSignal.ppmi) > 0.0)
+    }
+
+    // MARK: - Per-signal anti-similarity presets (W3)
+
+    @Test("anti_redundant_ri inverts RI to farthest and suppresses BM25/Hamming")
+    func antiRedundantRI() throws {
+        let s = try #require(RecallShape.preset("anti_redundant_ri"))
+        // RI lane inverted to farthest (anti-similar).
+        #expect(s.isAntiSimilar(RecallShape.DenseSignal.randomIndexing))
+        // Only RI is anti-similar — LSA, NMF, FDC stay nearest.
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.nmf))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
+        // Anti-similar flag flips direction, not magnitude — RI weight stays at 1.0.
+        #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) == 1.0)
+        // BM25 and Hamming suppressed to prevent lexical near-duplicates dominating.
+        #expect(s.weight(for: "bm25") < 0)
+        #expect(s.weight(for: "hamming") < 0)
+        // Frontier narrowed to floor for a tight, focused diversity pool.
+        #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
+        // Catalog description is present.
+        #expect(!RecallShape.presetDescription("anti_redundant_ri").isEmpty)
+    }
+
+    @Test("anti_redundant_lsa inverts LSA to farthest and suppresses BM25/Hamming")
+    func antiRedundantLSA() throws {
+        let s = try #require(RecallShape.preset("anti_redundant_lsa"))
+        #expect(s.isAntiSimilar(RecallShape.DenseSignal.lsa))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.randomIndexing))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
+        #expect(s.weight(for: RecallShape.DenseSignal.lsa) == 1.0)
+        #expect(s.weight(for: "bm25") < 0)
+        #expect(s.weight(for: "hamming") < 0)
+        #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
+        #expect(!RecallShape.presetDescription("anti_redundant_lsa").isEmpty)
+    }
+
+    @Test("anti_redundant_nmf inverts NMF to farthest and suppresses BM25/Hamming")
+    func antiRedundantNMF() throws {
+        let s = try #require(RecallShape.preset("anti_redundant_nmf"))
+        #expect(s.isAntiSimilar(RecallShape.DenseSignal.nmf))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
+        #expect(s.weight(for: RecallShape.DenseSignal.nmf) == 1.0)
+        #expect(s.weight(for: "bm25") < 0)
+        #expect(s.weight(for: "hamming") < 0)
+        #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
+        #expect(!RecallShape.presetDescription("anti_redundant_nmf").isEmpty)
+    }
+
+    // MARK: - Multi-column matrix presets (W3)
+
+    @Test("temporal_connection amplifies temporal + coOccurrence for matrixAware scoring")
+    func temporalConnection() throws {
+        let s = try #require(RecallShape.preset("temporal_connection"))
+        // Both matrix columns amplified above neutral.
+        #expect(s.weight(for: "temporal") > 1.0)
+        #expect(s.weight(for: "coOccurrence") > 1.0)
+        // No lanes excluded or anti-similar — purely additive over balanced.
+        #expect(s.weight(for: "locus") == 1.0)
+        #expect(s.weight(for: "bm25") == 1.0)
+        #expect(s.antiSimilarLanes.isEmpty)
+        // No frontier override — the engine formula applies.
+        #expect(s.frontierK == nil)
+        #expect(!RecallShape.presetDescription("temporal_connection").isEmpty)
+    }
+
+    @Test("field_preference amplifies fieldFit + preference for matrixAware scoring")
+    func fieldPreference() throws {
+        let s = try #require(RecallShape.preset("field_preference"))
+        // Both matrix columns amplified above neutral.
+        #expect(s.weight(for: "fieldFit") > 1.0)
+        #expect(s.weight(for: "preference") > 1.0)
+        // No lanes excluded or anti-similar — purely additive over balanced.
+        #expect(s.weight(for: "locus") == 1.0)
+        #expect(s.weight(for: "temporal") == 1.0)
+        #expect(s.antiSimilarLanes.isEmpty)
+        #expect(s.frontierK == nil)
+        #expect(!RecallShape.presetDescription("field_preference").isEmpty)
+    }
+
+    // MARK: - Float-lane metric presets
+
+    @Test("float-l2 sets floatMetric to l2 and leaves all other fields at their defaults")
+    func floatL2() throws {
+        let s = try #require(RecallShape.preset("float-l2"))
+        // The ONLY change from balanced is the float-lane metric.
+        #expect(s.floatMetric == "l2")
+        // All lane weights stay neutral — no fusion steering.
+        #expect(s.laneWeights.isEmpty)
+        // Anti-similar set stays empty — no direction inversion.
+        #expect(s.antiSimilarLanes.isEmpty)
+        // No frontier override — engine default applies.
+        #expect(s.frontierK == nil)
+        // Binary metric unchanged from the default.
+        #expect(s.binaryMetric == "hamming")
+        // Description is present in the catalog.
+        #expect(!RecallShape.presetDescription("float-l2").isEmpty)
+    }
+
+    @Test("float-dot sets floatMetric to dot and leaves all other fields at their defaults")
+    func floatDot() throws {
+        let s = try #require(RecallShape.preset("float-dot"))
+        // The ONLY change from balanced is the float-lane metric.
+        #expect(s.floatMetric == "dot")
+        // All lane weights stay neutral — no fusion steering.
+        #expect(s.laneWeights.isEmpty)
+        // Anti-similar set stays empty — no direction inversion.
+        #expect(s.antiSimilarLanes.isEmpty)
+        // No frontier override — engine default applies.
+        #expect(s.frontierK == nil)
+        // Binary metric unchanged from the default.
+        #expect(s.binaryMetric == "hamming")
+        // Description is present in the catalog.
+        #expect(!RecallShape.presetDescription("float-dot").isEmpty)
     }
 }

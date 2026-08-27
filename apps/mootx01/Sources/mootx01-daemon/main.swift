@@ -9,8 +9,9 @@
 // structural digest identity: the mission's cross-shell self-report assertion
 // holds because there is exactly one module for the two shells to report.
 //
-// c1 modes (self-report, proof race) run to completion and start no run
-// loop; the resident service mode is MACD-2c2's deliverable.
+// Wave A1b: `residentActivate` is now wired to `CommunityResidentMain.run`
+// so the `resident` mode runs the real production loop instead of exit 4.
+// Shell substance stays here; the loop lives in MootCommunityDaemon.
 //
 // MACD-3D EE composition root: MootDaemonFederation is linked only in the EE
 // edition (see Package.swift — the EE mootx01-daemon target depends on both
@@ -22,6 +23,7 @@
 
 import Foundation
 import MootDaemonProvider
+import MootCommunityDaemon
 
 // MACD-3D: Collect EE-only capability tokens from MootDaemonFederation when
 // it is linked (EE build). The CE build omits MootDaemonFederation from the
@@ -36,6 +38,7 @@ private let eeExtraCapabilities: [String] = []
 
 let exitCode = await DaemonShellMain.run(
     arguments: Array(CommandLine.arguments.dropFirst()),
-    extraCapabilities: eeExtraCapabilities
+    extraCapabilities: eeExtraCapabilities,
+    residentActivate: CommunityResidentMain.run
 )
 exit(exitCode)

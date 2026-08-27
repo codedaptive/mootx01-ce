@@ -463,19 +463,11 @@ public struct MigrationGrantAuthority: Sendable {
         guard envelope.credentialGeneration == currentGenerations.credential else {
             throw DaemonProviderError.grantInvalid(.staleGeneration)
         }
-        // 5. Replay: the durable journal, fail-closed.
+        // 5–6. Replay check and durable burn are one locked operation.
         do {
-            guard try !journal.contains(envelope.grantIdentifier) else {
+            guard try journal.recordConsumptionIfAbsent(envelope.grantIdentifier) else {
                 throw DaemonProviderError.grantInvalid(.consumed)
             }
-        } catch DaemonProviderError.leaseInvalid(.journalUnavailable) {
-            throw DaemonProviderError.grantInvalid(.journalUnavailable)
-        }
-        // 6. Burn BEFORE resolve (journal-first): once recorded, this grant
-        //    can never resolve again — even if we crash on the next
-        //    instruction.
-        do {
-            try journal.recordConsumption(envelope.grantIdentifier)
         } catch DaemonProviderError.leaseInvalid(.journalUnavailable) {
             throw DaemonProviderError.grantInvalid(.journalUnavailable)
         }

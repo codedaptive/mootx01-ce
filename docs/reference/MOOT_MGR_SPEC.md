@@ -1,10 +1,10 @@
 ---
 title: moot-mgr Specification
-version: 1.1.0
+version: 1.1.1
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-08-26
 description: Specification for moot-mgr, the GUI control and monitor surface for the headless mootx01 daemon — store ownership, the global monitoring switch, retention, the CLI read/status surface, and the read-plane wire deltas.
 relates_to:
   - docs/engineering/STANDARD_CODE_AUTHORING_PRACTICE.md#dependency-manifest-rule
@@ -213,7 +213,7 @@ dashboard's live node-pulse targeting and radar-loop playback.
 
 moot-mgr reads the topology snapshot from its own `topology_snapshots` table
 (the same stats.sqlite the aria-mcp daemon's sink writes — §3 store ownership).
-Source of truth: `StatsStore.latestTopologySnapshot(estate:)`. When a snapshot
+Authoritative source: `StatsStore.latestTopologySnapshot(estate:)`. When a snapshot
 is present, moot-mgr decodes the stored `StoredGraphPayload` and enriches
 `communities` at the content boundary: the governor's `{id, size, dominantUdcCode}`
 becomes `{id, code, label, size}` where `label = FDC.label(for: dominantUdcCode)`
@@ -345,3 +345,9 @@ built entirely from metadata already on the wire (drawer id, domain label,
 classification code, neighbor ids) — retrieval of memory CONTENT happens in
 the user's AI session under its own authorization, never through this
 console. Content-safety boundary is unchanged; no API surface.
+
+## Changelog
+
+### 1.1.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.

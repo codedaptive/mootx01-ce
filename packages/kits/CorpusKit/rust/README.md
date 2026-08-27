@@ -29,7 +29,7 @@ Core `rag-kit` integration tests (in `tests/`):
 
 ## What does NOT ship at v1.0
 
-- Real model bundles conforming to `vectorkit::EmbeddingProvider` (ONNX/Candle/Burn). The Swift consolidation (2026-05-27) moved text providers onto VectorKit's `EmbeddingProvider`; the Rust mirror is now the same trait. Closure-injected paths can be wired through `FloatSimHashEmbeddingProvider` from vectorkit today.
+- Real model-inference bundles conforming to `vectorkit::EmbeddingProvider` (the engine-neutral `neural-embed` backend lives as a standalone tool crate, `tools/neural-embed`, outside the kits). The Swift consolidation (2026-05-27) moved text providers onto VectorKit's `EmbeddingProvider`; the Rust mirror is now the same trait. Closure-injected paths can be wired through `FloatSimHashEmbeddingProvider` from vectorkit today.
 - MMR diversification in `recall` (configuration field is reserved; the implementation lands in a follow-on)
 - BM25 persistence (rebuilt in-memory from `BundleStore` today; persistent IDF/posting-list backed by storage-kit is deferred to v1.x per the Swift kit's own note)
 - Apple `NaturalLanguage`-quality sentence segmentation (the delimiter fallback is identical to Swift's Linux path)

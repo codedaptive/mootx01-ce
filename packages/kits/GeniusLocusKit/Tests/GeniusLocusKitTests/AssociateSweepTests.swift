@@ -202,3 +202,80 @@ struct AssociateSweepTests {
         #expect(report.deduplicated == 0)
     }
 }
+
+// MARK: - Ladder cut (Bob ruling 2026-08-26)
+
+/// Direct rung coverage for `ProximityScanCore.ladderNeighbours` via the
+/// injectable fetch closure, plus one end-to-end permutation-independence
+/// check on the sweep itself.
+@Suite("associateSweep ladder cut", .serialized)
+struct AssociateSweepLadderTests {
+
+    private let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+    /// Synthetic match list: `groups` = (distance, count) runs in order.
+    private func matches(_ groups: [(Int, Int)]) -> [VectorMatch] {
+        var out: [VectorMatch] = []
+        var n = 0
+        for (distance, count) in groups {
+            for _ in 0..<count {
+                out.append(VectorMatch(
+                    itemID: String(format: "%04d", n), distance: distance,
+                    modelID: "m", generation: 0))
+                n += 1
+            }
+        }
+        return out
+    }
+
+    /// Rung 1: a boundary inside the ×3 pool, at or after `units`, cuts there.
+    @Test func rung1BoundaryAfterUnitsCuts() async {
+        let pool = matches([(0, 1), (1, 9), (2, 8)])  // 18 rows; boundary at 10
+        let out = await ProximityScanCore.ladderNeighbours(units: 5) { limit in
+            Array(pool.prefix(limit))
+        }
+        #expect(out.nonUnique == false)
+        #expect(out.matches.count == 10, "cut lands at the d1→d2 boundary (index 10)")
+        #expect(out.matches.allSatisfy { $0.distance <= 1 })
+    }
+
+    /// Rung 2: no boundary in ×3 (all one group there), boundary appears in ×6.
+    @Test func rung2BoundaryInWiderPoolCuts() async {
+        let pool = matches([(1, 20), (2, 12)])  // ×3=15 all d1; ×6=30 boundary at 20
+        let out = await ProximityScanCore.ladderNeighbours(units: 5) { limit in
+            Array(pool.prefix(limit))
+        }
+        #expect(out.nonUnique == false)
+        #expect(out.matches.count == 20, "cut lands at the d1→d2 boundary (index 20)")
+    }
+
+    /// Rung 3: no boundary in ×6, but one INSIDE units → the longest
+    /// determinate prefix shorter than the budget.
+    @Test func rung3BoundaryInsideUnitsCuts() async {
+        let pool = matches([(0, 2), (1, 40)])  // boundary only at index 2 (< units)
+        let out = await ProximityScanCore.ladderNeighbours(units: 5) { limit in
+            Array(pool.prefix(limit))
+        }
+        #expect(out.nonUnique == false)
+        #expect(out.matches.count == 2, "the only boundary is inside units — cut there")
+    }
+
+    /// Rung 4: one giant tie group — nothing returned, flagged non-unique.
+    @Test func rung4OneTieGroupReturnsNothingFlagged() async {
+        let pool = matches([(1, 40)])
+        let out = await ProximityScanCore.ladderNeighbours(units: 5) { limit in
+            Array(pool.prefix(limit))
+        }
+        #expect(out.nonUnique == true)
+        #expect(out.matches.isEmpty)
+    }
+
+    /// Exhausted pool: the store returned everything it has — complete result,
+    /// returned whole, never flagged.
+    @Test func exhaustedPoolReturnsWhole() async {
+        let pool = matches([(1, 7)])  // fewer than units×3
+        let out = await ProximityScanCore.ladderNeighbours(units: 5) { _ in pool }
+        #expect(out.nonUnique == false)
+        #expect(out.matches.count == 7)
+    }
+}

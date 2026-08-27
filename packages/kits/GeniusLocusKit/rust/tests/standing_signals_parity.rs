@@ -1,13 +1,13 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
-// of the eleven standing signals (GLK-05 + brain-layer governor ownership
-// + consolidation-sweep signal 11).
+// of the twelve standing signals (GLK-05 + brain-layer governor ownership
+// + consolidation-sweep signal 11 + anomaly-flag sweep signal 12).
 //
 // Mirrors `StandingSignalsTests.swift`. The gate asserts:
 //
 // 1. Each signal's stable name and cadence match the Swift reference.
 // 2. Each signal's spec produces the expected emission classes when
 //    fired through a `SerialLaneScheduler` instance.
-// 3. The default-set helper registers all eleven in the canonical order.
+// 3. The default-set helper registers all twelve in the canonical order.
 // 4. VectorSimilaritySignal with an empty VectorStore emits only the
 //    scan-summary diagnostic (zero associate emissions) — parity with
 //    the Swift empty-store test.
@@ -15,10 +15,13 @@
 //    one diagnostic per tick regardless of gate state.
 // 6. ConsolidationSignal (signal 11): daily cadence, default_spec emits
 //    "consolidation-sweep.fired", live spec surfaces sweep report counts.
+// 7. AnomalySweepSignal (signal 12, P3a): hourly cadence, default_spec
+//    emits "anomaly-flag-sweep.fired", live spec surfaces changed-drawer
+//    count in "anomaly-flag-sweep.complete".
 
 use std::sync::Arc;
 
-use genius_locus_kit::brain::signals::ContradictionScoutSignal;
+use genius_locus_kit::brain::signals::{AdornmentPassSignal, AnomalySweepSignal, ContradictionScoutSignal};
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
     ConsolidationSignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
@@ -126,12 +129,22 @@ fn default_signal_names_and_cadences_match_swift_reference() {
         ConsolidationSignal::DEFAULT_CADENCE_SECONDS, 86_400,
         "consolidation-sweep runs daily per Wave-2 D9 spec"
     );
+
+    // Signal 12 — P3a anomaly-flag sweep (hourly, same cadence family as
+    // distillation and training).
+    assert_eq!(AnomalySweepSignal::SIGNAL_NAME, "anomaly-flag-sweep");
+    assert_eq!(
+        AnomalySweepSignal::DEFAULT_CADENCE_SECONDS, 3_600,
+        "anomaly-flag-sweep runs hourly per architecture spec §11.18"
+    );
 }
 
 #[test]
 fn default_standing_signal_names_helper_returns_canonical_order() {
     // Keep this compile-time roster synchronized with the production helper.
     // Signal 11 (consolidation-sweep) appended after training-daemon.
+    // Signal 12 (anomaly-flag-sweep, P3a) appended after consolidation-sweep.
+    // Signal 13 (adornment-pass, GENIUSLOCUSKIT_SPEC 2.0.0 § 16) appended after anomaly-flag-sweep.
     let names = default_standing_signal_names();
     assert_eq!(
         names,
@@ -147,17 +160,20 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
             "distillation-sweep",
             "training-daemon",
             "consolidation-sweep",
+            "anomaly-flag-sweep",
+            "adornment-pass",
         ]
     );
 }
 
 #[test]
-fn default_standing_signal_specs_returns_eleven_specs_with_interval_triggers() {
-    // Signal count updated from ten to eleven with the addition of signal 11
-    // (ConsolidationSignal, daily Wave-2 consolidation sweep).
+fn default_standing_signal_specs_returns_thirteen_specs_with_interval_triggers() {
+    // Signal count updated to thirteen with the addition of signal 13
+    // (AdornmentPassSignal, SPEC_ADORNMENT §4, hourly dream-time minting pass).
+    // hunt_cycle, anomaly_cycle, and adornment_cycle are None → no-op defaults.
     let store = make_empty_vector_store();
-    let specs = default_standing_signal_specs(store, "test-model", None);
-    assert_eq!(specs.len(), 11);
+    let specs = default_standing_signal_specs(store, "test-model", None, None, None, None);
+    assert_eq!(specs.len(), 13);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
@@ -441,17 +457,18 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 }
 
 #[test]
-fn registering_all_eleven_default_specs_produces_eleven_reports() {
-    // Updated from ten to eleven specs with the addition of signal 11
-    // (ConsolidationSignal). The consolidation-sweep name must appear in the
-    // report and its trigger must be interval-driven (daily cadence).
+fn registering_all_thirteen_default_specs_produces_thirteen_reports() {
+    // Updated to thirteen specs with the addition of signal 13
+    // (AdornmentPassSignal, GENIUSLOCUSKIT_SPEC 2.0.0 § 16). The adornment-pass
+    // name must appear in the report and its trigger must be interval-driven (hourly cadence).
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
-    for spec in default_standing_signal_specs(store, "test-model", None) {
+    // hunt_cycle, anomaly_cycle, and adornment_cycle are None → no-op defaults.
+    for spec in default_standing_signal_specs(store, "test-model", None, None, None, None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 11);
+    assert_eq!(reports.len(), 13);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -670,5 +687,315 @@ fn consolidation_signal_live_spec_emits_error_diagnostic_on_err() {
             .detail
             .contains("estate unavailable"),
         "error detail must propagate the closure's message"
+    );
+}
+
+// ─── Signal 12: AnomalySweepSignal parity tests (P3a) ────────────────────────
+
+/// Parity with Swift's `AnomalySweepSignal.defaultSpec()` no-op emission.
+/// The no-op spec fires an "anomaly-flag-sweep.fired" diagnostic on each tick.
+#[test]
+fn anomaly_sweep_signal_default_spec_emits_fired_diagnostic() {
+    let spec = AnomalySweepSignal::default_spec();
+    let report = fire(spec);
+    assert_eq!(report.name, "anomaly-flag-sweep");
+    assert_eq!(
+        report.emission_count, 1,
+        "default spec emits one diagnostic per tick"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "anomaly-flag-sweep.fired",
+        "no-op spec must emit anomaly-flag-sweep.fired title"
+    );
+}
+
+/// Parity with Swift `AnomalySweepSignal.spec` live path: successful sweep
+/// surfaces the changed-drawer count in the "anomaly-flag-sweep.complete"
+/// diagnostic title. Golden pin: Ok(1) → detail contains "updated 1 drawer(s)".
+#[test]
+fn anomaly_sweep_signal_live_spec_emits_complete_diagnostic_on_ok() {
+    // Golden pin: same closure shape as the Swift spec test. The live sweep
+    // returns 1 (one drawer's bit 26 changed). Cross-port golden pin:
+    // Swift AnomalyFlagSweepTests uses the same 1-changed count on first run.
+    let spec = AnomalySweepSignal::spec(Arc::new(|| Ok(1)));
+    let report = fire(spec);
+    assert_eq!(report.name, "anomaly-flag-sweep");
+    assert_eq!(
+        report.emission_count, 1,
+        "live spec emits one diagnostic per tick"
+    );
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "anomaly-flag-sweep.complete",
+        "live spec emits anomaly-flag-sweep.complete on success"
+    );
+    // The detail string must surface the changed-drawer count so
+    // application monitoring can observe sweep activity.
+    let detail = &report.recent_diagnostics[0].detail;
+    assert!(
+        detail.contains("updated 1 drawer(s)"),
+        "detail must include changed-drawer count; got: {detail}"
+    );
+}
+
+/// Parity with Swift error path: Err(msg) emits "anomaly-flag-sweep.error"
+/// diagnostic — the scheduler's drain loop is not interrupted.
+#[test]
+fn anomaly_sweep_signal_live_spec_emits_error_diagnostic_on_err() {
+    let spec = AnomalySweepSignal::spec(Arc::new(|| {
+        Err("estate handle not available for anomaly sweep".to_string())
+    }));
+    let report = fire(spec);
+    assert_eq!(report.name, "anomaly-flag-sweep");
+    assert_eq!(report.emission_count, 1);
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(
+        report.recent_diagnostics[0].title, "anomaly-flag-sweep.error",
+        "error path must emit anomaly-flag-sweep.error title"
+    );
+    assert!(
+        report.recent_diagnostics[0]
+            .detail
+            .contains("estate handle not available"),
+        "error detail must propagate the closure's message"
+    );
+}
+
+/// Idempotence golden pin: second sweep call on unchanged estate returns
+/// Ok(0). Mirrors Swift `anomalySweepSignalIdempotence` test.
+#[test]
+fn anomaly_sweep_signal_idempotence_ok_zero_on_second_run() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // First call returns 1 (bit changed), second returns 0 (no change).
+    let call_count = Arc::new(AtomicU32::new(0));
+    let call_count_c = call_count.clone();
+    let spec = AnomalySweepSignal::spec(Arc::new(move || {
+        let n = call_count_c.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            Ok(1) // first run: one drawer bit changed
+        } else {
+            Ok(0) // subsequent runs: idempotent, no change
+        }
+    }));
+
+    // Fire twice through a single scheduler to simulate two hourly ticks.
+    let cadence = AnomalySweepSignal::DEFAULT_CADENCE_SECONDS;
+    let mut scheduler = make_scheduler();
+    let id = scheduler.register(spec, T0_NANOS);
+
+    // First tick: bit changed → Ok(1).
+    scheduler.tick(first_fire_nanos(cadence));
+    let report_1 = scheduler
+        .report()
+        .into_iter()
+        .find(|r| r.signal_id == id)
+        .expect("signal must appear after first tick");
+    // recent_diagnostics accumulates across ticks; use last() for the newest entry.
+    let diag_1 = report_1
+        .recent_diagnostics
+        .last()
+        .expect("first tick must produce a diagnostic");
+    assert_eq!(diag_1.title, "anomaly-flag-sweep.complete");
+    assert!(diag_1.detail.contains("updated 1 drawer(s)"));
+
+    // Second tick: idempotent → Ok(0).
+    let second_fire = T0_NANOS + (cadence as i64 * 2 + 2) * 1_000_000_000;
+    scheduler.tick(second_fire);
+    let report_2 = scheduler
+        .report()
+        .into_iter()
+        .find(|r| r.signal_id == id)
+        .expect("signal must appear after second tick");
+    // After two ticks, recent_diagnostics has two entries; last() is the newest.
+    let diag_2 = report_2
+        .recent_diagnostics
+        .last()
+        .expect("second tick must produce a diagnostic");
+    assert_eq!(diag_2.title, "anomaly-flag-sweep.complete");
+    assert!(
+        diag_2.detail.contains("updated 0 drawer(s)"),
+        "second run must report zero changed drawers (idempotent); got: {}",
+        diag_2.detail
+    );
+}
+
+// ─── Live-closure injection parity tests ─────────────────────────────────────
+//
+// These tests run under --features test-seams to confirm that injecting live
+// hunt and anomaly closures into default_standing_signal_specs produces
+// the "complete" diagnostic titles (not the no-op "fired" titles). This is the
+// cross-port parity gate: the Rust resident must reach the same diagnostic
+// vocabulary as the Swift resident, where huntCycle and anomalyCycle are wired
+// to real EstateCoordinator methods.
+//
+// The closures here are synthetic (atomic-counter sentinels returning Ok(0)/
+// Ok((0,0))) — they verify the spec selection path, not the coordinator
+// logic. The coordinator integration is covered by the coordinator tests
+// (hunt_contradictions, anomaly_flag_sweep in coordinator.rs).
+
+/// Parity gate: injecting a live hunt closure selects ContradictionScoutSignal::spec
+/// instead of default_spec, so the diagnostic title is
+/// "contradiction-scout.pass.complete" (live) not "contradiction-scout.fired" (no-op).
+/// Golden pin matches Swift's ContradictionScoutSignal.spec live-path test.
+#[test]
+fn live_hunt_closure_emits_complete_diagnostic_not_noop_fired() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hunt_called = Arc::new(AtomicBool::new(false));
+    let hunt_called_c = hunt_called.clone();
+
+    // Live hunt cycle: returns (0 proposed, 0 borderline) — empty estate.
+    // The closure being called (not default_spec) is what this test gates.
+    let hunt_cycle: Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync> =
+        Arc::new(move || {
+            hunt_called_c.store(true, Ordering::SeqCst);
+            Ok((0, 0))
+        });
+
+    let store = make_empty_vector_store();
+    let specs = default_standing_signal_specs(
+        store, "test-model", None, Some(hunt_cycle), None, None,
+    );
+
+    let scout_spec = specs
+        .into_iter()
+        .find(|s| s.name == ContradictionScoutSignal::SIGNAL_NAME)
+        .expect("contradiction-scout must be in the default spec set");
+    let report = fire(scout_spec);
+
+    // The live closure was used — not the no-op default_spec.
+    assert!(
+        hunt_called.load(Ordering::SeqCst),
+        "live hunt closure must be called when Some(hunt_cycle) is injected"
+    );
+    assert_eq!(report.name, "contradiction-scout");
+    assert_eq!(report.emission_count, 1, "live spec emits one diagnostic per tick");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    // Golden pin (cross-port): Swift's live huntCycle produces
+    // "contradiction-scout.pass.complete"; Rust must match.
+    assert_eq!(
+        report.recent_diagnostics[0].title,
+        "contradiction-scout.pass.complete",
+        "live hunt closure must emit .pass.complete, not .fired (no-op title)"
+    );
+    // Golden pin: detail format matches Swift — "proposed 0 contradiction(s), 0 borderline"
+    let detail = &report.recent_diagnostics[0].detail;
+    assert!(
+        detail.contains("proposed 0 contradiction(s)"),
+        "detail must contain proposed count; got: {detail}"
+    );
+    assert!(
+        detail.contains("0 borderline candidate(s)"),
+        "detail must contain borderline count; got: {detail}"
+    );
+}
+
+/// Parity gate: injecting a live anomaly closure selects AnomalySweepSignal::spec
+/// instead of default_spec, so the diagnostic title is
+/// "anomaly-flag-sweep.complete" (live) not "anomaly-flag-sweep.fired" (no-op).
+/// Golden pin matches Swift's AnomalySweepSignal.spec live-path test and the
+/// ResidentDaemon anomalyCycle wiring.
+#[test]
+fn live_anomaly_closure_emits_complete_diagnostic_not_noop_fired() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let anomaly_called = Arc::new(AtomicBool::new(false));
+    let anomaly_called_c = anomaly_called.clone();
+
+    // Live anomaly cycle: returns 0 changed drawers — empty estate.
+    // The closure being called (not default_spec) is what this test gates.
+    let anomaly_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
+        Arc::new(move || {
+            anomaly_called_c.store(true, Ordering::SeqCst);
+            Ok(0)
+        });
+
+    let store = make_empty_vector_store();
+    let specs = default_standing_signal_specs(
+        store, "test-model", None, None, Some(anomaly_cycle), None,
+    );
+
+    let anomaly_spec = specs
+        .into_iter()
+        .find(|s| s.name == AnomalySweepSignal::SIGNAL_NAME)
+        .expect("anomaly-flag-sweep must be in the default spec set");
+    let report = fire(anomaly_spec);
+
+    // The live closure was used — not the no-op default_spec.
+    assert!(
+        anomaly_called.load(Ordering::SeqCst),
+        "live anomaly closure must be called when Some(anomaly_cycle) is injected"
+    );
+    assert_eq!(report.name, "anomaly-flag-sweep");
+    assert_eq!(report.emission_count, 1, "live spec emits one diagnostic per tick");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    // Golden pin (cross-port): Swift's live anomalyCycle produces
+    // "anomaly-flag-sweep.complete"; Rust must match.
+    assert_eq!(
+        report.recent_diagnostics[0].title,
+        "anomaly-flag-sweep.complete",
+        "live anomaly closure must emit .complete, not .fired (no-op title)"
+    );
+    // Golden pin: detail format "updated N drawer(s)" matches the Swift spec
+    // factory's format string and the ResidentDaemon diagnostic surface.
+    let detail = &report.recent_diagnostics[0].detail;
+    assert!(
+        detail.contains("updated 0 drawer(s)"),
+        "detail must contain changed-drawer count; got: {detail}"
+    );
+}
+
+/// Parity gate: injecting a live adornment closure selects AdornmentPassSignal::spec
+/// instead of default_spec, so the diagnostic title is
+/// "adornment-pass.complete" (live) not "adornment-pass.fired" (no-op).
+/// Golden pin matches the AdornmentPassSignal.spec live-path title.
+#[test]
+fn live_adornment_closure_emits_complete_diagnostic_not_noop_fired() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let adornment_called = Arc::new(AtomicBool::new(false));
+    let adornment_called_c = adornment_called.clone();
+
+    // Live adornment cycle: returns 0 adorned pairs — no debt pairs.
+    // The closure being called (not default_spec) is what this test gates.
+    let adornment_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
+        Arc::new(move || {
+            adornment_called_c.store(true, Ordering::SeqCst);
+            Ok(0)
+        });
+
+    let store = make_empty_vector_store();
+    let specs = default_standing_signal_specs(
+        store, "test-model", None, None, None, Some(adornment_cycle),
+    );
+
+    let adornment_spec = specs
+        .into_iter()
+        .find(|s| s.name == AdornmentPassSignal::SIGNAL_NAME)
+        .expect("adornment-pass must be in the default spec set");
+    let report = fire(adornment_spec);
+
+    // The live closure was used — not the no-op default_spec.
+    assert!(
+        adornment_called.load(Ordering::SeqCst),
+        "live adornment closure must be called when Some(adornment_cycle) is injected"
+    );
+    assert_eq!(report.name, "adornment-pass");
+    assert_eq!(report.emission_count, 1, "live spec emits one diagnostic per tick");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    // Golden pin (cross-port): Swift's live adornmentCycle produces
+    // "adornment-pass.complete"; Rust must match.
+    assert_eq!(
+        report.recent_diagnostics[0].title,
+        "adornment-pass.complete",
+        "live adornment closure must emit .complete, not .fired (no-op title)"
+    );
+    // Golden pin: detail format "adorned N drawer(s)" matches the Swift spec
+    // factory's format string.
+    let detail = &report.recent_diagnostics[0].detail;
+    assert!(
+        detail.contains("adorned 0 drawer(s)"),
+        "detail must contain adorned-drawer count; got: {detail}"
     );
 }

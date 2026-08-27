@@ -520,15 +520,16 @@ struct StandingSignalsTests {
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        // brain-layer governor ownership  added TrainingSignal as signal 9; the contradiction
-        // scout (hunter background half) is signal 10. Any future addition
-        // must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 11, "all ten standing signals register")
+        // brain-layer governor ownership added TrainingSignal as signal 9; the contradiction
+        // scout (hunter background half) is signal 10; P3a added AnomalySweepSignal
+        // as signal 12; SPEC_ADORNMENT §4 added AdornmentPassSignal as signal 13.
+        // Any future addition must update this count and extend defaultStandingSignalNames.
+        #expect(registered.count == 13, "all thirteen standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 11)
+        #expect(reports.count == 13)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -570,6 +571,10 @@ struct StandingSignalsTests {
         // matching the distillation-sweep and temporal-causality-fold rhythm.
         #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
             "training-daemon signal runs hourly")
+        // Added 2026-08-23 (SPEC_ADORNMENT §4): adornment-minting pass runs hourly
+        // matching the anomaly-sweep and distillation-sweep cadence family.
+        #expect(AdornmentPassSignal.defaultCadenceSeconds == 3_600,
+            "adornment-minting pass runs hourly per SPEC_ADORNMENT §4")
     }
 
     // MARK: - T-population end-to-end

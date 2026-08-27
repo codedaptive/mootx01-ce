@@ -257,11 +257,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 74 tools exact
+// 1. tools/list surface assertions — 76 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_74() {
+fn tools_list_count_is_77() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -272,13 +272,14 @@ fn tools_list_count_is_74() {
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
     // moot_monitoring_status (out-of-band sensitivity grants, daemon telemetry monitoring control) +
     // the contradiction hunter (moot_review_tunnel interface tool +
-    // moot_hunt_contradictions recipe tool):
+    // moot_hunt_contradictions recipe tool) +
+    // moot_recall_walk (D10: escalation-ladder recall):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   12  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //   13  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped,
     //                     recall_vague, dream, distill, recall_distilled,
-    //                     hunt_contradictions —
+    //                     hunt_contradictions, recall_walk —
     //                     moot_consolidate no longer dispatches (SPEC §3 Phase 2)
     //                     and moot_recollect retired with the factoid tier, §3/§11)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
@@ -289,19 +290,20 @@ fn tools_list_count_is_74() {
     //    6  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
     //                          moot_timing_report, moot_palace_import, moot_json_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   74  total (memory adapter excluded — opt-in, off by default; C3+A6
-    //       benchmark reset added moot_timing_report)
+    //   77  total (memory adapter excluded — opt-in, off by default; D10 added
+    //       moot_recall_walk escalation-ladder recall recipe; 2026-08-26 added
+    //       moot_rebuild_status, the derived-state rebuild condition surface)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 75.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 78.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 74, "expected 74 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 77, "expected 77 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_74_names() {
-    // Gate: all 74 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_names() {
+    // Gate: all 75 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -313,6 +315,8 @@ fn tools_list_name_set_matches_expected_74_names() {
     // dispatches — §3 Phase 2 — and moot_recollect retired with the factoid tier).
     // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
     // shipped in the 1.0.x train per Bob's build-now ruling).
+    // moot_recall_walk (D10): escalation-ladder recall — cheap session_hybrid
+    // first, precise hamming+text only when Stage 1 is not confident.
     let expected: std::collections::HashSet<&str> = [
         // Tier 1 — Core memory (9)
         "moot_file_memory",
@@ -345,10 +349,11 @@ fn tools_list_name_set_matches_expected_74_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (13) — list_lenses + list_recipes + synthesize + run_migration
+        // Recipe (14) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_connected
         //               + recall_shaped + recall_vague + dream
         //               + distill + recall_distilled + hunt_contradictions
+        //               + recall_walk (D10: escalation-ladder recall)
         //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
         //                moot_recollect is a notice-only stub, not listed)
         "moot_list_lenses",
@@ -357,6 +362,7 @@ fn tools_list_name_set_matches_expected_74_names() {
         "moot_run_migration",
         "moot_confirm_migration",
         "moot_recall_precise",
+        "moot_recall_temporal",
         "moot_recall_connected",
         "moot_recall_shaped",
         "moot_recall_vague",
@@ -364,8 +370,10 @@ fn tools_list_name_set_matches_expected_74_names() {
         "moot_distill",
         "moot_recall_distilled",
         "moot_hunt_contradictions",
+        "moot_recall_walk",
         "moot_reindex",
         "moot_drain_status",
+        "moot_rebuild_status",
         "moot_reclassify_fdc",
         "moot_timing_report",
         "moot_palace_import",
@@ -410,7 +418,7 @@ fn tools_list_name_set_matches_expected_74_names() {
     .collect();
 
     // Use build_tool_list_with_flags with memory_on=false: this test gates the
-    // baseline 74-name set; the `memory` tool's opt-in appearance is tested in
+    // baseline 75-name set; the `memory` tool's opt-in appearance is tested in
     // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
     // mutations in the three memory_env_lock()-gated tests below.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
@@ -1234,7 +1242,7 @@ fn memory_search_over_filed_memory_finds_it() {
     assert!(is_success(&result));
     let text = content_text(&result);
     assert!(
-        text.contains("found 1 memory(s)"),
+        text.contains("found 1 candidate memory"),
         "should find the filed memory; got: {text}"
     );
 }
@@ -1278,7 +1286,7 @@ fn memory_search_with_scoring_arg_rrf_succeeds() {
     let text = content_text(&result);
     // recall_scored always returns at least one hit (the locus fallback).
     assert!(
-        text.contains("found 1 memory(s)"),
+        text.contains("found 1 candidate memory"),
         "must find the filed memory; got: {text}"
     );
     // Per-row score annotation was removed for Swift output parity.
@@ -1311,10 +1319,42 @@ fn memory_search_with_scoring_arg_matrix_aware_succeeds() {
     assert!(is_success(&result), "scoring=matrixAware must succeed; got: {result:?}");
     let text = content_text(&result);
     assert!(
-        text.contains("found 1 memory(s)"),
+        text.contains("found 1 candidate memory"),
         "must find the filed memory; got: {text}"
     );
     // Per-row score annotation removed for Swift parity. Verify via recall_provenance.
+    assert!(
+        text.contains("recall_provenance:"),
+        "recall_scored output must include recall_provenance line; got: {text}"
+    );
+    assert!(
+        !text.contains("(score:"),
+        "per-row score annotation must not appear (Swift parity); got: {text}"
+    );
+}
+
+// M3: `scoring=discriminative` accepted as a known value and succeeds end-to-end.
+//
+// Without a corpus the discrimination factor is 1.0 → identical to rrf in score
+// magnitude; the important assertion is that the tool does NOT return an error.
+#[test]
+fn memory_search_with_scoring_arg_discriminative_succeeds() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    file_one_memory(&registry, "scoring-arg-discriminative-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "scoring-arg-discriminative-test", "scoring" => "discriminative"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_search with scoring=discriminative must not throw");
+    assert!(is_success(&result), "scoring=discriminative must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("found 1 candidate memory"),
+        "must find the filed memory; got: {text}"
+    );
     assert!(
         text.contains("recall_provenance:"),
         "recall_scored output must include recall_provenance line; got: {text}"
@@ -1455,7 +1495,7 @@ fn memory_search_ordering_by_relevance_desc_succeeds_and_finds_memory() {
     );
     let text = content_text(&result);
     assert!(
-        text.contains("found 1 memory(s)"),
+        text.contains("found 1 candidate memory"),
         "byRelevanceDesc must find the filed memory; got: {text}"
     );
     // Per-row score annotation removed for Swift parity. Verify the scored path
@@ -1491,7 +1531,7 @@ fn memory_search_ordering_by_relevance_desc_on_empty_estate_succeeds() {
     );
     let text = content_text(&result);
     assert!(
-        text.contains("found 0 memory(s)"),
+        text.contains("found 0 candidate memories"),
         "empty estate must return 0 memories; got: {text}"
     );
 }
@@ -1601,15 +1641,13 @@ fn memory_get_found_returns_full_content_verbatim() {
     // asserting the content is the final block; what is under test is that
     // the content itself is not truncated. Mirrors Swift
     // `MemoryGetTests.foundReturnsFullContentVerbatim`.
-    let advisory = text
-        .lines()
-        .next_back()
-        .expect("reply must not be empty");
+    // ARIA_MCP_SPEC 2.0.0 § 11.12: the advisory does NOT render in get
+    // payloads (it lives in the tool description + estate_status).
     assert!(
-        advisory.starts_with("sensitivity_advisory: "),
-        "with no grant live the reply must end with the sensitivity-gate advisory; got: {text}"
+        !text.contains("sensitivity_advisory:"),
+        "the get payload must not carry the sensitivity advisory; got: {text}"
     );
-    let body = text[..text.len() - advisory.len()].trim_end_matches('\n');
+    let body = text.trim_end_matches('\n');
     assert!(
         body.ends_with("verbatim content for memory-get test"),
         "response must include the exact verbatim content as the final block; got: {text}"
@@ -2060,7 +2098,7 @@ fn withdraw_memory_removes_from_unconfirmed_set() {
     .expect("search must succeed");
     let search_text = content_text(&search);
     assert!(
-        search_text.contains("found 0 memory(s)"),
+        search_text.contains("found 0 candidate memories"),
         "withdrawn memory must not appear in search; got: {search_text}"
     );
 }
@@ -2305,7 +2343,7 @@ fn move_memory_with_wing_reanchors_to_target_wing() {
     assert!(is_success(&target_recall));
     let target_text = content_text(&target_recall);
     assert!(
-        !target_text.contains("found 0 memory(s)"),
+        !target_text.contains("found 0 candidate memories"),
         "recall in TargetWing must find the moved memory; got: {target_text}"
     );
 
@@ -2323,7 +2361,7 @@ fn move_memory_with_wing_reanchors_to_target_wing() {
     assert!(is_success(&origin_recall));
     let origin_text = content_text(&origin_recall);
     assert!(
-        origin_text.contains("found 0 memory(s)"),
+        origin_text.contains("found 0 candidate memories"),
         "recall in OriginWing must return 0 hits after cross-wing move; got: {origin_text}"
     );
 }
@@ -2331,7 +2369,7 @@ fn move_memory_with_wing_reanchors_to_target_wing() {
 /// Bug O regression (Rust verification): moot_memory_search with results must
 /// NOT emit the "no memories matched" coaching hint.
 ///
-/// The Rust coaching_engine already gated on "found 0 memory(s)" (not the
+/// The Rust coaching_engine already gated on "found 0 candidate memories" (not the
 /// substring "0 memory"), so this test proves the invariant is preserved.
 #[test]
 fn search_with_results_does_not_emit_no_results_hint() {
@@ -5237,9 +5275,9 @@ fn recall_precise_default_composition_returns_memory_shape() {
     .expect("moot_recall_precise must succeed");
     assert!(is_success(&result));
     let text = content_text(&result);
-    // Same shape as moot_memory_search: a "found N memory(s)" header line.
+    // Same shape as moot_memory_search: a "found N candidate memories, one per line" header line.
     assert!(
-        text.starts_with("found ") && text.contains("memory(s)"),
+        text.starts_with("found ") && text.contains("candidate memor"),
         "precise recall must emit the moot_memory_search shape; got: {text}"
     );
 }
@@ -5312,7 +5350,7 @@ fn recall_shaped_known_preset_returns_memory_shape() {
     assert!(is_success(&result));
     let text = content_text(&result);
     assert!(
-        text.starts_with("found ") && text.contains("memory(s)"),
+        text.starts_with("found ") && text.contains("candidate memor"),
         "shaped recall must emit the moot_memory_search shape; got: {text}"
     );
 }
@@ -5367,6 +5405,51 @@ fn recall_shaped_missing_query_is_transport_fault() {
     )
     .expect_err("missing required query must produce a transport fault");
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// ── float-metric presets (float-l2, float-dot) ───────────────────────────────
+// Mirror the Swift testShapedRecallFloatMetricPresetsAccepted cases.
+
+#[test]
+fn recall_shaped_float_l2_preset_is_accepted() {
+    // float-l2 is a valid roster name — the MCP boundary must accept it and
+    // return the moot_memory_search shape (not a tool error).
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the tide rises past the sea wall at dusk", "history");
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "tide sea wall", "preset" => "float-l2"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_recall_shaped with float-l2 preset must succeed");
+    assert!(is_success(&result), "float-l2 must not return a tool error");
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("found ") && text.contains("candidate memor"),
+        "float-l2 must emit the moot_memory_search shape; got: {text}"
+    );
+}
+
+#[test]
+fn recall_shaped_float_dot_preset_is_accepted() {
+    // float-dot is a valid roster name — the MCP boundary must accept it and
+    // return the moot_memory_search shape (not a tool error).
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "the crane stands motionless at the water's edge", "history");
+    let result = dispatch_tool(
+        "moot_recall_shaped",
+        &args!["query" => "crane water edge", "preset" => "float-dot"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_recall_shaped with float-dot preset must succeed");
+    assert!(is_success(&result), "float-dot must not return a tool error");
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("found ") && text.contains("candidate memor"),
+        "float-dot must emit the moot_memory_search shape; got: {text}"
+    );
 }
 
 /// Run moot_run_migration and return the (winner_bid, full_text).
@@ -5463,15 +5546,17 @@ fn lens_keystones_over_estate_succeeds() {
     );
 }
 
-// PR-05 Part B golden: trust_synthesis dense-row output byte-matches dense_row::render.
+// PR-05 Part B golden: trust_synthesis S2-row output byte-matches result_composer::render_s2_row.
 // Mirrors Swift `trustSynthesisDenseRowsMatchRenderer` in LensToolsTests.swift.
+// COMPOSER-02B: render_s2_row replaces the deleted dense_row::render.
 #[test]
 fn trust_synthesis_dense_row_matches_renderer() {
     let registry = EstateRegistry::new_inmemory();
     let id = file_one_memory(&registry, "golden trust memory — PR-05 rust golden", "study");
-    // Fetch the drawer from the store to compute the expected dense row.
+    // Fetch the drawer from the store to compute the expected S2 row.
     let drawer = stored_drawer(&registry, &id);
-    let expected_row = aria_mcp::dense_row::render(&drawer);
+    let expected_row = aria_mcp::result_composer::render_s2_row(
+        &aria_mcp::result_composer::candidate_from_drawer(&drawer));
     let result = dispatch_tool(
         "moot_lens_trust_synthesis",
         &args![],
@@ -5488,10 +5573,10 @@ fn trust_synthesis_dense_row_matches_renderer() {
     );
 }
 
-// PR-05 Part B golden: moot_lens_successors dense-row output byte-matches dense_row::render.
+// PR-05 Part B golden: moot_lens_successors S2-row output byte-matches result_composer::render_s2_row.
 // Uses a direct tunnel between two captured drawers so the successor is guaranteed
 // to be a real DrawerStore entry — get_drawer finds it and renders it hydrated.
-// Mirrors Swift successors dense-row contract (progressive-recall rule).
+// COMPOSER-02B: render_s2_row replaces the deleted dense_row::render.
 #[test]
 fn successors_dense_row_matches_renderer() {
     use locus_kit::tunnel::Tunnel;
@@ -5528,9 +5613,10 @@ fn successors_dense_row_matches_renderer() {
         .store
         .add_tunnel(&tunnel)
         .expect("add_tunnel must succeed");
-    // Fetch target drawer from the DrawerStore for expected dense row computation.
+    // Fetch target drawer from the DrawerStore for expected S2 row computation.
     let tgt_drawer = stored_drawer(&registry, &tgt_id);
-    let expected_row = aria_mcp::dense_row::render(&tgt_drawer);
+    let expected_row = aria_mcp::result_composer::render_s2_row(
+        &aria_mcp::result_composer::candidate_from_drawer(&tgt_drawer));
     // Call successors — target must appear as the successor of source.
     let result = dispatch_tool(
         "moot_lens_successors",
@@ -6108,7 +6194,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 74, "vault-on must produce 74 tools (68 + 2 contradiction-hunter + 3 dataset + moot_json_import; incl. moot_recall_connected and moot_timing_report)");
+    assert_eq!(arr.len(), 77, "vault-on must produce 77 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, and moot_rebuild_status)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6123,7 +6209,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 67, "vault-off must produce 67 tools (74 - 5 vault - 2 gated import lanes)");
+    assert_eq!(arr.len(), 70, "vault-off must produce 70 tools (77 - 5 vault - 2 gated import lanes)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -7103,19 +7189,19 @@ fn grounded_synthesis_query_ranks_cue_matches_first() {
     ).expect("query-grounded synthesize must dispatch");
     assert!(is_success(&result), "synthesize should succeed; got: {result:?}");
     let text = content_text(&result);
-    assert!(text.contains("query: carbon compounds"),
+    assert!(text.contains("query: carbon, compounds"),
         "the response must name the cue; got: {text}");
     // Two-lane grounding is a RANKING guarantee, not a hard exclusion: the
     // scored lane (high-recall) may admit non-matching rows BELOW the term
     // matches. The first keyInsight must be a cue-matched memory — a
     // zero-term-match row must never outrank a term match.
-    let insights = text.split("keyInsights:").last().unwrap_or("");
-    let first_insight = insights
+    let candidates = text.split("candidate memories, one per line").last().unwrap_or("");
+    let first_row = candidates
         .lines()
-        .find(|l| l.trim_start().starts_with("- "))
+        .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    assert!(first_insight.contains("carbon"),
-        "cue-matched memory must lead keyInsights; got '{first_insight}'");
+    assert!(first_row.contains("carbon"),
+        "cue-matched memory must lead the candidate section; got '{first_row}'");
 }
 
 /// Provenance Restricted/Secret is a separate axis from the adjective
@@ -7148,9 +7234,9 @@ fn grounded_synthesis_does_not_expose_provenance_sensitive_rows() {
     assert!(is_success(&result));
     assert!(
         !text.contains("classified aardvark synthesis token"),
-        "provenance-sensitive content must not reach keyInsights: {text}"
+        "provenance-sensitive content must not reach the candidate section: {text}"
     );
-    assert!(text.contains("grounded_synthesis: 0 drawer(s)"));
+    assert!(text.contains("grounded_synthesis: 0 drawers"));
 }
 
 /// Mixed-pool case: one normal row and one provenance-restricted row.
@@ -7192,7 +7278,7 @@ fn grounded_synthesis_mixed_pool_only_exposes_normal_rows() {
 
     // Only the normal row feeds synthesis — gate removes restricted before synthesize.
     assert!(
-        text.contains("grounded_synthesis: 1 drawer(s)"),
+        text.contains("grounded_synthesis: 1 drawer\n"),
         "only the normal row must survive the gate; got: {text}"
     );
     assert!(
@@ -7257,8 +7343,9 @@ fn connected_recall_reaches_bridge_linked_answer() {
     assert!(text.starts_with("found "), "memory_search-shaped header expected; got: {text}");
     assert!(text.contains(&answer),
         "the tunnel-linked answer must be reachable via the walk; got: {text}");
-    assert!(text.contains("connected: anchor="),
-        "the lane-provenance line must be present; got: {text}");
+    assert!(!text.contains("connected: anchor="),
+        "no tool-specific text control line (ARIA_MCP_SPEC 2.0.0 § 8.4 — \
+         graph provenance is structured data); got: {text}");
 }
 
 /// Gate invariant: a withdrawn memory linked by a tunnel to a live anchor must
@@ -7662,10 +7749,10 @@ fn grounded_synthesis_cue_ranking_brings_old_answer_to_top() {
     // of the cap-3 output (positions 1 and 2 are the 2 most-recent generics).
     assert!(
         text.contains("daguerreotype"),
-        "answer drawer content must appear in keyInsights after cue ranking; got: {text}"
+        "answer drawer content must appear in the candidate section after cue ranking; got: {text}"
     );
     assert!(
-        text.contains("query: daguerreotype vintage cameras collection"),
+        text.contains("query: daguerreotype, vintage, cameras, collection"),
         "response must name the cue; got: {text}"
     );
 }
@@ -9021,9 +9108,11 @@ fn consolidate_name_is_unknown_tool() {
     assert_eq!(err.code, JSONRPCErrorCode::METHOD_NOT_FOUND);
 }
 
-/// moot_recall_distilled without ack returns the contract change notice.
+/// moot_recall_distilled runs UNCONDITIONALLY — no acknowledgment ceremony
+/// precedes any result (ARIA_MCP_SPEC 2.0.0 § 8.6). The former ack gate and
+/// CONTRACT CHANGE NOTICE were deleted in COMPOSER-02B.
 #[test]
-fn recall_distilled_without_ack_returns_contract_notice() {
+fn recall_distilled_runs_without_any_ack() {
     let registry = EstateRegistry::new_inmemory();
     let ledger = SurfacedRecallLedger::new();
 
@@ -9032,86 +9121,31 @@ fn recall_distilled_without_ack_returns_contract_notice() {
         &args!["query" => "any query"],
         &registry,
         &ledger,
-    ).expect("ACK gate must return Ok(notice), not Err");
+    ).expect("distilled recall must dispatch unconditionally");
 
     assert!(!is_error_result(&result));
     let text = text_from_result(&result);
-    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"),
-        "notice must start with CONTRACT CHANGE NOTICE:");
-    assert!(text.contains(r#"ack: "recall_distilled/v2""#),
-        "notice must quote the current token");
-    assert!(!text.contains("found "),
-        "no recall must have run — estate untouched");
-}
-
-/// moot_recall_distilled with a wrong/stale ack returns the same notice.
-#[test]
-fn recall_distilled_wrong_ack_returns_contract_notice() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-
-    let result = dispatch_tool(
-        "moot_recall_distilled",
-        &args!["query" => "any query", "ack" => "recall_distilled/v1"],
-        &registry,
-        &ledger,
-    ).expect("wrong ack must return Ok(notice)");
-
-    assert!(!is_error_result(&result));
-    let text = text_from_result(&result);
-    assert!(text.starts_with("CONTRACT CHANGE NOTICE:"));
-    assert!(text.contains(r#"ack: "recall_distilled/v2""#),
-        "notice must always show the current token");
-}
-
-/// moot_recall_distilled with correct ack executes.
-#[test]
-fn recall_distilled_correct_ack_executes() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-
-    let result = dispatch_tool(
-        "moot_recall_distilled",
-        &args!["query" => "any query", "ack" => "recall_distilled/v2"],
-        &registry,
-        &ledger,
-    ).expect("correct ack must execute and return Ok");
-
-    assert!(!is_error_result(&result));
-    let text = text_from_result(&result);
-    // Recall handler runs and reports 0 results on the empty estate.
     assert!(text.contains("found "),
-        "correct ack must run the recall handler: {:?}", text);
-    assert!(!text.starts_with("CONTRACT CHANGE NOTICE:"),
-        "correct ack must not return a contract notice");
+        "the recall handler must run without any ack: {:?}", text);
+    assert!(!text.contains("CONTRACT CHANGE NOTICE"),
+        "no ceremony may precede results");
 }
 
-/// The recall_distilled tool schema exposes an "ack" property.
+/// The recall_distilled tool schema carries NO "ack" property and its
+/// description carries no ceremony vocabulary.
 #[test]
-fn recall_distilled_schema_exposes_ack_param() {
+fn recall_distilled_schema_has_no_ack_param() {
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("tool list must be array");
     let tool = arr.iter()
         .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))
         .expect("moot_recall_distilled must appear in tools list");
     let props = &tool["inputSchema"]["properties"];
-    assert!(props["ack"].is_object(),
-        "moot_recall_distilled schema must have 'ack' property; schema: {props:?}");
-    assert_eq!(props["ack"]["type"].as_str(), Some("string"),
-        "ack param must be type: string");
-}
-
-/// The recall_distilled description documents the current ack token.
-#[test]
-fn recall_distilled_description_contains_ack_token() {
-    let tools = build_tool_list_with_flags(vault_enabled(), false);
-    let arr = tools.as_array().expect("tool list must be array");
-    let tool = arr.iter()
-        .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))
-        .expect("moot_recall_distilled must appear in tools list");
+    assert!(props["ack"].is_null(),
+        "moot_recall_distilled schema must NOT have an 'ack' property; schema: {props:?}");
     let desc = tool["description"].as_str().unwrap_or("");
-    assert!(desc.contains("recall_distilled/v2"),
-        "description must document the current ack token; got: {desc:?}");
+    assert!(!desc.contains("CONTRACT CHANGE"),
+        "description must carry no ceremony vocabulary; got: {desc:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -9247,7 +9281,7 @@ fn secret_ceiling_is_counted_but_silent() {
 // counts and rankings are unchanged and the gate is not itself an oracle.
 // ---------------------------------------------------------------------------
 
-/// The canary lives in the SUBJECT, not the content: `dense_row::render`
+/// The canary lives in the SUBJECT, not the content: `result_composer::render_s2_row`
 /// renders `subject`, so a canary in the body would prove nothing.
 const DM_CANARY: &str = "dm stale-edge target SUBJECTCANARY";
 
@@ -9301,7 +9335,7 @@ fn assert_gated_but_present(body: &str, tgt: &str, ranking_marker: &str) {
         "gated endpoint must NOT render its subject; got: {body}"
     );
     assert!(
-        body.contains(&aria_mcp::dense_row::render_unhydrated(tgt)),
+        body.contains(&aria_mcp::result_composer::render_s2_row_unhydrated(tgt)),
         "gated endpoint must render the unhydrated row byte-for-byte; got: {body}"
     );
 }
@@ -9386,7 +9420,8 @@ fn dm_normal_endpoint_still_hydrates_fully() {
         &registry,
         locus_kit::adjectives::AdjectiveSensitivity::Normal,
     );
-    let expected = aria_mcp::dense_row::render(&stored_drawer(&registry, &tgt));
+    let expected = aria_mcp::result_composer::render_s2_row(
+        &aria_mcp::result_composer::candidate_from_drawer(&stored_drawer(&registry, &tgt)));
     let result = dispatch_tool(
         "moot_lens_successors",
         &args!["wing" => "Agentic Memory", "anchorID" => src.as_str()],
@@ -10906,4 +10941,243 @@ fn json_import_id_map_block_survives_unknown_arg_hint() {
     let map = map_json["id_map"].as_object().expect("id_map object");
     assert_eq!(map.len(), 2, "one id_map entry per seeded record");
     assert!(map.contains_key("h1") && map.contains_key("h2"));
+}
+
+// ---------------------------------------------------------------------------
+// Front-door family — `door` argument on moot_memory_search
+// ---------------------------------------------------------------------------
+//
+// The `door` argument is an adjective on the recall verb (ARIA grammar).
+// Precedence: explicit door arg > explicit scoring arg > A1 DoorManifest
+// (provisioned) > MatrixAware.
+//
+// Tests:
+//   A. Unknown door string → INVALID_PARAMS (fail-closed).
+//   B. Reserved names "hedge"/"thorough" → INVALID_PARAMS (not yet wired).
+//   C. door="guess" with no A1 config → falls back to MatrixAware, succeeds.
+//   D. Known door rawValues (rrf, matrixAware, raw) succeed.
+//   E. door overrides scoring when both present (no error on valid combination).
+
+// A. Unknown door fails closed.
+#[test]
+fn memory_search_unknown_door_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "unknown-door-test content", "lab/notes");
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "unknown-door-test", "door" => "teleporter"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("unknown door must produce a transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "unknown door must be INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// B. Reserved name "hedge" is not yet wired — must fail CLOSED.
+#[test]
+fn memory_search_reserved_door_hedge_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "hedge-test", "door" => "hedge"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("reserved door 'hedge' must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// B. Reserved name "thorough" is not yet wired — must fail CLOSED.
+#[test]
+fn memory_search_reserved_door_thorough_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "thorough-test", "door" => "thorough"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("reserved door 'thorough' must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// B. Null door is explicitly rejected.
+#[test]
+fn memory_search_null_door_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let mut args = args!["query" => "null-door-test"];
+    args.insert("door".to_string(), JsonValue::Null);
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args,
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("door:null must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+// C. door="guess" with no A1 config provisioned → falls back to MatrixAware.
+#[test]
+fn memory_search_door_guess_with_no_config_falls_back_to_matrix_aware() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "door-guess-no-config-test content", "lab/notes");
+
+    // No DoorManifest has been provisioned — coordinator returns Default
+    // (MatrixAware). The call must succeed, not error.
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "door-guess-no-config-test", "door" => "guess"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=guess with no config must not throw");
+    assert!(
+        is_success(&result),
+        "door=guess with no provisioned config must succeed (fallback to MatrixAware); got: {result:?}"
+    );
+}
+
+// C2. door="guess" with a provisioned DoorManifest(scoring: .rrf) routes
+//     through the manifest-scoring path — the A1 per-corpus static config tier.
+#[test]
+fn memory_search_door_guess_with_provisioned_config_uses_manifest_scoring() {
+    use genius_locus_kit::coordinator::DoorManifest;
+    use genius_locus_kit::recall::GLKRecallScoring;
+
+    let registry = EstateRegistry::new_inmemory();
+    // Provision DoorManifest { scoring: Rrf } so door="guess" reads it.
+    {
+        let coord = registry.coord.lock().unwrap();
+        let manifest = DoorManifest { scoring: GLKRecallScoring::Rrf };
+        coord
+            .provision_door_config(&registry.default.handle, &manifest)
+            .expect("provision_door_config must succeed on in-memory estate");
+    }
+    file_one_memory(&registry, "door-guess-provisioned-test content", "lab/notes");
+
+    // door="guess" reads the provisioned manifest (scoring=rrf) and routes
+    // through it. The call must succeed — the provisioned config must reach
+    // the recall pipeline.
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "door-guess-provisioned-test", "door" => "guess"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=guess with DoorManifest{scoring:rrf} must not throw");
+    assert!(
+        is_success(&result),
+        "door=guess with provisioned DoorManifest(scoring:rrf) must succeed; got: {result:?}"
+    );
+    // The provisioned rrf scoring on unionBest mode degrades to the raw
+    // lane-normalised score (unionBest has no distinct equal-weight RRF
+    // fusion), recording "unionBest.rrf" in degraded_stages. This proves
+    // the provisioned scoring — not the matrixAware default — was used.
+    let text = content_text(&result);
+    assert!(
+        text.contains("degraded_stages:[unionBest.rrf]"),
+        "provisioned rrf scoring on unionBest must record unionBest.rrf degraded stage \
+         (proving door=guess read the provisioned config, not the default); text: {text}"
+    );
+}
+
+// D. Known door rawValues succeed end-to-end.
+#[test]
+fn memory_search_door_rrf_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "door-rrf-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "door-rrf-test", "door" => "rrf"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=rrf must not throw");
+    assert!(is_success(&result), "door=rrf must succeed; got: {result:?}");
+}
+
+#[test]
+fn memory_search_door_matrix_aware_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "door-matrixAware-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "door-matrixAware-test", "door" => "matrixAware"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=matrixAware must not throw");
+    assert!(is_success(&result), "door=matrixAware must succeed; got: {result:?}");
+}
+
+#[test]
+fn memory_search_door_raw_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "door-raw-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "door-raw-test", "door" => "raw"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=raw must not throw");
+    assert!(is_success(&result), "door=raw must succeed; got: {result:?}");
+}
+
+// E. door overrides scoring when both are present — discriminating assertion.
+//
+// When door=rrf and scoring=matrixAware are both present, the door arg wins.
+// rrf on unionBest mode has no distinct equal-weight RRF fusion and records
+// "unionBest.rrf" in degraded_stages. matrixAware on unionBest runs the full
+// matrix pipeline with no degradation. The response text therefore differs:
+//   door wins (rrf)   → "degraded_stages:[unionBest.rrf]"
+//   scoring wins (matrixAware) → "degraded_stages:none"
+// This discriminating assertion proves which path ran — not just that the
+// call succeeded.
+#[test]
+fn memory_search_door_overrides_scoring_when_both_present() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "door-overrides-scoring-test content", "lab/notes");
+
+    // door=rrf wins; scoring=matrixAware is superseded. The rrf path on
+    // unionBest records "unionBest.rrf" in degraded_stages, proving the
+    // door arg was applied (not the scoring arg).
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args![
+            "query" => "door-overrides-scoring-test",
+            "door" => "rrf",
+            "scoring" => "matrixAware"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("door=rrf + scoring=matrixAware must not throw");
+    assert!(
+        is_success(&result),
+        "door takes precedence over scoring; must succeed; got: {result:?}"
+    );
+    // Discriminating assertion: "unionBest.rrf" in the response text proves
+    // door=rrf won over scoring=matrixAware. If scoring won instead, the
+    // matrixAware full-pipeline path would record no scoring fallback and
+    // the text would contain "degraded_stages:none" instead.
+    let text = content_text(&result);
+    assert!(
+        text.contains("degraded_stages:[unionBest.rrf]"),
+        "door=rrf must win over scoring=matrixAware — response must contain \
+         degraded_stages:[unionBest.rrf]; text: {text}"
+    );
 }

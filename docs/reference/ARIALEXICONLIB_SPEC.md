@@ -1,8 +1,8 @@
 ---
 title: AriaLexiconLib Specification
-version: 1.1.1
+version: 1.1.2
 status: active
-date: 2026-07-16
+date: 2026-08-26
 description: "Behavioral specification for AriaLexiconLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -24,7 +24,7 @@ purpose: |
 
 ## § 1 — What this package is
 
-AriaLexiconLib is the single source of truth for the vocabulary every
+AriaLexiconLib is the single authoritative source for the vocabulary every
 consumer uses to talk to a MOOTx01 estate. It states the ARIA grammar
 in one sentence — *every call is one verb applied to a noun, optionally
 constrained by adjectives* — and reifies the pieces of that sentence as
@@ -172,6 +172,10 @@ against the Swift raw values for every variant, so a JSON lexicon
 payload is byte-identical across ports.
 
 ## Changelog
+
+### 1.1.2 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.1.1 -- 2026-07-16
 B-2 role-partition: corrected `KGFact` typo to `kgFact` (wire-string/Swift-case spelling; Rust variant is `KgFact`). Neither port spells the variant `KGFact`. Aligns B-2 with C-3 which already used `kgFact`.

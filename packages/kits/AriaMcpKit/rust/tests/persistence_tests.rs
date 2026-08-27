@@ -555,3 +555,114 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
         let _ = std::fs::remove_dir_all(parent);
     }
 }
+
+// ---------------------------------------------------------------------------
+// B-10a reward wiring: moot_memory_get is a dereference verb (W1 mission)
+// ---------------------------------------------------------------------------
+
+/// `moot_memory_get` must mark recall-trace rows as used (B-10a reward path)
+/// when the fetched drawer was previously surfaced by `moot_memory_search`.
+///
+/// Probe pattern: after a successful `moot_memory_get`, call
+/// `mark_recall_used` with a window wide enough to cover any trace row
+/// written in this test. If `moot_memory_get` already fired the reward path
+/// (set `used=true` on all live rows), the probe finds zero rows with
+/// `used=false` and returns 0. A non-zero return proves the reward path
+/// did NOT fire, which is a B-10a violation.
+///
+/// Uses a SQLite-backed estate because recall-trace rows are only written
+/// on the SQLite backend (in-memory estates cannot test this). Mirrors
+/// Swift `memoryGetAfterTracedSearchSetsUsedBit` in `TraceRewardTests.swift`.
+#[test]
+fn memory_get_after_search_sets_used_bit() {
+    let path = temp_sqlite_path("b10a-get-reward");
+
+    let registry = EstateRegistry::new_sqlite(&path, "test-owner")
+        .expect("new_sqlite must succeed");
+
+    // File a memory so the estate is non-empty.
+    let drawer_id = {
+        let a = args![
+            "content" => "memory get reward wiring test",
+            "subject" => "memory get reward wiring test",
+            "location" => "get-reward-room"
+        ];
+        let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+            .expect("moot_file_memory must succeed");
+        let text = content_text(&result);
+        let id_line = text.lines().next().unwrap_or("");
+        let id = id_line.strip_prefix("filed memory ").unwrap_or("").to_owned();
+        assert!(!id.is_empty(), "filed memory id must be non-empty; got: {text}");
+        id
+    };
+
+    // Search using a SHARED ledger — the ledger carries surfaced ids across
+    // calls within the same simulated session. dispatch_tool takes &SurfacedRecallLedger
+    // (thread-safe interior mutex), so we create one and pass it to both calls.
+    let session_ledger = SurfacedRecallLedger::new();
+
+    let search_result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "memory get reward"],
+        &registry,
+        &session_ledger,
+    )
+    .expect("moot_memory_search must succeed");
+    let search_text = content_text(&search_result);
+    assert!(
+        search_text.contains(&drawer_id),
+        "search must surface the filed drawer; got: {search_text}"
+    );
+
+    // Verify trace rows were written (B-10a external-origin contract).
+    {
+        let coord = registry.coord.lock().unwrap();
+        let trace_count = coord
+            .count_recall_traces(&registry.default.handle)
+            .expect("count_recall_traces");
+        assert!(
+            trace_count > 0,
+            "external search must write recall-trace rows; got count={trace_count}"
+        );
+    }
+
+    // Dereference via moot_memory_get — passes the SAME session ledger so
+    // note_usage can find the drawer id and call mark_recall_used.
+    let get_result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => drawer_id.as_str()],
+        &registry,
+        &session_ledger,
+    )
+    .expect("moot_memory_get must succeed");
+    let is_error = get_result["isError"].as_bool().unwrap_or(true);
+    assert!(
+        !is_error,
+        "moot_memory_get must return a non-error result; got: {get_result}"
+    );
+
+    // Probe: call mark_recall_used with a window guaranteed to cover the test's
+    // trace rows ([year-2000, year-3000]). If moot_memory_get already set
+    // used=true on all rows, the probe finds 0 rows with used=false → returns 0.
+    // A non-zero result means memory_get did NOT fire the reward path.
+    let probe_count = {
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .mark_recall_used(
+                &registry.default.handle,
+                &drawer_id,
+                "2000-01-01T00:00:00Z", // since: far past — guaranteed to cover test rows
+                "3000-01-01T00:00:00Z", // now: far future — guaranteed to be after recalledAt
+            )
+            .expect("probe mark_recall_used must not error")
+    };
+    assert_eq!(
+        probe_count, 0,
+        "moot_memory_get must fire the B-10a reward path (note_usage → mark_recall_used) \
+         before the probe; probe found {probe_count} rows still with used=false"
+    );
+
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::remove_dir_all(parent);
+    }
+}

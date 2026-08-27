@@ -1,11 +1,11 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.12.0
+version: 1.18.1
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-14
-description: Public API surface for NeuronKit in both the Swift and Rust ports.
+date: 2026-08-26
+description: "Public API surface for NeuronKit in both the Swift and Rust ports. 1.18.0: MarkerValidators removed (moved to AdornmentLib as AdornmentValidators). 1.17.0: W4 CompositionGrid.named(_:applyingTuning:) / named_with_tuning; HybridRecall manifest-aware tuning read."
 package: NeuronKit
 languages: [swift, rust]
 relates_to:
@@ -268,7 +268,7 @@ impl RecallFrameTuning { pub const fn default_tuning() -> Self; }   // also impl
 **Swift:**
 
 ```swift
-public typealias Drawer = LocusKit.Drawer   // cosmetic alias; storage truth stays LocusKit.Drawer
+public typealias Drawer = LocusKit.Drawer   // cosmetic alias; the stored type stays LocusKit.Drawer
 
 public struct RecallStream: AsyncSequence, Sendable {
     public typealias Element = Page
@@ -1031,6 +1031,13 @@ public enum CompositionGrid {
     public static let defaultName: String       // "text"
     public static let all: [ReductionComposition]
     public static func named(_ name: String?) -> ReductionComposition
+    /// W4: apply optimizer-owned recall tuning. Overrides mmrLambda on MMR
+    /// compositions; non-MMR compositions returned unchanged. Pass .default
+    /// to preserve spec-constant behavior (identical to named(_:)).
+    public static func named(
+        _ name: String?,
+        applyingTuning tuning: RecallTuningManifest
+    ) -> ReductionComposition
     public static var names: [String]
 }
 ```
@@ -1041,6 +1048,11 @@ public enum CompositionGrid {
 pub const DEFAULT_NAME: &str;                         // "text"
 pub fn all() -> Vec<ReductionComposition>;
 pub fn named(name: Option<&str>) -> ReductionComposition;
+/// W4: apply optimizer-owned recall tuning. Mirrors Swift named(_:applyingTuning:).
+pub fn named_with_tuning(
+    name: Option<&str>,
+    tuning: &genius_locus_kit::RecallTuningManifest,
+) -> ReductionComposition;
 pub fn names() -> Vec<String>;
 pub fn is_known(name: &str) -> bool;                  // Rust-only convenience predicate
 ```
@@ -1754,7 +1766,7 @@ shape deltas.
 | Anchor confidence band | `AnchorConfidence` `LatticeAnchorInference.swift:70` | `AnchorConfidence` `lattice_anchor.rs:74` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
 | Enrichment status | `EnrichmentStatus` `LatticeAnchorInference.swift:80` | `EnrichmentStatus` `lattice_anchor.rs:92` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
 | Recall fusion tuning | `RecallFrameTuning` `HybridRecall.swift:94` | `RecallFrameTuning` `hybrid_recall.rs:31` | `public` / `pub` | identical (Swift `Int`/`Float`, Rust `i32`/`f32` idiom) | `HybridRecallTests.swift` ; `hybrid_recall.rs` tests | Confirmed |
-| Drawer row alias | `Drawer` typealias `HybridRecall.swift:53` | `DrawerRow` `hybrid_recall.rs:22` | `public` / `pub` | Swift aliases `LocusKit.Drawer` (storage truth); Rust has no estate dep so `DrawerRow` is a flat `{id, content}` projection — sanctioned (Rust: no LocusKit/EngramLib dep, SPEC I-17/I-18) | `HybridRecallTests.swift` ; `hybrid_recall.rs` rerank tests | Confirmed |
+| Drawer row alias | `Drawer` typealias `HybridRecall.swift:53` | `DrawerRow` `hybrid_recall.rs:22` | `public` / `pub` | Swift aliases `LocusKit.Drawer` (the stored type); Rust has no estate dep so `DrawerRow` is a flat `{id, content}` projection — sanctioned (Rust: no LocusKit/EngramLib dep, SPEC I-17/I-18) | `HybridRecallTests.swift` ; `hybrid_recall.rs` rerank tests | Confirmed |
 | Recall page / stream | `RecallStream` (+ nested `Page`) `HybridRecall.swift:140` | `RecallPage` `hybrid_recall.rs:63` | `public` / `pub` | Swift `AsyncSequence` of `Page`; Rust sync `Vec<RecallPage>` (no async runtime — sanctioned, cf. policy-store seam) | `HybridRecallTests.swift` ; `hybrid_recall.rs` paging tests | Confirmed |
 | Context document | `ContextDocument` `ContextSynthesizer.swift:23` | `ContextDocument` `context_synthesizer.rs:16` | `public` / `pub` | identical fields | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
 | Context synthesizer | `ContextSynthesizer` (enum) `ContextSynthesizer.swift:77` | free fn `synthesize` `context_synthesizer.rs` | `public` / `pub` | Swift caseless-enum namespace `async` taking `EstateHandle`; Rust free `synthesize` takes explicit `&[DrawerRowMeta]` (no estate) — sanctioned (Rust: no estate dep) | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
@@ -2126,6 +2138,48 @@ Three cases keyed on `confidence`:
 
 ## Changelog
 
+### 1.18.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.18.0 -- 2026-08-23
+
+ADORNMENT mission — validators moved to AdornmentLib.
+
+**Removed:** `MarkerValidators` enum (previously Swift-only in NeuronKit),
+`MarkerValidationFunctions` struct, and all `MV-*` public constants. These
+were renamed `AdornmentValidators` / `AV-*` and moved to the new
+`AdornmentLib` package. Callers that previously imported NeuronKit for
+validators must import AdornmentLib instead.
+
+**Rust:** `marker_validators` module removed from NeuronKit rust crate;
+moved to `adornment_lib` crate as `adornment_validators` module.
+
+### 1.17.0 -- 2026-08-20
+
+W4 optimizer-owned recall tuning surface in NeuronKit (both ports).
+
+**Swift additions:**
+
+- `NeuronKit.CompositionGrid.named(_:applyingTuning:)` — new overload of the
+  existing `named(_:)` function. Accepts a `RecallTuningManifest` (from
+  `GeniusLocusKit`) and overrides `mmrLambda` on MMR compositions when the
+  manifest is non-default. Non-MMR compositions are returned unchanged.
+  Spec-default tuning returns the same composition as `named(_:)` exactly.
+
+- `NeuronKit.HybridRecall` (hybridRecall function) — now reads the estate's
+  `"recall_tuning"` manifest key when the caller passes `.default` tuning.
+  If the manifest is non-default, a `RecallFrameTuning` is constructed from
+  the manifest's four fields and used for the recall frame. Explicit
+  (non-default) caller tuning bypasses the manifest read entirely (caller-
+  explicit > provisioned > spec-default precedence, mirroring lane weights).
+
+**Rust additions:**
+
+- `composition_grid::named_with_tuning(name: Option<&str>, tuning: &RecallTuningManifest) -> ReductionComposition` — mirrors Swift `named(_:applyingTuning:)`.
+
+No existing public signatures change; all additions are purely additive.
+
 ### 1.12.0 -- 2026-08-14
 
 - `PerformanceHealthDuty` protocol (Swift) / trait (Rust) — 24 h
@@ -2195,6 +2249,14 @@ empty `cueTerms` is bit-identical to the previous output. Rust port mirrors Swif
 ### 1.5.0 -- 2026-07-16
 Audit pass: added all surface items shipped since 1.4.0 that were absent
 from the doc. Additions:
+
+- **1.16.0 (2026-08-20)** — ReductionQuery.init(text:udcCode:qid:) and ReductionCandidate `qid` field (additive, default unanchored); latticeAnchorSimilarity replaces latticeProximity; QIDClosureAdjacency provider (Rust twins: lattice_anchor_similarity, QIDClosureAdjacency).
+
+- **v1.15.0 (2026-08-20)** — `isDateSeekingQuery(_:) -> Bool` (Rust `is_date_seeking_query`); `ReductionCandidate.filedAt: Date?` (Rust `filed_at: Option<i64>`, epoch ms), populated body-free from the hit drawer.
+
+- **v1.14.0 (2026-08-19)** — `paddedWindow(_:days:) -> QueryDateWindow` (days <= 0 returns the window unchanged); Rust `padded_window(&QueryDateWindow, i64)` and `shift_iso_day(&str, i64)`.
+
+- **v1.13.0 (2026-08-19)** — QueryDateWindow surface: `parseQueryDateExpression(_:) -> QueryDateParse` (.none/.anchored([QueryDateWindow])/.monthOnly), `expandMonthOnly(month:matchedText:years:)`, `windowContains(_:eventTime:)`; Rust twins in neuron_kit::query_date_window.
 
 - **§ 1 layout** — added `BenchmarkScoring.swift`, `Lenses/NodeMotion.swift`,
   `Lenses/QueryPrecision.swift`, `Dreaming/CorpusGrowthProbe.swift`,

@@ -368,6 +368,29 @@ pub enum EmbeddingModelConfig {
     /// Embedding-Gemma 300M (768-dim pooled output). FNV-1a tokenization
     /// (vocab 256000, max 2048 tokens), EmbeddingGemma projection seed.
     EmbeddingGemma { inference: NamedInferenceFn },
+
+    /// Candle NL in-process inference provider (all-MiniLM-L6-v2, 384-dim).
+    ///
+    /// The caller loads a `CandleNLProvider` from `corpus-kit-providers`
+    /// (requires model weights on disk; fetch via the provider's
+    /// `fetch-model.sh`) and passes it here as a `Box<dyn EmbeddingProvider>`.
+    /// No host inference seam is needed — the provider carries its own BERT
+    /// model weights via the `candle` ML crate.
+    ///
+    /// Unlike the distributional cases, this provider is NOT trainable: it
+    /// carries fixed model weights and produces embeddings without any
+    /// corpus-specific training pass.
+    ///
+    /// # Important: GeniusLocusKit compatibility note
+    ///
+    /// GeniusLocusKit's `SharedContentMigration::has_trainable_provider`
+    /// check uses a `matches!` pattern that does not name this variant. A
+    /// pure-CandleNL ensemble (no RI/PPMI/LSA/NMF) will be incorrectly
+    /// classified as "has trainable provider", causing an over-eager capacity
+    /// pre-check. This is benign (false-positive only) and correct for the
+    /// expected use case of adding CandleNL to the default five-signal
+    /// ensemble (CANDLE-ADOPT Blast Radius Report §1, INTENTIONALLY_LEFT).
+    CandleNL { provider: Box<dyn EmbeddingProvider> },
 }
 
 impl EmbeddingModelConfig {
@@ -419,7 +442,11 @@ impl EmbeddingModelConfig {
             | EmbeddingModelConfig::Fdc { .. }
             | EmbeddingModelConfig::MiniLM { .. }
             | EmbeddingModelConfig::MPNet { .. }
-            | EmbeddingModelConfig::EmbeddingGemma { .. } => Err(CorpusKitError::NotTrainable(
+            | EmbeddingModelConfig::EmbeddingGemma { .. }
+            // CandleNL carries fixed model weights loaded at provider
+            // construction time; there is no corpus-trained basis to
+            // reconstruct. Not trainable (CANDLE-ADOPT §1, is_trainable).
+            | EmbeddingModelConfig::CandleNL { .. } => Err(CorpusKitError::NotTrainable(
                 "embedding model is not a trainable-basis provider; reconstruction \
                  from a serialized basis is only supported for RI/PPMI/LSA/NMF"
                     .to_string(),
@@ -928,6 +955,10 @@ impl Corpus {
             // Fdc: the caller constructed an FDCProvider externally. FDCProvider is
             // stateless (no training required) — not trainable.
             EmbeddingModelConfig::Fdc { provider } => ProviderHandle::Plain(provider),
+            // CandleNL: the caller loaded a CandleNLProvider from disk and passed
+            // it in as a Box<dyn EmbeddingProvider>. The provider owns its weights;
+            // no training step is needed or possible (not trainable).
+            EmbeddingModelConfig::CandleNL { provider } => ProviderHandle::Plain(provider),
             EmbeddingModelConfig::MiniLM { inference } => {
                 ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
                     "minilm-v6",
@@ -3196,15 +3227,18 @@ impl Corpus {
         // farthest is NOT a reordering of nearest (the dissimilar chunks are not
         // in the nearest top-K), so the store runs the farthest scan.
         let store_result = match direction {
+            // Corpus (old type) always uses cosine — metric selection is on CorpusContentEngine.
             SearchDirection::Nearest => self.vector_store.find_nearest_float(
                 &probe,
                 &slot.model_id,
                 limit.saturating_mul(4),
+                vectorkit::engine::metric::FloatMetric::Cosine,
             ),
             SearchDirection::Farthest => self.vector_store.find_farthest_float(
                 &probe,
                 &slot.model_id,
                 limit.saturating_mul(4),
+                vectorkit::engine::metric::FloatMetric::Cosine,
             ),
         };
         let matches = match store_result {

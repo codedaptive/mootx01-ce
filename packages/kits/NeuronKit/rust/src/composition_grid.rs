@@ -162,6 +162,35 @@ pub fn named(name: Option<&str>) -> ReductionComposition {
     }
 }
 
+/// Look up a composition by name and apply the optimizer-owned recall tuning to
+/// override `mmr_lambda` for compositions that include an `mmr` term. Non-MMR
+/// compositions are returned unchanged. Spec-default tuning (all fields at their
+/// defaults) returns the same composition as `named(name)` exactly.
+///
+/// Mirrors Swift `CompositionGrid.named(_:applyingTuning:)` (W4).
+///
+/// # Parameters
+/// - `name`: composition name; falls back to `text` when unknown or `None`.
+/// - `tuning`: optimizer-owned recall-tuning envelope from the estate manifest
+///   (e.g. from `EstateCoordinator::provisioned_recall_tuning`). Pass
+///   `RecallTuningManifest::default()` to preserve spec-constant behavior.
+pub fn named_with_tuning(
+    name: Option<&str>,
+    tuning: &genius_locus_kit::RecallTuningManifest,
+) -> ReductionComposition {
+    let base = named(name);
+    // Only override mmr_lambda when the composition has an MMR term and the
+    // manifest carries a non-default value. Default tuning returns the
+    // same value as `named(name)` exactly (no float drift).
+    if !base.has_mmr() || *tuning == genius_locus_kit::RecallTuningManifest::default() {
+        return base;
+    }
+    ReductionComposition {
+        mmr_lambda: f64::from(tuning.mmr_lambda),
+        ..base
+    }
+}
+
 /// True when `name` is a known composition in the grid. Used by the ARIA
 /// boundary to fail closed on an unknown composition arg (the Rust side's
 /// fail-closed validation; the recipe's `named` still degrades to `text`).

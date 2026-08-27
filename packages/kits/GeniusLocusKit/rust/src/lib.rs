@@ -45,6 +45,11 @@
 
 pub mod audit;
 pub mod brain;
+// packager.rs — GLKResultsPackager Rust port (PACKAGER mission). Post-recall,
+// pre-presentation packager: gate signals, confidence levels, cliff cutoff,
+// and the packed result type consumed by the ARIA boundary. Mirrors
+// GeniusLocusKit/RecallDirector/GLKResultsPackager.swift.
+pub mod packager;
 // dataset_signatures.rs — MX-TAB-5 layered dataset signatures.
 // Tier-1 table SHA-256 + tier-2 per-column SHA-256 fingerprints computed from
 // schema + sampled content. Byte-identical mirror of
@@ -115,10 +120,10 @@ pub use brain::scheduler::{
 #[cfg(any(test, feature = "test-seams"))]
 pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
-    default_standing_signal_names, default_standing_signal_specs, AssociationEdgeChecker,
-    ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal, DistillationSignal,
-    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal,
-    TrainingSignal, VectorSimilaritySignal,
+    default_standing_signal_names, default_standing_signal_specs, AdornmentPassSignal,
+    AssociationEdgeChecker, ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal,
+    DistillationSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
 pub use migration::{
     run_parallel, verify_migration, ExternalCorpus, ExternalEntry, MigrationDivergence,
@@ -142,9 +147,12 @@ pub use coordinator::{
     SyncEngineEntry, format_sync_state_token,
     ExpungeIntegritySweepResult, ExpungeVerbOutcome, DrainStatus,
     SubjectProducer, SubjectBackfillReport,
-    // dreaming-queue job payload. Public so the  drainer
+    // dreaming-queue job payload. Public so the drainer
     // (a downstream crate) and integration tests can decode queue.sqlite payloads.
     DreamingItem,
+    // W4: optimizer-owned recall tuning envelope. Public so NeuronKit and the
+    // ARIA boundary can read/write it without reaching into coordinator internals.
+    RecallTuningManifest,
 };
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
@@ -179,6 +187,13 @@ pub use recall::{
     GraphCache, PreferenceStore,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
     RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,
+};
+// PACKAGER mission: GLKResultsPackager public surface. Re-exported from
+// packager.rs so downstream crates (AriaMcpKit) import from `genius_locus_kit`
+// without reaching into module internals.
+pub use packager::{
+    GLKAnswerBlock, GLKConfidenceSignals, GLKPackagedResult, GLKResponseLevel,
+    GLKResultsPackager, PackagerAnswerMode, PackagerConfidenceLevel, PackagerThresholds,
 };
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,

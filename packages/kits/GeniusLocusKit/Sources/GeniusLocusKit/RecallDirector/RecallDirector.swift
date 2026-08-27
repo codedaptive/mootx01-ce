@@ -23,6 +23,15 @@ public extension GeniusLocusKit {
 
     /// Logger for the Recall Director. Uses the fleet-standard subsystem
     /// and category per CLAUDE.md.
+    /// Graph/tunnel expansion caps (codex finding 2026-08-26). Per-source
+    /// bounds one high-degree drawer's contribution; total bounds the whole
+    /// lane's pool growth per call. Generous engineering defaults — a real
+    /// association fan-out is single digits, so the caps only bite on
+    /// adversarial or degenerate graphs. Tunable by ruling; the Rust twin
+    /// carries the same values.
+    static let graphExpansionPerSourceCap = 32
+    static let graphExpansionTotalCap = 512
+
     private static var recallLog: Logger {
         Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
     }
@@ -63,13 +72,28 @@ public extension GeniusLocusKit {
 
         // Compute the execution plan. frontierK bounds candidate retrieval:
         // min(max(limit * 4, 64), 256) ensures we pull enough candidates
-        // for scoring without retrieving unbounded rows. A RecallShape may
-        // override this pool depth (6b-modifiers); the override is clamped to the
-        // SAME [64, 256] envelope so a shape cannot request an unbounded scan, and
-        // a nil shape (or nil override) leaves the computed default unchanged.
+        // for scoring without retrieving unbounded rows.
+        //
+        // Three-level precedence (highest to lowest):
+        //   1. request.frontierK — a per-call override the caller sets directly
+        //      on the request, clamped to [frontierKFloor, frontierKCeiling].
+        //   2. recallShape.frontierK — the shape-level pool override from the
+        //      signed-weight steering vector (6b-modifiers), also clamped.
+        //   3. Engine formula — the computed default above, which scales with
+        //      the request's limit so larger result sets get a deeper frontier.
+        //
+        // Neither the per-call nor the shape override can exceed [64, 256], so
+        // no caller can request an unbounded scan.
         let computedFrontierK = min(max(request.limit * 4, 64), 256)
-        let frontierK = request.recallShape?.effectiveFrontierK(engineDefault: computedFrontierK)
-            ?? computedFrontierK
+        let frontierK: Int
+        if let requestOverride = request.frontierK {
+            // Per-call override wins; clamp to the same envelope the engine uses.
+            frontierK = min(RecallShape.frontierKCeiling, max(RecallShape.frontierKFloor, requestOverride))
+        } else {
+            // Shape override (if any), then engine default.
+            frontierK = request.recallShape?.effectiveFrontierK(engineDefault: computedFrontierK)
+                ?? computedFrontierK
+        }
         let plan = RecallPlan(
             effectiveMode: request.mode,
             frontierK: frontierK,
@@ -80,21 +104,22 @@ public extension GeniusLocusKit {
             "RecallDirector: mode=\(request.mode.rawValue, privacy: .public) limit=\(request.limit, privacy: .public) frontierK=\(frontierK, privacy: .public)"
         )
 
-        let result: GLKRecallResult
+        // `laneResult` holds the raw per-lane output before the admission gate.
+        let laneResult: GLKRecallResult
         switch request.mode {
         case .locusOnly:
-            result = try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            laneResult = try await recallLocusOnly(estate: estate, request: request, plan: plan)
 
         case .corpusOnly:
-            result = try await recallCorpusOnly(
+            laneResult = try await recallCorpusOnly(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .hybrid:
-            result = try await recallHybrid(
+            laneResult = try await recallHybrid(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .unionBest:
-            result = try await recallUnionBest(
+            laneResult = try await recallUnionBest(
                 estate: estate, request: request, plan: plan, handle: handle)
 
         case .nodeTreeNative:
@@ -110,7 +135,41 @@ public extension GeniusLocusKit {
             //
             // nodeTreeNative routes to locusOnly; no corpus/vector stages are
             // attempted, so degradedStages is always empty for this mode.
-            result = try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            laneResult = try await recallLocusOnly(estate: estate, request: request, plan: plan)
+        }
+
+        // §11.18 anomalous-flag admission gate — applied BEFORE scoring writes
+        // and dreaming enqueue so trace rows and the dreaming pipeline only see
+        // the candidates the caller actually receives.
+        //
+        // nil  = no filtering (byte-identical to a request without this param).
+        // true = admit ONLY anomalous drawers (bit 26 set).
+        // false = EXCLUDE anomalous drawers (bit 26 clear).
+        //
+        // Hits without a hydrated drawer (drawer == nil) are always admitted
+        // unchanged — the isAnomalous bit requires a hydrated body to test.
+        // laneRanks is preserved verbatim so trace-row attribution remains
+        // correct for the ids that survive the gate.
+        let result: GLKRecallResult
+        if let anomalousFilter = request.anomalousFilter {
+            let admissible = laneResult.hits.filter { hit in
+                // Unhydrated hits carry no drawer body; admit them to avoid
+                // silently dropping results from non-full hydration recall.
+                guard let drawer = hit.drawer else { return true }
+                return drawer.isAnomalous == anomalousFilter
+            }
+            result = GLKRecallResult(
+                request: laneResult.request,
+                plan: laneResult.plan,
+                unionProfile: laneResult.unionProfile,
+                hits: admissible,
+                denseLaneStatus: laneResult.denseLaneStatus,
+                degradedStages: laneResult.degradedStages,
+                laneRanks: laneResult.laneRanks,
+                queryLatticeAnchor: laneResult.queryLatticeAnchor)
+        } else {
+            // No filter — pass through byte-identical.
+            result = laneResult
         }
 
         // Enqueue a dreaming item for external-origin scored recalls.
@@ -128,11 +187,59 @@ public extension GeniusLocusKit {
         // `now` is Date() here — the allowed call site per the determinism rule
         // (Date() inside sub-engines is forbidden; the verb boundary is the
         // sanctioned entry point, identical to propose/associate).
+        var finalResult = result
         if request.origin == .external {
-            await enqueueDreamingItem(drawers: result.drawers, handle: handle, now: Date())
+            // One wall-clock instant for the trace rows and the dreaming
+            // enqueue alike (the verb boundary is the sanctioned Date() site).
+            let now = Date()
+
+            // W2.5 Track R(a) — the reward-cycle trace write, re-homed here
+            // from the inner locus frame so the traced rows are the hits the
+            // caller ACTUALLY receives (pre-R(a), fused lanes traced the
+            // locus scan's rows, which need not match the fused result), and
+            // so each row carries door/composition/laneRanks attribution.
+            // traceLimit caps the write to what the caller receives when a
+            // recipe passes a coarse pool as `limit` (B-10a budget contract,
+            // unchanged). FAIL-CLOSED like the retired verb-path write: a
+            // trace fault never fails the recall — it is surfaced on
+            // degradedStages as "recall.trace_write_failed" (same stage
+            // vocabulary LocusKit's verb path uses).
+            let budget = request.traceLimit ?? request.limit
+            let surfaced = result.hits.prefix(max(0, budget))
+            if !surfaced.isEmpty {
+                let composition = request.composition
+                    ?? "\(request.mode.rawValue)/\(request.scoring.rawValue)"
+                let items = surfaced.map { hit in
+                    RecallTraceItem(
+                        target: hit.id,
+                        recalledAt: now,
+                        score: Double(hit.score.final),
+                        operationalBitmap: 0,
+                        door: request.door,
+                        composition: composition,
+                        laneRanks: RecallTraceItem.packLaneRanks(result.laneRanks[hit.id] ?? [:]))
+                }
+                do {
+                    try await estate.insertRecallTraces(Array(items))
+                } catch {
+                    Self.recallLog.error(
+                        "RecallDirector: reward-cycle trace write failed: \(error, privacy: .public)")
+                    finalResult = GLKRecallResult(
+                        request: result.request,
+                        plan: result.plan,
+                        unionProfile: result.unionProfile,
+                        hits: result.hits,
+                        denseLaneStatus: result.denseLaneStatus,
+                        degradedStages: result.degradedStages + ["recall.trace_write_failed"],
+                        laneRanks: result.laneRanks,
+                        queryLatticeAnchor: result.queryLatticeAnchor)
+                }
+            }
+
+            await enqueueDreamingItem(drawers: result.drawers, handle: handle, now: now)
         }
 
-        return result
+        return finalResult
     }
 
     // MARK: - Late body hydration capability
@@ -204,26 +311,13 @@ public extension GeniusLocusKit {
         // The stream's page size is controlled by the estate; we take the
         // first `request.limit` rows after materializing.
         //
-        // B-10a: trace rows are written ONLY for external-origin requests.
-        // Internal reads (dreaming, standing signals, recipes, migration, etc.)
-        // must leave traceLimit = nil so the reward pipeline learns from
-        // experience with users, not from the system's own reflective reads.
-        //
-        // For external requests: traceLimit = request.traceLimit ?? request.limit
-        // so the reward cycle records exactly the rows surfaced to the caller.
-        // When a caller (e.g. the PreciseRecall recipe) passes a coarse pool as
-        // `limit` but a smaller final-result count as `traceLimit`, the trace
-        // write is capped to the final result count — writing pool-sized trace
-        // rows for a limit-20 precise query would inflate the trace table with
-        // rows the caller never received.
-        var tracedFrame = request.frame
-        if case .external = request.origin {
-            // External-origin: set traceLimit so the estate writes reward-cycle
-            // trace rows. The frame is immutable, so we build a local copy.
-            tracedFrame.traceLimit = request.traceLimit ?? request.limit
-        }
-        // Internal-origin: tracedFrame.traceLimit stays nil — no trace writes.
-        let stream = await estate.recall(tracedFrame)
+        // B-10a: trace rows are written ONLY for external-origin requests,
+        // and (since W2.5 Track R(a)) by the director's central writer in
+        // `recall(_:_:)` AFTER the lane returns — the write covers the hits
+        // the caller actually receives, carrying door/composition/laneRanks
+        // attribution. The inner locus frame therefore never sets traceLimit;
+        // internal reads continue to write zero trace rows.
+        let stream = await estate.recall(request.frame)
         var rows: [LocusKit.Drawer] = []
         for await page in stream {
             rows.append(contentsOf: page.rows)
@@ -257,20 +351,42 @@ public extension GeniusLocusKit {
         // eval) names a `locus.*` stage on the stream so a FAILED locus recall
         // is distinguishable from a GENUINE-EMPTY estate. Genuine-empty seeds none.
         var degradedStages: [String] = stream.degradedStages
-        if request.scoring == .matrixAware {
+        if request.scoring == .matrixAware || request.scoring == .discriminative {
             // estateUUID is actor-isolated on LocusKit.Estate; recallLocusOnly
             // has no EstateHandle parameter (it is reachable via the corpusOnly
             // allowDegraded path with a synthesised plan), so read it here.
             let estateID = await estate.estateUUID.uuidString
-            Self.recallLog.debug(
-                "RecallDirector locusOnly: matrixAware requested but no matrix pass in this lane — degraded to raw ordering")
-            glkEmit(
-                name: GLKMetricName.locusOnlyMatrixAwareFallback,
-                value: 1.0,
-                tags: ["estate_id": estateID],
-                now: Date()
-            )
-            degradedStages.append("locusOnly.matrixAware")
+            if request.scoring == .matrixAware {
+                Self.recallLog.debug(
+                    "RecallDirector locusOnly: matrixAware requested but no matrix pass in this lane — degraded to raw ordering")
+                glkEmit(
+                    name: GLKMetricName.locusOnlyMatrixAwareFallback,
+                    value: 1.0,
+                    tags: ["estate_id": estateID],
+                    now: Date()
+                )
+                degradedStages.append("locusOnly.matrixAware")
+            } else {
+                // .discriminative: no corpus dense lane in locusOnly path —
+                // discrimination factor cannot be computed; degrade to raw.
+                Self.recallLog.debug(
+                    "RecallDirector locusOnly: discriminative requested but no corpus in this lane — degraded to raw ordering")
+                glkEmit(
+                    name: GLKMetricName.locusOnlyDiscriminativeFallback,
+                    value: 1.0,
+                    tags: ["estate_id": estateID],
+                    now: Date()
+                )
+                degradedStages.append("locusOnly.discriminative")
+            }
+        }
+
+        // Per-lane rank capture (W2.5 Track R(a)): the locusOnly lane has
+        // exactly one candidate list — rank is the row's position in the
+        // limited result.
+        var laneRanks: [String: [String: Int]] = [:]
+        for (idx, drawer) in limited.enumerated() {
+            laneRanks[drawer.id] = ["locus": idx + 1]
         }
 
         // Wrap each drawer as a RecallHit. The locusOnly lane:
@@ -298,13 +414,17 @@ public extension GeniusLocusKit {
         // but unavailable in this lane, set above) and any LocusKit recall
         // internal-read failure surfaced via the stream (P0-5 sites 1-5, seeded
         // into degradedStages at the drain above).
+        // queryLatticeAnchor is nil for locusOnly — no sketch is compiled for
+        // pure bitmap-index recalls, and CognitionKit recipes do not use this lane.
         return GLKRecallResult(
             request: request,
             plan: plan,
             unionProfile: nil,
             hits: hits,
             denseLaneStatus: nil,
-            degradedStages: degradedStages
+            degradedStages: degradedStages,
+            laneRanks: laneRanks,
+            queryLatticeAnchor: nil
         )
     }
 
@@ -358,7 +478,9 @@ public extension GeniusLocusKit {
                     unionProfile: inner.unionProfile,
                     hits: inner.hits,
                     denseLaneStatus: inner.denseLaneStatus,
-                    degradedStages: ["corpusOnly.degraded"] + remappedStages
+                    degradedStages: ["corpusOnly.degraded"] + remappedStages,
+                    laneRanks: inner.laneRanks,
+                    queryLatticeAnchor: inner.queryLatticeAnchor
                 )
             }
             throw GeniusLocusKitError.recallLaneUnavailable(.corpus)
@@ -551,10 +673,12 @@ public extension GeniusLocusKit {
                 }
             }
             fused = Array(merged.prefix(request.limit))
-        case .rrf, .matrixAware:
+        case .rrf, .matrixAware, .discriminative:
             // .rrf — real two-lane reciprocal-rank fusion of BM25 + vector.
             // .matrixAware reuses this fusion (no matrix pass in this lane) and
             // records the scoring fallback below.
+            // .discriminative: discrimination factor not computed in this lane;
+            // falls back to RRF fusion and records the discriminative fallback.
             if request.scoring == .matrixAware {
                 Self.recallLog.debug(
                     "RecallDirector corpusOnly: matrixAware requested but no matrix pass in this lane — degraded to rrf")
@@ -565,12 +689,24 @@ public extension GeniusLocusKit {
                     now: Date()
                 )
                 degradedStages.append("corpusOnly.matrixAware")
+            } else if request.scoring == .discriminative {
+                Self.recallLog.debug(
+                    "RecallDirector corpusOnly: discriminative requested but discrimination factor not computed in this lane — degraded to rrf")
+                glkEmit(
+                    name: GLKMetricName.corpusOnlyDiscriminativeFallback,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("corpusOnly.discriminative")
             }
             // Signed-weight fusion (6b-modifiers). Lane order [bm25, hamming] is
             // fixed; the weight array is empty when no shape is set, so rrfFuseN
             // takes its all-1.0 fast path — unweighted two-lane RRF.
-            let weights = laneWeights(
-                for: request.recallShape, laneKeys: ["bm25", "hamming"])
+            let weights = Self.mergedLaneWeights(
+                shape: request.recallShape,
+                provisioned: await provisionedLaneWeights(estate: estate),
+                laneKeys: ["bm25", "hamming"])
             fused = GeniusLocusKit.rrfFuseN([bm25List, vectorList], weights: weights, k: 60, limit: request.limit)
         }
 
@@ -590,13 +726,35 @@ public extension GeniusLocusKit {
             degradedStages: &degradedStages
         )
 
+        // Sort corpus-only hits by (score DESC, subject ASC) before returning
+        // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 2). Score equality for
+        // tie purposes is exact float equality (ruling 3: no third key by design;
+        // mutual order among exact equals is unspecified and must stay that way).
+        let sortedHits = hits.sorted { a, b in
+            let sa = a.score.final, sb = b.score.final
+            if sa != sb { return sa > sb }
+            let subA = a.drawer?.subject ?? "", subB = b.drawer?.subject ?? ""
+            return subA < subB
+        }
+
         Self.recallLog.debug(
-            "RecallDirector corpusOnly: bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
+            "RecallDirector corpusOnly: bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(sortedHits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
+        // Per-lane rank capture (W2.5 Track R(a)): positions in the two
+        // corpus candidate lists as fused (bm25, hamming).
+        var laneRanks: [String: [String: Int]] = [:]
+        for (idx, entry) in bm25List.enumerated() {
+            laneRanks[entry.id, default: [:]]["bm25"] = idx + 1
+        }
+        for (idx, entry) in vectorList.enumerated() {
+            laneRanks[entry.id, default: [:]]["hamming"] = idx + 1
+        }
+
         // corpusOnly does not include the dense float lane (BM25 + Hamming only).
-        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
-                               denseLaneStatus: nil, degradedStages: degradedStages)
+        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: sortedHits,
+                               denseLaneStatus: nil, degradedStages: degradedStages,
+                               laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
     }
 
     // MARK: - hybrid lane
@@ -620,16 +778,11 @@ public extension GeniusLocusKit {
         var degradedStages: [String] = []
 
         // Locus lane — same drain as locusOnly.
-        // B-10a: trace rows only for external-origin requests. For external,
-        // traceLimit = request.traceLimit ?? request.limit so the reward cycle
-        // records the rows the caller finally receives, not the internal scan
-        // candidate count. PreciseRecall passes traceLimit = finalLimit so a
-        // pool-500 precise query does not write 500 trace rows for a 20-row result.
-        var tracedFrame = request.frame
-        if case .external = request.origin {
-            tracedFrame.traceLimit = request.traceLimit ?? request.limit
-        }
-        let stream = await estate.recall(tracedFrame)
+        // B-10a + W2.5 Track R(a): trace rows are written by the director's
+        // central writer in `recall(_:_:)` after fusion, never by the inner
+        // locus frame — so the traced rows are the FUSED hits the caller
+        // receives, with door/composition/laneRanks attribution.
+        let stream = await estate.recall(request.frame)
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
@@ -808,10 +961,12 @@ public extension GeniusLocusKit {
                 if seen.insert(item.id).inserted { merged.append(item) }
             }
             fused = Array(merged.prefix(request.limit))
-        case .rrf, .matrixAware:
+        case .rrf, .matrixAware, .discriminative:
             // .rrf — real three-way RRF fusion of locus + BM25 + vector.
             // .matrixAware reuses this fusion (no matrix pass in this lane) and
             // records the scoring fallback below.
+            // .discriminative: discrimination factor not computed in this lane;
+            // falls back to RRF fusion and records the discriminative fallback.
             if request.scoring == .matrixAware {
                 Self.recallLog.debug(
                     "RecallDirector hybrid: matrixAware requested but no matrix pass in this lane — degraded to rrf")
@@ -822,12 +977,24 @@ public extension GeniusLocusKit {
                     now: Date()
                 )
                 degradedStages.append("hybrid.matrixAware")
+            } else if request.scoring == .discriminative {
+                Self.recallLog.debug(
+                    "RecallDirector hybrid: discriminative requested but discrimination factor not computed in this lane — degraded to rrf")
+                glkEmit(
+                    name: GLKMetricName.hybridDiscriminativeFallback,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("hybrid.discriminative")
             }
             // Signed-weight fusion (6b-modifiers). Lane order [locus, bm25, hamming]
             // is fixed; the weight array is empty when no shape is set, so rrfFuseN
             // takes its all-1.0 fast path — unweighted three-lane RRF.
-            let weights = laneWeights(
-                for: request.recallShape, laneKeys: ["locus", "bm25", "hamming"])
+            let weights = Self.mergedLaneWeights(
+                shape: request.recallShape,
+                provisioned: await provisionedLaneWeights(estate: estate),
+                laneKeys: ["locus", "bm25", "hamming"])
             fused = GeniusLocusKit.rrfFuseN(
                 [locusList, bm25List, vectorList], weights: weights, k: 60, limit: request.limit,
                 contentKeyMap: contentByID)
@@ -937,9 +1104,24 @@ public extension GeniusLocusKit {
             "RecallDirector hybrid: locus=\(locusList.count, privacy: .public) bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
+        // Per-lane rank capture (W2.5 Track R(a)): positions in the three
+        // pre-fusion candidate lists (locus stable rank list, bm25, hamming).
+        var laneRanks: [String: [String: Int]] = [:]
+        for (idx, entry) in locusList.enumerated() {
+            laneRanks[entry.id, default: [:]]["locus"] = idx + 1
+        }
+        for (idx, entry) in bm25List.enumerated() {
+            laneRanks[entry.id, default: [:]]["bm25"] = idx + 1
+        }
+        for (idx, entry) in vectorList.enumerated() {
+            laneRanks[entry.id, default: [:]]["hamming"] = idx + 1
+        }
+
         // hybrid does not include the dense float lane (locus + BM25 + Hamming only).
         return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
-                               denseLaneStatus: nil, degradedStages: degradedStages)
+                               denseLaneStatus: nil, degradedStages: degradedStages,
+                               laneRanks: laneRanks,
+                               queryLatticeAnchor: hybridSketch?.latticeAnchor)
     }
 
     // MARK: - Query sketch compiler
@@ -1028,6 +1210,17 @@ public extension GeniusLocusKit {
         } else {
             queryFingerprint = nil
         }
+        // Lattice anchor — derived once here (M4: single derivation point).
+        // QueryLatticeAnchor.derive returns Anchor("","") when text is nil/blank
+        // or unanchorable; we store nil in that case so consumers can branch on
+        // presence (mirror of the queryFingerprint nil-for-dark-lane convention).
+        let latticeAnchor: QueryLatticeAnchor.Anchor?
+        if let t = text, !t.isEmpty {
+            let a = QueryLatticeAnchor.derive(from: t)
+            latticeAnchor = (a.udcCode.isEmpty && a.qid.isEmpty) ? nil : a
+        } else {
+            latticeAnchor = nil
+        }
         return RecallQuerySketch(
             frame: request.frame,
             bitmapPredicates: request.frame.filterChain,
@@ -1035,7 +1228,7 @@ public extension GeniusLocusKit {
             queryTokens: tokens,
             queryEngram: engram,
             queryFingerprint: queryFingerprint,
-            latticeAnchor: nil
+            latticeAnchor: latticeAnchor
         )
     }
 
@@ -1167,9 +1360,137 @@ public extension GeniusLocusKit {
         shape?.binaryMetric == "jaccard" ? .binary(.jaccard) : .binary(.hamming)
     }
 
-    private func laneWeights(for shape: RecallShape?, laneKeys: [String]) -> [Float] {
-        guard let shape else { return [] }
-        return laneKeys.map { shape.weight(for: $0) }
+    /// Resolve the shape's float-lane metric (W2.5 M1 float unlock). Maps the
+    /// string selector on `RecallShape.floatMetric` to a concrete `FloatMetric`
+    /// value for the dense embedding lane. Unknown strings and nil shapes both
+    /// degrade to `.cosine` per the shape contract — a shape must degrade, never
+    /// fail. Callers that omit a shape (i.e. pre-floatMetric callers) also get
+    /// `.cosine`, keeping behaviour byte-identical to the pre-field baseline.
+    private func floatMetric(for shape: RecallShape?) -> FloatMetric {
+        switch shape?.floatMetric {
+        case "l2": return .l2
+        case "dot": return .dot
+        default: return .cosine
+        }
+    }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED default lane
+    /// weights (W2.5 Track R(b)): a JSON object of lane key → signed float.
+    /// The optimizer emits it; the product only CONSUMES it (the
+    /// benchmarker/optimizer split — weights are selection-brain output,
+    /// never product-computed).
+    static var laneWeightsMetaKey: String { "lane_weights" }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED recall-tuning
+    /// envelope: a JSON object with the four recall knobs
+    /// (`rrf_k`, `mmr_lambda`, `rrf_bm25_weight`, `rrf_vector_weight`).
+    /// Same precedence and fail-quiet contract as `laneWeightsMetaKey`:
+    /// the optimizer emits it; the product only reads it; a missing or
+    /// malformed key falls back to `RecallTuningManifest.default` (spec
+    /// constants), so no estate migration is required.
+    static var recallTuningMetaKey: String { "recall_tuning" }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED embedding-provider
+    /// selection: a plain string holding the `EmbeddingProvider.modelID` of
+    /// the provider to use when constructing the Corpus ensemble for this
+    /// estate. Absent key → the deterministic default ensemble (RI/PPMI/LSA/
+    /// NMF/FDC) — no estate migration required.
+    ///
+    /// Same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey` and
+    /// `recallTuningMetaKey`: the benchmarker/optimizer selects the provider;
+    /// the product only reads the selection.
+    static var embeddingProviderMetaKey: String { "embedding_provider" }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED door-selection
+    /// config: a JSON object with the `scoring` field storing the winning
+    /// `GLKRecallScoring` rawValue for this corpus. The quality optimizer
+    /// emits it via `GeniusLocusKit.provisionDoorConfig(_:for:)` from
+    /// arm-comparison evidence (benchmark-ee/configs/door/*.json).
+    ///
+    /// Same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey`,
+    /// `recallTuningMetaKey`, and `embeddingProviderMetaKey`: the optimizer
+    /// selects the door; the product only reads it. Absent key → `.default`
+    /// (scoring = `.matrixAware`) — byte-identical to today's behaviour.
+    static var doorConfigMetaKey: String { "door_config" }
+
+    /// The estate-manifest key carrying the USER-OWNED modes-preference config:
+    /// a JSON object with `sticky_enabled` (Bool, default `true`) and
+    /// `coaching_calls` (Int, default `25`, `0 = off`). The user sets it via
+    /// `GeniusLocusKit.provisionModesConfig(_:for:)`; AriaMcpKit reads it at
+    /// session start and applies it to `ModeSessionState`.
+    ///
+    /// Same fail-quiet contract as `laneWeightsMetaKey`, `recallTuningMetaKey`,
+    /// and `doorConfigMetaKey`: absent key → `ModesManifest.default` (spec
+    /// constants, byte-identical to pre-provisioning behaviour). No estate
+    /// migration required.
+    static var modesConfigMetaKey: String { "modes_config" }
+
+    /// Read the provisioned door-selection config, or `.default` when the
+    /// manifest carries none. Malformed JSON or an unknown scoring string
+    /// both degrade to `.default` (scoring = `.matrixAware`) so a bad
+    /// provision never breaks recall. The manifest row store is RAM-resident,
+    /// so the per-call read is a dictionary hit, not disk I/O.
+    func provisionedDoorConfig(estate: LocusKit.Estate) async -> DoorManifest {
+        guard let json = try? await estate.meta(key: Self.doorConfigMetaKey),
+              let data = json.data(using: .utf8),
+              let config = try? JSONDecoder().decode(DoorManifest.self, from: data)
+        else { return .default }
+        return config
+    }
+
+    /// Read the provisioned modes-preference config, or `.default` when the
+    /// manifest carries none. Malformed JSON or absent keys both degrade to
+    /// `.default` (stickyEnabled = true, coachingCalls = 25) so a bad provision
+    /// never breaks session initialization. The manifest row store is RAM-resident,
+    /// so the per-session read is a dictionary hit, not disk I/O.
+    func provisionedModesConfig(estate: LocusKit.Estate) async -> ModesManifest {
+        guard let json = try? await estate.meta(key: Self.modesConfigMetaKey),
+              let data = json.data(using: .utf8),
+              let config = try? JSONDecoder().decode(ModesManifest.self, from: data)
+        else { return .default }
+        return config
+    }
+
+    /// Read the provisioned estate-default lane weights, or `[:]` when the
+    /// manifest carries none. Malformed JSON fails quiet to `[:]` — a bad
+    /// provision must degrade to today's neutral fusion, never break recall.
+    /// The manifest row store is RAM-resident, so the per-recall read is a
+    /// dictionary hit, not disk I/O.
+    func provisionedLaneWeights(estate: LocusKit.Estate) async -> [String: Float] {
+        guard let json = try? await estate.meta(key: Self.laneWeightsMetaKey),
+              let data = json.data(using: .utf8),
+              let map = try? JSONDecoder().decode([String: Float].self, from: data)
+        else { return [:] }
+        return map
+    }
+
+    /// Read the provisioned recall-tuning envelope, or `.default` when the
+    /// manifest carries none. Malformed JSON fails quiet to `.default` so
+    /// a bad provision degrades to spec constants rather than breaking recall.
+    /// Partial JSON (e.g. only `rrf_k` present) is handled by
+    /// `RecallTuningManifest`'s custom `Decodable` which fills every absent
+    /// key with its spec default.
+    /// The manifest row store is RAM-resident, so the per-call read is cheap.
+    func provisionedRecallTuning(estate: LocusKit.Estate) async -> RecallTuningManifest {
+        guard let json = try? await estate.meta(key: Self.recallTuningMetaKey),
+              let data = json.data(using: .utf8),
+              let tuning = try? JSONDecoder().decode(RecallTuningManifest.self, from: data)
+        else { return .default }
+        return tuning
+    }
+
+    /// Merge precedence per lane key (W2.5 R(b)): a key EXPLICIT in the
+    /// shape wins; else the provisioned estate default; else neutral 1.0.
+    /// With no shape and no provision the array is empty so `rrfFuseN`
+    /// keeps its all-1.0 fast path (byte-identical to the pre-R(b) flow).
+    static func mergedLaneWeights(
+        shape: RecallShape?, provisioned: [String: Float], laneKeys: [String]
+    ) -> [Float] {
+        if shape == nil && provisioned.isEmpty { return [] }
+        return laneKeys.map { key in
+            if let shaped = shape?.laneWeights[key] { return shaped }
+            return provisioned[key] ?? 1.0
+        }
     }
 
     // MARK: - unionBest lane
@@ -1207,6 +1528,19 @@ public extension GeniusLocusKit {
         // Accumulates recoverable stage failures for GLKRecallResult.degradedStages.
         var degradedStages: [String] = []
 
+        // W2.5 R(b): resolve lane weights ONCE for this recall with the
+        // provision-aware precedence (shape-explicit > provisioned estate
+        // default > neutral 1.0). Every weight read below goes through this
+        // resolver so the optimizer-emitted defaults reach the fixed lanes,
+        // the dense per-model modifiers, and the union column multipliers
+        // alike.
+        let provisionedWeights = await provisionedLaneWeights(estate: estate)
+        let recallShapeForWeights = request.recallShape
+        let laneWeight: (String) -> Float = { key in
+            if let shaped = recallShapeForWeights?.laneWeights[key] { return shaped }
+            return provisionedWeights[key] ?? 1.0
+        }
+
         // Step 1 — compile sketch (may be empty if no corpus is registered).
         let sketch: RecallQuerySketch
         if let corpus = corpusKits[handle] {
@@ -1227,6 +1561,15 @@ public extension GeniusLocusKit {
             } else {
                 noCorpusFingerprint = nil
             }
+            // Lattice anchor — derived once here (M4: single derivation point).
+            // Same nil-for-empty convention as the corpus path above.
+            let noCorpusLatticeAnchor: QueryLatticeAnchor.Anchor?
+            if let t = request.queryText, !t.isEmpty {
+                let a = QueryLatticeAnchor.derive(from: t)
+                noCorpusLatticeAnchor = (a.udcCode.isEmpty && a.qid.isEmpty) ? nil : a
+            } else {
+                noCorpusLatticeAnchor = nil
+            }
             sketch = RecallQuerySketch(
                 frame: request.frame,
                 bitmapPredicates: request.frame.filterChain,
@@ -1234,21 +1577,16 @@ public extension GeniusLocusKit {
                 queryTokens: [],
                 queryEngram: nil,
                 queryFingerprint: noCorpusFingerprint,
-                latticeAnchor: nil
+                latticeAnchor: noCorpusLatticeAnchor
             )
         }
 
         // Step 2 — locus lane.
-        // B-10a: trace rows only for external-origin requests. For external,
-        // traceLimit = request.traceLimit ?? request.limit so the reward cycle
-        // records the rows the caller finally receives, not the coarse pool
-        // width. PreciseRecall passes traceLimit = finalLimit so a pool-500
-        // precise query does not write 500 trace rows for a 20-row result.
-        var tracedFrame = request.frame
-        if case .external = request.origin {
-            tracedFrame.traceLimit = request.traceLimit ?? request.limit
-        }
-        let stream = await estate.recall(tracedFrame)
+        // B-10a + W2.5 Track R(a): trace rows are written by the director's
+        // central writer in `recall(_:_:)` after union scoring, never by the
+        // inner locus frame — the traced rows are the SELECTED hits the
+        // caller receives, with door/composition/laneRanks attribution.
+        let stream = await estate.recall(request.frame)
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
@@ -1383,6 +1721,88 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 4.35 — GRAPH / TUNNEL EXPANSION LANE. Expands the candidate pool via
+        // LocusKit's KG/tunnel edges. For every drawer in `locusSlice`, fetches its
+        // active outgoing tunnels (stored KG-fact edges in the estate's tunnel table)
+        // and collects the unique target drawer IDs. Target IDs already present in
+        // the locus bitmap slice are skipped — they will already carry bitLocusBitmap
+        // in the buffer; a graph-only expansion brings in strictly additional candidates.
+        //
+        // Each tunnel-neighbor gets a fixed locus score of 0.5, reflecting that
+        // proximity via a known edge makes a candidate meaningfully relevant, but not
+        // as strongly as a direct bitmap hit. The buffer.merge max-score rule ensures
+        // that if a graph neighbor also arrives via BM25/vector, the higher of its
+        // own lane score and this 0.5 wins — the graph expansion never LOWERS a
+        // candidate's score, only adds the bitLocusGraph attribution bit.
+        //
+        // Failure DEGRADES gracefully: if any individual activeTunnelsFrom call throws,
+        // that drawer's neighbours are silently skipped and the lane continues. If the
+        // subsequent getDrawers load for neighbour IDs throws, graphHits is left empty.
+        // In both cases degradedStages records the failure so GLKRecallResult surfaces it.
+        var graphHits: [RecallHit] = []
+        var graphNeighborIDs: [String] = []
+        // `seenGraphIDs` prevents collecting the same target drawer ID twice when
+        // multiple locusSlice drawers tunnel to the same target. It is intentionally
+        // NOT seeded with `locusIDSet`: a drawer already in the locus lane that is
+        // ALSO a tunnel target should receive bitLocusGraph in addition to bitLocusBitmap
+        // — the bit records that the graph lane reached it, which is factually true and
+        // useful for attribution and agreement-bonus accounting.
+        var seenGraphIDs: Set<String> = []
+        for drawer in locusSlice {
+            // Total-cap check up front so a saturated pool stops issuing
+            // per-source fetches entirely.
+            if graphNeighborIDs.count >= Self.graphExpansionTotalCap { break }
+            let tunnels: [LocusKit.Tunnel]
+            do {
+                tunnels = try await estate.activeTunnelsFrom(drawerId: drawer.id)
+            } catch {
+                // Individual drawer tunnel-fetch failed — degrade and continue.
+                Self.recallLog.warning(
+                    "RecallDirector unionBest: activeTunnelsFrom(\(drawer.id, privacy: .public)) degraded: \(error, privacy: .public)")
+                degradedStages.append("graph.activeTunnelsFrom.\(drawer.id)")
+                continue
+            }
+            // Bounded expansion (codex finding 2026-08-26): tunnels are
+            // unbounded per source, so one high-degree drawer could make a
+            // single allowed search decode an unbounded edge set.
+            // Deterministic truncation: store order is stable per estate, so
+            // the SAME prefix survives on every run. Caps are the tunable
+            // constants below the logger declaration.
+            var taken = 0
+            for tunnel in tunnels {
+                guard taken < Self.graphExpansionPerSourceCap,
+                      graphNeighborIDs.count < Self.graphExpansionTotalCap else { break }
+                guard let tid = tunnel.targetDrawerId, !seenGraphIDs.contains(tid) else { continue }
+                seenGraphIDs.insert(tid)
+                graphNeighborIDs.append(tid)
+                taken += 1
+            }
+        }
+        if !graphNeighborIDs.isEmpty {
+            do {
+                let filtered = try await estate.getDrawers(
+                    ids: graphNeighborIDs,
+                    matchingFrame: request.frame,
+                    hydrationLevel: .structured)
+                // Use only drawers that passed the recall frame filter.
+                for d in filtered.admissible {
+                    let sv = RecallScoreVector(
+                        locus: 0.5, bm25: 0, vector: 0,
+                        fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                        redundancyPenalty: 0, final: 0.5
+                    )
+                    graphHits.append(RecallHit(id: d.id, drawer: d,
+                                               sources: [.locusGraph],
+                                               score: sv,
+                                               explanation: ["locusGraph"]))
+                }
+            } catch {
+                Self.recallLog.warning(
+                    "RecallDirector unionBest: graph expansion getDrawers degraded: \(error, privacy: .public)")
+                degradedStages.append("graph.getDrawers")
+            }
+        }
+
         // Step 4.5 — DENSE FLOAT lane (Lane D), PER-SIGNAL. The TRUE float-embedding
         // lane: cosine over the retained pooled vector, NOT the lossy 256-bit
         // SimHash-Hamming projection. Fires independently of the Hamming lane —
@@ -1451,15 +1871,18 @@ public extension GeniusLocusKit {
             // not anything about the farthest lane. The (outcome, discrimination) pairs
             // are available here; `nearestPerSignal` is extracted for the anti-similar
             // logic that follows (which uses only outcomes, not discrimination).
+            // Resolve the shape's float-lane metric once and pass it to both corpus
+            // calls so both nearest and farthest use the same distance function.
+            let fMetric = floatMetric(for: request.recallShape)
             let nearestPerSignalWithDisc = await corpus.floatNearestPerSignalWithDiscrimination(
-                query: text, limit: plan.frontierK)
+                query: text, limit: plan.frontierK, metric: fMetric)
             let nearestPerSignal: [(modelID: String, outcome: FloatLaneOutcome)] =
                 nearestPerSignalWithDisc.map { (modelID: $0.modelID, outcome: $0.outcome) }
             let perSignal: [(modelID: String, outcome: FloatLaneOutcome)]
             if antiSimilarLanes.isEmpty {
                 perSignal = nearestPerSignal
             } else {
-                let farthestPerSignal = await corpus.floatFarthestPerSignal(query: text, limit: plan.frontierK)
+                let farthestPerSignal = await corpus.floatFarthestPerSignal(query: text, limit: plan.frontierK, metric: fMetric)
                 // Index the farthest outcomes by modelID for the per-signal pick.
                 var farthestByModel: [String: FloatLaneOutcome] = [:]
                 for entry in farthestPerSignal { farthestByModel[entry.modelID] = entry.outcome }
@@ -1503,7 +1926,8 @@ public extension GeniusLocusKit {
 
             // Per-signal ranked id lists feed the N-way RRF voter set. Each list is
             // tagged with its `modelID` so the dense-steering weight
-            // `shape.weight(for: "dense:<modelID>")` can scale it (6b-modifiers-core-2):
+            // the dense-steering weight `laneWeight("dense:<modelID>")` (shape-
+            // explicit > provisioned > 1.0) can scale it (6b-modifiers-core-2):
             // the modelID is the only place per-signal dense identity exists before the
             // lists collapse into the single aggregate `dense` column below.
             // `denseSignalsByID` records which modelIDs voted, for per-hit provenance.
@@ -1524,7 +1948,7 @@ public extension GeniusLocusKit {
                     // suppressing signal (w<0) DID contribute (subtracted mass), so it
                     // stays in provenance — honest about which signals shaped the hit.
                     let signalVotes =
-                        (request.recallShape?.weight(for: "dense:\(modelID)") ?? 1.0) != 0
+                        laneWeight("dense:\(modelID)") != 0
                     var rankedList: [(id: String, score: Float)] = []
                     rankedList.reserveCapacity(matches.count)
                     for m in matches {
@@ -1600,7 +2024,7 @@ public extension GeniusLocusKit {
 
             // N-way consensus over the per-signal dense lists, DENSE-STEERED by the
             // `dense:<modelID>` lane weights (6b-modifiers-core-2). For each list L
-            // tagged by `modelID`, `w = shape.weight(for: "dense:<modelID>")` (1.0 when
+            // tagged by `modelID`, `w = laneWeight("dense:<modelID>")` (1.0 when
             // the shape is nil or the key absent). Each list's reciprocal-rank term is
             // scaled by `w` before the per-id fold:
             //
@@ -1631,7 +2055,7 @@ public extension GeniusLocusKit {
             var denseBestTerm: [String: Float] = [:]
             var denseCosineByID: [String: Float] = [:]
             for entry in perSignalLists {
-                let w = request.recallShape?.weight(for: "dense:\(entry.modelID)") ?? 1.0
+                let w = laneWeight("dense:\(entry.modelID)")
                 if w == 0 { continue }  // exclusion: this dense signal votes for nothing
                 for (rank, item) in entry.list.enumerated() {
                     let term = w * Float(1.0 / Double(consensusK + rank + 1))
@@ -1739,16 +2163,40 @@ public extension GeniusLocusKit {
             return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
         }
 
+        // Per-lane rank capture (W2.5 Track R(a)): positions in each lane's
+        // FINAL ranked candidate list (after the content-deterministic sorts
+        // and frontierK caps above, before buffer merge and union scoring).
+        var laneRanks: [String: [String: Int]] = [:]
+        for (idx, drawer) in locusSlice.enumerated() {
+            laneRanks[drawer.id, default: [:]]["locus"] = idx + 1
+        }
+        for (idx, hit) in graphHits.enumerated() {
+            laneRanks[hit.id, default: [:]]["graph"] = idx + 1
+        }
+        for (idx, hit) in bm25Hits.enumerated() {
+            laneRanks[hit.id, default: [:]]["bm25"] = idx + 1
+        }
+        for (idx, hit) in vectorHits.enumerated() {
+            laneRanks[hit.id, default: [:]]["hamming"] = idx + 1
+        }
+        for (idx, hit) in denseHits.enumerated() {
+            laneRanks[hit.id, default: [:]]["dense"] = idx + 1
+        }
+
         // Count how many lanes actually contributed hits (for signalAgreement normaliser).
+        // The agreement bonus denominator is normalised over five primary candidate-supply
+        // lanes (locus, locusGraph, bm25, vectorHamming, vectorDense) — each lane that
+        // contributed candidates shifts a hit's sourceMask nonzero bit count upward.
         var primarySourceCount = 1 // locus always contributes
+        if !graphHits.isEmpty  { primarySourceCount += 1 }
         if !bm25Hits.isEmpty   { primarySourceCount += 1 }
         if !vectorHits.isEmpty { primarySourceCount += 1 }
         if !denseHits.isEmpty  { primarySourceCount += 1 }
 
         // Step 5 — merge all hits into the candidate buffer.
-        // Capacity covers all FOUR lanes (locus, BM25, Hamming, dense) at
+        // Capacity covers all FIVE lanes (locus, locusGraph, BM25, Hamming, dense) at
         // frontierK each, plus slack, so no lane's candidates are dropped.
-        let bufferCapacity = plan.frontierK * 4 + 10
+        let bufferCapacity = plan.frontierK * 5 + 10
         var buffer = RecallCandidateBuffer(capacity: bufferCapacity)
 
         for (idx, drawer) in locusSlice.enumerated() {
@@ -1762,6 +2210,11 @@ public extension GeniusLocusKit {
             let hit = RecallHit(id: drawer.id, drawer: drawer, sources: [.locusBitmap],
                                 score: sv, explanation: ["locusBitmap"])
             buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitLocusBitmap)
+        }
+        // Graph/tunnel-expansion candidates: set bitLocusGraph so attribution
+        // correctly reports the .locusGraph evidence path for these hits.
+        for hit in graphHits {
+            buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitLocusGraph)
         }
         for hit in bm25Hits {
             buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitCorpusBM25)
@@ -1857,22 +2310,36 @@ public extension GeniusLocusKit {
                 matrixCoordsFor(drawer: $0)
             } ?? []
             let ff = scorer.fieldFit(queryCoords: queryCoords, matrix: matrix)
+            // W2.5 S4-C arm: "decayed" reads the §8.13 exp-decayed O/T
+            // projections instead of the count matrices. Anything else
+            // (including absent shape) walks the canonical counts —
+            // byte-identical to the pre-S4 flow.
+            let useDecayed = request.recallShape?.matrixWeighting == "decayed"
             for i in 0..<buffer.count {
                 let candidateCoords = drawerIndex[buffer.ids[i]].map {
                     matrixCoordsFor(drawer: $0)
                 } ?? []
                 buffer.fieldFit[i] = ff
-                buffer.coOccurrence[i] = scorer.coOccurrence(
-                    queryCoords: queryCoords,
-                    candidateCoords: candidateCoords,
-                    matrix: matrix
-                )
-                buffer.temporal[i] = scorer.temporal(
-                    queryCoords: queryCoords,
-                    candidateCoords: candidateCoords,
-                    activeLags: MatrixTier.lagBuckets,
-                    matrix: matrix
-                )
+                buffer.coOccurrence[i] = useDecayed
+                    ? scorer.coOccurrenceDecayed(
+                        queryCoords: queryCoords,
+                        candidateCoords: candidateCoords,
+                        matrix: matrix)
+                    : scorer.coOccurrence(
+                        queryCoords: queryCoords,
+                        candidateCoords: candidateCoords,
+                        matrix: matrix)
+                buffer.temporal[i] = useDecayed
+                    ? scorer.temporalDecayed(
+                        queryCoords: queryCoords,
+                        candidateCoords: candidateCoords,
+                        activeLags: MatrixTier.lagBuckets,
+                        matrix: matrix)
+                    : scorer.temporal(
+                        queryCoords: queryCoords,
+                        candidateCoords: candidateCoords,
+                        activeLags: MatrixTier.lagBuckets,
+                        matrix: matrix)
             }
         }
 
@@ -1955,9 +2422,9 @@ public extension GeniusLocusKit {
         // .matrixAware — the full existing weighted pipeline IS the matrixAware
         //   path. Active weights: locus, bm25, vector (Hamming AND dense, sharing
         //   the vector budget), fieldFit, graph, preference, matrix (coOccurrence
-        //   + temporal combined). agreementBonus = 0.05 × popcount(sourceMask) / 4
-        //   (normalised to max 0.05 over 4 lane source bits: locus, bm25,
-        //   vectorHamming, vectorDense).
+        //   + temporal combined). agreementBonus = 0.05 × popcount(sourceMask) / 5
+        //   (normalised to max 0.05 over 5 lane source bits: locus, locusGraph,
+        //   bm25, vectorHamming, vectorDense).
         //   RecallWeights has no dedicated preference field; preference is scored
         //   at equal weight to graph (weights.graph) so both cold-path signals
         //   share the same budget slice.
@@ -2011,15 +2478,15 @@ public extension GeniusLocusKit {
         // which sums to the original term when both weights are 1.0 (byte-identical).
         // Steering the matrix columns is a no-op for .raw/.rrf — those paths never
         // run this weighted formula (they read buffer.final directly below).
-        let shapeLocus        = request.recallShape?.weight(for: "locus")        ?? 1.0
-        let shapeBM25         = request.recallShape?.weight(for: "bm25")         ?? 1.0
-        let shapeHamming      = request.recallShape?.weight(for: "hamming")      ?? 1.0
-        let shapeDense        = request.recallShape?.weight(for: "dense")        ?? 1.0
-        let shapeFieldFit     = request.recallShape?.weight(for: "fieldFit")     ?? 1.0
-        let shapeCoOccurrence = request.recallShape?.weight(for: "coOccurrence") ?? 1.0
-        let shapeTemporal     = request.recallShape?.weight(for: "temporal")     ?? 1.0
-        let shapeGraph        = request.recallShape?.weight(for: "graph")        ?? 1.0
-        let shapePreference   = request.recallShape?.weight(for: "preference")   ?? 1.0
+        let shapeLocus        = laneWeight("locus")
+        let shapeBM25         = laneWeight("bm25")
+        let shapeHamming      = laneWeight("hamming")
+        let shapeDense        = laneWeight("dense")
+        let shapeFieldFit     = laneWeight("fieldFit")
+        let shapeCoOccurrence = laneWeight("coOccurrence")
+        let shapeTemporal     = laneWeight("temporal")
+        let shapeGraph        = laneWeight("graph")
+        let shapePreference   = laneWeight("preference")
         switch request.scoring {
         case .matrixAware:
             // Whether coOccurrence and temporal both steer at the neutral 1.0 weight.
@@ -2081,8 +2548,24 @@ public extension GeniusLocusKit {
                     matrixTerm +
                     shapeGraph      * weights.graph          * buffer.graph[i] +
                     shapePreference * weights.graph          * buffer.preference[i] +
-                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0 +
+                    // Denominator 5.0: five primary candidate-supply bits
+                    // (locus, locusGraph, bm25, vectorHamming, vectorDense).
+                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 5.0 +
                     pinnedBonus
+            }
+        case .discriminative:
+            // RRF + dense-lane saturation discount. Applies `denseDiscriminationFactor`
+            // (computed above from the mean relative spread of nearest cosines) to the
+            // buffer.final composite score. No matrix, fieldFit, graph, or preference
+            // signals — lighter than matrixAware, heavier than rrf.
+            //
+            // When the dense lane is absent or contrastive (spread ≥ 0.15), factor is
+            // 1.0 and discriminative is byte-identical to rrf. When saturated
+            // (spread ≈ 0.05), the composite score is discounted proportionally.
+            // No degraded stage is recorded — discriminative is genuinely implemented
+            // on the unionBest path.
+            for i in 0..<buffer.count {
+                scores[i] = denseDiscriminationFactor * buffer.final[i]
             }
         case .raw, .rrf:
             // .raw: use the normalised lane-rank score directly — no matrix signals,
@@ -2180,9 +2663,21 @@ public extension GeniusLocusKit {
         } else {
             unselected = Set(0..<buffer.count)
         }
-        let limit = min(request.limit, buffer.count)
-
-        while selected.count < limit, !unselected.isEmpty {
+        // WINDOWED TIE RESOLUTION at the final presentation boundary
+        // (DECISION_SCORE_TRANSPARENT_ORDERING 2026-08-24, ruling 1).
+        //
+        // Phase 1 fills the 2N working view; Phase 2 (conditional) widens to
+        // 4N when a tie straddles the presentation cut. frontierK =
+        // min(max(limit*4, 64), 256) already over-fetches the 4N window for
+        // limit ≤ 64 — no extra retrieval pass needed. For limit > 64 the cap
+        // is 256, so 4N may be unavailable; the determinate-prefix branch
+        // fires in that case.
+        //
+        // `unselected` and `maxSim` are preserved between phases so Phase 2
+        // continues MMR from exactly where Phase 1 stopped — no duplicate work,
+        // no state reset.
+        let workLimit2N = min(request.limit * 2, buffer.count)
+        while selected.count < workLimit2N, !unselected.isEmpty {
             // Pick argmax of λ·relevance − (1−λ)·maxSimilarityToSelected.
             //
             // DETERMINISM: `unselected` is a Set<Int>, whose iteration order is
@@ -2229,6 +2724,91 @@ public extension GeniusLocusKit {
                 }
                 if sim > maxSim[i] { maxSim[i] = sim }
             }
+        }
+
+        // Presentation-order comparator: (score DESC, subject ASC).
+        // Nil subject sorts as "" (before any non-empty subject in ASC order).
+        // Among exact (score, subject) equals the mutual order is unspecified
+        // BY DESIGN (ruling 3 — if they are meaningfully different, the
+        // scoring should say so; do NOT add a third key to "fix" this).
+        let presentationBefore: (Int, Int) -> Bool = { i, j in
+            let si = scores[i], sj = scores[j]
+            if si != sj { return si > sj }
+            let subI = drawerIndex[buffer.ids[i]]?.subject ?? ""
+            let subJ = drawerIndex[buffer.ids[j]]?.subject ?? ""
+            return subI < subJ
+        }
+        let sorted2N = selected.sorted(by: presentationBefore)
+
+        // Tie check at the presentation boundary. If the item at position
+        // (request.limit − 1) in sorted2N shares its score with position
+        // request.limit, a tie straddles the cut and Phase 2 widens to 4N.
+        let presentationCut = min(request.limit, sorted2N.count)
+        if sorted2N.count > request.limit,
+           scores[sorted2N[presentationCut - 1]] == scores[sorted2N[presentationCut]] {
+            // Phase 2: continue MMR to 4N. Starts from current `unselected`
+            // and `maxSim` — no restart, no re-selection of Phase 1 results.
+            let workLimit4N = min(request.limit * 4, buffer.count)
+            while selected.count < workLimit4N, !unselected.isEmpty {
+                var bestIdx4 = -1
+                var bestMMR4 = -Float.greatestFiniteMagnitude
+                for i in unselected {
+                    let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
+                    if bestIdx4 == -1
+                        || mmrScore > bestMMR4
+                        || (mmrScore == bestMMR4
+                            && (mmrContentByID[buffer.ids[i]] ?? buffer.ids[i])
+                                < (mmrContentByID[buffer.ids[bestIdx4]] ?? buffer.ids[bestIdx4])) {
+                        bestMMR4 = mmrScore
+                        bestIdx4 = i
+                    }
+                }
+                selected.append(bestIdx4)
+                unselected.remove(bestIdx4)
+                let contentBest4 = mmrContentByID[buffer.ids[bestIdx4]] ?? ""
+                for i in unselected {
+                    let sim: Float
+                    let contentI = mmrContentByID[buffer.ids[i]] ?? ""
+                    if !contentBest4.isEmpty, !contentI.isEmpty {
+                        sim = glkShingleSimilarity(contentBest4, contentI)
+                    } else {
+                        sim = glkSourceMaskJaccard(
+                            buffer.sourceMask[bestIdx4], buffer.sourceMask[i])
+                    }
+                    if sim > maxSim[i] { maxSim[i] = sim }
+                }
+            }
+            let sorted4N = selected.sorted(by: presentationBefore)
+            let tiedScore = scores[sorted2N[presentationCut - 1]]
+            // Find where the tie group ends in the 4N view: first position
+            // where score drops below tiedScore. Items at tiedScore are the
+            // tie group; items strictly above tiedScore are the clear prefix.
+            if let breakAt = sorted4N.firstIndex(where: { scores[$0] < tiedScore }) {
+                // Break found within 4N: return the WHOLE tie group (honest
+                // expansion past the requested limit — the scores decide).
+                selected = Array(sorted4N[0..<breakAt])
+            } else if unselected.isEmpty {
+                // Pool fully exhausted before hitting the 4N cap: no more
+                // candidates exist anywhere. Return the entire sorted 4N pool —
+                // the estate cannot discriminate further, so all items are
+                // equally valid and returning any subset would be arbitrary.
+                // This is the "break found at end of pool" interpretation.
+                selected = sorted4N
+            } else {
+                // No break within 4N AND the pool still has admissible items
+                // beyond the cap: the tie group extends past what we retrieved.
+                // Return only the determinate prefix above the tie group.
+                // No arbitrary member of an unresolved tie group is returned.
+                let tieGroupStart = sorted4N.firstIndex(where: { scores[$0] == tiedScore }) ?? 0
+                selected = Array(sorted4N[0..<tieGroupStart])
+                // Signal to the MCP surface that the reply is truncated by a
+                // tie the 4N window could not resolve.
+                degradedStages.append("tie.nonDeterminate")
+            }
+        } else {
+            // No tie at the boundary (or buffer has ≤ request.limit items):
+            // trim to request.limit in presentation order.
+            selected = Array(sorted2N[0..<presentationCut])
         }
 
         // Step 10.5 — LATE BODY HYDRATION for the returned top-k. The pool was
@@ -2290,9 +2870,11 @@ public extension GeniusLocusKit {
             returnedDistilledByID = [:]
         }
 
-        // Step 11 — build RecallHit array in MMR-selected order.
-        // The explainer runs here — only for selected hits, never for frontier
-        // candidates — then wires the explanation array onto each RecallHit.
+        // Step 11 — build RecallHit array in presentation order (score DESC,
+        // subject ASC). `selected` was sorted into this order by the windowed
+        // tie-resolution algorithm above. The explainer runs here — only for
+        // selected hits, never for frontier candidates — then wires the
+        // explanation array onto each RecallHit.
         let explainer = RecallExplainer()
         var hits: [RecallHit] = []
         hits.reserveCapacity(selected.count)
@@ -2384,7 +2966,8 @@ public extension GeniusLocusKit {
         )
 
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
-                               denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages)
+                               denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages,
+                               laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
     }
 
     // MARK: - Matrix coord helper
@@ -2602,6 +3185,9 @@ public extension GeniusLocusKit {
             subject: d.subject,
             subjectPipelineVersion: d.subjectPipelineVersion,
             subjectAt: d.subjectAt
+            // Adornment text is no longer a Drawer field (ADORN-STORE-02 v17).
+            // Active adornments are fetched separately via
+            // Estate.activeAdornments(drawerIDs:) before composition.
         )
     }
 

@@ -26,7 +26,7 @@ import SubstrateTypes
 @testable import SubstrateML
 @testable import GeniusLocusKit
 
-@Suite("Seeded hint encode routing (DISTILL_SEED_STALL)")
+@Suite("Seeded hint encode routing (DISTILL_SEED_STALL)", .serialized)
 struct SeedHintEncodeTests {
 
     /// Provision a GLK estate (mounts Corpus + VectorStore + drain workers).
@@ -112,5 +112,44 @@ struct SeedHintEncodeTests {
         let drawers = try await estate.getDrawers(ids: ids)
         #expect(drawers.contains { $0.content.contains("standing orders") },
                 "a BM25 hit for the hint phrase must hydrate to the seeded hint drawer")
+    }
+
+    @Test("charters carry the fixed sentinel identity: charterSeedDate + well-known IDs")
+    func chartersCarrySentinelIdentity() async throws {
+        // Failure mode this discriminates: with wall-clock stamps / random
+        // UUIDs restored, the ID-set assertion fails immediately (random ids)
+        // and the date assertion fails on any estate provisioned after 2000 —
+        // the exact pre-fix behavior that made same-recipe estates rank
+        // differently (2026-08-24 replay-drift root cause).
+        let (kit, handle) = try await provisionGLKEstate()
+        let estate = try await kit.estate(for: handle)
+        let all = try await estate.allDrawers()
+        let names = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
+        let charters = all.filter { names[$0.parentNodeId]?.room == LocusKit.hintRoom }
+        #expect(charters.count == LocusKit.defaultWings.count)
+        let expectedIDs = Set((0..<LocusKit.defaultWings.count).map {
+            LocusKit.charterDrawerID(forWingIndex: $0)
+        })
+        #expect(Set(charters.map(\.id)) == expectedIDs,
+                "charter drawers must carry the fixed well-known IDs")
+        for c in charters {
+            #expect(c.filedAt == LocusKit.charterSeedDate,
+                    "charter filedAt must be the fixed 2000-01-01 sentinel")
+        }
+    }
+
+    @Test("MOOTX01_SKIP_CHARTERS suppresses charter seeding entirely")
+    func skipEnvSuppressesCharters() async throws {
+        // Failure mode: without the seedDefaultWings guard the estate carries
+        // 7 charter drawers and the zero-count assertion fails.
+        setenv("MOOTX01_SKIP_CHARTERS", "1", 1)
+        defer { unsetenv("MOOTX01_SKIP_CHARTERS") }
+        let (kit, handle) = try await provisionGLKEstate()
+        let estate = try await kit.estate(for: handle)
+        let all = try await estate.allDrawers()
+        let names = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
+        let charters = all.filter { names[$0.parentNodeId]?.room == LocusKit.hintRoom }
+        #expect(charters.isEmpty,
+                "no charter drawers may exist when the skip seam is set")
     }
 }

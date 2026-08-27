@@ -24,13 +24,13 @@ enum EnrichmentStage {
 
     /// Nouns shorter than this never anchor (single letters and "ok"-class
     /// tokens produce junk FDC hits).
-    private static let minNounLength = 3
+    static let minNounLength = 3
 
     /// Function words and conversational fillers that the word-class
     /// baseline sometimes admits as nouns ("the" was observed anchoring to
     /// a junk category on the first native build). Pinned identically in
     /// both ports; extending it bumps the pipeline version.
-    private static let stopwords: Set<String> = [
+    static let stopwords: Set<String> = [
         "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
     ]
 
@@ -55,7 +55,7 @@ enum EnrichmentStage {
     /// first-seen order is preserved.
     /// Longest phrase length attempted by the multi-word pre-pass. The
     /// vendored label table tops out at ~5-word labels.
-    private static let maxPhraseWords = 5
+    static let maxPhraseWords = 5
 
     static func trailer(forContent content: String) -> String {
         var facts: [(label: String, value: String)] = []
@@ -115,7 +115,7 @@ enum EnrichmentStage {
             guard token.count >= minNounLength,
                   !stopwords.contains(token),
                   !seenNouns.contains(token),
-                  LatticeLib.wordClass(token) == .noun else { continue }
+                  LatticeLib.wordClass(token, recordNovel: false) == .noun else { continue }
             seenNouns.insert(token)
 
             let anchor = EideticLib.lookup(token)
@@ -168,5 +168,64 @@ enum EnrichmentStage {
         guard !facts.isEmpty else { return "" }
         let body = facts.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
         return " \(TrailerGrammar.open) \(body) \(TrailerGrammar.close)"
+    }
+}
+
+/// Query-side lattice anchoring (W2.5 Track S): derives the ONE §8.3 lattice
+/// anchor a recall query is "about", using the SAME selection rules as the
+/// categorizer above (multi-word phrase pre-pass, then the first anchoring
+/// noun) so the query and the drawer sides anchor in the same code space.
+/// Consumers (the CognitionKit precise/temporal doors) put the result on
+/// `ReductionQuery` so the `lattice` reduction signal can fire; an
+/// unanchorable query returns the empty anchor and the signal stays neutral.
+/// Deterministic: HMM word classes, bundled FDC canon, vendored QID tables —
+/// no clock, no locale, no network.
+public enum QueryLatticeAnchor {
+
+    /// The derived anchor: the drawer-side `udcCode` space (FDC code, `""`
+    /// for phrase anchors, which carry no FDC code) plus the Wikidata Q-ID
+    /// (`""` when the anchoring term has none).
+    public struct Anchor: Sendable, Equatable {
+        public let udcCode: String
+        public let qid: String
+        public init(udcCode: String, qid: String) {
+            self.udcCode = udcCode
+            self.qid = qid
+        }
+    }
+
+    /// Derive the query's lattice anchor, or the empty anchor when nothing
+    /// anchors. Selection mirrors `EnrichmentStage.trailer(forContent:)`:
+    /// a greedy multi-word phrase match (5..2 words) wins at each position;
+    /// otherwise the FIRST noun (≥ 3 letters, not a pinned stopword) whose
+    /// EideticLib anchor is non-empty and non-root ("000") wins.
+    public static func derive(from text: String) -> Anchor {
+        let tokens = text.split(whereSeparator: { !$0.isLetter })
+            .map { $0.lowercased() }
+
+        // Multi-word phrase pass — the first phrase hit anchors the query.
+        var i = 0
+        while i < tokens.count {
+            var n = min(EnrichmentStage.maxPhraseWords, tokens.count - i)
+            while n >= 2 {
+                let phrase = tokens[i..<(i + n)].joined(separator: " ")
+                if let qid = QIDFacts.qid(forPhrase: phrase) {
+                    return Anchor(udcCode: "", qid: qid)
+                }
+                n -= 1
+            }
+            i += 1
+        }
+
+        // Single-token pass — the first anchoring noun wins.
+        for token in tokens {
+            guard token.count >= EnrichmentStage.minNounLength,
+                  !EnrichmentStage.stopwords.contains(token),
+                  LatticeLib.wordClass(token, recordNovel: false) == .noun else { continue }
+            let anchor = EideticLib.lookup(token)
+            guard !anchor.code.isEmpty, anchor.code != "000" else { continue }
+            return Anchor(udcCode: anchor.code, qid: anchor.wikidataQID ?? "")
+        }
+        return Anchor(udcCode: "", qid: "")
     }
 }

@@ -90,7 +90,8 @@ public extension GeniusLocusKit {
         drawerID: String,
         content: String,
         distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
-        now: Date
+        now: Date,
+        corefPool: [CorefStage.Antecedent] = []
     ) async throws -> Bool {
         guard storages[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
@@ -109,6 +110,12 @@ public extension GeniusLocusKit {
             // Matrix path (§7.4): intra-item M×|V| reduction. Stage 5
             // renders core-first compacted prose and computes the
             // OR-reduced structural fingerprint.
+            // memoryTimestamps stays nil ON PURPOSE (W2.5 S6): the
+            // "memories" here are one item's sentences, which all share the
+            // item's single timestamp — equal ages make TypedDecayWeighting's
+            // weights cancel in the normalizer (wdf ≡ df), so threading the
+            // timestamp is a mathematical no-op. The decay branch is live in
+            // the CROSS-ITEM consolidation path (ConsolidationCycle).
             let output = distillFn(DistillationInput(
                 memoryContents: sentences,
                 memoryTimestamps: nil,
@@ -134,12 +141,19 @@ public extension GeniusLocusKit {
                 extractFeatures: DistillationPipeline.defaultExtractor)
         }
 
+        // Pipeline p2.3 stage A (W2.2, accepted design A1): resolve
+        // third-person pronouns in the RENDERING against the session
+        // antecedent pool the sweep hands in (empty for single-item
+        // callers → no-op). Runs BEFORE the trailer weld so trailer facts
+        // stay verbatim-derived and the grammar block is never rewritten.
+        let resolved = CorefStage.resolve(rendering: rendering, pool: corefPool)
+
         // Pipeline p2 (DECISION_DENSE_LANE_ENRICHMENT): weld the categorizer
         // trailer onto the rendering. Facts come from the VERBATIM content
         // (the enrichment source of truth), the trailer rides the distilled
         // lane only, and CorpusKit's trailer lexical supplement admits its
         // tokens to BM25 at index time.
-        let enriched = rendering + EnrichmentStage.trailer(forContent: content)
+        let enriched = resolved + EnrichmentStage.trailer(forContent: content)
 
         // Write 1 of 2 (§7.2): the four representation columns, atomically.
         let updated = try await estate.setDistilledRepresentation(
@@ -215,8 +229,18 @@ public extension GeniusLocusKit {
             // shows 1 for bit 19 the true AND is also 1 — safe to skip.
             if (entry.fingerprint.operationalAnd & skipBit) == skipBit { continue }
 
+            // Session order for the coref window (W2.2 A1): the room's
+            // drawers sorted by (eventTime, filedAt, id) — deterministic and
+            // conversation-shaped. The antecedent pool for item i is the
+            // anchored entities of up to CorefStage.windowItems PRECEDING
+            // items whose eventTime lies within CorefStage.windowMinutes.
             let drawers = try await estate.drawersIn(wing: entry.wing, room: entry.room)
-            for drawer in drawers {
+                .sorted { a, b in
+                    if a.eventTime != b.eventTime { return a.eventTime < b.eventTime }
+                    if a.filedAt != b.filedAt { return a.filedAt < b.filedAt }
+                    return a.id < b.id
+                }
+            for (position, drawer) in drawers.enumerated() {
                 if let cap = limit, produced >= cap { break rooms }
                 guard !drawer.content.isEmpty else { continue }
                 // Eligibility (§7.1): bit 19 (has_current_representation)
@@ -230,9 +254,29 @@ public extension GeniusLocusKit {
                 guard !drawer.hasCurrentRepresentation
                     || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
                 else { continue }
+                // Antecedent pool: entities contributed by the session
+                // window, oldest first (resolution prefers the pool's ONLY
+                // compatible candidate, so order matters only for the
+                // deterministic first-seen dedup inside the stage).
+                let windowStart = drawer.eventTime.addingTimeInterval(
+                    -Double(CorefStage.windowMinutes) * 60)
+                // Sensitivity ceiling (codex finding 2026-08-26): a
+                // predecessor may contribute antecedents ONLY when its
+                // sensitivity is at or below the drawer being distilled —
+                // substitution copies the predecessor's entity text into
+                // THIS drawer's persisted distillate, and by-id reads gate
+                // on the returned drawer's own sensitivity, so an
+                // uphill-sourced antecedent would surface Restricted/Secret
+                // entity text through a Normal row without a grant.
+                let ceiling = drawer.sensitivity.rawValue
+                let pool = drawers[..<position]
+                    .suffix(CorefStage.windowItems)
+                    .filter { $0.eventTime >= windowStart }
+                    .filter { $0.sensitivity.rawValue <= ceiling }
+                    .flatMap { CorefStage.contributedEntities(from: $0.content) }
                 if try await distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
-                    distillFn: distillFn, now: now) {
+                    distillFn: distillFn, now: now, corefPool: pool) {
                     produced += 1
                     // Dense-over-distillate (Stream F): recompose the dense float
                     // vector from the newly-written distillate. The idempotence gate

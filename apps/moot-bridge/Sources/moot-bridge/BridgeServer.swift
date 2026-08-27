@@ -20,13 +20,12 @@ import Foundation
 //      response, id-preserving, returns to the client) AND translate the call
 //      through the secondary's verbMap and fire it at the secondary. The
 //      secondary's response is NOT returned; a secondary FAILURE is counted and
-//      swallowed so the client never sees it (backend-failure isolation, carried
-//      from ProxyServer.swift:553-559).
+//      swallowed so the client never sees it (backend-failure isolation).
 //
 //   4. READ-classified calls (query) and ANY unclassifiable tool call — go to the
 //      PRIMARY only, verbatim, id-preserving. Unclassifiable calls are NOT
-//      blind-fanned to the secondary (carried from the classify-then-translate
-//      contract): only calls we can classify and translate are mirrored.
+//      blind-fanned to the secondary (classify-then-translate contract):
+//      only calls we can classify and translate are mirrored.
 //
 //   5. bridge-owned calls (bridge_set_primary, bridge_status) — handled entirely inside
 //      the bridge; they never touch a backend transport. bridge_set_primary swaps
@@ -387,7 +386,7 @@ final class BridgeServer {
         writeToolText(clientID: clientID, text: lines.joined(separator: "\n"), to: clientOut)
     }
 
-    // MARK: - Classify + translate (carried from ProxyServer)
+    // MARK: - Classify + translate
 
     /// Classifies a tools/call by tool name against a verbMap. Returns the call
     /// type, or nil when the tool name matches neither verb (unclassifiable → no
@@ -562,7 +561,7 @@ final class BridgeServer {
         clientOut.write(out)
     }
 
-    // MARK: - Line framing + timing (carried from ProxyServer)
+    // MARK: - Line framing + timing
 
     /// Monotonic elapsed seconds since a start mark.
     static func elapsedSeconds(since start: DispatchTime) -> Double {

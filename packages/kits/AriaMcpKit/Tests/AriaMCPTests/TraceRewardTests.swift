@@ -10,6 +10,7 @@
 //   3. Dereference after search triggers the used bit on trace rows.
 //   4. moot_estate_status reports trace_rows count.
 //   5. SurfacedRecallLedger unit tests: session scope, capacity, eviction-free.
+//   6. moot_memory_get after search triggers the used bit on trace rows (B-10a).
 //
 // SQLite-backed where the Rust tests are SQLite-backed — InMemory tests are
 // insufficient because the recall-trace schema only exists in the SQLite
@@ -398,5 +399,63 @@ struct TraceRewardTests {
         let isError = confirmResult.objectValue?["isError"]?.boolValue ?? true
         #expect(!isError,
                 "confirming an unsurfaced memory must succeed (no error); got: \(confirmResult)")
+    }
+
+    // MARK: - Test 6: moot_memory_get after search fires the used-bit reward
+
+    /// After an external `moot_memory_search` surfaces a drawer, a subsequent
+    /// `moot_memory_get` on that drawer's id must call `noteUsage` →
+    /// `markRecallUsed` so the dreaming daemon's reward sweep sets reward=1.0.
+    ///
+    /// Verified indirectly: after `moot_memory_get` fires the reward, a probe
+    /// call to `kit.markRecallUsed` returns 0 updated rows — meaning the used
+    /// bit is already set. Before the fix, the probe returns > 0 (rows still
+    /// unused because memory_get did not trigger noteUsage).
+    ///
+    /// Mirrors Rust `memory_get_after_search_sets_used_bit` in
+    /// `persistence_tests.rs`.
+    @Test func memoryGetAfterTracedSearchSetsUsedBit() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
+
+        // File a memory so there is something to search for and retrieve.
+        let drawerID = try await fileMemory(
+            dispatcher,
+            content: "memory get reward wiring test",
+            location: "get-reward-room"
+        )
+
+        // External search — writes trace rows for drawerID (used=false) and
+        // records the id in the session ledger.
+        let searchText = try await search(dispatcher, query: "memory get reward")
+        #expect(searchText.contains(drawerID),
+                "search must surface the filed drawer; got: \(searchText)")
+
+        // Confirm trace rows exist and are not yet used.
+        let traceCountAfterSearch = try await kit.countRecallTraces(handle)
+        #expect(traceCountAfterSearch > 0,
+                "external search must write trace rows; got count=\(traceCountAfterSearch)")
+
+        // moot_memory_get — the dereference under test. It must fire noteUsage →
+        // markRecallUsed on the recall-trace rows for drawerID.
+        let getResult = try await dispatcher.dispatch(
+            name: "moot_memory_get",
+            arguments: .object(["id": .string(drawerID)])
+        )
+        let isError = getResult.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "moot_memory_get must succeed; got: \(getResult)")
+
+        // Probe: a fresh markRecallUsed call for drawerID should return 0
+        // updated rows because memory_get already set used=true on all live
+        // trace rows for that drawer. A non-zero return means memory_get did
+        // NOT fire the reward (the bug this test guards against).
+        let now = Date()
+        let probeCount = try await kit.markRecallUsed(handle, target: drawerID, now: now)
+        // probeCount == 0 means memory_get already set used=true on all live trace rows.
+        // A non-zero count means the used bit was still false — memory_get did NOT fire.
+        #expect(probeCount == 0,
+                "moot_memory_get must fire noteUsage so the used bit is set before the probe")
     }
 }

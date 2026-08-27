@@ -3,6 +3,8 @@ import Testing
 import AriaMCP
 @testable import MootDaemonProvider
 
+typealias VersionCompatibilityVerdict = MootDaemonProvider.VersionCompatibilityVerdict
+
 // MARK: - MACD-3B1 — ProviderVersionVector tests (schema-3 wire contract)
 //
 // Test order:

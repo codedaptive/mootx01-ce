@@ -70,7 +70,7 @@ public extension Estate {
     ///   requirement is invariant I-5.
     /// - Returns: the stored `Drawer` with its generated id and all
     ///   bitmap fields populated.
-    func capture(_ frame: CaptureFrame) async throws -> Drawer {
+    public func capture(_ frame: CaptureFrame) async throws -> Drawer {
         guard !frame.content.isEmpty else {
             throw LocusKitError.invalidContent("content must not be empty")
         }
@@ -194,6 +194,10 @@ public extension Estate {
             embeddingModelID: frame.embeddingModelID,
             provenance: provenanceBitmap,
             adjectiveBitmap: adjBitmap,
+            // New captures start bare: no adornment rows exist yet for this drawer.
+            // The adornment debt queue (adornmentDebtBatch) discovers missing
+            // (drawer, minter) pairs by querying the adornments table directly —
+            // no bitmap bit required (ADORN-STORE-02 v17, bits 27-30 now FREE).
             operationalBitmap: opBitmap,
             lineageID: frame.lineageID ?? UUID(),
             udcCode: frame.latticeAnchor.udcCode,
@@ -365,15 +369,24 @@ public extension Estate {
                 shift: 30, width: 6
             )
 
+            // Per-record capture timestamp: when frame.captureDate is set
+            // (schema v1.2 import field), that instant is used as filedAt and
+            // as the HLC physical-time seed for this drawer. When absent, the
+            // batch wall-clock `now` is used — byte-identical to all existing
+            // capture paths where no captureDate is supplied.
+            let drawerFiledAt = frame.captureDate ?? now
             let drawer = Drawer(
                 content: frame.content,
                 parentNodeId: triple.roomNodeId.uuidString,
                 addedBy: frame.addedBy,
-                filedAt: now,
-                eventTime: frame.eventTime ?? now,
+                filedAt: drawerFiledAt,
+                eventTime: frame.eventTime ?? drawerFiledAt,
                 embeddingModelID: frame.embeddingModelID,
                 provenance: provenanceBitmap,
                 adjectiveBitmap: adjBitmap,
+                // New (superseding) drawers start bare: no adornment rows yet.
+                // AdornmentPass discovers missing (drawer, minter) pairs via
+                // adornmentDebtBatch, not via a bitmap bit (ADORN-STORE-02 v17).
                 operationalBitmap: opBitmap,
                 lineageID: frame.lineageID ?? UUID(),
                 udcCode: frame.latticeAnchor.udcCode,
@@ -381,9 +394,11 @@ public extension Estate {
                 wikidataQID: frame.latticeAnchor.wikidataQID,
                 wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
                 // Subject trio at birth — identical translation to capture().
+                // subjectAt uses drawerFiledAt so the subject timestamp
+                // is consistent with the drawer's ingest clock.
                 subject: frame.subject,
                 subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
-                subjectAt: frame.subject == nil ? nil : now
+                subjectAt: frame.subject == nil ? nil : drawerFiledAt
             )
             prepared.append(PreparedItem(drawer: drawer, wing: triple.wing, room: triple.room))
         }
@@ -957,16 +972,17 @@ public extension Estate {
             candidates = Array(rows.prefix(scanBound))
         } else {
             // No pruning possible: bounded corpus scan.
-            // P4-secfix: scan ORDER BY (filedAt DESC, id DESC) so the cap
+            // Scan ORDER BY (filedAt DESC, content DESC, id DESC) so the cap
             // retains the NEWEST candidates rather than the oldest. An estate
             // with >256 drawers and a Director-path caller (frame.limit == nil
             // → scanBound = 256) would silently exclude every drawer filed
             // after the 256th-oldest. DESC ordering ensures recent content is
             // always in the candidate pool.
-            // The compound (filedAt, id) key gives a deterministic total
-            // order: rows with the same filedAt are broken by id (the declared
-            // TEXT primary key, present in SQLite + PostgreSQL + InMemory),
-            // so DESC is exactly reverse(ASC) for any fixed dataset.
+            // The three-column key gives a deterministic total order: rows
+            // with the same filedAt are broken by content (content-stable,
+            // deterministic per seed), then by id (primary key, TEXT).
+            // DrawerStore.allDrawers enforces this order on all backends
+            // (SCORE-ORDERING mission, 2026-08-24).
             // Using id (not rowid) makes the tie-break portable to PostgreSQL
             // estates where rowid is undefined (c-recall-portable fix).
             // The RecallDirector downstream ranks by content signal, not
@@ -2152,15 +2168,25 @@ public extension Estate {
         let roomNode = try await nodeStore.createNode(
             displayName: hintRoom, parentId: wingNode.id, now: now)
 
+        // Canonical charter identity: roster wings get a FIXED drawer id and
+        // the FIXED charterSeedDate filing instant (see DefaultWings.swift for
+        // the recency-exclusion and determinism rationale). Node creation above
+        // keeps the caller's `now` — only the drawer row is pinned. A wing not
+        // in the default roster falls back to the ordinary random id + `now`.
+        let rosterIndex = defaultWings.firstIndex(where: { $0.name == wingName })
+        let charterID = rosterIndex.map { charterDrawerID(forWingIndex: $0) } ?? UUID().uuidString
+        let charterStamp = rosterIndex != nil ? charterSeedDate : now
+
         // UDC "001" (Knowledge) is the canonical code for self-describing /
         // meta-knowledge drawers per spec I-5 (udcCode must not be empty).
         // The hint uses the caller-supplied embedding model ID so it is
         // indexed semantically and recallable like any other drawer.
         let drawer = Drawer(
+            id: charterID,
             content: hintText,
             parentNodeId: roomNode.id.uuidString,
             addedBy: addedBy,
-            filedAt: now,
+            filedAt: charterStamp,
             embeddingModelID: embeddingModelID,
             udcCode: hintUDCCode,
             // Structural seeds emit their own subject (SPEC § 14): a hint
@@ -2170,7 +2196,7 @@ public extension Estate {
             // pipeline tag so a regeneration sweep can target seeds.
             subject: String("Charter hint: how to use the \(wingName) wing.".prefix(DrawerStore.subjectLengthContract)),
             subjectPipelineVersion: "seed-v1",
-            subjectAt: now
+            subjectAt: charterStamp
         )
         // Route through the covered chokepoint so the container fingerprint
         // is maintained — same structural guarantee as ordinary capture.
@@ -2284,6 +2310,39 @@ public extension Estate {
             unitSessionID: unitSessionID,
             at: markedAt
         )
+    }
+
+    // MARK: - Archive (community review duplicate resolution — F4)
+
+    /// Archive a drawer by running the full expunge path (tombstones the row,
+    /// zeroes the content blob, records an erasure ledger entry, seals the
+    /// audit event). This is the estate effect that backs the community review
+    /// "archive the older duplicate" resolution choices.
+    ///
+    /// Semantics:
+    ///   - The drawer becomes invisible to any consumer that filters on
+    ///     `tombstonedAt == nil` (review sessions, recall, LAN eligibility).
+    ///   - The row is retained in the database with tombstonedAt stamped, so
+    ///     the erasure ledger and audit trail remain intact.
+    ///   - Content is zeroed to prevent retention of archived duplicates.
+    ///
+    /// Throws `LocusKitError.drawerNotFound` if the id does not resolve, or
+    /// `LocusKitError.invalidContent` if the gate refuses the transition
+    /// (e.g. the drawer is already accepted / S-3 protected).
+    ///
+    /// The `DrawerStore.ExpungeOutcome.refusedSiblingIDs` field names any
+    /// lineage siblings the gate refused; the caller receives the full outcome
+    /// so it can propagate partial refusals accurately rather than treating
+    /// a partial expunge as a complete success (SPEC B-8b, MXE-FA).
+    public func archiveDrawer(
+        id: String,
+        reason: String,
+        now: Date
+    ) async throws -> DrawerStore.ExpungeOutcome {
+        // Delegate to the internal expunge path: confirmation is always true
+        // because the community review coordinator is the decision authority —
+        // the caller has already confirmed via the choiceID it submitted.
+        try await expunge(rowID: id, reason: reason, confirmation: true, now: now)
     }
 
 }

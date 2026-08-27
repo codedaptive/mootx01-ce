@@ -4,10 +4,8 @@ This is the current evidence snapshot for `develop/1.0.x`, measured on
 2026-07-22 local time (2026-07-23 UTC) at commit
 `b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99`.
 
-Raw samples and provenance are in
-[`results/2026-07-22-apple-m4-b3fcd1dc-evidence/`](results/2026-07-22-apple-m4-b3fcd1dc-evidence/).
-The conditions and limitations are part of that bundle and are required when
-citing a number from this page.
+The conditions and limitations of that run are required when citing a number
+from this page.
 
 ## What the evidence says
 
@@ -44,7 +42,7 @@ concurrent throughput.
 
 ## Historical retrieval gauntlet retest
 
-The EE `tools/mcp-benchmarker` adversarial gauntlet was rerun on the MOOT side
+The adversarial retrieval gauntlet (`benchmark/ (mcp-benchmarker)`) was rerun on the MOOT side
 against the same deterministic seed and workload: 200 queries, 1,040 records,
 five difficulty tiers, and four distractors per needle. The full report's
 DegeneracyGuard passed. See [`GAUNTLET.md`](GAUNTLET.md) for the tier definitions,
@@ -60,8 +58,6 @@ historical comparison, and limitations.
 The common precise strategies are 6.46×–6.55× faster by mean latency and
 4.44×–4.86× faster at P95 than the historical MOOT rows. This is not a blanket
 latency claim: `precise:text+mmr` measured 1,634.1 ms mean / 3,787.9 ms P95.
-Nor is it a current MemPalace comparison: MemPalace was not rerun, so the
-source-native report correctly records superiority as `NOT EVALUABLE`.
 
 ## Exact-kernel results
 
@@ -140,8 +136,6 @@ as a regression sentinel rather than generalized to natural-language input.
 - The product dataset is intentionally small and disposable.
 - The adversarial gauntlet is larger but still only 1,040 records, and its full
   run reuses a preloaded/dreamed estate; it does not measure ingest-to-ready time.
-- Historical MemPalace values are context only and cannot establish current
-  comparative superiority.
 - Cross-generation hardware conclusions await the matched Mac mini M4 vs
   MacBook Pro M5 Max mission in
   `docs/engineering/MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md`.

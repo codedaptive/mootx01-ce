@@ -45,6 +45,10 @@ public enum ToolProvenance: Sendable, Equatable {
     case recipe
     /// A VaultKit control-surface tool.
     case vault
+    /// A community-contract tool (Wave A1b: moot_community_* namespace).
+    /// These tools are dispatched through CommunityToolHandler rather than
+    /// through ToolDispatcher; no GeniusLocusKit actor is required.
+    case community
 }
 
 /// A single tool advertised in `tools/list`.
@@ -190,7 +194,10 @@ public enum ToolProjection {
             ProjectedTool(
                 name: tool.name,
                 description: tool.description,
-                inputSchema: withTeachme(tool.inputSchema),
+                // Apply mode arg first, then teachme: both are injected on every tool.
+                // withModeArg adds "mode" to every tool's inputSchema so it is
+                // recognized by acceptedArgKeys and not flagged as an unknown arg.
+                inputSchema: withTeachme(withModeArg(tool.inputSchema)),
                 provenance: tool.provenance,
                 // Carried through explicitly: this re-wrap constructs a NEW
                 // ProjectedTool, so omitting the field here would silently
@@ -233,18 +240,41 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_memory_search",
-                description: "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
+                description: "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked S1 rows — uuid · subject · firstSentence · SSC · adornments · eventTime · score — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision); absence means a clear, nominal result. Sensitivity: a sensitivity tier gate is in effect by default — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "query": stringSchema("Natural-language search query. Provide query OR near — exactly one."),
                         "near": stringSchema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
-                        "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
+                        "limit": integerSchema("Relevance floor, not an exact row count (default 20). Equal-scored results at the boundary are all returned, so the actual count may exceed this value — or fall below it when an unresolved score tie is disclosed instead of arbitrarily cut. Omit to use the default; null is invalid."),
                         "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained, pinned. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. \"pinned\" constrains to user-pinned drawers (rooms without a pinned drawer are pruned from the search). null is invalid."),
                         "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                         "media_type": stringSchema("Optional media type filter: voice (drawers captured with voice audio, bit 13), image (drawers from or carrying an image, bit 14). Composable with filter and wing. Omit to search all media types. null is invalid."),
                         "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
-                        "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
+                        "door": stringSchema(
+                            "Optional retrieval door — the front-door family adjective. Overrides scoring when both are present. "
+                            + "Valid values: "
+                            + "guess — use the per-estate A1 config the quality optimizer provisioned (best automatic choice; falls back to matrixAware when no config is set); "
+                            + "rrf — reciprocal rank fusion (benchmark winner on every full-coverage lane: lme, locomo, lmeb, membench); "
+                            + "matrixAware — full weighted pipeline (matrix + temporal + fieldFit + graph + preference signals; prior default); "
+                            + "raw — lane order, no reranking; "
+                            + "discriminative — rrf composite scaled by dense-lane saturation discount. "
+                            + "Pick by question shape: single-fact lookups → guess/rrf; "
+                            + "temporal (when/before/after) → keep default and use ordering:byRelevanceDesc; "
+                            + "aggregative (how many/all the…) or comparative (which is more…) → rrf or thorough (future); "
+                            + "knowledge-update (what is it NOW) → rrf; "
+                            + "noisy/partial-cue → raw or rrf. "
+                            + "Omit to use the A1 provisioned config (or matrixAware for un-provisioned estates). null is invalid."
+                        ),
+                        "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware, discriminative. Overridden by door when both are supplied. Omit to use the door selection (see door arg). null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
+                        "frontier_k": integerSchema("Optional candidate-pool depth override (integer, clamped to [64, 256] by the recall engine). Controls how many candidates each lane fetches before fusion. When absent the engine formula is used (min(max(limit × 4, 64), 256)). Omit to use the default; null is invalid."),
+                        "answer": stringSchema(
+                            "Response shape adjective: "
+                            + "\"never\" (default) — dense rows only, byte-identical to today; "
+                            + "\"always\" — compose an answer block and prepend it to the rows (L1-full); "
+                            + "\"auto\" — server picks the shape by confidence gate: CONFIDENT → answer-only (L0), INTERMEDIATE → answer+rows (L1), WEAK → rows-only. "
+                            + "Omit or pass \"never\" for the current default behaviour. Unknown values are rejected."
+                        ),
                     ],
                     required: []
                 )),
@@ -266,7 +296,7 @@ public enum ToolProjection {
             ),
             ProjectedTool(
                 name: "moot_memory_get",
-                description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
+                description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record. Sensitivity: a sensitivity tier gate is in effect by default — run `mootx01 unlock private` to include restricted memories, `mootx01 unlock secret` for secret memories.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "id": stringSchema("Memory row identifier (drawer UUID). Provide id or ids."),
@@ -569,7 +599,21 @@ public enum ToolProjection {
             // converge. Lightweight — no orientation block — and safe to poll.
             ProjectedTool(
                 name: "moot_drain_status",
-                description: "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
+                description: "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state. Lanes: corpus_encode (the encode/ingest queue, with its live encoded-chunk count), distillation (row-level representation debt), dreaming (the recall-event dreaming queue, paid down out-of-band), and subject_backfill (only while a subject producer is registered). Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Rebuild OPERATIONS are not drains — poll moot_rebuild_status for those.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [:],
+                    required: []
+                )),
+                provenance: .interface
+            ),
+            // Maintenance / admin tool — NOT one of the nine ARIA grammar
+            // verbs. Reports the derived-state rebuild OPERATION (reindex
+            // backfill / basis retrain + re-embed); a rebuild is not a drain,
+            // so it never appears in moot_drain_status (Bob ruling
+            // 2026-08-26). Rust twin: tool_list.rs rebuild_status_tool.
+            ProjectedTool(
+                name: "moot_rebuild_status",
+                description: "Maintenance: report whether a derived-state rebuild (reindex backfill or embedding-basis retrain + re-embed) is currently running for the estate — 'rebuild: running' or 'rebuild: idle'. Read-only and lightweight — safe to poll while waiting for a rebuild triggered by moot_reindex or a large import to finish. moot_estate_status includes this line in its condition report.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [:],
                     required: []
@@ -729,6 +773,34 @@ public enum ToolProjection {
             ]),
             "required": .array([.string("results")]),
         ])
+    }
+
+    /// Inject an optional `mode` property into an object schema.
+    ///
+    /// Applied to every tool in `tools()` so the `mode` argument is
+    /// advertised in every tool's inputSchema and recognized by
+    /// `acceptedArgKeys(for:)`. The dispatch layer extracts the mode
+    /// value, updates sticky session state, and routes the unknown-mode
+    /// hint path when the value is not in the registry (fail-open).
+    ///
+    /// Mode arg grammar: `"Recall=Auto"` (name=variant) or `"Recall"` (bare
+    /// name, advisory only). See `ModeRegistry.swift` for the full roster.
+    static func withModeArg(_ schema: JSONValue) -> JSONValue {
+        guard case .object(var object) = schema,
+              case .object(var properties)? = object["properties"] else {
+            return schema
+        }
+        properties["mode"] = stringSchema(
+            "Optional mode declaration (advisory): name a tool bundle for this session. "
+            + "Format: name or name=variant. "
+            + "Modes: Recall (variants: Auto=answer:auto session default, Rows=rows-only, Answer=answer:always), "
+            + "Filing, Lenses, Vault, Curator. "
+            + "The last declared mode+variant is sticky for the session; per-call args always override. "
+            + "Unknown modes are accepted and ignored with a hint. "
+            + "Example: mode:\"Recall=Auto\" sets answer:auto as the search default for this session."
+        )
+        object["properties"] = .object(properties)
+        return .object(object)
     }
 
     /// Inject an optional `teachme` property into an object schema.

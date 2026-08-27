@@ -885,6 +885,238 @@ pub struct AssociateSweepReport {
     pub written: usize,
     /// Pairs skipped because an active (non-tombstoned) association already existed.
     pub deduplicated: usize,
+    /// (probe, lane) scans whose ENTIRE ladder pool was one distance tie
+    /// group (Bob ladder ruling 2026-08-26, rung 4): no clean cut exists,
+    /// so the probe contributed zero pairs from that lane rather than a
+    /// run-dependent subset. Surfaced on the dream association line.
+    pub non_unique_probes: usize,
+}
+
+/// The optimizer-tunable recall knobs stored under the estate manifest key
+/// `"recall_tuning"`. Mirrors Swift `GeniusLocusKit.RecallTuningManifest`.
+///
+/// Absent or malformed JSON falls back to `RecallTuningManifest::default()` (the
+/// spec constants) — the fail-quiet contract the recall path applies. Partial JSON
+/// fills absent keys with spec defaults via `#[serde(default = …)]` annotations.
+///
+/// The seven packager threshold fields (added in the PACKAGER mission) are also
+/// fail-quiet: absent keys fill with spec defaults so no estate migration is
+/// required to deploy this type. They are read by `packager_thresholds()`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct RecallTuningManifest {
+    /// RRF reciprocal rank fusion constant k. Default: 60. Spec § 4.1.
+    #[serde(default = "RecallTuningManifest::default_rrf_k", rename = "rrf_k")]
+    pub rrf_k: u32,
+    /// MMR diversity re-rank lambda (0–1; 0 = pure diversity, 1 = pure relevance).
+    /// Default: 0.7. Spec § 4.1.
+    #[serde(default = "RecallTuningManifest::default_mmr_lambda", rename = "mmr_lambda")]
+    pub mmr_lambda: f32,
+    /// BM25 weight in the RRF blend. Default: 0.3. Spec § 4.1.
+    #[serde(default = "RecallTuningManifest::default_rrf_bm25_weight", rename = "rrf_bm25_weight")]
+    pub rrf_bm25_weight: f32,
+    /// Vector (embedding) weight in the RRF blend. Default: 0.7. Spec § 4.1.
+    #[serde(default = "RecallTuningManifest::default_rrf_vector_weight", rename = "rrf_vector_weight")]
+    pub rrf_vector_weight: f32,
+
+    // MARK: Packager thresholds (PACKAGER mission — GLKResultsPackager)
+
+    /// CONFIDENT gate: minimum top-margin (m1). Spec default: 0.25.
+    #[serde(default = "RecallTuningManifest::default_packager_t1", rename = "packager_t1")]
+    pub packager_t1: f64,
+    /// CONFIDENT gate: minimum lane agreement (m2). Spec default: 0.50.
+    #[serde(default = "RecallTuningManifest::default_packager_t2", rename = "packager_t2")]
+    pub packager_t2: f64,
+    /// WEAK gate: m1 ceiling below which WEAK fires (t1'). Spec default: 0.05.
+    #[serde(default = "RecallTuningManifest::default_packager_t1_prime", rename = "packager_t1_prime")]
+    pub packager_t1_prime: f64,
+    /// WEAK gate: dense-spread floor (t3'). Spec default: 0.10.
+    #[serde(default = "RecallTuningManifest::default_packager_t3_prime", rename = "packager_t3_prime")]
+    pub packager_t3_prime: f64,
+    /// Score-cliff ratio threshold (c). Spec default: 0.20.
+    #[serde(default = "RecallTuningManifest::default_packager_c", rename = "packager_c")]
+    pub packager_c: f64,
+    /// Minimum response rows (k_min). Spec default: 3.
+    #[serde(default = "RecallTuningManifest::default_packager_k_min", rename = "packager_k_min")]
+    pub packager_k_min: usize,
+    /// Maximum response rows (k_max). Spec default: 20.
+    #[serde(default = "RecallTuningManifest::default_packager_k_max", rename = "packager_k_max")]
+    pub packager_k_max: usize,
+}
+
+impl Default for RecallTuningManifest {
+    fn default() -> Self {
+        Self {
+            rrf_k: Self::default_rrf_k(),
+            mmr_lambda: Self::default_mmr_lambda(),
+            rrf_bm25_weight: Self::default_rrf_bm25_weight(),
+            rrf_vector_weight: Self::default_rrf_vector_weight(),
+            packager_t1: Self::default_packager_t1(),
+            packager_t2: Self::default_packager_t2(),
+            packager_t1_prime: Self::default_packager_t1_prime(),
+            packager_t3_prime: Self::default_packager_t3_prime(),
+            packager_c: Self::default_packager_c(),
+            packager_k_min: Self::default_packager_k_min(),
+            packager_k_max: Self::default_packager_k_max(),
+        }
+    }
+}
+
+impl RecallTuningManifest {
+    fn default_rrf_k() -> u32 { 60 }
+    fn default_mmr_lambda() -> f32 { 0.7 }
+    fn default_rrf_bm25_weight() -> f32 { 0.3 }
+    fn default_rrf_vector_weight() -> f32 { 0.7 }
+    // Packager threshold defaults (spec constants — PACKAGER mission).
+    fn default_packager_t1() -> f64 { 0.25 }
+    fn default_packager_t2() -> f64 { 0.50 }
+    fn default_packager_t1_prime() -> f64 { 0.05 }
+    fn default_packager_t3_prime() -> f64 { 0.10 }
+    fn default_packager_c() -> f64 { 0.20 }
+    fn default_packager_k_min() -> usize { 3 }
+    fn default_packager_k_max() -> usize { 20 }
+
+    /// Extract the packager thresholds as a `PackagerThresholds` value for direct
+    /// use by `glk_results_packager`. Mirrors Swift
+    /// `RecallTuningManifest.packagerThresholds`.
+    pub fn packager_thresholds(&self) -> crate::packager::PackagerThresholds {
+        crate::packager::PackagerThresholds {
+            t1: self.packager_t1,
+            t2: self.packager_t2,
+            t1_prime: self.packager_t1_prime,
+            t3_prime: self.packager_t3_prime,
+            c: self.packager_c,
+            k_min: self.packager_k_min,
+            k_max: self.packager_k_max,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DoorManifest
+// ---------------------------------------------------------------------------
+
+/// Optimizer-owned per-estate door-selection config stored under the estate
+/// manifest key `"door_config"`. Mirrors Swift `GeniusLocusKit.DoorManifest`.
+///
+/// An absent or malformed manifest key falls back to `DoorManifest::default()`
+/// (scoring = `MatrixAware`) — byte-identical to today's behaviour. An unknown
+/// `scoring` string in the stored JSON also falls back to `MatrixAware` so a
+/// bad provision degrades gracefully rather than breaking recall.
+///
+/// Wire format: `{"scoring":"rrf"}` — snake_case keys matching the
+/// quality-optimizer's emitted format (benchmark-ee/configs/door/*.json).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DoorManifest {
+    /// Scoring strategy to apply when no explicit `door` or `scoring`
+    /// argument is supplied. Defaults to `MatrixAware` (the spec constant)
+    /// when absent from the stored JSON, preserving the pre-front-door
+    /// behaviour for unprovisionied estates.
+    ///
+    /// Custom serde helpers are required because `GLKRecallScoring` does not
+    /// implement `serde::Serialize`/`Deserialize` — it only exposes a
+    /// `raw_value()` string method. The serialize helper emits the rawValue
+    /// string; the deserialize helper maps strings back to the enum, falling
+    /// back to `MatrixAware` for unknown values.
+    #[serde(
+        default = "DoorManifest::default_scoring_str",
+        rename = "scoring",
+        serialize_with = "DoorManifest::serialize_scoring",
+        deserialize_with = "DoorManifest::deserialize_scoring"
+    )]
+    pub scoring: crate::recall::GLKRecallScoring,
+}
+
+impl Default for DoorManifest {
+    /// Spec-default: scoring = `MatrixAware`. An estate with no `"door_config"`
+    /// manifest key resolves to this value.
+    fn default() -> Self {
+        Self { scoring: crate::recall::GLKRecallScoring::MatrixAware }
+    }
+}
+
+impl DoorManifest {
+    fn default_scoring_str() -> crate::recall::GLKRecallScoring {
+        crate::recall::GLKRecallScoring::MatrixAware
+    }
+
+    /// Serialize `GLKRecallScoring` as its rawValue string so the manifest is
+    /// human-readable and matches the quality-optimizer's emitted format.
+    fn serialize_scoring<S>(
+        scoring: &crate::recall::GLKRecallScoring,
+        ser: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_str(scoring.raw_value())
+    }
+
+    /// Deserialize a scoring rawValue string to `GLKRecallScoring`. Unknown
+    /// values fall back to `MatrixAware` — a bad provision must degrade to
+    /// the spec default rather than breaking recall. Mirrors the fail-quiet
+    /// contract on `RecallTuningManifest` and `lane_weights`.
+    fn deserialize_scoring<'de, D>(
+        de: D,
+    ) -> Result<crate::recall::GLKRecallScoring, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Use the fully-qualified path to avoid a bare `use serde::Deserialize`
+        // import that would pollute the module-level namespace here.
+        let s = <String as serde::Deserialize>::deserialize(de)?;
+        Ok(match s.as_str() {
+            "raw"            => crate::recall::GLKRecallScoring::Raw,
+            "rrf"            => crate::recall::GLKRecallScoring::Rrf,
+            "matrixAware"    => crate::recall::GLKRecallScoring::MatrixAware,
+            "discriminative" => crate::recall::GLKRecallScoring::Discriminative,
+            // Unknown scoring string: degrade to MatrixAware, same as Swift.
+            _                => crate::recall::GLKRecallScoring::MatrixAware,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModesManifest
+// ---------------------------------------------------------------------------
+
+/// User-owned per-estate modes-preference config stored under the estate
+/// manifest key `"modes_config"`. Mirrors Swift `GeniusLocusKit.ModesManifest`.
+///
+/// Two preferences:
+/// - `sticky_enabled` (default `true`): when `false`, mode declarations are
+///   advisory-only — accepted and hinted but never recorded as sticky state.
+/// - `coaching_calls` (default `25`, `0 = off`): how many moot tool calls
+///   between periodic coaching blocks.
+///
+/// An absent or malformed manifest key falls back to `ModesManifest::default()`
+/// — byte-identical to pre-provisioning behaviour. No estate migration required.
+///
+/// Wire format: `{"sticky_enabled":true,"coaching_calls":25}` — snake_case keys
+/// matching the other provisioned-manifest families.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct ModesManifest {
+    /// Whether sticky mode declarations persist across calls. Default `true`.
+    /// JSON key `"sticky_enabled"`. Absent key fills with `true`.
+    #[serde(default = "ModesManifest::default_sticky_enabled", rename = "sticky_enabled")]
+    pub sticky_enabled: bool,
+
+    /// How many moot tool calls between periodic coaching blocks. `0 = off`.
+    /// Default `25`. JSON key `"coaching_calls"`. Absent key fills with `25`.
+    #[serde(default = "ModesManifest::default_coaching_calls", rename = "coaching_calls")]
+    pub coaching_calls: usize,
+}
+
+impl Default for ModesManifest {
+    /// Spec-default: `sticky_enabled = true`, `coaching_calls = 25`.
+    /// An estate with no `"modes_config"` manifest key resolves to this value.
+    fn default() -> Self {
+        Self { sticky_enabled: true, coaching_calls: 25 }
+    }
+}
+
+impl ModesManifest {
+    fn default_sticky_enabled() -> bool { true }
+    fn default_coaching_calls() -> usize { 25 }
 }
 
 /// # Adding a per-estate registry
@@ -913,6 +1145,13 @@ pub struct EstateCoordinator {
     /// Per-estate CorpusKit handles. Optional; activates BM25 lane in recall_scored.
     /// Mirrors Swift actor's `corpusKits: [EstateHandle: Corpus]`.
     pub(crate) corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
+    /// Estates with a derived-state rebuild span in flight (reindex backfill
+    /// and/or a corpus basis retrain). A DEPTH, not a flag — nested spans
+    /// increment/decrement symmetrically. Backs `derived_rebuild_active`
+    /// (the `moot_rebuild_status` surface; Bob ruling 2026-08-26: rebuild
+    /// status is its own vocabulary, never a drain lane). Twin of Swift
+    /// `GeniusLocusKit.derivedRebuildDepth`.
+    derived_rebuild_depth: std::collections::HashMap<EstateHandle, usize>,
     /// Subject-backfill rider registry (PR-09, DARK LANE): the pluggable
     /// producer that writes subjects for subject-debt rows. No producer
     /// ships in Rust until a model exists (the SIMD/tagger dark-lane
@@ -1169,6 +1408,12 @@ impl DrainStatus {
     /// `DrainStatus.subjectBackfillName`.
     pub const SUBJECT_BACKFILL_NAME: &'static str = "subject_backfill";
 
+    /// Canonical name of the dreaming-queue drain lane (2026-08-26). A
+    /// GENUINE queue drain paid down out-of-band; NON-GATING for the
+    /// benchmarker's encode barrier (`barrierNonGatingLanes` gained this
+    /// name in the same change). Twin of Swift `DrainStatus.dreamingName`.
+    pub const DREAMING_NAME: &'static str = "dreaming";
+
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     pub fn is_draining(&self) -> bool {
@@ -1205,6 +1450,7 @@ impl EstateCoordinator {
             grant_stores: HashMap::new(),
             scope_vaults: HashMap::new(),
             corpus_kits: HashMap::new(),
+            derived_rebuild_depth: std::collections::HashMap::new(),
             subject_producers: HashMap::new(),
             vector_stores: HashMap::new(),
             mount_states: HashMap::new(),
@@ -1670,6 +1916,10 @@ impl EstateCoordinator {
         }
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        // Derived-rebuild span depth (moot_rebuild_status): plain counter,
+        // no worker to tear down — remove so a reopened same-estate handle
+        // never inherits a stale span.
+        self.derived_rebuild_depth.remove(handle);
         // Drop the subject-backfill rider (PR-09). A producer is registered
         // against a handle, and handles are stable across reopens of the same
         // estate (`handle.rs` — `estate_uuid` comes from the manifest, so
@@ -2049,7 +2299,21 @@ impl EstateCoordinator {
             )),
         });
 
-        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
+        // the queue is MOUNTED (absent ≠ 0 — same honesty rule as the corpus
+        // lane). `in_flight` is 0: the claim window is inside the dreamer's
+        // own drain call, not observable from a non-claiming peek. Mirrors
+        // the Swift drainStatuses entry.
+        if let Some(dreaming_pending) = self.dreaming_queue_pending_count_for_gate(handle) {
+            statuses.push(DrainStatus {
+                name: DrainStatus::DREAMING_NAME.to_string(),
+                pending: dreaming_pending,
+                in_flight: 0,
+                detail: Some("stream: dreaming".to_string()),
+            });
+        }
+
+        // Drain 4 of N: subject backfill (PR-09). Rendered ONLY while a
         // subject producer is registered (rider-gated). `pending` is the
         // NULL-only presence debt (`count_subject_debt`), a row-level
         // eligibility count like the distillation lane's; `in_flight` is
@@ -2476,6 +2740,328 @@ impl EstateCoordinator {
     /// Swift default so all lens and recipe outputs compare cross-port. Callers
     /// that need the full estate (e.g. VaultBridge) must set an explicit
     /// `frame.limit` before calling.
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED default lane
+    /// weights (W2.5 Track R(b)). Mirrors Swift
+    /// `GeniusLocusKit.laneWeightsMetaKey`.
+    pub const LANE_WEIGHTS_META_KEY: &str = "lane_weights";
+
+    /// Provision the optimizer-owned default lane weights on an estate:
+    /// stored as deterministic (sorted-key) JSON under `lane_weights`. The
+    /// recall path consumes it with shape-explicit > provisioned > 1.0
+    /// precedence. The product never computes these weights — the quality
+    /// optimizer emits them (benchmarker/optimizer split). Mirrors Swift
+    /// `GeniusLocusKit.provisionLaneWeights(_:for:)`.
+    pub fn provision_lane_weights(
+        &self,
+        handle: &EstateHandle,
+        weights: &std::collections::BTreeMap<String, f32>,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let json = serde_json::to_string(weights).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionLaneWeights".to_string(),
+                reason: format!("lane_weights encode failed: {e}"),
+            })
+        })?;
+        estate
+            .set_meta(Self::LANE_WEIGHTS_META_KEY, &json)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionLaneWeights".to_string(),
+                reason: format!("provision_lane_weights set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned default lane weights, or empty when the
+    /// estate carries none (or the stored JSON is malformed — the same
+    /// fail-quiet contract the recall path applies). Mirrors Swift
+    /// `GeniusLocusKit.provisionedLaneWeights(for:)`.
+    pub fn provisioned_lane_weights(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<std::collections::HashMap<String, f32>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        Ok(estate
+            .meta(Self::LANE_WEIGHTS_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED recall tuning
+    /// knobs (W4). Mirrors Swift `GeniusLocusKit.recallTuningMetaKey`.
+    pub const RECALL_TUNING_META_KEY: &str = "recall_tuning";
+
+    /// Provision the optimizer-owned recall tuning on an estate: stored as
+    /// deterministic (sorted-key) JSON under `"recall_tuning"`. The recall
+    /// path consumes it with caller-explicit > provisioned > spec-default
+    /// precedence. Mirrors Swift `GeniusLocusKit.provisionRecallTuning(_:for:)`.
+    pub fn provision_recall_tuning(
+        &self,
+        handle: &EstateHandle,
+        tuning: &RecallTuningManifest,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // Sort keys for deterministic JSON output (same contract as
+        // Swift's JSONEncoder.outputFormatting = [.sortedKeys]).
+        let json = serde_json::to_string(tuning).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionRecallTuning".to_string(),
+                reason: format!("recall_tuning encode failed: {e}"),
+            })
+        })?;
+        estate
+            .set_meta(Self::RECALL_TUNING_META_KEY, &json)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionRecallTuning".to_string(),
+                reason: format!("provision_recall_tuning set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned recall tuning, or the spec-default manifest
+    /// when the estate carries none (or the stored JSON is malformed — the
+    /// same fail-quiet contract the Swift port applies). Mirrors Swift
+    /// `GeniusLocusKit.provisionedRecallTuning(for:)`.
+    pub fn provisioned_recall_tuning(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<RecallTuningManifest, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        Ok(estate
+            .meta(Self::RECALL_TUNING_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<RecallTuningManifest>(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED embedding-provider
+    /// selection: a plain string holding the `EmbeddingProvider` model_id of
+    /// the provider the Corpus ensemble should use for this estate.
+    /// Mirrors Swift `GeniusLocusKit.embeddingProviderMetaKey`.
+    ///
+    /// Absent key → deterministic default ensemble (RI/PPMI/LSA/NMF/FDC).
+    /// No estate migration required.
+    pub const EMBEDDING_PROVIDER_META_KEY: &str = "embedding_provider";
+
+    /// Provision the optimizer-owned embedding-provider selection on an estate:
+    /// stored as a plain string (the `EmbeddingProvider` model_id) under
+    /// `"embedding_provider"`. No JSON encoding — the value IS the model_id.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionEmbeddingProvider(_:for:)`.
+    ///
+    /// The Rust port does not implement ML embedding providers (sanctioned
+    /// Swift-only divergence: `NaturalLanguage` is Apple-only). This constant
+    /// and these methods exist so the manifest key is consistent between ports
+    /// and the provision/read surface is available to integration tests and
+    /// any future Rust consumer (e.g. a federation relay reading estate config).
+    pub fn provision_embedding_provider(
+        &self,
+        handle: &EstateHandle,
+        model_id: &str,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // The value is a plain string — no JSON encoding needed.
+        estate
+            .set_meta(Self::EMBEDDING_PROVIDER_META_KEY, model_id)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionEmbeddingProvider".to_string(),
+                reason: format!("provision_embedding_provider set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned embedding-provider model_id, or `None` when
+    /// the estate carries none. `None` means "use the deterministic default
+    /// ensemble." The caller maps the model_id to a concrete provider.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionedEmbeddingProvider(for:)`.
+    pub fn provisioned_embedding_provider(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Option<String>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // meta() returns Ok(None) when the key is absent; Ok(Some("")) when
+        // an empty string was stored. Callers treat Some("") the same as None
+        // (unknown model_id → deterministic default).
+        let value = estate
+            .meta(Self::EMBEDDING_PROVIDER_META_KEY)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionedEmbeddingProvider".to_string(),
+                reason: format!("provisioned_embedding_provider meta failed: {e:?}"),
+            }))?;
+        Ok(value)
+    }
+
+    /// Read the provisioned `embedding_provider` manifest key and emit a
+    /// provenance line on stderr. Selection is intentionally omitted.
+    ///
+    /// ## Why Rust records provenance but selects nothing
+    ///
+    /// ML embedding providers in this codebase are all Apple-platform-specific:
+    /// `NLEmbedding` (used by `AppleNLProvider`) is part of Apple's
+    /// `NaturalLanguage` framework, which is unavailable on Linux/Windows — the
+    /// Rust port's target platforms. The engine-neutral Rust backend for
+    /// `neural-embed-v1` exists as the standalone `tools/neural-embed` crate,
+    /// reached as an external subprocess seam, but it is not linked into any
+    /// product crate — kits remain zero-dependency.
+    ///
+    /// The parity ruling (GENIUSLOCUSKIT_INTERFACE.md §1.53, EMBED-PROV-E2)
+    /// formalises this: Rust reads the key for manifest consistency and
+    /// provenance recording so log correlation across ports is possible, but
+    /// never instantiates a provider. The Rust ensemble is always the
+    /// configured `embedding_models` argument to `provision`.
+    ///
+    /// **Provenance contract:** when the key is present and non-empty, one
+    /// line is emitted to stderr per estate open: the model_id and the
+    /// estate UUID. This makes it impossible for a silently-ignored selection
+    /// to mislabel benchmark arms — the presence of the key is always visible
+    /// in logs regardless of whether the Rust port can honour it.
+    ///
+    /// Mirrors Swift `EstateLifecycle.applyProvisionedEmbeddingProvider` (provenance
+    /// path only — no return value because Rust never modifies the ensemble here).
+    pub fn apply_provisioned_embedding_provider(&self, handle: &EstateHandle) {
+        // Fail-quiet: estate lookup errors here are non-fatal — the Corpus
+        // construction that follows will also fail on a stale handle.
+        let Ok(estate) = self.estate_for(&handle) else { return };
+        // Read the key. Absent key (None) and empty string both mean
+        // "no provider provisioned" — emit nothing, just use the configured ensemble.
+        let Ok(Some(model_id)) = estate.meta(Self::EMBEDDING_PROVIDER_META_KEY) else {
+            return;
+        };
+        if model_id.is_empty() {
+            return;
+        }
+        // Emit provenance: one line per estate open when a provider ID is set.
+        // Rust selects no ML provider in-process (no NaturalLanguage framework on
+        // Linux/Windows; the neural-embed backend is a standalone tool crate, not
+        // linked into product crates). The Swift port resolves "apple-nl-v1" →
+        // AppleNLProvider and "neural-embed-v1" → NeuralEmbedProvider; the
+        // Rust port leaves the ensemble unchanged and records why here.
+        eprintln!(
+            "mootx01 embed-prov: estate {} provisioned embedding_provider '{}' — \
+             Rust port records provenance but selects nothing (no in-process ML provider; \
+             see PART_E_RUST_SEAM_DESIGN.md and the standalone tools/neural-embed backend)",
+            uuid_to_str(&handle.estate_uuid),
+            model_id
+        );
+    }
+
+    /// The estate-manifest key carrying the OPTIMIZER-OWNED door-selection
+    /// config (A1 per-corpus static config tier). Mirrors Swift
+    /// `GeniusLocusKit.doorConfigMetaKey` (RecallDirector.swift).
+    ///
+    /// The quality optimizer emits a `DoorManifest` JSON object under this
+    /// key after a full-coverage arm comparison. Absent key → spec-default
+    /// `DoorManifest` (scoring = `MatrixAware`). No estate migration required.
+    pub const DOOR_CONFIG_META_KEY: &str = "door_config";
+
+    /// Provision the optimizer-owned door-selection config on an estate:
+    /// stored as deterministic JSON under `"door_config"`. The recall path
+    /// consumes it with precedence:
+    ///   explicit door arg > explicit scoring arg > provisioned estate default > matrixAware
+    ///
+    /// The product never computes or overrides the selection — the benchmarker/
+    /// optimizer split means the optimizer emits it, the product reads it.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionDoorConfig(_:for:)`.
+    pub fn provision_door_config(
+        &self,
+        handle: &EstateHandle,
+        config: &DoorManifest,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let json = serde_json::to_string(config).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionDoorConfig".to_string(),
+                reason: format!("door_config encode failed: {e}"),
+            })
+        })?;
+        estate
+            .set_meta(Self::DOOR_CONFIG_META_KEY, &json)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionDoorConfig".to_string(),
+                reason: format!("provision_door_config set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned door-selection config, or `DoorManifest::default()`
+    /// when the estate carries none (scoring = `MatrixAware` — byte-identical to
+    /// the pre-front-door behaviour). Malformed JSON also returns the default —
+    /// the same fail-quiet contract as `provisioned_recall_tuning` and
+    /// `provisioned_lane_weights`.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionedDoorConfig(for:)`.
+    pub fn provisioned_door_config(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<DoorManifest, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        Ok(estate
+            .meta(Self::DOOR_CONFIG_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<DoorManifest>(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// The estate-manifest key carrying the USER-OWNED modes-preference config
+    /// (a JSON object). AriaMcpKit reads it at session start and applies it to
+    /// `ModeSessionState`. Mirrors Swift `GeniusLocusKit.modesConfigMetaKey`
+    /// (RecallDirector.swift).
+    ///
+    /// Same fail-quiet contract as `DOOR_CONFIG_META_KEY`, `LANE_WEIGHTS_META_KEY`,
+    /// and `RECALL_TUNING_META_KEY`: absent key → `ModesManifest::default()`.
+    /// No estate migration required.
+    pub const MODES_CONFIG_META_KEY: &str = "modes_config";
+
+    /// Write the user-owned modes-preference config to the estate manifest.
+    ///
+    /// Stored as deterministic JSON under `"modes_config"`. AriaMcpKit reads it
+    /// once at session start and applies it to `ModeSessionState`. An absent key
+    /// leaves `ModeSessionState` at its defaults (sticky_enabled=true,
+    /// coaching_calls=25).
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionModesConfig(_:for:)`.
+    pub fn provision_modes_config(
+        &self,
+        handle: &EstateHandle,
+        config: &ModesManifest,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let json = serde_json::to_string(config).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionModesConfig".to_string(),
+                reason: format!("modes_config encode failed: {e}"),
+            })
+        })?;
+        estate
+            .set_meta(Self::MODES_CONFIG_META_KEY, &json)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionModesConfig".to_string(),
+                reason: format!("provision_modes_config set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned modes-preference config, or
+    /// `ModesManifest::default()` when the estate carries none
+    /// (sticky_enabled=true, coaching_calls=25 — byte-identical to the
+    /// pre-provisioning behaviour). Malformed JSON also returns the default —
+    /// the same fail-quiet contract as `provisioned_door_config`.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionedModesConfig(for:)`.
+    pub fn provisioned_modes_config(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<ModesManifest, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        Ok(estate
+            .meta(Self::MODES_CONFIG_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<ModesManifest>(&json).ok())
+            .unwrap_or_default())
+    }
+
     pub fn recall(
         &self,
         handle: &EstateHandle,
@@ -3007,6 +3593,7 @@ impl EstateCoordinator {
         drawer_id: &str,
         content: &str,
         now: i64,
+        coref_pool: &[crate::brain::coref_stage::Antecedent],
     ) -> bool {
         use crate::brain::distillation_cycle::{render_distillation, DISTILLATION_LANE_MODEL_ID};
         use substrate_ml::token_compaction;
@@ -3014,7 +3601,7 @@ impl EstateCoordinator {
         if content.is_empty() {
             return false;
         }
-        let (rendering, fingerprint) = render_distillation(drawer_id, content);
+        let (rendering, fingerprint) = render_distillation(drawer_id, content, coref_pool);
 
         // Write 1 of 2 (§7.2): the four representation columns, atomically.
         let token_count = token_compaction::estimate_token_count(&rendering);
@@ -3086,11 +3673,20 @@ impl EstateCoordinator {
                 continue;
             }
 
-            let room_drawers = estate
+            // Session order for the coref window (W2.2 A1): sorted by
+            // (event_time, filed_at, id) — deterministic, conversation-
+            // shaped. Mirrors Swift distillItemsSweep.
+            let mut room_drawers = estate
                 .drawers_in_wing_room(&entry.wing, &entry.room)
                 .map_err(|e| remap("distill_items_sweep", &entry.room, e))?;
+            room_drawers.sort_by(|a, b| {
+                a.event_time
+                    .cmp(&b.event_time)
+                    .then(a.filed_at.cmp(&b.filed_at))
+                    .then(a.id.cmp(&b.id))
+            });
 
-            for drawer in &room_drawers {
+            for (position, drawer) in room_drawers.iter().enumerate() {
             if let Some(cap) = limit {
                 if produced >= cap {
                         break 'rooms;
@@ -3115,12 +3711,37 @@ impl EstateCoordinator {
             // — the same call tree the drain-stage rider and the seeding
             // path take. A false return means the row vanished mid-sweep or
             // the write failed: skip it.
+            // Antecedent pool (W2.2 A1): entities contributed by up to
+            // WINDOW_ITEMS preceding same-room items whose event_time lies
+            // within WINDOW_MINUTES. event_time is epoch ms.
+            let window_start = drawer.event_time
+                - crate::brain::coref_stage::WINDOW_MINUTES * 60 * 1000;
+            // Sensitivity ceiling (codex finding 2026-08-26): a predecessor
+            // may contribute antecedents ONLY when its sensitivity is at or
+            // below the drawer being distilled — substitution copies the
+            // predecessor's entity text into THIS drawer's persisted
+            // distillate, and by-id reads gate on the returned drawer's own
+            // sensitivity, so an uphill-sourced antecedent would surface
+            // Restricted/Secret entity text through a Normal row without a
+            // grant. Twin of the Swift DistillationCycle ceiling.
+            let ceiling = drawer.sensitivity().raw_value();
+            let pool: Vec<crate::brain::coref_stage::Antecedent> = room_drawers
+                [..position]
+                .iter()
+                .rev()
+                .take(crate::brain::coref_stage::WINDOW_ITEMS)
+                .rev()
+                .filter(|d| d.event_time >= window_start)
+                .filter(|d| d.sensitivity().raw_value() <= ceiling)
+                .flat_map(|d| crate::brain::coref_stage::contributed_entities(&d.content))
+                .collect();
             if !Self::distill_item(
                 estate,
                 vector_store_opt.as_ref(),
                 &drawer.id,
                 &drawer.content,
                 now,
+                &pool,
             ) {
                 continue;
             }
@@ -3141,6 +3762,175 @@ impl EstateCoordinator {
         } // end 'rooms: for entry in &rooms
 
         Ok(produced)
+    }
+
+    // MARK: - anomaly_flag_sweep
+
+    /// Compute room-cohesion z-scores and set/clear bit 26 (`is_anomalous()`)
+    /// on every active drawer in the estate. Rust parity of Swift
+    /// `GeniusLocusKit.anomalyFlagSweep(handle:threshold:now:)`.
+    ///
+    /// For each room with ≥ `ANOMALY_SWEEP_MIN_ROOM_SIZE` drawers:
+    ///   1. Compute each drawer's mean char-3-shingle Jaccard similarity to
+    ///      all OTHER drawers in the room (cohesion score) via
+    ///      `substrate_ml::shingle_similarity::similarity`.
+    ///   2. Derive z-scores from the room's cohesion distribution (mean, stddev)
+    ///      via `substrate_ml::anomaly::AnomalyDetection::z_score`.
+    ///   3. Set bit 26 on drawers whose cohesion z-score ≤ −threshold
+    ///      (low-cohesion outlier); clear bit 26 on all others in the room.
+    ///
+    /// Rooms with fewer than `ANOMALY_SWEEP_MIN_ROOM_SIZE` drawers have all
+    /// members' bit 26 cleared — z-score is statistically unstable with too
+    /// few peers.
+    ///
+    /// Idempotent: `Estate::set_anomalous_flag` skips the UPDATE when the bit
+    /// is already in the correct state (avoids spurious write traffic on a
+    /// stable estate). Returns count of drawers whose bit 26 changed state.
+    ///
+    /// `now` is epoch milliseconds — deterministic clock, threaded from the
+    /// caller per the no-internal-clock discipline.
+    pub fn anomaly_flag_sweep(
+        &self,
+        handle: &EstateHandle,
+        threshold: f32,
+        now: i64,
+    ) -> Result<usize, VerbDispatchError> {
+        use crate::brain::anomaly_flag_sweep::{
+            ANOMALY_SWEEP_MIN_ROOM_SIZE, ANOMALY_SWEEP_DEFAULT_THRESHOLD,
+        };
+        use substrate_ml::anomaly::AnomalyDetection;
+        use substrate_ml::shingle_similarity;
+
+        // Use the supplied threshold, or fall back to the default constant.
+        // (The argument is always explicit from callers, but the constant
+        // documents the intended default for signal-driven invocations.)
+        let _ = ANOMALY_SWEEP_DEFAULT_THRESHOLD; // suppress unused-constant lint
+
+        let estate = self.estate_for_verb(handle)?;
+        let rooms = estate
+            .room_level_fingerprints()
+            .map_err(|e| remap("anomaly_flag_sweep", "", e))?;
+
+        let mut changed: usize = 0;
+
+        for entry in &rooms {
+            // Rooms-first sweep: enumerate rooms via room_level_fingerprints,
+            // then load drawers via drawers_in_wing_room. Matches the Swift
+            // AnomalyFlagSweep iteration pattern.
+            let drawers = estate
+                .drawers_in_wing_room(&entry.wing, &entry.room)
+                .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+
+            // Sensitivity cohort gate (codex finding 2026-08-26):
+            // restricted/secret drawers are EXCLUDED from the cohesion
+            // cohort entirely — they neither receive bit 26 nor influence
+            // any other drawer's score. Including them let a caller without
+            // a sensitivity grant plant visible probe rows and read
+            // anomalous_filter results to observe lexical similarity to
+            // hidden content. Excluded rows also get any stale bit 26
+            // cleared. Twin of the Swift AnomalyFlagSweep gate.
+            let mut drawers_vec = Vec::with_capacity(drawers.len());
+            for drawer in drawers {
+                use locus_kit::provenance::Sensitivity;
+                let s = drawer.sensitivity();
+                if s == Sensitivity::Restricted || s == Sensitivity::Secret {
+                    if drawer.is_anomalous() {
+                        let n = estate
+                            .set_anomalous_flag(&drawer.id, false, now)
+                            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+                        changed += n;
+                    }
+                } else {
+                    drawers_vec.push(drawer);
+                }
+            }
+            let drawers = drawers_vec;
+
+            if drawers.is_empty() {
+                continue;
+            }
+
+            if drawers.len() < ANOMALY_SWEEP_MIN_ROOM_SIZE {
+                // Too few peers for a meaningful z-score. Clear bit 26 on any
+                // drawer that currently has it set. Drawers in small rooms are
+                // not anomalous by definition — the room has no cohesion
+                // baseline to score against. Mirrors Swift small-room branch.
+                for drawer in &drawers {
+                    if drawer.is_anomalous() {
+                        let n = estate
+                            .set_anomalous_flag(&drawer.id, false, now)
+                            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+                        changed += n;
+                    }
+                }
+                continue;
+            }
+
+            let count = drawers.len();
+
+            // Step 1: Compute per-drawer cohesion = mean shingle-similarity
+            // to all OTHER drawers in the room.
+            //
+            // Complexity O(n²) per room. Acceptable on the maintenance path;
+            // rooms are small in practice. Precompute shingle sets to avoid
+            // recomputing them for every pair (the set-based overload is
+            // ~181s faster over a 250-drawer pool per the SubstrateML comment).
+            // Mirrors the Swift double-loop with `ShingleSimilarity.similarity`.
+            let shingle_sets: Vec<_> = drawers
+                .iter()
+                .map(|d| shingle_similarity::shingles(&d.content))
+                .collect();
+
+            let mut cohesion: Vec<f32> = vec![0.0; count];
+            for i in 0..count {
+                let mut sum: f32 = 0.0;
+                for j in 0..count {
+                    if i == j {
+                        continue;
+                    }
+                    // char-3-shingle Jaccard similarity; conformance-gated
+                    // byte-identical across Swift and Rust legs (the Swift
+                    // ShingleSimilarity.windowSize is 3, matching WINDOW_SIZE
+                    // in substrate_ml::shingle_similarity).
+                    sum += shingle_similarity::similarity_sets(
+                        &shingle_sets[i],
+                        &shingle_sets[j],
+                    );
+                }
+                // (count - 1) peers; safe because count >= ANOMALY_SWEEP_MIN_ROOM_SIZE (3).
+                cohesion[i] = sum / (count - 1) as f32;
+            }
+
+            // Step 2: Derive z-scores from the room's cohesion distribution.
+            let n = count as f32;
+            let mean: f32 = cohesion.iter().sum::<f32>() / n;
+            let variance: f32 = cohesion
+                .iter()
+                .map(|x| {
+                    let d = x - mean;
+                    d * d
+                })
+                .sum::<f32>()
+                / n;
+            let stddev = variance.sqrt();
+
+            // Step 3: Set/clear bit 26 on each drawer per its z-score.
+            // Anomalous = low-cohesion outlier: z ≤ −threshold.
+            // AnomalyDetection::z_score returns 0 when stddev == 0 (all
+            // identical content) — safe: threshold > 0 so no drawer is
+            // flagged in that case.
+            for (idx, drawer) in drawers.iter().enumerate() {
+                let z = AnomalyDetection::z_score(cohesion[idx], mean, stddev);
+                // Negative z = below-average cohesion = low-cohesion outlier.
+                let should_be_anomalous = z <= -threshold;
+                let n = estate
+                    .set_anomalous_flag(&drawer.id, should_be_anomalous, now)
+                    .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+                changed += n;
+            }
+        }
+
+        Ok(changed)
     }
 
     // MARK: - contradiction hunt
@@ -3756,6 +4546,52 @@ impl EstateCoordinator {
 
     /// D6/D7 composition + distillation shared by the consolidation act and
     /// fold-in regeneration. Mirrors Swift `composeAndDistill`.
+    /// Maps each sentence of the joined cluster text back to the piece
+    /// (constituent) whose region it starts in, yielding the per-sentence
+    /// timestamp vector (epoch seconds) the distillation pipeline's
+    /// TypedDecayWeighting branch consumes (W2.5 S6). Piece start offsets
+    /// (in CHARACTERS, mirroring the Swift port's String.count offsets) are
+    /// accumulated over the join; sentences are located in order with a
+    /// moving cursor. Returns None if any sentence cannot be located —
+    /// fail-quiet to the pipeline's uniform document-frequency branch.
+    /// Mirrors Swift `ConsolidationCycle.sentenceTimestamps`.
+    fn sentence_timestamps(
+        sentences: &[String],
+        pieces: &[(String, f64)],
+        separator: &str,
+        combined: &str,
+    ) -> Option<Vec<f64>> {
+        if sentences.is_empty() || pieces.is_empty() {
+            return None;
+        }
+        let mut piece_starts: Vec<(usize, f64)> = Vec::with_capacity(pieces.len());
+        let mut offset = 0usize;
+        for (index, piece) in pieces.iter().enumerate() {
+            piece_starts.push((offset, piece.1));
+            offset += piece.0.chars().count();
+            if index < pieces.len() - 1 {
+                offset += separator.chars().count();
+            }
+        }
+        // Byte cursor for the substring search; char offset runs alongside so
+        // piece starts (char-counted, Swift-parity) compare correctly.
+        let mut result: Vec<f64> = Vec::with_capacity(sentences.len());
+        let mut cursor_bytes = 0usize;
+        for sentence in sentences {
+            let found_rel = combined[cursor_bytes..].find(sentence.as_str())?;
+            let found_bytes = cursor_bytes + found_rel;
+            let start_chars = combined[..found_bytes].chars().count();
+            let timestamp = piece_starts
+                .iter()
+                .rev()
+                .find(|(start, _)| *start <= start_chars)
+                .map(|(_, ts)| *ts)?;
+            result.push(timestamp);
+            cursor_bytes = found_bytes + sentence.len();
+        }
+        Some(result)
+    }
+
     fn compose_and_distill(
         constituents: &[locus_kit::drawer::Drawer],
         config: &crate::brain::consolidation_cycle::ConsolidationConfig,
@@ -3763,24 +4599,48 @@ impl EstateCoordinator {
         use crate::brain::distillation_cycle::{compaction_rendering, item_is_distillable};
         use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 
-        let combined: String = if constituents.len() > config.large_cluster_fallback {
-            constituents
-                .iter()
-                .map(|c| c.distilled.clone().unwrap_or_else(|| c.content.clone()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            constituents
-                .iter()
-                .map(|c| c.content.clone())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
+        // Each piece keeps its constituent's event time so sentences can be
+        // mapped back to the memory they came from (W2.5 S6: the pipeline's
+        // TypedDecayWeighting branch needs per-sentence timestamps — cross-
+        // item clusters are exactly where type-specific decay reweights
+        // features, DISTILLATION_MATH_DIFFUSION §2). event_time is epoch MS;
+        // the pipeline consumes epoch SECONDS (f64).
+        let (pieces, separator): (Vec<(String, f64)>, &str) =
+            if constituents.len() > config.large_cluster_fallback {
+                (
+                    constituents
+                        .iter()
+                        .map(|c| (
+                            c.distilled.clone().unwrap_or_else(|| c.content.clone()),
+                            c.event_time as f64 / 1000.0,
+                        ))
+                        .collect(),
+                    "\n",
+                )
+            } else {
+                (
+                    constituents
+                        .iter()
+                        .map(|c| (c.content.clone(), c.event_time as f64 / 1000.0))
+                        .collect(),
+                    "\n\n",
+                )
+            };
+        let combined: String = pieces
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect::<Vec<_>>()
+            .join(separator);
         let sentences: Vec<String> = eidetic_lib::segmenter::sentences(&combined);
+        // Per-sentence timestamps by OFFSET mapping — the sentence array is
+        // segmented over the JOINED text (segmentation must not change), so
+        // each sentence takes the timestamp of the piece its start falls in.
+        let sentence_timestamps =
+            Self::sentence_timestamps(&sentences, &pieces, separator, &combined);
         let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
             let input = DistillationInput::new(
                 sentences,
-                None,
+                sentence_timestamps,
                 constituents[0].id.clone(),
                 constituents.iter().map(|c| c.id.clone()).collect(),
             );
@@ -6267,6 +7127,20 @@ impl EstateCoordinator {
     ///
     /// Returns `AssociateSweepReport` with probed/candidate_pairs/written/deduplicated counts.
     /// Mirrors Swift `GeniusLocusKit.associateSweep(in:probeLimit:now:)`.
+    /// True while any derived-state rebuild span is open for `handle`.
+    /// Twin of Swift `derivedRebuildActive(for:)`.
+    pub fn derived_rebuild_active(&self, handle: &EstateHandle) -> bool {
+        self.derived_rebuild_depth.get(handle).copied().unwrap_or(0) > 0
+    }
+
+    /// Open/close a derived-rebuild span (dispatcher backfill and basis
+    /// retrain call sites). Twin of Swift `derivedRebuildSpan(_:open:)`.
+    pub fn derived_rebuild_span(&mut self, handle: &EstateHandle, open: bool) {
+        let e = self.derived_rebuild_depth.entry(*handle).or_insert(0);
+        if open { *e += 1; } else { *e = e.saturating_sub(1); }
+        if *e == 0 { self.derived_rebuild_depth.remove(handle); }
+    }
+
     pub fn associate_sweep(
         &self,
         handle: &EstateHandle,
@@ -6290,6 +7164,7 @@ impl EstateCoordinator {
                     candidate_pairs: 0,
                     written: 0,
                     deduplicated: 0,
+                    non_unique_probes: 0,
                 })
             }
         };
@@ -6304,6 +7179,7 @@ impl EstateCoordinator {
                 candidate_pairs: 0,
                 written: 0,
                 deduplicated: 0,
+                non_unique_probes: 0,
             });
         }
 
@@ -6332,7 +7208,7 @@ impl EstateCoordinator {
         // hunt_contradictions. Corpus lane 2 mined when a corpus is registered.
         let model_id = "minilm-v6";
         let corpus = self.corpus_kits.get(handle).map(Arc::as_ref);
-        let candidates = proximity_scan_candidates(
+        let (candidates, non_unique_probes) = proximity_scan_candidates(
             vector_store,
             &item_ids,
             model_id,
@@ -6374,6 +7250,7 @@ impl EstateCoordinator {
             candidate_pairs: candidates.len(),
             written,
             deduplicated,
+            non_unique_probes,
         })
     }
 
@@ -6849,8 +7726,32 @@ impl EstateCoordinator {
         // estates don't retain one (storages holds only DrawerStore-backed
         // storages); they full-rebuild without persistence, as in Swift's
         // .inMemory mode.
+        // S4-C (§8.13, Bob's Option C ruling): the decayed O/T projections
+        // are recomputed IN FULL at every maintenance pass (fp
+        // non-associativity of exp-factor composition rules out an exact
+        // incremental merge). `now` at this surface is epoch SECONDS
+        // (the documented i64-unit seam); the decay clock is ms.
+        let decay_now_ms = now * 1000;
+        let apply_decayed_projections =
+            |tier: &mut crate::matrix::MatrixTier,
+             log: &crate::audit::UnifiedAuditLog,
+             event_times: &std::collections::HashMap<crate::audit::EntryUUID, i64>| {
+                tier.co_occurrence_decayed =
+                    crate::matrix::MatrixTier::decayed_co_occurrence(log, decay_now_ms);
+                tier.temporal_causality_decayed =
+                    crate::matrix::MatrixTier::rebuild_temporal_from_with_decay(
+                        log,
+                        substrate_types::hlc::HLC::ZERO,
+                        event_times,
+                        Some(decay_now_ms),
+                    )
+                    .temporal_causality_decayed;
+                tier.decayed_as_of_ms = decay_now_ms;
+            };
+
         let Some(storage) = self.storages.get(handle).cloned() else {
-            let tier = crate::matrix::MatrixTier::full_rebuild(&log, &event_times);
+            let mut tier = crate::matrix::MatrixTier::full_rebuild(&log, &event_times);
+            apply_decayed_projections(&mut tier, &log, &event_times);
             self.register_matrix_tier(handle, tier);
             return Ok(());
         };
@@ -6886,6 +7787,8 @@ impl EstateCoordinator {
         };
 
         // Step 3 — install so the matrixAware recall lane is live.
+        let mut tier = tier;
+        apply_decayed_projections(&mut tier, &log, &event_times);
         self.register_matrix_tier(handle, tier.clone());
 
         // Step 4 — persist the fresh tier so the NEXT launch loads it. Watermark
@@ -8185,6 +9088,15 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<(), GeniusLocusKitError> {
+        // Benchmark-only bypass (MOOTX01_SKIP_CHARTERS): skip charter seeding
+        // entirely so measured estates contain exactly the imported corpus
+        // (charters are outside the benchmark spec and occupy candidate-pool
+        // slots in every recall — 2026-08-24 ruling). Env-only seam, never on
+        // the MCP surface; production estates always seed charters. Twin of
+        // the Swift guard in `seedDefaultWings`.
+        if std::env::var_os("MOOTX01_SKIP_CHARTERS").is_some() {
+            return Ok(());
+        }
         let estate = self
             .estate_for(handle)
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -8304,6 +9216,10 @@ impl EstateCoordinator {
                     &hint.id,
                     &hint.content,
                     now,
+                    // Single-item rider: no session context in hand — the
+                    // coref stage is identity on an empty pool; the sweep
+                    // re-distills with context on the next version pass.
+                    &[],
                 ) {
                     let _ = corpus.recompose_dense_vector(&hint.id, now);
                 }
@@ -8689,6 +9605,9 @@ impl EstateCoordinator {
                                     &drawer.id,
                                     &drawer.content,
                                     now_ms,
+                                    // Single-item callback: no session
+                                    // context — identity on empty pool.
+                                    &[],
                                 ) {
                                     // (3) Dense-over-distillate (Stream F): recompose
                                     // the dense float vector from the new distillate.
@@ -8740,6 +9659,16 @@ impl EstateCoordinator {
                 return Err(e);
             }
         }
+
+        // Step 2b-prov: Record embedding-provider provenance.
+        // Reads the "embedding_provider" manifest key and emits one line to stderr
+        // when a provider ID is set. The Rust port never modifies the ensemble
+        // (no ML providers available on Linux/Windows); the Swift port resolves
+        // the ID to a concrete provider (AppleNLProvider / NeuralEmbedProvider).
+        // See apply_provisioned_embedding_provider for the full rationale and
+        // PART_E_RUST_SEAM_DESIGN.md for the external-process seam the
+        // standalone tools/neural-embed backend implements.
+        self.apply_provisioned_embedding_provider(&handle);
 
         // Step 2c: Seed the seven default wings (the default-wing policy) — AFTER wiring,
         // so each hint drawer is stamped with the corpus's normal model id rather
@@ -8994,16 +9923,29 @@ impl EstateCoordinator {
 
         // Frontier-K bounds candidate retrieval: min(max(limit * 4, 64), 256).
         // Mirrors Swift RecallDirector's frontierK computation — enough candidates
-        // for inter-lane deduplication without unbounded row retrieval. A
-        // RecallShape may override this pool depth (6b-modifiers), clamped to the
-        // SAME [64, 256] envelope so a shape cannot request an unbounded scan; a
-        // None shape (or None override) leaves the computed default unchanged.
+        // for inter-lane deduplication without unbounded row retrieval.
+        //
+        // Three-level precedence (highest to lowest), matching Swift exactly:
+        //   1. request.frontier_k — per-call override, clamped to [64, 256].
+        //   2. recall_shape.frontier_k — shape-level override (6b-modifiers),
+        //      also clamped via effective_frontier_k.
+        //   3. Engine formula — computed_frontier_k, the default above.
+        //
+        // No override can exceed [64, 256], so no caller can request an
+        // unbounded scan.
         let computed_frontier_k = (request.limit * 4).max(64).min(256);
-        let frontier_k = request
-            .recall_shape
-            .as_ref()
-            .map(|s| s.effective_frontier_k(computed_frontier_k))
-            .unwrap_or(computed_frontier_k);
+        let frontier_k = if let Some(req_override) = request.frontier_k {
+            // Per-call override wins; clamp to the engine envelope.
+            req_override
+                .min(RecallShape::FRONTIER_K_CEILING)
+                .max(RecallShape::FRONTIER_K_FLOOR)
+        } else {
+            request
+                .recall_shape
+                .as_ref()
+                .map(|s| s.effective_frontier_k(computed_frontier_k))
+                .unwrap_or(computed_frontier_k)
+        };
 
         let plan = RecallPlan {
             effective_mode: request.mode,
@@ -9070,6 +10012,42 @@ impl EstateCoordinator {
             }
         }?;
 
+        // §11.18 anomalous-flag admission gate — applied BEFORE trace writes and
+        // dreaming enqueue so trace rows and the dreaming pipeline only see the
+        // candidates the caller actually receives.
+        //
+        // None  = no filtering (byte-identical to a request without this param).
+        // Some(true)  = admit ONLY anomalous drawers (bit 26 set).
+        // Some(false) = EXCLUDE anomalous drawers (bit 26 clear).
+        //
+        // Hits without a hydrated drawer (drawer == None) are always admitted —
+        // the is_anomalous bit requires a hydrated body to test. lane_ranks is
+        // preserved verbatim so trace-row attribution is correct for surviving ids.
+        // Mirrors Swift RecallDirector's anomalous gate (same position in call flow).
+        let result = if let Some(anomalous_filter) = request.anomalous_filter {
+            let admissible: Vec<RecallHit> = result.hits.into_iter().filter(|hit| {
+                match &hit.drawer {
+                    None => true,  // unhydrated — admit unchanged
+                    Some(drawer) => drawer.is_anomalous() == anomalous_filter,
+                }
+            }).collect();
+            GLKRecallResult {
+                request: result.request,
+                plan: result.plan,
+                union_profile: result.union_profile,
+                hits: admissible,
+                dense_lane_status: result.dense_lane_status,
+                degraded_stages: result.degraded_stages,
+                lane_ranks: result.lane_ranks,
+                // Passthrough: carry the pre-computed anchor unchanged.
+                // M4 single-derivation doctrine — the director derives once;
+                // the anomalous filter is a pure-hit-set operation, not a recall.
+                query_lattice_anchor: result.query_lattice_anchor,
+            }
+        } else {
+            result
+        };
+
         // Enqueue a dreaming item for external-origin scored recalls.
         //
         // Guard (spec §12.2 + B-10a):
@@ -9085,7 +10063,46 @@ impl EstateCoordinator {
         // failures. `now` uses the same epoch-millisecond unit as `recall_scored`,
         // so `enqueue_dreaming_item` stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
+        let mut result = result;
         if request.origin == RecallOrigin::External {
+            // W2.5 Track R(a) — the reward-cycle trace write, re-homed here
+            // from the inner locus frame so the traced rows are the hits the
+            // caller ACTUALLY receives, with door/composition/lane_ranks
+            // attribution. trace_limit caps the write to what the caller
+            // receives when a pool-fetching caller passes a coarse pool as
+            // `limit` (B-10a budget contract, unchanged). FAIL-CLOSED like
+            // the retired verb-path write: a trace fault never fails the
+            // recall — it is surfaced on degraded_stages as
+            // "recall.trace_write_failed". Mirrors Swift RecallDirector.
+            let budget = request.trace_limit.unwrap_or(request.limit);
+            let count = budget.min(result.hits.len());
+            if count > 0 {
+                let recalled_at =
+                    locus_kit::tunnel_review_ledger::iso8601_from_millis(now);
+                let composition = request.composition.clone().unwrap_or_else(|| {
+                    format!("{}/{}", request.mode.raw_value(), request.scoring.raw_value())
+                });
+                let traces: Vec<locus_kit::recall_trace_item::RecallTraceItem> = result
+                    .hits[..count]
+                    .iter()
+                    .map(|hit| {
+                        let packed = result.lane_ranks.get(&hit.id).and_then(
+                            locus_kit::recall_trace_item::RecallTraceItem::pack_lane_ranks);
+                        locus_kit::recall_trace_item::RecallTraceItem::new(
+                            uuid::Uuid::new_v4().to_string(),
+                            hit.id.clone(),
+                            recalled_at.clone(),
+                            Some(hit.score.final_score as f64),
+                            0,
+                        )
+                        .with_attribution(request.door.clone(), Some(composition.clone()), packed)
+                    })
+                    .collect();
+                if estate.insert_recall_traces(&traces).is_err() {
+                    result.degraded_stages.push("recall.trace_write_failed".to_string());
+                }
+            }
+
             let drawers: Vec<Drawer> = result.hits.iter()
                 .filter_map(|h| h.drawer.clone())
                 .collect();
@@ -9106,15 +10123,11 @@ impl EstateCoordinator {
         plan: RecallPlan,
         now: i64,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
-        // B-10a: only external-origin requests write recall-trace rows. Build
-        // a local frame copy and set trace_limit only when origin == External.
-        let mut traced_frame = request.frame.clone();
-        if request.origin == RecallOrigin::External {
-            // External path: trace exactly the rows returned to the caller
-            // (request.trace_limit ?? request.limit). Mirrors Swift RecallDirector.
-            traced_frame.trace_limit = Some(request.trace_limit.unwrap_or(request.limit));
-        }
-        // Internal-origin: traced_frame.trace_limit stays None — no trace writes.
+        // B-10a + W2.5 Track R(a): trace rows are written by `recall_scored`'s
+        // central writer AFTER the lane returns — covering the hits the caller
+        // actually receives, with door/composition/lane_ranks attribution. The
+        // inner locus frame therefore never sets trace_limit. Mirrors Swift.
+        let traced_frame = request.frame.clone();
 
         // Drain the RecallStream up to frontier_k, then apply the limit.
         // collect_all_with_degraded surfaces LocusKit recall internal-read
@@ -9145,6 +10158,27 @@ impl EstateCoordinator {
                 [("estate_id".to_string(), estate_tag)]
                     .into_iter().collect::<std::collections::HashMap<_, _>>()
             );
+        } else if request.scoring == GLKRecallScoring::Discriminative {
+            // Discriminative requires the dense-lane discrimination factor which
+            // is only computed on the unionBest path. On locusOnly, fall back to
+            // raw bitmap ordering and surface the degradation stage.
+            degraded_stages.push("locusOnly.discriminative".to_string());
+            let estate_tag = estate.estate_uuid().to_string();
+            glk_emit!(
+                crate::telemetry::metric_names::LOCUS_ONLY_DISCRIMINATIVE_FALLBACK,
+                1.0,
+                [("estate_id".to_string(), estate_tag)]
+                    .into_iter().collect::<std::collections::HashMap<_, _>>()
+            );
+        }
+
+        // Per-lane rank capture (W2.5 Track R(a)): the locusOnly lane has one
+        // candidate list — rank is the row's position in the limited result.
+        let mut lane_ranks: std::collections::HashMap<String, std::collections::HashMap<String, i64>> =
+            std::collections::HashMap::new();
+        for (idx, drawer) in limited.iter().enumerate() {
+            lane_ranks.entry(drawer.id.clone()).or_default()
+                .insert("locus".to_string(), (idx + 1) as i64);
         }
 
         // Each hit: sources=[LocusBitmap], score=locus(1.0).
@@ -9169,6 +10203,10 @@ impl EstateCoordinator {
             dense_lane_status: None,
             degraded_stages,
             hits,
+            lane_ranks,
+            // locusOnly compiles no sketch — the anchor derivation never runs.
+            // Mirrors Swift RecallDirector.locusOnly path (GLKRecallResult.swift §M4).
+            query_lattice_anchor: None,
         })
     }
 
@@ -9354,6 +10392,39 @@ impl EstateCoordinator {
         force_vector_hamming_error: Option<String>,
         force_embed_error: Option<String>,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
+        // W2.5 R(b): merge the estate's PROVISIONED default lane weights
+        // (optimizer-owned, manifest key `lane_weights`, JSON of lane key →
+        // signed float) into the request shape. Precedence per key mirrors
+        // Swift's mergedLaneWeights exactly: a key explicit in the shape
+        // wins; a provisioned key fills; anything else stays 1.0 at the
+        // read sites. A provision with no shape materializes a neutral
+        // shape carrying only the weights (RecallShape::new defaults are
+        // all-neutral, so no other Some-gated behavior changes). Malformed
+        // or absent JSON fails quiet to today's flow — a bad provision must
+        // degrade to neutral fusion, never break recall.
+        let request = {
+            let provisioned: std::collections::HashMap<String, f32> = estate
+                .meta(Self::LANE_WEIGHTS_META_KEY)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+            if provisioned.is_empty() {
+                request
+            } else {
+                let mut request = request;
+                let mut shape = request
+                    .recall_shape
+                    .take()
+                    .unwrap_or_else(|| crate::recall::RecallShape::new(
+                        std::collections::HashMap::new(), None));
+                for (key, weight) in provisioned {
+                    shape.lane_weights.entry(key).or_insert(weight);
+                }
+                request.recall_shape = Some(shape);
+                request
+            }
+        };
         // Accumulates stage IDs for any lane that degraded (i.e. threw and was
         // recovered rather than propagated). Matches Swift GLKRecallResult.degradedStages.
         let mut degraded_stages: Vec<String> = vec![];
@@ -9392,14 +10463,11 @@ impl EstateCoordinator {
         // --- Lane 1: Locus (active for Hybrid and UnionBest; skipped for CorpusOnly) ---
         // Rank-normalised: score = (frontier_k - rank) / frontier_k.
         //
-        // B-10a: set trace_limit on the frame only for external-origin requests.
-        // Internal reads must not write recall-trace rows. The locus lane is the
-        // primary recall path and the only one where trace rows can be written.
-        let mut traced_frame = request.frame.clone();
-        if request.origin == RecallOrigin::External {
-            traced_frame.trace_limit = Some(request.trace_limit.unwrap_or(request.limit));
-        }
-        // Internal-origin: traced_frame.trace_limit stays None — no trace writes.
+        // B-10a + W2.5 Track R(a): trace rows are written by `recall_scored`'s
+        // central writer AFTER fusion — the traced rows are the SELECTED hits
+        // the caller receives, with door/composition/lane_ranks attribution.
+        // The inner locus frame never sets trace_limit. Mirrors Swift.
+        let traced_frame = request.frame.clone();
 
         let locus_list: Vec<(String, f32)>;
         // Mutable: after the candidate set is assembled below, the semantic-lane
@@ -9413,7 +10481,6 @@ impl EstateCoordinator {
         );
 
         if include_locus {
-            // Use traced_frame (carries trace_limit for external-origin recalls).
             // collect_all_with_degraded surfaces LocusKit recall internal-read
             // failures (P0-5 sites 1-5) for the Hybrid/UnionBest locus lane: a
             // failed locus read names a locus.* stage so a FAILED locus lane is
@@ -9441,10 +10508,10 @@ impl EstateCoordinator {
             drawer_index = locus_rows.into_iter().map(|d| (d.id.clone(), d)).collect();
         } else {
             locus_list = Vec::new();
-            // For CorpusOnly: locus lane skipped for scoring, but still needed for
-            // drawer hydration. Use plain frame (no trace_limit) — CorpusOnly external
-            // recalls trace via the locus lane only when include_locus is true. This
-            // branch is for CorpusOnly mode where the locus lane is not the recall path.
+            // For CorpusOnly: locus lane skipped for scoring, but still needed
+            // for drawer hydration. Trace rows (if external-origin) are written
+            // by recall_scored's central writer from the fused result — the
+            // hydration scan itself never traces.
             let all_rows: Vec<Drawer> = estate
                 .recall(request.frame.clone(), now)
                 .collect_all()
@@ -9460,6 +10527,18 @@ impl EstateCoordinator {
         // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
         // at its internal K-boundary; content-sort + cap happen at the content-sort block below.
         let query_str = request.query_text.as_deref().unwrap_or("").to_string();
+
+        // M4 single-derivation: derive the §8.3 lattice anchor exactly ONCE here
+        // (the sketch compilation point) and carry it through to GLKRecallResult.
+        // Callers (CognitionKit's PreciseRecall, TemporalRecall) read the anchor
+        // off the result — they MUST NOT call query_anchor a second time.
+        // None when the query is empty or unanchorable (both fields empty).
+        let query_lattice_anchor: Option<(String, String)> = if !query_str.is_empty() {
+            let (udc, qid) = crate::brain::enrichment_stage::query_anchor(&query_str);
+            if udc.is_empty() && qid.is_empty() { None } else { Some((udc, qid)) }
+        } else {
+            None
+        };
         let mut bm25_list: Vec<(String, f32)> = if let Some(ref c) = corpus {
             if !query_str.is_empty() {
                 c.bm25_top_k_by_source(&query_str, plan.frontier_k * 4)
@@ -9698,8 +10777,12 @@ impl EstateCoordinator {
                     // measured on the standard nearest-similarity pass — it measures
                     // "are the top-K nearest cosines near-uniform?". The outcomes are
                     // extracted for the anti-similar substitution logic below.
+                    // Resolve the shape's float-lane metric once; thread it into
+                    // both nearest and farthest corpus calls so both use the same
+                    // distance function for the same request.
+                    let f_metric = float_metric_for(request.recall_shape.as_ref());
                     let nearest_per_signal_with_disc: Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> =
-                        c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k);
+                        c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k, f_metric);
                     // Aggregate discrimination: mean relative spread across .Hits signals.
                     // Saturation threshold 0.15 mirrors Swift RecallDirector.
                     // linear ramp: factor = min(1.0, mean_spread / 0.15)
@@ -9722,7 +10805,7 @@ impl EstateCoordinator {
                         nearest_per_signal
                     } else {
                         let farthest_per_signal =
-                            c.float_farthest_per_signal(&query_str, plan.frontier_k);
+                            c.float_farthest_per_signal(&query_str, plan.frontier_k, f_metric);
                         let mut farthest_by_model: HashMap<String, FloatLaneOutcome> =
                             HashMap::new();
                         for (m, o) in farthest_per_signal {
@@ -9897,9 +10980,88 @@ impl EstateCoordinator {
             })
             .collect();
 
+        // --- Step 4.35 — Graph / tunnel expansion lane ---
+        //
+        // Mirrors Swift RecallDirector step 4.35 in recallUnionBest. For every
+        // drawer in the locus lane, fetch its active outgoing tunnels and collect
+        // the unique target drawer IDs. Each tunnel neighbor is assigned a fixed
+        // locus score of 0.5 — meaningful proximity via a known edge, but weaker
+        // than a direct bitmap hit. Targets already collected from another locus
+        // drawer via an earlier tunnel are de-duplicated by `seen_graph_ids`.
+        //
+        // Intentionally NOT seeding `seen_graph_ids` from the locus ID set: a drawer
+        // that is ALSO a direct locus hit should receive the bitLocusGraph bit in
+        // addition to bitLocusBitmap when a tunnel points to it. The bit records
+        // that the graph lane reached it, which is factually correct and improves
+        // attribution and agreement-bonus accuracy.
+        //
+        // Failure degrades gracefully: a failed `all_active_tunnels` call is logged
+        // and the graph lane contributes nothing — recall continues on the remaining
+        // lanes exactly as if no tunnels exist.
+
+        // score_map entry: (rank_index, score). Graph neighbors all share a fixed
+        // score of 0.5 and are ranked in the order they were discovered.
+        let graph_score_map: HashMap<String, (usize, f32)> = {
+            let mut map = HashMap::new();
+            let mut seen_graph_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut rank: usize = 0;
+            match estate.all_active_tunnels() {
+                Ok(tunnels) => {
+                    // Index tunnels by source_drawer_id for fast per-locus lookup.
+                    let mut by_source: std::collections::HashMap<String, Vec<String>> =
+                        std::collections::HashMap::new();
+                    for t in tunnels {
+                        if let (Some(src), Some(tgt)) = (t.source_drawer_id, t.target_drawer_id) {
+                            by_source.entry(src).or_default().push(tgt);
+                        }
+                    }
+                    // Bounded expansion (codex finding 2026-08-26): tunnels
+                    // are unbounded per source, so one high-degree drawer
+                    // could make a single allowed search expand an unbounded
+                    // edge set. Deterministic truncation: store order is
+                    // stable per estate, so the SAME prefix survives every
+                    // run. Same cap values as the Swift twin
+                    // (graphExpansionPerSourceCap / graphExpansionTotalCap).
+                    const GRAPH_EXPANSION_PER_SOURCE_CAP: usize = 32;
+                    const GRAPH_EXPANSION_TOTAL_CAP: usize = 512;
+                    'sources: for (locus_id, _) in &locus_list {
+                        if let Some(targets) = by_source.get(locus_id) {
+                            let mut taken = 0usize;
+                            for tgt in targets {
+                                if map.len() >= GRAPH_EXPANSION_TOTAL_CAP {
+                                    break 'sources;
+                                }
+                                if taken >= GRAPH_EXPANSION_PER_SOURCE_CAP {
+                                    break;
+                                }
+                                if seen_graph_ids.insert(tgt.clone()) {
+                                    // Fixed score 0.5: proximity via a tunnel edge is
+                                    // real but weaker than a direct bitmap rank hit.
+                                    map.insert(tgt.clone(), (rank, 0.5_f32));
+                                    rank += 1;
+                                    taken += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Graph-expansion degraded — log and continue on remaining lanes.
+                    // Recall survives on locus/BM25/vector/dense; no graph neighbors expand.
+                    eprintln!(
+                        "[GeniusLocusKit] recall_scored_multi_lane: graph expansion \
+                         all_active_tunnels degraded: {e:?}"
+                    );
+                    degraded_stages.push("graph.all_active_tunnels".to_string());
+                }
+            }
+            map
+        };
+
         // --- Candidate set: collect unique IDs from all populated lanes ---
         let mut all_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (id, _) in &locus_list  { all_ids.insert(id.clone()); }
+        for (id, _) in &graph_score_map { all_ids.insert(id.clone()); }
         for (id, _) in &bm25_list   { all_ids.insert(id.clone()); }
         for (id, _) in &vector_list { all_ids.insert(id.clone()); }
         for (id, _) in &dense_list  { all_ids.insert(id.clone()); }
@@ -10045,7 +11207,35 @@ impl EstateCoordinator {
         let dense_score_map: HashMap<String, (usize, f32)> = dense_list
             .iter().enumerate().map(|(r, (id, s))| (id.clone(), (r, *s))).collect();
 
+        // Per-lane rank capture (W2.5 Track R(a)): positions in each lane's
+        // FINAL ranked candidate list (after the content-deterministic sorts
+        // and frontier_k caps above, before fusion). Mirrors Swift unionBest.
+        let mut lane_ranks: std::collections::HashMap<String, std::collections::HashMap<String, i64>> =
+            std::collections::HashMap::new();
+        for (idx, (id, _)) in locus_list.iter().enumerate() {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("locus".to_string(), (idx + 1) as i64);
+        }
+        // Graph-expansion rank: order of discovery from the tunnel expansion.
+        for (id, (rank, _)) in &graph_score_map {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("graph".to_string(), (*rank + 1) as i64);
+        }
+        for (idx, (id, _)) in bm25_list.iter().enumerate() {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("bm25".to_string(), (idx + 1) as i64);
+        }
+        for (idx, (id, _)) in vector_list.iter().enumerate() {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("hamming".to_string(), (idx + 1) as i64);
+        }
+        for (idx, (id, _)) in dense_list.iter().enumerate() {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("dense".to_string(), (idx + 1) as i64);
+        }
+
         let locus_contributed  = !locus_list.is_empty();
+        let graph_contributed  = !graph_score_map.is_empty();
         let bm25_contributed   = !bm25_list.is_empty();
         let vector_contributed = !vector_list.is_empty();
         let dense_contributed  = !dense_list.is_empty();
@@ -10067,6 +11257,12 @@ impl EstateCoordinator {
         //   for UnionBest + Raw/Rrf Swift uses buffer.final (same as RRF here).
         //   For simplicity, all non-(UnionBest+MatrixAware) paths use the RRF/raw
         //   formula below, matching Swift's documented fallback behaviour.
+        //
+        // UnionBest + Discriminative is handled in the else-branch below: the
+        // dense_discrimination_factor is computed for ALL UnionBest calls (the
+        // `include_dense` guard gates only on mode, not scoring), so the factor
+        // is already live. The else branch applies `factor * rrf` without the
+        // full matrix steer.
         let use_matrix_aware_pipeline = request.mode == GLKRecallMode::UnionBest
             && request.scoring == GLKRecallScoring::MatrixAware;
 
@@ -10089,8 +11285,15 @@ impl EstateCoordinator {
             let count = ordered_ids.len();
 
             // Lane score columns (raw values, before normalisation).
+            // Graph-expansion candidates write their score (0.5) into the locus
+            // column (max with any direct locus score), mirroring Swift where
+            // RecallHit.score.locus = 0.5 for graph neighbors. This lets the
+            // weighted pipeline see graph-only candidates as having a moderate
+            // locus signal, preserving Swift's scoring contract.
             let mut col_locus:  Vec<f32> = ordered_ids.iter().map(|id| {
-                locus_score_map.get(id).map_or(0.0, |&(_, s)| s)
+                let direct = locus_score_map.get(id).map_or(0.0, |&(_, s)| s);
+                let via_graph = graph_score_map.get(id).map_or(0.0, |&(_, s)| s);
+                direct.max(via_graph)
             }).collect();
             let mut col_bm25:   Vec<f32> = ordered_ids.iter().map(|id| {
                 bm25_score_map.get(id).map_or(0.0, |&(_, s)| s)
@@ -10103,13 +11306,20 @@ impl EstateCoordinator {
             }).collect();
 
             // Source-mask bitset per candidate for signal-agreement computation.
-            // Bits: 0=locus, 1=bm25, 2=vector, 3=dense (matching Swift bit ordinals).
+            // Bit ordinals mirror Swift RecallCandidateBuffer exactly (five primary
+            // candidate-supply lanes; matrix/graph-scoring/preference are NOT bits):
+            //   bit 0 (1<<0): locus bitmap lane        (bitLocusBitmap)
+            //   bit 1 (1<<1): graph/tunnel-expansion   (bitLocusGraph)
+            //   bit 2 (1<<2): BM25 corpus lane         (bitCorpusBM25)
+            //   bit 3 (1<<3): Hamming vector lane      (bitVectorHamming)
+            //   bit 4 (1<<4): dense float lane         (bitVectorDense)
             let source_masks: Vec<u16> = ordered_ids.iter().map(|id| {
                 let mut mask: u16 = 0;
                 if locus_score_map.contains_key(id)  { mask |= 1 << 0; }
-                if bm25_score_map.contains_key(id)   { mask |= 1 << 1; }
-                if vector_score_map.contains_key(id) { mask |= 1 << 2; }
-                if dense_score_map.contains_key(id)  { mask |= 1 << 3; }
+                if graph_score_map.contains_key(id)  { mask |= 1 << 1; }
+                if bm25_score_map.contains_key(id)   { mask |= 1 << 2; }
+                if vector_score_map.contains_key(id) { mask |= 1 << 3; }
+                if dense_score_map.contains_key(id)  { mask |= 1 << 4; }
                 mask
             }).collect();
 
@@ -10182,35 +11392,75 @@ impl EstateCoordinator {
                                 .unwrap_or_default();
 
                         if !candidate_coords.is_empty() {
-                            // coOccurrence: Σ O[q, c] / liveRowCount for all (q, c) pairs.
-                            // Mirrors Swift RecallMatrixScorer.coOccurrence.
-                            let mut co_sum: i64 = 0;
-                            for q in &query_coords {
-                                for c in &candidate_coords {
-                                    let key = crate::matrix::MatrixCoOccurKey::new(
-                                        q.clone(), c.clone()
-                                    );
-                                    co_sum += tier.co_occurrence.get(&key).copied().unwrap_or(0);
-                                }
-                            }
-                            col_co_occur[i] = co_sum as f32 / tier.live_row_count as f32;
-
-                            // temporal: Σ T[q, c, lag] / liveRowCount for all lags.
-                            // Mirrors Swift RecallMatrixScorer.temporal.
-                            let mut t_sum: i64 = 0;
-                            for q in &query_coords {
-                                for c in &candidate_coords {
-                                    for &lag in crate::matrix::MatrixTier::LAG_BUCKETS {
-                                        let key = crate::matrix::MatrixTemporalKey {
-                                            source: q.clone(),
-                                            target: c.clone(),
-                                            lag_bucket: lag,
-                                        };
-                                        t_sum += tier.temporal_causality.get(&key).copied().unwrap_or(0);
+                            // W2.5 S4-C arm: "decayed" reads the §8.13
+                            // exp-decayed O/T projections; anything else
+                            // walks the canonical counts — byte-identical
+                            // to the pre-S4 flow. Mirrors Swift.
+                            let use_decayed = request
+                                .recall_shape
+                                .as_ref()
+                                .map(|s| s.matrix_weighting == "decayed")
+                                .unwrap_or(false);
+                            // coOccurrence: Σ O[q, c] / liveRowCount for all
+                            // (q, c) pairs. The COUNT branch keeps the original
+                            // i64-sum → f32-division arithmetic exactly (back-
+                            // compat is byte-identical); the DECAYED branch
+                            // accumulates f64 then narrows once, mirroring the
+                            // Swift coOccurrenceDecayed order of operations.
+                            if use_decayed {
+                                let mut co_sum: f64 = 0.0;
+                                for q in &query_coords {
+                                    for c in &candidate_coords {
+                                        let key = crate::matrix::MatrixCoOccurKey::new(
+                                            q.clone(), c.clone()
+                                        );
+                                        co_sum += tier.co_occurrence_decayed.get(&key).copied().unwrap_or(0.0);
                                     }
                                 }
+                                col_co_occur[i] = (co_sum / tier.live_row_count as f64) as f32;
+                                let mut t_sum: f64 = 0.0;
+                                for q in &query_coords {
+                                    for c in &candidate_coords {
+                                        for &lag in crate::matrix::MatrixTier::LAG_BUCKETS {
+                                            let key = crate::matrix::MatrixTemporalKey {
+                                                source: q.clone(),
+                                                target: c.clone(),
+                                                lag_bucket: lag,
+                                            };
+                                            t_sum += tier.temporal_causality_decayed.get(&key).copied().unwrap_or(0.0);
+                                        }
+                                    }
+                                }
+                                col_temporal[i] = (t_sum / tier.live_row_count as f64) as f32;
+                            } else {
+                                let mut co_sum: i64 = 0;
+                                for q in &query_coords {
+                                    for c in &candidate_coords {
+                                        let key = crate::matrix::MatrixCoOccurKey::new(
+                                            q.clone(), c.clone()
+                                        );
+                                        co_sum += tier.co_occurrence.get(&key).copied().unwrap_or(0);
+                                    }
+                                }
+                                col_co_occur[i] = co_sum as f32 / tier.live_row_count as f32;
+
+                                // temporal: Σ T[q, c, lag] / liveRowCount for all lags.
+                                // Mirrors Swift RecallMatrixScorer.temporal.
+                                let mut t_sum: i64 = 0;
+                                for q in &query_coords {
+                                    for c in &candidate_coords {
+                                        for &lag in crate::matrix::MatrixTier::LAG_BUCKETS {
+                                            let key = crate::matrix::MatrixTemporalKey {
+                                                source: q.clone(),
+                                                target: c.clone(),
+                                                lag_bucket: lag,
+                                            };
+                                            t_sum += tier.temporal_causality.get(&key).copied().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                                col_temporal[i] = t_sum as f32 / tier.live_row_count as f32;
                             }
-                            col_temporal[i] = t_sum as f32 / tier.live_row_count as f32;
                         }
                     }
                 }
@@ -10257,9 +11507,11 @@ impl EstateCoordinator {
             Self::normalize_column(&mut col_final,     count);
 
             // Compute union profile (step 7) over the normalised columns.
+            // Five primary candidate-supply lanes: locus, locusGraph, bm25, vector, dense.
             let primary_source_count = {
                 let mut n = 0usize;
                 if locus_contributed  { n += 1; }
+                if graph_contributed  { n += 1; }
                 if bm25_contributed   { n += 1; }
                 if vector_contributed { n += 1; }
                 if dense_contributed  { n += 1; }
@@ -10367,26 +11619,60 @@ impl EstateCoordinator {
                    // as Swift (RecallDirector step 9: both columns multiply weights.graph).
                    + sh_graph      * weights.graph * col_graph[i]
                    + sh_preference * weights.graph * col_preference[i]
-                   + agreement_bonus * source_masks[i].count_ones() as f32 / 4.0;
+                   // Denominator 5.0: five primary candidate-supply bits
+                   // (locus, locusGraph, bm25, vectorHamming, vectorDense).
+                   // Mirrors Swift RecallDirector agreementBonus / 5.0.
+                   + agreement_bonus * source_masks[i].count_ones() as f32 / 5.0;
             }
 
-            // Sort descending by final score; content-derived tiebreak for determinism
-            // across replay runs. moot_recall_shaped uses mode=UnionBest + scoring=matrixAware
-            // (the default), so this path IS activated by the benchmark. UUID tiebreak is
-            // non-deterministic across estate imports; drawer content is stable for a given seed.
+            // Presentation sort: (score DESC, subject ASC). subject is content-derived
+            // and deterministic per seed; nil subject (Option<String>::None) sorts as "".
+            // Among exact (score, subject) equals the mutual order is unspecified by design
+            // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 3 — do NOT add a third key).
             let mut indexed: Vec<(usize, f32)> = (0..count).map(|i| (i, col_final[i])).collect();
             indexed.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
-                        let ka = tiebreak_key(drawer_index.get(&ordered_ids[a.0])
-                            .map(|d| d.content.as_str()), ordered_ids[a.0].as_str());
-                        let kb = tiebreak_key(drawer_index.get(&ordered_ids[b.0])
-                            .map(|d| d.content.as_str()), ordered_ids[b.0].as_str());
-                        ka.cmp(kb)
+                        let sub_a = drawer_index.get(&ordered_ids[a.0])
+                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                        let sub_b = drawer_index.get(&ordered_ids[b.0])
+                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                        sub_a.cmp(sub_b)
                     })
             });
-            indexed.truncate(request.limit);
+            // WINDOWED TIE RESOLUTION (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1):
+            // plan.frontier_k = min(max(limit*4, 64), 256) already provides the 4N pool
+            // for limit ≤ 64. When limit > 64, frontier_k = 256 < 4*limit; the
+            // determinate-prefix branch fires if the 4N pool is exhausted.
+            let presentation_cut = request.limit.min(indexed.len());
+            if indexed.len() > request.limit {
+                let score_at_cut = indexed[presentation_cut - 1].1;
+                if score_at_cut == indexed[presentation_cut].1 {
+                    // Tie straddles the cut — hunt the group's break in the 4N pool.
+                    let pool_4n = (request.limit * 4).min(indexed.len());
+                    let tied_score = score_at_cut;
+                    if let Some(break_at) = indexed[..pool_4n].iter().position(|(_, s)| *s < tied_score) {
+                        // Break found: return the whole tie group (honest expansion).
+                        indexed.truncate(break_at);
+                    } else if pool_4n == indexed.len() {
+                        // Pool fully exhausted — indexed contains ALL candidates.
+                        // No break exists in the entire estate; return the whole
+                        // pool (honest expansion, pool is the tie group).
+                        // No truncation: already at full pool size.
+                    } else {
+                        // No break within 4N AND more items exist beyond the cap.
+                        // Return only the determinate prefix above the tie group.
+                        let tie_start = indexed[..pool_4n].iter()
+                            .position(|(_, s)| *s == tied_score).unwrap_or(0);
+                        indexed.truncate(tie_start);
+                        degraded_stages.push("tie.nonDeterminate".to_string());
+                    }
+                } else {
+                    // No tie at cut: trim to limit.
+                    indexed.truncate(presentation_cut);
+                }
+            } // else: fewer candidates than limit — keep all.
 
             fused_scored = indexed.into_iter().map(|(i, final_s)| {
                 let id = ordered_ids[i].clone();
@@ -10445,6 +11731,27 @@ impl EstateCoordinator {
                             .into_iter().collect::<std::collections::HashMap<_, _>>()
                     );
                 }
+                // Discriminative degrades on Hybrid and CorpusOnly (the dense
+                // discrimination factor requires the UnionBest path). Surface the
+                // degraded stage so callers know the requested scoring was not applied.
+                (GLKRecallMode::Hybrid, GLKRecallScoring::Discriminative) => {
+                    degraded_stages.push("hybrid.discriminative".to_string());
+                    glk_emit!(
+                        crate::telemetry::metric_names::HYBRID_DISCRIMINATIVE_FALLBACK,
+                        1.0,
+                        [("estate_id".to_string(), estate_tag.clone())]
+                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                    );
+                }
+                (GLKRecallMode::CorpusOnly, GLKRecallScoring::Discriminative) => {
+                    degraded_stages.push("corpusOnly.discriminative".to_string());
+                    glk_emit!(
+                        crate::telemetry::metric_names::CORPUS_ONLY_DISCRIMINATIVE_FALLBACK,
+                        1.0,
+                        [("estate_id".to_string(), estate_tag.clone())]
+                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                    );
+                }
                 _ => {}
             }
 
@@ -10476,6 +11783,7 @@ impl EstateCoordinator {
                 .iter()
                 .filter_map(|id| {
                     let (locus_rank, locus_raw) = locus_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
+                    let (graph_rank, graph_raw)  = graph_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (bm25_rank, bm25_raw)   = bm25_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (vec_rank, vec_raw)      = vector_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (dense_rank, dense_raw)  = dense_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
@@ -10484,11 +11792,27 @@ impl EstateCoordinator {
                     // byte-identical). Folded into final_score so a multi-signal
                     // candidate ranks at/above an equal-cosine single-signal one.
                     let dense_boost = dense_consensus_boost.get(id).copied().unwrap_or(0.0);
+                    // Graph locus-effective score: the max of direct locus score and graph
+                    // expansion score (0.5), mirroring Swift's buffer.merge max-score rule
+                    // (buffer.locus[idx] = max(existing, hit.score.locus)).
+                    let effective_locus_raw = locus_raw.max(graph_raw);
+                    let effective_locus_rank = if locus_rank < usize::MAX { locus_rank } else { graph_rank };
 
                     let final_score = match request.scoring {
-                        GLKRecallScoring::Raw => locus_raw + bm25_raw + vec_raw + dense_raw + dense_boost,
-                        GLKRecallScoring::Rrf | GLKRecallScoring::MatrixAware => {
-                            // MatrixAware falls back to RRF for Hybrid/CorpusOnly.
+                        GLKRecallScoring::Raw =>
+                            // Use effective_locus_raw so graph-only candidates score as 0.5,
+                            // not 0.0 — parity with Swift's buffer.final for graph candidates.
+                            effective_locus_raw + bm25_raw + vec_raw + dense_raw + dense_boost,
+                        GLKRecallScoring::Rrf
+                        | GLKRecallScoring::MatrixAware
+                        | GLKRecallScoring::Discriminative => {
+                            // MatrixAware and Discriminative fall back to RRF for
+                            // Hybrid/CorpusOnly (no matrix or discrimination pass available
+                            // outside UnionBest). Discriminative on UnionBest applies
+                            // `dense_discrimination_factor * rrf` after the shared RRF
+                            // computation below — the factor is 1.0 when no dense lane
+                            // runs, making it byte-identical to Rrf in that case.
+                            //
                             // Each lane's reciprocal-rank term is scaled by its signed
                             // weight: w=1.0 neutral, w=0 EXCLUDES (the lane is skipped
                             // entirely — an id whose ONLY source is an excluded lane
@@ -10502,8 +11826,10 @@ impl EstateCoordinator {
                             // the id adds a term. An id with no contributing lane is
                             // absent from Swift's output, so it is dropped here too.
                             let mut contributed = false;
-                            if locus_rank < usize::MAX && w_locus != 0.0 {
-                                rrf += w_locus * (1.0 / (k + locus_rank as f32 + 1.0));
+                            if effective_locus_rank < usize::MAX && w_locus != 0.0 {
+                                // Use effective_locus_rank so graph-only candidates participate
+                                // in RRF with their graph discovery rank.
+                                rrf += w_locus * (1.0 / (k + effective_locus_rank as f32 + 1.0));
                                 contributed = true;
                             }
                             if bm25_rank < usize::MAX && w_bm25 != 0.0 {
@@ -10529,7 +11855,15 @@ impl EstateCoordinator {
                             rrf += dense_boost;
                             // Drop ids no surviving lane voted for (exclusion parity).
                             if !contributed { return None; }
-                            rrf
+                            // Discriminative: apply the dense-lane saturation discount to
+                            // the RRF composite. The factor is 1.0 when no dense lane ran
+                            // (corpus absent or empty query), making the result byte-identical
+                            // to Rrf in that case. No matrix steer is applied.
+                            if request.scoring == GLKRecallScoring::Discriminative {
+                                dense_discrimination_factor * rrf
+                            } else {
+                                rrf
+                            }
                         }
                     };
                     // Trailing zeros: fieldFit, coOccurrence, temporal, graph, preference —
@@ -10539,19 +11873,43 @@ impl EstateCoordinator {
                 })
                 .collect();
 
+            // Presentation sort: (score DESC, subject ASC). subject is content-derived
+            // and deterministic per seed; None subject sorts as "".
+            // Among exact (score, subject) equals the order is unspecified by design
+            // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 3).
             scored.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
-                        // Content-derived tiebreak: stable across replay runs because drawer
-                        // content is deterministic for a given seed, unlike drawer UUIDs which
-                        // are minted fresh on each estate import.
-                        let ka = tiebreak_key(drawer_index.get(&a.0).map(|d| d.content.as_str()), a.0.as_str());
-                        let kb = tiebreak_key(drawer_index.get(&b.0).map(|d| d.content.as_str()), b.0.as_str());
-                        ka.cmp(kb)
+                        let sub_a = drawer_index.get(&a.0)
+                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                        let sub_b = drawer_index.get(&b.0)
+                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                        sub_a.cmp(sub_b)
                     })
             });
-            scored.truncate(request.limit);
+            // WINDOWED TIE RESOLUTION (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1):
+            // plan.frontier_k provides the 4N pool for limit ≤ 64.
+            let presentation_cut = request.limit.min(scored.len());
+            if scored.len() > request.limit {
+                let score_at_cut = scored[presentation_cut - 1].1;
+                if score_at_cut == scored[presentation_cut].1 {
+                    let pool_4n = (request.limit * 4).min(scored.len());
+                    let tied_score = score_at_cut;
+                    if let Some(break_at) = scored[..pool_4n].iter().position(|(_, s, ..)| *s < tied_score) {
+                        scored.truncate(break_at);
+                    } else if pool_4n == scored.len() {
+                        // Pool fully exhausted: return the whole pool.
+                    } else {
+                        let tie_start = scored[..pool_4n].iter()
+                            .position(|(_, s, ..)| *s == tied_score).unwrap_or(0);
+                        scored.truncate(tie_start);
+                        degraded_stages.push("tie.nonDeterminate".to_string());
+                    }
+                } else {
+                    scored.truncate(presentation_cut);
+                }
+            } // else: fewer candidates than limit — keep all.
             fused_scored = scored;
 
             union_profile = match request.mode {
@@ -10588,7 +11946,11 @@ impl EstateCoordinator {
             .map(|(id, final_s, locus_s, bm25_s, vec_s, dense_s, ff_s, co_s, t_s, g_s, p_s)| {
                 let drawer = drawer_index.get(&id).cloned();
                 let mut sources = Vec::new();
+                // Attribution: check each candidate-supply lane's score map.
+                // LocusGraph bit corresponds to graph/tunnel expansion (bit 1),
+                // parity with Swift RecallCandidateBuffer.bitLocusGraph (1 << 1).
                 if locus_contributed  && locus_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::LocusBitmap); }
+                if graph_contributed  && graph_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::LocusGraph); }
                 if bm25_contributed   && bm25_score_map.contains_key(&id)   { sources.push(RecallEvidencePath::CorpusBm25); }
                 if vector_contributed && vector_score_map.contains_key(&id) { sources.push(RecallEvidencePath::VectorHamming); }
                 if dense_contributed  && dense_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::VectorDense); }
@@ -10658,6 +12020,10 @@ impl EstateCoordinator {
             // DISTINGUISHABLE from "absent evidence" (empty Vec, no matching docs).
             degraded_stages,
             hits,
+            lane_ranks,
+            // M4: pre-computed anchor from the sketch compilation block above.
+            // Callers must read from here; single-derivation doctrine enforced.
+            query_lattice_anchor,
         })
     }
 
@@ -10679,11 +12045,10 @@ impl EstateCoordinator {
         plan: RecallPlan,
         now: i64,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
-        // B-10a: set trace_limit on frame copy only for external-origin requests.
-        let mut traced_frame = request.frame.clone();
-        if request.origin == RecallOrigin::External {
-            traced_frame.trace_limit = Some(request.trace_limit.unwrap_or(request.limit));
-        }
+        // B-10a + W2.5 Track R(a): trace rows are written by `recall_scored`'s
+        // central writer AFTER the lane returns; the inner frame never sets
+        // trace_limit. Mirrors Swift.
+        let traced_frame = request.frame.clone();
 
         // Collect the full locus lane from LocusKit. collect_all_with_degraded
         // surfaces LocusKit recall internal-read failures (P0-5 sites 1-5):
@@ -10708,6 +12073,15 @@ impl EstateCoordinator {
                 (d.id.clone(), score)
             })
             .collect();
+
+        // Per-lane rank capture (W2.5 Track R(a)): single locus candidate
+        // list — rank is the row's position in the stable-sorted lane list.
+        let mut lane_ranks: std::collections::HashMap<String, std::collections::HashMap<String, i64>> =
+            std::collections::HashMap::new();
+        for (idx, (id, _)) in locus_list.iter().enumerate() {
+            lane_ranks.entry(id.clone()).or_default()
+                .insert("locus".to_string(), (idx + 1) as i64);
+        }
 
         // Build an index for fast drawer lookup during hit construction.
         let drawer_index: HashMap<String, Drawer> = locus_rows
@@ -10774,20 +12148,51 @@ impl EstateCoordinator {
                         .into_iter().collect::<std::collections::HashMap<_, _>>()
                 );
             }
+            // Discriminative degrades to RRF on the no-corpus locus-only path.
+            // The dense discrimination factor requires a live corpus; without one
+            // the factor is 1.0 and the result is byte-identical to Rrf.
+            (GLKRecallMode::Hybrid, GLKRecallScoring::Discriminative) => {
+                degraded_stages.push("hybrid.discriminative".to_string());
+                glk_emit!(
+                    crate::telemetry::metric_names::HYBRID_DISCRIMINATIVE_FALLBACK,
+                    1.0,
+                    [("estate_id".to_string(), estate_tag.clone())]
+                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                );
+            }
+            (GLKRecallMode::CorpusOnly, GLKRecallScoring::Discriminative) => {
+                degraded_stages.push("corpusOnly.discriminative".to_string());
+                glk_emit!(
+                    crate::telemetry::metric_names::CORPUS_ONLY_DISCRIMINATIVE_FALLBACK,
+                    1.0,
+                    [("estate_id".to_string(), estate_tag.clone())]
+                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                );
+            }
+            (GLKRecallMode::LocusOnly, GLKRecallScoring::Discriminative) => {
+                degraded_stages.push("locusOnly.discriminative".to_string());
+                glk_emit!(
+                    crate::telemetry::metric_names::LOCUS_ONLY_DISCRIMINATIVE_FALLBACK,
+                    1.0,
+                    [("estate_id".to_string(), estate_tag.clone())]
+                        .into_iter().collect::<std::collections::HashMap<_, _>>()
+                );
+            }
             _ => {}
         }
 
         // Select candidates according to the scoring strategy.
         //
         // .raw — candidates in locus-bitmap order, rank-normalised locus scores.
-        // .rrf / .matrixAware — RRF over the single locus list (k=60).
-        //   For a single lane this is rank-preserving (same relative order as .raw)
-        //   but produces different score values — demonstrating strategy is active.
+        // .rrf / .matrixAware / .discriminative — RRF over the single locus list
+        //   (k=60). For a single lane this is rank-preserving (same relative order as
+        //   .raw) but produces different score values. Discriminative without a corpus
+        //   has factor 1.0 so equals Rrf here.
         let fused: Vec<(String, f32)> = match request.scoring {
             GLKRecallScoring::Raw => {
                 locus_list.into_iter().take(request.limit).collect()
             }
-            GLKRecallScoring::Rrf | GLKRecallScoring::MatrixAware => {
+            GLKRecallScoring::Rrf | GLKRecallScoring::MatrixAware | GLKRecallScoring::Discriminative => {
                 // RRF over a single lane: rrfScore(id, rank) = 1 / (k + rank + 1).
                 // k=60 is the Robertson et al. recommendation, matching Swift
                 // RecallDirector.rrfFuse.
@@ -10865,6 +12270,21 @@ impl EstateCoordinator {
         } else {
             None
         };
+
+        // M4 single-derivation: this path runs for modes that compile a sketch
+        // (Hybrid, CorpusOnly, UnionBest) when no corpus/vector store is registered.
+        // Derive the §8.3 lattice anchor from the query text exactly once here.
+        // Callers read off the result; they MUST NOT call query_anchor separately.
+        // None when the query is empty or unanchorable.
+        let query_lattice_anchor: Option<(String, String)> = request
+            .query_text
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .and_then(|text| {
+                let (udc, qid) = crate::brain::enrichment_stage::query_anchor(text);
+                if udc.is_empty() && qid.is_empty() { None } else { Some((udc, qid)) }
+            });
+
         Ok(GLKRecallResult {
             request,
             plan,
@@ -10874,6 +12294,9 @@ impl EstateCoordinator {
             // there is no throwing stage on the locus-ranked path.
             degraded_stages,
             hits,
+            lane_ranks,
+            // M4: pre-computed anchor — single derivation for this recall path.
+            query_lattice_anchor,
         })
     }
 }
@@ -10938,6 +12361,37 @@ fn stable_locus_rank_rows(mut rows: Vec<Drawer>, frontier_k: usize) -> Vec<Drawe
 // per-signal fusion / recall-un-pinning is proven in the dedicated end-to-end
 // payoff test, not here.
 mod tests {
+
+    #[test]
+    fn sentence_timestamps_map_by_offset() {
+        // W2.5 S6 — mirrors the Swift GeniusLocusKit.sentenceTimestamps pins.
+        let pieces = vec![
+            ("Alpha fact one. Alpha fact two.".to_string(), 1_000_000.0),
+            ("Beta fact three.".to_string(), 2_000_000.0),
+        ];
+        let separator = "\n\n";
+        let combined = pieces
+            .iter()
+            .map(|p| p.0.as_str())
+            .collect::<Vec<_>>()
+            .join(separator);
+        let sentences = vec![
+            "Alpha fact one.".to_string(),
+            "Alpha fact two.".to_string(),
+            "Beta fact three.".to_string(),
+        ];
+        let ts = super::EstateCoordinator::sentence_timestamps(
+            &sentences, &pieces, separator, &combined);
+        assert_eq!(ts, Some(vec![1_000_000.0, 1_000_000.0, 2_000_000.0]));
+    }
+
+    #[test]
+    fn sentence_timestamps_fail_quiet() {
+        let pieces = vec![("Alpha.".to_string(), 1.0)];
+        let ts = super::EstateCoordinator::sentence_timestamps(
+            &["Missing sentence.".to_string()], &pieces, "\n\n", "Alpha.");
+        assert_eq!(ts, None);
+    }
     use super::*;
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -13624,5 +15078,18 @@ fn binary_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::
     match shape.map(|s| s.binary_metric.as_str()) {
         Some("jaccard") => vectorkit::engine::metric::DenseMetric::JACCARD,
         _ => vectorkit::engine::metric::DenseMetric::HAMMING,
+    }
+}
+
+/// Resolve a shape's float-lane metric (W2.5 M1 float unlock). Maps the string
+/// selector on `RecallShape.float_metric` to a concrete `FloatMetric` value.
+/// Unknown strings and `None` shapes both degrade to cosine per the shape
+/// contract — a shape must degrade, never fail. Twin of Swift
+/// `RecallDirector.floatMetric(for:)`.
+fn float_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::FloatMetric {
+    match shape.map(|s| s.float_metric.as_str()) {
+        Some("l2") => vectorkit::engine::metric::FloatMetric::L2,
+        Some("dot") => vectorkit::engine::metric::FloatMetric::Dot,
+        _ => vectorkit::engine::metric::FloatMetric::Cosine,
     }
 }

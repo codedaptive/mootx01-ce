@@ -2,7 +2,9 @@
 //
 // Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8)
 // + brain-layer governor ownership  (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
-// + contradiction-scout (signal 10) + consolidation-sweep (signal 11).
+// + contradiction-scout (signal 10) + consolidation-sweep (signal 11)
+// + P3a anomaly-flag sweep (signal 12, AnomalySweepSignal)
+// + SPEC_ADORNMENT §4 adornment-minting pass (signal 13, AdornmentPassSignal).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The
@@ -17,6 +19,8 @@
 // closure; other signals still emit demonstrative shapes for the
 // conformance gate.
 
+pub mod adornment;
+pub mod anomaly_sweep;
 pub mod by_reference_validity;
 pub mod consolidation;
 pub mod contradiction_scout;
@@ -30,6 +34,8 @@ pub mod temporal_causality;
 pub mod training;
 pub mod vector_similarity;
 
+pub use adornment::AdornmentPassSignal;
+pub use anomaly_sweep::AnomalySweepSignal;
 pub use by_reference_validity::ByReferenceValiditySignal;
 pub use consolidation::ConsolidationSignal;
 pub use contradiction_scout::ContradictionScoutSignal;

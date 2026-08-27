@@ -48,17 +48,17 @@ public struct GLKRecallRequest: Sendable {
     public let queryText: String?
     /// How many rows to record as recall-trace rows in the reward cycle.
     ///
-    /// When set, the RecallDirector uses this value for `traceLimit` on the
-    /// primary locus frame instead of `limit`. This lets precise-recall paths
-    /// (PreciseRecall recipe) decouple the coarse candidate pool (`limit =
+    /// When set, the RecallDirector's central trace writer caps the write to
+    /// this many of the result's leading hits instead of `limit`. This lets
+    /// pool-fetching callers decouple the coarse candidate pool (`limit =
     /// poolSize`) from the reward-cycle trace budget (`traceLimit = final limit
     /// returned to the caller`). The pool is the scan width; the trace budget
     /// is what the caller actually receives — writing ~500 trace rows for a
-    /// limit-20 precise query inflates the trace table ~25× for no benefit.
+    /// limit-20 query inflates the trace table ~25× for no benefit.
     ///
-    /// When nil, the trace limit falls back to `request.limit` — but ONLY when
-    /// `origin == .external`. Internal requests never set `traceLimit` on the
-    /// frame regardless of this field (B-10a).
+    /// When nil, the trace budget falls back to `request.limit` — but ONLY
+    /// when `origin == .external`. Internal requests write zero trace rows
+    /// regardless of this field (B-10a).
     public let traceLimit: Int?
     /// Whether this recall originates from an external consumer or an internal
     /// system process.
@@ -82,6 +82,57 @@ public struct GLKRecallRequest: Sendable {
     /// at weight `1.0` — which is BYTE-IDENTICAL to the pre-6b-modifiers behaviour.
     /// This is the back-compat contract: an absent shape changes nothing.
     public let recallShape: RecallShape?
+
+    /// Door identity for the reward-cycle trace rows (W2.5 Track R(a)):
+    /// the tool or recipe that issued this recall (e.g. "memory_search",
+    /// "recall_precise"). Recorded verbatim into `recall_trace.door` for
+    /// external-origin requests. `nil` (the default) writes a NULL door —
+    /// honest for callers with no door identity. Never derived from the
+    /// query; no query text is ever stored (privacy ruling 2026-08-20).
+    public let door: String?
+
+    /// Composition identity for the reward-cycle trace rows: the caller's
+    /// composition name where the caller knows one (a reduction
+    /// composition such as "text", a shaped preset name). When nil the
+    /// director records "<mode>/<scoring>" so every attributed trace row
+    /// carries at least the lane-composition identity.
+    public let composition: String?
+
+    /// Optional per-call candidate-pool depth override.
+    ///
+    /// When non-nil this overrides BOTH the engine's computed default AND
+    /// any `RecallShape.frontierK` the request carries — the precedence is:
+    ///
+    ///   request.frontierK > recallShape.frontierK > engine formula
+    ///
+    /// The value is clamped to `[RecallShape.frontierKFloor, RecallShape.frontierKCeiling]`
+    /// (`[64, 256]`) so a call site cannot request an unbounded scan. A nil value
+    /// falls through to the shape override (if any) or the engine's computed
+    /// default `min(max(limit * 4, 64), 256)`.
+    ///
+    /// Use this to set the pool depth per-call without constructing a full
+    /// `RecallShape` — for example, when a recipe drives the pool size from a
+    /// runtime parameter but does not need to steer the lane weights.
+    public let frontierK: Int?
+
+    /// Optional anomalous-flag admission gate (§11.18 anomalous-flag recall
+    /// prefilter).
+    ///
+    /// Applied BEFORE scoring at candidate admission in `RecallDirector`:
+    /// - `nil`   — no filtering; all candidates admitted (default, back-compat).
+    /// - `true`  — admit ONLY anomalous drawers (bit 26 set). Surfaces
+    ///   low-cohesion outliers for review or triage workflows.
+    /// - `false` — EXCLUDE anomalous drawers (bit 26 clear). Returns only
+    ///   cohesive, room-typical candidates.
+    ///
+    /// The filter reads `DrawerHit.drawer.isAnomalous` (bit 26 of
+    /// `operationalBitmap`), which is populated by GeniusLocusKit's
+    /// room-cohesion maintenance sweep. Drawers in rooms with fewer than 3
+    /// members always have bit 26 clear (the sweep skips small rooms).
+    ///
+    /// A `nil` value produces byte-identical results to requests without
+    /// this parameter — no performance cost when unused.
+    public let anomalousFilter: Bool?
 
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
@@ -108,6 +159,17 @@ public struct GLKRecallRequest: Sendable {
     ///   - recallShape: Optional signed per-lane fusion steering. Nil means uniform
     ///     positive weights — byte-identical to pre-6b-modifiers behaviour. See
     ///     `RecallShape` for the signed-weight semantics and lane-key scheme.
+    ///   - door: Trace-row door identity (tool/recipe name) for external-origin
+    ///     requests; nil writes a NULL door. W2.5 Track R(a).
+    ///   - composition: Trace-row composition identity where the caller knows
+    ///     one; nil lets the director record "<mode>/<scoring>".
+    ///   - frontierK: Optional per-call candidate-pool depth override, clamped
+    ///     to `[RecallShape.frontierKFloor, RecallShape.frontierKCeiling]`.
+    ///     Takes precedence over `recallShape.frontierK` and the engine default.
+    ///     Nil (the default) defers to the shape override or the engine formula.
+    ///   - anomalousFilter: Optional anomalous-flag admission gate (§11.18).
+    ///     `nil` = no filter (byte-identical to omitting the parameter); `true` =
+    ///     anomalous only; `false` = exclude anomalous. Applied BEFORE scoring.
     public init(
         frame: LocusKit.RecallFrame,
         mode: GLKRecallMode,
@@ -117,7 +179,11 @@ public struct GLKRecallRequest: Sendable {
         queryText: String? = nil,
         traceLimit: Int? = nil,
         origin: RecallOrigin,
-        recallShape: RecallShape? = nil
+        recallShape: RecallShape? = nil,
+        door: String? = nil,
+        composition: String? = nil,
+        frontierK: Int? = nil,
+        anomalousFilter: Bool? = nil
     ) {
         self.frame = frame
         self.mode = mode
@@ -128,5 +194,9 @@ public struct GLKRecallRequest: Sendable {
         self.traceLimit = traceLimit
         self.origin = origin
         self.recallShape = recallShape
+        self.door = door
+        self.composition = composition
+        self.frontierK = frontierK
+        self.anomalousFilter = anomalousFilter
     }
 }

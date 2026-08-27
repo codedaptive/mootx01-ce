@@ -1,8 +1,8 @@
 ---
 title: Federation SyncServer Wire Protocol
-version: v0.1
+version: v0.2
 status: accepted
-date: 2026-07-17
+date: 2026-08-26
 mission: CVK-WC7a
 reviewer: Bob
 relates_to:
@@ -360,7 +360,7 @@ losing federation history. Longer retention requires server-side storage
 budget negotiation and is a server concern.
 
 Clients must not assume envelopes remain after the retention window. Senders
-hold the ground truth in `_fed_outbox`; they must re-send if the recipient
+hold the authoritative record in `_fed_outbox`; they must re-send if the recipient
 missed an envelope within the window.
 
 ### 3.4 Record-level idempotency (existing convergence guarantee)
@@ -564,6 +564,7 @@ variants may be introduced in a future protocol version with a new
 | Version | Date | Author | Notes |
 |---|---|---|---|
 | v0.1 | 2026-07-17 | CVK-WC7a | Initial draft — proposed, awaiting Bob's review |
+| v0.2 | 2026-08-26 | docs-pass | Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change. |
 
 ## Implementation notes (CVK-WC7)
 

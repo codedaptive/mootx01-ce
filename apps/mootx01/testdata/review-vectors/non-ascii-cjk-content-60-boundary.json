@@ -1,0 +1,46 @@
+{
+  "description": "One drawer with 65 CJK chars (U+7684 × 65). No subject; drawer_subject falls back to content prefix(60 chars). Rust &preview[..60] would panic on non-ASCII boundary; chars().take(60) must be used.",
+  "drawers": [
+    {
+      "content": "的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的",
+      "filedAt": "2026-08-24T08:00:00.000Z",
+      "id": "d3000000-0000-0000-0000-000000000001",
+      "subject": null,
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark '的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的' as reviewed.",
+        "id": "bb65783d-27b7-50e0-a602-30ecf6007a08",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [],
+    "generatedAt": "2026-08-24T09:00:00.000Z",
+    "id": "4e3231a8-3ec4-5ed0-b04a-41b1f207307e",
+    "kind": "morning",
+    "sections": [
+      {
+        "id": "06cf92e9-7ac2-564b-a9ca-532b020da053",
+        "items": [
+          {
+            "detail": "的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的",
+            "id": "0fb39352-58f6-5b74-8d6c-c487a4ed6813",
+            "subject": "的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的的"
+          }
+        ],
+        "title": "First priorities"
+      }
+    ],
+    "sourceEstateState": "sha256:e8cf8e0da3c5f42dd4ec7f986b68bf86:1"
+  },
+  "kind": "morning",
+  "now": "2026-08-24T09:00:00.000Z",
+  "vectorID": "non-ascii-cjk-content-60-boundary"
+}

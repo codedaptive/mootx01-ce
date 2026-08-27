@@ -8,11 +8,123 @@
 //! a usage example, and common mistakes. Content mirrors Swift TeachmeGuides.swift
 //! at ≥80% fidelity (structure preserved; some details abbreviated).
 
-/// Return the teachme guide for `tool_name`, or a generic fallback.
+/// Return the teachme guide for `tool_name` as an owned `String`.
 ///
-/// Called by `dispatch.rs` when `args["teachme"] == true`. Returns a static
-/// string; the caller wraps it in `text_result`. Estate is never touched.
-pub fn guide(tool_name: &str) -> &'static str {
+/// Called by `dispatch.rs` when `args["teachme"] == true`. Returns a `String`
+/// so that `moot_estate_status` can render its modes section from the live
+/// registry (for byte-identity with Swift's dynamic `modesTeachmeGuide`).
+/// All other guides return static strings wrapped in `String::from`.
+/// Estate is never touched.
+pub fn guide(tool_name: &str) -> String {
+    if tool_name == "moot_estate_status" {
+        return estate_status_guide();
+    }
+    guide_static(tool_name).to_string()
+}
+
+/// Return the modes orientation section of the estate_status teachme guide.
+///
+/// Covers the five-mode roster, Recall variant set, decision guidance, and
+/// sticky-state behavior. Derived from `MootMode::all_cases()` so the tool
+/// roster and contracts in the guide are always current.
+///
+/// Byte-identical to Swift `TeachmeGuides.modesTeachmeGuide` — both ports read
+/// the shared `Tests/Conformance/modes_teachme_guide_fixture.json` fixture to
+/// verify parity.
+pub fn modes_teachme_guide() -> String {
+    use crate::mode_registry::MootMode;
+
+    // Build the mode roster lines from the live registry.
+    // Format: "  ModeName — contract Core: core_tools_description"
+    // The contract already ends in "." so no extra punctuation is added before
+    // "Core:" — omitting the extra dot prevents a double-dot on every line.
+    // Matches Swift's modesTeachmeGuide roster format for byte-identity.
+    let roster_lines: Vec<String> = MootMode::all_cases()
+        .iter()
+        .map(|m| {
+            format!(
+                "  {} \u{2014} {} Core: {}",
+                m.raw_value(),
+                m.contract(),
+                m.core_tools_description()
+            )
+        })
+        .collect();
+
+    // The format! string uses `\` line continuations (not `\n\`): each `\`
+    // at a source-line end strips the physical newline + leading whitespace,
+    // then the next source line starts with `\n  content` (newline + intended
+    // leading spaces as content). This produces leading-space-preserving output
+    // byte-identical to Swift's multiline string literal (which strips 12-space
+    // indentation from the closing `"""`).
+    format!(
+        "Modes (advisory session bundles):\n{}\
+         \n\
+         \nRecall variants (change the answer default on moot_memory_search):\
+         \n  Recall=Auto   \u{2014} answer:auto  (server decides when to synthesize)\
+         \n  Recall=Rows   \u{2014} answer:never (raw rows only, fastest)\
+         \n  Recall=Answer \u{2014} answer:always (always synthesize)\
+         \n  A per-call answer: arg always overrides the sticky variant.\
+         \n\
+         \nDecision guidance:\
+         \n  Filing session?    Use mode:\"Filing\"    \u{2014} keeps you in file+confirm flow.\
+         \n  Exploring topics?  Use mode:\"Lenses\"    \u{2014} nudges you toward cognition tools.\
+         \n  Browsing rows?     Use mode:\"Recall=Rows\"  \u{2014} raw recall, no synthesis.\
+         \n  Want synthesis?    Use mode:\"Recall=Answer\" \u{2014} every search returns a summary.\
+         \n  Managing archives? Use mode:\"Vault\"     \u{2014} vault tool surface.\
+         \n  Building KG?       Use mode:\"Curator\"   \u{2014} fact and connection tools.\
+         \n\
+         \nSticky state behavior:\
+         \n  \u{2014} Last mode declared wins for the session (per-call arg always pierces).\
+         \n  \u{2014} Bare mode name (\"Recall\") clears any prior variant for that mode.\
+         \n  \u{2014} Unknown mode or variant: accepted and hinted, not an error.\
+         \n  \u{2014} Sticky is process-lifetime for stdio; on HTTP the state is currently\
+         \n    shared across all clients in the same process (a per-client-id map with\
+         \n    TTL is a planned follow-up for the resident HTTP server).\
+         \n\
+         \nDeclare a mode on any call: mode:\"Recall=Auto\" (or any tool you are using).\
+         \nThe server echoes the active mode in the modes section of estate_status.",
+        roster_lines.join("\n")
+    )
+}
+
+/// Return the estate_status teachme guide, embedding the live modes section
+/// from `modes_teachme_guide()`.
+///
+/// Parity: the embedded modes block is byte-identical to Swift's
+/// `TeachmeGuides.modesTeachmeGuide` (computed property).
+pub fn estate_status_guide() -> String {
+    let modes_section = modes_teachme_guide();
+    format!(
+        "moot_estate_status \u{2014} get estate metadata and health summary\n\
+         \n\
+         Optional args:\n\
+           estateID (string) defaults to the default estate\n\
+           teachme  (bool)   true returns this guide without touching the estate\n\
+         \n\
+         Returns: estate name, drawer count, subject-debt counter\n\
+         (\"subjects: N/M (K missing)\"), KG fact count, wing list, plus the ARIA\n\
+         session protocol block.\n\
+         \n\
+         Subject debt \u{2014} STANDING BEHAVIOR: when K > 0, offer the user an\n\
+         interactive backfill, and only proceed with their explicit\n\
+         time-and-permission consent. The walk: moot_memory_list\n\
+         filter:missing_subject \u{2192} moot_memory_get per id \u{2192} moot_update_memory\n\
+         mutation=setSubject with a one-sentence AI-facing subject. Never\n\
+         backfill silently; the debt line is a reminder, not a license.\n\
+         \n\
+         Tips:\n\
+           \u{2014} Call moot_estate_status with teachme:true for a full orientation on first connect.\n\
+           \u{2014} Wing list helps you navigate to specific areas with moot_memory_search.\n\
+         \n\
+         {}",
+        modes_section
+    )
+}
+
+/// Return the static teachme guide for `tool_name`, or a generic fallback.
+/// Does not handle `moot_estate_status` — use `guide()` for that.
+fn guide_static(tool_name: &str) -> &'static str {
     match tool_name {
         // Tier 1 — Core memory
         "moot_file_memory" => GUIDE_FILE_MEMORY,
@@ -37,8 +149,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         // Tier 4 — Journal
         "moot_write_journal" => GUIDE_WRITE_JOURNAL,
         "moot_read_journal" => GUIDE_READ_JOURNAL,
-        // Tier 5 — Estate
-        "moot_estate_status" => GUIDE_ESTATE_STATUS,
+        // Tier 5 — Estate (moot_estate_status handled by estate_status_guide())
         "moot_estate_map" => GUIDE_ESTATE_MAP,
         "moot_estate_ping" => GUIDE_ESTATE_PING,
         // Monitoring control
@@ -568,28 +679,6 @@ Response: \"journal for <agent>: N entry(s)\\n  <timestamp> | <entry_preview>\""
 // ---------------------------------------------------------------------------
 // Tier 5 — Estate
 // ---------------------------------------------------------------------------
-
-const GUIDE_ESTATE_STATUS: &str = "\
-moot_estate_status — get estate metadata and health summary
-
-Optional args:
-  estateID (string) defaults to the default estate
-  teachme  (bool)   true returns this guide without touching the estate
-
-Returns: estate name, drawer count, subject-debt counter
-(\"subjects: N/M (K missing)\"), KG fact count, wing list, plus the ARIA
-session protocol block.
-
-Subject debt — STANDING BEHAVIOR: when K > 0, offer the user an
-interactive backfill, and only proceed with their explicit
-time-and-permission consent. The walk: moot_memory_list
-filter:missing_subject → moot_memory_get per id → moot_update_memory
-mutation=setSubject with a one-sentence AI-facing subject. Never
-backfill silently; the debt line is a reminder, not a license.
-
-Tips:
-  — Call moot_estate_status with teachme:true for a full orientation on first connect.
-  — Wing list helps you navigate to specific areas with moot_memory_search.";
 
 const GUIDE_ESTATE_MAP: &str = "\
 moot_estate_map — show memory taxonomy grouped by wing and room

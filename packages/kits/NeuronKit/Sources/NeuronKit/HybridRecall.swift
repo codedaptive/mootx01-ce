@@ -113,6 +113,38 @@ public func hybridRecall(
     scoredLane: ScoredLane? = nil
 ) async throws -> RecallStream {
     let start = Date().timeIntervalSince1970
+
+    // Resolve per-estate recall tuning with caller-explicit > provisioned > spec
+    // precedence. When the caller uses `.default` and the estate carries a
+    // provisioned "recall_tuning" manifest key, the manifest's four knobs
+    // (rrf_k, mmr_lambda, rrf_bm25_weight, rrf_vector_weight) override the
+    // spec constants. A caller who constructs a non-default RecallFrameTuning
+    // keeps their values unchanged — their explicit values win. pageSize has
+    // no manifest equivalent and always comes from the caller's tuning.
+    // The manifest read fails quiet (returns .default) if the key is absent or
+    // malformed, preserving byte-identical behavior for estates with no key.
+    let manifestTuning: RecallTuningManifest
+    if tuning == .default {
+        manifestTuning = (try? await glk.provisionedRecallTuning(for: handle)) ?? .default
+    } else {
+        // Caller supplied explicit values — skip the manifest read entirely.
+        manifestTuning = .default
+    }
+    // When the caller used .default AND the manifest differs from the spec,
+    // build a new RecallFrameTuning from the manifest's four knobs.
+    // pageSize is not a manifest concern and is always taken from the caller.
+    let resolvedTuning: RecallFrameTuning
+    if tuning == .default && manifestTuning != .default {
+        resolvedTuning = RecallFrameTuning(
+            bm25Weight: manifestTuning.rrfBm25Weight,
+            vectorWeight: manifestTuning.rrfVectorWeight,
+            rrfK: manifestTuning.rrfK,
+            mmrLambda: manifestTuning.mmrLambda,
+            pageSize: tuning.pageSize)
+    } else {
+        resolvedTuning = tuning
+    }
+
     let frameRows = try await glk.recall(handle, frame)
 
     // Union the two lanes. Scored hits lead in THEIR relevance order —
@@ -140,7 +172,7 @@ public func hybridRecall(
             frame: scoredLane.frame,
             mode: .unionBest,
             scoring: .raw,
-            limit: scoredLane.frame.limit ?? tuning.pageSize,
+            limit: scoredLane.frame.limit ?? resolvedTuning.pageSize,
             fallback: .allowDegraded,
             queryText: scoredLane.queryText,
             traceLimit: scoredLane.traceLimit,
@@ -176,21 +208,22 @@ public func hybridRecall(
     // adjacent-rank lexical gap stays constant, so any blended weight
     // degrades to recency-first exactly on large estates (the measured
     // trial-2 failure). rrfK, mmrLambda, and pageSize always come from the
-    // caller.
+    // resolved tuning (manifest-filled when the caller used .default, caller
+    // values when an explicit RecallFrameTuning was passed).
     let effectiveTuning: RecallFrameTuning
     if !cueTerms.isEmpty && scoredLeadCount == 0 {
         effectiveTuning = RecallFrameTuning(
             bm25Weight: 1.0,
             vectorWeight: 0.0,
-            rrfK: tuning.rrfK,
-            mmrLambda: tuning.mmrLambda,
-            pageSize: tuning.pageSize)
+            rrfK: resolvedTuning.rrfK,
+            mmrLambda: resolvedTuning.mmrLambda,
+            pageSize: resolvedTuning.pageSize)
     } else {
-        effectiveTuning = tuning
+        effectiveTuning = resolvedTuning
     }
 
     let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: effectiveTuning, cueTerms: cueTerms)
-    let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
+    let stream = RecallStream(rows: reranked, pageSize: resolvedTuning.pageSize)
 
     // Emit hybrid-recall telemetry at the operation boundary. `start` is
     // read from `Date().timeIntervalSince1970` here at the verb boundary

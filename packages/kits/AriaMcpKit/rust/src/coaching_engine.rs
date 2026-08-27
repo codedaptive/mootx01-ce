@@ -7,12 +7,12 @@
 //! # Trigger table
 //!
 //! 1.  `long_query`          — moot_memory_search with query > 200 chars
-//! 2.  `no_results_search`   — moot_memory_search returns "found 0 memory(s)"
+//! 2.  `no_results_search`   — moot_memory_search returns "found 0 candidate memories"
 //! 3.  `filed_memory`        — moot_file_memory success — prompt to confirm
 //! 4.  `empty_estate_status` — moot_estate_status with "drawers: 0"
 //! 5.  `journal_empty`       — moot_read_journal returns "0 entry(s)"
-//! 6.  `connection_empty`    — moot_connection_search returns ": 0"
-//! 7.  `facts_empty`         — moot_fact_search returns ": 0" and no query
+//! 6.  `connection_empty`    — moot_connection_search returns "found 0 outgoing"
+//! 7.  `facts_empty`         — moot_fact_search returns "found 0 facts" and no query
 //! 8.  `many_facts`          — moot_fact_timeline returns ≥20 facts
 //! 9.  `search_after_empty`  — moot_memory_search after estate_status with
 //!                             zero drawers (detected from result pattern)
@@ -48,8 +48,10 @@ pub fn hint(
         }
     }
 
-    // Trigger 2: no results — moot_memory_search returned 0 hits
-    if name == "moot_memory_search" && result_text.contains("found 0 memory(s)") {
+    // Trigger 2: no results — moot_memory_search returned 0 hits.
+    // Matches the S1 empty-result header "found 0 candidate memories, one per line"
+    // (COMPOSER-02B format; §11.1 rule 7 in ARIA_MCP_INTERFACE.md).
+    if name == "moot_memory_search" && result_text.contains("found 0 candidate memories") {
         return Some(
             "no memories matched — try moot_estate_status to check estate \
              contents, or broaden the query",
@@ -80,17 +82,21 @@ pub fn hint(
         );
     }
 
-    // Trigger 6: no outgoing connections — moot_connection_search returned 0
-    if name == "moot_connection_search" && result_text.contains(": 0") {
+    // Trigger 6: no outgoing connections — moot_connection_search returned 0.
+    // Matches the S5 header "found 0 outgoing connections, one per line"
+    // (COMPOSER-02B format; §11.8 in ARIA_MCP_INTERFACE.md).
+    if name == "moot_connection_search" && result_text.starts_with("found 0 outgoing") {
         return Some(
             "no outgoing connections found — use moot_link_memories to \
              create typed relationships between memories",
         );
     }
 
-    // Trigger 7: empty fact store — moot_fact_search with no query returned 0
+    // Trigger 7: empty fact store — moot_fact_search with no query returned 0.
+    // Matches the S4 header "found 0 facts, one per line"
+    // (COMPOSER-02B format; §11.7 in ARIA_MCP_INTERFACE.md).
     if name == "moot_fact_search"
-        && result_text.starts_with("facts: 0")
+        && result_text.starts_with("found 0 facts")
         && !args.contains_key("query")
     {
         return Some(
@@ -112,8 +118,10 @@ pub fn hint(
         }
     }
 
-    // Trigger 9: connection map empty — moot_connection_map returned 0
-    if name == "moot_connection_map" && result_text.contains(": 0") {
+    // Trigger 9: connection map empty — moot_connection_map returned 0.
+    // Matches the S5 header "found 0 incoming connections, one per line"
+    // (COMPOSER-02B format; §11.8 in ARIA_MCP_INTERFACE.md).
+    if name == "moot_connection_map" && result_text.starts_with("found 0 incoming") {
         return Some(
             "no incoming connections found — use moot_link_memories to \
              build the association graph",

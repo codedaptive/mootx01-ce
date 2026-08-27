@@ -57,13 +57,13 @@ use vault_kit::json_import_bridge::JsonImportBridge;
 use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
-    clamp_limit, decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
-    require_string, text_result, text_result_blocks, wall_now,
+    bench_clock_now, clamp_limit, decode_filter_chain, error_result, optional_bool,
+    optional_integer, optional_string, require_string, text_result, text_result_blocks,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
-use crate::session_protocol::ARIA_SESSION_PROTOCOL;
+use crate::session_protocol::{ARIA_SESSION_PROTOCOL, modes_status_section};
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 
 // ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ pub fn dispatch(
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
         "moot_memory_list" => run_memory_list(args, registry),
-        "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger),
+        "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger, ledger),
         "moot_update_memory" => run_update_memory(args, registry, ledger),
         "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger),
         "moot_erase_memory" => run_erase_memory(args, registry),
@@ -405,6 +405,7 @@ pub fn dispatch(
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
+        "moot_rebuild_status" => run_rebuild_status(args, registry),
         "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
         "moot_timing_report" => run_timing_report(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
@@ -537,7 +538,8 @@ fn run_file_memory(
         // past or more than 1 day in the future. An extreme back-date forces
         // the matrix temporal buckets to span a huge range, triggering a full
         // rebuild on every subsequent capture.
-        let now_ms = crate::dispatch::wall_now();
+        // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW when set; wall clock otherwise.
+        let now_ms = bench_clock_now();
         let ten_years_ms: i64 = 10 * 365 * 86_400 * 1_000;
         let one_day_ms: i64 = 86_400 * 1_000;
         if ms < now_ms - ten_years_ms || ms > now_ms + one_day_ms {
@@ -556,7 +558,8 @@ fn run_file_memory(
     let impatient = optional_bool(args, "impatient")?.unwrap_or(false);
     let mode = if impatient { WriteMode::Impatient } else { WriteMode::Regular };
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     // `capture_with_mode` is a write verb that mounts/feeds the encode queue, so
     // it takes `&mut self`; lock the coordinator mutably for the duration.
     let mut coord = estate.coord.lock().unwrap();
@@ -603,12 +606,13 @@ fn is_sensitivity_filter(f: &locus_kit::filter::Filter) -> bool {
 
 /// Search memories in the estate using hybrid BM25+vector scored recall.
 ///
-/// Requires `query`. Optional `scoring` (raw/rrf/matrixAware, default
-/// "matrixAware"; an unknown non-empty value returns invalidParams),
-/// `limit` (default 20), and `ordering` (see below).
-/// Decodes the scoring argument and routes through `recall_scored` with
-/// mode=unionBest, matching Swift `runMemorySearch` which also uses
-/// unionBest+matrixAware defaults.
+/// Requires `query`. Optional `door` (front-door family adjective; overrides
+/// `scoring`), `scoring` (raw/rrf/matrixAware/discriminative; an unknown
+/// non-empty value returns invalidParams), `limit` (default 20), and `ordering`
+/// (see below). Scoring precedence: explicit door > explicit scoring > A1
+/// per-corpus DoorManifest (provisioned by the quality optimizer) > MatrixAware.
+/// Decodes the door/scoring arguments and routes through `recall_scored` with
+/// mode=unionBest, matching Swift `runMemorySearch`.
 ///
 /// # ordering argument
 ///
@@ -674,14 +678,13 @@ pub fn structured_text_result(
     })
 }
 
-/// Build the structured row for a drawer the text path renders as a dense
-/// row. The subject slot mirrors `dense_row::render`'s priority exactly
-/// (redaction marker → stored subject → absence marker), and the SAME
-/// provenance redaction extends to the content field: a restricted/secret
-/// row's body never enters the structured block — both fields carry the
-/// marker the text shows. Content values in hand at the recipe call sites
-/// (`PreciseMatch.content`) are PRE-redaction, so they must pass through
-/// this switch, never straight into a row. Mirrors Swift
+/// Build the structured row for a drawer. The subject slot applies the same
+/// redaction priority as `result_composer::candidate_from_drawer`:
+/// restricted/secret sensitivity → marker → stored subject → absence marker.
+/// The SAME provenance redaction extends to the content field: restricted/secret
+/// rows never expose body content in the structured block. Content values at the
+/// call site (`PreciseMatch.content`) are PRE-redaction; they must pass through
+/// this switch, never directly into a row. Mirrors Swift
 /// `ToolDispatcher.structuredRecallRow`.
 pub fn structured_recall_row(
     id: &str,
@@ -694,14 +697,14 @@ pub fn structured_recall_row(
         Sensitivity::Restricted => StructuredRow {
             id: id.to_string(),
             room,
-            content: content.map(|_| crate::dense_row::RESTRICTED_MARKER.to_string()),
-            subject: Some(crate::dense_row::RESTRICTED_MARKER.to_string()),
+            content: content.map(|_| crate::result_composer::RESTRICTED_MARKER.to_string()),
+            subject: Some(crate::result_composer::RESTRICTED_MARKER.to_string()),
         },
         Sensitivity::Secret => StructuredRow {
             id: id.to_string(),
             room,
-            content: content.map(|_| crate::dense_row::SECRET_MARKER.to_string()),
-            subject: Some(crate::dense_row::SECRET_MARKER.to_string()),
+            content: content.map(|_| crate::result_composer::SECRET_MARKER.to_string()),
+            subject: Some(crate::result_composer::SECRET_MARKER.to_string()),
         },
         _ => StructuredRow {
             id: id.to_string(),
@@ -711,23 +714,22 @@ pub fn structured_recall_row(
                 drawer
                     .subject
                     .clone()
-                    .unwrap_or_else(|| crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+                    .unwrap_or_else(|| crate::result_composer::NO_SUBJECT_MARKER.to_string()),
             ),
         },
     }
 }
 
-/// The structured twin of `dense_row::render_unhydrated` — id plus the
-/// absence marker only. Room and content stay absent even when values are in
-/// hand at the call site: an id the text renders opaquely (gated or
-/// unhydrated) must be exactly as opaque in the structured block. Mirrors
-/// Swift `ToolDispatcher.opaqueStructuredRow`.
+/// The structured twin of `render_s2_row_unhydrated` — id plus the absence
+/// marker only. Room and content stay absent: an id the text renders opaquely
+/// (gated or unhydrated) must be exactly as opaque in the structured block.
+/// Mirrors Swift `ToolDispatcher.opaqueStructuredRow`.
 pub fn opaque_structured_row(id: &str) -> StructuredRow {
     StructuredRow {
         id: id.to_string(),
         room: None,
         content: None,
-        subject: Some(crate::dense_row::NO_SUBJECT_MARKER.to_string()),
+        subject: Some(crate::result_composer::NO_SUBJECT_MARKER.to_string()),
     }
 }
 
@@ -817,21 +819,80 @@ fn run_memory_search(
     };
     let query = query.as_str();
 
-    // Decode optional `scoring` argument. Absent/None keeps the documented
-    // default (matrixAware) to match Swift. An unknown NON-EMPTY string is a
-    // client error and fails CLOSED with invalidParams — silently coercing it
-    // to matrixAware would run a different scoring mode than the caller asked
-    // for and hide the typo. This mirrors the `ordering` decode below, which
-    // is already strict. Mirrors Swift runMemorySearch.
-    let scoring = match optional_string(args, "scoring")? {
-        None | Some("matrixAware") => GLKRecallScoring::MatrixAware,
-        Some("raw") => GLKRecallScoring::Raw,
-        Some("rrf") => GLKRecallScoring::Rrf,
-        Some(unknown) => {
-            return Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
-                format!("Unknown scoring: {unknown}. Valid: raw, rrf, matrixAware"),
-            ));
+    // Decode scoring via the front-door precedence chain:
+    //   explicit door arg > explicit scoring arg > provisioned estate default (A1) > matrixAware
+    //
+    // `door` is an adjective on the recall verb (ARIA grammar: one verb, adjectives constrain).
+    // Valid door values:
+    //   "guess"         — A1 per-corpus config (reads DoorManifest from the coordinator;
+    //                     falls back to MatrixAware when no config is provisioned).
+    //   <scoring raw>   — direct scoring override ("rrf", "matrixAware", "raw", "discriminative").
+    //   unknown         — fail CLOSED (invalidParams), including reserved "hedge"/"thorough"
+    //                     which are wired at the recipe layer in a future build.
+    //
+    // When door is absent and scoring is also absent, reads the A1 manifest from the
+    // coordinator — byte-identical to today's behaviour for un-provisioned estates
+    // (DoorManifest::default().scoring == MatrixAware).
+    //
+    // Mirrors Swift runMemorySearch door decode.
+    let scoring: GLKRecallScoring = match optional_string(args, "door")? {
+        Some("guess") => {
+            // A1 per-corpus static config: read the DoorManifest provisioned by the
+            // quality optimizer. Lock the coordinator briefly to read the manifest key,
+            // then release so recall_scored can re-acquire further down (lock is not
+            // held across recall — the pattern the anchor pivot above also follows).
+            let door_manifest = {
+                let coord = estate.coord.lock().unwrap();
+                coord.provisioned_door_config(&estate.handle)
+                    .unwrap_or_default()
+            };
+            door_manifest.scoring
+        }
+        Some(door_str) => {
+            // Attempt to interpret as a direct GLKRecallScoring rawValue.
+            // Unknown strings (including reserved "hedge"/"thorough") fail CLOSED.
+            match door_str {
+                "raw"            => GLKRecallScoring::Raw,
+                "rrf"            => GLKRecallScoring::Rrf,
+                "matrixAware"    => GLKRecallScoring::MatrixAware,
+                "discriminative" => GLKRecallScoring::Discriminative,
+                unknown => {
+                    return Err(JSONRPCError::new(
+                        JSONRPCErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Unknown door: {unknown}. Valid: guess, raw, rrf, matrixAware, discriminative"
+                        ),
+                    ));
+                }
+            }
+        }
+        None => {
+            // No door arg: try explicit scoring, then A1 manifest, then MatrixAware.
+            match optional_string(args, "scoring")? {
+                Some("raw")            => GLKRecallScoring::Raw,
+                Some("rrf")            => GLKRecallScoring::Rrf,
+                Some("matrixAware")    => GLKRecallScoring::MatrixAware,
+                // M3: discriminative = RRF + dense-lane saturation discount, no matrix steer.
+                Some("discriminative") => GLKRecallScoring::Discriminative,
+                Some(unknown) => {
+                    return Err(JSONRPCError::new(
+                        JSONRPCErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Unknown scoring: {unknown}. Valid: raw, rrf, matrixAware, discriminative"
+                        ),
+                    ));
+                }
+                None => {
+                    // Neither door nor scoring supplied: A1 per-corpus manifest.
+                    // Fails quiet on missing key → MatrixAware (pre-front-door default).
+                    let door_manifest = {
+                        let coord = estate.coord.lock().unwrap();
+                        coord.provisioned_door_config(&estate.handle)
+                            .unwrap_or_default()
+                    };
+                    door_manifest.scoring
+                }
+            }
         }
     };
 
@@ -877,7 +938,8 @@ fn run_memory_search(
     // call site this replaces) so the SAME instant gates both the out-of-band sensitivity grants
     // grant check below and `recall_scored` further down — one request, one
     // `now`. Mirrors Swift `runMemorySearch`'s identical hoist.
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     // sensitivity unlock: when a restricted/secret grant is live,
     // inject the grant-lifted ceiling explicitly. This is the seam
     // `BitmapEvaluator::insert_defaults` documents: conditional on absence
@@ -918,11 +980,40 @@ fn run_memory_search(
     let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
+    // optional `anomalous_filter` argument (§11.18 anomalous-flag recall
+    // prefilter). Maps to GLKRecallRequest.anomalous_filter:
+    //   absent or null → None (no filter; default, byte-identical)
+    //   true  → admit ONLY anomalous drawers (bit 26 set)
+    //   false → EXCLUDE anomalous drawers (bit 26 clear)
+    // Applied BEFORE scoring in the coordinator. Mirrors Swift runMemorySearch.
+    let anomalous_filter = optional_bool(args, "anomalous_filter")?;
+    // Optional per-call candidate-pool depth override. Absent or null → None
+    // (engine default formula min(max(limit × 4, 64), 256), byte-identical to
+    // today's behaviour). Present but not an integer → clear error from
+    // optional_integer. The GLK engine clamps to [64, 256]; out-of-range caller
+    // values are silently clamped rather than rejected at this boundary.
+    // Mirrors Swift runMemorySearch `frontier_k` decode.
+    let frontier_k = optional_integer(args, "frontier_k")?;
+
+    // PACKAGER mission: `answer` adjective — response shape selector.
+    // "never" (default) → byte-identical to today; "always" / "auto" → run the
+    // packager gate. Unknown values fail CLOSED (invalidParams) so a typo never
+    // silently falls back to "never". Mirrors Swift runMemorySearch answer decode.
+    let answer_mode: genius_locus_kit::PackagerAnswerMode =
+        match optional_string(args, "answer")? {
+            Some(v) => genius_locus_kit::PackagerAnswerMode::from_str(v)
+                .ok_or_else(|| JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("Unknown answer: {v}. Valid: never, always, auto"),
+                ))?,
+            None => genius_locus_kit::PackagerAnswerMode::Never,
+        };
+
     // B-10a: RecallOrigin::External causes the coordinator to write recall-trace
     // rows for the reward pipeline. The ARIA_MCP boundary is the ONLY call site
     // that passes External — internal callers (dreaming, lenses, recipes) pass
     // Internal at the constructor, enforced at compile time.
-    let request = GLKRecallRequest::new(
+    let mut request = GLKRecallRequest::new(
         frame,
         GLKRecallMode::UnionBest,
         scoring,
@@ -930,7 +1021,20 @@ fn run_memory_search(
         RecallFallbackPolicy::AllowDegraded,
         RecallOrigin::External, // B-10a: ARIA boundary is external origin
     )
-    .with_query_text(query.to_string());
+    .with_query_text(query.to_string())
+    // W2.5 Track R(a): door identity recorded on every reward-cycle trace
+    // row this recall writes. The coordinator derives the composition
+    // ("unionBest/<scoring>") since no recipe-level composition exists on
+    // this direct search path. Mirrors Swift runMemorySearch.
+    .with_door("memory_search");
+    // §11.18: thread the anomalous_filter through the request when provided.
+    if let Some(af) = anomalous_filter {
+        request = request.with_anomalous_filter(af);
+    }
+    // Thread frontier_k through when provided (additive; absent = engine default).
+    if let Some(fk) = frontier_k {
+        request = request.with_frontier_k(fk as usize);
+    }
 
     // `mut`: out-of-band sensitivity grants read-under-grant audit recording below needs a
     // mutable coordinator borrow (audit append is a coordinator-owned
@@ -952,8 +1056,14 @@ fn run_memory_search(
 
     // Record surfaced drawer ids in the session ledger so dereference verbs can
     // trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12.md §session-ledger).
+    // Use hit.id (always present) rather than hit.drawer.as_ref().map(|d| d.id) so
+    // unhydrated hits (drawer == None, rendered via render_unhydrated) are also
+    // tracked. A drawer can arrive unhydrated when the recall engine returns it
+    // but the hydration step cannot load the full record; the id is still valid
+    // and the reward path must fire if the caller later dereferences it.
+    // Mirrors Swift runMemorySearch (same fix, same comment).
     let surfaced_ids: Vec<String> = result.hits.iter()
-        .filter_map(|h| h.drawer.as_ref().map(|d| d.id.clone()))
+        .map(|h| h.id.clone())
         .collect();
     if !surfaced_ids.is_empty() {
         ledger.record_surfaced(&surfaced_ids, now);
@@ -997,13 +1107,90 @@ fn run_memory_search(
     // "high — clear top result" is never reported on a lexical-only ranking.
     let dense_lane_dark = result.dense_lane_status.is_some();
 
-    // Dense-row reply (PR-03): UUID · subject · fdc · qid · event_time per
-    // hit — the address plus the assertion, no content hauling. Redaction
-    // (provenance sensitivity restricted/secret) replaces the subject field
-    // inside dense_row::render — the body's access control must not be
-    // bypassable through its content-derived summary. The full text is one
-    // hop away via moot_memory_get depth:full. Mirrors Swift runMemorySearch.
-    let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
+    // PACKAGER mission: run the results packager for non-never modes.
+    //
+    // The Rust port has no GroundedSynthesis (Swift-only seam), so
+    // composed_answer is always None here. The packager runs the gate logic
+    // (m1/m2/m3/m4 signals, cliff cutoff, response level) against the
+    // recall result; the answer block will carry an empty answer text. This
+    // is the conformance twin for the gate algorithms — the rendered answer
+    // text is the only asymmetry between the Swift and Rust paths.
+    //
+    // answer:never fast path → all hits unchanged, byte-identical. Mirrors
+    // Swift ToolDispatch answerMode decode and packager call.
+    let tuning = {
+        let packager_thresholds = coord
+            .provisioned_recall_tuning(&estate.handle)
+            .unwrap_or_default()
+            .packager_thresholds();
+        packager_thresholds
+    };
+    let packaged = genius_locus_kit::GLKResultsPackager::new().package(
+        &result,
+        answer_mode,
+        None, // no Rust GroundedSynthesis; answer block text is empty for always/auto
+        tuning,
+    );
+    // For the never fast path the rows list equals all hits (byte-identical).
+    // For non-never the packager may have applied cliff cutoff; use packaged rows.
+    let shown_hits: &[genius_locus_kit::RecallHit] = match packaged.level {
+        genius_locus_kit::GLKResponseLevel::L0AnswerOnly => &[],
+        _ => &packaged.rows,
+    };
+
+    // S2-row reply (COMPOSER-02B §11.5): UUID · subject · firstSentence · SSC ·
+    // adornments · eventTime — the address plus the assertion, no content hauling.
+    // Redaction (provenance sensitivity restricted/secret) replaces the subject
+    // field via result_composer::candidate_from_drawer — the body's access
+    // control must not be bypassable through its content-derived summary. The
+    // full text is one hop away via moot_memory_get depth:full. Mirrors Swift runMemorySearch.
+    //
+    // Batch-read active adornments for the shown hits (ADORN-STORE-02 Part C).
+    // Zero-active-minters IS the suppression arm: no minters → no adornment
+    // lines, exactly matching the retired MOOT_SUPPRESS_ADORNMENT semantics.
+    // One call-scoped read per batch (GENIUSLOCUSKIT_SPEC §16.2).
+    let shown_drawer_ids_owned: Vec<String> = shown_hits.iter()
+        .filter_map(|h| h.drawer.as_ref().map(|d| d.id.clone()))
+        .collect();
+    let shown_drawer_id_refs: Vec<&str> = shown_drawer_ids_owned.iter().map(|s| s.as_str()).collect();
+    let search_adornment_map = coord
+        .estate_for(&estate.handle)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e)))?
+        .active_adornments(&shown_drawer_id_refs)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, e.to_string()))?;
+    let total_count = packaged.total_count;
+    // ARIA_MCP_SPEC 2.0.0 §11.2 S1 header: singular when exactly 1, plural otherwise.
+    let header = if total_count == 1 {
+        "found 1 candidate memory, one per line".to_string()
+    } else {
+        format!("found {} candidate memories, one per line", total_count)
+    };
+    let mut lines = vec![header];
+
+    // Prepend answer block for L0AnswerOnly and L1Full levels.
+    // The Rust port has no synthesis text, so the answer line is intentionally
+    // empty — the confidence/citations/signals lines still prove the gate ran.
+    if let Some(ref block) = packaged.answer_block {
+        if matches!(packaged.level, genius_locus_kit::GLKResponseLevel::L0AnswerOnly | genius_locus_kit::GLKResponseLevel::L1Full) {
+            if !block.answer.is_empty() {
+                lines.push(format!("answer: {}", block.answer));
+            }
+            lines.push(format!("confidence: {}", block.confidence_label));
+            let citation_line = block.citation_ids.iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !citation_line.is_empty() {
+                lines.push(format!("citations: {}", citation_line));
+            }
+            lines.push(format!(
+                "signals: m1={:.3} m2={:.3} m3={:.3} m4={}",
+                block.signals.m1, block.signals.m2, block.signals.m3, block.signals.m4
+            ));
+        }
+    }
+
     // Structured twin (MXE-SS): room is resolved in ONE batched node-name
     // read over the shown rows (the same resolution
     // `memory_get_full_record_lines` uses per drawer) — disclosed in the BRR
@@ -1012,7 +1199,7 @@ fn run_memory_search(
     // runMemorySearch.
     let shown_parent_ids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
-        result.hits.iter().take(50)
+        shown_hits.iter()
             .filter_map(|h| h.drawer.as_ref().map(|d| d.parent_node_id.clone()))
             .filter(|p| seen.insert(p.clone()))
             .collect()
@@ -1020,10 +1207,33 @@ fn run_memory_search(
     let search_node_names =
         coord.resolve_drawer_node_names(&estate.handle, &shown_parent_ids);
     let mut results: Vec<StructuredRow> = Vec::new();
-    for hit in result.hits.iter().take(50) {
+    for hit in shown_hits.iter() {
         match hit.drawer.as_ref() {
             Some(d) => {
-                lines.push(crate::dense_row::render(d));
+                // Score transparency (DECISION_SCORE_TRANSPARENT_ORDERING
+                // 2026-08-24): the final composite score travels with the row,
+                // 4 decimals, appended after the dense row so DenseRow::render
+                // and its fixtures are unchanged. final_score uses the Rust
+                // field name (Swift uses `final`; `final` is a keyword in Rust).
+                lines.push(format!(
+                    "{} · {:.4}",
+                    crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)),
+                    hit.score.final_score
+                ));
+                // Adornment short form (SPEC_ADORNMENT §4): appended as a separate
+                // line so the AI sees the pre-minted claim without hauling the full
+                // body. Absent when the adornments table has no active rows for this
+                // drawer (zero-active-minters is the suppression arm; no env seam).
+                // Multiple minters → texts joined with " || " (same as Swift port).
+                if let Some(adornments) = search_adornment_map.get(&d.id) {
+                    if !adornments.is_empty() {
+                        let text: String = adornments.iter()
+                            .map(|a| a.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" || ");
+                        lines.push(format!("adornment: {}", text));
+                    }
+                }
                 results.push(structured_recall_row(
                     &d.id,
                     search_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone()),
@@ -1032,7 +1242,7 @@ fn run_memory_search(
                 ));
             }
             None => {
-                lines.push(crate::dense_row::render_unhydrated(&hit.id));
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&hit.id));
                 results.push(opaque_structured_row(&hit.id));
             }
         }
@@ -1072,22 +1282,15 @@ fn run_memory_search(
         };
         lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
     }
-    // Sensitivity-gate advisory — conditioned on GRANT STATE ALONE.
-    // When no grant is live the gate is in effect, so the client is told
-    // the gate exists and which commands lift it. The message asserts
-    // NOTHING about what this estate holds: any condition that consulted
-    // estate contents would make advisory presence a disclosure channel
-    // for exactly the restricted/secret rows the gate protects, to a
-    // caller with no grant. Emitting on grant state alone discloses
-    // nothing — the caller is the party that did not unlock, so they
-    // already know it. Gated on `!sensitivity_ceiling_lifted`: under a live
-    // grant those rows are already included and no advisory applies.
-    // Mirrors Swift `runMemorySearch`.
-    if !sensitivity_ceiling_lifted {
+    // Non-determinate tie disclosure (DECISION_SCORE_TRANSPARENT_ORDERING
+    // ruling 1): emitted when the windowed 4N window was exhausted without
+    // finding a score break. The system returned only the determinate prefix
+    // above the tied group; the AI should refine the query for specificity.
+    // Mirrors Swift ToolDispatch.runMemorySearch.
+    if result.degraded_stages.iter().any(|s| s == "tie.nonDeterminate") {
         lines.push(
-            "sensitivity_advisory: a sensitivity tier gate is in effect — \
-             run `mootx01 unlock private` to include restricted memories, \
-             `mootx01 unlock secret` for secret memories.".to_string()
+            "note: additional results share this score on a non-deterministic tie; \
+             refine the query".to_string()
         );
     }
     Ok(structured_text_result(&lines.join("\n"), &results))
@@ -1130,6 +1333,7 @@ fn run_memory_get(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     sensitivity_ledger: &SensitivityGrantLedger,
+    ledger: &SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     // Hydration depth (PR-03): one verb, three tiers — subject (dense row
@@ -1182,7 +1386,8 @@ fn run_memory_get(
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
     })?;
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     // sensitivity unlock: same grant-ceiling injection as
     // run_memory_search — see that function's comment. moot_memory_get
     // deliberately uses the SAME containment gate moot_memory_search does,
@@ -1228,10 +1433,34 @@ fn run_memory_get(
         ));
     }
 
+    // Batch-read active adornments for the admissible rows (ADORN-STORE-02 Part C).
+    // Zero-active-minters IS the suppression arm: no minters → no adornment
+    // lines, exactly matching the retired MOOT_SUPPRESS_ADORNMENT semantics.
+    // One call-scoped read per batch (GENIUSLOCUSKIT_SPEC §16.2).
+    let get_drawer_ids_owned: Vec<String> = row_ids.iter()
+        .filter(|id| admissible_by_id.contains_key(*id))
+        .cloned()
+        .collect();
+    let get_drawer_id_refs: Vec<&str> = get_drawer_ids_owned.iter().map(|s| s.as_str()).collect();
+    let get_adornment_map = coord
+        .estate_for(&estate.handle)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e)))?
+        .active_adornments(&get_drawer_id_refs)
+        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, e.to_string()))?;
     // Batch / shallow-depth rendering (PR-03). depth:full + single id falls
     // through to the original full record below.
     if !single_id_mode || depth != "full" {
         let mut lines: Vec<String> = Vec::new();
+        // Collect found IDs now (while admissible_by_id is available) so we
+        // can call note_usage after coord is dropped. B-10a: memory_get is a
+        // dereference verb and must fire the reward path for every successfully
+        // returned drawer. note_usage acquires estate.coord, so coord must be
+        // released first to avoid deadlock — same pattern as run_update_memory
+        // and other dereference verbs. Mirrors Swift runMemoryGet.
+        let found_ids: Vec<String> = row_ids.iter()
+            .filter(|id| admissible_by_id.contains_key(*id))
+            .cloned()
+            .collect();
         // Structured twin (MXE-SS): one batched node-name read for room over
         // the admissible rows. Not-found ids are omitted from the structured
         // block — the text's "not found:" line is the signal, and the row
@@ -1267,14 +1496,38 @@ fn run_memory_get(
             let room = get_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone());
             match depth.as_str() {
                 "subject" => {
-                    lines.push(crate::dense_row::render(d));
+                    lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
+                    // Adornment short form after the dense row (SPEC_ADORNMENT §4).
+                    // Absent when the adornments table has no active rows for this
+                    // drawer (zero-active-minters is the suppression arm).
+                    if let Some(adornments) = get_adornment_map.get(&d.id) {
+                        if !adornments.is_empty() {
+                            let text: String = adornments.iter()
+                                .map(|a| a.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            lines.push(format!("adornment: {}", text));
+                        }
+                    }
                     // Content stays ABSENT at the travel tier — the text
                     // carries no body here, and the structured block must
                     // not defeat the depth knob's token economy.
                     results.push(structured_recall_row(&d.id, room, None, d));
                 }
                 "distilled" => {
-                    lines.push(crate::dense_row::render(d));
+                    lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
+                    // Adornment short form after the dense row (SPEC_ADORNMENT §4).
+                    // Precedes the distilled text so the AI sees the claim first.
+                    // Absent when no active minters have produced adornment for this drawer.
+                    if let Some(adornments) = get_adornment_map.get(&d.id) {
+                        if !adornments.is_empty() {
+                            let text: String = adornments.iter()
+                                .map(|a| a.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" || ");
+                            lines.push(format!("adornment: {}", text));
+                        }
+                    }
                     match d.distilled.as_deref() {
                         Some(text) if !text.is_empty() => {
                             lines.push(text.to_string());
@@ -1314,7 +1567,15 @@ fn run_memory_get(
         if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
             lines.pop();
         }
-        return Ok(structured_text_result(&lines.join("\n"), &results));
+        let batch_result = structured_text_result(&lines.join("\n"), &results);
+        // B-10a: drop coord before note_usage — note_usage acquires
+        // estate.coord and would deadlock if coord is still held here.
+        // Build the result value first, then release, then mark usage.
+        drop(coord);
+        for id in &found_ids {
+            note_usage(id, &estate, ledger);
+        }
+        return Ok(batch_result);
     }
 
     let drawer = admissible_by_id.get(row_id).cloned().expect("guarded above");
@@ -1340,21 +1601,6 @@ fn run_memory_get(
 
     let mut lines = memory_get_full_record_lines(&mut coord, &estate.handle, &drawer)?;
 
-    // Sensitivity-gate advisory — same rule as run_memory_search: grant
-    // state alone, never estate contents. It matters more here than in
-    // search, because this reply follows a SUCCESSFUL fetch of a visible
-    // row; a contents-dependent advisory would attach an estate-wide
-    // existence signal to that reply, which is precisely what this
-    // function's containment contract (see its doc comment: gated rows
-    // must be indistinguishable from absent ones) forbids.
-    // Mirrors Swift `ToolDispatcher.runMemoryGet`.
-    if !sensitivity_ceiling_lifted {
-        lines.push(
-            "sensitivity_advisory: a sensitivity tier gate is in effect on this estate — \
-             run `mootx01 unlock private` to include restricted memories, \
-             `mootx01 unlock secret` for secret memories.".to_string()
-        );
-    }
     // Structured twin (MXE-SS) of the single-id full record. The node tree
     // is consulted a second time here (memory_get_full_record_lines resolves
     // internally but returns rendered lines); one extra by-id lookup is
@@ -1370,7 +1616,13 @@ fn run_memory_get(
         content: Some(drawer.content.clone()),
         subject: drawer.subject.clone(),
     };
-    Ok(structured_text_result(&lines.join("\n"), &[row]))
+    let single_result = structured_text_result(&lines.join("\n"), &[row]);
+    // B-10a: memory_get is a dereference verb. Drop coord before note_usage so
+    // note_usage can acquire estate.coord without deadlock — same pattern as the
+    // batch path above and the mutation verbs (run_update_memory, etc.).
+    drop(coord);
+    note_usage(row_id, &estate, ledger);
+    Ok(single_result)
 }
 
 /// The full-record block for one drawer — the depth:full tier and the
@@ -1458,7 +1710,8 @@ fn note_usage(
     ledger: &SurfacedRecallLedger,
 ) {
     if let Some(entry) = ledger.get(id) {
-        let now = wall_now();
+        // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
         // Retention window: 30 days. `surfaced_at_secs` and `now` are epoch-ms
         // (epoch-millisecond instants; the `_secs` suffix is legacy naming), so the window is in ms.
         let since_ms = entry.surfaced_at_secs - 30 * 24 * 60 * 60 * 1000;
@@ -1593,7 +1846,8 @@ fn run_withdraw_memory(
     // Note usage: if this drawer was surfaced by moot_memory_search, mark its
     // recall-trace rows used so the reward sweep assigns reward 1.0.
     note_usage(id, &estate, ledger);
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
     match coord.withdraw(&estate.handle, id, reason, now) {
         Ok(()) => Ok(text_result(&format!("withdrew memory {id}"))),
@@ -1629,7 +1883,8 @@ fn run_erase_memory(
     let coord = estate.coord.lock().unwrap();
     // Wall-clock `now` enters at the ARIA boundary; the deferred-seal expunge
     // (§B-2a) threads it so the success-audit timestamp is deterministic downstream.
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     match coord.expunge(&estate.handle, id, reason, confirmed, now) {
         // Honest reporting (SPEC B-8b, MXE-FA): a caller acting on this
         // sentence is making a privacy decision on it. When the audit gate
@@ -1745,7 +2000,8 @@ fn run_link_memories(
         ));
     }
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to resolve wing+room for source and target.
@@ -1904,7 +2160,8 @@ fn run_review_tunnel(
     // Review timestamps are wall-clock: this tool is a live I/O surface
     // (no `now` argument), and the deterministic engines receive the
     // instant from here, the I/O boundary.
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
     let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
@@ -1992,7 +2249,8 @@ fn run_connection_search(
     let estate = registry.resolve_direct(args)?;
     let from_id = require_string(args, "from_id")?;
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to find the source drawer's wing.
@@ -2050,8 +2308,8 @@ fn run_connection_search(
         let cite = match t.target_drawer_id.as_deref() {
             Some(id) => by_id
                 .get(id)
-                .map(|d| crate::dense_row::render(d))
-                .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                .map(|d| crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)))
+                .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id)),
             None => format!("{}/{}", t.target_wing, t.target_room),
         };
         lines.push(format!("{}  [{}]  → {}", t.id, t.label, cite));
@@ -2070,7 +2328,8 @@ fn run_connection_map(
     let estate = registry.resolve_direct(args)?;
     let to_id = require_string(args, "to_id")?;
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
 
     // Recall all drawers to discover all wings in the estate.
@@ -2119,8 +2378,8 @@ fn run_connection_map(
         let cite = match t.source_drawer_id.as_deref() {
             Some(id) => by_id
                 .get(id)
-                .map(|d| crate::dense_row::render(d))
-                .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                .map(|d| crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)))
+                .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id)),
             None => format!("{}/{}", t.source_wing, t.source_room),
         };
         lines.push(format!("{}  [{}]  ← {}", t.id, t.label, cite));
@@ -2156,7 +2415,8 @@ fn run_file_fact(
         ..Default::default()
     };
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
     match coord.add_kg_fact_with_origin(
         &estate.handle, subject, predicate, object, source_id, &origin, now,
@@ -2305,7 +2565,8 @@ fn run_retire_fact(
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
     match coord.withdraw_kg_fact(&estate.handle, id, now) {
         Ok(()) => Ok(text_result(&format!("retired fact {id}"))),
@@ -2530,7 +2791,8 @@ fn run_write_journal(
     let entry = require_string(args, "entry")?;
     let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
 
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
     match coord.add_diary_entry(
         &estate.handle,
@@ -2777,8 +3039,41 @@ fn run_estate_status(
     if let Some(line) = update_advisory.and_then(|provider| provider()) {
         body.push_str(&format!("\nupdate_available: {line}"));
     }
+    // Composite condition surface (Bob ruling 2026-08-26): estate_status
+    // folds in the drain report and the rebuild status so the AI reads the
+    // estate's condition in ONE call; the narrow moot_drain_status /
+    // moot_rebuild_status tools stay the cheap machine-polling surfaces.
+    // Mirrors Swift runEstateStatus. Uses the guard already held since the
+    // top of this function — re-locking `estate.coord` here would self-
+    // deadlock (std::sync::Mutex is not reentrant).
+    {
+        match coord.drain_statuses(&estate.handle) {
+            Ok(drains) if drains.is_empty() => body.push_str("\ndrains: none"),
+            Ok(drains) => {
+                body.push_str(&format!("\ndrains: {}", drains.len()));
+                for d in &drains {
+                    body.push_str(&format!(
+                        "\n  {}: {} — pending: {}, in_flight: {}",
+                        d.name,
+                        if d.is_draining() { "draining" } else { "idle" },
+                        d.pending,
+                        d.in_flight
+                    ));
+                }
+            }
+            Err(_) => body.push_str("\ndrains: none"),
+        }
+        body.push_str(&format!(
+            "\nrebuild: {}",
+            if coord.derived_rebuild_active(&estate.handle) { "running" } else { "idle" }
+        ));
+    }
     body.push('\n');
     body.push_str(ARIA_SESSION_PROTOCOL);
+    // Append the modes status section — the five-mode roster with contracts.
+    // Rendered from the registry via modes_status_section() for byte-identity with
+    // Swift's SessionProtocol.modesStatusSection (single canonical renderer).
+    body.push_str(&modes_status_section());
     Ok(text_result(&body))
 }
 
@@ -2869,7 +3164,7 @@ fn run_memory_list(
         if missing_subject_only {
             lines.push(format!("  {} [{}]", d.id, room));
         } else {
-            lines.push(format!("  {}", crate::dense_row::render(d)));
+            lines.push(format!("  {}", crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d))));
         }
     }
     Ok(text_result(&lines.join("\n")))
@@ -3301,7 +3596,8 @@ fn run_reindex(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     // reindex now AUTO-CONTINUES (enqueue a pass → await its drain → re-collect)
     // to FULL coverage, which can take minutes on a large estate. Run it on a
     // detached worker so the HTTP handler returns immediately; the resident
@@ -3310,6 +3606,11 @@ fn run_reindex(
     // no repeated moot_reindex calls are needed, at any corpus size.)
     let bg_coord = std::sync::Arc::clone(&estate.coord);
     let bg_handle = estate.handle;
+    // moot_rebuild_status span: opened BEFORE the worker thread spawns so the
+    // status never reads idle in the scheduling gap between "reindex started"
+    // and the backfill actually running; closed by the thread on every exit
+    // path. Twin of Swift's reindexGuard + GLK span pairing.
+    bg_coord.lock().unwrap().derived_rebuild_span(&bg_handle, true);
     std::thread::Builder::new()
         .name("reindex-backfill".into())
         .spawn(move || {
@@ -3319,6 +3620,7 @@ fn run_reindex(
                 ),
                 Err(e) => eprintln!("reindex: background backfill failed: {e}"),
             }
+            bg_coord.lock().unwrap().derived_rebuild_span(&bg_handle, false);
         })
         .ok();
     Ok(text_result(
@@ -3344,6 +3646,25 @@ fn run_reindex(
 /// gain this name in the same mission (the distillation-lane
 /// precedent). Twin: Swift `ToolDispatcher.subjectBackfillLaneName`.
 pub const SUBJECT_BACKFILL_LANE_NAME: &str = "subject_backfill";
+
+/// `moot_rebuild_status` — the derived-state rebuild operation status (Bob
+/// ruling 2026-08-26: a rebuild is an OPERATION, never a drain lane — drains
+/// are queues). Reports `rebuild: running` while a derived-rebuild span is
+/// open for the estate (reindex backfill / basis retrain + re-embed, whoever
+/// triggered it). `moot_estate_status` composes this line; settle gates poll
+/// this tool directly. Twin of Swift `runRebuildStatus`.
+fn run_rebuild_status(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let coord = estate.coord.lock().unwrap();
+    let running = coord.derived_rebuild_active(&estate.handle);
+    Ok(text_result(&format!(
+        "rebuild: {}",
+        if running { "running" } else { "idle" }
+    )))
+}
 
 fn run_drain_status(
     args: &BTreeMap<String, JsonValue>,
@@ -3948,7 +4269,8 @@ fn run_palace_import(
     let estate = registry.resolve_direct(args)?;
     let palace_path = require_string(args, "palace_path")?;
     let palace_root = std::path::Path::new(&palace_path);
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     // mut: PalaceBridge holds &mut EstateCoordinator (same pattern as VaultBridge).
     let mut coord = estate.coord.lock().unwrap();
     let mut bridge = PalaceBridge::new(&mut coord);
@@ -4038,7 +4360,8 @@ fn run_json_import(
     let estate = registry.resolve_direct(args)?;
     let path = require_string(args, "path")?;
     let seed_path = std::path::Path::new(&path);
-    let now = wall_now();
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
 
     // Optional default wing for records that omit `wing`. An explicit
     // empty string is invalid rather than silently ignored.

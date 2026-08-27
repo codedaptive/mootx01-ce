@@ -30,13 +30,16 @@
 //!
 //! # Duplicate Detection
 //!
-//! Pass 1 — same normalized subject (lowercase + whitespace-collapse; NFC is a no-op
-//!           for the ASCII-range test vectors but is noted as the full spec).
+//! Pass 1 — same normalized subject (NFC + lowercase + whitespace-collapse; uses
+//!           unicode-normalization crate for full NFC spec compliance — F9 fix).
 //! Pass 2 — identical trimmed content.
 //! First match wins per drawer; groups sorted by group UUID string ASC.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+// unicode-normalization: NFC normalization for normalize_subject, matching Swift's
+// precomposedStringWithCanonicalMapping. Added for F9 parity (2026-08-24).
+use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
 // Fixed namespace (MUST NOT change — changing breaks Swift/Rust parity)
@@ -109,6 +112,13 @@ pub struct DrawerInput {
     pub filed_at: String,
     /// If present, the drawer is tombstoned and excluded from the session.
     pub tombstoned_at: Option<String>,
+    /// Origin label written at capture time.
+    ///
+    /// System-origin drawers (prefixed "system:") are implementation artifacts —
+    /// e.g. the "personal/capture" sentinel seeded by CommunityCaptureCoordinator
+    /// when the estate has no rooms. They must be excluded from review sessions,
+    /// actions, and duplicate detection, mirroring the Swift engine's filter (F11).
+    pub added_by: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +142,23 @@ pub fn generate_session(
     drawers: &[DrawerInput],
     now: &str,
 ) -> serde_json::Value {
-    // Filter to active (non-tombstoned) drawers.
-    let active: Vec<&DrawerInput> = drawers.iter().filter(|d| d.tombstoned_at.is_none()).collect();
+    // Filter to active drawers: non-tombstoned AND not system-origin.
+    //
+    // System-origin drawers (added_by prefixed "system:") are implementation
+    // artifacts — e.g. the "personal/capture" sentinel — that must not appear
+    // in review sessions, actions, or duplicate groups. Mirrors the Swift engine
+    // filter in CommunityReviewEngine.generateSession() (F11 fix).
+    let active: Vec<&DrawerInput> = drawers
+        .iter()
+        .filter(|d| {
+            d.tombstoned_at.is_none()
+                && !d
+                    .added_by
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("system:")
+        })
+        .collect();
 
     // Compute estate fingerprint from active drawers.
     let source_estate_state = estate_fingerprint(&active);
@@ -166,10 +191,16 @@ pub fn generate_session(
             // Item ID: SHA-256(namespace + "item\0sectionID\0drawerID\0idx")
             let item_id = derive_id(&["item", &section_id, &drawer.id, &idx.to_string()]);
             let subject = drawer_subject(drawer);
-            // Detail: content prefix 120 chars, trimmed.
-            let detail = drawer.content.trim_end();
-            let detail = if detail.len() > 120 { &detail[..120] } else { detail };
-            let detail = detail.trim();
+            // Detail: content prefix 120 CHARS (not bytes), trimmed.
+            //
+            // Swift: String(drawer.content.prefix(120)).trimmingCharacters(in: .whitespaces)
+            // Swift's .prefix(120) counts Unicode scalar values (chars), not bytes.
+            // For non-ASCII content (e.g. 65 CJK chars × 3 bytes = 195 bytes), the old
+            // byte-indexed &detail[..120] would take only 40 chars and panic on non-boundary
+            // offsets. chars().take(120) is the correct, panic-free equivalent.
+            // Trim uses is_swift_whitespace (excludes \n) to match Swift .whitespaces exactly.
+            let detail_chars: String = drawer.content.chars().take(120).collect();
+            let detail = trim_swift_whitespaces(&detail_chars);
             build_obj([
                 ("detail", serde_json::Value::String(detail.to_string())),
                 ("id", serde_json::Value::String(item_id)),
@@ -453,17 +484,29 @@ fn derive_id_from_joined(joined: &str) -> String {
 /// Extract a display subject from a DrawerInput.
 ///
 /// Uses subject field if non-empty; falls back to content prefix (60 chars, trimmed).
-/// Mirrors Swift CommunityReviewEngine.drawerSubject.
+/// Mirrors Swift CommunityReviewEngine.drawerSubject exactly:
+///   1. prefix(60) by CHARACTER (Swift String.prefix counts grapheme clusters; here we
+///      use chars().take(60) which counts Unicode scalar values — equivalent for all
+///      content that produces identical output to Swift's grapheme-cluster count,
+///      which is true for any content where scalars == grapheme clusters, i.e. all
+///      non-ZWJ-sequence / non-emoji-modifier content).
+///   2. THEN trimmingCharacters(in: .whitespaces) — trims space (U+0020) and tab
+///      (U+0009) only, matching Swift's CharacterSet.whitespaces (NOT newlines).
+///
+/// F9 fix: the previous implementation used trim_end() BEFORE slicing (wrong order)
+/// and used byte indexing &preview[..60] (panics on non-ASCII multibyte boundaries).
+/// Swift order: take 60 chars FIRST, then trim whitespace.
 fn drawer_subject(drawer: &DrawerInput) -> String {
     if let Some(ref sub) = drawer.subject {
         if !sub.is_empty() {
             return sub.clone();
         }
     }
-    // Fallback: first 60 chars of content, trimmed.
-    let preview = drawer.content.trim_end();
-    let preview = if preview.len() > 60 { &preview[..60] } else { preview };
-    let preview = preview.trim();
+    // Fallback: take first 60 Unicode scalar values (chars), matching Swift's
+    // String.prefix(60) on grapheme-cluster boundaries for non-combining content.
+    // Then trim Swift .whitespaces (space + tab only, NOT newlines or \r).
+    let preview: String = drawer.content.chars().take(60).collect();
+    let preview = trim_swift_whitespaces(&preview);
     if preview.is_empty() {
         drawer.id.clone()
     } else {
@@ -471,18 +514,67 @@ fn drawer_subject(drawer: &DrawerInput) -> String {
     }
 }
 
+/// Whether a char is in Swift's CharacterSet.whitespaces (used by normalize_subject).
+///
+/// Swift's .whitespaces includes: SPACE (U+0020), TAB (U+0009), and other Unicode
+/// category Zs characters (NO-BREAK SPACE U+00A0, EN QUAD U+2000–EM SPACE U+2003, etc.).
+/// It does NOT include newlines (\n, \r, \r\n), which are in .newlines and
+/// .whitespacesAndNewlines but NOT in .whitespaces.
+///
+/// F9 fix: the previous `split_whitespace()` was Rust's Unicode whitespace split,
+/// which INCLUDES newlines — diverging from Swift on newline-bearing subjects.
+/// This function matches Swift's .whitespaces set for the split/filter step.
+fn is_swift_whitespace(c: char) -> bool {
+    matches!(c,
+        // ASCII space and tab — the primary Swift .whitespaces members.
+        '\u{0009}' | '\u{0020}' |
+        // Unicode Zs category (space separators) — all in Swift's .whitespaces.
+        '\u{00A0}' | // NO-BREAK SPACE
+        '\u{1680}' | // OGHAM SPACE MARK
+        '\u{2000}' | // EN QUAD
+        '\u{2001}' | // EM QUAD
+        '\u{2002}' | // EN SPACE
+        '\u{2003}' | // EM SPACE
+        '\u{2004}' | // THREE-PER-EM SPACE
+        '\u{2005}' | // FOUR-PER-EM SPACE
+        '\u{2006}' | // SIX-PER-EM SPACE
+        '\u{2007}' | // FIGURE SPACE
+        '\u{2008}' | // PUNCTUATION SPACE
+        '\u{2009}' | // THIN SPACE
+        '\u{200A}' | // HAIR SPACE
+        '\u{202F}' | // NARROW NO-BREAK SPACE
+        '\u{205F}' | // MEDIUM MATHEMATICAL SPACE
+        '\u{3000}'   // IDEOGRAPHIC SPACE
+    )
+}
+
+/// Trim Swift .whitespaces (space and tab only, NOT newlines) from both ends.
+///
+/// Mirrors Swift's trimmingCharacters(in: .whitespaces).
+fn trim_swift_whitespaces(s: &str) -> &str {
+    s.trim_matches(is_swift_whitespace)
+}
+
 /// Normalize a subject string for duplicate-detection comparison.
 ///
-/// Applies: lowercase + whitespace-collapse. NFC is a no-op for the ASCII
-/// test vectors; a production implementation would use the unicode-normalization
-/// crate for full spec compliance.
+/// Applies: NFC + lowercase + whitespace-collapse matching Swift .whitespaces.
+///
+/// F9 fixes (divergences from Swift corrected):
+///   1. NFC normalization — Swift uses precomposedStringWithCanonicalMapping (NFC).
+///      A decomposed subject ("e" + U+0301) must normalize to the same key as the
+///      precomposed form ("é"). The `unicode-normalization` crate provides `.nfc()`.
+///   2. Whitespace set — `split_whitespace()` splits on newlines (Rust Unicode
+///      whitespace), but Swift's .whitespaces does NOT include newlines.
+///      Changed to split on is_swift_whitespace (Zs + tab + space, no newlines).
 ///
 /// Mirrors Swift CommunityReviewEngine.normalizeSubject.
 fn normalize_subject(subject: &str) -> String {
-    // Whitespace-split then rejoin — identical to Swift's whitespace-collapse.
-    subject
-        .to_lowercase()
-        .split_whitespace()
+    // Step 1: NFC normalize — matches Swift precomposedStringWithCanonicalMapping.
+    let nfc: String = subject.nfc().collect();
+    // Step 2: lowercase + split on Swift .whitespaces (NOT newlines) + filter empty + rejoin.
+    nfc.to_lowercase()
+        .split(is_swift_whitespace)
+        .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -523,6 +615,10 @@ pub fn drawers_from_vector(vector: &serde_json::Value) -> Vec<DrawerInput> {
             content: d["content"].as_str().expect("drawer.content").to_string(),
             filed_at: d["filedAt"].as_str().expect("drawer.filedAt").to_string(),
             tombstoned_at: d.get("tombstonedAt").and_then(|v| v.as_str()).map(String::from),
+            // addedBy is optional in the vector format — legacy vectors that predate the
+            // system-origin filter do not include this field; they implicitly have no
+            // system-origin drawers, so None is the correct default (F11 fix).
+            added_by: d.get("addedBy").and_then(|v| v.as_str()).map(String::from),
         })
         .collect()
 }
@@ -674,6 +770,7 @@ mod tests {
             content: String::new(),
             filed_at: String::new(),
             tombstoned_at: None,
+            added_by: None,
         };
         let refs: Vec<&DrawerInput> = vec![&d];
         let fp = estate_fingerprint(&refs);
@@ -705,6 +802,7 @@ mod tests {
             content: "Active drawer.".to_string(),
             filed_at: "2026-08-23T08:00:00.000Z".to_string(),
             tombstoned_at: None,
+            added_by: None,
         };
         let dead = DrawerInput {
             id: "d2000000-0000-0000-0000-000000000001".to_string(),
@@ -712,6 +810,7 @@ mod tests {
             content: "Tombstoned drawer.".to_string(),
             filed_at: "2026-08-23T08:00:00.000Z".to_string(),
             tombstoned_at: Some("2026-08-23T09:00:00.000Z".to_string()),
+            added_by: None,
         };
         let session = generate_session(
             ReviewKind::Morning,
@@ -737,6 +836,7 @@ mod tests {
             content: "Test content.".to_string(),
             filed_at: "2026-08-23T08:00:00.000Z".to_string(),
             tombstoned_at: None,
+            added_by: None,
         };
         let drawers = vec![d];
         let s1 = generate_session(ReviewKind::Morning, &drawers, "2026-08-23T09:00:00.000Z");
@@ -757,6 +857,7 @@ mod tests {
             content: "Test content.".to_string(),
             filed_at: "2026-08-23T08:00:00.000Z".to_string(),
             tombstoned_at: None,
+            added_by: None,
         };
         let drawers = vec![d];
         let s1 = generate_session(ReviewKind::Morning, &drawers, "2026-08-23T09:00:00.000Z");
@@ -784,5 +885,198 @@ mod tests {
         assert!(sections.is_empty(), "empty estate must produce no sections");
         let actions = session["actions"].as_array().unwrap();
         assert!(actions.is_empty(), "empty estate must produce no actions");
+    }
+
+    // -----------------------------------------------------------------------
+    // F9 parity tests — non-ASCII canonical vectors
+    // -----------------------------------------------------------------------
+
+    /// F9-P1: Decomposed Unicode subject parity.
+    ///
+    /// Two drawers with NFD ("écafe") and NFC ("écafe") subject forms.
+    /// After NFC normalization, both produce the same duplicate-detection key
+    /// and must be grouped as duplicates — byte-identical to Swift output.
+    ///
+    /// Tests fix: NFC normalization via unicode-normalization crate in normalize_subject.
+    #[test]
+    fn f9_p1_decomposed_unicode_subject_parity() {
+        assert_vector_parity("non-ascii-decomposed-unicode-subject.json");
+    }
+
+    /// F9-P2: CJK content 60-character boundary parity.
+    ///
+    /// One drawer with 65 CJK characters (U+7684 × 65), no subject.
+    /// drawer_subject falls back to content prefix(60 chars). The previous
+    /// &preview[..60] byte-indexed slice would panic on non-ASCII UTF-8
+    /// boundaries (U+7684 is 3 bytes; byte 60 falls inside a character).
+    /// chars().take(60) must be used instead — byte-identical to Swift output.
+    ///
+    /// Tests fix: chars().take(60) instead of &preview[..60] in drawer_subject.
+    #[test]
+    fn f9_p2_cjk_content_60_boundary_parity() {
+        assert_vector_parity("non-ascii-cjk-content-60-boundary.json");
+    }
+
+    /// F9-P3: Newline-bearing subject parity.
+    ///
+    /// Two drawers with subject "hello\nworld" (literal embedded newline).
+    /// Swift's .whitespaces does NOT include newlines, so the subject stays as
+    /// one token after normalization → both drawers share the key "hello\nworld"
+    /// and form a duplicate group.
+    ///
+    /// The previous split_whitespace() (Rust Unicode whitespace, includes \n)
+    /// would produce key "hello world" (space-joined) instead of "hello\nworld",
+    /// diverging from Swift and NOT grouping these drawers as duplicates.
+    ///
+    /// Tests fix: split(is_swift_whitespace) instead of split_whitespace() in normalize_subject.
+    #[test]
+    fn f9_p3_newline_bearing_subject_parity() {
+        assert_vector_parity("non-ascii-newline-subject.json");
+    }
+
+    // -----------------------------------------------------------------------
+    // F9 unit tests — sub-primitive correctness
+    // -----------------------------------------------------------------------
+
+    /// F9-U1: normalize_subject applies NFC before comparison.
+    ///
+    /// NFD "écafe" and NFC "\u{e9}cafe" must produce the same normalized key.
+    /// Without NFC, these would be different strings — breaking duplicate detection
+    /// for drawers with decomposed Unicode subjects.
+    #[test]
+    fn f9_u1_normalize_subject_nfc() {
+        // NFD: "e" + combining acute (U+0301) + "cafe"
+        let nfd = "e\u{0301}cafe";
+        // NFC: precomposed é (U+00E9) + "cafe"
+        let nfc = "\u{00e9}cafe";
+        // After NFC normalization, both should produce the same lowercase key.
+        let key_nfd = normalize_subject(nfd);
+        let key_nfc = normalize_subject(nfc);
+        assert_eq!(
+            key_nfd, key_nfc,
+            "NFD and NFC forms of the same subject must normalize to the same key; \
+             got '{}' vs '{}'", key_nfd, key_nfc
+        );
+        assert_eq!(key_nfd, "\u{00e9}cafe", "normalized key should be NFC lowercase");
+    }
+
+    /// F9-U2: normalize_subject does NOT split on newlines.
+    ///
+    /// Swift's .whitespaces (which normalize_subject mirrors) splits on space and tab
+    /// but NOT on newlines. "hello\nworld" is one token, not two. A Rust implementation
+    /// using split_whitespace() would split on \n and produce "hello world" instead.
+    #[test]
+    fn f9_u2_normalize_subject_no_newline_split() {
+        // Subject with embedded newline — Swift .whitespaces does NOT split on \n.
+        let key = normalize_subject("hello\nworld");
+        // Must stay as one token containing the newline, not be split into two tokens.
+        assert_eq!(
+            key, "hello\nworld",
+            "normalize_subject must NOT split on newlines (Swift .whitespaces excludes \\n); \
+             got '{:?}'", key
+        );
+    }
+
+    /// F9-U3: drawer_subject takes 60 chars (not 60 bytes) from content.
+    ///
+    /// For content consisting of 65 CJK characters (3 bytes each), a byte-indexed
+    /// &content[..60] would only capture 20 characters — and would panic because
+    /// byte 60 falls in the middle of the third character. chars().take(60)
+    /// correctly takes the first 60 Unicode scalar values.
+    #[test]
+    fn f9_u3_drawer_subject_cjk_60_chars_not_bytes() {
+        // 65 CJK characters (U+7684 "的"), each 3 bytes in UTF-8.
+        let cjk_content: String = std::iter::repeat('\u{7684}').take(65).collect();
+        assert_eq!(cjk_content.len(), 195, "sanity: 65 × 3 bytes = 195");
+
+        let drawer = DrawerInput {
+            id: "test-id".to_string(),
+            subject: None,
+            content: cjk_content,
+            filed_at: String::new(),
+            tombstoned_at: None,
+            added_by: None,
+        };
+
+        // drawer_subject should return the first 60 CHARACTERS, not 60 bytes.
+        let subject = drawer_subject(&drawer);
+        let expected: String = std::iter::repeat('\u{7684}').take(60).collect();
+        assert_eq!(
+            subject, expected,
+            "drawer_subject must take first 60 chars (not 60 bytes) from CJK content"
+        );
+        // The subject must be exactly 60 CJK chars (180 bytes), not 20 CJK chars (60 bytes).
+        assert_eq!(subject.chars().count(), 60, "expected 60 chars");
+        assert_eq!(subject.len(), 180, "expected 180 bytes (60 × 3)");
+    }
+
+    /// F9-U5: detail uses prefix(120 chars), not prefix(120 bytes).
+    ///
+    /// Swift: String(drawer.content.prefix(120)).trimmingCharacters(in: .whitespaces)
+    /// For 125 CJK characters (3 bytes each = 375 bytes), the old byte-indexed
+    /// &detail[..120] would take only 40 chars. chars().take(120) correctly takes 120.
+    ///
+    /// Tests the F9 fix applied to the detail field (same root cause as drawer_subject).
+    #[test]
+    fn f9_u5_detail_cjk_120_chars_not_bytes() {
+        // 125 CJK characters, each 3 bytes in UTF-8.
+        let cjk_content: String = std::iter::repeat('\u{7684}').take(125).collect();
+        assert_eq!(cjk_content.len(), 375, "sanity: 125 × 3 bytes = 375");
+
+        let drawer = DrawerInput {
+            id: "detail-test-id".to_string(),
+            subject: Some("explicit subject".to_string()), // non-empty so subject != detail
+            content: cjk_content,
+            filed_at: String::new(),
+            tombstoned_at: None,
+            added_by: None,
+        };
+
+        // Generate a session with this one drawer. The detail field in the
+        // generated session item must be prefix(120 chars), not prefix(120 bytes).
+        let now = "2026-08-24T09:00:00.000Z";
+        let session = generate_session(ReviewKind::Morning, &[drawer], now);
+        let sections = session["sections"].as_array().unwrap();
+        assert!(!sections.is_empty(), "session must have a section");
+        let items = sections[0]["items"].as_array().unwrap();
+        assert!(!items.is_empty(), "section must have an item");
+        let detail = items[0]["detail"].as_str().unwrap();
+        let expected: String = std::iter::repeat('\u{7684}').take(120).collect();
+        assert_eq!(
+            detail, expected,
+            "detail must be first 120 CHARS (not 40 chars from 120 bytes) for CJK content"
+        );
+        assert_eq!(detail.chars().count(), 120, "expected 120 chars in detail");
+    }
+
+    /// F9-U4: drawer_subject trims AFTER taking prefix (Swift order).
+    ///
+    /// Swift: String(content.prefix(60)).trimmingCharacters(in: .whitespaces)
+    /// The trim happens AFTER the prefix, not before. If a 60-char prefix ends
+    /// with trailing spaces, those are trimmed. If we trim FIRST then slice (old
+    /// buggy Rust order), we'd get a different (longer) result for content that
+    /// starts with spaces.
+    #[test]
+    fn f9_u4_drawer_subject_trim_after_prefix() {
+        // Content: 4 leading spaces + 60 chars of 'x' = 64 chars total.
+        // Swift prefix(60) = "    " + "x"×56. After trim = "x"×56.
+        // Old Rust (trim first, then slice): trim → "x"×60, slice to 60 → "x"×60. WRONG.
+        let content = format!("    {}", "x".repeat(60)); // 64 chars total
+        let drawer = DrawerInput {
+            id: "test-id".to_string(),
+            subject: None,
+            content,
+            filed_at: String::new(),
+            tombstoned_at: None,
+            added_by: None,
+        };
+
+        // Swift order: prefix(60) → "    " + "x"×56 → trim → "x"×56
+        let subject = drawer_subject(&drawer);
+        assert_eq!(
+            subject, "x".repeat(56),
+            "drawer_subject must apply trim AFTER prefix, not before; \
+             leading spaces in the prefix must be trimmed from the result"
+        );
     }
 }

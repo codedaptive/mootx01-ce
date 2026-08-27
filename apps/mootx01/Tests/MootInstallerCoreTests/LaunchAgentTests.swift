@@ -182,7 +182,7 @@ struct LaunchAgentTests {
 // The signed app-like daemon bundle contract: one Swift constant surface
 // (DaemonBundle) that the LaunchAgent plist, the pkg payload, the Makefile,
 // build-pkg.sh, and release.yml all spell identically — verified here so
-// generated and manual sources cannot diverge (KONG-4). Status honesty
+// generated and manual sources cannot diverge (KONG-4). Status accuracy
 // (P-c2-10): registration, PID, or an answering port is NEVER reported as a
 // running/ready server.
 
@@ -277,12 +277,12 @@ struct DaemonBundleContractTests {
     }
 }
 
-@Suite("Honest status vocabulary (MACD-2c2, P-c2-10)")
+@Suite("Observed status vocabulary (MACD-2c2, P-c2-10)")
 struct HonestStatusTests {
 
     @Test("an answering port alone is an unverified holder, never a running server")
     func portAloneNeverRunning() {
-        let line = LaunchAgent.honestServerStatus(
+        let line = LaunchAgent.observedServerStatus(
             registration: .none, port: .answering, providerReportedState: nil
         )
         #expect(!line.lowercased().contains("running"))
@@ -291,7 +291,7 @@ struct HonestStatusTests {
 
     @Test("registration alone is registered-not-started, never running")
     func registrationAloneNeverRunning() {
-        let line = LaunchAgent.honestServerStatus(
+        let line = LaunchAgent.observedServerStatus(
             registration: .registered, port: .unbound, providerReportedState: nil
         )
         #expect(!line.lowercased().contains("running"))
@@ -300,7 +300,7 @@ struct HonestStatusTests {
 
     @Test("registration plus an answering port is still not readiness")
     func registrationPlusPortNeverRunning() {
-        let line = LaunchAgent.honestServerStatus(
+        let line = LaunchAgent.observedServerStatus(
             registration: .registered, port: .answering, providerReportedState: nil
         )
         #expect(!line.lowercased().contains("running"))
@@ -308,13 +308,13 @@ struct HonestStatusTests {
 
     @Test("only the provider's OWN authenticated report carries its state, verbatim")
     func providerReportVerbatim() {
-        let line = LaunchAgent.honestServerStatus(
+        let line = LaunchAgent.observedServerStatus(
             registration: .registered, port: .answering, providerReportedState: "ready"
         )
         #expect(line.contains("ready"))
         // The provider's spelling is passed through, not re-derived — the
         // status surface owns no second copy of the arbiter vocabulary.
-        let conflicted = LaunchAgent.honestServerStatus(
+        let conflicted = LaunchAgent.observedServerStatus(
             registration: .none, port: .unbound, providerReportedState: "conflicted"
         )
         #expect(conflicted.contains("conflicted"))
@@ -322,7 +322,7 @@ struct HonestStatusTests {
 
     @Test("nothing observed reports not installed")
     func nothingObserved() {
-        let line = LaunchAgent.honestServerStatus(
+        let line = LaunchAgent.observedServerStatus(
             registration: .none, port: .unbound, providerReportedState: nil
         )
         #expect(line.contains("not installed"))

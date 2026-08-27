@@ -358,10 +358,14 @@ struct RecallFrameGatedScoringTests {
         #expect(!contentsB.contains("zeta quantum unrelated mmr decoy"),
             "restricted decoy must not appear in estate B unionBest results")
 
-        // Count must be invariant: both estates have 4 admissible drawers, limit=3,
-        // so 3 admissible items must be returned from each.
-        #expect(contentsA.count == 3,
-            "estate A must return 3 admissible drawers; got: \(contentsA)")
+        // Exact count (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1): the four
+        // admissible drawers tie on score, the tie group straddles the limit-3
+        // boundary, and honest expansion returns the WHOLE group — exactly the
+        // admissible pool, deterministically. An exact assertion also catches
+        // over-expansion regressions a floor check would let through.
+        // Count must also be invariant to the restricted decoy's presence.
+        #expect(contentsA.count == admissibleContents.count,
+            "estate A must return exactly the \(admissibleContents.count) admissible drawers; got: \(contentsA)")
         #expect(contentsA.count == contentsB.count,
             "count must be invariant to restricted decoy content; A=\(contentsA.count), B=\(contentsB.count)")
 

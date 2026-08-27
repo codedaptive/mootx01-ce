@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "description": "Score-transparent ordering cross-port golden pins (SCORE-ORDERING). Read by Swift ScoreOrderingTests.swift and Rust score_ordering_parity.rs. Verifies (score DESC, subject ASC) ordering contract across both ports. Two items with distinct relevance so score ordering is unambiguous; the higher-relevance item repeats query terms and appears first in both ports.",
+  "query": "score-order-cross-port alpha beta gamma",
+  "items": [
+    {
+      "content": "score-order-cross-port alpha beta gamma cross port ordering parity alpha beta gamma",
+      "subject": "high-relevance"
+    },
+    {
+      "content": "score-order-cross-port alpha unrelated filler material",
+      "subject": "low-relevance"
+    }
+  ],
+  "expected_subject_order": ["high-relevance", "low-relevance"]
+}

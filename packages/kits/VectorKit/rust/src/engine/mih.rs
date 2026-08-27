@@ -22,7 +22,7 @@
 //!      streams deterministic without relying on HashMap iteration order.
 //!   4. k-NN retention: retained = k codes minimising (dist, item_id)
 //!      lexicographically. Bounded max-heap evicts by (dist DESC, item_id DESC).
-//!   5. Result order: (dist ASC, item_id ASC).
+//!   5. Result order: (dist ASC, vec_hash ASC, item_id ASC) — SPEC 1.9.0.
 //!   6. Integer-only: distances are u32 via EngramLib. No floats.
 //!   7. m is pinned config, never auto-derived (§1.6).
 //!
@@ -130,18 +130,20 @@ impl SubstringTable {
 /// the root is the WORST retained element — evicted when a strictly better
 /// candidate arrives.
 ///
-/// §1.8 rule 4: among codes tied at the boundary distance, those with
-/// smaller keys are kept. "key" is the full VectorRecordKey, which orders
-/// by (item_id, vector_index, model_id, model_version). Two records sharing
-/// the same item_id but differing in vector_index or model_id are retained
-/// independently — neither collapses the other.
+/// §1.8 rule 4 (SPEC 1.9.0): among codes tied at the boundary distance,
+/// those with the smaller vec_hash (FNV-1a content hash — stable across
+/// estate provisionings, unlike item UUIDs) are kept; the full
+/// VectorRecordKey — (item_id, vector_index, model_id, model_version) —
+/// is the final backstop. Two records sharing the same item_id but
+/// differing in vector_index or model_id are retained independently —
+/// neither collapses the other.
 /// (secfix/punt-vector: MIH itemID collision fix)
 ///
-/// Eviction key: (dist DESC, key DESC).
+/// Eviction key: (dist DESC, vec_hash DESC, key DESC).
 #[derive(Debug)]
 struct BoundedMaxHeap {
     capacity: usize,
-    elements: Vec<(u32, VectorRecordKey)>,   // (dist, full key)
+    elements: Vec<(u32, u64, VectorRecordKey)>,   // (dist, vec_hash, full key)
 }
 
 impl BoundedMaxHeap {
@@ -158,11 +160,12 @@ impl BoundedMaxHeap {
     fn worst_dist(&self) -> u32 { self.elements[0].0 }
 
     /// Comparison: is element at index i "worse" (= higher priority in the
-    /// max-heap = larger (dist, key)) than the element at j?
+    /// max-heap = larger (dist, vec_hash, key)) than the element at j?
     fn is_worse(&self, i: usize, j: usize) -> bool {
-        let (da, ka) = &self.elements[i];
-        let (db, kb) = &self.elements[j];
+        let (da, ha, ka) = &self.elements[i];
+        let (db, hb, kb) = &self.elements[j];
         if da != db { return da > db; }
+        if ha != hb { return ha > hb; }
         ka > kb
     }
 
@@ -190,29 +193,32 @@ impl BoundedMaxHeap {
         }
     }
 
-    /// Offer (dist, key) to the heap.
+    /// Offer (dist, vec_hash, key) to the heap.
     ///
     /// If not full: always insert.
-    /// If full: replace the worst only if (dist, key) is strictly better
-    /// (smaller dist, or equal dist and smaller VectorRecordKey).
-    fn offer(&mut self, dist: u32, key: VectorRecordKey) {
+    /// If full: replace the worst only if the triple is strictly better —
+    /// lexicographically smaller by (dist, vec_hash, key).
+    fn offer(&mut self, dist: u32, vec_hash: u64, key: VectorRecordKey) {
         if self.elements.len() < self.capacity {
-            self.elements.push((dist, key));
+            self.elements.push((dist, vec_hash, key));
             let i = self.elements.len() - 1;
             self.sift_up(i);
         } else {
-            let (wd, wk) = self.elements[0].clone();
-            let better = dist < wd || (dist == wd && key < wk);
+            let (wd, wh, wk) = self.elements[0].clone();
+            let better = if dist != wd { dist < wd }
+                else if vec_hash != wh { vec_hash < wh }
+                else { key < wk };
             if !better { return; }
-            self.elements[0] = (dist, key);
+            self.elements[0] = (dist, vec_hash, key);
             self.sift_down(0);
         }
     }
 
-    /// Return results sorted (dist ASC, key ASC) — the oracle final order.
-    fn sorted_ascending(mut self) -> Vec<(u32, VectorRecordKey)> {
+    /// Return results sorted (dist ASC, vec_hash ASC, key ASC) — the
+    /// oracle final order (SPEC 1.9.0).
+    fn sorted_ascending(mut self) -> Vec<(u32, u64, VectorRecordKey)> {
         self.elements.sort_by(|a, b| {
-            a.0.cmp(&b.0).then(a.1.cmp(&b.1))
+            a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
         });
         self.elements
     }
@@ -575,10 +581,11 @@ impl MIHIndex {
             r += 1;
         }
 
-        // Build DenseHit from sorted heap output ((dist ASC, key ASC)).
-        // The key is stored directly in the heap element — no secondary lookup.
+        // Build DenseHit from sorted heap output ((dist ASC, vec_hash ASC,
+        // key ASC)). The key is stored directly in the heap element — no
+        // secondary lookup.
         let sorted = heap.sorted_ascending();
-        sorted.into_iter().map(|(dist, key)| {
+        sorted.into_iter().map(|(dist, _, key)| {
             DenseHit {
                 key,
                 raw_distance: dist as i32,
@@ -607,11 +614,11 @@ impl MIHIndex {
                 if !f.accepts(record_key) { continue; }
             }
             let dist = EngramLib::distance(probe, code_engram);
-            heap.offer(dist, record_key.clone());
+            heap.offer(dist, super::fnv1a64(&code_engram.wire_bytes()), record_key.clone());
         }
-        // Sort (dist ASC, key ASC) — oracle order (§0.3 extended to full
-        // VectorRecordKey for same-item_id disambiguation).
-        heap.sorted_ascending().into_iter().map(|(dist, key)| {
+        // Sort (dist ASC, vec_hash ASC, key ASC) — oracle order (SPEC 1.9.0,
+        // full VectorRecordKey for same-item_id disambiguation).
+        heap.sorted_ascending().into_iter().map(|(dist, _, key)| {
             DenseHit {
                 key,
                 raw_distance: dist as i32,
@@ -656,7 +663,11 @@ impl MIHIndex {
                     // I-7: ALL distances through EngramLib (SubstrateKernel).
                     if let Some(code) = self.codes.get(record_key) {
                         let dist = EngramLib::distance(probe, code);
-                        heap.offer(dist, record_key.clone());
+                        // vec_hash from the engram's wire bytes — the same 32
+                        // bytes the brute-force engine hashes from the payload,
+                        // so both engines produce identical tie orders
+                        // (conformance gate).
+                        heap.offer(dist, super::fnv1a64(&code.wire_bytes()), record_key.clone());
                     }
                 }
             }
@@ -821,8 +832,11 @@ mod tests {
         assert_eq!(hits[1].raw_distance, 1);
     }
 
+    /// MIH-2 (SPEC 1.9.0): the smaller vec_hash (content hash) wins the
+    /// boundary tie among distinct payloads, not the item_id. Twin of
+    /// Swift `mih2_tieBreakByVecHash`.
     #[test]
-    fn mih2_tie_break_by_item_id() {
+    fn mih2_tie_break_by_vec_hash() {
         let mut mih = MIHIndex::new(MIHBandCount::M4);
         mih.add(key("id-1"), engram_payload(0, 0, 0, 0)).unwrap();
         mih.add(key("id-2"), engram_payload(7, 0, 0, 0)).unwrap();
@@ -833,23 +847,51 @@ mod tests {
         let hits = mih.search(&zero_payload(), DenseMetric::HAMMING, 2, None).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].key.item_id, "id-1"); assert_eq!(hits[0].raw_distance, 0);
-        // id-4 < id-5 in string order — id-4 wins the second slot.
-        assert_eq!(hits[1].key.item_id, "id-4"); assert_eq!(hits[1].raw_distance, 1);
+        let h4 = super::super::fnv1a64(&Engram::new(0, 0, 0, 0x8000_0000_0000_0000).wire_bytes());
+        let h5 = super::super::fnv1a64(&Engram::new(1, 0, 0, 0).wire_bytes());
+        let winner = if h4 < h5 { "id-4" } else { "id-5" };
+        assert_eq!(hits[1].key.item_id, winner);
+        assert_eq!(hits[1].raw_distance, 1);
     }
 
+    /// SPEC 1.9.0 residual: byte-identical payloads fall to item_id.
+    #[test]
+    fn mih2b_identical_payloads_fall_to_item_id() {
+        let mut mih = MIHIndex::new(MIHBandCount::M4);
+        mih.add(key("zzz"), engram_payload(1, 0, 0, 0)).unwrap();
+        mih.add(key("aaa"), engram_payload(1, 0, 0, 0)).unwrap();
+        let hits = mih.search(&zero_payload(), DenseMetric::HAMMING, 1, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key.item_id, "aaa");
+    }
+
+    /// The two dist-4 survivors are the smallest by (vec_hash, item_id) —
+    /// SPEC 1.9.0. Twin of Swift `mih3_multiBandThreeWayTie_k3`.
     #[test]
     fn mih3_multiband_three_way_tie_k3() {
         let mut mih = MIHIndex::new(MIHBandCount::M4);
-        mih.add(key("id-10"), engram_payload(3, 3, 0, 0)).unwrap();
-        mih.add(key("id-11"), engram_payload(0, 0, 0, 0x0F)).unwrap();
-        mih.add(key("id-12"), engram_payload(0x0F, 0, 0, 0)).unwrap();
+        let candidates: [(&str, (u64, u64, u64, u64)); 3] = [
+            ("id-10", (3, 3, 0, 0)),
+            ("id-11", (0, 0, 0, 0x0F)),
+            ("id-12", (0x0F, 0, 0, 0)),
+        ];
+        for (id, (b0, b1, b2, b3)) in &candidates {
+            mih.add(key(id), engram_payload(*b0, *b1, *b2, *b3)).unwrap();
+        }
         mih.add(key("id-13"), engram_payload(1, 0, 0, 0)).unwrap();
 
         let hits = mih.search(&zero_payload(), DenseMetric::HAMMING, 3, None).unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].key.item_id, "id-13"); assert_eq!(hits[0].raw_distance, 1);
-        assert_eq!(hits[1].key.item_id, "id-10"); assert_eq!(hits[1].raw_distance, 4);
-        assert_eq!(hits[2].key.item_id, "id-11"); assert_eq!(hits[2].raw_distance, 4);
+        let mut ranked: Vec<(&str, u64)> = candidates.iter()
+            .map(|(id, (b0, b1, b2, b3))| {
+                let e = Engram::new(*b0, *b1, *b2, *b3);
+                (*id, super::super::fnv1a64(&e.wire_bytes()))
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
+        assert_eq!(hits[1].key.item_id, ranked[0].0); assert_eq!(hits[1].raw_distance, 4);
+        assert_eq!(hits[2].key.item_id, ranked[1].0); assert_eq!(hits[2].raw_distance, 4);
     }
 
     #[test]

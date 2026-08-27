@@ -19,8 +19,8 @@ the isolated product-boundary benchmark. Add `--quick` for a smoke test. See the
 
 The current published evidence and its claim-by-claim interpretation are in
 [`PERFORMANCE.md`](PERFORMANCE.md). Coverage of the cookbook math is recorded
-in [`COVERAGE.md`](COVERAGE.md). The 1.0.34 retest of the historical EE
-MemPalace/MOOT retrieval workload is documented in [`GAUNTLET.md`](GAUNTLET.md).
+in [`COVERAGE.md`](COVERAGE.md). The 1.0.34 retest of the adversarial retrieval
+gauntlet is documented in [`GAUNTLET.md`](GAUNTLET.md).
 
 ## Add a new language port
 
@@ -67,7 +67,7 @@ win.
 | `catalog-bench` | All 29 canonical cookbook/conformance primitives, after a mandatory conformance pass (schema `catalog-1`) |
 | `fdc-bench` | Deterministic classifier v4 encode and semantic stages across resolved, unresolved, long, and code inputs (schema `fdc-1`) |
 | `product-bench.py` | Resident `mootx01` loopback MCP calls against a disposable estate (schema `product-1`) |
-| EE `tools/mcp-benchmarker` | Seeded adversarial retrieval quality and latency through the shipped MCP product; current CE artifact is MOOT-only |
+| `benchmark/ (mcp-benchmarker)` | Seeded adversarial retrieval quality and latency through the shipped MCP product; current CE artifact is MOOT-only |
 
 Each run produces a structured JSON file with:
 

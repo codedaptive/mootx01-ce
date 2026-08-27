@@ -207,6 +207,7 @@ fn sample_drawer(label: &str) -> Drawer {
         subject: None,
         subject_pipeline_version: None,
         subject_at: None,
+        // Adornment rows live in the separate `adornments` table (ADORN-STORE-02 v17).
     }
 }
 

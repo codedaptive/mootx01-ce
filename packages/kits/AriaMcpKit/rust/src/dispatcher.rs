@@ -29,6 +29,9 @@
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
+use crate::mode_registry::ModeDeclaration;
+use crate::mode_session_state::ModeSessionState;
+use crate::periodic_coach;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::tool_list::build_tool_list;
@@ -120,6 +123,12 @@ pub struct Dispatcher {
     /// `observer_sink::StatsStore`. AriaMcpKit never imports observer_sink directly —
     /// the trait keeps the dependency boundary clean.
     pub(crate) monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
+    /// Per-session mode sticky state and coaching counters.
+    ///
+    /// One instance per `Dispatcher` (= one per `mootx01 serve` process for stdio,
+    /// or one per HTTP dispatcher for HTTP). Uses `Mutex` for interior mutability
+    /// so `Dispatcher::handle` stays `&self`. Mirrors Swift `ToolDispatcher.modeSessionState`.
+    mode_session_state: ModeSessionState,
 }
 
 impl Dispatcher {
@@ -156,7 +165,21 @@ impl Dispatcher {
             // `Dispatcher::new` call sites (tests included) stay unchanged.
             update_advisory: None,
             monitoring_control,
+            // Spec defaults: sticky_enabled = true, coaching_calls_x = 25.
+            // Overridden on the first tool call by provisioned_modes_config
+            // read from the default estate's manifest (apply_preferences).
+            mode_session_state: ModeSessionState::new(),
         }
+    }
+
+    /// Test seam: return the current sticky recall answer mode raw value.
+    ///
+    /// Exposes the session state's sticky Recall variant for dispatcher-level
+    /// gate tests (modes_tests.rs test I). Not for production use.
+    /// Note: not gated on #[cfg(test)] because integration tests in tests/
+    /// compile against the library without the test feature flag.
+    pub fn sticky_recall_answer_mode_for_test(&self) -> Option<&'static str> {
+        self.mode_session_state.sticky_recall_answer_mode()
     }
 
     /// Builder-style injection of the upstream-release advisory provider
@@ -266,9 +289,55 @@ impl Dispatcher {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
-        let args_map = arguments.as_object().cloned().unwrap_or_default();
+        let mut args_map = arguments.as_object().cloned().unwrap_or_default();
 
-        crate::dispatch::dispatch_tool_with_ledgers(
+        // Decode the optional `mode` argument (modes are fail-open by spec).
+        //
+        // ## Fail-open vs. fail-closed contrast
+        //
+        // The `mode` argument is ADVISORY: unknown mode names and unknown variants
+        // are accepted with a hint appended (fail-open). This is the OPPOSITE of the
+        // `answer` argument, which throws invalidParams on unknown values (fail-closed).
+        // The reason: an AI re-declaring a mode it discovered must never lose the call
+        // when the server has an older mode registry. Advisory modes survive version skew.
+        let mode_declaration: Option<ModeDeclaration> = args_map
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .map(ModeDeclaration::parse);
+
+        // Apply estate-provisioned modes preferences on the first call.
+        // Guards itself: apply_preferences is a no-op if configured_from_estate
+        // is already set (bitmap bit 1). Reading the manifest is a RAM-resident
+        // dictionary hit so the overhead is negligible.
+        if !self.mode_session_state.is_configured_from_estate() {
+            if let Ok(config) = self.registry.coord
+                .lock()
+                .expect("coordinator lock")
+                .provisioned_modes_config(&self.registry.default.handle)
+            {
+                self.mode_session_state.apply_preferences(
+                    config.sticky_enabled,
+                    config.coaching_calls,
+                );
+            }
+        }
+
+        // Record the call in session state (updates sticky, counters, bigrams).
+        self.mode_session_state.record_call(name, mode_declaration.as_ref());
+
+        // Recall variant: if sticky Recall=<variant> is set and `answer` is absent,
+        // inject the variant's answer mode into args_map so interface_tools sees it.
+        // Per-call `answer` arg always takes precedence (most specific wins).
+        if name == "moot_memory_search" && !args_map.contains_key("answer") {
+            if let Some(answer_raw) = self.mode_session_state.sticky_recall_answer_mode() {
+                args_map.insert(
+                    "answer".to_owned(),
+                    JsonValue::String(answer_raw.to_owned()),
+                );
+            }
+        }
+
+        let mut result = crate::dispatch::dispatch_tool_with_ledgers(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
             &self.build_serial, &self.version_skew,
             // Upstream-release advisory provider — evaluated by ping/status
@@ -277,6 +346,39 @@ impl Dispatcher {
             // thread the monitoring-control seam so the
             // interface-tools layer can reach it without importing observer_sink.
             self.monitoring_control.as_deref(),
-        )
+        )?;
+
+        // Append unknown-mode hint when the mode arg contained something unrecognized.
+        if let Some(ref decl) = mode_declaration {
+            if let Some(hint) = decl.unknown_hint() {
+                result = append_hint_to_result(result, &hint);
+            }
+        }
+
+        // Append periodic coaching block when the cadence fires.
+        if self.mode_session_state.should_coach() {
+            let snap = self.mode_session_state.snapshot();
+            let block = periodic_coach::render_block(&snap);
+            result = append_hint_to_result(result, &block);
+        }
+
+        Ok(result)
     }
+}
+
+/// Append a hint/coaching line to the first text block of a tool result.
+///
+/// The result is expected to have `content[0].text` (the standard text_result shape).
+/// If the shape doesn't match, the result is returned unchanged rather than erroring.
+///
+/// Mirrors Swift `ToolDispatcher.appendingHint(_:to:)`.
+fn append_hint_to_result(mut result: serde_json::Value, text: &str) -> serde_json::Value {
+    if let Some(content) = result.get_mut("content") {
+        if let Some(first) = content.as_array_mut().and_then(|arr| arr.first_mut()) {
+            if let Some(existing) = first.get_mut("text").and_then(|t| t.as_str()).map(|t| t.to_string()) {
+                first["text"] = serde_json::Value::String(format!("{}\nhint: {}", existing, text));
+            }
+        }
+    }
+    result
 }

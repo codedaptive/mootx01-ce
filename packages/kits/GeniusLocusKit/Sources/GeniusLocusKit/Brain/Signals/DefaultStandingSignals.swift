@@ -2,12 +2,14 @@ import Foundation
 import LocusKit
 import VectorKit
 
-/// Registration helper for the ten standing signals — architecture
+/// Registration helper for the thirteen standing signals — architecture
 /// spec §11.2 plus the contradiction scout (signal 10, the hunter's
-/// background half).
+/// background half), consolidation sweep (signal 11), the
+/// anomaly-flag sweep (signal 12, P3a), and the adornment-minting
+/// pass (signal 13, SPEC_ADORNMENT §4).
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// ten default signal specs against the addressed estate's scheduler
+/// thirteen default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -35,9 +37,19 @@ import VectorKit
 /// handles the
 /// dormant/active decision; the signal fires the daemon unconditionally
 /// and the gate short-circuits below the threshold.
+///
+/// Signal 12 (AnomalySweepSignal) was wired in P3a. Production callers
+/// supply an `anomalyCycle` closure that wraps
+/// `kit.anomalyFlagSweep(handle:now:)` and returns the count of
+/// drawers whose `isAnomalous` bit changed.
+///
+/// Signal 13 (AdornmentPassSignal) was wired in GENIUSLOCUSKIT_SPEC 2.0.0 § 16.
+/// Production callers supply an `adornmentCycle` closure that wraps
+/// `AdornmentPass.run(estate:now:)` with the estate handle and returns
+/// the count of (drawer, minter) pairs whose adornment was minted and stored.
 public extension GeniusLocusKit {
 
-    /// Names of the eleven standing signals, in the order they are
+    /// Names of the thirteen standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -54,6 +66,8 @@ public extension GeniusLocusKit {
             DistillationSignal.signalName,
             TrainingSignal.signalName,
             ConsolidationSignal.signalName,
+            AnomalySweepSignal.signalName,
+            AdornmentPassSignal.signalName,
         ]
     }
 
@@ -97,6 +111,19 @@ public extension GeniusLocusKit {
     ///     closure returns (proposed, borderline) counts. Defaults to a
     ///     no-op returning zeros — correct for test registration where no
     ///     live hunter is wired.
+    ///   - anomalyCycle: async closure forwarded to
+    ///     `AnomalySweepSignal.spec(anomalyCycle:)`. The caller wraps
+    ///     `kit.anomalyFlagSweep(handle:now:)` with the estate handle here;
+    ///     the sweep sets/clears bit 26 and the closure returns the count of
+    ///     changed drawers. Defaults to a no-op returning zero — correct for
+    ///     test registration where no live sweep is wired.
+    ///   - adornmentCycle: async closure forwarded to
+    ///     `AdornmentPassSignal.spec(adornmentCycle:)`. The caller wraps
+    ///     `AdornmentPass.run(estate:now:)` with the estate here;
+    ///     the pass mints adornments for (drawer, minter) pairs without an
+    ///     adornment row and returns the count of pairs adorned.
+    ///     Defaults to a no-op returning zero — correct for test registration
+    ///     where no live generator is available.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -114,6 +141,8 @@ public extension GeniusLocusKit {
         trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" },
         huntCycle: @escaping @Sendable (Date) async throws -> (proposed: Int, borderline: Int)
             = { _ in (0, 0) },
+        anomalyCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
+        adornmentCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
@@ -165,6 +194,20 @@ public extension GeniusLocusKit {
             // ConsolidationSignal.spec(consolidationCycle:) at daemon wiring
             // (the same pattern TemporalCausalitySignal documents above).
             ConsolidationSignal.defaultSpec(),
+            // AnomalySweepSignal (P3a, signal 12): hourly room-cohesion
+            // sweep that sets/clears bit 26 (isAnomalous) based on
+            // char-3-shingle Jaccard z-scores. The caller wraps
+            // kit.anomalyFlagSweep with the estate handle; the default
+            // no-op is appropriate for test registration where no live
+            // sweep is available.
+            AnomalySweepSignal.spec(anomalyCycle: anomalyCycle),
+            // AdornmentPassSignal (GENIUSLOCUSKIT_SPEC 2.0.0 § 16, signal 13):
+            // hourly dream-time minting pass that writes StoredAdornment rows for
+            // (drawer, active minter) pairs without an adornment row. The caller
+            // wraps AdornmentPass.run(estate:now:) with the estate;
+            // the default no-op is appropriate for test registration where
+            // no live generator is available.
+            AdornmentPassSignal.spec(adornmentCycle: adornmentCycle),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

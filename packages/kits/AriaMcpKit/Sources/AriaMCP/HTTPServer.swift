@@ -523,7 +523,7 @@ public struct HTTPServer: Sendable {
         self.firstPartyAuth = firstPartyAuth
     }
 
-    /// Bind the loopback listener and serve until the process is terminated.
+    /// Bind the loopback listener and serve until the task is cancelled.
     ///
     /// The blocking `accept()` loop runs on a dedicated thread so it never
     /// occupies the cooperative pool; each accepted connection is served on its
@@ -546,6 +546,13 @@ public struct HTTPServer: Sendable {
     /// ensures cooperative-executor threads remain available for off-pool read
     /// continuations, preventing the deadlock described in finding 105e5a96.
     ///
+    /// Cooperative shutdown: when the calling Task is cancelled, the accept thread
+    /// exits because `shutdown(2)` + `close(2)` cause the blocking `accept()` to
+    /// return an error, and the stop flag converts that nil into a loop break.
+    /// `run()` does NOT return until the accept thread has exited, so any work
+    /// that follows (e.g. `provider.shutdown()`) runs strictly after the last
+    /// `accept()` call. The fd is closed here before returning.
+    ///
     /// - Note: For the OS-assigned `port: 0` test path, call `bind()` directly;
     ///   `bind()` returns the bound port and `boundPort` reflects the assigned
     ///   port. `run()` has no return value.
@@ -559,9 +566,23 @@ public struct HTTPServer: Sendable {
         let gate = self.concurrencyGate
         let sseGate = self.sseConcurrencyGate
         let firstParty = self.firstPartyAuth
+        // Cooperative-shutdown state: set to true before closing the fd so the
+        // accept loop knows the nil return from acceptOne is intentional (not a
+        // transient EAGAIN) and should break rather than continue.
+        let stopFlag = Atomic<Bool>(false)
+        // Signals once after the accept thread's loop body exits (break or return).
+        // Waited on by run() before returning, so any code that follows (e.g.
+        // provider.shutdown()) runs strictly after the last accept() call.
+        let threadDone = DispatchSemaphore(value: 0)
         let thread = Thread {
+            defer { threadDone.signal() }
             while true {
-                guard let cfd = POSIXSocket.acceptOne(listenFD) else { continue }
+                guard let cfd = POSIXSocket.acceptOne(listenFD) else {
+                    // accept() returned an error. Two causes:
+                    //   1. Cooperative shutdown: stopFlag is set — break cleanly.
+                    //   2. Transient EAGAIN or similar: continue accepting.
+                    if stopFlag.load(ordering: .relaxed) { break } else { continue }
+                }
 
                 // Phase 1 (accept thread, NON-BLOCKING): check whether this
                 // connection fits within the gate's depth limit. tryEnqueue()
@@ -599,14 +620,108 @@ public struct HTTPServer: Sendable {
         }
         thread.name = "com.mootx01.aria-mcp.http.accept"
         thread.start()
-        // Resident: the blocking accept loop runs on its own thread above. Park
-        // this async function until the task is cancelled (process shutdown) with
-        // a cancellable sleep loop — NOT a leaked continuation, which the Swift
+        // Park this async function until the task is cancelled (process shutdown).
+        // A cancellable sleep loop avoids leaked continuations that the Swift
         // runtime flags as "continuation misuse." Task.sleep throws on cancel,
-        // which exits the loop cleanly.
+        // which exits the loop.
         while !Task.isCancelled {
             do { try await Task.sleep(nanoseconds: 3_600_000_000_000) }  // 1h, re-armed
             catch { break }
+        }
+        // Cooperative shutdown: set the stop flag, then interrupt the blocking
+        // accept() call via shutdown(SHUT_RDWR) + close. The accept thread sees
+        // a nil return from acceptOne, checks the flag, and exits its loop.
+        // shutdown() before close() is deliberate: it wakes a blocking accept()
+        // immediately without racing against the kernel's file-descriptor table.
+        stopFlag.store(true, ordering: .relaxed)
+        shutdown(listenFD, SHUT_RDWR)
+        close(listenFD)
+        // Wait for the accept thread to stop before returning. Bridging the
+        // blocking DispatchSemaphore.wait() through DispatchQueue.global() keeps
+        // the cooperative executor thread free during the wait.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                threadDone.wait()
+                cont.resume()
+            }
+        }
+    }
+
+    /// Enter the accept loop on an ALREADY-BOUND file descriptor.
+    ///
+    /// Used by `CommunityResidentMain` (Wave A1b): it calls `bind()` on a minimal
+    /// HTTPServer BEFORE `DaemonProvider.activate()` to reserve the port early, then
+    /// constructs the real dispatcher (with live estate/instance UUIDs from the
+    /// activation result) and calls `serve(withFD:)` on the real server. This avoids
+    /// a TOCTOU gap between descriptor publication and the server accepting connections.
+    ///
+    /// The fd must already be listening (`listen(2)` has been called). Cooperative
+    /// shutdown: when the calling Task is cancelled, the accept thread is signalled
+    /// via `shutdown(2)` + `close(2)`, the stop flag converts the resulting nil
+    /// return from `acceptOne` into a loop break, and `serve(withFD:)` does NOT
+    /// return until the accept thread has exited. The fd is closed before returning.
+    /// Any code that follows (e.g. `provider.shutdown()`) therefore runs strictly
+    /// after the last `accept()` call.
+    ///
+    /// - Parameter fd: A loopback TCP file descriptor already in the LISTEN state.
+    ///   Ownership is transferred to `serve(withFD:)` — the caller must NOT close
+    ///   it; `serve(withFD:)` closes it during shutdown.
+    public func serve(withFD fd: Int32) async {
+        let dispatcher = self.dispatcher
+        let maxBody = self.maxBodyBytes
+        let reader = self.topologyReader
+        let gate = self.concurrencyGate
+        let sseGate = self.sseConcurrencyGate
+        let firstParty = self.firstPartyAuth
+        // Cooperative-shutdown state: set to true before closing the fd so the
+        // accept loop knows the nil return from acceptOne is intentional (not a
+        // transient EAGAIN) and should break rather than continue.
+        let stopFlag = Atomic<Bool>(false)
+        // Signals once after the accept thread's loop body exits.
+        // Waited on before returning so provider.shutdown() runs strictly after.
+        let threadDone = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            defer { threadDone.signal() }
+            while true {
+                guard let cfd = POSIXSocket.acceptOne(fd) else {
+                    // accept() returned an error. Two causes:
+                    //   1. Cooperative shutdown: stopFlag is set — break cleanly.
+                    //   2. Transient EAGAIN or similar: continue accepting.
+                    if stopFlag.load(ordering: .relaxed) { break } else { continue }
+                }
+                if !gate.tryEnqueue() {
+                    _ = globalShedCounter.add(1, ordering: .relaxed)
+                    HTTPServer.sendShedResponse(cfd)
+                    continue
+                }
+                Task {
+                    await HTTPServer.serve(
+                        cfd,
+                        dispatcher: dispatcher,
+                        maxBodyBytes: maxBody,
+                        topologyReader: reader,
+                        gate: gate,
+                        sseGate: sseGate,
+                        firstPartyAuth: firstParty
+                    )
+                }
+            }
+        }
+        thread.name = "com.mootx01.aria-mcp.http.accept"
+        thread.start()
+        while !Task.isCancelled {
+            do { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
+            catch { break }
+        }
+        // Cooperative shutdown: signal the accept thread, then wait for it.
+        stopFlag.store(true, ordering: .relaxed)
+        shutdown(fd, SHUT_RDWR)
+        close(fd)
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                threadDone.wait()
+                cont.resume()
+            }
         }
     }
 
@@ -1698,9 +1813,17 @@ public struct HTTPServer: Sendable {
     /// Content-safety: only UDC/MDCC decimal codes and integer counts cross
     /// this surface (concepts §1.6). No drawer content is included.
     private static func latticeSnapshot(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        // Community-only mode has no GeniusLocusKit tooling; lattice is unavailable.
+        guard let tooling = dispatcher.tooling else {
+            return HTTPResponse(
+                status: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"not_found"}"#.utf8)
+            )
+        }
         do {
-            let kit = dispatcher.tooling.kit
-            let handle = dispatcher.tooling.handle
+            let kit = tooling.kit
+            let handle = tooling.handle
             let locus = try await kit.estate(for: handle)
 
             let drawers = try await locus.allDrawers().filter { $0.tombstonedAt == nil }
@@ -1737,6 +1860,14 @@ public struct HTTPServer: Sendable {
     /// Backend is inferred from the process environment: `ARIA_MCP_POSTGRES_URL`
     /// → "PostgreSQL", `ARIA_MCP_SQLITE_PATH` → "SQLite", neither → "InMemory".
     private static func adminEstatesSnapshot(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        // Community-only mode has no GeniusLocusKit tooling; admin estates unavailable.
+        guard let tooling = dispatcher.tooling else {
+            return HTTPResponse(
+                status: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"not_found"}"#.utf8)
+            )
+        }
         let env = ProcessInfo.processInfo.environment
         let backend: String
         if env["ARIA_MCP_POSTGRES_URL"] != nil {
@@ -1747,7 +1878,7 @@ public struct HTTPServer: Sendable {
             backend = "InMemory"
         }
 
-        let kit = dispatcher.tooling.kit
+        let kit = tooling.kit
         let handles = await kit.handles
 
         var entries: [ARIAAdminEstateEntry] = []
@@ -1795,9 +1926,17 @@ public struct HTTPServer: Sendable {
     /// ```
     /// `tier` and `expiresAt` are both null when neither tier is currently granted.
     private static func controlGrants(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
+        // Community-only mode has no sensitivity ledger; return null state.
+        guard let tooling = dispatcher.tooling else {
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"tier":null,"expiresAt":null}"#.utf8)
+            )
+        }
         let now = Date()
         let iso = iso8601Formatter()
-        if let (tier, expiresAt) = await dispatcher.tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
+        if let (tier, expiresAt) = await tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
             let expiresStr = iso.string(from: expiresAt)
             // Hand-construct JSON — struct encoding would be fine too, but the
             // shape is simple enough that raw concatenation avoids an import.
@@ -1878,17 +2017,26 @@ public struct HTTPServer: Sendable {
             )
         }
 
+        // Community-only mode has no sensitivity ledger; unlock is unavailable.
+        guard let tooling = dispatcher.tooling else {
+            return HTTPResponse(
+                status: 404,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"error":"not_found"}"#.utf8)
+            )
+        }
+
         // Grant the tier. Actor isolation requires await.
         switch tier {
         case .restricted:
-            await dispatcher.tooling.sensitivityUnlockLedger.grantRestricted(now: now)
+            await tooling.sensitivityUnlockLedger.grantRestricted(now: now)
         case .secret:
-            await dispatcher.tooling.sensitivityUnlockLedger.grantSecret(now: now)
+            await tooling.sensitivityUnlockLedger.grantSecret(now: now)
         }
 
         // Read back the resulting expiry for the response.
         let iso = iso8601Formatter()
-        if let (_, expiresAt) = await dispatcher.tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
+        if let (_, expiresAt) = await tooling.sensitivityUnlockLedger.grantStateSnapshot(now: now) {
             let expiresStr = iso.string(from: expiresAt)
             let body = Data(
                 #"{"ok":true,"tier":"\#(tier.rawValue)","expiresAt":"\#(expiresStr)"}"#.utf8
@@ -1914,7 +2062,15 @@ public struct HTTPServer: Sendable {
     ///
     /// Response body (application/json): `{"ok":true}`
     private static func controlLock(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
-        await dispatcher.tooling.sensitivityUnlockLedger.lock()
+        // Community-only mode has no sensitivity ledger; lock is a no-op (already locked).
+        guard let tooling = dispatcher.tooling else {
+            return HTTPResponse(
+                status: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"ok":true}"#.utf8)
+            )
+        }
+        await tooling.sensitivityUnlockLedger.lock()
         Logging.stderr.log("all sensitivity grants locked")
         return HTTPResponse(
             status: 200,

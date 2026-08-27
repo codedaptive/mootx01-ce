@@ -14,6 +14,18 @@ public enum TemporalWindowMode: String, Sendable {
     case tight
 }
 
+/// The candidate-grab arm (ruling Q1 2026-08-19: build BOTH and compare).
+public enum TemporalGrab: String, Sendable {
+    /// The lexical coarse grab only (v1 behavior): the window re-orders or
+    /// filters what the hybrid lanes surfaced.
+    case pool
+    /// The lexical grab UNIONED with a date-indexed store fetch: drawers
+    /// whose eventTime falls inside the (max-padded) window join the pool
+    /// even when no lexical lane surfaced them. Fixes the measured
+    /// "evidence never in the pool" miss class.
+    case dated
+}
+
 /// One temporal-recall match.
 public struct TemporalMatch: Sendable, Equatable, Codable {
     public let id: String
@@ -21,15 +33,21 @@ public struct TemporalMatch: Sendable, Equatable, Codable {
     public let content: String
     /// The drawer's event time in UTC ISO8601, or nil when it carried none.
     public let eventTime: String?
-    /// Whether the drawer's event time fell inside the applied window(s).
+    /// Whether the drawer's event time fell inside the applied window(s)
+    /// (at the applied pad — see `padDays`).
     public let inWindow: Bool
+    /// Sliding-window distance: 0 = inside the stated window; n = inside
+    /// only after widening by ±n days (ruling Q2, cap ±10); nil = outside
+    /// every padded window (loose-mode tail rows only).
+    public let padDays: Int?
     public init(id: String, room: String, content: String,
-                eventTime: String?, inWindow: Bool) {
+                eventTime: String?, inWindow: Bool, padDays: Int? = nil) {
         self.id = id
         self.room = room
         self.content = content
         self.eventTime = eventTime
         self.inWindow = inWindow
+        self.padDays = padDays
     }
 }
 
@@ -42,6 +60,11 @@ public struct TemporalRecallOutcome: Sendable {
     /// "explicit" (from/to args), "parsed" (query text), or "none".
     public let windowSource: String
     public let mode: TemporalWindowMode
+    /// The grab arm that supplied the candidates.
+    public let grab: TemporalGrab
+    /// The sliding-window pad (days) at which the member quorum was met;
+    /// 0 = the stated window sufficed. Meaningless when `windows` is empty.
+    public let appliedPad: Int
 }
 
 /// Temporal-recall errors. Tight mode without a resolvable window is caller
@@ -87,6 +110,24 @@ public enum TemporalRecall {
     /// discriminates cheaply, so the grab errs toward recall.
     public static let defaultPool = 120
 
+    /// Sliding-window hard cap (ruling Q2): the window may widen ±1 day at a
+    /// time while members < limit, never beyond ±10 days.
+    public static let maxPadDays = 10
+
+    /// Member re-rank ceiling: at most this many in-window members are
+    /// hydrated and affinity-folded (a month window over a dated grab can
+    /// admit hundreds; the fold must stay bounded). Members beyond the cap
+    /// keep coarse order after the folded block, within their pad tier.
+    public static let rerankCap = 200
+
+    /// Parses the fixed "YYYY-MM-DDTHH:MM:SSZ" bound shape to a Date.
+    /// Deterministic (fixed UTC grammar, no locale, no clock).
+    private static func isoDate(_ iso: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: iso)
+    }
+
     /// Fixed UTC ISO8601 rendering for drawer event times (no fractional
     /// seconds — the same wire shape the import boundary accepts).
     private static func isoString(_ date: Date) -> String {
@@ -99,11 +140,32 @@ public enum TemporalRecall {
 
     /// Parses an explicit from/to argument: a bare date expands to the day's
     /// bound (start for `from`, end for `to`); a full datetime passes through.
-    private static func explicitBound(_ raw: String, isFrom: Bool) throws -> String {
-        if raw.count == 10, raw[raw.index(raw.startIndex, offsetBy: 4)] == "-" {
+    /// Internal (not private) so the strict-shape contract is pinned by a
+    /// direct test (codex finding 2026-08-26).
+    internal static func explicitBound(_ raw: String, isFrom: Bool) throws -> String {
+        // Strict shape validation (codex finding 2026-08-26): the previous
+        // checks (length 10 + hyphen at 4; length 20 + trailing Z) accepted
+        // values like "2023-aa-bb", which downstream shiftISODay force-
+        // unwraps into a fatal trap — attacker-reachable through the public
+        // moot_recall_temporal from/to arguments. Every character position
+        // is now verified, so only genuine "YYYY-MM-DD" /
+        // "YYYY-MM-DDTHH:MM:SSZ" shapes pass (all-ASCII by construction,
+        // which the Rust twin's narration slicing also relies on).
+        func matchesShape(_ s: String, _ shape: String) -> Bool {
+            guard s.count == shape.count else { return false }
+            for (c, template) in zip(s, shape) {
+                if template == "9" {
+                    guard c.isASCII, c.isNumber else { return false }
+                } else {
+                    guard c == template else { return false }
+                }
+            }
+            return true
+        }
+        if matchesShape(raw, "9999-99-99") {
             return raw + (isFrom ? "T00:00:00Z" : "T23:59:59Z")
         }
-        if raw.count == 20, raw.hasSuffix("Z") {
+        if matchesShape(raw, "9999-99-99T99:99:99Z") {
             return raw
         }
         throw TemporalRecallError.invalidExplicitWindow(raw)
@@ -123,7 +185,8 @@ public enum TemporalRecall {
         pool: Int = defaultPool,
         mode: TemporalWindowMode = .loose,
         from: String? = nil,
-        to: String? = nil
+        to: String? = nil,
+        grab: TemporalGrab = .pool
     ) async throws -> TemporalRecallOutcome {
         let poolSize = max(pool, limit)
 
@@ -180,37 +243,165 @@ public enum TemporalRecall {
         if windows.isEmpty && mode == .tight {
             throw TemporalRecallError.tightModeRequiresWindow
         }
+        // Gap 3 scanner fork: the query ASKS FOR a date but states none
+        // ("When did X happen?"). No window can apply — the date is the
+        // ANSWER — so loose mode ranks REAL-dated memories (two-clock
+        // backfilled eventTime, != filedAt) first and the caller reads the
+        // date off the returned rows' event_time.
+        let dateSeeking = windows.isEmpty && isDateSeekingQuery(query)
+        if dateSeeking { source = "date-seeking" }
 
-        // c. WINDOW APPLICATION — deterministic: membership primary, coarse
-        //    rank secondary; a candidate with no event time is never in-window.
-        func inWindow(_ c: NeuronKit.ReductionCandidate) -> Bool {
-            guard let et = c.eventTime else { return false }
-            let iso = isoString(et)
-            return windows.contains { windowContains($0, eventTime: iso) }
+        // c'. DATED GRAB (ruling Q1: second arm) — when a window resolved,
+        //     fetch drawers BY DATE from the store (eventAfter/eventBefore,
+        //     window pre-padded to the ±10 cap so the sliding expansion below
+        //     has material) and union them into the pool. This is what makes
+        //     evidence the lexical lanes never surfaced reachable at all.
+        var candidatePool = candidates
+        if grab == .dated && !windows.isEmpty {
+            let windowFilters: [LocusKit.Filter] = windows.compactMap { w in
+                let padded = paddedWindow(w, days: maxPadDays)
+                guard let s = isoDate(padded.start), let e = isoDate(padded.end) else {
+                    return nil
+                }
+                return .all([.eventAfter(s), .eventBefore(e)])
+            }
+            if !windowFilters.isEmpty {
+                let datedFrame = LocusKit.RecallFrame(
+                    filterChain: [LocusKit.Filter.all([filter, .any(windowFilters)])],
+                    hydrationLevel: .bitmapOnly,
+                    limit: poolSize,
+                    ordering: .byCaptureTimeDesc)
+                let datedRequest = GLKRecallRequest(
+                    frame: datedFrame,
+                    mode: .unionBest,
+                    scoring: .raw,
+                    limit: poolSize,
+                    fallback: .allowDegraded,
+                    queryText: query,
+                    traceLimit: limit,
+                    origin: .internal)
+                let datedResult = try await kit.recall(handle, datedRequest)
+                var seen = Set(candidatePool.map(\.id))
+                for (index, hit) in datedResult.hits.enumerated() where !seen.contains(hit.id) {
+                    seen.insert(hit.id)
+                    // Dated-only candidates rank after the lexical pool: their
+                    // coarse rank continues past the pool's tail, so the
+                    // affinity fold (not arrival order) decides their place.
+                    candidatePool.append(NeuronKit.ReductionCandidate.from(
+                        hit: hit, coarseRank: candidatePool.count + index))
+                }
+            }
         }
-        let ordered: [(NeuronKit.ReductionCandidate, Bool)]
+
+        // c. WINDOW APPLICATION with SLIDING EXPANSION (ruling Q2) —
+        //    padDays(c) = the smallest pad in 0...maxPadDays at which the
+        //    candidate's event time falls inside some window; nil = outside
+        //    even the widest. The applied pad is the smallest one whose
+        //    member count reaches `limit` (or the cap if none does).
+        func padDays(_ c: NeuronKit.ReductionCandidate) -> Int? {
+            guard let et = c.eventTime, !windows.isEmpty else { return nil }
+            let iso = isoString(et)
+            for pad in 0...maxPadDays {
+                if windows.contains(where: {
+                    windowContains(paddedWindow($0, days: pad), eventTime: iso)
+                }) {
+                    return pad
+                }
+            }
+            return nil
+        }
+        // Date-seeking membership: a candidate is a "member" when it carries
+        // a REAL event date (eventTime present and != filedAt); pad 0. The
+        // ordinary path computes sliding-window pads.
+        let flagged: [(candidate: NeuronKit.ReductionCandidate, pad: Int?)] =
+            dateSeeking
+            ? candidatePool.map { c in
+                let real = c.eventTime != nil && c.filedAt != nil && c.eventTime != c.filedAt
+                return (c, real ? 0 : nil)
+            }
+            : candidatePool.map { ($0, padDays($0)) }
+        var appliedPad = 0
+        if !windows.isEmpty {
+            while appliedPad < maxPadDays,
+                  flagged.count(where: { ($0.pad ?? .max) <= appliedPad }) < limit {
+                appliedPad += 1
+            }
+        }
+        let members = flagged.filter { ($0.pad ?? .max) <= appliedPad }
+        let outsiders = flagged.filter { ($0.pad ?? .max) > appliedPad }
+
+        // c''. WITHIN-WINDOW RE-RANK (ruling Q3, deterministic): the members
+        //     are affinity-folded with the same composition machinery
+        //     PreciseRecall uses, then ordered pad-first (date proximity is
+        //     the primary key, affinity the secondary). The fold is bounded
+        //     by `rerankCap`; members beyond the cap keep coarse order after
+        //     the folded block. Pre-selection into the cap is (pad, coarse).
+        let preselected = members.sorted {
+            ($0.pad ?? .max, $0.candidate.coarseRank)
+                < ($1.pad ?? .max, $1.candidate.coarseRank)
+        }
+        let foldSet = Array(preselected.prefix(rerankCap))
+        let overflow = Array(preselected.dropFirst(rerankCap))
+        let padByID = Dictionary(uniqueKeysWithValues: foldSet.map { ($0.candidate.id, $0.pad ?? 0) })
+        // Query-side §8.3 lattice anchor (W2.5 Track S); the default text
+        // composition never reads it, but lattice-bearing compositions can.
+        //
+        // M4: read the pre-computed anchor from `result.queryLatticeAnchor` rather
+        // than re-deriving. The RecallDirector derives it exactly once inside
+        // compileSketch (single-derivation doctrine).
+        let temporalReductionQuery = NeuronKit.ReductionQuery(
+            text: query,
+            udcCode: result.queryLatticeAnchor?.udcCode ?? "",
+            qid: result.queryLatticeAnchor?.qid ?? "")
+        let folded = try await NeuronKit.reduceLate(
+            composition: NeuronKit.CompositionGrid.named(nil),
+            query: temporalReductionQuery,
+            candidates: foldSet.map(\.candidate),
+            limit: foldSet.count,
+            hydrate: { ids in try await kit.hydrate(handle, ids: ids) })
+        // Pad-first over the affinity order: enumerate the fold order so the
+        // sort is explicitly stable on (pad, affinityIndex).
+        let rankedMembers: [(NeuronKit.ReductionCandidate, Int)] = folded.enumerated()
+            .map { (index, c) in (c, index) }
+            .sorted { (padByID[$0.0.id] ?? 0, $0.1) < (padByID[$1.0.id] ?? 0, $1.1) }
+            .map { ($0.0, padByID[$0.0.id] ?? 0) }
+            + overflow.map { ($0.candidate, $0.pad ?? 0) }
+
+        // Final ordering. Loose keeps everything: members first, then the
+        // outsiders in coarse order (v1 semantics, now pad-aware). Tight
+        // returns members only.
+        let survivorsWithPad: [(NeuronKit.ReductionCandidate, Int?)]
         switch mode {
         case .loose:
-            let flagged = candidates.map { ($0, inWindow($0)) }
-            ordered = flagged.filter(\.1) + flagged.filter { !$0.1 }
+            survivorsWithPad = Array((rankedMembers.map { ($0.0, Int?($0.1)) }
+                + outsiders.map { ($0.candidate, $0.pad) }).prefix(limit))
         case .tight:
-            ordered = candidates.filter(inWindow).map { ($0, true) }
+            survivorsWithPad = Array(rankedMembers.map { ($0.0, Int?($0.1)) }.prefix(limit))
         }
-        let survivors = Array(ordered.prefix(limit))
 
-        // d. LATE HYDRATION of survivors only. A hydrate failure is a failed
-        //    recall, not an empty one — the error propagates (PreciseRecall's
-        //    fail-closed rule).
-        let bodies = try await kit.hydrate(handle, ids: survivors.map { $0.0.id })
-        let matches = survivors.map { candidate, isIn in
+        // d. LATE HYDRATION for any survivor the fold did not hydrate (loose
+        //    outsiders and overflow members). A hydrate failure is a failed
+        //    recall, not an empty one — the error propagates.
+        let unhydrated = survivorsWithPad.filter { $0.0.content.isEmpty }.map { $0.0.id }
+        let bodies = unhydrated.isEmpty
+            ? [:] : try await kit.hydrate(handle, ids: unhydrated)
+        let matches = survivorsWithPad.map { candidate, pad in
             TemporalMatch(
                 id: candidate.id,
                 room: candidate.room,
-                content: bodies[candidate.id] ?? candidate.content,
+                content: candidate.content.isEmpty
+                    ? (bodies[candidate.id] ?? "") : candidate.content,
                 eventTime: candidate.eventTime.map(isoString),
-                inWindow: isIn)
+                inWindow: pad != nil,
+                padDays: pad)
         }
         return TemporalRecallOutcome(
-            matches: matches, windows: windows, windowSource: source, mode: mode)
+            matches: matches, windows: windows, windowSource: source, mode: mode,
+            grab: grab, appliedPad: windows.isEmpty ? 0 : appliedPad)
     }
 }
+
+// Note: the private `reductionQuery(for:)` helper was removed in M4.
+// The anchor is now derived once by the RecallDirector's compileSketch and
+// surfaced via GLKRecallResult.queryLatticeAnchor. TemporalRecall reads it
+// there; no re-derivation here (single-derivation doctrine).

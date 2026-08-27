@@ -126,10 +126,18 @@ public struct FoldResult: Sendable {
     /// HLC of the last new entry processed, or `startWatermark`
     /// when no new entries were found. Mirrors Rust `new_watermark`.
     public let newWatermark: HLC
+    /// DECAYED per-key weights (§8.13, W2.5 S4-C): each pair occurrence
+    /// contributes exp(−age·ln2/τ) where age is measured from the pair's
+    /// NEWER entry (the observation moment) to `decayNowMs`. Empty unless
+    /// the fold was called with a decay clock — counts stay the canonical
+    /// output; this projection is the arm surface beside them.
+    public let weightedDeltas: [TemporalCausalityKey: Double]
 
-    public init(deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC) {
+    public init(deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC,
+                weightedDeltas: [TemporalCausalityKey: Double] = [:]) {
         self.deltas = deltas
         self.newWatermark = newWatermark
+        self.weightedDeltas = weightedDeltas
     }
 }
 
@@ -245,7 +253,9 @@ public enum TemporalCausalityFold {
     public static func fold(
         entries: [TemporalAuditEntry],
         windowMinutes: Int = defaultWindowMinutes,
-        startWatermark: HLC
+        startWatermark: HLC,
+        decayNowMs: Int64? = nil,
+        decayHalfLifeSeconds: Double = DecayHalfLives.temporalCausalitySeconds
     ) -> FoldResult {
         // Rolling buffer of earlier entries whose HLC is within
         // windowMinutes of the current entry. Buffer is maintained in
@@ -256,6 +266,10 @@ public enum TemporalCausalityFold {
         // one tuple per pair occurrence. Stable ordering is recovered
         // after aggregation.
         var deltaMap: [TemporalCausalityKey: Int64] = [:]
+        // Decayed projection accumulator (§8.13); populated only when a
+        // decay clock is passed. Negative ages clamp to 0 (a future-stamped
+        // pair is treated as "now" — the TypedDecayWeighting convention).
+        var weightedMap: [TemporalCausalityKey: Double] = [:]
 
         // Stable ordering key for the delta map: records insertion
         // order for each key so that equal-HLC new entries produce a
@@ -304,6 +318,12 @@ public enum TemporalCausalityFold {
                                     ordinal += 1
                                 }
                                 deltaMap[key, default: 0] += 1
+                                if let decayNowMs {
+                                    let ageSeconds = max(
+                                        0, Double(decayNowMs - entry.hlc.physicalTime) / 1000.0)
+                                    weightedMap[key, default: 0] += exp(
+                                        -ageSeconds * Double.ln2 / decayHalfLifeSeconds)
+                                }
                             }
                         }
                     }
@@ -338,6 +358,8 @@ public enum TemporalCausalityFold {
                 return (key, count)
             }
 
-        return FoldResult(deltas: orderedDeltas, newWatermark: newWatermark)
+        return FoldResult(
+            deltas: orderedDeltas, newWatermark: newWatermark,
+            weightedDeltas: weightedMap)
     }
 }

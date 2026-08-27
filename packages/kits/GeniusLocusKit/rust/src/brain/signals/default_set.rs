@@ -1,4 +1,4 @@
-// brain/signals/default_set.rs — registration helper for the eleven
+// brain/signals/default_set.rs — registration helper for the thirteen
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
 // Signal history:
@@ -13,14 +13,22 @@
 //   Signal 11    Consolidation sweep / 2026-07-30: ConsolidationSignal
 //                (daily Wave-2 consolidation, D9 cadence class). Rust twin of
 //                ConsolidationSignal.swift.
+//   Signal 12    P3a / 2026-08-20: AnomalySweepSignal (hourly room-cohesion
+//                anomaly-flag sweep, sets/clears bit 26 via z-score). Rust twin
+//                of AnomalySweepSignal.swift.
+//   Signal 13    GENIUSLOCUSKIT_SPEC 2.0.0 § 16 / 2026-08-23: AdornmentPassSignal
+//                (hourly dream-time minting pass, writes StoredAdornment rows for
+//                (drawer, active-minter) pairs; pair-model — batch_size counts
+//                PAIRS, per-pair failure isolation, never disables a minter).
+//                Rust twin of AdornmentPassSignal.swift.
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
-// real row embeddings on each fire). Signals 7–11 use their `default_spec()`
+// real row embeddings on each fire). Signals 7–12 use their `default_spec()`
 // no-op variants here because the helper cannot supply estate-specific context
-// (audit log, mutable MatrixTier, daemon instance, consolidation cycle) without
-// breaking its generic signature. Production callers that want live closures
-// register the signals individually via `SerialLaneScheduler::register` with the
-// appropriate `spec(…)` factory.
+// (audit log, mutable MatrixTier, daemon instance, consolidation cycle, estate
+// handle for anomaly sweep) without breaking its generic signature. Production
+// callers that want live closures register the signals individually via
+// `SerialLaneScheduler::register` with the appropriate `spec(…)` factory.
 //
 // The Rust port returns the specs as a Vec; the conformance gate inspects the
 // names and cadences against the Swift reference. There is no `GeniusLocusKit`
@@ -33,14 +41,15 @@ use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
-    ByReferenceValiditySignal, ConsolidationSignal, ContradictionScoutSignal, DecaySweepSignal,
-    DistillationSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
-    TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
+    AdornmentPassSignal, AnomalySweepSignal, ByReferenceValiditySignal, ConsolidationSignal,
+    ContradictionScoutSignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
+    EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal, TrainingSignal,
+    VectorSimilaritySignal,
 };
 
-/// Stable names of the eleven standing signals, in registration
+/// Stable names of the thirteen standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 11] {
+pub fn default_standing_signal_names() -> [&'static str; 13] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
@@ -53,6 +62,8 @@ pub fn default_standing_signal_names() -> [&'static str; 11] {
         DistillationSignal::SIGNAL_NAME,
         TrainingSignal::SIGNAL_NAME,
         ConsolidationSignal::SIGNAL_NAME,
+        AnomalySweepSignal::SIGNAL_NAME,
+        AdornmentPassSignal::SIGNAL_NAME,
     ]
 }
 
@@ -62,13 +73,21 @@ pub fn default_standing_signal_names() -> [&'static str; 11] {
 /// `VectorSimilaritySignal::spec` so the signal can query real row
 /// embeddings on each five-minute fire.
 ///
-/// Signals 7–11 (TemporalCausalitySignal, DistillationSignal,
-/// TrainingSignal, ContradictionScoutSignal, ConsolidationSignal) use
-/// their `default_spec()` no-op variants because this helper cannot
-/// supply estate-specific closures (fold cycle, distillation cycle,
-/// training daemon, contradiction hunt cycle, consolidation cycle)
-/// without breaking its generic signature. Production callers wire live
-/// closures via the individual `spec(…)` factories.
+/// `hunt_cycle`, `anomaly_cycle`, and `adornment_cycle` are optional live
+/// closures for signals 10, 12, and 13 respectively. When `Some`, the live
+/// `spec(…)` factory is used so the resident's real `EstateCoordinator`
+/// methods are called on each fire. When `None`, the diagnostic-only
+/// `default_spec()` is used (no-op, correct for test contexts and callers
+/// that have not yet wired a live estate). This matches the Swift
+/// `registerDefaultStandingSignals(huntCycle:anomalyCycle:adornmentCycle:)`
+/// parameter pattern where all three default to the no-op closure.
+///
+/// Signals 7–9 and 11 (TemporalCausalitySignal, DistillationSignal,
+/// TrainingSignal, ConsolidationSignal) retain their `default_spec()` no-op
+/// variants in this helper — their estate-specific closures require additional
+/// context (MatrixTier, audit log, distillation engine) that this generic
+/// helper cannot supply. Production callers wire those via the individual
+/// `spec(…)` factories if needed.
 ///
 /// Each call mints new `Arc<dyn Fn>` closures so the conformance gate
 /// can register them against multiple scheduler instances independently.
@@ -76,7 +95,43 @@ pub fn default_standing_signal_specs(
     vector_store: Arc<VectorStore>,
     model_id: impl Into<String>,
     corpus: Option<Arc<corpus_kit::CorpusContentEngine>>,
+    hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
+    anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+    adornment_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
 ) -> Vec<SignalSpec> {
+    // Signal 10: ContradictionScoutSignal. Use the live hunt closure when
+    // provided; fall back to the diagnostic no-op. Mirrors Swift's default
+    // `huntCycle: { _ in (0, 0) }` parameter in registerDefaultStandingSignals.
+    //
+    // The `dyn Fn` inside the Arc is not Sized, so we wrap it in a concrete
+    // closure that calls the inner Arc — this gives spec<F> a concrete F: Sized.
+    let scout_spec = match hunt_cycle {
+        Some(f) => {
+            ContradictionScoutSignal::spec(Arc::new(move || f()))
+        }
+        None => ContradictionScoutSignal::default_spec(),
+    };
+    // Signal 12: AnomalySweepSignal (P3a). Use the live anomaly closure when
+    // provided; fall back to the diagnostic no-op. Mirrors Swift's default
+    // `anomalyCycle: { _ in 0 }` parameter in registerDefaultStandingSignals.
+    //
+    // Same Sized-wrapping pattern as the hunt closure above.
+    let anomaly_spec = match anomaly_cycle {
+        Some(f) => {
+            AnomalySweepSignal::spec(Arc::new(move || f()))
+        }
+        None => AnomalySweepSignal::default_spec(),
+    };
+    // Signal 13: AdornmentPassSignal (SPEC_ADORNMENT §4). Use the live
+    // adornment closure when provided; fall back to the diagnostic no-op.
+    // Mirrors Swift's default `adornmentCycle: { _ in 0 }` parameter in
+    // registerDefaultStandingSignals.
+    //
+    // Same Sized-wrapping pattern as the hunt and anomaly closures above.
+    let adornment_spec = match adornment_cycle {
+        Some(f) => AdornmentPassSignal::spec(Arc::new(move || f())),
+        None => AdornmentPassSignal::default_spec(),
+    };
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live
         // DreamingDaemon should pass a real closure via DreamingSignal::spec.
@@ -95,12 +150,8 @@ pub fn default_standing_signal_specs(
             None, // edge_checker: DB-level uniqueness (LocusKit v10) prevents
                   // duplicates; wire a checker for production frame-churn reduction.
         ),
-        // Signal 10: ContradictionScoutSignal registered with its no-op
-        // spec — the generic helper cannot supply the estate-specific hunt
-        // closure. Production callers wire a live hunt via
-        // ContradictionScoutSignal::spec(hunt_cycle) around
-        // EstateCoordinator::hunt_contradictions.
-        ContradictionScoutSignal::default_spec(),
+        // Signal 10: ContradictionScoutSignal — live or no-op per hunt_cycle above.
+        scout_spec,
         DecaySweepSignal::default_spec(),
         ByReferenceValiditySignal::default_spec(),
         EndOfDayTournamentSignal::default_spec(),
@@ -128,5 +179,12 @@ pub fn default_standing_signal_specs(
         // EstateCoordinator::consolidation_sweep_report on each daily fire
         // (Wave-2 D9 cadence).
         ConsolidationSignal::default_spec(),
+        // Signal 12: AnomalySweepSignal (P3a) — live or no-op per anomaly_cycle above.
+        anomaly_spec,
+        // Signal 13: AdornmentPassSignal (SPEC_ADORNMENT §4) — live or no-op per
+        // adornment_cycle above. Hourly dream-time minting pass over
+        // (drawer, active-minter) pairs: per-pair failure isolation, writes
+        // StoredAdornment rows via LocusKit; batch counts pairs.
+        adornment_spec,
     ]
 }

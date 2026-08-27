@@ -91,6 +91,9 @@ struct LensToolsTests {
             // Distillation-family recipes: dispatched as recipe tools by
             // RecipeTools, not as lens tools by LensTools.
             "distill", "distilled_recall",
+            // D10 walk-recall escalation ladder: dispatched by RecipeTools as
+            // moot_recall_walk, not a lens tool.
+            "walk_recall",
         ]
         let lensToolCount = RecipeCatalog.names
             .filter { !nonLensRecipes.contains($0) }
@@ -653,9 +656,9 @@ extension LensToolsTests {
 extension LensToolsTests {
 
     /// Golden test: `moot_lens_trust_synthesis` row strings match
-    /// `DenseRow.render` byte-for-byte. Both paths (the lens and the
-    /// test) call `estate.getDrawers(ids:hydrationLevel:.structured)` then
-    /// `DenseRow.render` — identical inputs must produce identical strings.
+    /// `ResultComposer.renderS2Row` byte-for-byte. Both paths (the lens and the
+    /// test) route through `RecipeTools.s2RowsByID` — identical inputs must
+    /// produce identical strings.
     @Test func trustSynthesisDenseRowsMatchRenderer() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -666,13 +669,12 @@ extension LensToolsTests {
         let id = try await capture(kit, handle,
             content: "golden trust memory", room: "study")
 
-        // Hydrate at structured level — the same level RecipeTools.denseRowsByID
-        // uses — then render. This is the reference string.
+        // Get the reference string via the same path the lens uses internally:
+        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
         let estate = try await kit.estate(for: handle)
-        let drawers = try await estate.getDrawers(ids: [id], hydrationLevel: .structured)
-        let drawer = try #require(drawers.first,
-            "captured drawer must be fetchable at structured hydration level")
-        let expectedRow = DenseRow.render(drawer)
+        let rows = try await RecipeTools.s2RowsByID(ids: [id], estate: estate)
+        let expectedRow = try #require(rows[id],
+            "captured drawer must produce an S2 row via s2RowsByID")
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_trust_synthesis",
@@ -681,13 +683,13 @@ extension LensToolsTests {
         let body = try text(result)
         // Each ranked drawer appears as two-space-indented row in the output.
         #expect(body.contains("  " + expectedRow),
-            "trust_synthesis output must contain the dense row byte-for-byte")
+            "trust_synthesis output must contain the S2 row byte-for-byte")
     }
 
-    /// Golden test: `moot_lens_keystones` row strings match `DenseRow.render`
+    /// Golden test: `moot_lens_keystones` row strings match `ResultComposer.renderS2Row`
     /// byte-for-byte for a hub drawer whose UUID is a real captured drawer.
-    /// Using a real drawer ensures `denseRowsByID` hydrates it fully rather
-    /// than falling back to `renderUnhydrated`.
+    /// Using a real drawer ensures `s2RowsByID` hydrates it fully rather
+    /// than falling back to the unhydrated S2 fallback.
     @Test func keystonesDenseRowsMatchRenderer() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -705,13 +707,12 @@ extension LensToolsTests {
             try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
         }
 
-        // Compute the expected dense row via the same path the lens uses:
-        // structured hydration + DenseRow.render.
+        // Compute the expected row via the same path the lens uses:
+        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
         let estate = try await kit.estate(for: handle)
-        let drawers = try await estate.getDrawers(ids: [hubID], hydrationLevel: .structured)
-        let hubDrawer = try #require(drawers.first,
-            "hub drawer must be fetchable at structured hydration level")
-        let expectedRow = DenseRow.render(hubDrawer)
+        let rows = try await RecipeTools.s2RowsByID(ids: [hubID], estate: estate)
+        let expectedRow = try #require(rows[hubID],
+            "hub drawer must produce an S2 row via s2RowsByID")
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_keystones",
@@ -719,6 +720,6 @@ extension LensToolsTests {
 
         let body = try text(result)
         #expect(body.contains(expectedRow),
-            "keystones output must contain the hub's dense row byte-for-byte")
+            "keystones output must contain the hub's S2 row byte-for-byte")
     }
 }

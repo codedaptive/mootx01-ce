@@ -1,8 +1,8 @@
 ---
 title: SubstrateLib Specification
-version: 1.3.0
+version: 1.3.1
 status: active
-date: 2026-07-16
+date: 2026-08-26
 description: "Behavioral specification for SubstrateLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -148,8 +148,8 @@ Orchestration-specific:
 - **O-5.** AuditGate's basis vocabulary is derived from typed
   enums, not hardcoded integer arrays. The four SubstrateLib-local
   CaseIterable enums (`AuditState`, `AuditSensitivity`,
-  `AuditExportability`, `AuditTrust`) are the single source of truth
-  for the legal values of each adjective-axis basis slot. Adding a
+  `AuditExportability`, `AuditTrust`) are the single authoritative definition
+  of the legal values of each adjective-axis basis slot. Adding a
   new enum case automatically extends the gate vocabulary. Cross-layer
   adjective parity vs LocusKit's adjective types is CI-enforced.
 
@@ -411,6 +411,10 @@ sentinel. Non-telemetry calls use `ts: 0.0`, which every
 timestamp-filtered sink discards.
 
 ## Changelog
+
+### 1.3.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.3.0 -- 2026-07-16
 Corrected §5.1: `Substrate` is a stateful struct with mutating verb methods,

@@ -121,6 +121,27 @@ public actor GeniusLocusKit {
     /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
     internal var corpusKits: [EstateHandle: CorpusContentEngine] = [:]
 
+    /// Estates with a derived-state rebuild span in flight (reindexMissing
+    /// backfill and/or a corpus basis retrain via reindexCorpus). A DEPTH,
+    /// not a flag: nested/overlapping spans (reindexMissing's own retrain
+    /// tail) increment and decrement symmetrically. Backs
+    /// `derivedRebuildActive(for:)` — the `moot_rebuild_status` surface
+    /// (Bob ruling 2026-08-26: rebuild status is its own vocabulary, never
+    /// a drain lane — a drain is a queue; a rebuild is an operation).
+    internal var derivedRebuildDepth: [EstateHandle: Int] = [:]
+
+    /// True while any derived-state rebuild span is open for `handle`.
+    public func derivedRebuildActive(for handle: EstateHandle) -> Bool {
+        (derivedRebuildDepth[handle] ?? 0) > 0
+    }
+
+    /// Open/close a derived-rebuild span (internal; called by the
+    /// reindexMissing and reindexCorpus entry/exit points).
+    internal func derivedRebuildSpan(_ handle: EstateHandle, open: Bool) {
+        derivedRebuildDepth[handle, default: 0] += open ? 1 : -1
+        if derivedRebuildDepth[handle] == 0 { derivedRebuildDepth[handle] = nil }
+    }
+
     /// Subject-backfill rider registry (PR-09): the pluggable producer
     /// that writes subjects for subject-debt rows. NO producer ships in
     /// this mission — the Apple miniLLM producer is the PR-10 rider;

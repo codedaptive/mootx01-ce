@@ -1,9 +1,9 @@
 ---
 title: LocusKit Specification
-version: 1.23.0
+version: 2.2.0
 status: active
-date: 2026-08-20
-description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-08-26
+description: "Behavioral specification for LocusKit. 2.0.0 moves all adornments from Drawer rows into permanent normalized minter-master and adornment tables with runtime activation."
 spec_type: kit
 authors: MOOTx01 maintainers
 package: LocusKit
@@ -130,6 +130,7 @@ attribute of `Drawer`, `KGFact`, `DiaryEntry`, `Tunnel`, and
 column (`adjectiveBitmap`, `operationalBitmap`, `provenance`/
 `provenanceBitmap`). Bool surfaces only as a computed property backed by a
 bitmap bit (e.g. `Drawer.isPinned` via feature-flag bit 12,
+`Drawer.isAnomalous` via bit 26 (low-cohesion outlier flag, §11.18),
 `RecallTraceItem.used` via bit 0, `Tunnel.hasInverse` via bit 12).
 
 **I-3 (drawer content immutable at core):** `Drawer.content` is stored
@@ -347,9 +348,9 @@ but the audit event is returned unsealed. The caller is responsible for calling
 one of two sealing methods after determining step-2 success or failure:
 
 - `sealExpungeAudit(_ event: AuditEvent)` (success path): appends the gate-
-  produced event as `verb = "tombstone"` — the success audit is honest.
+  produced event as `verb = "tombstone"` — the success audit records the full success.
 - `sealExpungeOrphanAudit(rowID:successEvent:now:)` (failure path): constructs and
-  appends an `"expungeOrphan"` event — the audit honestly records the partial state
+  appends an `"expungeOrphan"` event — the audit records the partial state
   (storage succeeded, cross-kit delete did not). If this seal call also fails, the
   error is NOT swallowed: it is propagated to the GLK boundary (folded into the
   Rust `CrossKitVectorDeleteFailed.reason` string; logged at OSLog `.fault` in
@@ -586,7 +587,7 @@ the same contract with different host shapes:
   is structurally Rust-only; Swift reaches the same durable behaviour by
   implementing every method against its injected `Storage`.
 
-- **KG-fact active filter — single source of truth.** The active KGFact
+- **KG-fact active filter — single authoritative definition.** The active KGFact
   recall paths (`allKGFacts()` / `all_kg_facts`, `kgFacts(forDrawerID:)` /
   `kg_facts_for_drawer`, and the GLK `recallKGFacts` / `recall_kg_facts`
   pass-throughs) return the **RowState Cluster-A** set — the
@@ -982,8 +983,10 @@ normal verb surface.
 ## § 14 — Subject representation behavioral contracts
 
 The subject is a one-sentence, AI-facing summary of a drawer's content —
-the assertion field of the progressive-recall dense row (UUID · subject ·
-FDC code · WikiQID · event_time). Schema v12 stores it as three nullable
+the second column of the canonical candidate row (ARIA_MCP_SPEC 2.0.0
+§ 8: UUID · subject · first sentence · SSC (Semantic Search Candle) ·
+adornment · event_time ·
+score). Schema v12 stores it as three nullable
 `drawers` columns (`subject`, `subject_pipeline_version`, `subject_at`)
 that are written and cleared together, mirroring the distilled quad's
 NULL-together lifecycle.
@@ -997,7 +1000,7 @@ NULL-together lifecycle.
   `set_subject_representation` reject an empty subject or one longer than
   120 characters (`DrawerStore.subjectLengthContract` ↔
   `SUBJECT_LENGTH_CONTRACT`; both ports count characters, not bytes). The
-  cap keeps the dense row's per-row cost near-uniform.
+  cap keeps the candidate row's per-row cost near-uniform.
 - **B-19 (atomic set):** the trio is populated by ONE UPDATE statement.
   `subject_pipeline_version` records producer provenance (e.g. `ai-v1`,
   `minillm-v1`) and is the regeneration lever; `subject_at` is the
@@ -1027,6 +1030,107 @@ NULL-together lifecycle.
   plus the content trail reconstructs the history. A write that matches
   no row (unknown id) seals nothing. (MXE-SK, Codex
   cc90c5dcecb081918c159788e1ffb3d6.)
+
+## § ADORNMENT_STORE: Normalized adornment storage
+
+**Sensitivity gate (2.2.0).** `activeAdornments(drawerIDs:)` — the one
+result-composition read — withholds every adornment row whose drawer's
+provenance sensitivity is Restricted or Secret. Adornment text is a
+content-derived pre-minted claim and inherits the drawer's access
+posture: render layers redact the subject and first sentence for those
+rows, and an attached adornment would return the very content the
+markers withhold. The rows REMAIN in the `adornments` table (estate
+data; erasure and supersession semantics unchanged) — only the
+composition projection is gated. Both ports.
+
+LocusKit owns adornment persistence. Adornments are ordinary estate data, not
+benchmark variants or fields embedded in a Drawer. The target schema has two
+tables:
+
+```text
+adornment_minters
+  id TEXT PRIMARY KEY
+  name TEXT NOT NULL
+  family TEXT NOT NULL
+  model_id TEXT NOT NULL
+  model_version TEXT NOT NULL
+  prompt_digest TEXT NOT NULL
+  parameters JSON NOT NULL
+  is_active INTEGER NOT NULL
+  ext JSON NULL
+
+adornments
+  drawer_id TEXT NOT NULL -> drawers.id
+  minter_id TEXT NOT NULL -> adornment_minters.id
+  text TEXT NOT NULL
+  PRIMARY KEY (drawer_id, minter_id)
+```
+
+The minter master row stores shared model identity and configuration once.
+`parameters` is one canonical JSON object, with keys serialized in lexical
+order. A configuration change creates a new minter row; `is_active` is the
+only mutable selection field. The schema does not name Apple, Candle, a port,
+or a fixed seat count. Zero, one, or many rows MAY be active at runtime.
+
+The `adornments` row stores only the two compact references and the generated
+text. It is the sole production home of adornment text. There is no
+`Drawer.adornment`, active-adornment pointer, variant table, or copied Drawer
+content. The composite key permits one adornment per Drawer per registered
+minter and permits many minters to adorn the same Drawer.
+
+### Active set and debt
+
+The active minter set is exactly the rows where `is_active = 1`. Missing work
+is computed as live Drawers crossed with the active minter set, minus existing
+`adornments` pairs. It is not represented by a Drawer bit. Activating a minter
+therefore creates debt for every live Drawer it has not adorned; deactivating
+it immediately removes that minter from generation and result composition
+without deleting its rows. Reactivation can reuse already stored rows.
+
+Replacing the active set is one transaction. The replacement accepts an empty
+set and fails without mutation if any requested minter ID is unknown. A result
+composer therefore observes the complete old set or complete new set, never an
+intermediate sequence of per-row toggles.
+
+Any operation that changes content while retaining a Drawer identifier MUST
+delete every adornment row for that Drawer in the same transaction. A
+superseding Drawer begins with no adornment rows. Tombstoned Drawers are
+excluded by the live-Drawer predicate; physical Drawer deletion cascades to
+its adornment rows.
+
+### Bitmap retirement and migration
+
+Bits 27 through 30 no longer encode adornment work or minter identity. They
+return to the unassigned operational-bitmap pool and MUST be zero after the
+migration. Minter identity and activation are table state and MUST NOT be
+compressed into a hard-coded family bitmask.
+
+`mootx01 upgrade` performs the breaking migration in one quiesced estate:
+
+1. create `adornment_minters` and `adornments`;
+2. register a legacy minter row for each legacy family/generation code that
+   actually has stored text;
+3. copy every non-empty legacy Drawer adornment into `adornments`, referencing
+   its Drawer and mapped legacy minter;
+4. remove the Drawer adornment column from the target schema and clear bits
+   27 through 30; and
+5. verify copied-row counts before committing.
+
+The migration never infers that a legacy minter is active. Runtime activation
+is provisioned explicitly after capability discovery.
+
+### Conformance pins
+
+- Zero active minters yields zero debt pairs and an empty active projection,
+  even when inactive adornment rows exist.
+- One live Drawer crossed with two active minters yields two independent debt
+  pairs; writing one does not satisfy or overwrite the other.
+- The batch active read excludes inactive minters and orders returned values by
+  minter ID in both ports.
+- Bulk activation with an unknown ID changes no row; an empty set disables all
+  minters in one transaction.
+- Migration preserves every non-empty legacy adornment, associates each with a
+  legacy minter row, and clears operational bits 27 through 30.
 
 *End of LocusKit Specification.*
 
@@ -1064,6 +1168,105 @@ records `changedBy` into the ledger's `reviewedBy` — reviewer identity
 is recorded on accept and reject alike.
 
 ## Changelog
+
+### 2.2.0 -- 2026-08-26
+
+Sensitivity gate on `activeAdornments`: Restricted/Secret drawers
+contribute no rows to the composition projection (codex finding
+2026-08-26 — legacy-migrated adornments rendered for redacted rows).
+Storage semantics unchanged; both ports; pinned by AdornmentStoreTests /
+adornment_tests.
+
+### 2.0.3 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.0.2 -- 2026-08-26
+
+Vocabulary (mission SSC-RENAME): the § 14 candidate-row citation now
+defines SSC = Semantic Search Candle. Terminology only; no schema or
+behavior change.
+
+### 2.0.1 -- 2026-08-25
+
+§ 14 wording aligned to ARIA_MCP_SPEC 2.0.0 § 8: the subject is the
+second column of the seven-column canonical candidate row (the retired
+five-field dense-row spelling with FDC/WikiQID columns removed from the
+description). No behavioral change.
+
+### 2.0.0 -- 2026-08-25
+
+Moved adornment text out of Drawer rows into permanent normalized
+`adornment_minters` and `adornments` tables. Added runtime zero/one/many
+minter activation, computed per-Drawer/per-minter debt, composite-key storage,
+and the legacy-column migration. Retired the adornment-required and
+engine-family bits.
+
+### 1.27.0 -- 2026-08-24
+
+ADORN-BACKFILL: `AdornmentRequiredBackfill` — populated-estate bit 27 migration.
+
+New idempotent, re-runnable backfill (`AdornmentRequiredBackfill` Swift /
+`adornment_required_backfill` Rust) that sets `adornmentRequired` (bit 27 of
+`operationalBitmap`) on live, never-adorned drawers written before the adornment
+feature landed (v15 → v16). Estates predating v16 have bit 27 = 0 on every
+existing row; `adornmentDebtBatch` therefore returns nothing and `AdornmentPass`
+never mints adornment for them. This backfill closes that gap.
+
+Predicate: `tombstonedAt IS NULL AND adornment IS NULL AND bitmaskNone(bit 27)`.
+Tombstoned rows are skipped (adornmentRequired is intentionally not set on
+expunge). Rows with existing adornment text are skipped (they were correctly
+processed by AdornmentPass; their bit 27 state reflects the prior mint).
+Rows already flagged are skipped (idempotence). Each qualifying row receives
+one per-row UPDATE that ORs bit 27 into `operationalBitmap`, preserving all
+other bits.
+
+Run ONLY by `mootx01 upgrade` — the sole migration vehicle (Bob's ruling).
+Wired immediately after `KGFactIdentityBackfill` in both the up-to-date
+early-return path and the full convergence path.
+
+### 1.26.0 -- 2026-08-24
+
+SCORE-ORDERING mission: DrawerStore ORDER BY three-column contract.
+
+All `DrawerStore` scan methods that return ordered results now use a
+**three-column ORDER BY**: `(filedAt, content, id)` in the ASC variant and
+`(filedAt DESC, content DESC, id DESC)` in the DESC variant. This replaces
+the prior two-column form `(filedAt, id)`. The `content` column is the
+middle tiebreak, making the scan order deterministic even when multiple
+drawers share the same `filedAt`. Both the Swift (SQLite backend,
+`EstateVerbs.swift`) and Rust (`InMemoryDrawerStore`, `DrawerStore` trait
+default) ports are updated. The stale `P4-secfix` comment on the SQLite
+scan path was corrected to describe the three-column form.
+
+### 1.25.0 -- 2026-08-23
+
+- Schema §: `adornment` nullable TEXT column added to the drawer row
+  (SPEC_ADORNMENT §1). Bit 27 of `operationalBitmap` assigned as
+  `adornmentRequired` — set by body-mutating verbs and cleared by
+  `AdornmentPass` after a successful write. Bits 28–30 assigned as the
+  `adornmentBitmask` 3-bit engine-family × generation code
+  (000 = unadorned; 001/011/111 = apple gen1-3; 100/110/101 = non-apple
+  gen1-3). Migration: `addColumn("adornment", type: .text, nullable: true)`
+  via `mootx01 upgrade` (PersistenceKit idempotent replay). Bit 27 was
+  previously listed as free; bits 28-30 newly assigned.
+- New estate API: `adornmentDebtBatch(limit:afterID:)` fetches active
+  drawers with `adornmentRequired` set. `setAdornment(drawerId:adornment:
+  bitmaskCode:)` writes the adornment field + bits 28–30 atomically and
+  clears bit 27.
+
+### 1.24.0 -- 2026-08-20
+
+- Bit 26 of `operationalBitmap` assigned as `isAnomalous` — the low-cohesion
+  outlier flag (§11.18). `DrawerFeatureFlags.isAnomalous` = `1 << 26`;
+  `Drawer.isAnomalous: Bool` is a computed property reading bit 26 of
+  `operationalBitmap` directly (bit 26 is above the feature-flags region
+  12–23, so `featureFlags.contains(.isAnomalous)` is intentionally false;
+  the accessor reads the raw bitmap). Bit 26 is set/cleared by the
+  GeniusLocusKit room-cohesion anomaly-flag sweep; LocusKit owns the write
+  primitive `Estate.setAnomalousFlag(drawerId:anomalous:now:)` (no audit
+  event, no lifecycle field touched — derived-signal write). Bits 27–63
+  remain reserved.
 
 ### 1.23.0 -- 2026-08-20
 
@@ -1128,6 +1331,8 @@ is recorded on accept and reject alike.
   cc90c5dcecb081918c159788e1ffb3d6 (MXE-SK).
 
 ### 1.17.0 -- 2026-08-04
+
+- **v1.22.0 (2026-08-19)** — Filter gains eventAfter/eventBefore (EventAfter/EventBefore in Rust): structured-tier predicates over the drawer's eventTime (two-clock effective capture instant, ING-01), INCLUSIVE at both edges — a [start, end] window is all([eventAfter(start), eventBefore(end)]). Distinct from the strict createdAfter/createdBefore pair, which reads filedAt. Enables date-indexed grabs (temporal_recall dated arm).
 
 - **Schema v13: the kg_facts identity trio gains a migration ladder entry
   (MXE-MI).** MXE-KH declared `addedBy` / `foreignSourceKey` /

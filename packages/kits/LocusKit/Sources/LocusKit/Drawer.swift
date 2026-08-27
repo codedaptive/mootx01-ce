@@ -310,6 +310,12 @@ extension Drawer: Codable {
         case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
         case distilled, distilledPipelineVersion, distilledTokenCount, distilledAt
         case subject, subjectPipelineVersion, subjectAt
+        // Note: the `adornment` CodingKey is intentionally absent. The drawers
+        // table column is retained physically (dead column, see LocusKitSchema
+        // v17 comment), but the Drawer struct no longer carries the field.
+        // Payloads encoded before ADORN-STORE-02 that include an "adornment"
+        // key will have it silently ignored by the decoder (decodeIfPresent
+        // not called = key not consumed = tolerated per Swift Codable rules).
     }
 
     public init(from decoder: Decoder) throws {
@@ -342,6 +348,9 @@ extension Drawer: Codable {
         subject = try c.decodeIfPresent(String.self, forKey: .subject)
         subjectPipelineVersion = try c.decodeIfPresent(String.self, forKey: .subjectPipelineVersion)
         subjectAt = try c.decodeIfPresent(Date.self, forKey: .subjectAt)
+        // Note: adornment is no longer a Drawer field (ADORN-STORE-02 v17).
+        // The "adornment" key, if present in legacy payloads, is silently
+        // ignored because decodeIfPresent is not called for it.
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -372,5 +381,8 @@ extension Drawer: Codable {
         try c.encodeIfPresent(subject, forKey: .subject)
         try c.encodeIfPresent(subjectPipelineVersion, forKey: .subjectPipelineVersion)
         try c.encodeIfPresent(subjectAt, forKey: .subjectAt)
+        // Note: adornment is no longer a Drawer field (ADORN-STORE-02 v17).
+        // Adornment text lives in the adornments table keyed by
+        // (drawer_id, minter_id); read via DrawerStore.activeAdornments(drawerIDs:).
     }
 }

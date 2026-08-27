@@ -58,17 +58,29 @@ public struct ShapedRecall: Recipe {
         public let filter: LocusKit.Filter
         /// How many ranked matches to return.
         public let limit: Int
+        /// Optional per-call candidate-pool depth override, clamped to
+        /// `[RecallShape.frontierKFloor, RecallShape.frontierKCeiling]` (`[64, 256]`)
+        /// by the GLK recall engine. Takes precedence over the shape's own
+        /// `frontierK` setting and the engine formula `min(max(limit × 4, 64), 256)`.
+        /// Nil (the default) defers to the shape or the engine formula — byte-identical
+        /// to requests without this parameter. Mirrors `GLKRecallRequest.frontierK`.
+        ///
+        /// Not applied to the session_hybrid path, which constructs its own
+        /// recall request through NeuronKit.hybridRecall.
+        public let frontierK: Int?
 
         public init(
             query: String,
             preset: String,
             filter: LocusKit.Filter,
-            limit: Int
+            limit: Int,
+            frontierK: Int? = nil
         ) {
             self.query = query
             self.preset = preset
             self.filter = filter
             self.limit = limit
+            self.frontierK = frontierK
         }
     }
 
@@ -155,7 +167,13 @@ public struct ShapedRecall: Recipe {
             fallback: .allowDegraded,
             queryText: input.query,
             origin: .internal,
-            recallShape: shape)
+            recallShape: shape,
+            // frontierK: caller-supplied per-call pool depth override (see
+            // Input.frontierK). Nil preserves byte-identical behaviour when
+            // the argument is absent. The engine clamps to [64, 256] so
+            // out-of-range caller values are silently clamped rather than
+            // rejected here.
+            frontierK: input.frontierK)
         let result = try await kit.recall(estate, request)
 
         // Project each hit into a PreciseMatch. The hits arrive in the shaped

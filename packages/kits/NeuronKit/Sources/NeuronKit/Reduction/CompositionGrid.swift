@@ -12,6 +12,7 @@
 // gauntlet and reads the per-tier leaderboard.
 
 import Foundation
+import GeniusLocusKit
 import SubstrateML
 
 extension NeuronKit {
@@ -154,6 +155,36 @@ extension NeuronKit {
         public static func named(_ name: String?) -> NeuronKit.ReductionComposition {
             guard let name else { return byName(defaultName) }
             return byName(name)
+        }
+
+        /// Look up a composition by name and apply the optimizer-owned recall
+        /// tuning to override the `mmrLambda` for compositions that include an
+        /// `mmr` term. Non-MMR compositions are returned unchanged.
+        ///
+        /// Precedence: the `tuning.mmrLambda` always applies when the composition
+        /// has an MMR term — the optimizer chose it; the spec constant is the
+        /// factory fallback when no manifest key is present.
+        ///
+        /// - Parameters:
+        ///   - name: composition name (falls back to `text` if unknown or nil).
+        ///   - tuning: optimizer-owned recall-tuning envelope from the estate
+        ///     manifest (e.g. from `GeniusLocusKit.provisionedRecallTuning(for:)`).
+        ///     Pass `.default` to preserve the spec constant behavior.
+        /// - Returns: the named composition with `mmrLambda` overridden when the
+        ///   tuning is non-default and the composition uses the `mmr` signal.
+        public static func named(
+            _ name: String?,
+            applyingTuning tuning: RecallTuningManifest
+        ) -> NeuronKit.ReductionComposition {
+            let base = named(name)
+            // Only override mmrLambda when the composition has an MMR term and
+            // the manifest carries a non-spec-default value. Pure-spec-default
+            // tuning returns the same composition as `named(_:)` exactly.
+            guard base.hasMMR, tuning != .default else { return base }
+            return NeuronKit.ReductionComposition(
+                name: base.name,
+                terms: base.terms,
+                mmrLambda: Double(tuning.mmrLambda))
         }
 
         /// All composition names in grid order (the gauntlet column ids).

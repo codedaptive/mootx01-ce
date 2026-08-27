@@ -98,6 +98,8 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✓ Stopped and removed the management console (launchd).")
             LaunchAgent.uninstallDaemon(homeDirectory: home)
             print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
+            LaunchAgent.uninstallDaemonBundle(homeDirectory: home)
+            print("  ✓ Stopped and removed the Community daemon provider (launchd).")
 
             // MACD-2c2 preservation contract: uninstall removes ONLY the
             // artifacts this installation OWNS (DaemonBundle.ownedArtifactPaths
@@ -109,11 +111,6 @@ struct UninstallCommand: AsyncParsableCommand {
             // explicit data-removal flow below is the only thing that may
             // touch estate data, and even it never touches non-owned census
             // candidates (other editions' default estates).
-            let bundlePlist = DaemonBundle.launchAgentPlistURL(homeDirectory: home)
-            if FileManager.default.fileExists(atPath: bundlePlist.path) {
-                try? FileManager.default.removeItem(at: bundlePlist)
-                print("  ✓ Removed the daemon provider bundle registration (was disabled).")
-            }
             print("  ⓘ Estate data, migration receipts, backups, and Keychain credentials are preserved.")
             #endif
 

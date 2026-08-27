@@ -350,12 +350,13 @@ public enum AriaResident {
             StatsStoreMonitoringControl(store: store)
         }
         let residentDispatcher: ARIA_MCPDispatcher
-        if let monitoringControl {
+        if let monitoringControl, let existingTooling = dispatcher.tooling {
             // Re-wrap the dispatcher with the monitoring seam wired. ToolDispatcher
             // is a value type, so this copies all fields and overwrites only
             // monitoringControl. ARIA_MCPDispatcher.init re-invokes ToolProjection
             // to regenerate the projected-tool list — idempotent and cheap.
-            let updatedTooling = dispatcher.tooling.withMonitoringControl(monitoringControl)
+            // Community-only mode (tooling == nil) has no monitoring seam; skip.
+            let updatedTooling = existingTooling.withMonitoringControl(monitoringControl)
             residentDispatcher = ARIA_MCPDispatcher(info: dispatcher.info, tooling: updatedTooling)
         } else {
             residentDispatcher = dispatcher
@@ -470,6 +471,19 @@ public enum AriaResident {
                     // scheduler clock is the deterministic `now` it passes.
                     anomalyCycle: { now in
                         try await kit.anomalyFlagSweep(handle: handle, now: now)
+                    },
+                    // Live adornment cycle (SPEC_ADORNMENT §4 wiring): without
+                    // this closure AdornmentPassSignal registers its no-op
+                    // defaultSpec and no adornment passes fire in a resident
+                    // estate. The pass fetches (drawer, minter) pairs with
+                    // missing adornments, invokes MOOT_MINT_CMD per pair,
+                    // validates with AdornmentValidators, and writes to the
+                    // normalized `adornments` table. No-op when MOOT_MINT_CMD
+                    // is unset or no minters are active.
+                    adornmentCycle: { now in
+                        // `runAdornmentPass` returns `AdornmentPassResult`; extract
+                        // `adornedPairs` for the signal's `Int` progress counter.
+                        try await kit.runAdornmentPass(handle: handle, now: now).adornedPairs
                     },
                     now: Date()
                 )

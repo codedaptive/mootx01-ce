@@ -33,7 +33,7 @@ use persistence_kit::{
 };
 use persistence_kit::predicate::{OrderClause, StoragePredicate};
 use uuid::Uuid;
-use vectorkit::{VectorPayload, VectorPayloadInput, VectorStore};
+use vectorkit::{engine::metric::FloatMetric, VectorPayload, VectorPayloadInput, VectorStore};
 
 // HNSW threshold lowered to 5 so tests activate the HNSW path without many vectors.
 const HNSW_THRESHOLD: u32 = 5;
@@ -314,7 +314,7 @@ fn gate1_shadow_rows_invisible_before_publish() {
     // Capture a reference result set from the serving generation.
     let probe: Vec<f32> = (0..4).map(|i| i as f32 * 0.1).collect();
     let results_before: Vec<String> = store
-        .find_nearest_float(&probe, MODEL_A, 3)
+        .find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine)
         .expect("find before shadow")
         .into_iter()
         .map(|m| m.item_id)
@@ -335,7 +335,7 @@ fn gate1_shadow_rows_invisible_before_publish() {
     // GATE: find_nearest_float must return the same serving items as before
     // the shadow was opened. Shadow-only items must NOT appear.
     let results_during: Vec<String> = store
-        .find_nearest_float(&probe, MODEL_A, 5)
+        .find_nearest_float(&probe, MODEL_A, 5, FloatMetric::Cosine)
         .expect("find during shadow")
         .into_iter()
         .map(|m| m.item_id)
@@ -387,7 +387,7 @@ fn gate2_crash_mid_build_recovery_serves_old_generation() {
 
         let probe: Vec<f32> = vec![0.5, 0.5, 0.1, 0.1];
         results_a = store
-            .find_nearest_float(&probe, MODEL_A, 3)
+            .find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine)
             .expect("find serving")
             .into_iter()
             .map(|m| m.item_id)
@@ -412,7 +412,7 @@ fn gate2_crash_mid_build_recovery_serves_old_generation() {
 
         let probe: Vec<f32> = vec![0.5, 0.5, 0.1, 0.1];
         let results_b: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, 5)
+            .find_nearest_float(&probe, MODEL_A, 5, FloatMetric::Cosine)
             .expect("find after crash-reopen")
             .into_iter()
             .map(|m| m.item_id)
@@ -483,7 +483,7 @@ fn gate3a_completed_flip_reopen_invariant() {
         let store_b = open_store(&db);
         let probe: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
         let results: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, new_item_count)
+            .find_nearest_float(&probe, MODEL_A, new_item_count, FloatMetric::Cosine)
             .expect("find after reopen")
             .into_iter()
             .map(|m| m.item_id)
@@ -576,7 +576,7 @@ fn gate3b_two_model_atomic_publish() {
         let probe: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
 
         let results_a: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, n)
+            .find_nearest_float(&probe, MODEL_A, n, FloatMetric::Cosine)
             .expect("find MODEL_A after atomic publish")
             .into_iter()
             .map(|m| m.item_id)
@@ -589,7 +589,7 @@ fn gate3b_two_model_atomic_publish() {
         }
 
         let results_b: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_B, n)
+            .find_nearest_float(&probe, MODEL_B, n, FloatMetric::Cosine)
             .expect("find MODEL_B after atomic publish")
             .into_iter()
             .map(|m| m.item_id)
@@ -694,7 +694,7 @@ fn gate3_interrupted_flip() {
 
         // MODEL_A: must serve old-gen 'item-' rows, NOT 'new-a-' shadow rows.
         let results_a: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, n)
+            .find_nearest_float(&probe, MODEL_A, n, FloatMetric::Cosine)
             .expect("find MODEL_A after interrupted flip")
             .into_iter()
             .map(|m| m.item_id)
@@ -709,7 +709,7 @@ fn gate3_interrupted_flip() {
 
         // MODEL_B: must serve old-gen 'base-b-' rows, NOT 'new-b-' shadow rows.
         let results_b: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_B, n)
+            .find_nearest_float(&probe, MODEL_B, n, FloatMetric::Cosine)
             .expect("find MODEL_B after interrupted flip")
             .into_iter()
             .map(|m| m.item_id)
@@ -748,7 +748,7 @@ fn gate3c_publish_idempotency() {
 
     // Probe to populate last_served_graph_generation.
     let probe: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
-    let _ = store.find_nearest_float(&probe, MODEL_A, 3).expect("find after publish");
+    let _ = store.find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine).expect("find after publish");
     let served_gen = store.last_served_graph_generation(MODEL_A);
 
     // Second publish: no shadow active — must be a no-op.
@@ -823,7 +823,7 @@ fn gate4_crash_mid_reclaim_resumability() {
         // Queries on reopen must still return correct results (new-gen items).
         let probe: Vec<f32> = vec![0.2, 0.3, 0.1, 0.4];
         let results_on_reopen: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, corpus)
+            .find_nearest_float(&probe, MODEL_A, corpus, FloatMetric::Cosine)
             .expect("find after kill+reopen")
             .into_iter()
             .map(|m| m.item_id)
@@ -854,7 +854,7 @@ fn gate4_crash_mid_reclaim_resumability() {
 
         // Queries must remain correct after the complete reclaim.
         let results_after = store_b
-            .find_nearest_float(&probe, MODEL_A, corpus)
+            .find_nearest_float(&probe, MODEL_A, corpus, FloatMetric::Cosine)
             .expect("find after second unbounded pass");
         assert!(!results_after.is_empty(),
             "gate4: results must be non-empty after complete reclaim");
@@ -901,7 +901,7 @@ fn gate5_post_swap_coherence() {
 
         // Probe to record last_served_graph_generation.
         let probe: Vec<f32> = vec![0.3, 0.3, 0.3, 0.3];
-        let _ = store_a.find_nearest_float(&probe, MODEL_A, 3).expect("find post-publish");
+        let _ = store_a.find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine).expect("find post-publish");
 
         // Probe A: last_served_graph_generation == published gen.
         let last_served = store_a.last_served_graph_generation(MODEL_A);
@@ -920,7 +920,7 @@ fn gate5_post_swap_coherence() {
         // stored graph, hnsw_index_resident would be false, and build_count stays 0
         // but the HNSW path is unused (exact scan instead).
         let probe: Vec<f32> = vec![0.3, 0.3, 0.3, 0.3];
-        let _ = store_b.find_nearest_float(&probe, MODEL_A, 3).expect("find store_b");
+        let _ = store_b.find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine).expect("find store_b");
 
         let build_count = store_b.hnsw_build_count_for(MODEL_A);
         assert_eq!(
@@ -958,7 +958,7 @@ fn interrupt_crash_mid_build_partial_shadow_rows() {
 
         let probe: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
         serving_item_ids = store
-            .find_nearest_float(&probe, MODEL_A, 3)
+            .find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine)
             .expect("serving results")
             .into_iter()
             .map(|m| m.item_id)
@@ -980,7 +980,7 @@ fn interrupt_crash_mid_build_partial_shadow_rows() {
         let store2 = open_store(&db);
         let probe: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
         let results: Vec<String> = store2
-            .find_nearest_float(&probe, MODEL_A, 5)
+            .find_nearest_float(&probe, MODEL_A, 5, FloatMetric::Cosine)
             .expect("find after partial-build crash")
             .into_iter()
             .map(|m| m.item_id)
@@ -1048,7 +1048,7 @@ fn interrupt_flipped_registry_stale_graph_handled() {
         // load_hnsw_graph_if_present accepts it. Results contain new-gen items.
         let probe: Vec<f32> = vec![0.95, 0.05, 0.05, 0.05];
         let results: Vec<String> = store_b
-            .find_nearest_float(&probe, MODEL_A, 5)
+            .find_nearest_float(&probe, MODEL_A, 5, FloatMetric::Cosine)
             .expect("find after publish-reopen")
             .into_iter()
             .map(|m| m.item_id)
@@ -1102,7 +1102,7 @@ fn interrupt_theta_after_swap_rebuild() {
     {
         let store_b = open_store(&db);
         let probe: Vec<f32> = vec![0.1, 0.1, 0.1, 0.1];
-        let _ = store_b.find_nearest_float(&probe, MODEL_A, 3).expect("find after THETA reopen");
+        let _ = store_b.find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine).expect("find after THETA reopen");
         assert!(
             store_b.hnsw_index_resident(MODEL_A),
             "interrupt4c: HNSW must be resident after THETA-rebuilt graph is loaded on reopen"
@@ -1137,7 +1137,7 @@ fn interrupt_recall_unchanged_across_swap() {
     // Capture results before shadow build.
     let probe: Vec<f32> = vec![0.5, 0.3, 0.2, 0.1];
     let results_before: Vec<String> = store
-        .find_nearest_float(&probe, MODEL_A, 3)
+        .find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine)
         .expect("find before shadow")
         .into_iter()
         .map(|m| m.item_id)
@@ -1160,7 +1160,7 @@ fn interrupt_recall_unchanged_across_swap() {
 
     // Capture results after swap.
     let results_after: Vec<String> = store
-        .find_nearest_float(&probe, MODEL_A, 3)
+        .find_nearest_float(&probe, MODEL_A, 3, FloatMetric::Cosine)
         .expect("find after swap")
         .into_iter()
         .map(|m| m.item_id)

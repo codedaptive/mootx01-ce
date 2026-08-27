@@ -126,10 +126,28 @@ struct ScoringDispatchTests {
         #expect(!isError, "scoring=raw must succeed")
     }
 
+    /// M3: `scoring=discriminative` must be accepted as a known value and
+    /// succeed end-to-end through ToolDispatch → RecallDirector.
+    @Test func knownScoringDiscriminativeSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        try await fileMemory(content: "scoring-discriminative-test", location: "test", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("scoring-discriminative-test"),
+                "scoring": .string("discriminative"),
+            ])
+        )
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "scoring=discriminative must succeed end-to-end")
+    }
+
     // MARK: - C. Absent scoring defaults
 
-    /// Omitting `scoring` keeps the documented default (matrixAware) and must
-    /// succeed — only an unknown NON-EMPTY string errors.
+    /// Omitting `scoring` (and `door`) routes through the A1 per-corpus
+    /// DoorManifest and falls back to matrixAware when none is provisioned.
+    /// Must succeed — only an unknown NON-EMPTY string errors.
+    /// Full precedence: explicit door > explicit scoring > A1 manifest > matrixAware.
     @Test func absentScoringDefaultsAndSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "absent-scoring-test", location: "test", dispatcher: dispatcher)
@@ -150,6 +168,7 @@ struct ScoringDispatchTests {
         )
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        #expect(text.contains("found 1 memory(s)"), "omitted filter must find fresh captures; got: \(text)")
+        // COMPOSER-02B §11.1: S1 header is "found N candidate memory/memories, one per line"
+        #expect(text.contains("found 1 candidate memory"), "omitted filter must find fresh captures; got: \(text)")
     }
 }

@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.8.1
+version: 1.15.0
 status: active
-date: 2026-08-06
+date: 2026-08-25
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -203,7 +203,11 @@ public struct GroundedSynthesis: Recipe {
     public struct Output: Sendable {
         public let context: ContextDocument
         public let drawerCount: Int
-        public init(context: ContextDocument, drawerCount: Int)
+        // Drawer IDs of the ranked, capped, provenance-gated pool that fed
+        // the synthesis, in rank order. The ARIA candidate section renders
+        // this pool (ARIA_MCP_SPEC 2.0.0 § 8.7).
+        public let rankedIDs: [String]
+        public init(context: ContextDocument, drawerCount: Int, rankedIDs: [String])
     }
     public init()
     public let name = "grounded_synthesis"
@@ -215,8 +219,10 @@ public struct GroundedSynthesis: Recipe {
 }
 ```
 
-**Rust** — exposed as `run_grounded_synthesis` returning the synthesized
-`ContextDocument` and drawer count (see `grounded_synthesis.rs`); the
+**Rust** — exposed as `run_grounded_synthesis` returning `GroundedOutput`
+(the synthesized `ContextDocument`, drawer count, and `ranked_ids` — the
+ranked pool's drawer IDs, twin of Swift `rankedIDs`; see
+`grounded_synthesis.rs`); the
 descriptor (name/version/description/capabilities) matches the Swift values
 byte-for-byte (§ 7).
 
@@ -624,6 +630,88 @@ pub fn classify_distilled_discrimination(scores: &[f64]) -> DistilledDiscriminat
 
 Thresholds: `HIGH_MARGIN = 0.25`, `LOW_MARGIN = 0.05`, `LOW_SPREAD = 0.15`.
 These match across ports byte-for-byte.
+
+### WalkRecall (D10)
+
+**Swift**
+
+```swift
+public enum WalkStage: String, Sendable, Equatable, Codable {
+    case stage1SessionHybrid = "stage1_session_hybrid"
+    case stage2PreciseHamming = "stage2_precise_hamming"
+}
+
+public struct WalkMatch: Sendable, Equatable, Codable {
+    public let id: String
+    public let room: String
+    public let content: String
+    public let score: Double
+    public let stage: WalkStage
+    public init(id: String, room: String, content: String,
+                score: Double, stage: WalkStage)
+}
+
+public struct WalkRecallOutcome: Sendable {
+    public let matches: [WalkMatch]
+    public let stage: WalkStage
+    public let stoppedEarly: Bool
+    public init(matches: [WalkMatch], stage: WalkStage, stoppedEarly: Bool)
+}
+
+public enum WalkRecall {
+    public static let stage1Preset: String       // "session_hybrid"
+    public static let stage1Pool: Int            // 20
+    public static let stage2Composition: String  // "hamming+text"
+    public static let stopThreshold: Double      // 0.25 (= RecallDiscrimination.HIGH_MARGIN)
+
+    public static func run(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        query: String,
+        filter: LocusKit.Filter,
+        limit: Int,
+        now: Date
+    ) async throws -> WalkRecallOutcome
+
+    internal static func isConfident(_ scores: [Double]) -> Bool
+}
+```
+
+**Rust**
+
+```rust
+pub enum WalkStage {
+    Stage1SessionHybrid,
+    Stage2PreciseHamming,
+}
+
+pub struct WalkRecallOutcome {
+    pub matches: Vec<PreciseMatch>,  // re-uses PreciseMatch (id, room, content, score)
+    pub stage: WalkStage,
+    pub stopped_early: bool,
+}
+
+pub const STAGE1_PRESET: &str = "session_hybrid";
+pub const STAGE1_POOL: usize = 20;
+pub const STAGE2_COMPOSITION: &str = "hamming+text";
+pub const STOP_THRESHOLD: f64 = 0.25;  // mirrors RecallDiscrimination HIGH_MARGIN
+
+pub fn run(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    query: &str,
+    filter: Filter,
+    limit: usize,
+    now: i64,
+    node_names: &HashMap<String, (String, String)>,
+) -> Result<WalkRecallOutcome, RecipeRunError>;
+
+pub fn is_confident(scores: &[f64]) -> bool;
+```
+
+Stop criterion (both ports): `topGap = (s0 - s1) / max(|s0|, eps) ≥ 0.25`.
+Empty list → not confident (escalate). Single result → confident (stop).
+Catalog entry 30 in both ports. MCP surface: `moot_recall_walk`.
 
 ### Recollect
 
@@ -1154,6 +1242,35 @@ disabled.
 
 ## Changelog
 
+### 1.15.0 -- 2026-08-25
+
+- `GroundedSynthesis.Output` gains `rankedIDs: [String]` (Rust
+  `GroundedOutput.ranked_ids: Vec<String>`): the ranked, capped,
+  provenance-gated pool's drawer IDs in rank order, exposed so the ARIA
+  candidate section renders the recipe's own two-lane ranking
+  (ARIA_MCP_SPEC 2.0.0 § 8.7) instead of re-deriving an order. Swift
+  `Output.init` gains the parameter (source-breaking for direct
+  constructors; the recipe is the only in-repo constructor).
+
+### 1.14.0 -- 2026-08-21
+
+- `WalkRecall` static enum namespace (D10): `WalkStage`, `WalkMatch`,
+  `WalkRecallOutcome` types added. `WalkRecall.run(kit:handle:query:filter:limit:now:)`
+  → `WalkRecallOutcome`. Rust: `walk_recall::run(...)` → `WalkRecallOutcome`
+  (shares `PreciseMatch`). Constants: `stage1Preset = "session_hybrid"`,
+  `stage1Pool = 20`, `stage2Composition = "hamming+text"`,
+  `stopThreshold = 0.25`. Helper: `isConfident(_:)` / `is_confident(scores)`.
+  Both ports registered in catalog as entry 30. MCP surface: `moot_recall_walk`.
+
+### 1.13.0 -- 2026-08-20
+
+- M4 single-derivation: PreciseRecall and TemporalRecall no longer call
+  `QueryLatticeAnchor.derive(from:)` / `query_anchor()`. The §8.3 lattice
+  anchor now comes from `GLKRecallResult.queryLatticeAnchor` /
+  `query_lattice_anchor`. No changes to the public recipe signatures
+  (`PreciseRecall.run` / `run_precise_recall`, `TemporalRecall.run` /
+  `run_temporal_recall`) or their return types.
+
 ### 1.8.0 -- 2026-08-06
 
 - `ConnectedRecall.run(kit:handle:query:wing:filter:limit:seeds:steps:
@@ -1251,4 +1368,12 @@ seam (Swift) / shaped recall + inline fusion (Rust) and applies
 `SessionHybridFusion` temporal-window + speaker-aware boosts post-processing.
 New types: `SessionHybridFusion` (Swift `enum`, Rust `session_hybrid_fusion` module).
 No change to `ShapedRecall.Input`/`Output` signatures or the `RecallShape` API —
-`session_hybrid` is a new name in `RecallShape.presetNames` only.
+`session_hybrid` is a new name in `RecallShape.presetNames` only.- **1.12.0 (2026-08-20)** — PreciseRecall/TemporalRecall reduction queries now carry udcCode+qid from QueryLatticeAnchor (both ports); no tool-surface changes.
+
+- **v1.11.0 (2026-08-20)** — TemporalRecallOutcome.windowSource gains the value "date-seeking" (windows remain empty in that mode). No signature changes.
+
+- **v1.10.0 (2026-08-19)** — TemporalRecall.run gains `grab: TemporalGrab = .pool`; new `TemporalGrab` (pool|dated), `maxPadDays` (10), `rerankCap` (200); `TemporalMatch.padDays: Int?`; `TemporalRecallOutcome.grab`/`appliedPad`. Rust: `TemporalGrab`, `TEMPORAL_MAX_PAD_DAYS`, `TEMPORAL_RERANK_CAP`, `iso_to_epoch_ms`, run(...) gains the grab parameter.
+
+- **v1.9.0 (2026-08-19)** — TemporalRecall surface: `TemporalRecall.run(kit:handle:query:filter:limit:pool:mode:from:to:) -> TemporalRecallOutcome`, `TemporalWindowMode` (loose|tight), `TemporalMatch`, `TemporalRecallError`; Rust `cognition_kit::run_temporal_recall` (+ TEMPORAL_DEFAULT_POOL, epoch_ms_to_iso).
+
+

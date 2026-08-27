@@ -1694,6 +1694,261 @@ public extension GeniusLocusKit {
         }
     }
 
+    /// Provision the OPTIMIZER-OWNED default lane weights on an estate
+    /// (W2.5 Track R(b)): a JSON object of lane key → signed float stored
+    /// under the `lane_weights` manifest key. The RecallDirector consumes it
+    /// with shape-explicit > provisioned > 1.0 precedence on every recall.
+    /// The product never computes these weights — the quality optimizer is
+    /// the selection brain that emits them (benchmarker/optimizer split).
+    /// Keys are encoded sorted so the stored JSON is deterministic.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionLaneWeights(
+        _ weights: [String: Float], for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(weights)
+            try await estate.setMeta(
+                key: GeniusLocusKit.laneWeightsMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(verb: "provisionLaneWeights", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned default lane weights, or `[:]` when the
+    /// estate carries none (or the stored JSON is malformed — the same
+    /// fail-quiet contract the RecallDirector applies at recall).
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionedLaneWeights(for handle: EstateHandle) async throws -> [String: Float] {
+        let estate = try estate(for: handle)
+        guard let json = try? await estate.meta(key: GeniusLocusKit.laneWeightsMetaKey),
+              let data = json.data(using: .utf8),
+              let map = try? JSONDecoder().decode([String: Float].self, from: data)
+        else { return [:] }
+        return map
+    }
+
+    /// Provision the OPTIMIZER-OWNED recall-tuning envelope on an estate:
+    /// a JSON object with the four recall knobs (`rrf_k`, `mmr_lambda`,
+    /// `rrf_bm25_weight`, `rrf_vector_weight`) stored under the
+    /// `"recall_tuning"` manifest key. The HybridRecall consumer reads it
+    /// with caller-explicit > provisioned > spec-default precedence.
+    /// The product never computes these values — the quality optimizer is
+    /// the selection brain that emits them (benchmarker/optimizer split).
+    /// Keys are encoded sorted so the stored JSON is deterministic.
+    ///
+    /// - Parameters:
+    ///   - tuning: the recall-tuning envelope to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionRecallTuning(
+        _ tuning: RecallTuningManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(tuning)
+            try await estate.setMeta(
+                key: GeniusLocusKit.recallTuningMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(verb: "provisionRecallTuning", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned recall-tuning envelope, or `.default` when
+    /// the estate carries none (or the stored JSON is malformed — same
+    /// fail-quiet contract the RecallDirector applies at recall).
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionedRecallTuning(for handle: EstateHandle) async throws -> RecallTuningManifest {
+        let estate = try estate(for: handle)
+        guard let json = try? await estate.meta(key: GeniusLocusKit.recallTuningMetaKey),
+              let data = json.data(using: .utf8),
+              let tuning = try? JSONDecoder().decode(RecallTuningManifest.self, from: data)
+        else { return .default }
+        return tuning
+    }
+
+    /// Provision the OPTIMIZER-OWNED embedding-provider selection on an estate:
+    /// a plain string holding the `EmbeddingProvider.modelID` of the provider
+    /// the Corpus ensemble should use for this estate, stored under the
+    /// `"embedding_provider"` manifest key.
+    ///
+    /// ## Semantics
+    ///
+    /// The selection is optimizer-owned and product-consumed — the same
+    /// benchmarker/optimizer split as `provisionLaneWeights` and
+    /// `provisionRecallTuning`. The product reads the key when constructing
+    /// the estate's Corpus ensemble; it never computes or modifies the
+    /// selection.
+    ///
+    /// An absent key means "use the deterministic default ensemble
+    /// (RI/PPMI/LSA/NMF/FDC)." No estate migration is required.
+    ///
+    /// ## Provider model ID contract
+    ///
+    /// The value stored here is the `EmbeddingProvider.modelID` string, e.g.
+    /// `"apple-nl-v1"` or `"apple-nlembedding-v1"`. The Corpus consumer maps
+    /// it back to a concrete `EmbeddingModel` case at open time. Unknown
+    /// model IDs are ignored (fail-quiet, fallback to deterministic ensemble).
+    ///
+    /// - Parameters:
+    ///   - modelID: the `EmbeddingProvider.modelID` to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionEmbeddingProvider(
+        _ modelID: String, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            // The value is a plain string, not JSON — no encoder needed.
+            // An empty modelID is written as-is; consumers treat unknown IDs
+            // as absent (fall through to the deterministic ensemble default).
+            try await estate.setMeta(
+                key: GeniusLocusKit.embeddingProviderMetaKey,
+                value: modelID)
+        } catch {
+            throw remap(verb: "provisionEmbeddingProvider", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned embedding-provider model ID, or `nil` when
+    /// the estate carries none. `nil` means "use the deterministic default
+    /// ensemble" — the caller decides what to do with it.
+    ///
+    /// Unlike `provisionedRecallTuning`, there is no typed struct to decode:
+    /// the manifest stores a raw `String` (the `EmbeddingProvider.modelID`)
+    /// and callers map it to a concrete provider themselves. This keeps the
+    /// manifest reader lean and avoids a decoding dependency between
+    /// GeniusLocusKit and CorpusKit's provider registry.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String? {
+        let estate = try estate(for: handle)
+        // meta(key:) returns nil when the key is absent; an empty string
+        // stored by a previous call is returned as "". Callers treat "" the
+        // same as nil (unknown → deterministic default).
+        return try? await estate.meta(key: GeniusLocusKit.embeddingProviderMetaKey)
+    }
+
+    /// Provision the OPTIMIZER-OWNED door-selection config on an estate:
+    /// a JSON object with the `scoring` field holding the winning
+    /// `GLKRecallScoring` rawValue for this corpus, stored under the
+    /// `"door_config"` manifest key.
+    ///
+    /// ## Semantics
+    ///
+    /// The config is optimizer-owned and product-consumed — the same
+    /// benchmarker/optimizer split as `provisionLaneWeights`,
+    /// `provisionRecallTuning`, and `provisionEmbeddingProvider`. The
+    /// quality optimizer emits it via `quality-optimizer door-recommend`
+    /// from arm-comparison evidence; the product reads it on every
+    /// `moot_memory_search` call when no explicit `door` or `scoring`
+    /// argument is supplied (the A1 per-corpus static config tier).
+    ///
+    /// An absent key means "use the spec default (matrixAware)." No
+    /// estate migration is required.
+    ///
+    /// - Parameters:
+    ///   - config: the door config to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionDoorConfig(
+        _ config: DoorManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(config)
+            try await estate.setMeta(
+                key: GeniusLocusKit.doorConfigMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(
+                verb: "provisionDoorConfig",
+                estateID: handle.estateUUID.uuidString,
+                error: error)
+        }
+    }
+
+    /// Read back the provisioned door-selection config, or `.default`
+    /// (scoring = `.matrixAware`) when the estate carries none. Malformed
+    /// JSON and unknown scoring strings both fall back to `.default` — the
+    /// same fail-quiet contract `provisionedRecallTuning` applies.
+    ///
+    /// Delegates to `RecallDirector.provisionedDoorConfig(estate:)` — the single
+    /// implementation of the manifest-key decode for this key. One seam: the
+    /// director's internal method reads the key at recall time; this public method
+    /// exposes the same read to callers who only have an `EstateHandle`.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionedDoorConfig(for handle: EstateHandle) async throws -> DoorManifest {
+        let estate = try estate(for: handle)
+        return await provisionedDoorConfig(estate: estate)
+    }
+
+    /// Write the user-owned modes-preference config to the estate manifest.
+    ///
+    /// Stored as a JSON object under `"modes_config"`. AriaMcpKit reads it
+    /// once at session start and applies it to `ModeSessionState` (overriding
+    /// the spec defaults). An absent key leaves `ModeSessionState` at its
+    /// defaults (`stickyEnabled = true`, `coachingCalls = 25`).
+    ///
+    /// Part of the same provisioned-manifest family as `provisionDoorConfig`,
+    /// `provisionLaneWeights`, `provisionRecallTuning`, and
+    /// `provisionEmbeddingProvider`. The user (or a configuration tool) owns
+    /// this value; AriaMcpKit only reads it — never computes or overrides it.
+    ///
+    /// - Parameters:
+    ///   - config: the modes config to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionModesConfig(
+        _ config: ModesManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(config)
+            try await estate.setMeta(
+                key: GeniusLocusKit.modesConfigMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(
+                verb: "provisionModesConfig",
+                estateID: handle.estateUUID.uuidString,
+                error: error)
+        }
+    }
+
+    /// Read back the provisioned modes-preference config, or `.default`
+    /// (stickyEnabled = true, coachingCalls = 25) when the estate carries none.
+    /// Malformed JSON also falls back to `.default` — the same fail-quiet
+    /// contract as `provisionedDoorConfig`.
+    ///
+    /// Delegates to `RecallDirector.provisionedModesConfig(estate:)` — the
+    /// single implementation of the manifest-key decode for this key. One seam:
+    /// AriaMcpKit reads the key at session start through this public method.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    public func provisionedModesConfig(for handle: EstateHandle) async throws -> ModesManifest {
+        let estate = try estate(for: handle)
+        return await provisionedModesConfig(estate: estate)
+    }
+
     /// Count all rows in the recall_trace table for the estate addressed by
     /// `handle`. Used by estate-status reporting so trace-table growth is
     /// observable. Returns 0 on an empty table or for a stale handle.

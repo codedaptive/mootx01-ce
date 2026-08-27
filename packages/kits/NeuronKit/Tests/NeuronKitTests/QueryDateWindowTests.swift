@@ -73,4 +73,35 @@ struct QueryDateWindowTests {
         #expect(windowContains(w, eventTime: "2023-07-01T00:00:00Z"))
         #expect(!windowContains(w, eventTime: "2023-08-01T00:00:00Z"))
     }
+
+    @Test("paddedWindow widens both bounds across month and year edges")
+    func paddedWindowPins() {
+        let w = QueryDateWindow(start: "2023-10-03T00:00:00Z",
+                                end: "2023-10-03T23:59:59Z", matchedText: "x")
+        let p1 = paddedWindow(w, days: 1)
+        #expect(p1.start == "2023-10-02T00:00:00Z")
+        #expect(p1.end == "2023-10-04T23:59:59Z")
+        // Month edge and leap-year edge.
+        let feb = QueryDateWindow(start: "2024-03-01T00:00:00Z",
+                                  end: "2024-03-01T23:59:59Z", matchedText: "x")
+        let p2 = paddedWindow(feb, days: 1)
+        #expect(p2.start == "2024-02-29T00:00:00Z")
+        #expect(p2.end == "2024-03-02T23:59:59Z")
+        // Year edge, 10-day cap shape.
+        let jan = QueryDateWindow(start: "2023-01-05T00:00:00Z",
+                                  end: "2023-01-05T23:59:59Z", matchedText: "x")
+        let p3 = paddedWindow(jan, days: 10)
+        #expect(p3.start == "2022-12-26T00:00:00Z")
+        #expect(p3.end == "2023-01-15T23:59:59Z")
+        #expect(paddedWindow(w, days: 0) == w)
+    }
+
+    @Test("date-seeking intent pins")
+    func dateSeekingPins() {
+        #expect(isDateSeekingQuery("When did Melanie go camping?"))
+        #expect(isDateSeekingQuery("What date was the gala in Boston?"))
+        #expect(isDateSeekingQuery("how long ago did they meet"))
+        #expect(!isDateSeekingQuery("Which city was Calvin at on October 3, 2023?"))
+        #expect(!isDateSeekingQuery("What is Melanie's favorite song?"))
+    }
 }

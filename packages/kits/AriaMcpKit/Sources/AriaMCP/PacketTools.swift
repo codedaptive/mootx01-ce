@@ -62,15 +62,18 @@ enum PacketTools {
     ///
     /// `resolveHandle` is the same estate-routing closure used by DatasetTools and
     /// InterfaceTools — it maps optional estateID args to a registered EstateHandle.
+    /// `now` is the bench-clock instant threaded from `ToolDispatcher.dispatch()`.
+    /// Runners must not call `Date()` directly (replay seam: `MOOT_BENCH_EPOCH_NOW`).
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle
+        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
+        now: Date
     ) async throws -> JSONValue {
         switch name {
         case "moot_file_packet":
-            return try await runFilePacket(args: args, kit: kit, handle: try resolveHandle(args))
+            return try await runFilePacket(args: args, kit: kit, handle: try resolveHandle(args), now: now)
         case "moot_packet_get":
             return try await runPacketGet(args: args, kit: kit, handle: try resolveHandle(args))
         case "moot_packet_list":
@@ -233,7 +236,8 @@ enum PacketTools {
     private static func runFilePacket(
         args: [String: JSONValue],
         kit: GeniusLocusKit,
-        handle: EstateHandle
+        handle: EstateHandle,
+        now: Date
     ) async throws -> JSONValue {
         let objective = try requireString(args, "objective")
         let model = try requireString(args, "model")
@@ -246,7 +250,7 @@ enum PacketTools {
         let nextSteps = parseStringArray(args["next_steps"])
         let links = try parseLineageLinks(args["lineage_links"])
 
-        let now = Date()
+        // `now` is threaded from the bench clock seam — not Date() directly.
         let provenance = WorkPacketProvenance(
             model: model, agent: agent, createdAt: now, updatedAt: now)
 

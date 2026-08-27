@@ -227,10 +227,12 @@ public enum DaemonShellMain {
     ///   requires the injected SQLite seam, which has no production
     ///   conformer here, so nonempty candidates classify UNVERIFIABLE and
     ///   the disposition hard-stops conservatively (KONG-2) until MACD-3.
-    /// - `resident` — the LaunchAgent contract's entry point. Fail-closes
-    ///   honestly (exit 4) until MACD-3 activates estate hosting; the
-    ///   installer writes the bundle plist DISABLED, so nothing launches
-    ///   this mode in production before then.
+    /// - `resident` — the LaunchAgent contract's entry point. When
+    ///   `residentActivate` is nil, fail-closes honestly (exit 4). When
+    ///   `residentActivate` is provided (Wave A1b+), delegates to the
+    ///   injected closure which brings up the full production run loop.
+    ///   The installer writes the bundle plist DISABLED; `residentActivate`
+    ///   is what enables it.
     /// - `race --context <uuid> [--hold-ms <n>]` — proof mode: judge REAL
     ///   eligibility (reported honestly, never overridden), resolve the REAL
     ///   App Group root, then race for the provider lock inside the named
@@ -245,24 +247,38 @@ public enum DaemonShellMain {
     /// any one-use record (Perkins P10/F3: cleanup belongs to the driver that
     /// owns the context, not to a shell flag).
     ///
+    /// - Parameters:
+    ///   - arguments: The argv slice (drop the binary name before passing).
+    ///   - extraCapabilities: Edition-owned capability tokens appended to the
+    ///     provider configuration. The shared provider never hard-codes EE
+    ///     capabilities; Community passes an empty list.
+    ///   - residentActivate: Injected by `mootx01-daemon` (Wave A1b+) to run
+    ///     the production resident loop. When nil, `resident` mode returns
+    ///     exit 4 (the pre-A1b honest refusal). The shell is the COMPOSITION
+    ///     ROOT; MootDaemonProvider never imports MootCommunityDaemon — the
+    ///     closure is the seam that keeps the dependency direction correct.
     /// - Returns: The process exit code; the caller passes it to `exit(2)`.
-    ///
-    /// - Parameter extraCapabilities: Additional capability tokens to include in
-    ///   `DaemonProviderConfiguration.capabilities`.  The SHARED module never
-    ///   hard-codes EE-specific tokens; the EE composition root injects them here
-    ///   so the SHARED code remains edition-neutral (Kong invariant 4).
-    ///   Defaults to empty — the CE daemon passes no extras.
-    public static func run(arguments: [String], extraCapabilities: [String] = []) async -> Int32 {
-        let (code, output) = await runCollecting(arguments: arguments, extraCapabilities: extraCapabilities)
+    public static func run(
+        arguments: [String],
+        extraCapabilities: [String] = [],
+        residentActivate: (@Sendable () async -> (code: Int32, output: String))? = nil
+    ) async -> Int32 {
+        let (code, output) = await runCollecting(
+            arguments: arguments,
+            extraCapabilities: extraCapabilities,
+            residentActivate: residentActivate
+        )
         if !output.isEmpty { print(output) }
         return code
     }
 
-    /// `run(arguments:)` with the output returned instead of printed, so the
-    /// tests judge exact bytes and the shells stay printable-only wrappers.
+    /// `run(arguments:extraCapabilities:residentActivate:)` with the output
+    /// returned instead of printed, so tests judge exact bytes and the shells
+    /// stay printable-only wrappers.
     public static func runCollecting(
         arguments: [String],
-        extraCapabilities: [String] = []
+        extraCapabilities: [String] = [],
+        residentActivate: (@Sendable () async -> (code: Int32, output: String))? = nil
     ) async -> (code: Int32, output: String) {
         guard let mode = arguments.first else {
             return (ExitCode.usage.rawValue, usageText)
@@ -276,9 +292,13 @@ public enum DaemonShellMain {
             return runCensus()
         case "resident":
             guard arguments.count == 1 else { return (ExitCode.usage.rawValue, usageText) }
-            // Honest refusal: estate hosting activates with MACD-3. The
-            // bundle plist is written DISABLED, so launchd never spins on
-            // this exit; a manual invocation gets the truth, not a fake bind.
+            if let activate = residentActivate {
+                // Production run loop injected by MootCommunityDaemon (Wave A1b+).
+                // The shell delegates; substance lives in CommunityResidentMain.
+                return await activate()
+            }
+            // Honest refusal: no residentActivate supplied. The bundle plist is
+            // written DISABLED until this path is wired, so launchd never spins.
             let refusal: [String: Any] = [
                 "mode": "resident",
                 "moduleDigest": ProviderSelfReport.moduleDigest(),

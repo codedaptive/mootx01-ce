@@ -17,6 +17,13 @@
 //     correctly; the Swift and Rust graphs legitimately differ (HNSW_DESIGN §7).
 //   - Within-port reproducibility IS required. SplitMix64 seeded at index
 //     creation so the same seed + insertion order yields the same graph.
+//   - CROSS-RUN identity for BULK builds (SPEC 1.10.0): every bulk rebuild
+//     (compact() here; VectorStore.rebuildHNSWIndex at the store) inserts rows
+//     in content-stable order — (fnv1a64(payload bytes) ASC, itemID ASC) — so
+//     identical content yields an identical graph across independent builds
+//     even though item UUIDs differ per provisioning. Incremental single-row
+//     inserts keep ARRIVAL order: only bulk rebuilds guarantee cross-run
+//     identity; the next THETA rebuild converges an incrementally-grown graph.
 //   - Crossover threshold: 5,000 vectors per modelID partition. Below this
 //     count FloatBruteForceIndex is faster (see §Crossover below).
 //   - Nearest only. Farthest queries still use FloatBruteForceIndex regardless
@@ -121,6 +128,13 @@ public actor HNSWIndex {
         let modelID: String
         /// IEEE-754 LE float32 bytes (same format as VectorPayload.bytes).
         let vectorBytes: [UInt8]
+        /// FNV-1a 64 over `vectorBytes` — the content-derived tie key shared
+        /// with every k-NN engine (SPEC 1.10.0). Computed once at node
+        /// construction; used by the neighbour-truncation cuts in `insert`
+        /// and by the content-stable bulk rebuild order in `compact`.
+        /// Placeholder tombstones (empty bytes) carry the hash of the empty
+        /// sequence — never compared, because tombstones are skipped.
+        let vecHash: UInt64
         /// `neighbours[l]` = array of node indices (Int32) at layer l.
         /// Layer 0 (the densest) has up to M0 connections; layers ≥1 have up to M.
         var neighbours: [[Int32]]
@@ -242,6 +256,27 @@ public actor HNSWIndex {
         guard denom > 0 else { return 1.0 }
         let sim = (dot / denom).clamped(to: -1.0...1.0)
         return 1.0 - sim
+    }
+
+    // MARK: - Truncation total order
+
+    /// Total order used wherever a candidate list is CUT to a neighbour cap
+    /// during graph construction: (dist ASC, vecHash ASC, itemID ASC).
+    ///
+    /// This is the universal tie-break key (SPEC 1.10.0): a raw index-order
+    /// cut at the cap boundary would break ties by internal node index —
+    /// i.e. by arrival order — making the wired topology depend on which of
+    /// two equidistant nodes happened to be inserted first. The content hash
+    /// makes the cut identical across independent builds of the same content;
+    /// itemID remains the final backstop for byte-identical vectors, which
+    /// are interchangeable for every ordering consumer.
+    private func truncationOrdered(
+        _ a: (dist: Float, idx: Int32), _ b: (dist: Float, idx: Int32)
+    ) -> Bool {
+        if a.dist != b.dist { return a.dist < b.dist }
+        let na = nodes[Int(a.idx)], nb = nodes[Int(b.idx)]
+        if na.vecHash != nb.vecHash { return na.vecHash < nb.vecHash }
+        return na.itemID < nb.itemID
     }
 
     /// Decode one IEEE-754 LE float32 from byte array at index i.
@@ -381,7 +416,7 @@ public actor HNSWIndex {
         let emptyLayers = [[Int32]](repeating: [], count: level + 1)
         nodes.append(Node(
             itemID: itemID, modelID: modelID,
-            vectorBytes: bytes, neighbours: emptyLayers
+            vectorBytes: bytes, vecHash: fnv1a64(bytes), neighbours: emptyLayers
         ))
         nodeIndex[itemID] = newIdx
 
@@ -410,7 +445,9 @@ public actor HNSWIndex {
                 var cands = searchLayer(
                     probe: vector, entryPts: [curEP], ef: hnswEfConstruction, layer: lc
                 )
-                cands.sort { $0.dist < $1.dist }
+                // Truncation cut at mMax: (dist, vecHash, itemID) total order so
+                // ties at the cap boundary do not fall to arrival order.
+                cands.sort { truncationOrdered($0, $1) }
                 let mMax = lc == 0 ? hnswM0 : hnswM
                 let selected = cands.prefix(mMax)
 
@@ -435,7 +472,8 @@ public actor HNSWIndex {
                             return (cosineDistanceToNode(probe: nProbe, nodeIdx: ci), cidx)
                         }
                         conns.append((cosineDistanceToNode(probe: nProbe, nodeIdx: Int(newIdx)), newIdx))
-                        conns.sort { $0.dist < $1.dist }
+                        // Same truncation total order as the forward-edge cut above.
+                        conns.sort { truncationOrdered($0, $1) }
                         nNeighbours = Array(conns.prefix(mMax).map { $0.idx })
                     }
                     nodes[nInt].neighbours[lc] = nNeighbours
@@ -563,12 +601,23 @@ public actor HNSWIndex {
     /// Rebuild the graph from live nodes, dropping all tombstones (BETA duty).
     ///
     /// O(n log n) where n is the live count. Dead nodes and their inbound edges
-    /// are permanently removed. The graph is deterministically rebuilt using the
-    /// same seed and in the order of the original live insertions.
+    /// are permanently removed. The graph is rebuilt in the CONTENT-STABLE bulk
+    /// build order (SPEC 1.10.0): live rows sorted by (vecHash ASC, itemID ASC)
+    /// before re-insertion, so a bulk rebuild from the same row set produces the
+    /// identical graph regardless of the original arrival order.
     public func compact() {
         let live = nodes.filter { !$0.tombstoned }
         guard !live.isEmpty else { clear(); return }
-        let snapshot = live.map { (itemID: $0.itemID, modelID: $0.modelID, bytes: $0.vectorBytes) }
+        var snapshot = live.map {
+            (itemID: $0.itemID, modelID: $0.modelID, bytes: $0.vectorBytes, vecHash: $0.vecHash)
+        }
+        // Content-stable bulk build order: (fnv1a64(payload bytes) ASC, itemID
+        // ASC). Identical content yields an identical insertion sequence — and
+        // therefore an identical graph — across independent rebuilds; itemID is
+        // the backstop only for byte-identical (interchangeable) vectors.
+        snapshot.sort { a, b in
+            a.vecHash != b.vecHash ? a.vecHash < b.vecHash : a.itemID < b.itemID
+        }
         clear()
         for node in snapshot {
             let floats = bytesToFloats(node.bytes)
@@ -806,6 +855,7 @@ public actor HNSWIndex {
                     itemID:      itemID,
                     modelID:     modelID,  // partition-scoped; needed by search filter
                     vectorBytes: bytes,
+                    vecHash:     fnv1a64(bytes),
                     neighbours:  nodeNeighbours
                 ))
                 nodeIndex[itemID] = Int32(nodes.count - 1)
@@ -819,6 +869,7 @@ public actor HNSWIndex {
                     itemID:      "",
                     modelID:     modelID,
                     vectorBytes: [],
+                    vecHash:     fnv1a64([]),  // never compared — tombstones are skipped
                     neighbours:  nodeNeighbours,
                     tombstoned:  true
                 ))

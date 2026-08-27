@@ -132,7 +132,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["from_id": .string(srcID)]
         )
         #expect(
-            text.contains(": 0"),
+            text.contains("found 0 outgoing"),
             "proposed tunnel must not appear in connection_search; got: \(text)"
         )
     }
@@ -152,7 +152,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["from_id": .string(srcID)]
         )
         #expect(
-            text.contains(": 0"),
+            text.contains("found 0 outgoing"),
             "withdrawn tunnel must not appear in connection_search; got: \(text)"
         )
     }
@@ -172,7 +172,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["from_id": .string(srcID)]
         )
         #expect(
-            text.contains(": 0"),
+            text.contains("found 0 outgoing"),
             "superseded tunnel must not appear in connection_search; got: \(text)"
         )
     }
@@ -197,7 +197,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["from_id": .string(srcID)]
         )
         #expect(
-            text.contains(": 1"),
+            text.contains("found 1 outgoing"),
             "exactly one active tunnel must appear; proposed must be excluded; got: \(text)"
         )
     }
@@ -219,7 +219,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["to_id": .string(tgtID)]
         )
         #expect(
-            text.contains(": 0"),
+            text.contains("found 0 incoming"),
             "proposed tunnel must not appear in connection_map; got: \(text)"
         )
     }
@@ -239,7 +239,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["to_id": .string(tgtID)]
         )
         #expect(
-            text.contains(": 0"),
+            text.contains("found 0 incoming"),
             "withdrawn tunnel must not appear in connection_map; got: \(text)"
         )
     }
@@ -264,7 +264,7 @@ struct TunnelLifecycleDisclosureTests {
             args: ["to_id": .string(tgtID)]
         )
         #expect(
-            text.contains(": 1"),
+            text.contains("found 1 incoming"),
             "exactly one active tunnel must appear; proposed must be excluded; got: \(text)"
         )
     }

@@ -1,8 +1,8 @@
 ---
 title: ARIA Verb Families
-version: 0.1.0
+version: 0.1.1
 status: active
-date: 2026-08-02
+date: 2026-08-26
 description: "The ARIA verb surface documented in the ratified six-family, three-tier taxonomy: every live verb with its use, arguments, default reply shape, and follow-up affordances."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -204,7 +204,7 @@ never edited; its standing is.
 
 ### Tier 1 — Circulation
 
-Changes reach, not truth — the broadest, most reversible tier.
+Changes reach while stored content stays intact; the broadest and most reversible tier.
 
 - **moot_withdraw_memory** — soft-remove from active circulation
   (reversible via the revive mutation). Args: id, reason.
@@ -311,7 +311,7 @@ Broad, idempotent, safe to repeat; changes no beliefs.
 - **moot_dream** — rebuild the matrix tier, run one dreaming cycle and
   one contradiction-hunt sweep. Reply: cycle summary. Follow-ups:
   moot_review_tunnel on proposed edges.
-- **moot_reindex** — rebuild recall indexes over captured truth.
+- **moot_reindex** — rebuild recall indexes over captured content.
 
 ### Tier 2 — Sweeps
 
@@ -396,6 +396,10 @@ Orientation; vault_export in Operations. `moot_recollect` is retired
 (notice-only stub; removal queued for the next major).
 
 ## Changelog
+
+### 0.1.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 0.1.0 -- 2026-08-02
 

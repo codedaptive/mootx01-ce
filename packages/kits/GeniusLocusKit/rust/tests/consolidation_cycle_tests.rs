@@ -156,12 +156,8 @@ fn d3_recent_recall_blocks_consolidation() {
     let aged = NOW + 91 * DAY;
     // Two hot members drop the 4-cluster below D5 (one would leave 3,
     // which correctly still consolidates) — twin of the Swift arithmetic.
-    let mk = |target: &String, at: i64| RecallTraceItem {
-        id: Uuid::new_v4().to_string(),
-        target: target.clone(),
-        recalled_at: iso(at),
-        score: None,
-        operational_bitmap: 0,
+    let mk = |target: &String, at: i64| {
+        RecallTraceItem::new(Uuid::new_v4().to_string(), target.clone(), iso(at), None, 0)
     };
     coord
         .insert_recall_traces(&handle, &[mk(&ids[0], aged - DAY), mk(&ids[1], aged - DAY / 2)])

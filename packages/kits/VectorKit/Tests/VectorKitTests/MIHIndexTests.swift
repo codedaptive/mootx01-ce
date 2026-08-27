@@ -26,7 +26,8 @@
 //      rebuild MIHIndex from the loaded array, assert identical results.
 //      Tests run on a real .vec sidecar, NOT InMemory.
 //
-// All tests use the canonical §0.3 itemID tie-break: smaller itemID wins.
+// All tests use the canonical §0.3 tie-break (SPEC 1.9.0): vecHash
+// (content hash) ASC, with itemID only as the final backstop.
 
 import Testing
 import Foundation
@@ -142,18 +143,21 @@ struct MIHIndexCanonicalVectors {
         #expect(hits[1].rawDistance == 1)
     }
 
-    // MARK: MIH-2: tie-break by id
+    // MARK: MIH-2: tie-break by vecHash (content), itemID backstop
 
-    /// §1.10 MIH-2: add id-5 (dist=1) to the MIH-1 index. id-4 and id-5
-    /// both at dist=1. id-4 < id-5 so id-4 wins second slot.
-    /// Expected: [(id-1, 0), (id-4, 1)].
-    @Test func mih2_tieBreakByItemID() async throws {
+    /// §1.10 MIH-2 (SPEC 1.9.0): add id-5 (dist=1) to the MIH-1 index.
+    /// id-4 and id-5 both sit at dist=1 with DIFFERENT payload bytes, so
+    /// the winner of the second slot is decided by vecHash ascending —
+    /// the content-derived tie key — NOT by itemID.
+    @Test func mih2_tieBreakByVecHash() async throws {
         let mih = MIHIndex(bandCount: .m4)
+        let p4 = payload(b0: 0, b1: 0, b2: 0, b3: 0x8000_0000_0000_0000)
+        let p5 = payload(b0: 1)  // dist=1, different content than p4
         try await mih.add(key: key("id-1"), vector: payload(b0: 0, b1: 0, b2: 0, b3: 0))
         try await mih.add(key: key("id-2"), vector: payload(b0: 7))
         try await mih.add(key: key("id-3"), vector: payload(b0: 0xFF))
-        try await mih.add(key: key("id-4"), vector: payload(b0: 0, b1: 0, b2: 0, b3: 0x8000_0000_0000_0000))
-        try await mih.add(key: key("id-5"), vector: payload(b0: 1))  // dist=1, id-5 > id-4
+        try await mih.add(key: key("id-4"), vector: p4)
+        try await mih.add(key: key("id-5"), vector: p5)
 
         let hits = try await mih.search(
             probe: zeroPayload, metric: .hamming, k: 2, filter: nil)
@@ -161,9 +165,24 @@ struct MIHIndexCanonicalVectors {
         #expect(hits.count == 2)
         #expect(hits[0].key.itemID == "id-1")
         #expect(hits[0].rawDistance == 0)
-        // id-4 < id-5 in string order — id-4 should win the second slot.
-        #expect(hits[1].key.itemID == "id-4")
+        // The content hash decides the boundary tie: smaller vecHash wins.
+        let expectedWinner = fnv1a64(p4.bytes) < fnv1a64(p5.bytes) ? "id-4" : "id-5"
+        #expect(hits[1].key.itemID == expectedWinner)
         #expect(hits[1].rawDistance == 1)
+    }
+
+    /// SPEC 1.9.0 residual: two records with byte-IDENTICAL payloads tie
+    /// on distance AND vecHash — only then does itemID break the tie.
+    @Test func mih2b_identicalPayloadsFallToItemID() async throws {
+        let mih = MIHIndex(bandCount: .m4)
+        let same = payload(b0: 1)
+        try await mih.add(key: key("zzz"), vector: same)
+        try await mih.add(key: key("aaa"), vector: same)
+
+        let hits = try await mih.search(
+            probe: zeroPayload, metric: .hamming, k: 1, filter: nil)
+        #expect(hits.count == 1)
+        #expect(hits[0].key.itemID == "aaa")
     }
 
     // MARK: MIH-3: radius forces multi-band, k=3
@@ -180,13 +199,17 @@ struct MIHIndexCanonicalVectors {
     /// id-12: 4 bits in band0 (block0) = dist 4.
     /// id-13: 1 bit in band0 = dist 1.
     ///
-    /// Expected: [(id-13,1), (id-10,4), (id-11,4)].
-    /// id-12 is excluded: id-10 < id-11 < id-12 so id-12 loses the boundary tie.
+    /// Expected: [(id-13,1)] then the two of the three dist-4 candidates
+    /// with the smallest vecHash (SPEC 1.9.0: the content hash, not the
+    /// itemID, resolves the boundary tie among distinct payloads).
     @Test func mih3_multiBandThreeWayTie_k3() async throws {
         let mih = MIHIndex(bandCount: .m4)
-        try await mih.add(key: key("id-10"), vector: payload(b0: 3, b1: 3, b2: 0, b3: 0))
-        try await mih.add(key: key("id-11"), vector: payload(b0: 0, b1: 0, b2: 0, b3: 0x0F))
-        try await mih.add(key: key("id-12"), vector: payload(b0: 0x0F))
+        let candidates: [(id: String, p: VectorPayload)] = [
+            ("id-10", payload(b0: 3, b1: 3, b2: 0, b3: 0)),
+            ("id-11", payload(b0: 0, b1: 0, b2: 0, b3: 0x0F)),
+            ("id-12", payload(b0: 0x0F)),
+        ]
+        for c in candidates { try await mih.add(key: key(c.id), vector: c.p) }
         try await mih.add(key: key("id-13"), vector: payload(b0: 1))
 
         let hits = try await mih.search(
@@ -195,9 +218,13 @@ struct MIHIndexCanonicalVectors {
         #expect(hits.count == 3)
         #expect(hits[0].key.itemID == "id-13")
         #expect(hits[0].rawDistance == 1)
-        #expect(hits[1].key.itemID == "id-10")
+        // The two dist-4 survivors are the smallest by (vecHash, itemID).
+        let ranked = candidates
+            .map { (id: $0.id, h: fnv1a64($0.p.bytes)) }
+            .sorted { $0.h != $1.h ? $0.h < $1.h : $0.id < $1.id }
+        #expect(hits[1].key.itemID == ranked[0].id)
         #expect(hits[1].rawDistance == 4)
-        #expect(hits[2].key.itemID == "id-11")
+        #expect(hits[2].key.itemID == ranked[1].id)
         #expect(hits[2].rawDistance == 4)
     }
 

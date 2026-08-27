@@ -17,7 +17,8 @@ struct RecipeCatalogTests {
         // Every catalog descriptor registers (LENS_DISCOVERABILITY_DECISION v2.0):
         // the 2 foundational recipes plus the 16 reasoning lenses plus the 3
         // analytics lenses plus the 4 temporal/entropy lenses plus shaped_recall,
-        // recall_exploratory, and the 2 distillation-family recipes = 29 total.
+        // recall_exploratory, and the 2 distillation-family recipes, and the
+        // walk_recall escalation-ladder recipe (D10) = 30 total.
         // Catalog/descriptor parity is verified here; the Rust distillation entries
         // have catalog descriptors but not full Rust recipe bodies in the Rust kit.
         #expect(RecipeCatalog.names.sorted() == [
@@ -50,6 +51,7 @@ struct RecipeCatalogTests {
             "theme_weather",
             "trust_grounded_synthesis",
             "tunnel_successor",
+            "walk_recall",
         ])
     }
 
@@ -94,11 +96,11 @@ struct RecipeCatalogTests {
     @Test("catalog names match catalog.rs declaration order — 30 entries")
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
-        // All 30 entries are registered in both Swift and Rust. The three
+        // All 30 entries are registered in both Swift and Rust. The
         // distillation-family entries (distill, distilled_recall) carry
-        // descriptor metadata in Rust. Any reordering on either
-        // side, or a Swift recipe absent from this list, breaks this test —
-        // that is its purpose.
+        // descriptor metadata in Rust. Any reordering on either side, or a
+        // Swift recipe absent from this list, breaks this test — that is its
+        // purpose.
         #expect(RecipeCatalog.names == [
             "grounded_synthesis",
             "migration_benchmark",
@@ -129,6 +131,7 @@ struct RecipeCatalogTests {
             "recall_exploratory",
             "distill",
             "distilled_recall",
+            "walk_recall",
         ])
     }
 

@@ -314,6 +314,8 @@ fn a9_glk_recall_result_drawers_filters_none() {
         dense_lane_status: None,
         // No lane was run — degraded_stages is empty per contract.
         degraded_stages: vec![],
+        lane_ranks: std::collections::HashMap::new(),
+        query_lattice_anchor: None,
         hits,
     };
     // No drawers have Some(drawer), so drawers() returns empty.
@@ -805,7 +807,9 @@ fn c5_bm25_lane_skipped_when_query_text_absent() {
         RecallOrigin::Internal,
     )
         // no .with_query_text(...)
-        .with_limit(10);
+        ;
+    let mut req = req;
+    req.limit = 10;
 
     let result = coord.recall_scored(&h, req, NOW + 1).expect("recall_scored");
     // Falls back to locus-only when no query is provided (BM25 and vector return empty).
@@ -986,7 +990,9 @@ fn d6_union_best_corpus_empty_query_dense_lane_status_is_dark_empty_query() {
         RecallOrigin::Internal,
     )
         // no query text → empty string after Option::unwrap_or_default
-        .with_limit(5);
+        ;
+    let mut req = req;
+    req.limit = 5;
 
     let result = coord.recall_scored(&h, req, NOW).expect("recall_scored");
     assert_eq!(

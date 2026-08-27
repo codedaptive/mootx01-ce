@@ -65,6 +65,7 @@
 //! directly. When persistence-kit grows an async surface, this trait moves
 //! with it.
 
+use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
 use crate::diary_entry::DiaryEntry;
 use crate::drawer::Drawer;
 // ─────────────────────────────────────────────────────────────────
@@ -98,6 +99,23 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
+
+/// One (drawer, minter) pair that does not yet have an adornment row.
+///
+/// Returned by `DrawerStore::adornment_debt_batch` to describe work the
+/// AdornmentPass in GeniusLocusKit must perform. The minter holds the full
+/// descriptor so the caller can immediately invoke the minter without a
+/// separate registry lookup.
+///
+/// Per LOCUSKIT_INTERFACE 2.0.1 § normalized adornment storage (ADORN-STORE-02 v17).
+/// Mirrors Swift `AdornmentDebt`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdornmentDebt {
+    /// The drawer that needs an adornment from `minter`.
+    pub drawer: Drawer,
+    /// The active minter that has not yet produced an adornment for `drawer`.
+    pub minter: AdornmentMinterDescriptor,
+}
 
 /// Contract every LocusKit storage backend conforms to.
 ///
@@ -498,14 +516,14 @@ pub trait DrawerStore: Send + Sync {
     /// true DESC SQL query for O(cap) I/O.
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
         // Load the full (unbounded) set and reverse to get DESC order.
-        // `all_drawers()` uses (filed_at ASC, id ASC) compound ordering
-        // (c-recall-portable fix; id is the declared TEXT primary key,
-        // portable to PostgreSQL where rowid is undefined), so `.reverse()`
-        // yields exactly (filed_at DESC, id DESC) — a deterministic total
-        // order that is the byte-for-byte reverse of the ASC result for any
-        // fixed dataset. This is correct but O(estate) — backends
-        // (DrawerStoreCore) override with an efficient SQL ORDER BY DESC,
-        // LIMIT query for O(cap) I/O.
+        // `all_drawers()` uses (filedAt ASC, content ASC, id ASC) compound
+        // ordering (SCORE-ORDERING 2026-08-24; id is the declared TEXT primary
+        // key, portable to PostgreSQL where rowid is undefined), so `.reverse()`
+        // yields exactly (filedAt DESC, content DESC, id DESC) — the deterministic
+        // total order that is the byte-for-byte reverse of the ASC result for
+        // any fixed dataset. This is correct but O(estate) — the DrawerStoreCore
+        // backend overrides with an efficient SQL ORDER BY DESC, LIMIT query for
+        // O(cap) I/O.
         let mut all = self.all_drawers()?;
         all.reverse();
         Ok(match limit {
@@ -711,6 +729,115 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "set_distilled_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
+    ///
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade, no
+    /// lifecycle or lineage field touched, and no content digest or revision
+    /// bump. The anomaly flag is computed by GeniusLocusKit's room-cohesion
+    /// sweep (`anomaly_flag_sweep`), not asserted by a user or belief-state
+    /// change. Implemented as a read-modify-write: read the current bitmap,
+    /// set or clear bit 26, write if changed. Returns 0 when the drawer is
+    /// not found; 1 on success; 0 if the bit was already in the requested
+    /// state (idempotent skip-write). Mirrors Swift
+    /// `DrawerStore.setAnomalousFlag(drawerId:anomalous:)`.
+    ///
+    /// - `drawer_id`: target drawer identifier.
+    /// - `anomalous`: `true` sets bit 26; `false` clears it.
+    fn set_anomalous_flag(
+        &self,
+        _drawer_id: &str,
+        _anomalous: bool,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_anomalous_flag not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
+
+    /// Return all registered adornment minters, ordered by name ascending.
+    /// Mirrors Swift `DrawerStore.listAdornmentMinters()`.
+    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "list_adornment_minters not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Register or replace one adornment minter (upsert on `id`).
+    /// Mirrors Swift `DrawerStore.registerAdornmentMinter(_:)`.
+    fn register_adornment_minter(
+        &self,
+        _minter: &AdornmentMinterDescriptor,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "register_adornment_minter not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Set the active flag for one minter. Returns 0 (not found) or 1 (updated).
+    /// Mirrors Swift `DrawerStore.setAdornmentMinterActive(id:active:)`.
+    fn set_adornment_minter_active(
+        &self,
+        _id: &str,
+        _active: bool,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_adornment_minter_active not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Atomically replace the active minter set. Fails on unknown id.
+    /// Returns total update count (deactivations + activations).
+    /// Mirrors Swift `DrawerStore.setActiveAdornmentMinters(ids:)`.
+    fn set_active_adornment_minters(
+        &self,
+        _ids: &[&str],
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_active_adornment_minters not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Bounded batch of (drawer, minter) pairs without an adornment row.
+    /// Mirrors Swift `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)`.
+    fn adornment_debt_batch(
+        &self,
+        _limit: usize,
+        _after_drawer_id: Option<&str>,
+    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "adornment_debt_batch not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Insert or replace one (drawer, minter) adornment row.
+    /// Returns 1 on success. Mirrors Swift `DrawerStore.putAdornment(_:)`.
+    fn put_adornment(&self, _adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "put_adornment not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Return all adornment rows for one drawer, ordered by minter_id.
+    /// Mirrors Swift `DrawerStore.adornments(drawerID:)`.
+    fn adornments(&self, _drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "adornments not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Return active adornments for a batch of drawers.
+    /// Returns a map of drawer_id → Vec<StoredAdornment> (active minters only).
+    /// Mirrors Swift `DrawerStore.activeAdornments(drawerIDs:)`.
+    fn active_adornments(
+        &self,
+        _drawer_ids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "active_adornments not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2302,6 +2429,40 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             token_count,
             generated_at,
         )
+    }
+    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
+        self.as_ref().list_adornment_minters()
+    }
+    fn register_adornment_minter(
+        &self,
+        minter: &AdornmentMinterDescriptor,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().register_adornment_minter(minter)
+    }
+    fn set_adornment_minter_active(&self, id: &str, active: bool) -> Result<usize, LocusKitError> {
+        self.as_ref().set_adornment_minter_active(id, active)
+    }
+    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
+        self.as_ref().set_active_adornment_minters(ids)
+    }
+    fn adornment_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
+        self.as_ref().adornment_debt_batch(limit, after_drawer_id)
+    }
+    fn put_adornment(&self, adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
+        self.as_ref().put_adornment(adornment)
+    }
+    fn adornments(&self, drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
+        self.as_ref().adornments(drawer_id)
+    }
+    fn active_adornments(
+        &self,
+        drawer_ids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
+        self.as_ref().active_adornments(drawer_ids)
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_undistilled(pipeline_version)

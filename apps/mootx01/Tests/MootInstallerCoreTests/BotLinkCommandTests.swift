@@ -561,7 +561,7 @@ struct BotLinkCallTests {
     @Test("call prepends moot_ and prints the raw result object, exit 0")
     func callSuccess() async throws {
         let stub = TransportStub(responses: [
-            response(id: 2, result: textResult("found 3 memory(s)"))
+            response(id: 2, result: textResult("found 3 candidate memories, one per line"))
         ])
         let outcome = await BotLink.call(
             verb: "memory_search",

@@ -1,5 +1,5 @@
 {
-  "binary": "/Users/bob/devlop/mootx01-ee-benchmark-artifacts/m5-runtime-1.0.34/mootx01",
+  "binary": "mootx01",
   "binary_sha256": "bc940718884951b1f4ec98779e8e3094b6d4993ca73ba97eb962c36d6817bb38",
   "binary_version": "1.0.34 (2026-07-20)",
   "daemon_startup_ns": 2079361167,

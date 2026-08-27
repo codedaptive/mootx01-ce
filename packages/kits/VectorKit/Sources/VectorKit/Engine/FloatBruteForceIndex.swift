@@ -297,17 +297,6 @@ public actor FloatBruteForceIndex: DenseIndex {
         }
     }
 
-    /// FNV-1a 64-bit hash of raw bytes. Deterministic for identical byte sequences.
-    private func fnv1a64(_ bytes: Data) -> UInt64 {
-        // FNV-1a constants per the public-domain FNV specification.
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        let prime: UInt64 = 1_099_511_628_211
-        for byte in bytes {
-            hash ^= UInt64(byte)
-            hash &*= prime
-        }
-        return hash
-    }
 
     /// Add a single float32 vector record to the index.
     ///

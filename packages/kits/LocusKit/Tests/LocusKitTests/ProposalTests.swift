@@ -344,13 +344,16 @@ struct ProposalTests {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
 
+        // Bits 27-30 are FREE (ADORN-STORE-02 v17): new drawers start with
+        // operationalBitmap 0; adornment state lives in the adornments table.
         let drawer = Drawer(
             id: TestStorage.tid("drawer-1"),
             content: "hello",
             parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_000),
-            embeddingModelID: "minilm-v6"
+            embeddingModelID: "minilm-v6",
+            operationalBitmap: 0
         )
         try await store.addDrawer(drawer)
         try await store.addProposal(sampleProposal(id: "p-iso", targetRowID: "drawer-1"))

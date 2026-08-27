@@ -17,10 +17,9 @@ The current evidence deliberately separates five questions:
    model paths, which are newer than the canonical primitive catalog.
 4. `product-bench.py` measures a built `mootx01` binary over resident loopback
    MCP against a disposable estate, preserving raw samples and percentiles.
-5. The EE `tools/mcp-benchmarker` gauntlet measures retrieval quality and latency
-   through the product MCP boundary on a deterministic adversarial corpus. The
-   current CE evidence reruns only MOOT; historical MemPalace numbers remain
-   non-current context.
+5. The `benchmark/ (mcp-benchmarker)` gauntlet measures retrieval quality and
+   latency through the product MCP boundary on a deterministic adversarial
+   corpus. The current CE evidence reruns MOOT only.
 
 These layers are not interchangeable. Catalog per-case time includes
 comparison and CRC work over pre-parsed cases; a microbenchmark does not establish product latency;

@@ -184,6 +184,29 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// a `.zero` fallback.
     public private(set) var temporalWatermarkHLC: HLC
 
+    /// DECAYED O projection (§8.13, W2.5 S4-C — Bob's Option C ruling):
+    /// per-pair Σ exp(−age·ln2/τ_O), τ_O = §6.8 co-activation 60d, age
+    /// from each contributing bundle's capture HLC (the same clock
+    /// `rebuild` keys O on) to `decayedAsOfMs`. Computed as a FULL
+    /// recompute every maintenance pass — exp-factor composition is not
+    /// fp-associative, so an incremental merge cannot equal a full
+    /// recompute bit-for-bit; v1 buys byte-identical cross-port
+    /// determinism with an O(log) pass (same cost class as the temporal
+    /// backdated-row fallback). Arm surface only: the count matrices
+    /// stay the canonical scoring input until the arm is accepted.
+    public internal(set) var coOccurrenceDecayed: [MatrixCoOccurKey: Double]
+
+    /// DECAYED T projection (§8.13): fold-weighted pairs at τ_T = 30d,
+    /// age from each pair's NEWER entry (its observation moment) on the
+    /// same substituted event-time clock `rebuildTemporal` uses. Same
+    /// full-recompute discipline as `coOccurrenceDecayed`.
+    public internal(set) var temporalCausalityDecayed: [MatrixTemporalKey: Double]
+
+    /// The decay clock (epoch ms) the projections were computed at; 0 =
+    /// never computed (both maps empty). Encoded only when non-zero so
+    /// pre-S4 snapshots and never-decayed tiers keep their byte shape.
+    public internal(set) var decayedAsOfMs: Int64
+
     /// Log-spaced lag bucket boundaries in minutes (cookbook §6.4).
     /// The canonical implementation lives in
     /// `TemporalCausalityFold.lagBuckets`; this constant mirrors it
@@ -202,6 +225,9 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         self.liveRowCount = 0
         self.lastHLC = .zero
         self.temporalWatermarkHLC = .zero
+        self.coOccurrenceDecayed = [:]
+        self.temporalCausalityDecayed = [:]
+        self.decayedAsOfMs = 0
     }
 
     // MARK: - Codable (backward-compatible)
@@ -219,6 +245,9 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         case liveRowCount
         case lastHLC
         case temporalWatermarkHLC
+        case coOccurrenceDecayed
+        case temporalCausalityDecayed
+        case decayedAsOfMs
     }
 
     public init(from decoder: Decoder) throws {
@@ -231,6 +260,13 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         // Decode with fallback to .zero so snapshots produced before
         // this field was added still decode without throwing keyNotFound.
         temporalWatermarkHLC = try c.decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero
+        // S4-C decayed projections are additive (2026-08-20): snapshots
+        // that predate them decode to the never-computed state.
+        coOccurrenceDecayed = try c.decodeIfPresent(
+            [MatrixCoOccurKey: Double].self, forKey: .coOccurrenceDecayed) ?? [:]
+        temporalCausalityDecayed = try c.decodeIfPresent(
+            [MatrixTemporalKey: Double].self, forKey: .temporalCausalityDecayed) ?? [:]
+        decayedAsOfMs = try c.decodeIfPresent(Int64.self, forKey: .decayedAsOfMs) ?? 0
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -241,6 +277,14 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         try c.encode(liveRowCount,          forKey: .liveRowCount)
         try c.encode(lastHLC,               forKey: .lastHLC)
         try c.encode(temporalWatermarkHLC,  forKey: .temporalWatermarkHLC)
+        // Encode the decayed projections only when computed: a never-
+        // decayed tier keeps the pre-S4 byte shape (schema-signature
+        // fixtures and old-snapshot roundtrips stay stable).
+        if decayedAsOfMs != 0 {
+            try c.encode(coOccurrenceDecayed,      forKey: .coOccurrenceDecayed)
+            try c.encode(temporalCausalityDecayed, forKey: .temporalCausalityDecayed)
+            try c.encode(decayedAsOfMs,            forKey: .decayedAsOfMs)
+        }
     }
 
     // MARK: Derived correlation
@@ -286,17 +330,11 @@ public struct MatrixTier: Sendable, Equatable, Codable {
             }
         }
 
-        // O: co-occurrence over the row's (field, value) coordinates.
-        // Each bitmap field contributes one coordinate per set bit,
-        // but the cookbook's O is field-value not field-bit — so we
-        // collapse a bitmap field into one coordinate carrying its
-        // bitmap value, and contribute non-bitmap fields directly.
-        var coords: [MatrixValueCoord] = valueFields
-        coords.reserveCapacity(valueFields.count + bitmapFields.count)
-        for (path, bitmap) in bitmapFields where bitmap != 0 {
-            coords.append(MatrixValueCoord(fieldPath: path,
-                                           value: .bitmap(bitmap)))
-        }
+        // O: co-occurrence over the row's (field, value) coordinates —
+        // derivation shared with the S4-C decayed projection so the two
+        // can never disagree about what a bundle contributes.
+        let coords = Self.coOccurrenceCoords(
+            bitmapFields: bitmapFields, valueFields: valueFields)
 
         if coords.count >= 2 {
             for i in 0..<(coords.count - 1) {
@@ -309,6 +347,85 @@ public struct MatrixTier: Sendable, Equatable, Codable {
 
         liveRowCount = max(0, liveRowCount + delta)
         if hlc > lastHLC { lastHLC = hlc }
+    }
+
+    /// The (field, value) coordinates one capture bundle contributes to
+    /// O. Each bitmap field collapses into ONE coordinate carrying its
+    /// bitmap value (the cookbook's O is field-value, not field-bit);
+    /// non-bitmap fields contribute directly. Shared by `applyCapture`
+    /// (counts) and `decayedCoOccurrence` (S4-C weighted projection).
+    static func coOccurrenceCoords(
+        bitmapFields: [(String, UInt64)],
+        valueFields: [MatrixValueCoord]
+    ) -> [MatrixValueCoord] {
+        var coords: [MatrixValueCoord] = valueFields
+        coords.reserveCapacity(valueFields.count + bitmapFields.count)
+        for (path, bitmap) in bitmapFields where bitmap != 0 {
+            coords.append(MatrixValueCoord(fieldPath: path,
+                                           value: .bitmap(bitmap)))
+        }
+        return coords
+    }
+
+    /// Compute the DECAYED O projection (§8.13, W2.5 S4-C): replay the
+    /// same capture/expunge bundles `rebuild` applies, weighting each
+    /// bundle's pair contributions by sign × exp(−age·ln2/τ_O) at
+    /// `nowMs`, τ_O = §6.8 co-activation (60d). Age keys off the bundle's
+    /// capture HLC — the same clock `rebuild` keys O on (a bulk import
+    /// stamps one HLC, so its bundles weight uniformly; harmless).
+    /// FULL recompute by design — see `coOccurrenceDecayed`'s fp
+    /// non-associativity note. Deterministic given (log, nowMs).
+    public static func decayedCoOccurrence(
+        from log: UnifiedAuditLog,
+        nowMs: Int64
+    ) -> [MatrixCoOccurKey: Double] {
+        struct RowKey: Hashable {
+            let tier: AuditTier
+            let rowID: UUID
+            let hlc: HLC
+        }
+        var bundle: [RowKey: [(String, UInt64)]] = [:]
+        var valueBundle: [RowKey: [MatrixValueCoord]] = [:]
+        var bundleSign: [RowKey: Double] = [:]
+        for entry in log.entriesInHLCOrder() {
+            switch entry.verb {
+            case .capture, .expunge:
+                let key = RowKey(tier: entry.tier, rowID: entry.rowID, hlc: entry.hlc)
+                switch entry.afterValue {
+                case .bitmap(let v):
+                    bundle[key, default: []].append((entry.fieldPath, v))
+                default:
+                    valueBundle[key, default: []].append(
+                        MatrixValueCoord(fieldPath: entry.fieldPath, value: entry.afterValue))
+                }
+                bundleSign[key] = entry.verb == .capture ? 1.0 : -1.0
+            default:
+                continue
+            }
+        }
+        var projection: [MatrixCoOccurKey: Double] = [:]
+        let tau = DecayHalfLives.coActivationSeconds
+        for (key, sign) in bundleSign {
+            let coords = coOccurrenceCoords(
+                bitmapFields: bundle[key] ?? [],
+                valueFields: valueBundle[key] ?? [])
+            guard coords.count >= 2 else { continue }
+            // Age computed in Double, not Int64: peer-supplied audit HLCs
+            // are content-hashed but not range-bounded, and an extreme
+            // physicalTime (e.g. Int64.min) made the integer subtraction
+            // trap during rebuild (codex finding 2026-08-26). Double math
+            // cannot trap; max(0,·) clamps future-dated entries as before.
+            let ageSeconds = max(0, (Double(nowMs) - Double(key.hlc.physicalTime)) / 1000.0)
+            let weight = sign * exp(-ageSeconds * Double.ln2 / tau)
+            for i in 0..<(coords.count - 1) {
+                for j in (i + 1)..<coords.count {
+                    projection[MatrixCoOccurKey(coords[i], coords[j]), default: 0] += weight
+                }
+            }
+        }
+        // Expunge can drive a cell slightly negative in fp; clamp at 0 the
+        // way count cells clamp — decay only forgets, never goes negative.
+        return projection.filter { $0.value > 0 }
     }
 
     /// Update one cell of the temporal matrix. The dreaming-daemon
@@ -523,7 +640,8 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     public static func rebuildTemporal(
         from log: UnifiedAuditLog,
         startWatermark: HLC = .zero,
-        eventTimes: [UUID: Int64] = [:]
+        eventTimes: [UUID: Int64] = [:],
+        decayNowMs: Int64? = nil
     ) -> MatrixTier {
         var tier = MatrixTier()
 
@@ -625,7 +743,8 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         let foldResult = TemporalCausalityFold.fold(
             entries: temporalEntries,
             windowMinutes: Self.temporalWindowMinutes,
-            startWatermark: startWatermark)
+            startWatermark: startWatermark,
+            decayNowMs: decayNowMs)
 
         for (foldKey, delta) in foldResult.deltas {
             // Map TemporalCausalityKey → (source, target, deltaMinutes) for
@@ -649,6 +768,22 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         }
 
         tier.temporalWatermarkHLC = foldResult.newWatermark
+        // S4-C: map the fold's decayed weights onto MatrixTemporalKey the
+        // same way the count loop above maps deltas.
+        if let decayNowMs {
+            for (foldKey, weight) in foldResult.weightedDeltas {
+                let key = MatrixTemporalKey(
+                    source: MatrixValueCoord(
+                        fieldPath: foldKey.source.fieldPath,
+                        value: decodeValueRepr(foldKey.source.valueRepr)),
+                    target: MatrixValueCoord(
+                        fieldPath: foldKey.target.fieldPath,
+                        value: decodeValueRepr(foldKey.target.valueRepr)),
+                    lagBucket: foldKey.lagBucket)
+                tier.temporalCausalityDecayed[key] = weight
+            }
+            tier.decayedAsOfMs = decayNowMs
+        }
         return tier
     }
 

@@ -196,6 +196,9 @@ impl Estate {
                 _ => None,
             })
             .unwrap_or(0);
+        // Clear hasCurrentRepresentation (bit 19). Bits 27-30 are FREE
+        // (ADORN-STORE-02 v17 retired adornmentRequired / adornmentBitmask).
+        // Adornment debt is discovered via adornmentDebtBatch, not via bitmap.
         let cleared_op = current_op
             & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
         let mut values = BTreeMap::new();

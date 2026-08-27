@@ -186,7 +186,7 @@ impl FloatBruteForceIndex {
                 v
             };
             let dist = float_distance(&probe_floats, &candidate, float_metric);
-            let hash = fnv1a64(slot_bytes);
+            let hash = super::fnv1a64(slot_bytes);
             scored.push((dist, key, hash));
         }
 
@@ -439,17 +439,6 @@ fn float_to_raw(dist: f32) -> i32 {
 /// FNV-1a 64-bit hash of raw bytes. Deterministic for identical byte sequences.
 /// Used as a content-derived tiebreak: same content → same embedding → same bytes
 /// → same hash, stable across estate imports (UUIDs are not).
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    // FNV-1a constants per the public-domain FNV specification.
-    const OFFSET: u64 = 14_695_981_039_346_656_037;
-    const PRIME: u64 = 1_099_511_628_211;
-    let mut hash = OFFSET;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
-}
 
 // MARK: - Model partition builder
 

@@ -398,6 +398,52 @@ impl DrawerStore for PostgresDrawerStore {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)
     }
+    fn list_adornment_minters(
+        &self,
+    ) -> Result<Vec<adornment_lib::AdornmentMinterDescriptor>, LocusKitError> {
+        self.0.list_adornment_minters()
+    }
+    fn register_adornment_minter(
+        &self,
+        minter: &adornment_lib::AdornmentMinterDescriptor,
+    ) -> Result<(), LocusKitError> {
+        self.0.register_adornment_minter(minter)
+    }
+    fn set_adornment_minter_active(&self, id: &str, active: bool) -> Result<usize, LocusKitError> {
+        self.0.set_adornment_minter_active(id, active)
+    }
+    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
+        self.0.set_active_adornment_minters(ids)
+    }
+    fn adornment_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<crate::drawer_store::AdornmentDebt>, LocusKitError> {
+        self.0.adornment_debt_batch(limit, after_drawer_id)
+    }
+    fn put_adornment(
+        &self,
+        adornment: &adornment_lib::StoredAdornment,
+    ) -> Result<usize, LocusKitError> {
+        self.0.put_adornment(adornment)
+    }
+    fn adornments(
+        &self,
+        drawer_id: &str,
+    ) -> Result<Vec<adornment_lib::StoredAdornment>, LocusKitError> {
+        self.0.adornments(drawer_id)
+    }
+    fn active_adornments(
+        &self,
+        drawer_ids: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, Vec<adornment_lib::StoredAdornment>>, LocusKitError>
+    {
+        self.0.active_adornments(drawer_ids)
+    }
+    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
+        self.0.set_anomalous_flag(drawer_id, anomalous)
+    }
     fn seal_expunge_audit(
         &self,
         event: &substrate_lib::verbs::AuditEvent,

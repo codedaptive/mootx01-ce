@@ -54,6 +54,11 @@ pub struct ShapedRecallOutput {
 /// - `filter`: the orthogonal ADJECTIVE constraint (filters; does not rank).
 ///
 /// A recall failure propagates as `RecipeRunError::Substrate`.
+/// - `frontier_k`: optional per-call candidate-pool depth override. `None` = engine
+///   default formula `min(max(limit × 4, 64), 256)`, byte-identical to today's
+///   behaviour. The GLK engine clamps to `[64, 256]`. Not applied on the
+///   `session_hybrid` path (which constructs its own recall request).
+///   Mirrors Swift `ShapedRecall.Input.frontierK`.
 pub fn run(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
@@ -63,6 +68,7 @@ pub fn run(
     limit: usize,
     now: i64,
     node_names: &std::collections::HashMap<String, (String, String)>,
+    frontier_k: Option<usize>,
 ) -> Result<ShapedRecallOutput, RecipeRunError> {
     // Resolve the preset NAME to its signed-weight shape. `None` means
     // "balanced / unsteered" (the name "balanced", or an unknown name): the recall
@@ -123,6 +129,16 @@ pub fn run(
         // recall-trace rows are written (B-10a).
         origin: genius_locus_kit::recall::RecallOrigin::Internal,
         recall_shape: shape,
+        // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+        // written, so door/composition stay None.
+        door: None,
+        composition: None,
+        // Caller-supplied pool depth override (see `frontier_k` param above).
+        // None = engine default, byte-identical to today. Clamped to [64, 256]
+        // by the coordinator. Mirrors Swift ShapedRecall.run GLKRecallRequest.frontierK.
+        frontier_k,
+        // §11.18: internal recall — no anomalous-flag filter applied.
+        anomalous_filter: None,
     };
     let result = coord
         .recall_scored(handle, request, now)
@@ -197,6 +213,13 @@ fn run_session_hybrid(
         trace_limit: None,
         origin: genius_locus_kit::recall::RecallOrigin::Internal,
         recall_shape: shape,
+        // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+        // written, so door/composition stay None.
+        door: None,
+        composition: None,
+        frontier_k: None,
+        // §11.18: internal recall — no anomalous-flag filter applied.
+        anomalous_filter: None,
     };
     let result = coord
         .recall_scored(handle, request, now)
@@ -283,7 +306,7 @@ mod tests {
             "a dog ran in the park",
             "cats and dogs are pets",
         ]);
-        let out = run(&coord, &h, "cat", "precise", Filter::CurrentlyBelieve, 10, NOW, &empty_names())
+        let out = run(&coord, &h, "cat", "precise", Filter::CurrentlyBelieve, 10, NOW, &empty_names(), None)
             .expect("run");
         assert_eq!(out.applied_preset, "precise");
         assert!(!out.matches.is_empty(), "the shaped recall surfaces rows");
@@ -306,6 +329,7 @@ mod tests {
             10,
             NOW,
             &empty_names(),
+            None,
         )
         .expect("unknown-name run still succeeds");
         assert_eq!(out.applied_preset, "balanced");
@@ -315,7 +339,7 @@ mod tests {
     #[test]
     fn sr3_balanced_runs_unsteered() {
         let (coord, h) = coord_with_rows(&["one two three", "four five six"]);
-        let out = run(&coord, &h, "one", "balanced", Filter::CurrentlyBelieve, 5, NOW, &empty_names())
+        let out = run(&coord, &h, "one", "balanced", Filter::CurrentlyBelieve, 5, NOW, &empty_names(), None)
             .expect("run");
         assert_eq!(out.applied_preset, "balanced");
     }
@@ -326,7 +350,7 @@ mod tests {
     fn sr4_every_preset_runs() {
         let (coord, h) = coord_with_rows(&["alpha", "beta", "gamma"]);
         for name in RecallShape::PRESET_NAMES {
-            let out = run(&coord, &h, "alpha", name, Filter::CurrentlyBelieve, 5, NOW, &empty_names())
+            let out = run(&coord, &h, "alpha", name, Filter::CurrentlyBelieve, 5, NOW, &empty_names(), None)
                 .unwrap_or_else(|e| panic!("preset {name} failed: {e:?}"));
             let expected = if RecallShape::PRESET_NAMES.contains(&name) {
                 name

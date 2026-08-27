@@ -100,6 +100,27 @@ struct QIDClosureTests {
         #expect(h146 != h5)
     }
 
+    // MARK: - neighbors (undirected direct adjacency, W2.5 Track S)
+
+    @Test("neighbors returns direct parents AND children, excluding self")
+    func neighborsBothDirections() {
+        // Pinned artifact: Q1's only direct parent is Q36906466 — so Q1's
+        // neighbor set contains it, and Q36906466's neighbor set contains
+        // Q1 back (the reverse child edge).
+        let q1 = QIDClosure.neighbors(of: "Q1")
+        #expect(q1.contains("Q36906466"))
+        #expect(!q1.contains("Q1"))
+        let parent = QIDClosure.neighbors(of: "Q36906466")
+        #expect(parent.contains("Q1"))
+        #expect(!parent.contains("Q36906466"))
+    }
+
+    @Test("neighbors of empty/unknown qid is empty")
+    func neighborsEmptyUnknown() {
+        #expect(QIDClosure.neighbors(of: "").isEmpty)
+        #expect(QIDClosure.neighbors(of: "Q999999999").isEmpty)
+    }
+
     // MARK: - qidInt parsing
 
     @Test("qidInt parses the trailing integer")

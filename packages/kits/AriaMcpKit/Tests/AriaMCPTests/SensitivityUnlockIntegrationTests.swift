@@ -86,7 +86,7 @@ struct SensitivityUnlockIntegrationTests {
         try await seed("unlock-marker-restricted classified briefing", sensitivity: .restricted, in: handle, kit: kit)
 
         let before = try await dispatcher.runMemorySearch(["query": .string("unlock-marker-restricted")])
-        #expect(text(of: before).contains("found 0 memory(s)"),
+        #expect(text(of: before).contains("found 0 candidate memories"),
                 "without a grant the restricted drawer must not appear at all")
 
         let now = Date()
@@ -138,7 +138,7 @@ struct SensitivityUnlockIntegrationTests {
 
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
         let stillHidden = try await dispatcher.runMemorySearch(["query": .string("unlock-secret-marker")])
-        #expect(text(of: stillHidden).contains("found 0 memory(s)"),
+        #expect(text(of: stillHidden).contains("found 0 candidate memories"),
                 "a restricted-only grant must not reveal secret-tier content")
 
         await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
@@ -172,7 +172,7 @@ struct SensitivityUnlockIntegrationTests {
                 "a grant issued 31 minutes ago must have expired under the fixed 30-minute window")
 
         let result = try await dispatcher.runMemorySearch(["query": .string("unlock-expiry-marker")])
-        #expect(text(of: result).contains("found 0 memory(s)"),
+        #expect(text(of: result).contains("found 0 candidate memories"),
                 "an expired secret grant must not reveal secret-tier content")
     }
 
@@ -213,7 +213,7 @@ struct SensitivityUnlockIntegrationTests {
 
         await dispatcher.sensitivityUnlockLedger.lock()
         let hiddenAgain = try await dispatcher.runMemorySearch(["query": .string("unlock-lock-marker")])
-        #expect(text(of: hiddenAgain).contains("found 0 memory(s)"))
+        #expect(text(of: hiddenAgain).contains("found 0 candidate memories"))
     }
 
     // MARK: - out-of-band sensitivity grants: read-under-grant audit emission

@@ -570,6 +570,41 @@ struct GrantEnvelopeTests {
         }
     }
 
+    @Test("concurrent consumers resolve one migration grant exactly once")
+    func concurrentGrantSingleUse() async throws {
+        let scratch = try ConvergenceScratch()
+        defer { scratch.remove() }
+        let challenge = makeChallenge()
+        let envelope = makeEnvelope(challenge: challenge)
+        let grants = authority(scratch)
+
+        let outcomes = await withTaskGroup(of: Int.self, returning: [Int].self) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    await Task.yield()
+                    do {
+                        _ = try grants.consume(
+                            envelope, installationRoot: fixedRoot, challenge: challenge,
+                            currentGenerations: fixedGenerations
+                        )
+                        return 1
+                    } catch DaemonProviderError.grantInvalid(.consumed) {
+                        return 0
+                    } catch {
+                        return -1
+                    }
+                }
+            }
+            var values: [Int] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+
+        #expect(outcomes.filter { $0 == 1 }.count == 1)
+        #expect(outcomes.filter { $0 == 0 }.count == 63)
+        #expect(!outcomes.contains(-1))
+    }
+
     @Test("an unanswerable journal fails closed, never passes")
     func journalUnavailable() throws {
         let scratch = try ConvergenceScratch()

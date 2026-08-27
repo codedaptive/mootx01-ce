@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: accepted-1.1-target
-version: 1.10.0
-date: 2026-08-20
+version: 1.11.1
+date: 2026-08-26
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -218,9 +218,12 @@ ports; sanctioned date-storage seam.
 ### `VectorMatch`
 
 A nearest-neighbour result: one matched item, the distance, and the
-producing model's id (SPEC § 4, I-2; § 5, B-6/B-10). Ordered by distance
-ascending, ties by `itemID`/`item_id` ascending. Lane F rename:
-`drawerID` → `itemID`.
+producing model's id (SPEC § 4, I-2; § 5, B-6/B-10). Engine output is
+ordered by the universal tie-break (distance ASC, vecHash ASC, itemID
+ASC — SPEC 1.9.0); the type's own `Comparable` remains (distance,
+itemID) for within-estate sorting, so consumers MUST NOT re-sort an
+engine result (a re-sort of tied rows discards the content-stable
+order). Lane F rename: `drawerID` → `itemID`.
 
 **Swift:**
 
@@ -435,7 +438,7 @@ Write-behind policy (SPEC B-3a): the in-memory resident array
 is updated immediately; the `.vec` sidecar is marked dirty but NOT
 rewritten. Call `flush()` at a quiesce point to persist. Crash safety is
 preserved by the table-rebuild path (the `vectors` table is the durable
-source of truth; a stale sidecar is rebuilt from it on the next open).
+authoritative store; a stale sidecar is rebuilt from it on the next open).
 For importing many vectors at once, prefer `addPayloads(_:)` /
 `add_payloads` which bounds sidecar writes and index builds to O(batches).
 
@@ -476,7 +479,7 @@ entire batch is rejected (no partial writes) if any element has `kind ==
 .int8` / `Int8`. The first offending `itemID` is reported in the error.
 
 For a batch of N items it performs:
-- O(N) row upserts to the `vectors` table (durable source of truth —
+- O(N) row upserts to the `vectors` table (durable authoritative store —
   unavoidable and not the disease).
 - Binary lane: ONE tombstone pass, ONE array append pass, ONE sidecar
   write (`ResidentArrayStore.appendBatch` / `append_batch`), and ONE
@@ -490,8 +493,8 @@ For a batch of N items it performs:
   untouched.
 - Empty batch is a no-op.
 Search output is identical to N sequential `addPayload` calls for the same
-inputs (the total order (distance ASC, itemID ASC) is applied at query
-time, not insert time). Verified by C-10 (SPEC § 7).
+inputs (the total order (distance ASC, vecHash ASC, itemID ASC) is
+applied at query time, not insert time). Verified by C-10 (SPEC § 7).
 
 **Swift:**
 
@@ -676,8 +679,10 @@ pub fn vectors_for_item(&self, item_id: &str)
 
 k-nearest by Hamming distance over binary rows tagged with the given
 model, via the resident DenseIndex (BruteForceIndex below
-`mihThreshold`, MIHIndex at/above it — both exact). Sorted distance
-ascending, ties by item id ascending (SPEC § 5, B-6/B-10; I-2).
+`mihThreshold`, MIHIndex at/above it — both exact). Sorted by the
+universal tie-break: distance ascending, then vecHash (FNV-1a 64 over
+the stored payload bytes) ascending, then item id ascending
+(SPEC 1.9.0 § 5, B-6/B-10; I-2).
 
 **Swift:**
 
@@ -1163,6 +1168,17 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.11.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.11.0 -- 2026-08-26
+Binary-lane search ordering follows SPEC 1.9.0: engines emit
+(distance ASC, vecHash ASC, itemID ASC); vecHash is FNV-1a 64 over the
+stored vector payload bytes. `VectorMatch.Comparable` is unchanged and
+documented as within-estate only — consumers must not re-sort engine
+results. No signature changes.
 
 ### 1.9.0 -- 2026-08-15
 

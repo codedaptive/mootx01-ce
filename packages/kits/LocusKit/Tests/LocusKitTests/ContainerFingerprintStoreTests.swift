@@ -318,6 +318,10 @@ struct ContainerFingerprintStoreTests {
             // signing, so a fresh store per open is fine.)
             identityKeyStore: InMemoryEstateIdentityKeyStore())
         let r = try await estate.containerFP.get(wing: "w", room: "r")
-        #expect(r?.operational == 17 << 24)
+        // drawerValues stores operationalBitmap as-is from the drawer struct.
+        // The two drawers have op = (1<<24) and (16<<24); the container fingerprint
+        // OR-aggregates them → (1|16)<<24 = 17<<24. Bits 27-30 are FREE
+        // (ADORN-STORE-02 v17) and do not appear in any test bitmap here.
+        #expect(r?.operational == (17 << 24))
     }
 }

@@ -52,11 +52,13 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 37 total: 14 recipe tools + 23 lens tools. moot_distill is the sole
+        // 38 total: 15 recipe tools + 23 lens tools. moot_distill is the sole
         // distillation-sweep name (its compatibility alias is gone — Phase 2 of
         // SPEC_DISTILLATION_STORAGE §3) and moot_recollect retired with the
         // factoid tier (§3/§11). moot_recall_connected joined 2026-08-06
-        // (graph-diffusion multi-hop recall).
+        // (graph-diffusion multi-hop recall). moot_recall_walk joined D10
+        // (escalation-ladder recall: cheap session_hybrid first, precise
+        // hamming+text only when Stage 1 is not confident).
         #expect(recipeNames == [
             "moot_confirm_migration",
             "moot_distill",
@@ -93,6 +95,7 @@ struct RecipeToolsTests {
             "moot_recall_shaped",
             "moot_recall_temporal",
             "moot_recall_vague",
+            "moot_recall_walk",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -186,11 +189,11 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.hasPrefix("found "), "memory_search-shaped header expected")
+        #expect(text.hasPrefix("found "), "S1 header expected")
         #expect(text.contains(answer),
                 "the tunnel-linked answer must be reachable via the walk; got: \(text)")
-        #expect(text.contains("connected: anchor="),
-                "the lane-provenance line must be present")
+        // "connected: anchor=" text line was dropped in COMPOSER-02B; retrievalSource
+        // is now in the structured JSON block only (§11.10 extensions).
     }
 
     /// Gate invariant: a tombstoned (withdrawn) memory linked by a tunnel to
@@ -539,7 +542,7 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.contains("grounded_synthesis: 3 drawer"))
-        #expect(text.contains("patterns:"))
+        #expect(text.contains("candidate memories, one per line"))
         #expect(text.contains("carbon"))
     }
 
@@ -575,15 +578,15 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("query: carbon compounds"))
-        // The first keyInsight is a cue-matched memory — the two-lane fusion
+        #expect(text.contains("query: carbon, compounds"))
+        // The first candidate row is a cue-matched memory — the two-lane fusion
         // must never let a zero-term-match row outrank a term match.
-        let insights = text.components(separatedBy: "keyInsights:").last ?? ""
-        let firstInsight = insights.split(separator: "\n")
-            .first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- ") }
+        let candidates = text.components(separatedBy: "candidate memories, one per line").last ?? ""
+        let firstRow = candidates.split(separator: "\n")
+            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             .map(String.init) ?? ""
-        #expect(firstInsight.contains("carbon"),
-                "cue-matched memory must lead keyInsights; got '\(firstInsight)'")
+        #expect(firstRow.contains("carbon"),
+                "cue-matched memory must lead the candidate section; got '\(firstRow)'")
     }
 
     /// Ranking is driven by cue-term relevance, not recency. File 25 memories:
@@ -611,8 +614,8 @@ struct RecipeToolsTests {
         // drawers are selected, all remaining generics carry a ~0.95 shingle
         // similarity penalty while the answer (very different content) carries
         // only ~0.08. That penalty gap makes the answer's MMR score exceed every
-        // remaining generic's. With cap=3 the answer occupies the third slot in
-        // keyInsights. A pool of 10+ generics pushes the answer past position 3;
+        // remaining generic's. With cap=3 the answer occupies the third candidate
+        // row. A pool of 10+ generics pushes the answer past position 3;
         // a pool of 3 generics means limit=3 alone evicts the answer pre-change.
         for i in 1...4 {
             _ = try await dispatcher.dispatch(
@@ -636,12 +639,13 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // The answer drawer must appear in keyInsights — its first line excerpt
-        // contains the distinctive terms. keyInsights is the last of the 3-slot
-        // cap (positions 1 and 2 are the 2 most-recent generic drawers).
+        // The answer drawer must appear in the candidate section — its
+        // first-sentence excerpt contains the distinctive terms. It occupies
+        // the 3rd slot of the cap-3 output (positions 1 and 2 are the 2
+        // most-recent generic drawers).
         #expect(text.contains("daguerreotype"),
-                "answer drawer content must appear in keyInsights after cue ranking; got: \(text)")
-        #expect(text.contains("query: daguerreotype vintage cameras collection"))
+                "answer drawer content must appear in the candidate section after cue ranking; got: \(text)")
+        #expect(text.contains("query: daguerreotype, vintage, cameras, collection"))
     }
 
     /// `moot_synthesize` silently removes provenance-restricted rows from the
@@ -764,11 +768,10 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Same shape as moot_memory_search: a `found N memory(s)` header then
-        // one `id  [room]  preview` line per hit. The mootText parser keys on
-        // exactly this shape.
+        // Same shape as moot_memory_search: a S1 "found N candidate memories" header then
+        // one S2 row per hit (COMPOSER-02B §11.1/§11.5).
         #expect(text.hasPrefix("found "))
-        #expect(text.contains("memory(s)"))
+        #expect(text.contains("candidate memor"))
         // The precise target (46) is surfaced; the recipe ranks it first, so
         // its content appears in the first hit line after the header.
         let lines = text.split(separator: "\n").map(String.init)
@@ -898,8 +901,9 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // S1 header format (COMPOSER-02B §11.1): "found N candidate memories, one per line"
         #expect(text.hasPrefix("found "))
-        #expect(text.contains("memory(s)"))
+        #expect(text.contains("candidate memor"))
     }
 
     /// An unknown preset name is a caller error — the boundary rejects it
@@ -962,6 +966,42 @@ struct RecipeToolsTests {
         #expect(tool.description.contains("conceptual"))
         #expect(tool.description.contains("anti_redundant"))
         #expect(tool.description.contains("Roster:"))
+        // Float-metric presets are present in the roster advertisement.
+        #expect(tool.description.contains("float-l2"))
+        #expect(tool.description.contains("float-dot"))
+    }
+
+    /// float-l2 and float-dot are accepted by the MCP boundary and return
+    /// a valid memory-search-shaped result. Mirrors testShapedRecallDispatchReturnsMootTextShape
+    /// but exercises the float-metric preset path through the full dispatch chain.
+    @Test func testShapedRecallFloatMetricPresetsAccepted() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-float-metric"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "the tide rises past the sea wall at dusk"))
+
+        for presetName in ["float-l2", "float-dot"] {
+            let result = try await dispatcher.dispatch(
+                name: "moot_recall_shaped",
+                arguments: .object([
+                    "query": .string("tide sea wall"),
+                    "preset": .string(presetName),
+                    "filter": .string("unconfirmed"),
+                    "limit": .integer(10),
+                ]))
+
+            let obj = try #require(result.objectValue)
+            #expect(obj["isError"]?.boolValue == false,
+                    "\(presetName) must be accepted (is a valid preset name)")
+            let text = try #require(
+                obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+            #expect(text.hasPrefix("found "),
+                    "\(presetName) must return the moot_memory_search shape")
+        }
     }
 
     // MARK: - migration benchmark run → confirm, end to end
@@ -1249,20 +1289,24 @@ struct RecipeToolsTests {
         // moot_recollect is in the routing set as a notice-only stub (Wave 1 ACK
         // gate): it must reach dispatch to return the removal notice. Not listed.
         #expect(RecipeTools.isRecipeTool("moot_recollect"))
+        // D10: moot_recall_walk is a listed recipe tool (escalation-ladder recall).
+        #expect(RecipeTools.isRecipeTool("moot_recall_walk"))
     }
 
     // MARK: - tools() count
 
     @Test func testRecipeToolsCount() {
-        // 14 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // 15 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
         // preciseRecall, temporalRecall, connectedRecall, shapedRecall,
         // vagueRecall, runMigration, confirmMigration, dream, distill,
-        // recallDistilled, huntContradictions.
-        #expect(RecipeTools.tools().count == 14)
+        // recallDistilled, huntContradictions, walkRecall (D10).
+        #expect(RecipeTools.tools().count == 15)
         let names = RecipeTools.tools().map(\.name)
         #expect(names.contains("moot_distill"))
         #expect(!names.contains("moot_consolidate"))
         #expect(!names.contains("moot_recollect"))
+        // D10: moot_recall_walk is in the listed tools set.
+        #expect(names.contains("moot_recall_walk"))
     }
 
     // MARK: - moot_distill dispatch
@@ -1324,14 +1368,13 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Default output starts with "found N memory(s)" — no query echo
-        // and, since PR-03, no [distilled] tag (deviation-only narration:
-        // distilled service is this verb's norm, only fallback rows carry
-        // a marker). (echo_query:true opt-in restores the "for:" suffix.)
+        // S1 header format (COMPOSER-02B §11.1): "found N candidate memories, one per line"
+        // — no query echo; no [distilled] tag (deviation-only narration).
+        // (echo_query:true opt-in restores the "for: <query>" suffix.)
         #expect(text.hasPrefix("found "),
-                "moot_recall_distilled output must start with 'found N memory(s)'")
-        #expect(text.contains("memory(s)"),
-                "output header must include 'memory(s)'")
+                "moot_recall_distilled output must start with 'found N candidate memories'")
+        #expect(text.contains("candidate memor"),
+                "output header must use the S1 candidate memories format")
         #expect(!text.contains("[distilled]"),
                 "PR-03: the [distilled] header tag is retired")
         #expect(!text.contains("] for:"),
@@ -1378,16 +1421,16 @@ struct RecipeToolsTests {
             arguments: .object([
                 "query": .string("test echo query"),
                 "echo_query": .bool(true),
-                "ack": .string("recall_distilled/v2"),
             ]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // With echo_query:true, header must echo the query.
-        #expect(text.hasPrefix("found 0 memory(s) for: test echo query"),
-                "echo_query:true must restore 'for: {query}' suffix in header")
+        // With echo_query:true, header must echo the query (applied on both
+        // empty and non-empty results). New S1 format: "found N candidate memories for: <query>".
+        #expect(text.hasPrefix("found 0 candidate memories for: test echo query"),
+                "echo_query:true must produce 'found 0 candidate memories for: <query>' header")
         // echo_query is a declared arg — no unrecognized-arg hint must appear.
         #expect(!text.contains("hint: unrecognized argument(s) ignored"),
                 "echo_query is declared — must NOT trigger the unrecognized-arg hint")
@@ -1404,7 +1447,6 @@ struct RecipeToolsTests {
             name: "moot_recall_distilled",
             arguments: .object([
                 "query": .string("silent query test"),
-                "ack": .string("recall_distilled/v2"),
             ]))
 
         let obj = try #require(result.objectValue)
@@ -1412,10 +1454,11 @@ struct RecipeToolsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // Default (no echo_query) must omit the query from the header.
-        #expect(!text.contains("] for:"),
+        #expect(!text.contains("for:"),
                 "default response must NOT echo the query in the header")
-        #expect(text.contains("found 0 memory(s)"),
-                "header must still contain the count line")
+        // S1 empty header: "found 0 candidate memories, one per line" (COMPOSER-02B §11.1)
+        #expect(text.contains("found 0 candidate memories"),
+                "header must still contain the S1 count line")
     }
 
     // MARK: - ACK gate and notice-only stub tests (Wave 1)
@@ -1448,8 +1491,10 @@ struct RecipeToolsTests {
                 "notice must state the tool was removed")
     }
 
-    // moot_recall_distilled — notice when ack absent.
-    @Test func testRecallDistilledWithoutAckReturnsContractNotice() async throws {
+    // moot_recall_distilled runs UNCONDITIONALLY — no acknowledgment
+    // ceremony precedes any result (ARIA_MCP_SPEC 2.0.0 § 8.6). The former
+    // ack gate and CONTRACT CHANGE NOTICE were deleted in COMPOSER-02B.
+    @Test func testRecallDistilledRunsWithoutAnyAck() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-no-ack"))
@@ -1463,61 +1508,22 @@ struct RecipeToolsTests {
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text == RecipeTools.recallDistilledContractNotice,
-                "absent ack must return the exact CONTRACT CHANGE NOTICE text")
-        #expect(text.hasPrefix("CONTRACT CHANGE NOTICE:"),
-                "notice must start with CONTRACT CHANGE NOTICE:")
-        #expect(text.contains(#"ack: "recall_distilled/v2""#),
-                "notice must quote the current token")
-        // Side-effect check: notice fires before estate access.
-        #expect(!text.contains("found "),
-                "no recall must have run — estate must be untouched")
+        #expect(text.contains("found "),
+                "the recall handler must run without any ack")
+        #expect(!text.contains("CONTRACT CHANGE NOTICE"),
+                "no ceremony may precede results")
     }
 
-    // moot_recall_distilled — notice when ack is wrong/stale token.
-    @Test func testRecallDistilledWithWrongAckReturnsContractNotice() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-wrong-ack"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object([
-                "query": .string("any query"),
-                "ack": .string("recall_distilled/v1"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text == RecipeTools.recallDistilledContractNotice,
-                "wrong ack token must return the same CONTRACT CHANGE NOTICE")
-        #expect(text.contains(#"ack: "recall_distilled/v2""#),
-                "notice must always quote the current token, not the caller's stale one")
-    }
-
-    // Schema: moot_recall_distilled exposes ack parameter.
-    @Test func testRecallDistilledSchemaExposesAckParam() throws {
+    // Schema + description: no ack parameter, no ceremony vocabulary.
+    @Test func testRecallDistilledSchemaHasNoAckParam() throws {
         let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_distilled" })
         let tool_ = try #require(tool, "moot_recall_distilled must appear in tools()")
         let props = tool_.inputSchema.objectValue?["properties"]?.objectValue
         let props_ = try #require(props, "moot_recall_distilled schema must have properties")
-        #expect(props_["ack"] != nil,
-                "moot_recall_distilled schema must expose 'ack' parameter")
-        // The ack property must be a string type.
-        let ackType = props_["ack"]?.objectValue?["type"]?.stringValue
-        #expect(ackType == "string",
-                "ack param must be type: string")
-    }
-
-    // Description: moot_recall_distilled description documents the current token.
-    @Test func testRecallDistilledDescriptionContainsToken() throws {
-        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_distilled" })
-        let tool_ = try #require(tool)
-        #expect(tool_.description.contains("recall_distilled/v2"),
-                "moot_recall_distilled description must document the current ack token")
+        #expect(props_["ack"] == nil,
+                "moot_recall_distilled schema must NOT expose an 'ack' parameter")
+        #expect(!tool_.description.contains("CONTRACT CHANGE"),
+                "description must carry no ceremony vocabulary")
     }
 
     // MARK: - helpers
@@ -1736,5 +1742,61 @@ struct RecipeToolsSecurityTests {
         // Should not throw — clamped to 500 and dispatches normally.
         let args: JSONValue = .object(["limit": .integer(1_000_000)])
         _ = try? await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
+    }
+
+    // MARK: - moot_recall_walk dispatch (D10)
+
+    /// AM-WR-ARIA-1: moot_recall_walk dispatches successfully on an empty estate.
+    /// Returns "found 0 memory(s)" and a walk: stage line.
+    @Test func walkRecallDispatchOnEmptyEstate() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_walk",
+            arguments: .object(["query": .string("escalation test")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // Empty estate: S1 empty header + walk: stage line always present.
+        // S1 empty header is "found 0 candidate memories, one per line" (COMPOSER-02B §11.1).
+        #expect(text.hasPrefix("found 0 candidate memories"),
+            "moot_recall_walk output must start with the S1 empty header")
+        #expect(text.contains("walk: stage="),
+            "moot_recall_walk output must contain a walk: stage= line")
+    }
+
+    /// AM-WR-ARIA-2: moot_recall_walk tool descriptor appears in tools/list
+    /// with the correct name, required query param, and outputSchema.
+    @Test func walkRecallToolDescriptorIsWellFormed() {
+        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_walk" })
+        #expect(tool != nil, "moot_recall_walk must appear in RecipeTools.tools()")
+        guard let tool else { return }
+        // Required field is "query".
+        let props = tool.inputSchema.objectValue?["properties"]?.objectValue
+        #expect(props?["query"] != nil, "moot_recall_walk schema must have 'query' property")
+        let required = tool.inputSchema.objectValue?["required"]?.arrayValue?
+            .compactMap { $0.stringValue } ?? []
+        #expect(required.contains("query"),
+            "moot_recall_walk must require 'query'")
+        // outputSchema is present (same contract as moot_recall_precise).
+        #expect(tool.outputSchema != nil,
+            "moot_recall_walk must declare an outputSchema")
+    }
+
+    /// AM-WR-ARIA-3: missing query arg returns invalidParams, not a crash.
+    @Test func walkRecallMissingQueryThrows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(in: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_recall_walk",
+                arguments: .object([:]))
+        }
     }
 }

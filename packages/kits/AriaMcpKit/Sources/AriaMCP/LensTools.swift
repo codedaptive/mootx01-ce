@@ -385,25 +385,29 @@ enum LensTools {
     /// `resolvePeer` resolves a comparison estate from `estateID`; it is
     /// unrestricted because lens comparisons are read-only cross-estate
     /// operations that are explicitly opt-in via the `estateIDB` argument.
+    /// `now` is the bench-clock instant threaded from `ToolDispatcher.dispatch()`.
+    /// All `Date()` calls inside this function are replaced with `now` so the
+    /// replay seam (`MOOT_BENCH_EPOCH_NOW`) produces deterministic timestamps.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         defaultHandle: EstateHandle,
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        resolvePeer: ([String: JSONValue]) throws -> EstateHandle
+        resolvePeer: ([String: JSONValue]) throws -> EstateHandle,
+        now: Date
     ) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         switch name {
         case "moot_lens_keystones":
-            // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
+            // `now` is the bench-clock instant threaded from ToolDispatcher.dispatch().
             // Kits and substrate must never read the clock — the caller provides `now`.
             let ranked = try await Keystones.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 topK: try ToolDispatcher.clampLimit(
                     try integer(args, "topK", default: 5), argument: "topK"),
-                now: Date())
+                now: now)
             // isKeystone post-filter: when keystoneOnly is true, restrict the
             // returned candidate set to drawers that carry the isKeystone bit
             // (bit 17). Eigenvector centrality is computed over the full tunnel
@@ -430,18 +434,18 @@ enum LensTools {
             // address and lattice metadata so the caller can memory_get it
             // immediately (progressive-recall rule). The centrality score is
             // appended after the dense row as the lens-specific signal.
-            let denseByID = try await RecipeTools.denseRowsByID(ids: filtered.map(\.id), estate: estate)
+            let denseByID = try await RecipeTools.s2RowsByID(ids: filtered.map(\.id), estate: estate)
             return list("keystones", filtered.map {
-                let row = denseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                let row = denseByID[$0.id] ?? ResultComposer.renderS2Row(CandidateRowData(id: $0.id, eventTime: "-"))
                 return "\(row) centrality=\($0.centrality)"
             })
 
         case "moot_lens_constellation":
-            // Date() is permitted here: this is the ARIA MCP boundary, not a kit.
+            // `now` is the bench-clock instant threaded from ToolDispatcher.dispatch().
             // Kits and substrate must never read the clock — the caller provides `now`.
             let out = try await ConstellationLens.run(
                 kit: kit, handle: handle, wing: try requireString(args, "wing"),
-                now: Date())
+                now: now)
             return list("constellation", out.communities.map { $0.joined(separator: ", ") })
 
         case "moot_lens_free_association":
@@ -472,10 +476,10 @@ enum LensTools {
             // (progressive-recall rule). The activation score is appended after
             // the dense row as the lens-specific signal.
             let faEstate = try await kit.estate(for: handle)
-            let faDenseByID = try await RecipeTools.denseRowsByID(
+            let faDenseByID = try await RecipeTools.s2RowsByID(
                 ids: out.map(\.drawerID), estate: faEstate)
             return list("free_association", out.map {
-                let row = faDenseByID[$0.drawerID] ?? DenseRow.renderUnhydrated(id: $0.drawerID)
+                let row = faDenseByID[$0.drawerID] ?? ResultComposer.renderS2Row(CandidateRowData(id: $0.drawerID, eventTime: "-"))
                 return "\(row) activation=\($0.activation)"
             })
 
@@ -483,7 +487,7 @@ enum LensTools {
             let weather = try await ThemeWeather.run(
                 kit: kit, handle: handle, frame: try frame(args),
                 halfLifeSeconds: try number(args, "halfLifeSeconds", default: 604_800),
-                now: Date())
+                now: now)
             return list("theme_weather", weather.map { "\($0.category) momentum=\($0.momentum)" })
 
         case "moot_lens_latent_themes":
@@ -596,11 +600,11 @@ enum LensTools {
             // lattice metadata so the caller can memory_get it immediately
             // (progressive-recall rule). The outlier ids are drawer ids.
             let cohEstate = try await kit.estate(for: handle)
-            let cohDenseByID = try await RecipeTools.denseRowsByID(
+            let cohDenseByID = try await RecipeTools.s2RowsByID(
                 ids: out.outliers, estate: cohEstate)
             return list(
                 "cohesion_outliers (considered \(out.considered))",
-                out.outliers.map { cohDenseByID[$0] ?? DenseRow.renderUnhydrated(id: $0) })
+                out.outliers.map { cohDenseByID[$0] ?? ResultComposer.renderS2Row(CandidateRowData(id: $0, eventTime: "-")) })
 
         case "moot_lens_contradiction":
             // Genuine contradiction detector: (a) drawer pairs linked by a
@@ -643,7 +647,7 @@ enum LensTools {
             let keystoneEndpointIDs: Set<String>
             // Dense-row map: id → rendered row for admissible contradiction
             // endpoints. Admissible drawers are already .structured here, so
-            // DenseRow.render() can be called directly — no extra fetch.
+            // Drawers are already .structured here — renderS2Row needs no second fetch.
             var contradictionDenseByID: [String: String] = [:]
             if endpointIDs.isEmpty {
                 hiddenTunnelEndpointIDs = []
@@ -658,10 +662,17 @@ enum LensTools {
                 keystoneEndpointIDs = Set(result.admissible
                     .filter { $0.hasFeatureFlag(.isKeystone) }
                     .map(\.id))
-                // Build the dense-row map from the same admissible drawers —
+                // Build the S2-row map from the same admissible drawers —
                 // avoids a second getDrawers round-trip for citation rendering.
+                // COMPOSER-02B: renderS2Row replaces DenseRow.render.
                 contradictionDenseByID = Dictionary(uniqueKeysWithValues:
-                    result.admissible.map { ($0.id, DenseRow.render($0)) })
+                    result.admissible.map { d in
+                        let row = CandidateRowData(
+                            id: d.id, subject: d.subject,
+                            firstSentence: d.content.isEmpty ? nil : d.content,
+                            eventTime: ResultComposer.iso8601(d.eventTime))
+                        return (d.id, ResultComposer.renderS2Row(row))
+                    })
             }
             // Stable sort: keystone-involving contradictions first, then original
             // order. `.stable` is not needed (sort is applied to the prefix slice
@@ -690,7 +701,7 @@ enum LensTools {
                     if let sid = t.sourceDrawerId {
                         src = hiddenTunnelEndpointIDs.contains(sid)
                             ? "<hidden>"
-                            : (contradictionDenseByID[sid] ?? DenseRow.renderUnhydrated(id: sid))
+                            : (contradictionDenseByID[sid] ?? ResultComposer.renderS2Row(CandidateRowData(id: sid, eventTime: "-")))
                     } else {
                         src = "\(t.sourceWing)/\(t.sourceRoom)"
                     }
@@ -698,7 +709,7 @@ enum LensTools {
                     if let tid = t.targetDrawerId {
                         tgt = hiddenTunnelEndpointIDs.contains(tid)
                             ? "<hidden>"
-                            : (contradictionDenseByID[tid] ?? DenseRow.renderUnhydrated(id: tid))
+                            : (contradictionDenseByID[tid] ?? ResultComposer.renderS2Row(CandidateRowData(id: tid, eventTime: "-")))
                     } else {
                         tgt = "\(t.targetWing)/\(t.targetRoom)"
                     }
@@ -775,13 +786,13 @@ enum LensTools {
             // (progressive-recall rule). Ranked order is preserved — the first
             // row is the most trust-grounded hit.
             let tsEstate = try await kit.estate(for: handle)
-            let tsDenseByID = try await RecipeTools.denseRowsByID(
+            let tsDenseByID = try await RecipeTools.s2RowsByID(
                 ids: out.rankedIDs, estate: tsEstate)
             var tsLines = [
                 "trust_grounded_synthesis: \(out.rankedIDs.count) drawer(s), \(out.highTrustCount) high-trust",
             ]
             for id in out.rankedIDs {
-                tsLines.append("  " + (tsDenseByID[id] ?? DenseRow.renderUnhydrated(id: id)))
+                tsLines.append("  " + (tsDenseByID[id] ?? ResultComposer.renderS2Row(CandidateRowData(id: id, eventTime: "-"))))
             }
             tsLines.append("summary: \(out.context.summary)")
             return ToolDispatcher.textResult(tsLines.joined(separator: "\n"))
@@ -805,10 +816,10 @@ enum LensTools {
                 // (progressive-recall rule). The score is appended as the
                 // lens-specific signal after the dense row.
                 let pcEstate = try await kit.estate(for: handle)
-                let pcDenseByID = try await RecipeTools.denseRowsByID(
+                let pcDenseByID = try await RecipeTools.s2RowsByID(
                     ids: out.map(\.id), estate: pcEstate)
                 let resultLines = out.map {
-                    let row = pcDenseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                    let row = pcDenseByID[$0.id] ?? ResultComposer.renderS2Row(CandidateRowData(id: $0.id, eventTime: "-"))
                     return "\(row) score=\($0.score)"
                 }
                 var body = "partial_cue_recall: \(resultLines.count) result(s)"
@@ -899,10 +910,10 @@ enum LensTools {
             // (progressive-recall rule). The tunnel weight is appended as the
             // lens-specific signal after the dense row.
             let sucEstate = try await kit.estate(for: handle)
-            let sucDenseByID = try await RecipeTools.denseRowsByID(
+            let sucDenseByID = try await RecipeTools.s2RowsByID(
                 ids: out.map(\.id), estate: sucEstate)
             return list("tunnel_successor", out.map {
-                let row = sucDenseByID[$0.id] ?? DenseRow.renderUnhydrated(id: $0.id)
+                let row = sucDenseByID[$0.id] ?? ResultComposer.renderS2Row(CandidateRowData(id: $0.id, eventTime: "-"))
                 return "\(row) weight=\($0.weight)"
             })
 
@@ -1068,7 +1079,7 @@ enum LensTools {
                 kit: kit, handle: handle,
                 window: momentWindow,
                 comparisonWindows: compWindows,
-                now: Date())
+                now: now)
             var momentLines = [
                 "moment: window=\(out.windowCount) fingerprint(s), "
                     + "\(out.result.ranking.count) comparison(s) ranked",
@@ -1092,7 +1103,7 @@ enum LensTools {
                 bucketCount: bucketCount,
                 endingAt: endingAt,
                 topK: topK,
-                now: Date())
+                now: now)
             return list(
                 "rhythm (bucketCount=\(out.bucketCount))",
                 out.periods.map {
@@ -1115,7 +1126,7 @@ enum LensTools {
                 window: precedenceWindow,
                 target: TemporalFieldCoord(fieldPath: targetField, valueRepr: targetValue),
                 k: k,
-                now: Date())
+                now: now)
             return list(
                 "precedence (entryCount=\(out.entryCount))",
                 out.antecedents.map {
@@ -1222,7 +1233,7 @@ enum LensTools {
                 frame: try frame(args),
                 fieldA: fieldA,
                 fieldB: fieldB,
-                now: Date())
+                now: now)
             var complexityLines = [
                 "complexity: totalCount=\(out.totalCount)",
                 "entropyA=\(out.result.entropyA)",

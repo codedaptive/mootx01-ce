@@ -39,6 +39,9 @@ pub fn union_slots() -> Vec<FieldSlot> {
         FieldSlot::new(Column::Operational, 12, 12, "feature_flags"),
         FieldSlot::new(Column::Operational, 24, 1, "state_extension"),
         FieldSlot::new(Column::Operational, 25, 1, "lineage_clustering"),
+        // Bits 27-30 are FREE (ADORN-STORE-02 v17 retired adornmentRequired and
+        // adornmentBitmask). Adornment state moved to the normalized `adornments`
+        // table keyed by (drawer_id, minter_id).
         // provenance bitmap (cookbook §2.5)
         FieldSlot::with_values(
             Column::Provenance,

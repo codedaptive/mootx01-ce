@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Specification
-version: 1.8.1
+version: 1.14.0
 status: active
-date: 2026-08-06
+date: 2026-08-21
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -755,6 +755,29 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 
 ## Changelog
 
+### 1.14.0 -- 2026-08-21
+
+- New recipe WalkRecall (`walk_recall`, D10): escalation-ladder recall that runs
+  cheap Stage 1 (ShapedRecall / `session_hybrid` preset, pool 20) first and
+  stops when the top-gap is confident (≥ 0.25). Stage 2 (PreciseRecall /
+  `hamming+text` composition) fires only when Stage 1 is insufficient. The stop
+  criterion mirrors `RecallDiscrimination.HIGH_MARGIN`. Both Swift and Rust ports
+  ship; `is_confident` helper is testable in both ports. Registered as entry 30
+  in `RecipeCatalog`/`catalog.rs`. The MCP surface is `moot_recall_walk`
+  (AriaMcpKit both ports).
+
+### 1.13.0 -- 2026-08-20
+
+- M4 single-derivation: PreciseRecall and TemporalRecall no longer call
+  `QueryLatticeAnchor.derive(from:)` / `query_anchor()`. Both recipes
+  read the §8.3 lattice anchor from `GLKRecallResult.queryLatticeAnchor` /
+  `query_lattice_anchor` — derived exactly once inside the GLK recall
+  director. The `reductionQuery(for:)` private helper in Swift
+  TemporalRecall (which called `derive()`) is removed and replaced with
+  inline anchor construction from the result. Functional parity is exact:
+  both ports produce the same `udcCode`/`udc_code` and `qid` values for any
+  given query text.
+
 ### 1.8.0 -- 2026-08-06
 
 - New recipe ConnectedRecall (`recall_connected`): scored anchor grab →
@@ -851,4 +874,12 @@ key. Three conformance invariants: (1) scoredLane enforces RECENCY-SHALL-NOT-DOM
 (2) max combined boost 0.006 < cross-group evidence gap at rank >= 36 (evidence gate);
 (3) no Date() inside boost math (determinism). Rust port uses an equivalent inline
 fusion path (no scored_lane on Rust hybrid_recall). New: SessionHybridFusion.swift,
-SessionHybridTests.swift (12 tests), session_hybrid_fusion.rs (9 tests).
+SessionHybridTests.swift (12 tests), session_hybrid_fusion.rs (9 tests).- **1.12.0 (2026-08-20)** — The precise and temporal doors derive the query's §8.3 lattice anchor (GLK QueryLatticeAnchor) and stamp it on ReductionQuery, so lattice-bearing reduction compositions (lattice, lattice+hamming, weighted-all, composite) score real anchor distance at recall. The default text composition does not read the anchor — default door behavior is unchanged.
+
+- **v1.11.0 (2026-08-20)** — TemporalRecall date-seeking fork (Gap 3): when the query asks for a date but states none, loose mode ranks REAL-dated memories (eventTime != filedAt) first — the date is the answer and is read from the rows' event_time; windowSource reports "date-seeking". Tight semantics unchanged (still requires a window).
+
+- **v1.10.0 (2026-08-19)** — TemporalRecall v2 (rulings Q1–Q3, 2026-08-19): (1) TemporalGrab arm — pool (lexical grab only) or dated (grab unioned with a date-indexed EventAfter/EventBefore store fetch over the max-padded windows); (2) sliding-window expansion — the window widens ±1 day at a time while members < limit, hard cap ±10, each member carrying its padDays distance; (3) deterministic within-window re-rank — members are affinity-folded by the PreciseRecall composition machinery and ordered pad-first (date proximity primary, affinity secondary), bounded by rerankCap 200 with coarse-order overflow. Outcome gains grab and appliedPad; matches gain padDays.
+
+- **v1.9.0 (2026-08-19)** — Added TemporalRecall recipe: window resolution (explicit from/to wins over the query parse; tight without a window fails loud), wide body-free coarse grab (default pool 120), loose (membership-first stable re-rank, nothing dropped) and tight (filter) modes, late hydration of survivors. Decision record DECISION_SEARCH_STRATEGY_RECIPES_2026-08-19 item 4.
+
+

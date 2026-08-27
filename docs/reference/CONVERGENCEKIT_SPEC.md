@@ -1,8 +1,9 @@
 ---
 title: ConvergenceKit Specification
-version: 1.5
+version: 1.6
 status: active
-date: 2026-08-19
+date: 2026-08-26
+date: 2026-08-26
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -342,7 +343,7 @@ SubstrateTypes layout is optimised for compact node-ID addressing in
 the 8-bit range (node MSB). Side tables in each backend store HLCs from
 their own packing only — no cross-format integer comparison ever occurs.
 `SlotFencingScenarios.swift` provides two clearly-labelled extractor
-helpers as ground-truth references: `p4m3NodeIDOf` (SubstrateTypes
+helpers as canonical references: `p4m3NodeIDOf` (SubstrateTypes
 layout, node in bits 56–63) and `ckRecordNodeIDOf` (CKRecordMapping
 layout, node in low 4 bits).
 
@@ -850,6 +851,12 @@ without a live CloudKit container).
 
 ## Changelog
 
+### 1.6 -- 2026-08-26
+Ladder repair: develop/1.1.x (MACD-3D) and the benchmark lane each
+minted a 1.5 entry for unrelated changes. Both are preserved below
+under their original labels; neither is authoritative over the other,
+and 1.6 is the first version number that means one thing.
+
 ### 1.5 -- 2026-08-19 (MACD-3D)
 - **Added integration note — authorized caller (§3):** in a split-process
   architecture the process that holds the `Storage` handle is the authorized
@@ -859,6 +866,9 @@ without a live CloudKit container).
   is mandatory at the `enable` call site (Perkins Amendment 1).
 
 ### 1.4 -- 2026-07-17 (CVK-WC8)
+### 1.5 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.3 -- 2026-07-17 (CVK-WC6)
 - **Firmed B-7 (Federation pairing):** expanded from a one-paragraph

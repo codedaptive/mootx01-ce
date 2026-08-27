@@ -196,7 +196,7 @@ public enum MatrixDecay {
 extension Double {
     /// ln(2) constant for half-life math. Defined here to avoid
     /// pulling Darwin's M_LN2 macro and to match Rust's f64::LN_2.
-    static let ln2: Double = 0.6931471805599453
+    public static let ln2: Double = 0.6931471805599453
 }
 
 // MARK: - Recommended half-lives (cookbook § 6.8 table)

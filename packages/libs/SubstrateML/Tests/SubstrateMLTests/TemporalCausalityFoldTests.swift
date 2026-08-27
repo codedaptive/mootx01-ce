@@ -288,6 +288,42 @@ struct TemporalCausalityFoldTests {
         #expect(TemporalCausalityFold.lagBucket(forMinutes: 129) == 128) // clamp
     }
 
+    // MARK: - Decayed projection (§8.13, W2.5 S4-C)
+
+    @Test("weighted deltas: exact exp weight from the newer entry's age")
+    func weightedDeltaExactValue() {
+        // Pair observed at t=10min; decay clock 30 days later. Weight =
+        // exp(-(now-t)·ln2/τ) with τ = 30d → exactly exp(-ln2 · a) where
+        // a = ageSeconds/τ. Hand-computed literal pinned both ports.
+        let entries = [
+            entry(0, [coord("src", "bitmap:1")]),
+            entry(600_000, [coord("tgt", "bitmap:2")]),
+        ]
+        let tauSeconds = DecayHalfLives.temporalCausalitySeconds
+        let nowMs: Int64 = 600_000 + Int64(30 * 86_400) * 1000
+        let result = TemporalCausalityFold.fold(
+            entries: entries, windowMinutes: 256, startWatermark: .zero,
+            decayNowMs: nowMs)
+        #expect(result.deltas.count == 1)
+        let weight = result.weightedDeltas[result.deltas[0].0]
+        // Age is exactly one half-life → weight exactly exp(-ln2) = 0.5
+        // within one ulp of the shared double math.
+        #expect(weight != nil && abs(weight! - 0.5) < 1e-12)
+        _ = tauSeconds
+    }
+
+    @Test("no decay clock → weightedDeltas empty (counts unchanged)")
+    func noClockNoWeights() {
+        let entries = [
+            entry(0, [coord("src", "bitmap:1")]),
+            entry(60_000, [coord("tgt", "bitmap:2")]),
+        ]
+        let result = TemporalCausalityFold.fold(
+            entries: entries, windowMinutes: 256, startWatermark: .zero)
+        #expect(result.weightedDeltas.isEmpty)
+        #expect(result.deltas.count == 1)
+    }
+
     // MARK: - Helpers
 
     /// Run a fold with two entries separated by `separationMinutes` and

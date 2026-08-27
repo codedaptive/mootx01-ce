@@ -318,3 +318,33 @@ struct ConsolidationCycleTests {
         #expect(mBound.constituents.count == 1)
     }
 }
+
+/// W2.5 S6 — offset mapping of cluster sentences to constituent timestamps.
+@Suite("GeniusLocusKit.sentenceTimestamps (W2.5 S6)")
+struct SentenceTimestampMappingTests {
+
+    private let t1 = Date(timeIntervalSince1970: 1_000_000)
+    private let t2 = Date(timeIntervalSince1970: 2_000_000)
+
+    @Test("sentences map to the piece their start offset falls in")
+    func mapsByOffset() {
+        let pieces = [("Alpha fact one. Alpha fact two.", t1),
+                      ("Beta fact three.", t2)]
+        let separator = "\n\n"
+        let combined = pieces.map(\.0).joined(separator: separator)
+        let sentences = ["Alpha fact one.", "Alpha fact two.", "Beta fact three."]
+        let ts = GeniusLocusKit.sentenceTimestamps(
+            sentences: sentences, pieces: pieces,
+            separator: separator, combined: combined)
+        #expect(ts == [t1, t1, t2])
+    }
+
+    @Test("an unlocatable sentence fails quiet to nil (uniform branch)")
+    func failQuiet() {
+        let pieces = [("Alpha.", t1)]
+        let ts = GeniusLocusKit.sentenceTimestamps(
+            sentences: ["Missing sentence."], pieces: pieces,
+            separator: "\n\n", combined: "Alpha.")
+        #expect(ts == nil)
+    }
+}

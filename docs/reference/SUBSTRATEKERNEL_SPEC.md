@@ -1,8 +1,8 @@
 ---
 title: SubstrateKernel Specification
-version: 1.2.0
+version: 1.2.1
 status: active
-date: 2026-07-16
+date: 2026-08-26
 description: "Behavioral specification for SubstrateKernel: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -260,7 +260,7 @@ Accumulates `sum(x*x)` in coordinate order then takes `sqrt`. Returns
 `0.0` for an empty vector.
 
 `FloatVecOps.l2Normalize(_ v:[Float]) -> [Float]` — L2-normalise.
-Returns the zero vector unchanged when the norm is zero (the honest
+Returns the zero vector unchanged when the norm is zero (the
 "no information" signal that projects to `Engram.zero` through
 `FloatSimHash`). Operation sequence is fixed: sum-of-squares →
 guard on zero → `invNorm = 1.0 / sqrt(normSq)` → element-wise
@@ -354,6 +354,10 @@ on another in-repo kit when a recorded decision requires it. The telemetry it en
 the single `substrate.kernel.backend_selected` metric described in § 8.1.
 
 ## Changelog
+
+### 1.2.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.2.0 -- 2026-07-16
 Added § 5.8 FloatVecOps behavioral spec (`l2Norm`, `l2Normalize`, `dot`,

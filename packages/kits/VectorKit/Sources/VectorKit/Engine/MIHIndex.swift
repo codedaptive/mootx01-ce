@@ -27,7 +27,7 @@
 //      streams are deterministic without relying on hash-map iteration order.
 //   4. k-NN retention: retained = k codes minimising (dist, itemID)
 //      lexicographically. Bounded max-heap evicts by (dist DESC, itemID DESC).
-//   5. Result order: (dist ASC, itemID ASC).
+//   5. Result order: (dist ASC, vecHash ASC, itemID ASC) — SPEC 1.9.0.
 //   6. Integer-only: distances are Int via EngramLib. No floats.
 //   7. m is pinned config, never auto-derived (§1.6).
 //
@@ -129,23 +129,25 @@ private func lowerBound(in arr: [VectorRecordKey], for target: VectorRecordKey) 
 
 // MARK: - Bounded max-heap
 
-/// Retains the best k (dist, key) pairs by (dist ASC, key ASC).
+/// Retains the best k (dist, vecHash, key) triples by
+/// (dist ASC, vecHash ASC, key ASC).
 ///
-/// Internally a binary max-heap ordered by (dist DESC, key DESC), so
-/// the root is always the WORST retained element — the one evicted when a
-/// strictly better candidate arrives.
+/// Internally a binary max-heap ordered by (dist DESC, vecHash DESC,
+/// key DESC), so the root is always the WORST retained element — the one
+/// evicted when a strictly better candidate arrives.
 ///
-/// §1.8 rule 4: among codes tied at the boundary distance, those with
-/// smaller keys are kept. "key" here is the full VectorRecordKey, which
-/// orders by (itemID, vectorIndex, modelID, modelVersion) per §0.3.
-/// This means two vectors sharing the same itemID but differing in
-/// vectorIndex or modelID are each retained independently — no collapse.
+/// §1.8 rule 4 (SPEC 1.9.0): among codes tied at the boundary distance,
+/// those with the smaller vecHash (FNV-1a content hash — stable across
+/// estate provisionings, unlike item UUIDs) are kept; the full
+/// VectorRecordKey — (itemID, vectorIndex, modelID, modelVersion) — is
+/// the final backstop. Two vectors sharing the same itemID but differing
+/// in vectorIndex or modelID are each retained independently — no collapse.
 ///
-/// Eviction key: (dist DESC, key DESC) — evict largest dist, then among
-/// ties evict the largest VectorRecordKey.
+/// Eviction key: (dist DESC, vecHash DESC, key DESC) — evict largest
+/// dist, then among ties the largest vecHash, then the largest key.
 private struct BoundedMaxHeap {
     let capacity: Int
-    private(set) var elements: [(dist: Int, key: VectorRecordKey)] = []
+    private(set) var elements: [(dist: Int, vecHash: UInt64, key: VectorRecordKey)] = []
 
     init(capacity: Int) {
         self.capacity = capacity
@@ -157,48 +159,51 @@ private struct BoundedMaxHeap {
     /// Distance of the worst element (root). Only valid when size > 0.
     var worstDist: Int { elements[0].dist }
 
-    /// Offer `(dist, key)` to the heap.
+    /// Offer `(dist, vecHash, key)` to the heap.
     ///
     /// If not full: always insert.
-    /// If full: insert only if `(dist, key)` is strictly better than
-    /// the current worst. "Better" = lexicographically smaller by
-    /// (dist, key) — smaller dist, or equal dist and smaller VectorRecordKey.
-    mutating func offer(dist: Int, key: VectorRecordKey) {
+    /// If full: insert only if the triple is strictly better than the
+    /// current worst. "Better" = lexicographically smaller by
+    /// (dist, vecHash, key).
+    mutating func offer(dist: Int, vecHash: UInt64, key: VectorRecordKey) {
         if elements.count < capacity {
-            elements.append((dist, key))
+            elements.append((dist, vecHash, key))
             siftUp(from: elements.count - 1)
         } else {
             // Only replace if strictly better than the worst.
             let w = elements[0]
             let betterThanWorst: Bool
-            if dist < w.dist {
-                betterThanWorst = true
-            } else if dist == w.dist && key < w.key {
-                betterThanWorst = true
+            if dist != w.dist {
+                betterThanWorst = dist < w.dist
+            } else if vecHash != w.vecHash {
+                betterThanWorst = vecHash < w.vecHash
             } else {
-                betterThanWorst = false
+                betterThanWorst = key < w.key
             }
             if !betterThanWorst { return }
-            elements[0] = (dist, key)
+            elements[0] = (dist, vecHash, key)
             siftDown(from: 0)
         }
     }
 
-    /// Return results sorted (dist ASC, key ASC) — the oracle final order.
-    func sortedAscending() -> [(dist: Int, key: VectorRecordKey)] {
+    /// Return results sorted (dist ASC, vecHash ASC, key ASC) — the
+    /// oracle final order (SPEC 1.9.0).
+    func sortedAscending() -> [(dist: Int, vecHash: UInt64, key: VectorRecordKey)] {
         elements.sorted {
             if $0.dist != $1.dist { return $0.dist < $1.dist }
+            if $0.vecHash != $1.vecHash { return $0.vecHash < $1.vecHash }
             return $0.key < $1.key
         }
     }
 
-    // MARK: - Max-heap maintenance (ordered by (dist DESC, key DESC))
+    // MARK: - Max-heap maintenance (ordered by (dist DESC, vecHash DESC, key DESC))
 
     /// Returns true if element at index i is "worse" (higher priority in
-    /// the max-heap = larger (dist, key)) than the element at j.
+    /// the max-heap = larger (dist, vecHash, key)) than the element at j.
     private func isWorse(_ i: Int, _ j: Int) -> Bool {
         let a = elements[i], b = elements[j]
         if a.dist != b.dist { return a.dist > b.dist }
+        if a.vecHash != b.vecHash { return a.vecHash > b.vecHash }
         return a.key > b.key
     }
 
@@ -339,7 +344,8 @@ public actor MIHIndex: DenseIndex {
     /// k-nearest binary vectors by Hamming distance (exact, sub-linear).
     ///
     /// Returns up to k DenseHit values sorted `(rawDistance ASC,
-    /// key.itemID ASC)`. Result is EXACT — identical to BruteForceIndex.
+    /// vecHash ASC, key.itemID ASC)`. Result is EXACT — identical to
+    /// BruteForceIndex.
     ///
     /// - Parameters:
     ///   - probe: must be `.binary` kind, exactly 32 bytes.
@@ -556,9 +562,10 @@ public actor MIHIndex: DenseIndex {
         }
 
         // Build DenseHit array from the sorted heap output
-        // ((dist ASC, key ASC) where key is the full VectorRecordKey).
-        // The key is stored directly in the heap element — no secondary lookup.
-        return heap.sortedAscending().map { (dist, key) in
+        // ((dist ASC, vecHash ASC, key ASC) where key is the full
+        // VectorRecordKey). The key is stored directly in the heap
+        // element — no secondary lookup.
+        return heap.sortedAscending().map { (dist, _, key) in
             DenseHit(key: key, hammingDistance: dist)
         }
     }
@@ -581,11 +588,11 @@ public actor MIHIndex: DenseIndex {
         for (recordKey, codeEngram) in codes {
             if let f = filter, !f.accepts(recordKey) { continue }
             let dist = EngramLib.distance(probe, codeEngram)
-            heap.offer(dist: dist, key: recordKey)
+            heap.offer(dist: dist, vecHash: fnv1a64(codeEngram.wireBytes), key: recordKey)
         }
-        // Sort ascending (dist ASC, key ASC) — oracle order (§0.3 extended
-        // to full VectorRecordKey for same-itemID disambiguation).
-        return heap.sortedAscending().map { (dist, key) in
+        // Sort ascending (dist ASC, vecHash ASC, key ASC) — oracle order
+        // (SPEC 1.9.0, full VectorRecordKey for same-itemID disambiguation).
+        return heap.sortedAscending().map { (dist, _, key) in
             DenseHit(key: key, hammingDistance: dist)
         }
     }
@@ -625,7 +632,10 @@ public actor MIHIndex: DenseIndex {
                 // I-7: ALL Hamming distances through EngramLib (SubstrateKernel).
                 guard let codeEngram = codes[recordKey] else { continue }
                 let dist = EngramLib.distance(probe, codeEngram)
-                heap.offer(dist: dist, key: recordKey)
+                // vecHash from the engram's wire bytes — the same 32 bytes the
+                // brute-force engine hashes from the payload, so both engines
+                // produce identical tie orders (conformance gate).
+                heap.offer(dist: dist, vecHash: fnv1a64(codeEngram.wireBytes), key: recordKey)
             }
         }
     }

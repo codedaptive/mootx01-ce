@@ -16,7 +16,7 @@
 // All XOR/popcount is inside EngramLib → SubstrateKernel.
 //
 // Deterministic ordering (arch spec §6, retrieval algorithms ref §0.3):
-//   distance ASC, then key.itemID ASC.
+//   distance ASC, then vecHash ASC (content hash), then key.itemID ASC.
 // This total order matches a brute-force linear scan + sort, which is
 // exactly why MIH is gated against this output.
 //
@@ -80,13 +80,13 @@ public actor BruteForceIndex: DenseIndex {
 
     /// k-nearest binary vectors by Hamming distance (exact linear scan).
     ///
-    /// Returns up to k DenseHit values sorted by `(rawDistance ASC, key ASC)`
-    /// where the key comparison is the full VectorRecordKey order
-    /// (itemID, vectorIndex, modelID, modelVersion). The primary tie-break
-    /// is itemID per §0.3; secondary breaks on vectorIndex and modelID
-    /// produce a strict total order so that two records sharing the same
-    /// itemID but differing in vectorIndex or modelID are both returned
-    /// in deterministic order.
+    /// Returns up to k DenseHit values sorted by `(rawDistance ASC, vecHash ASC, key ASC)`.
+    /// The first tie-break is vecHash — the FNV-1a content hash of the
+    /// payload bytes (SPEC 1.9.0 B-6) — so tied candidates order the same
+    /// way across estate provisionings. The final backstop is the full
+    /// VectorRecordKey order (itemID, vectorIndex, modelID, modelVersion),
+    /// a strict total order that also keeps two records sharing an itemID
+    /// but differing in vectorIndex or modelID in deterministic order.
     ///
     /// - Parameters:
     ///   - probe: must be `.binary` kind with exactly 32 bytes.
@@ -143,6 +143,7 @@ public actor BruteForceIndex: DenseIndex {
         // and use slotIndices to map results back to VectorRecordKeys.
         var engrams: [Engram] = []
         var slotIndices: [Int] = []
+        var slotHashes: [UInt64] = []
         engrams.reserveCapacity(scanRange.count)
         slotIndices.reserveCapacity(scanRange.count)
 
@@ -160,6 +161,9 @@ public actor BruteForceIndex: DenseIndex {
                 let slot = VectorPayload(kind: .binary, dim: 256, bytes: bytes)
                 engrams.append(try slot.asEngram())
                 slotIndices.append(slotIdx)
+                // vecHash tie key (SPEC 1.9.0 B-6): FNV-1a over the stored
+                // payload bytes, computed once per accepted slot.
+                slotHashes.append(fnv1a64(bytes))
             } catch {
                 log.error("BruteForceIndex: skipping corrupted slot \(slotIdx): \(error)")
             }
@@ -175,7 +179,7 @@ public actor BruteForceIndex: DenseIndex {
         //
         // We do NOT use EngramLib.findNearest here because it applies an
         // insertion-order tie-break (by array index), while the oracle
-        // contract requires itemID-ascending tie-break. Using only the
+        // contract requires the (vecHash ASC, then itemID ASC) total order. Using only the
         // distances — the actual Hamming math — and sorting ourselves
         // is the correct division of labour: EngramLib provides the
         // kernel-gated distances, we provide the total order.
@@ -183,31 +187,35 @@ public actor BruteForceIndex: DenseIndex {
         // batch-distance path; Jaccard composes the same conformance-gated
         // primitives via EngramLib.jaccardSimilarities. Both produce hits
         // in the metric's natural unit; the total order below is shared.
-        var allHits: [DenseHit]
+        var allHits: [(hit: DenseHit, vecHash: UInt64)]
         if case .binary(.jaccard) = metric {
             let sims = EngramLib.jaccardSimilarities(probe: probeEngram, candidates: engrams)
             allHits = (0..<engrams.count).map { i in
-                DenseHit(key: array.keys[slotIndices[i]], jaccardDistance: 1.0 - sims[i])
+                (DenseHit(key: array.keys[slotIndices[i]], jaccardDistance: 1.0 - sims[i]),
+                 slotHashes[i])
             }
         } else {
             let distances = EngramLib.distances(probe: probeEngram, candidates: engrams)
             allHits = (0..<engrams.count).map { i in
-                DenseHit(key: array.keys[slotIndices[i]], hammingDistance: distances[i])
+                (DenseHit(key: array.keys[slotIndices[i]], hammingDistance: distances[i]),
+                 slotHashes[i])
             }
         }
 
-        // --- Sort to enforce total order: (distance ASC, key ASC) ---
-        // The primary order is distance ASC (§0.3). The tie-break uses the
-        // full VectorRecordKey comparison — (itemID, vectorIndex, modelID,
-        // modelVersion) — which is a strict total order. Using the full key
-        // (rather than just itemID) ensures deterministic results when two
-        // distinct records share the same itemID but differ in vectorIndex
-        // or modelID (the VectorStore UNIQUE constraint is
-        // (item_id, vector_index, model_id), so both records are valid and
-        // must each be returned). Sorting first guarantees that among
-        // candidates tied at the k-th boundary distance, the ones with
-        // smaller keys are kept — not the ones that happen to be first in
-        // the array.
+        // --- Sort to enforce total order: (distance ASC, vecHash ASC, key ASC) ---
+        // The primary order is distance ASC (SPEC 1.9.0 B-6). The FIRST
+        // tie-break is vecHash — the FNV-1a content hash of the payload
+        // bytes — so tied candidates order the same way across independent
+        // provisionings of the same content (item UUIDs differ per estate
+        // build; content does not). The FINAL backstop is the full
+        // VectorRecordKey comparison — (itemID, vectorIndex, modelID,
+        // modelVersion) — a strict total order that also disambiguates two
+        // records sharing an itemID but differing in vectorIndex or modelID
+        // (the VectorStore UNIQUE constraint is (item_id, vector_index,
+        // model_id), so both records are valid and must each be returned).
+        // Sorting first guarantees that among candidates tied at the k-th
+        // boundary distance, the ones with smaller (vecHash, key) are kept —
+        // not the ones that happen to be first in the array.
         // Metric-safety note (W2.5 M1): this Int32 comparison is ALSO
         // correct for the Jaccard path, where rawDistance holds a Float
         // bit pattern — IEEE-754 bit patterns of NON-NEGATIVE floats are
@@ -215,15 +223,15 @@ public actor BruteForceIndex: DenseIndex {
         // always in [0, 1] (sign bit 0). If a signed metric ever lands in
         // Lane A, this sort must decode before comparing.
         allHits.sort { lhs, rhs in
-            if lhs.rawDistance != rhs.rawDistance {
-                return lhs.rawDistance < rhs.rawDistance
+            if lhs.hit.rawDistance != rhs.hit.rawDistance {
+                return lhs.hit.rawDistance < rhs.hit.rawDistance
             }
-            return lhs.key < rhs.key
+            if lhs.vecHash != rhs.vecHash { return lhs.vecHash < rhs.vecHash }
+            return lhs.hit.key < rhs.hit.key
         }
 
         // Truncate to k after sorting.
-        if allHits.count > k { allHits = Array(allHits.prefix(k)) }
-        return allHits
+        return allHits.prefix(k).map(\.hit)
     }
 
     // MARK: - DenseIndex — add

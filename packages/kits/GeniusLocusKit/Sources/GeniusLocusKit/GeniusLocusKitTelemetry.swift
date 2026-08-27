@@ -166,6 +166,21 @@ enum GLKMetricName {
     /// equal-weight RRF fusion across lane scores; it fell back to the raw
     /// (`buffer.final`) lane-normalised score. Tagged: `estate_id`.
     static let unionBestRRFFallback = "glk.recall.unionBest.rrf_degraded"
+
+    /// `discriminative` was requested for the `locusOnly` lane, which has no
+    /// dense corpus lane for discrimination factor computation; the lane returned
+    /// raw bitmap-evaluator ordering. Tagged: `estate_id`.
+    static let locusOnlyDiscriminativeFallback = "glk.recall.locusOnly.discriminative_degraded"
+
+    /// `discriminative` was requested for the `corpusOnly` lane, which does not
+    /// compute the discrimination factor in this path; the lane fell back to RRF
+    /// fusion of BM25 + vector. Tagged: `estate_id`.
+    static let corpusOnlyDiscriminativeFallback = "glk.recall.corpusOnly.discriminative_degraded"
+
+    /// `discriminative` was requested for the `hybrid` lane, which does not
+    /// compute the discrimination factor in this path; the lane fell back to
+    /// three-way RRF fusion. Tagged: `estate_id`.
+    static let hybridDiscriminativeFallback = "glk.recall.hybrid.discriminative_degraded"
 }
 
 // MARK: - Shared emit helper

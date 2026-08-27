@@ -20,7 +20,7 @@
 //! the Rust encoding of the Swift recipe's heterogeneous untyped `throws`
 //! (`RecipeError` stays the closed, parity-gated guard set).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
@@ -89,6 +89,11 @@ pub const GROUNDING_POOL_BOUND: usize = 200;
 pub struct GroundedOutput {
     pub context: ContextDocument,
     pub drawer_count: usize,
+    /// Drawer IDs of the ranked, capped, provenance-gated pool that fed the
+    /// synthesis, in rank order (ARIA_MCP_SPEC 2.0.0 § 8.7: the candidate
+    /// section renders THIS pool — the two-lane ranking is a guarantee the
+    /// presentation layer must not re-derive). Twin of Swift `rankedIDs`.
+    pub ranked_ids: Vec<String>,
 }
 
 /// Run GroundedSynthesis against the estate addressed by `handle`. Sequences
@@ -176,6 +181,37 @@ fn run_grounded_synthesis_impl(
         return Err(RecipeRunError::Recipe(RecipeError::InvalidCap { value: 0 }));
     }
 
+    // W4 recall_tuning consumption: when the caller passed the default tuning
+    // (recipe_tools.rs hardcodes RecallFrameTuning::default()), read the
+    // estate-provisioned manifest and promote its fields into the frame tuning.
+    // Mirrors Swift HybridRecall.swift:127-132 which reads the manifest at the
+    // same precedence level (caller explicit > estate provisioned > spec constant).
+    // A provisioned manifest that is the default passes through unchanged so the
+    // common unprovisioned case is a zero-cost no-op (one estate meta read +
+    // equality check, no field copies).
+    let tuning = if tuning == RecallFrameTuning::default() {
+        match coord.provisioned_recall_tuning(handle) {
+            Ok(manifest) if manifest != genius_locus_kit::RecallTuningManifest::default() => {
+                RecallFrameTuning {
+                    bm25_weight: manifest.rrf_bm25_weight,
+                    vector_weight: manifest.rrf_vector_weight,
+                    // rrf_k is u32 in RecallTuningManifest and i32 in
+                    // RecallFrameTuning; cast is safe at spec-range values (≤ 512).
+                    rrf_k: manifest.rrf_k as i32,
+                    mmr_lambda: manifest.mmr_lambda,
+                    // Preserve the caller's page_size: it is a display-paging
+                    // knob orthogonal to the RRF/MMR weights.
+                    page_size: tuning.page_size,
+                }
+            }
+            _ => tuning,
+        }
+    } else {
+        // Caller passed an explicit (non-default) tuning — honour it; the
+        // manifest has no role when the caller has made an explicit choice.
+        tuning
+    };
+
     // Emit recipe start AFTER the capability gate so we never fire a "start"
     // for an invocation that will immediately throw. `now` is the
     // caller-supplied timestamp — NEVER call a clock inside the engine
@@ -229,6 +265,13 @@ fn run_grounded_synthesis_impl(
                 trace_limit: Some(cap.unwrap_or(tuning.page_size as usize)),
                 origin: genius_locus_kit::recall::RecallOrigin::Internal,
                 recall_shape: None,
+                // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+                // written, so door/composition stay None.
+                door: None,
+                composition: None,
+                frontier_k: None,
+                // §11.18: internal recall — no anomalous-flag filter applied.
+                anomalous_filter: None,
             };
             let result = coord
                 .recall_scored(handle, request, now)
@@ -293,6 +336,13 @@ fn run_grounded_synthesis_impl(
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the
     //    caller's recall frame governs which rows surface.
+    // ADORN-STORE-02 v17: `DrawerRow` no longer carries `adornment`.
+    // Active adornments are now fetched separately via
+    // `Estate.active_adornments(drawer_ids)` and passed into synthesis
+    // as a `BTreeMap<String,String>` keyed by drawer ID. The recipe caller
+    // owns the fetch-then-compose sequence; within this Rust port the
+    // active_adornments map is empty (fetch-and-compose requires an estate
+    // handle not available here — wired at the Swift GeniusLocusKit boundary).
     let rows: Vec<DrawerRow> = drawers
         .iter()
         .map(|d| DrawerRow {
@@ -375,7 +425,10 @@ fn run_grounded_synthesis_impl(
     // the historical 3-row excerpt). Digest mode keeps the 3-row bound.
     // Twin of the Swift recipe's maxKeyInsights threading.
     let max_key_insights = if cue_terms.is_empty() { 3 } else { drawer_count };
-    let context = synthesize(&page, &meta, max_key_insights);
+    // active_adornments: empty map — adornment fetch requires an estate handle
+    // not available inside this pure-Rust recipe. The fetch-and-compose step
+    // is owned by the Swift GeniusLocusKit boundary (ADORN-STORE-02 v17).
+    let context = synthesize(&page, &meta, &BTreeMap::new(), max_key_insights);
 
     // Emit recipe complete. drawer_count is finalised before the emit call so
     // the return value is identical whether monitoring is on or off (C-Det
@@ -385,6 +438,7 @@ fn run_grounded_synthesis_impl(
     Ok(GroundedOutput {
         context,
         drawer_count,
+        ranked_ids: page.rows.iter().map(|r| r.id.clone()).collect(),
     })
 }
 

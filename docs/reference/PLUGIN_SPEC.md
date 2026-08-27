@@ -1,8 +1,8 @@
 ---
 title: MOOTx01 Plugin Distribution Specification
-version: 0.1.0
+version: 0.1.1
 status: active
-date: 2026-06-23
+date: 2026-08-26
 description: "Behavioral specification for the MOOTx01 plugin packaging and distribution system: the canonical source, the packager, the three install modes, the platform family taxonomy, and conformance requirements for generated packages."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -38,7 +38,7 @@ This specification does NOT define:
 ## § 2 — Position in the system
 
 ```
-Data/canonical/                    ← single source of truth (EE-only)
+Data/canonical/                    ← authoritative source (EE-only)
     capability.json                   capability + marketplace metadata
     platform-matrix.json              one row per host
     skill-mootx01-memory.body.md      skill body
@@ -222,6 +222,12 @@ for `manifestBundle` hosts where those fields are non-nil.
   as a gap in `INSTALLER_INTERFACE.md`; out of scope for the packager
 - `moduleCode` native shim generation → future work, tracked in
   `PLUGIN_PACKAGING_SPEC_v0.1.md § 3.3`
+
+## Changelog
+
+### 0.1.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ---
 

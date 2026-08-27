@@ -64,4 +64,13 @@ public enum CommunityDaemonError: Error, Sendable, Equatable {
 
     /// A manifest query returned zero rows (a required key was missing).
     case missingManifestKey(URL, String)
+
+    /// The estate file does not exist at the expected path.
+    ///
+    /// Thrown by `requireEstate()` implementations when the caller attempts to
+    /// open an estate that has not been created yet. Surfaces the fail-closed
+    /// gate: capture, review, and LAN coordinators must not create the estate
+    /// file as a side-effect of being called — that responsibility belongs to
+    /// the lifecycle coordinator's `estate_create` endpoint.
+    case estateAbsent(URL)
 }

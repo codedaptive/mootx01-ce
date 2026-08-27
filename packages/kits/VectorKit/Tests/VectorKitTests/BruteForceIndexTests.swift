@@ -12,7 +12,8 @@
 //
 //   2. Determinism and order tests — the MIH spec vectors (§1.10 of the
 //      retrieval algorithms reference) exercised through BruteForceIndex:
-//      distance ASC, tie-break by itemID ASC, multi-model filter, delete.
+//      distance ASC, then vecHash ASC, then itemID ASC; multi-model
+//      filter, delete.
 //
 //   3. Sidecar-backed resident-array persistence — write → mmap-reopen →
 //      identical top-k on a real on-disk .vec file (NOT InMemory).
@@ -85,7 +86,8 @@ struct BruteForceIndexTests {
         // row_id=3 → block0=8  (1 bit set, distance=1)
         // row_id=4 → block0=4  (1 bit set, distance=1)
         // row_id=5 → block0=16 (1 bit set, distance=1)
-        // k=3, expected: row_ids 1,2,3 (smallest itemIDs win tie).
+        // k=3: the three winners are the candidates with the smallest
+        // vecHash (SPEC 1.9.0 content tie key) — derived below, not assumed.
         let anchor = Engram(blocks: 0, 0, 0, 0)
         let candidates: [(String, Engram)] = [
             ("00000000-0000-0000-0000-000000000005", Engram(blocks: 16, 0, 0, 0)),
@@ -111,11 +113,15 @@ struct BruteForceIndexTests {
         #expect(hits.count == 3)
         for h in hits { #expect(h.hammingDistance == 1) }
 
-        // Tie-break: smallest itemID ASC. The UUIDs sort as strings, so
-        // "...0001" < "...0002" < "...0003".
-        #expect(hits[0].key.itemID == "00000000-0000-0000-0000-000000000001")
-        #expect(hits[1].key.itemID == "00000000-0000-0000-0000-000000000002")
-        #expect(hits[2].key.itemID == "00000000-0000-0000-0000-000000000003")
+        // Tie-break: vecHash ASC (the candidates carry DISTINCT payloads),
+        // itemID only as the final backstop — derive the expected winners
+        // from the hashes exactly as the engine does.
+        let ranked = candidates
+            .map { (id: $0.0, h: fnv1a64(binaryPayload($0.1).bytes)) }
+            .sorted { $0.h != $1.h ? $0.h < $1.h : $0.id < $1.id }
+        #expect(hits[0].key.itemID == ranked[0].id)
+        #expect(hits[1].key.itemID == ranked[1].id)
+        #expect(hits[2].key.itemID == ranked[2].id)
     }
 
     // MARK: — MIH spec vectors exercised on BruteForce (oracle role)
@@ -150,9 +156,9 @@ struct BruteForceIndexTests {
         #expect(hits[1].hammingDistance == 1)
     }
 
-    /// MIH-2: tie-break by id.
-    /// id-4 and id-5 both have dist=1; id-4 wins (smaller itemID).
-    @Test func mih_vector2_tie_break_by_itemID() async throws {
+    /// MIH-2 (SPEC 1.9.0): id-4 and id-5 both have dist=1 with DIFFERENT
+    /// payloads; the smaller vecHash (content hash) wins, not the itemID.
+    @Test func mih_vector2_tie_break_by_vecHash() async throws {
         let codes: [(String, Engram)] = [
             ("id-1", Engram(blocks: 0, 0, 0, 0)),
             ("id-2", Engram(blocks: 7, 0, 0, 0)),
@@ -173,8 +179,10 @@ struct BruteForceIndexTests {
         #expect(hits.count == 2)
         #expect(hits[0].key.itemID == "id-1")
         #expect(hits[0].hammingDistance == 0)
-        // id-4 < id-5 in string order
-        #expect(hits[1].key.itemID == "id-4")
+        // The content hash decides the boundary tie: smaller vecHash wins.
+        let h4 = fnv1a64(binaryPayload(Engram(blocks: 0, 0, 0, 0x8000_0000_0000_0000)).bytes)
+        let h5 = fnv1a64(binaryPayload(Engram(blocks: 1, 0, 0, 0)).bytes)
+        #expect(hits[1].key.itemID == (h4 < h5 ? "id-4" : "id-5"))
         #expect(hits[1].hammingDistance == 1)
     }
 
@@ -184,8 +192,9 @@ struct BruteForceIndexTests {
         // id-11: 4 bits band3 = dist 4
         // id-12: 4 bits band0 = dist 4
         // id-13: 1 bit band0 = dist 1
-        // Expect (id-13, dist=1), (id-10, dist=4), (id-11, dist=4)
-        // Note: id-10 < id-11 < id-12 lexicographically so id-12 is excluded.
+        // Expect (id-13, dist=1) then the two dist-4 candidates with the
+        // smallest vecHash (SPEC 1.9.0 content tie key; itemID is only the
+        // final backstop).
         let codes: [(String, Engram)] = [
             ("id-10", Engram(blocks: 0x0000_0000_0000_0003,
                              0x0000_0000_0000_0003, 0, 0)),
@@ -206,13 +215,25 @@ struct BruteForceIndexTests {
         #expect(hits.count == 3)
         #expect(hits[0].key.itemID == "id-13")
         #expect(hits[0].hammingDistance == 1)
-        #expect(hits[1].key.itemID == "id-10")
+        // The two dist-4 survivors are the smallest by (vecHash, itemID).
+        let ranked = codes.dropLast()  // the three dist-4 candidates
+            .map { (id: $0.0, h: fnv1a64(binaryPayload($0.1).bytes)) }
+            .sorted { $0.h != $1.h ? $0.h < $1.h : $0.id < $1.id }
+        #expect(hits[1].key.itemID == ranked[0].id)
         #expect(hits[1].hammingDistance == 4)
-        #expect(hits[2].key.itemID == "id-11")
+        #expect(hits[2].key.itemID == ranked[1].id)
         #expect(hits[2].hammingDistance == 4)
     }
 
     /// MIH-4: fewer than k codes in index. k=5, only 1 code.
+    /// Cross-port golden pin: the vecHash of Engram(blocks: 1, 0, 0, 0)'s
+    /// wire bytes is this exact literal in BOTH ports (Rust twin:
+    /// `fnv1a64_golden_pin` in engine/mod.rs tests). A drift here means the
+    /// ports' tie orders have silently diverged.
+    @Test func fnv1a64GoldenPin() {
+        #expect(fnv1a64(Engram(blocks: 1, 0, 0, 0).wireBytes) == 0x0729_5d91_aa94_b524)
+    }
+
     @Test func mih_vector4_fewer_than_k() async throws {
         let index = BruteForceIndex()
         try await index.add(

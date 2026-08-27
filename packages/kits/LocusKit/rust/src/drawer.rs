@@ -218,6 +218,12 @@ pub struct Drawer {
     /// ISO8601 by the timestamp column type). Audit and sweep
     /// observability only. None iff `subject` is None.
     pub subject_at: Option<i64>,
+
+    // Adornment text was removed from the Drawer struct (ADORN-STORE-02 v17).
+    // Adornment rows live in the adornments table keyed by (drawer_id, minter_id).
+    // Retrieve via DrawerStore::adornments / active_adornments.
+    // The legacy drawers.adornment column remains physically in the SQLite schema
+    // (cannot DROP COLUMN without rebuild) but is no longer read or written.
 }
 
 impl Drawer {
@@ -264,6 +270,8 @@ impl Drawer {
             subject: None,
             subject_pipeline_version: None,
             subject_at: None,
+            // Adornment text removed from Drawer (ADORN-STORE-02 v17).
+            // New drawers start bare; adornment debt discovered via adornment_debt_batch.
         }
     }
 }

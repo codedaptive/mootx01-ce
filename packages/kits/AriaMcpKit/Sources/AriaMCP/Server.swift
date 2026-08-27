@@ -20,6 +20,26 @@ import OSLog
 /// host implementation (Claude Desktop, Claude Code, MemPalace's own
 /// MCP server) expects on the wire.
 
+/// A community-contract tool handler that MootCommunityDaemon injects into
+/// ARIA_MCPDispatcher without creating a circular dependency.
+///
+/// Defined here (in AriaMCP) so conformers in MootCommunityDaemon can import
+/// AriaMCP and satisfy the protocol — the dependency direction is correct.
+/// MootDaemonProvider is frozen; this protocol lives in AriaMCP which
+/// MootCommunityDaemon already imports for Wave A1b.
+///
+/// Community tools use the `moot_community_` name prefix. The dispatcher calls
+/// `isCommunityTool(_:)` before falling through to the `ToolDispatcher`, so
+/// community tools are served without a GeniusLocusKit actor.
+public protocol CommunityToolHandler: Sendable {
+    /// True when `name` is a community tool this handler owns.
+    func isCommunityTool(_ name: String) -> Bool
+    /// The ProjectedTool entries for tools/list.
+    var communityToolList: [ProjectedTool] { get }
+    /// Dispatch one community tool call. Throws JSONRPCError on failure.
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
+}
+
 /// The method router. Owns the tool registry and the estate
 /// dispatcher, calls each on the right inbound method, and converts
 /// thrown JSON-RPC errors into response payloads.
@@ -78,8 +98,35 @@ public struct ARIA_MCPDispatcher: Sendable {
     }
 
     public let info: ServerInfo
-    public let tools: [ProjectedTool]
-    public let tooling: ToolDispatcher
+    /// The effective tool list for tools/list.
+    ///
+    /// In the full (GLK-backed) dispatcher this is `ToolProjection.tools()`. In
+    /// community-only mode it is `communityHandler.communityToolList`. On the HTTP
+    /// plain lane (returned by `publicLane`) community tools are stripped so they
+    /// do not appear in the third-party client's tool list — `publicLane` filters
+    /// this array when it nils out the community handler.
+    ///
+    /// `private(set)` so `publicLane` can adjust the list without exposing a
+    /// general mutation surface. Callers read the list; they never write it.
+    public private(set) var tools: [ProjectedTool]
+    /// The GeniusLocusKit-backed dispatcher. Optional to support community-only mode
+    /// (Wave A1b) where only `moot_community_*` tools are served and no GeniusLocusKit
+    /// actor is available. When nil, non-community tool calls return methodNotFound.
+    public let tooling: ToolDispatcher?
+    /// Community-contract tool handler, or nil.
+    ///
+    /// When set, community tools are routed here BEFORE falling through to `tooling`.
+    /// Defined as an existential so MootCommunityDaemon can inject its conformer
+    /// without a circular dependency.
+    ///
+    /// On the HTTP plain (third-party) lane this is nil — `publicLane` strips it so
+    /// the plain lane behaves as if no community handler exists. Direct dispatcher
+    /// callers (unit tests, community-only mode via `(info:communityHandler:)`) are
+    /// unaffected; they never call `publicLane`.
+    ///
+    /// `private(set)` so `publicLane` can nil it without exposing a general mutation
+    /// surface. Callers read the handler; they never write it.
+    public private(set) var communityHandler: (any CommunityToolHandler)?
 
     /// The authenticated first-party identity this dispatcher reports, or `nil`
     /// on the ordinary third-party lane.
@@ -99,10 +146,26 @@ public struct ARIA_MCPDispatcher: Sendable {
     /// two can no longer diverge.
     public internal(set) var firstPartyIdentity: FirstPartyServerIdentity?
 
+    /// Full-mode initializer: GeniusLocusKit-backed dispatcher, no community handler.
+    /// This is the existing production path; the `tooling` parameter is non-optional
+    /// here to preserve every existing call site unchanged.
     public init(info: ServerInfo, tooling: ToolDispatcher) {
         self.info = info
         self.tools = ToolProjection.tools()
         self.tooling = tooling
+        self.communityHandler = nil
+        self.firstPartyIdentity = nil
+    }
+
+    /// Community-only initializer (Wave A1b): no GeniusLocusKit actor required.
+    /// `tooling` is nil; all tool dispatch goes through `communityHandler`.
+    /// Non-community tool names return methodNotFound. The `tools` list is
+    /// populated from `communityHandler.communityToolList` only.
+    public init(info: ServerInfo, communityHandler: any CommunityToolHandler) {
+        self.info = info
+        self.tools = communityHandler.communityToolList
+        self.tooling = nil
+        self.communityHandler = communityHandler
         self.firstPartyIdentity = nil
     }
 
@@ -111,23 +174,44 @@ public struct ARIA_MCPDispatcher: Sendable {
     ///
     /// `internal` on purpose: only the first-party router may call it, and only
     /// with an identity taken from the `FirstPartyAuthServer` that just
-    /// authenticated the request.
+    /// authenticated the request. Value copy preserves `communityHandler`.
     func withFirstPartyIdentity(_ identity: FirstPartyServerIdentity) -> ARIA_MCPDispatcher {
         var copy = self
         copy.firstPartyIdentity = identity
         return copy
     }
 
-    /// This dispatcher with any first-party identity removed.
+    /// This dispatcher as the HTTP plain (third-party) lane sees it.
     ///
-    /// Applied to every request on the public lane, unconditionally, so that a
-    /// caller who somehow obtained an identity-bearing dispatcher still cannot
-    /// cause the public lane to advertise or leak one. Cheap: `ARIA_MCPDispatcher`
-    /// is a value type.
+    /// Two changes from `self`:
+    ///   1. `firstPartyIdentity` is stripped unconditionally so the public lane
+    ///      cannot advertise `authenticated-first-party` or leak the daemon's
+    ///      instance and estate identifiers even if `self` carries an identity.
+    ///   2. `communityHandler` is set to nil and community tools are removed from
+    ///      `tools` (F1 fix). Community tools are an authenticated-first-party-only
+    ///      surface; a plain-lane client that reads tools/list must never see them,
+    ///      and a plain-lane tools/call for a community tool name must receive
+    ///      methodNotFound. Stripping the handler here — rather than gating inside
+    ///      toolsCall() — keeps dispatch logic simple: nil communityHandler means
+    ///      "no community surface", regardless of which lane is active.
+    ///
+    /// Direct dispatcher callers (unit tests, community-only mode created via the
+    /// `(info:communityHandler:)` initializer) are UNAFFECTED — `publicLane` is
+    /// only called from `HTTPServer.route()` for the plain HTTP lane.
+    ///
+    /// Cheap: `ARIA_MCPDispatcher` is a value type; the copy is stack-allocated.
     var publicLane: ARIA_MCPDispatcher {
-        guard firstPartyIdentity != nil else { return self }
         var copy = self
         copy.firstPartyIdentity = nil
+        // Strip community tools from the plain lane (F1).  The tools array is
+        // filtered rather than set to empty so non-community GLK tools remain
+        // visible on the plain lane. In community-only mode (tooling == nil) all
+        // tools have the "moot_community_" prefix, so this produces an empty list
+        // — correct: no tools are advertised to unauthenticated third-party clients.
+        if copy.communityHandler != nil {
+            copy.communityHandler = nil
+            copy.tools = copy.tools.filter { !$0.name.hasPrefix("moot_community_") }
+        }
         return copy
     }
 
@@ -302,7 +386,28 @@ public struct ARIA_MCPDispatcher: Sendable {
     // MARK: - tools/list
 
     private func toolsList() -> JSONValue {
-        let entries: [JSONValue] = tools.map { tool in
+        // Lane separation for community tools is enforced upstream in publicLane,
+        // which strips communityHandler (and filters tools) before HTTP plain-lane
+        // dispatch reaches here. No firstPartyIdentity check is needed at this level:
+        //   - Plain lane:         communityHandler == nil → no community entries added.
+        //   - First-party lane:   communityHandler != nil → community entries appear.
+        //   - Unit test callers:  communityHandler set by caller → entries appear as
+        //                         caller intended. publicLane is never called in tests.
+        let allTools: [ProjectedTool]
+        if let handler = communityHandler, tooling != nil {
+            // Full mode on the first-party lane: GeniusLocusKit tools AND community tools.
+            // tools = ToolProjection.tools(); handler.communityToolList supplies the rest.
+            allTools = tools + handler.communityToolList
+        } else {
+            // Three cases all collapse to the same answer:
+            //   a) Community-only mode (tooling == nil): tools = handler.communityToolList.
+            //   b) Full mode, no community handler: tools = GLK tools only.
+            //   c) Plain lane after publicLane stripping: communityHandler == nil,
+            //      tools = GLK tools (or empty after moot_community_ filter in
+            //      community-only mode).
+            allTools = tools
+        }
+        let entries: [JSONValue] = allTools.map { tool in
             var entry: [String: JSONValue] = [
                 "name": .string(tool.name),
                 "description": .string(tool.description),
@@ -342,6 +447,24 @@ public struct ARIA_MCPDispatcher: Sendable {
             }
         }
         let arguments = object["arguments"] ?? .object([:])
+        // Community tool dispatch. communityHandler is non-nil ONLY when the
+        // dispatcher is on the first-party lane or in a direct unit-test context;
+        // publicLane (called by HTTPServer.route for plain HTTP) strips the handler
+        // before any request reaches here. No firstPartyIdentity guard is needed:
+        //   - Plain lane:       communityHandler == nil → branch skipped → falls
+        //                       through to GLK dispatcher or methodNotFound below.
+        //   - First-party lane: communityHandler != nil → dispatch community tool.
+        //   - Unit test:        communityHandler set by test → dispatch as expected.
+        if let handler = communityHandler, handler.isCommunityTool(name) {
+            return try await handler.dispatch(name: name, arguments: arguments)
+        }
+        guard let tooling else {
+            // Community-only mode: no ToolDispatcher present; non-community tool is unknown.
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "Method not found: \(name)"
+            )
+        }
         return try await tooling.dispatch(name: name, arguments: arguments)
     }
 

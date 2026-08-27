@@ -1,8 +1,8 @@
 ---
 title: VectorKit Specification
-version: 1.8.0
+version: 1.10.1
 status: accepted-1.1-target
-date: 2026-08-20
+date: 2026-08-26
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -74,7 +74,7 @@ This specification defines:
   of batch size.
 - `flush()` / `flush()`: the quiesce-point method that persists the
   write-behind sidecar to disk; crash-safe because the `vectors` table
-  is always the durable source of truth.
+  is always the durable authoritative store.
 - `VectorPayloadInput` / `VectorPayloadInput`: the batch-row input type
   that bundles a `VectorPayload` with its index metadata.
 - Hamming-distance nearest-neighbour retrieval (`findNearest`) and its
@@ -228,7 +228,7 @@ The in-memory resident array is updated immediately; the `.vec` sidecar
 is marked dirty and NOT rewritten on each call. The caller persists the
 sidecar by calling `flush()` at a quiesce point (e.g. end of an import
 loop, before process exit, on a periodic checkpoint). Crash safety is
-preserved: the `vectors` table is the durable source of truth; a stale
+preserved: the `vectors` table is the durable authoritative store; a stale
 or absent sidecar is rebuilt from the table on the next store open
 (detected by comparing the sidecar `live_count` header field against the
 table's live binary-row count).
@@ -246,7 +246,8 @@ N items it performs exactly:
   The memory-only (no-sidecar) path merges the batch in one pass and
   builds both indexes once — no per-row array clone.
   Search output is identical to N sequential `addPayload` calls (the
-  total ordering (distance ASC, itemID ASC) is applied at query time).
+  total ordering (distance ASC, vecHash ASC, itemID ASC) is applied at
+  query time).
 
 **B-3d (replaceModelVectors — bulk re-embed path):**
 `replaceModelVectors(modelID:_:)` / `replace_model_vectors(model_id, batch)` is
@@ -289,9 +290,16 @@ as errors.
 only binary rows tagged with the given `modelID` via the resident
 DenseIndex (BruteForceIndex below the MIH threshold, MIHIndex at/above
 it — both exact), scores each by Hamming distance to the probe, and
-returns up to `limit` matches sorted by distance ascending, ties broken
-by `itemID` ascending. `limit <= 0` / `k == 0` or an empty model
-partition → empty. The ordering is stable across equivalent corpora.
+returns up to `limit` matches sorted by the universal tie-break order:
+distance ascending, then `vecHash` ascending (FNV-1a 64 over the stored
+vector payload bytes — content-derived, so the order is identical
+across independent provisionings of the same content even though item
+UUIDs differ), then `itemID` ascending as the final backstop. Rows with
+byte-identical vectors (identical content) still fall to the per-run
+`itemID`; such rows are interchangeable for every ordering consumer.
+`limit <= 0` / `k == 0` or an empty model partition → empty. The
+ordering is stable across equivalent corpora AND across independent
+imports of the same corpus.
 
 **B-7 (keyword pre-filter):** `findByKeyword(query, limit)` returns up
 to `limit` distinct `itemID`s whose `item_id` contains `query` as a
@@ -343,8 +351,9 @@ cosine-distance-1 spurious neighbour.
 **B-13 (float nearest — Lane D cosine):** `findNearestFloat(probe:modelID:
 limit:)` scans only the float32 rows tagged with `modelID`, scores each by
 COSINE distance to the probe through the in-house `FloatBruteForceIndex`, and
-returns up to `limit` matches sorted by cosine distance ascending, ties by
-item id ascending. `VectorMatch.distance` is the cosine distance ×10_000 (the
+returns up to `limit` matches sorted by cosine distance ascending, then
+`vecHash` ascending (the same FNV-1a content-derived tie key as B-6),
+then item id ascending. `VectorMatch.distance` is the cosine distance ×10_000 (the
 integer scale both ports share). Lane D maintains ONE `FloatBruteForceIndex` PER
 modelID, each built lazily on the first `findNearestFloat` for that model from
 that model's float rows only (uniform stride) and updated incrementally on float
@@ -367,10 +376,29 @@ first (largest cosine distance first) — for the "find things UNLIKE this"
 objective. It is NOT a negated nearest-list: the farthest rows are not in the
 nearest top-K, so the index orders by the opposite end (no new distance math).
 The ranking direction is named by the `SearchDirection` enum
-(`nearest`/`farthest`); the tie-break stays item-id ascending in BOTH
-directions, so the nearest path is byte-identical. Same emptiness conditions
+(`nearest`/`farthest`); the tie-break stays (vecHash, item-id) ascending
+in BOTH directions, so the nearest path is byte-identical. Same emptiness conditions
 and the same reproducible-within-config (not four-way bit-identical) boundary
 as B-13.
+
+**B-13b (HNSW bulk build order — content-stable):** every BULK HNSW graph
+build — a build from a row set, i.e. `rebuildHNSWIndex(for:)` /
+`rebuild_hnsw_index` (THETA duty, also run by `publishShadowGeneration`
+post-flip) and `HNSWIndex.compact()` / `HNSWIndex::compact` (BETA duty) —
+inserts rows in the content-stable order `(vecHash ASC, key ASC)`, where
+`vecHash` is the same FNV-1a 64 content tie key as B-6/B-13.
+Neighbour-truncation cuts inside the build (forward-edge selection and
+back-edge shrink at the M/M0 caps) break distance ties by `(vecHash,
+itemID)`, never by internal node index (arrival order). Consequence:
+building from the same content twice — including on independently
+provisioned estates where item UUIDs differ — yields the identical graph
+topology, per port. Rows with byte-identical vectors still fall to the
+per-run `itemID` and are interchangeable. CAVEAT: incremental single-row
+inserts (the write-path mirror into an active graph) keep ARRIVAL order —
+only bulk rebuilds guarantee cross-run graph identity; the next THETA
+rebuild converges an incrementally-grown graph. Cross-PORT graph identity
+remains a non-goal (the float lane is reproducible-within-config, not
+four-way bit-identical).
 
 ## § 6 — Error model (conceptual)
 
@@ -541,7 +569,7 @@ callers that need eager per-write persistence.
 ### Crash-safety invariant
 
 Crash safety is independent of the sidecar amortisation policy.
-The `vectors` SQLite table is the single durable source of truth at all
+The `vectors` SQLite table is the single durable authoritative store at all
 times. The `.vec` sidecar is a regenerable cache. On next open,
 `VectorStore._ensureIndexBuilt` / `ensure_index_built_locked` compares the
 sidecar `live_count` header field against the table's live binary-row count:
@@ -612,6 +640,36 @@ item/lane/model deletion or a CorpusKit-owned scope delete instead.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.10.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.10.0 -- 2026-08-26
+Added B-13b: HNSW BULK graph builds (rebuildHNSWIndex / rebuild_hnsw_index,
+HNSWIndex compact) insert rows in content-stable (vecHash ASC, key ASC)
+order, and in-build neighbour-truncation cuts tie-break by (vecHash,
+itemID) instead of arrival order. This closes the REPLAY_DRIFT_RCA
+queued follow-up left open by 1.9.0: the graph STRUCTURE previously rode
+insertion order, which rode per-run-random item UUIDs, so approximate
+results were per-run stable but not cross-run stable. Incremental
+single-row inserts keep arrival order (documented caveat: only bulk
+rebuilds guarantee cross-run identity). Cross-port graph identity remains
+a non-goal. Behavioral (MINOR).
+
+### 1.9.0 -- 2026-08-26
+The universal k-NN tie-break becomes content-stable in the BINARY lane:
+B-6 orders (distance, vecHash, itemID) where vecHash is FNV-1a 64 over
+the stored vector payload bytes. B-13/B-13a wording corrected to record
+the same rule the float engines already implement (the code predated
+this spec text). Rationale: item UUIDs are assigned per provisioning,
+so a UUID tie-break is stable within one estate but NOT across
+independent builds of the same content — measured as association-graph
+run variance in the dream associate sweep (REPLAY_DRIFT_RCA
+2026-08-26). Residual: byte-identical vectors still fall to itemID.
+MaxSim (ColBERT lane, no production consumers) and HNSW graph BUILD
+order are explicitly out of this change; HNSW cross-run graph stability
+is a queued follow-up. Behavioral (MINOR).
 
 ### 1.7.0 -- 2026-08-15
 

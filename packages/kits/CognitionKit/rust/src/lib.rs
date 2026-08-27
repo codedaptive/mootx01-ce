@@ -132,6 +132,8 @@ pub use dataset_cohesion::{
     run_dataset_cohesion, DatasetCohesionOutput, DatasetColumnValue, RowAnomalyScore, SCAN_CAP,
 };
 pub use mind_overlap_recipe::{run_mind_overlap, MindOverlap};
+pub mod temporal_recall;
+pub use temporal_recall::{run as run_temporal_recall, TemporalGrab, TemporalMatch, TemporalRecallOutcome, TemporalWindowMode, TEMPORAL_DEFAULT_POOL, TEMPORAL_MAX_PAD_DAYS, TEMPORAL_RERANK_CAP};
 pub use precise_recall::{run as run_precise_recall, PreciseMatch, DEFAULT_POOL as PRECISE_DEFAULT_POOL};
 pub use moment_recipe::{run_moment, MomentOutput};
 pub use precedence_recipe::{run_precedence, PrecedenceOutput};
@@ -140,3 +142,7 @@ pub use shaped_recall::{run as run_shaped_recall, ShapedRecallOutput};
 pub use theme_weather_recipe::run_theme_weather;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
 pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};
+pub mod walk_recall;
+pub use walk_recall::{run as run_walk_recall, WalkRecallOutcome, WalkStage,
+    STAGE1_POOL, STAGE1_PRESET, STAGE2_COMPOSITION, STOP_THRESHOLD,
+    is_confident as walk_recall_is_confident};

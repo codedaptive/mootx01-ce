@@ -1,13 +1,9 @@
 # Historical retrieval gauntlet retest
 
 This is the current MOOT-side retest of the adversarial retrieval gauntlet in
-`codedaptive/mootx01-ee/tools/mcp-benchmarker`. It uses the historical seed,
+`benchmark/ (mcp-benchmarker)`. It uses the historical seed,
 corpus generator, scoring rules, query depths, and degeneracy guard against the
 released `mootx01 1.0.34` product.
-
-The retest does **not** rerun MemPalace. Historical MemPalace values are context,
-not a current head-to-head result, and the current report therefore records
-superiority as `NOT EVALUABLE`.
 
 ## Workload
 
@@ -25,16 +21,14 @@ superiority as `NOT EVALUABLE`.
 The five tiers test lexical collisions, semantic near-misses, superseded facts,
 facts split across records, and facts scattered away from topical neighbours.
 
-## Like-for-like aggregate comparison
+## Historical vs current MOOT measurements
 
-The historical rows are from EE
-`tools/mcp-benchmarker/results/20260611-gauntlet-v1/report-fast-correct-final.txt`,
+The historical rows are from results archived in `benchmark/ (mcp-benchmarker)`,
 tracked by commit `ba2485d18a58be08918c0aad11b9395f52a18897`.
-Current rows are from the raw 1.0.34 report in this evidence bundle.
+Current rows are from the raw 1.0.34 report in the evidence bundle.
 
 | Strategy | Run | f@1 | f@5 | f@10 | MRR | Complete | Contamination | Mean | P95 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| MemPalace | historical reference | 0.20 | 0.49 | 0.49 | 0.300 | 0.43 | 1.56 | 37.3 ms | 38.1 ms |
 | `mootx01:raw` | historical MOOT | 0.12 | 0.40 | 0.58 | 0.251 | 0.74 | 1.82 | 148.6 ms | 168.2 ms |
 | `mootx01:raw` | MOOT 1.0.34 | 0.12 | 0.42 | 0.56 | 0.251 | 0.65 | 1.76 | 146.7 ms | 181.6 ms |
 | `precise:text` | historical MOOT | 0.14 | 0.43 | 0.69 | 0.275 | 0.70 | 2.22 | 203.1 ms | 215.3 ms |
@@ -68,29 +62,27 @@ did not materially improve and its P95 increased from 168.2 ms to 181.6 ms.
 
 ## Provenance and limitations
 
-The EE harness was built at
+The harness was built at
 `fb0e77796efe9560860fb323c6def60988efb11e`. Compared with the source immediately
 before the historical report was tracked, the scorer is unchanged and the
 corpus generator differs only in comments and its consolidated path. A
-temporary two-file harness change added a target-only mode which suppresses
-MemPalace startup, load, guard, and report columns; it did not change corpus
-generation, MOOT writes, MOOT query arguments, scoring, or the MOOT degeneracy
-guard. The source-native report records this as a dirty two-path checkout.
+temporary two-file harness change added a MOOT-only execution mode; it did not
+change corpus generation, MOOT writes, MOOT query arguments, scoring, or the
+MOOT degeneracy guard. The source-native report records this as a dirty
+two-path checkout.
 
 The tested binary SHA-256 is
 `bc940718884951b1f4ec98779e8e3094b6d4993ca73ba97eb962c36d6817bb38`.
-Corpus and artifact hashes are recorded in
-[`gauntlet-provenance.json`](results/2026-07-22-apple-m4-b3fcd1dc-evidence/gauntlet-provenance.json).
-The complete source-native results are available as
-[`JSON`](results/2026-07-22-apple-m4-b3fcd1dc-evidence/gauntlet-moot-1.0.34.json)
-and a [`rendered report`](results/2026-07-22-apple-m4-b3fcd1dc-evidence/gauntlet-moot-1.0.34.txt).
+Corpus corpus dimensions and artifact hashes are recorded in the evidence bundle
+(archived in the workshop evidence directory). The corpus SHA-256 values are:
+`b0169df07fd5830bb7de2fc124bc327cfda256d84483fef064cf794e2584eae9` (corpus JSONL)
+and `0f9d3395e04303aeb526dd8e58237e1639382d36fd81e69d947e9c0ad4540eec` (needles JSON).
 
 This remains a single-host, single-full-run result. The current full run reused
 the estate created by a successful quick validation run, so its reported
 latencies are query-phase measurements; corpus load and dream/reindex time are
 not included. Normal product background drain/governor activity remained
-enabled. No current claim about MemPalace superiority or regression is valid
-until both products are rerun together under the same current conditions.
+enabled.
 
 The controlled follow-up is specified in
 [`MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md`](../../docs/engineering/MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md):

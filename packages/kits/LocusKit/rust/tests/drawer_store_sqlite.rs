@@ -452,6 +452,11 @@ fn mutate_operational_persists() {
         .get_drawer("11111111-1111-4111-8111-111111111111")
         .unwrap()
         .unwrap();
+    // sample_drawer has operational_bitmap = 0; drawer_values no longer ORs in
+    // bit 27 at persist time. After mutate_operational(0x100), the gate writes
+    // the declared slots from 0x100 onto the prior (0), yielding 0x100 exactly.
+    // Bits 27-30 are now declared vocabulary slots and their value (0) is
+    // preserved from the prior through the mutation — no masking required.
     assert_eq!(back.operational_bitmap, 0x100);
 }
 
@@ -1333,7 +1338,10 @@ fn bitmap_mutation_survives_reopen() {
         .get_drawer("11111111-1111-4111-8111-111111111111")
         .unwrap()
         .unwrap();
-    // The operational bitmap written before the drop must survive.
+    // Bits 27-30 are now declared vocabulary slots; drawer_values no longer
+    // ORs in bit 27 at persist time. sample_drawer starts with operational = 0.
+    // mutate_operational(valid_op_bitmap) writes all declared slots from
+    // valid_op_bitmap onto the prior (0), yielding valid_op_bitmap exactly.
     assert_eq!(back.operational_bitmap, valid_op_bitmap);
 }
 

@@ -103,6 +103,11 @@ materialise_staged() {
   chmod +x "$_staged_root"/scripts/*.sh 2>/dev/null || true
 }
 
+# Collect staged file paths ONCE, before any consumer. The self-validation
+# block below previously read $staged_files before this assignment ran, so
+# the mismatch check silently never fired (codex finding 2026-08-26).
+staged_files="$(git diff --cached --name-only)"
+
 # The hook cannot validate a staged copy of ITSELF: git invokes the worktree
 # hook, so a staged-but-different hook is not the code running this check. The
 # correct response is to refuse rather than to report on the wrong file.
@@ -127,7 +132,7 @@ fi
 #   artifacts get treated as exempt from the guard. A change to the wiring here
 #   can disable GATE 2 as surely as a change to the pattern can reopen a bypass,
 #   so the wiring is gated by the same selftest it invokes.
-staged_files="$(git diff --cached --name-only)"
+#   ($staged_files was collected once, above the hook self-validation block.)
 if printf '%s\n' "$staged_files" | grep -qE \
     '^(scripts/check-docs-internal-paths\.sh|scripts/path-leak-fixtures\.txt|scripts/check-docs-internal-paths-selftest\.sh|\.githooks/pre-commit)$'
 then

@@ -4,7 +4,7 @@
 //
 // O — contradictory hint: moot_memory_search appended "No results / Try
 //     broader terms" even when results were present (the substring "0 memory"
-//     matched "20 memory(s)"). Fix: gate on "found 0 memory" prefix.
+//     matched "20 memory(s)"). Fix: gate on "found 0 candidate memories" prefix.
 //
 // J — move_memory ignores wing: moot_move_memory accepted a `wing` argument
 //     but silently dropped it, leaving the drawer in its original wing.
@@ -45,7 +45,7 @@ struct SurfaceHintAndMoveWingTests {
     // MARK: - Bug O: coaching hint fires only on zero results
 
     /// File a memory, search for it, then verify the "No results" coaching hint
-    /// does NOT appear. The test asserts the result does not contain "found 0 memory",
+    /// does NOT appear. The test asserts the result does not contain "found 0 candidate memories",
     /// confirming the hint fires only on genuine zero results, not on counts that
     /// happen to contain "0" as a substring.
     @Test("moot_memory_search with results does not emit No-results hint")
@@ -75,7 +75,7 @@ struct SurfaceHintAndMoveWingTests {
 
         // The result must show at least one hit.
         #expect(
-            !searchText.contains("found 0 memory"),
+            !searchText.contains("found 0 candidate memories"),
             "search must return at least one hit; got: \(searchText)"
         )
         // The no-results hint must NOT be present because results were returned.
@@ -107,7 +107,7 @@ struct SurfaceHintAndMoveWingTests {
 
         // Must report zero hits.
         #expect(
-            searchText.contains("found 0 memory"),
+            searchText.contains("found 0 candidate memories"),
             "zero-result search must report 0 memories; got: \(searchText)"
         )
         // The coaching hint must fire on genuine zero results.
@@ -189,7 +189,7 @@ struct SurfaceHintAndMoveWingTests {
         )
         let targetText = text(of: targetRecall)
         #expect(
-            !targetText.contains("found 0 memory"),
+            !targetText.contains("found 0 candidate memories"),
             "recall in TargetWing must find the moved memory; got: \(targetText)"
         )
 
@@ -203,7 +203,7 @@ struct SurfaceHintAndMoveWingTests {
         )
         let originText = text(of: originRecall)
         #expect(
-            originText.contains("found 0 memory"),
+            originText.contains("found 0 candidate memories"),
             "recall in OriginWing must return 0 hits after cross-wing move; got: \(originText)"
         )
     }
@@ -263,7 +263,7 @@ struct SurfaceHintAndMoveWingTests {
         )
         let recallText = text(of: recall)
         #expect(
-            !recallText.contains("found 0 memory"),
+            !recallText.contains("found 0 candidate memories"),
             "after room-only move, memory must still be in StableWing; got: \(recallText)"
         )
     }

@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.13.0
+version: 1.19.1
 status: active
-date: 2026-08-14
+date: 2026-08-26
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -431,8 +431,8 @@ hard bucket. Deterministic for a fixed `seed`. Result:
 the estate's share and a reference share, per category over the union of
 both label sets (a category present only in the reference gets
 estate_share 0 ⇒ strongly negative = avoided). Sorted by bias descending
-— most over-represented first, most avoided last, ties by label. Honest
-about being a share difference, not dressed-up math. Result:
+— most over-represented first, most avoided last, ties by label. The
+result is a plain share difference with no additional weighting. Result:
 `[CategoryBias { label, estateShare, referenceShare, bias }]`.
 
 **Learned preference — Bradley-Terry from curation.** The deeper, learned
@@ -623,8 +623,8 @@ parameter is reserved and untouched.
 `UnifiedAuditLog.add` (and every path that routes through it — `merge`,
 `add(contentsOf:)`, `init(entries:)`, `Codable` decode) recomputes an
 entry's SHA-256 content id on every ingress call; an entry whose stored
-id does not match is dropped, never inserted, and never overwrites an
-honest entry with the same id. This is unconditional — no configuration
+id does not match is dropped, never inserted, and never overwrites a
+valid entry with the same id. This is unconditional — no configuration
 re-admits a rejected entry. The rejection is also COUNTED
 (`rejectedEntryCount` / `rejected_count()`) at the same choke point, so
 the count is exactly as trustworthy as the rejection itself: any future
@@ -1118,6 +1118,35 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 
 ## Changelog
 
+### 1.19.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.19.0 -- 2026-08-25
+
+ContextSynthesizer keyInsights weld corrections (Bob rulings 2026-08-25):
+the adornment AUGMENTS the first-line excerpt as an UNLABELED indented
+sub-line — it never replaces the excerpt, and the former `adornment:`
+prefix is removed (scaffold vocabulary taints the calling AI's context).
+Both ports; tests pin the augment shape. The keyInsights surface itself is
+scheduled for replacement by the canonical candidate row
+(ARIA_MCP_SPEC.md § 9 (canonical candidate row)).
+
+
+### 1.18.0 -- 2026-08-23
+
+ADORNMENT mission — validators moved to AdornmentLib.
+
+- §Validators: `MarkerValidators` (MV-1..MV-8) removed from NeuronKit;
+  renamed `AdornmentValidators` (AV-1..AV-8) and moved to the new
+  standalone `AdornmentLib` package. Validation logic unchanged (containment,
+  count, date grounding). NeuronKit no longer exports any validator type.
+  `MarkerValidationFunctions` struct (protocol-adapter for injecting validators
+  into GLK without circular dep) also moved to AdornmentLib.
+- ContextSynthesizer §: `moot_synthesize` reads adornments preferentially;
+  adorned drawers yield the adornment short form as the primary content line
+  in candidate payloads.
+
 ### 1.13.0 -- 2026-08-14
 Add § 12.6.2 documenting the performance-health duty (A7 from Phase 4).
 `PerformanceHealthDuty` protocol (Swift) / trait (Rust) injected into
@@ -1285,4 +1314,12 @@ GLK RecallShape.presetNames (W1-session-hybrid) is the first consumer: it drives
 `hybridRecall` with a `ScoredLane` built from the query text, enforcing the
 RECENCY-SHALL-NOT-DOMINATE invariant while SessionHybridFusion applies bounded
 temporal-window + speaker-aware boosts as a secondary sort key. No invariant
-change; this is a conformance annotation only.
+change; this is a conformance annotation only.- **1.17.0 (2026-08-20)** — The `lattice` reduction signal is now cookbook §8.3 (W2.5 Track S): 1 − LatticeDistance with reference alphas 0.5/0.5, the Wikidata half a depth-4 BFS over the pinned QIDClosure adjacency. Replaces the earlier prefix-share approximation. §8.3 semantics: null Q-ID = maximally far on that axis (identical UDC without Q-IDs scores 0.5); a fully unanchored QUERY stays neutral (0.5). ReductionQuery and ReductionCandidate gain the `qid` anchor half (candidate reads Drawer.wikidataQID).
+
+- **v1.16.0 (2026-08-20)** — QueryDateWindow gains the date-seeking intent scanner (`isDateSeekingQuery` / `is_date_seeking_query`): deterministic token-bigram detection of questions that ASK FOR a date ("when did/was/will/is", "what/which date/day/year/month", "how long ago"). ReductionCandidate gains `filedAt`/`filed_at` (body-free, paired with eventTime) so recall can distinguish real-dated memories from streaming captures. Golden-pinned both ports.
+
+- **v1.15.0 (2026-08-19)** — QueryDateWindow gains the sliding-window expansion primitive: paddedWindow(window:days:) widens both bounds by N civil days (Hinnant day arithmetic, no clock, time-of-day suffixes preserved); shiftISODay is the underlying date shifter. Rust twins padded_window/shift_iso_day. Golden-pinned across month, leap-February, and year edges in both ports.
+
+- **v1.14.0 (2026-08-19)** — Added QueryDateWindow (Reduction/): deterministic absolute-date-expression parsing (day/month-year/month-only/year forms; month-only expands against a caller-supplied year span) and inclusive UTC window containment. The query-date reading consumed by the CognitionKit temporal_recall recipe. No clock, no locale; golden-pinned in both ports.
+
+

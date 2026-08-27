@@ -34,6 +34,7 @@ pub mod anticipation;
 pub mod autonomic_governor;
 pub mod diffusion;
 pub mod composition_grid;
+pub mod query_date_window;
 pub mod benchmark_live;
 pub mod benchmark_scoring;
 pub mod bias;

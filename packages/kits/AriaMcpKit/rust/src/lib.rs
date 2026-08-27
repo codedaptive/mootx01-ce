@@ -42,8 +42,17 @@
 
 pub mod build_serial;
 pub mod coaching_engine;
+// mode_registry: the five-mode roster, RecallVariant enum, and ModeDeclaration parser.
+// Modes are advisory and fail-open (mirrors Swift ModeRegistry.swift).
+pub mod mode_registry;
+// mode_session_state: per-session sticky mode state and call counters.
+// Uses Mutex for interior mutability (mirrors Swift ModeSessionState.swift actor).
+pub mod mode_session_state;
+// periodic_coach: deterministic coaching block renderer.
+// Golden-pin tested against Tests/Conformance/modes_coaching_fixture.json.
+pub mod periodic_coach;
 pub mod dataset_tools;
-pub mod dense_row;
+// dense_row module deleted in COMPOSER-02B: all render sites migrated to result_composer.
 pub mod dispatch;
 pub mod dispatcher;
 // monitoring_control: injection seam for daemon telemetry monitoring state.
@@ -64,6 +73,12 @@ pub mod jsonrpc;
 pub mod memory_adapter;
 pub mod lens_tools;
 pub mod recall_discrimination;
+// result_composer: the shared result composer for every ARIA MCP return shape
+// (ARIA_MCP_SPEC 2.0.0 § 8 composer invariant). All render functions are free
+// functions in this module; the typed intermediates (CandidateRowData,
+// ControlSignals, etc.) are exported for use by callers and the conformance
+// suite. Public so composer_conformance.rs integration tests can drive it.
+pub mod result_composer;
 pub mod recipe_tools;
 pub mod runtime;
 pub mod sensitivity_grant_ledger;

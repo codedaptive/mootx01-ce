@@ -1,6 +1,6 @@
 // StatusCommand.swift
 //
-// Show current serve state with the HONEST vocabulary (MACD-2c2, P-c2-10):
+// Show current serve state with the OBSERVED vocabulary (MACD-2c2, P-c2-10):
 // registration, PID, and port answers are reported as the observations they
 // are — never equated with a running/ready server. Also shows the active
 // estate name, wired MCP clients, and a brief estate summary (file size as
@@ -24,7 +24,7 @@ struct StatusCommand: AsyncParsableCommand {
         print("mootx01 status")
         print("─────────────────────────────────")
 
-        // Server state — HONEST vocabulary (MACD-2c2, P-c2-10): a PID file, a
+        // Server state — OBSERVED vocabulary (MACD-2c2, P-c2-10): a PID file, a
         // launchd registration, or an answering TCP port is NEVER equated
         // with a running/ready server. Readiness belongs exclusively to the
         // signed provider's OWN authenticated report; port liveness never
@@ -33,16 +33,14 @@ struct StatusCommand: AsyncParsableCommand {
         //     raw-serve label or the bundle label)?
         //   - port: does something accept a TCP connection (identity
         //     unverified — could be any process)?
-        //   - provider report: none in this release — the daemon provider
-        //     bundle registers DISABLED and its resident mode activates with
-        //     a later release, so there is no authenticated report to
-        //     consume yet; the seam passes it through verbatim when there is.
+        //   - provider report: the descriptor/authenticated readiness surface
+        //     remains authoritative; a registration or open port alone is not.
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
         let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
         #if os(macOS)
         // MACD-3B3 C5: run the authenticated ownership probe so the provider's
-        // verbatim state flows into `honestServerStatus`.  This surface owns no
+        // verbatim state flows into `observedServerStatus`.  This surface owns no
         // second copy of the arbiter vocabulary — the format rule lives in
         // `LaunchAgent.authenticatedBundledOwner` (P-c2-10, rule at line 183).
         // The probe is fail-closed: subprocess failure, JSON parse error, and
@@ -60,9 +58,9 @@ struct StatusCommand: AsyncParsableCommand {
             (legacyRegistered || bundleRegistered) ? .registered : .none
         let port: LaunchAgent.DaemonPortObservation =
             portIsListening(port: residentPort) ? .answering : .unbound
-        print("Server: \(LaunchAgent.honestServerStatus(registration: registration, port: port, providerReportedState: providerReportedState))")
+        print("Server: \(LaunchAgent.observedServerStatus(registration: registration, port: port, providerReportedState: providerReportedState))")
         if bundleRegistered {
-            print("Daemon provider bundle: registered disabled (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("Daemon provider bundle: enabled registration present (launchd: \(DaemonBundle.launchAgentLabel))")
         }
         #else
         print("Server: \(portIsListening(port: residentPort) ? "port answering (unverified — not proof of readiness)" : "not running")")

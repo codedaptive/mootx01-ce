@@ -34,7 +34,7 @@ Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation
 
 - ANN over `storage_kit::VectorIndex` (linear Hamming scan continues for now)
 - Full BM25 keyword retrieval (deferred to CorpusKit per the kit graph)
-- Real ONNX/Candle inference bundles for the FloatSimHash providers (closure-injected; bundles land in a follow-on R-mission)
+- Real model-inference bundles for the FloatSimHash providers (closure-injected; the engine-neutral `neural-embed` backend is a standalone tool crate outside the kits, and in-kit bundles land in a follow-on R-mission)
 
 ## Building
 

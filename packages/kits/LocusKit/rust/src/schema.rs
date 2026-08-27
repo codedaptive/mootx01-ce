@@ -52,7 +52,13 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v15 adds the recall_trace lane-attribution
+/// Current schema version. v16 adds `adornment` TEXT nullable to
+/// `drawers` — the dream-time minted short form (SPEC_ADORNMENT §2).
+/// NULL = never adorned or cleared by a body-mutating write. The Rust
+/// port never replays addColumn migrations; the column is included in
+/// the CREATE TABLE declaration for fresh databases. Matches Swift
+/// `LocusKitSchema.version`.
+/// v15 adds the recall_trace lane-attribution
 /// trio (`door`, `composition`, `laneRanks`, all TEXT nullable) — W2.5
 /// Track R(a). NULL on pre-v15 rows and rows written without door
 /// identity; no query text is stored (privacy ruling 2026-08-20).
@@ -99,7 +105,13 @@ pub const KIT_ID: &str = "LocusKit";
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
 /// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 15;
+/// v17 (ADORN-STORE-02) adds the normalized adornment tables:
+/// `adornment_minters` (minter master) and `adornments` (composite PK
+/// drawer_id + minter_id). The legacy `drawers.adornment` column is
+/// retained physically but dead — no code reads or writes it. Bits 27-30
+/// of `operationalBitmap` are returned to FREE. Matches Swift
+/// `LocusKitSchema.version` v17.
+pub const SCHEMA_VERSION: i32 = 17;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -129,9 +141,36 @@ pub fn schema() -> SchemaDeclaration {
             erasure_ledger_table(),
             snapshot_registry_table(),
             snapshot_attestations_table(),
+            adornment_minters_table(),
+            adornments_table(),
         ],
         indices: indices(),
         migrations: vec![
+            // v16 → v17: normalized adornment tables (ADORN-STORE-02).
+            // Creates `adornment_minters` and `adornments`; the legacy
+            // `drawers.adornment` column is retained physically but dead.
+            // Bits 27-30 of operationalBitmap are now FREE. Matches Swift
+            // LocusKitSchema v17.
+            Migration {
+                from_version: 16,
+                to_version: 17,
+                operations: vec![
+                    SchemaOperation::CreateTable(adornment_minters_table()),
+                    SchemaOperation::CreateTable(adornments_table()),
+                ],
+            },
+            // v15 → v16: add adornment TEXT nullable to drawers
+            // (SPEC_ADORNMENT §2, 2026-08-23). Legacy column — retained
+            // physically in v17 but no longer written or read. Matches Swift
+            // v15 → v16.
+            Migration {
+                from_version: 15,
+                to_version: 16,
+                operations: vec![SchemaOperation::AddColumn {
+                    table: "drawers".to_string(),
+                    column: ColumnDeclaration::text("adornment").nullable(),
+                }],
+            },
             // v14 → v15: recall_trace lane-attribution trio (W2.5 Track
             // R(a)). All three nullable TEXT, no backfill — NULL IS the
             // honest value for rows written before attribution existed;
@@ -403,6 +442,13 @@ fn drawers_table() -> TableDeclaration {
             ColumnDeclaration::text("subject").nullable(),
             ColumnDeclaration::text("subject_pipeline_version").nullable(),
             ColumnDeclaration::timestamp("subject_at").nullable(),
+            // Adornment (SPEC_ADORNMENT §2, 2026-08-23): dream-time minted
+            // short form — stated claims certified by AV-1..AV-8. None =
+            // never adorned or cleared by a body-mutating write.
+            // The Rust port never replays addColumn migrations — the column
+            // is included here so fresh databases include it from the start.
+            // Mirrors Swift drawersTable.adornment declaration.
+            ColumnDeclaration::text("adornment").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -1272,6 +1318,19 @@ fn indices() -> Vec<IndexDeclaration> {
             "recall_trace",
             vec!["recalledAt".to_string()],
         ),
+        // adornment_minters / adornments — ADORN-STORE-02 v17 query paths.
+        // `is_active` index accelerates the fetch-all-active-minters probe.
+        // `minter_id` index accelerates per-minter debt and result queries.
+        IndexDeclaration::new(
+            "idx_adornment_minters_active",
+            "adornment_minters",
+            vec!["is_active".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_adornments_minter_id",
+            "adornments",
+            vec!["minter_id".to_string()],
+        ),
         // nodes — node-tree integrity: parent_id for child queries,
         // (parent_id, lookup_name) supports I-NT-4 active-uniqueness lookup
         // (app-layer enforcement only — partial unique not DB-enforceable),
@@ -1292,6 +1351,73 @@ fn indices() -> Vec<IndexDeclaration> {
             vec!["depth".to_string(), "lookup_name".to_string()],
         ),
     ]
+}
+
+/// Adornment minter master table (ADORN-STORE-02 v17).
+///
+/// Each row describes one minter: the model, prompt digest, and parameter
+/// set used to produce adornment text. Composite primary key is `id` (TEXT).
+/// `is_active` is a plain INTEGER (not bitmap): 1 = active, 0 = inactive.
+/// House style requires no Bool stored properties on entities; INTEGER is the
+/// correct type here (a single bit used as an activation flag, not a general
+/// bitmap field). Default value is 0. Mirrors Swift's `.int` ColumnType.
+/// Parameters are stored as sorted-keys JSON TEXT, matching Swift's
+/// JSONEncoder `.sortedKeys` output so Rust BTreeMap and Swift Dictionary
+/// serialization agree.
+/// `ext` is a forward-compat nullable JSON slot (fleet convention).
+///
+/// Mirrors Swift `LocusKitSchema.adornmentMintersTable`.
+fn adornment_minters_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "adornment_minters".to_string(),
+        primary_key: vec!["id".to_string()],
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::text("name"),
+            ColumnDeclaration::text("family"),
+            ColumnDeclaration::text("model_id"),
+            ColumnDeclaration::text("model_version"),
+            ColumnDeclaration::text("prompt_digest"),
+            // Sorted-keys JSON object of String→String configuration pairs.
+            ColumnDeclaration::text("parameters"),
+            // INTEGER 1 = active (produces debt), 0 = inactive. NOT a bitmap
+            // field (no other bits are stored here); mirrors Swift `.int` type
+            // with defaultValue `.int(0)`. Default 0 so fresh rows default to
+            // inactive until explicitly activated.
+            ColumnDeclaration::int("is_active").with_default(TypedValue::Int(0)),
+            // Forward-compat nullable JSON slot (fleet convention).
+            // Mirrors Swift `.json("ext", nullable: true)`.
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        generated_columns: vec![],
+        append_only: false,
+        unique_constraints: vec![],
+        hashable: false,
+    }
+}
+
+/// Adornment storage table (ADORN-STORE-02 v17).
+///
+/// One row per (drawer, minter) pair. Composite primary key is
+/// (drawer_id, minter_id). A drawer that has never been adorned by a given
+/// minter simply has no row — the absence IS the "debt" signal, discovered
+/// by `adornmentDebtBatch`.
+///
+/// Mirrors Swift `LocusKitSchema.adornmentsTable`.
+fn adornments_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "adornments".to_string(),
+        primary_key: vec!["drawer_id".to_string(), "minter_id".to_string()],
+        columns: vec![
+            ColumnDeclaration::text("drawer_id"),
+            ColumnDeclaration::text("minter_id"),
+            ColumnDeclaration::text("text"),
+        ],
+        generated_columns: vec![],
+        append_only: false,
+        unique_constraints: vec![],
+        hashable: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,40 +1450,51 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_fifteen() {
-        assert_eq!(SCHEMA_VERSION, 15);
-        // Six migrations: v9 → v10 (FINDING-3 dedup + unique index),
-        //                 v10 → v11 (operationalAND on container_fingerprints),
-        //                 v11 → v12 (subject trio on drawers),
-        //                 v12 → v13 (kg_facts identity trio),
-        //                 v13 → v14 (idx_drawers_filedAt),
-        //                 v14 → v15 (recall_trace lane-attribution trio).
+    fn schema_version_is_seventeen() {
+        assert_eq!(SCHEMA_VERSION, 17);
+        // Eight migrations: v9 → v10 (FINDING-3 dedup + unique index),
+        //                   v10 → v11 (operationalAND on container_fingerprints),
+        //                   v11 → v12 (subject trio on drawers),
+        //                   v12 → v13 (kg_facts identity trio),
+        //                   v13 → v14 (idx_drawers_filedAt),
+        //                   v14 → v15 (recall_trace lane-attribution trio),
+        //                   v15 → v16 (adornment TEXT nullable on drawers),
+        //                   v16 → v17 (normalized adornment tables,
+        //                              ADORN-STORE-02).
         let m = schema();
-        assert_eq!(m.migrations.len(), 6);
-        // v14 → v15 is listed first (newest-first order).
-        assert_eq!(m.migrations[0].from_version, 14);
-        assert_eq!(m.migrations[0].to_version, 15);
-        assert_eq!(m.migrations[0].operations.len(), 3);
-        // v13 → v14 is listed second.
-        assert_eq!(m.migrations[1].from_version, 13);
-        assert_eq!(m.migrations[1].to_version, 14);
+        assert_eq!(m.migrations.len(), 8);
+        // v16 → v17 is listed first (newest-first order).
+        assert_eq!(m.migrations[0].from_version, 16);
+        assert_eq!(m.migrations[0].to_version, 17);
+        assert_eq!(m.migrations[0].operations.len(), 2);
+        // v15 → v16 is listed second.
+        assert_eq!(m.migrations[1].from_version, 15);
+        assert_eq!(m.migrations[1].to_version, 16);
         assert_eq!(m.migrations[1].operations.len(), 1);
-        // v12 → v13 is listed third.
-        assert_eq!(m.migrations[2].from_version, 12);
-        assert_eq!(m.migrations[2].to_version, 13);
+        // v14 → v15 is listed third.
+        assert_eq!(m.migrations[2].from_version, 14);
+        assert_eq!(m.migrations[2].to_version, 15);
         assert_eq!(m.migrations[2].operations.len(), 3);
-        // v11 → v12 is listed fourth.
-        assert_eq!(m.migrations[3].from_version, 11);
-        assert_eq!(m.migrations[3].to_version, 12);
-        assert_eq!(m.migrations[3].operations.len(), 3);
-        // v10 → v11 is listed fifth.
-        assert_eq!(m.migrations[4].from_version, 10);
-        assert_eq!(m.migrations[4].to_version, 11);
-        assert_eq!(m.migrations[4].operations.len(), 1);
-        // v9 → v10 is listed sixth.
-        assert_eq!(m.migrations[5].from_version, 9);
-        assert_eq!(m.migrations[5].to_version, 10);
-        assert_eq!(m.migrations[5].operations.len(), 2);
+        // v13 → v14 is listed fourth.
+        assert_eq!(m.migrations[3].from_version, 13);
+        assert_eq!(m.migrations[3].to_version, 14);
+        assert_eq!(m.migrations[3].operations.len(), 1);
+        // v12 → v13 is listed fifth.
+        assert_eq!(m.migrations[4].from_version, 12);
+        assert_eq!(m.migrations[4].to_version, 13);
+        assert_eq!(m.migrations[4].operations.len(), 3);
+        // v11 → v12 is listed sixth.
+        assert_eq!(m.migrations[5].from_version, 11);
+        assert_eq!(m.migrations[5].to_version, 12);
+        assert_eq!(m.migrations[5].operations.len(), 3);
+        // v10 → v11 is listed seventh.
+        assert_eq!(m.migrations[6].from_version, 10);
+        assert_eq!(m.migrations[6].to_version, 11);
+        assert_eq!(m.migrations[6].operations.len(), 1);
+        // v9 → v10 is listed eighth.
+        assert_eq!(m.migrations[7].from_version, 9);
+        assert_eq!(m.migrations[7].to_version, 10);
+        assert_eq!(m.migrations[7].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1365,7 +1502,9 @@ mod tests {
     /// ENC-01 encryption-key registry. `nodes` is the node-tree integrity
     /// containment tree. `erasure_ledger` is the NT-L4 append-only
     /// erasure record. `snapshot_registry` and `snapshot_attestations`
-    /// are the NT-L3 Part 3 snapshot tables. 17 tables total.
+    /// are the NT-L3 Part 3 snapshot tables. `adornment_minters` and
+    /// `adornments` are the ADORN-STORE-02 v17 normalized adornment tables.
+    /// 19 tables total.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
@@ -1389,6 +1528,8 @@ mod tests {
                 "erasure_ledger",
                 "snapshot_registry",
                 "snapshot_attestations",
+                "adornment_minters",
+                "adornments",
             ]
         );
     }
@@ -1528,6 +1669,9 @@ mod tests {
                 "subject",
                 "subject_pipeline_version",
                 "subject_at",
+                // Adornment column (SPEC_ADORNMENT §2): dream-time minted short
+                // form; NULL until AdornmentPass mints a valid adornment.
+                "adornment",
             ]
         );
     }
@@ -1680,6 +1824,10 @@ mod tests {
                 "idx_source_catalog_handle",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
+                // ADORN-STORE-02 v17: adornment_minters active-query path and
+                // adornments minter_id query path (added by this stream).
+                "idx_adornment_minters_active",
+                "idx_adornments_minter_id",
                 "idx_nodes_parent_id",
                 "idx_nodes_parent_lookup",
                 "idx_nodes_depth_lookup",

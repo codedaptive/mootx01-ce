@@ -420,6 +420,10 @@ public extension GeniusLocusKit {
         // No Corpus → no semantic lane to feed. Return immediately.
         guard let corpus = corpusKits[handle] else { return 0 }
         let estate = try estate(for: handle)
+        // moot_rebuild_status span: open for the whole backfill (incl. the
+        // retrain tail), closed on every exit path.
+        derivedRebuildSpan(handle, open: true)
+        defer { derivedRebuildSpan(handle, open: false) }
 
         // Fetch the canonical Drawer IDs already indexed by CorpusKit. A single
         // snapshot, not re-fetched per pass: the missing set below is
@@ -505,17 +509,16 @@ public extension GeniusLocusKit {
             // Batch-enqueue in bounded groups so the backend commits once per
             // group instead of once per job.
             //
-            // Stream choice is the delta decision made above:
-            //   • LARGE import → IMPORT stream: the discrete import drain worker
-            //     ingests structural Drawer state + BM25 only — no bootstrap
-            //     train, no embed. The
-            //     encode drain's embed-now work would be pure repeated waste for
-            //     a bulk import whose basis is retrained on the WHOLE corpus and
-            //     whose Drawers are embedded once at the tail below.
-            //   • SMALL delta → ENCODE stream: the encode drain embeds each
-            //     Drawer through the live basis as it ingests (identical to a
-            //     live capture), so no tail retrain/re-embed is needed at all.
-            // Same durable queue.sqlite either way, so a crash mid-import
+            // ONE encode stream for every batch: `enqueueChangeBatch` always
+            // targets the encode stream (CorpusContentEngineQueue), where the
+            // drain worker bootstrap-trains on first ingest and embeds each
+            // Drawer through the live basis as it ingests. The small-vs-large
+            // delta decision made above controls ONLY whether the full-corpus
+            // retrain tail (`corpus.reindex`) runs afterward — large imports
+            // get their basis retrained on the whole corpus and every Drawer
+            // re-embedded into a shadow generation at the tail; small deltas
+            // keep the drain worker's live-basis embeds with no tail.
+            // Durable queue.sqlite either way, so a crash mid-import
             // cold-starts: the drain worker reclaims orphaned rows and resumes.
             let enqueueChunk = 1024
             var offset = 0
@@ -530,7 +533,7 @@ public extension GeniusLocusKit {
             }
             total += batch.count
             Self.intakeLog.info(
-                "reindexMissing: enqueued \(batch.count, privacy: .public) drawers on the \(smallDelta ? "encode" : "import", privacy: .public) stream for estate \(handle.estateUUID, privacy: .public) (\(scannedCount, privacy: .public) scanned, \(indexedIDs.count, privacy: .public) already indexed at sweep time)")
+                "reindexMissing: enqueued \(batch.count, privacy: .public) drawers on the encode stream (\(smallDelta ? "no retrain tail" : "full retrain tail queued", privacy: .public)) for estate \(handle.estateUUID, privacy: .public) (\(scannedCount, privacy: .public) scanned, \(indexedIDs.count, privacy: .public) already indexed at sweep time)")
 
             // Wait for THIS pass to reach TRUE idle before advancing to the next
             // slice, so an in-flight batch is never starved of drain capacity by

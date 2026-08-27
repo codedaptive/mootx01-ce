@@ -26,9 +26,10 @@ import Foundation
 ///
 /// Ordering: lexicographic on (item_id, vector_index, model_id,
 /// model_version). This total order is used by the ResidentVectorArray
-/// partition index and by the tie-break rules in all search results
-/// (§0.3 of the retrieval algorithms reference: smaller id wins —
-/// VectorRecordKey.item_id plays the role of "id" at the engine seam).
+/// partition index and as the FINAL backstop of the search tie-break
+/// (SPEC 1.9.0: distance, then vecHash content hash, then this key —
+/// item UUIDs are per-provisioning, so the key alone is never the first
+/// tie discriminator).
 ///
 /// Thread-safety: value type, fully Sendable.
 public struct VectorRecordKey: Sendable, Equatable, Hashable, Comparable {

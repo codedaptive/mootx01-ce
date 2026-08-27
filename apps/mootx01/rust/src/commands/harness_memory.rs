@@ -1916,7 +1916,7 @@ mod tests {
             "/home/alice/.claude/projects/-home-alice-code-myapp/memory/MEMORY.md"
         ));
         assert!(is_harness_memory_path(
-            "/Users/bob/.claude/projects/-Users-bob-devlop-mootx01/memory/notes.md"
+            "/Users/carol/.claude/projects/-Users-carol-devlop-mootx01/memory/notes.md"
         ));
     }
 

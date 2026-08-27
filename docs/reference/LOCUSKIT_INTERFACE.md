@@ -1,9 +1,9 @@
 ---
 title: LocusKit Interface
-version: 1.27.0
+version: 2.1.0
 status: active
-date: 2026-08-20
-description: Public API surface for LocusKit in both the Swift and Rust ports.
+date: 2026-08-26
+description: "Public API surface for LocusKit in both ports. 2.0.0 adds permanent normalized minter/adornment storage and runtime activation, replacing Drawer.adornment and its bitmap state."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -289,8 +289,9 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let distilledPipelineVersion: String?
     public let distilledTokenCount: Int64?
     public let distilledAt: Date?
-    // Subject trio — one-sentence AI-facing summary returned in the
-    // progressive-recall dense row. RETURNED, never searched or indexed.
+    // Subject trio — one-sentence AI-facing summary returned as the
+    // canonical candidate row's subject column (ARIA_MCP_SPEC 2.0.0 § 8).
+    // RETURNED, never searched or indexed.
     // NULL-together; cleared by the same content-write invalidation as
     // the distilled quad. NULL `subject` = backfill-eligible.
     public let subject: String?                 // ≤ 120 chars (subjectLengthContract)
@@ -323,6 +324,10 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
 ```
 **Rust:** `pub struct Drawer` with the same fields (`snake_case`) and the
 same accessor set; bitmap decode is byte-identical.
+
+Adornment text is not a `Drawer` field. It is loaded through the normalized
+adornment APIs below, so a Drawer can have zero, one, or many adornments from
+different registered minters.
 
 #### `KGFact`, `DiaryEntry`, `Tunnel`
 
@@ -487,6 +492,15 @@ public struct CaptureFrame: Sendable {
     public var confidence: Confidence                // bits 24–29; default .null
     public var lineageID: LineageID?; public var room: RoomID; public var latticeAnchor: LatticeAnchor
     public var addedBy: String; public var embeddingModelID: String; public var eventTime: Date?
+    public var wing: String?                         // nil → defaultWing() at capture time
+    public var subject: String?                      // nil → born as subject debt (B-21)
+    /// Per-record ingest clock (schema v1.2 import seam). When non-nil,
+    /// `captureBatch` uses this as `filedAt` and HLC physical-time seed for
+    /// this drawer instead of the batch wall-clock `now`. Nil → wall-clock
+    /// (byte-identical legacy behavior). Rust: `pub capture_date: Option<i64>`
+    /// (epoch milliseconds). Cross-port golden pin: "2026-01-15T10:00:00Z"
+    /// → `filedAt = 1768471200000 ms`.
+    public var captureDate: Date?
     public init(content: String, channel: CaptureChannel, room: RoomID, latticeAnchor: LatticeAnchor,
                 addedBy: String, embeddingModelID: String, sensitivity: AdjectiveSensitivity = .normal,
                 kind: ContentKind = .prose, provenanceChannel: Channel = .uiTyped,
@@ -494,7 +508,8 @@ public struct CaptureFrame: Sendable {
                 confirmation: Confirmation = .unconfirmed, confidence: Confidence = .null,
                 lineageID: LineageID? = nil, eventTime: Date? = nil,
                 featureFlags: DrawerFeatureFlags = [],
-                exportability: AdjectiveExportability = .private_)
+                exportability: AdjectiveExportability = .private_,
+                wing: String? = nil, subject: String? = nil, captureDate: Date? = nil)
 }
 public struct RecallFrame: Sendable {
     public var filterChain: [Filter]            // implicit AND (B-4)
@@ -947,7 +962,7 @@ cited file.
   `public let hintRoom: String = "AI_Charter_Hint"` — room name for per-wing hint drawers.
   `public let hintUDCCode: String = "001"` — UDC class code stamped on hint drawers.
   `public let hintAddedBy: String = "estate-provision"` — actor string for hint drawer
-  provenance (honest provenance only — no code branches on this value).
+  provenance (recorded for provenance only — no code branches on this value).
   `public struct WingDefinition: Sendable, Equatable { name: String; hint: String }` — a wing
   name paired with its hint text.
   `public let defaultWings: [WingDefinition]` — the seven wings seeded at estate provision
@@ -1186,7 +1201,7 @@ Recurring sanctioned shapes:
 |---------|--------------|-------------|------------|------------|---------------------|--------|
 | Capture channel | `CaptureChannel` (DrawerOperational.swift:62) | `CaptureChannel` (drawer_operational.rs:57) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
 | Content kind | `ContentKind` (DrawerOperational.swift:79) | `ContentKind` (drawer_operational.rs:99) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
-| Drawer feature flags | `DrawerFeatureFlags` (DrawerOperational.swift:101) | `DrawerFeatureFlags` (drawer_operational.rs:146) | public / pub | Swift `OptionSet` struct / Rust ZST struct of `const` bit masks (idiomatic; same bit layout) | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` (FIELD_MASK + per-bit table) | Confirmed |
+| Drawer feature flags | `DrawerFeatureFlags` (DrawerOperational.swift:101) | `DrawerFeatureFlags` (drawer_operational.rs:146) | public / pub | Swift `OptionSet` struct / Rust ZST struct of `const` bit masks (idiomatic; same bit layout). Bit 26 (`isAnomalous` / `IS_ANOMALOUS`) is the low-cohesion outlier flag (§11.18); `Drawer.isAnomalous` / `is_anomalous()` reads bit 26 of `operationalBitmap` directly (not via `featureFlags`, which covers bits 12–23 only). Set/cleared by the GeniusLocusKit anomaly-flag sweep; LocusKit write primitive `Estate.setAnomalousFlag`. | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` (FIELD_MASK + per-bit table; `DrawerOperationalTests.swift` covers bit 26) | Confirmed |
 | Tunnel kind | `TunnelKind` (TunnelOperational.swift:39) | `TunnelKind` (tunnel_operational.rs:54) | public / pub | identical | `TunnelKindTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
 | Tunnel direction | `TunnelDirection` (TunnelOperational.swift:54) | `TunnelDirection` (tunnel_operational.rs:99) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
 | Tunnel lifecycle | `TunnelLifecycle` (TunnelOperational.swift:64) | `TunnelLifecycle` (tunnel_operational.rs:131) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
@@ -1498,9 +1513,208 @@ InMemory inherits).
 
 ---
 
+## Anomalous-flag write primitive (§11.18)
+
+Derived-signal write: sets or clears bit 26 (`isAnomalous`) of a drawer's
+`operationalBitmap`. No audit event is written, no lifecycle or lineage
+field is touched. The GeniusLocusKit anomaly-flag sweep is the only caller;
+LocusKit owns the write primitive so the composition layer does not bypass
+the store interface.
+
+### Swift: `DrawerStore` and `Estate` wrappers
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `DrawerStore.setAnomalousFlag(drawerId:anomalous:)` | `String, Bool` | `async throws -> Int` | Serializable transaction: read-modify-write on `operationalBitmap`. Sets bit 26 when `anomalous == true`, clears it otherwise. Returns 0 when the bit is already in the correct state (skip-write optimisation). Throws `invalidContent` on empty `drawerId`; unknown `drawerId` returns 0. |
+| `Estate.setAnomalousFlag(drawerId:anomalous:now:)` | `String, Bool, Date` | `async throws -> Int` | Pass-through to `DrawerStore`. Accepts `now:` for call-site determinism discipline; the write carries no timestamp. |
+
+Note: the `now:` parameter is accepted and discarded; the method signature
+honours the fleet-wide determinism rule (never call `Date()` inside an
+engine) without storing a timestamp for this derived-signal write.
+
+### Rust
+
+No Rust equivalent is shipped in this mission: the anomaly-flag sweep is
+a Swift-side maintenance function in GeniusLocusKit. Rust recall filtering
+reads `is_anomalous()` (bit 26 of `operational_bitmap`) on hydrated drawers
+— no write primitive is required in Rust for the §11.18 feature set.
+
+---
+
+## Normalized adornment storage
+
+The following cross-port values come from AdornmentLib:
+
+```swift
+public struct AdornmentMinterDescriptor: Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let family: String
+    public let modelID: String
+    public let modelVersion: String
+    public let promptDigest: String
+    public let parameters: [String: String]
+    public let isActive: Bool
+}
+
+public struct StoredAdornment: Sendable, Equatable {
+    public let drawerID: String
+    public let minterID: String
+    public let text: String
+}
+
+public struct AdornmentDebt: Sendable, Equatable {
+    public let drawer: Drawer
+    public let minter: AdornmentMinterDescriptor
+}
+```
+
+Swift `DrawerStore` and `Estate` expose:
+
+```swift
+public func listAdornmentMinters() async throws -> [AdornmentMinterDescriptor]
+public func registerAdornmentMinter(_ minter: AdornmentMinterDescriptor) async throws
+public func setAdornmentMinterActive(id: String, active: Bool) async throws -> Int
+public func setActiveAdornmentMinters(ids: Set<String>) async throws -> Int
+public func adornmentDebtBatch(limit: Int, afterDrawerID: String?) async throws -> [AdornmentDebt]
+public func putAdornment(_ adornment: StoredAdornment) async throws -> Int
+public func adornments(drawerID: String) async throws -> [StoredAdornment]
+public func activeAdornments(drawerIDs: [String]) async throws -> [String: [StoredAdornment]]
+```
+
+Rust exports value-equivalent structs and the following `DrawerStore` trait
+methods, with `Estate` pass-throughs:
+
+```rust
+fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError>;
+fn register_adornment_minter(&self, minter: &AdornmentMinterDescriptor) -> Result<(), LocusKitError>;
+fn set_adornment_minter_active(&self, id: &str, active: bool) -> Result<usize, LocusKitError>;
+fn set_active_adornment_minters(&self, ids: &BTreeSet<String>) -> Result<usize, LocusKitError>;
+fn adornment_debt_batch(&self, limit: usize, after_drawer_id: Option<&str>) -> Result<Vec<AdornmentDebt>, LocusKitError>;
+fn put_adornment(&self, adornment: &StoredAdornment) -> Result<usize, LocusKitError>;
+fn adornments(&self, drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError>;
+fn active_adornments(&self, drawer_ids: &[String]) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError>;
+```
+
+`registerAdornmentMinter` inserts an immutable configuration identity and is
+idempotent when an existing row has the same non-activation fields. Its active
+value is initial state only; registration never retoggles an existing row. A
+same-ID configuration change fails. `setAdornmentMinterActive` changes only
+the active flag and is the runtime toggle used by dreaming and result
+composition.
+
+`setActiveAdornmentMinters` atomically replaces the complete active set. An
+empty set disables all minters. An unknown ID fails the transaction before any
+row changes. The single-row setter is a convenience for a one-row toggle.
+
+`adornmentDebtBatch` computes missing `(live Drawer, active minter)` pairs.
+`putAdornment` inserts or replaces exactly one pair. `activeAdornments` performs
+one batch join for result Drawer IDs, filters by current minter activation, and
+orders each array by minter ID for cross-port determinism. Inactive adornments
+remain readable through `adornments(drawerID:)` but never appear in the active
+batch projection.
+
+There is no `Drawer.adornment`, `adornmentRequired`, `adornmentBitmask`, or
+`setAdornment(...bitmaskCode:)` in the 2.0 surface. Bits 27 through 30 are
+unassigned.
+
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 2.0.2 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.0.1 -- 2026-08-25
+
+Subject-trio comment aligned to ARIA_MCP_SPEC 2.0.0 § 8 (canonical
+candidate row replaces the retired dense-row spelling). No API change.
+
+### 2.0.0 -- 2026-08-25
+
+Replaced the scalar Drawer adornment API with permanent normalized minter and
+adornment values and store methods. Added runtime minter registration and
+activation, computed pair debt, per-pair writes, all-adornment reads, and
+batched active-adornment projection. Retired the legacy backfill, scalar write,
+and bits 27 through 30 from the target interface.
+
+### 1.32.0 -- 2026-08-24
+
+- **`AdornmentRequiredBackfill` / `adornment_required_backfill` (ADORN-BACKFILL).** New
+  public backfill entry, run only by `mootx01 upgrade`:
+
+  ```swift
+  public struct AdornmentRequiredBackfillReport: Sendable, Equatable {
+      public var scanned: Int   // live un-adorned rows examined
+      public var backfilled: Int // rows where bit 27 was set
+  }
+  public enum AdornmentRequiredBackfill {
+      public static func run(
+          storage: any Storage
+      ) async throws -> AdornmentRequiredBackfillReport
+  }
+  ```
+
+  ```rust
+  // locus_kit::adornment_required_backfill
+  #[derive(Debug, Clone, Default, PartialEq, Eq)]
+  pub struct AdornmentRequiredBackfillReport {
+      pub scanned: usize,
+      pub backfilled: usize,
+  }
+  pub fn run(
+      storage: &dyn Storage,
+  ) -> Result<AdornmentRequiredBackfillReport, LocusKitError>;
+  ```
+
+  Sets `adornmentRequired` (bit 27 of `operationalBitmap`) on every live,
+  never-adorned drawer (`tombstonedAt IS NULL AND adornment IS NULL AND
+  bitmaskNone(bit 27)`) so `AdornmentPass` processes pre-v16 drawers on the
+  next dream cycle. Idempotent and re-runnable. Wired immediately after
+  `KGFactIdentityBackfill` in both the up-to-date early-return path and the
+  full convergence path of `mootx01 upgrade`. No injected resolver (unlike
+  `KGFactIdentityBackfill`) — all evidence is within the estate itself.
+
+### 1.31.0 -- 2026-08-24
+
+SCORE-ORDERING mission: `DrawerStore` three-column ORDER BY.
+
+All ordered scan methods in `DrawerStore` (Swift `DrawerStore` protocol and
+SQLite implementation; Rust `DrawerStore` trait and `InMemoryDrawerStore`)
+now use a three-column ORDER BY with `content` inserted between `filedAt`
+and `id`. This makes scan results deterministic when multiple drawers share
+the same `filedAt`. No callers change; the ordering change affects only the
+position of equal-`filedAt` drawers within a single scan result.
+
+### 1.30.0 -- 2026-08-23
+
+- Drawer API §: `adornment: String?` stored column. Computed `Bool` accessors:
+  `adornmentRequired` (bit 27 of `operationalBitmap`) and `adornmentBitmask`
+  returning the 3-bit Int value from bits 28–30 (apple gen1=0b001, gen2=0b011,
+  gen3=0b111; non-apple gen1=0b100, gen2=0b110, gen3=0b101; unadorned=0b000).
+- New Estate API (Swift): `adornmentDebtBatch(limit:afterID:) async throws -> [Drawer]`
+  — fetch up to `limit` active drawers with `adornmentRequired` set.
+  `setAdornment(drawerId:adornment:bitmaskCode:) async throws -> Int` — write
+  adornment field + bits 28–30 and clear bit 27 atomically; returns updated row count.
+- Rust twins: `adornment_debt_batch(limit, after_id)` and
+  `set_adornment(drawer_id, adornment, bitmask_code)` on `DrawerStore`.
+
+### 1.29.0 -- 2026-08-20
+
+- `CaptureFrame` gains three nil-defaulted fields (schema v1.2 import seam, feat P2a). `wing: String?` — when nil, `captureBatch` substitutes `defaultWing()` at capture time. `subject: String?` — when nil, the drawer is born as subject debt (B-21) pending backfill. `captureDate: Date?` — per-record ingest clock override; when non-nil, `captureBatch` uses this value as `filedAt` and as the HLC physical-time seed for that drawer (Rust: `pub capture_date: Option<i64>`, epoch milliseconds). When nil, batch wall-clock `now` applies (byte-identical legacy behavior). Cross-port golden pin: `"2026-01-15T10:00:00Z"` → `filedAt = 1768471200000 ms`. `CaptureFrame.init` updated with all three as optional parameters defaulting to `nil`.
+
+### 1.28.0 -- 2026-08-20
+
+- Bit 26 of `operationalBitmap` assigned as `isAnomalous` / `IS_ANOMALOUS`
+  (§11.18). `DrawerFeatureFlags.isAnomalous` (Swift `OptionSet` member) and
+  `DrawerFeatureFlags::IS_ANOMALOUS` (Rust const) define the mask. Computed
+  accessor `Drawer.isAnomalous: Bool` / `Drawer::is_anomalous() -> bool`
+  reads bit 26 directly from `operationalBitmap` (bit 26 is outside the
+  feature-flags region 12–23). New write primitive
+  `DrawerStore.setAnomalousFlag(drawerId:anomalous:)` /
+  `Estate.setAnomalousFlag(drawerId:anomalous:now:)` — no audit event, no
+  lifecycle touch, skip-write when unchanged. Bits 27–63 remain reserved.
 
 ### 1.27.0 -- 2026-08-20
 
@@ -1512,6 +1726,10 @@ InMemory inherits).
   `laneRankOrder` / `LANE_RANK_ORDER` (locus, bm25, hamming, dense) —
   a cross-port byte-identical conformance surface. `DrawerStore`
   trace encode/decode and both used-mark rebuild paths carry the trio.
+
+### 1.26.0 -- 2026-08-19
+
+- New `Filter` cases `eventAfter(Date)` / `eventBefore(Date)` (Rust `EventAfter(i64)` / `EventBefore(i64)`, epoch milliseconds). `BitmapEvaluator` classifies these as the structured tier and evaluates them inclusively against `drawer.eventTime`.
 
 ### 1.25.0 -- 2026-08-13
 

@@ -10,11 +10,13 @@
 //!
 //! Deterministic ordering (retrieval algorithms reference §0.3):
 //!   primary: `raw_distance` ascending (nearer first);
-//!   tie-break: `key.item_id` ascending (smaller id wins).
+//!   tie-break: vec_hash (FNV-1a content hash) ascending, then
+//!   `key.item_id` ascending as the final backstop (SPEC 1.9.0).
 //! This total order is applied over ALL candidates, then truncated to k.
-//! The tie-break must use itemID ordering, not insertion order — which
-//! is why we use `EngramLib::distances` (all distances) rather than
-//! `EngramLib::find_nearest` (top-k by insertion-index tie-break).
+//! The tie-break is vec_hash (FNV-1a content hash) then item_id, not
+//! insertion order — which is why we use `EngramLib::distances` (all
+//! distances) rather than `EngramLib::find_nearest` (top-k by
+//! insertion-index tie-break).
 //!
 //! Thread-safety: `BruteForceIndex` holds its state behind a `Mutex`-free
 //! mutable reference; callers that share an index across threads must
@@ -204,7 +206,7 @@ impl DenseIndex for BruteForceIndex {
     /// k-nearest binary vectors by Hamming distance (exact linear scan).
     ///
     /// Uses `EngramLib::distances` (I-7) to compute ALL candidate distances
-    /// via the substrate kernel, then sorts by `(distance ASC, item_id ASC)`
+    /// via the substrate kernel, then sorts by `(distance ASC, vec_hash ASC, item_id ASC)`
     /// and truncates to k. This gives the correct total order regardless of
     /// insertion order.
     fn search(
@@ -240,6 +242,7 @@ impl DenseIndex for BruteForceIndex {
         // Collect live (non-tombstoned) Engrams and their slot indices.
         let mut engrams: Vec<Engram> = Vec::new();
         let mut slot_indices: Vec<usize> = Vec::new();
+        let mut slot_hashes: Vec<u64> = Vec::new();
         for slot_idx in scan {
             if self.array.is_tombstoned(slot_idx) {
                 continue;
@@ -255,6 +258,9 @@ impl DenseIndex for BruteForceIndex {
             if let Some(e) = Self::bytes_to_engram(bytes) {
                 engrams.push(e);
                 slot_indices.push(slot_idx);
+                // vec_hash tie key (SPEC 1.9.0 B-6): FNV-1a over the stored
+                // payload bytes, computed once per accepted slot.
+                slot_hashes.push(super::fnv1a64(bytes));
             }
         }
 
@@ -268,24 +274,24 @@ impl DenseIndex for BruteForceIndex {
         // jaccard_similarities composes the same conformance-gated
         // primitives (zip4 AND/OR + popcount). We are the oracle because
         // we do no math ourselves.
-        let mut all_hits: Vec<DenseHit> = if metric == DenseMetric::JACCARD {
+        let mut all_hits: Vec<(DenseHit, u64)> = if metric == DenseMetric::JACCARD {
             let sims = EngramLib::jaccard_similarities(&probe_engram, &engrams);
             (0..engrams.len())
                 .map(|i| {
-                    DenseHit::jaccard(
+                    (DenseHit::jaccard(
                         self.array.keys[slot_indices[i]].clone(),
                         1.0 - sims[i],
-                    )
+                    ), slot_hashes[i])
                 })
                 .collect()
         } else {
             let distances = EngramLib::distances(&probe_engram, &engrams);
             (0..engrams.len())
-                .map(|i| DenseHit {
+                .map(|i| (DenseHit {
                     key: self.array.keys[slot_indices[i]].clone(),
                     raw_distance: distances[i] as i32,
                     metric,
-                })
+                }, slot_hashes[i]))
                 .collect()
         };
 
@@ -294,20 +300,23 @@ impl DenseIndex for BruteForceIndex {
         // bit patterns of NON-NEGATIVE floats are monotone under integer
         // comparison, and Jaccard distance is in [0,1]). A signed metric
         // in Lane A would require decoding before comparing.
-        // Sort by (distance ASC, VectorRecordKey ASC) — strict total order.
-        // Using the full VectorRecordKey (itemID, vectorIndex, modelID, modelVersion)
-        // rather than itemID alone ensures that distinct records sharing the same
-        // itemID sort deterministically and consistently with MIHIndex's tie-break.
-        // This is the conformance-gate oracle order that MIH must replicate.
+        // Sort by (distance ASC, vec_hash ASC, VectorRecordKey ASC) — the
+        // strict total order of SPEC 1.9.0 B-6. vec_hash (FNV-1a content
+        // hash) resolves ties identically across estate provisionings; the
+        // full VectorRecordKey (item_id, vector_index, model_id,
+        // model_version) is the final backstop and disambiguates distinct
+        // records sharing an item_id. This is the conformance-gate oracle
+        // order that MIH must replicate.
         all_hits.sort_by(|a, b| {
-            a.raw_distance
-                .cmp(&b.raw_distance)
-                .then(a.key.cmp(&b.key))
+            a.0.raw_distance
+                .cmp(&b.0.raw_distance)
+                .then(a.1.cmp(&b.1))
+                .then(a.0.key.cmp(&b.0.key))
         });
 
         // Truncate to k.
         all_hits.truncate(k);
-        Ok(all_hits)
+        Ok(all_hits.into_iter().map(|(h, _)| h).collect())
     }
 
     fn add(
@@ -410,7 +419,8 @@ mod tests {
     //
     // Mirrors the hamming_nn_topk_tie.json vector: 5 candidates all at
     // Hamming distance 1 from the zero anchor. Top-3 must be the three
-    // with the smallest item_ids (tie-break by item_id ASC, §0.3).
+    // with the smallest vec_hash (FNV-1a content hash, SPEC 1.9.0);
+    // item_id is only the final backstop — derived below, not assumed.
 
     #[test]
     fn conformance_gate_hamming_nn_topk_tie() {
@@ -437,9 +447,17 @@ mod tests {
         ).unwrap();
         assert_eq!(hits.len(), 3);
         for h in &hits { assert_eq!(h.raw_distance, 1); }
-        assert_eq!(hits[0].key.item_id, "00000000-0000-0000-0000-000000000001");
-        assert_eq!(hits[1].key.item_id, "00000000-0000-0000-0000-000000000002");
-        assert_eq!(hits[2].key.item_id, "00000000-0000-0000-0000-000000000003");
+        // Tie-break: vec_hash ASC (the candidates carry DISTINCT payloads),
+        // item_id only as the final backstop — derive the expected winners
+        // from the hashes exactly as the engine does (twin of the Swift
+        // conformance-gate test).
+        let mut ranked: Vec<(&str, u64)> = candidates.iter()
+            .map(|(id, e)| (*id, super::super::fnv1a64(&e.wire_bytes())))
+            .collect();
+        ranked.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
+        assert_eq!(hits[0].key.item_id, ranked[0].0);
+        assert_eq!(hits[1].key.item_id, ranked[1].0);
+        assert_eq!(hits[2].key.item_id, ranked[2].0);
     }
 
     // ── MIH spec vectors ──────────────────────────────────────────────────
@@ -459,32 +477,64 @@ mod tests {
         assert_eq!(hits[1].raw_distance, 1);
     }
 
+    /// MIH-2 (SPEC 1.9.0): id-4 and id-5 both sit at dist=1 with DIFFERENT
+    /// payloads; the smaller vec_hash (content hash) wins, not the item_id.
+    /// Twin of Swift `mih_vector2_tie_break_by_vecHash`.
     #[test]
-    fn mih_vector2_tie_break_by_item_id() {
+    fn mih_vector2_tie_break_by_vec_hash() {
         let mut idx = BruteForceIndex::new();
+        let e4 = Engram::new(0, 0, 0, 0x8000_0000_0000_0000);
+        let e5 = Engram::new(1, 0, 0, 0);
         idx.add(key("id-1"), engram_payload(&Engram::new(0, 0, 0, 0))).unwrap();
         idx.add(key("id-2"), engram_payload(&Engram::new(7, 0, 0, 0))).unwrap();
         idx.add(key("id-3"), engram_payload(&Engram::new(0xFF, 0, 0, 0))).unwrap();
-        idx.add(key("id-4"), engram_payload(&Engram::new(0, 0, 0, 0x8000_0000_0000_0000))).unwrap();
-        idx.add(key("id-5"), engram_payload(&Engram::new(1, 0, 0, 0))).unwrap();
+        idx.add(key("id-4"), engram_payload(&e4)).unwrap();
+        idx.add(key("id-5"), engram_payload(&e5)).unwrap();
         let hits = idx.search(&zero_payload(), DenseMetric::HAMMING, 2, None).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].key.item_id, "id-1"); assert_eq!(hits[0].raw_distance, 0);
-        assert_eq!(hits[1].key.item_id, "id-4"); assert_eq!(hits[1].raw_distance, 1);
+        let winner = if super::super::fnv1a64(&e4.wire_bytes())
+            < super::super::fnv1a64(&e5.wire_bytes()) { "id-4" } else { "id-5" };
+        assert_eq!(hits[1].key.item_id, winner);
+        assert_eq!(hits[1].raw_distance, 1);
     }
 
+    /// SPEC 1.9.0 residual: byte-identical payloads tie on distance AND
+    /// vec_hash — only then does item_id break the tie.
+    #[test]
+    fn mih_vector2b_identical_payloads_fall_to_item_id() {
+        let mut idx = BruteForceIndex::new();
+        let same = Engram::new(1, 0, 0, 0);
+        idx.add(key("zzz"), engram_payload(&same)).unwrap();
+        idx.add(key("aaa"), engram_payload(&same)).unwrap();
+        let hits = idx.search(&zero_payload(), DenseMetric::HAMMING, 1, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key.item_id, "aaa");
+    }
+
+    /// The two dist-4 survivors are the smallest by (vec_hash, item_id) —
+    /// SPEC 1.9.0. Twin of Swift `mih_vector3_multiband_three_way_tie`.
     #[test]
     fn mih_vector3_multiband_three_way_tie() {
         let mut idx = BruteForceIndex::new();
-        idx.add(key("id-10"), engram_payload(&Engram::new(3, 3, 0, 0))).unwrap();
-        idx.add(key("id-11"), engram_payload(&Engram::new(0, 0, 0, 0x0F))).unwrap();
-        idx.add(key("id-12"), engram_payload(&Engram::new(0x0F, 0, 0, 0))).unwrap();
+        let candidates = [
+            ("id-10", Engram::new(3, 3, 0, 0)),
+            ("id-11", Engram::new(0, 0, 0, 0x0F)),
+            ("id-12", Engram::new(0x0F, 0, 0, 0)),
+        ];
+        for (id, e) in &candidates {
+            idx.add(key(id), engram_payload(e)).unwrap();
+        }
         idx.add(key("id-13"), engram_payload(&Engram::new(1, 0, 0, 0))).unwrap();
         let hits = idx.search(&zero_payload(), DenseMetric::HAMMING, 3, None).unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].key.item_id, "id-13"); assert_eq!(hits[0].raw_distance, 1);
-        assert_eq!(hits[1].key.item_id, "id-10"); assert_eq!(hits[1].raw_distance, 4);
-        assert_eq!(hits[2].key.item_id, "id-11"); assert_eq!(hits[2].raw_distance, 4);
+        let mut ranked: Vec<(&str, u64)> = candidates.iter()
+            .map(|(id, e)| (*id, super::super::fnv1a64(&e.wire_bytes())))
+            .collect();
+        ranked.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
+        assert_eq!(hits[1].key.item_id, ranked[0].0); assert_eq!(hits[1].raw_distance, 4);
+        assert_eq!(hits[2].key.item_id, ranked[1].0); assert_eq!(hits[2].raw_distance, 4);
     }
 
     #[test]

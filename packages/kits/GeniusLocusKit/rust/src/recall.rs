@@ -102,11 +102,13 @@ impl GLKRecallMode {
 
 /// Scoring strategy applied after lane recall completes.
 ///
-/// `.raw` returns hits in the order the active lane produced them with no
-/// reranking. `.rrf` applies Reciprocal Rank Fusion across lanes.
-/// `.matrixAware` enables the full weighted pipeline (matrix co-occurrence
+/// `Raw` returns hits in the order the active lane produced them with no
+/// reranking. `Rrf` applies Reciprocal Rank Fusion across lanes.
+/// `MatrixAware` enables the full weighted pipeline (matrix co-occurrence
 /// + temporal, fieldFit, graph, preference signals) mirroring the Swift
-/// `RecallDirector`'s step-9 path.
+/// `RecallDirector`'s step-9 path. `Discriminative` is RRF-based scoring
+/// with the dense-lane saturation discount applied to the composite score;
+/// no matrix steer, fieldFit, graph, or preference signals are applied.
 ///
 /// Mirrors Swift `GLKRecallScoring` (GLKRecallScoring.swift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,14 +119,20 @@ pub enum GLKRecallScoring {
     Rrf,
     /// Full weighted pipeline with matrix, fieldFit, graph, and preference signals.
     MatrixAware,
+    /// RRF composite score scaled by the dense-lane saturation discount
+    /// (`dense_discrimination_factor` ∈ [0, 1]). No matrix steer applied.
+    /// When the dense lane is absent or contrastive (spread ≥ 0.15) the
+    /// factor is 1.0 and the result is byte-identical to `Rrf`.
+    Discriminative,
 }
 
 impl GLKRecallScoring {
     pub fn raw_value(&self) -> &'static str {
         match self {
-            Self::Raw         => "raw",
-            Self::Rrf         => "rrf",
-            Self::MatrixAware => "matrixAware",
+            Self::Raw           => "raw",
+            Self::Rrf           => "rrf",
+            Self::MatrixAware   => "matrixAware",
+            Self::Discriminative => "discriminative",
         }
     }
 }
@@ -605,6 +613,20 @@ pub struct RecallShape {
     /// Twin of Swift `RecallShape.binaryMetric` (which is Codable-additive;
     /// this port's shape is constructed in-process, not deserialized).
     pub binary_metric: String,
+    /// Float-lane metric selector (W2.5 M1 float unlock): "cosine" (default),
+    /// "l2", or "dot". Unknown values degrade to cosine (shape contract — a
+    /// shape must degrade, never fail). Twin of Swift `RecallShape.floatMetric`.
+    ///
+    /// Semantics:
+    /// - "cosine": 1 − cos(a,b). Scale-invariant; the historical default.
+    /// - "l2": Euclidean distance √Σ(aᵢ−bᵢ)². Magnitude-sensitive.
+    /// - "dot": negative dot product −Σ(aᵢbᵢ). For dot-product-trained embeddings.
+    pub float_metric: String,
+    /// Matrix-signal weighting selector (W2.5 S4-C): "counts" (default —
+    /// the canonical i64 count matrices) or "decayed" (the §8.13
+    /// exp-decayed projections). Unknown values degrade to counts.
+    /// Twin of Swift `RecallShape.matrixWeighting`.
+    pub matrix_weighting: String,
 }
 
 impl RecallShape {
@@ -624,13 +646,30 @@ impl RecallShape {
             anti_similar_lanes: HashSet::new(),
             frontier_k,
             binary_metric: "hamming".to_string(),
+            float_metric: "cosine".to_string(),
+            matrix_weighting: "counts".to_string(),
         }
+    }
+
+    /// Builder: select the matrix-signal weighting ("counts" | "decayed",
+    /// W2.5 S4-C). Unknown values degrade to counts at the read site.
+    pub fn with_matrix_weighting(mut self, weighting: &str) -> Self {
+        self.matrix_weighting = weighting.to_string();
+        self
     }
 
     /// Builder: select the binary-lane metric ("hamming" | "jaccard",
     /// W2.5 M1). Unknown values degrade to Hamming at the read site.
     pub fn with_binary_metric(mut self, metric: &str) -> Self {
         self.binary_metric = metric.to_string();
+        self
+    }
+
+    /// Builder: select the float-lane metric ("cosine" | "l2" | "dot",
+    /// W2.5 M1 float unlock). Unknown values degrade to cosine at the read
+    /// site. Twin of Swift `RecallShape.floatMetric`.
+    pub fn with_float_metric(mut self, metric: &str) -> Self {
+        self.float_metric = metric.to_string();
         self
     }
 
@@ -697,13 +736,19 @@ impl RecallShape {
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
     /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 21] = [
+    pub const PRESET_NAMES: [&'static str; 29] = [
         "balanced",
         "precise",
         "conceptual",
         "broad",
         "lexical",
         "jaccard",
+        // Float-lane metric presets: identical fusion to balanced, but the
+        // dense float embedding lane uses L2 or dot-product distance instead
+        // of the default cosine. Mirrors the jaccard/binary_metric pattern.
+        "float-l2",
+        "float-dot",
+        "matrix_decayed",
         "not_lexical",
         "associative",
         "consensus",
@@ -718,10 +763,19 @@ impl RecallShape {
         "field",
         "preference",
         "anti_redundant",
+        // Per-signal anti-similarity variants: same suppression shape as
+        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
+        // inverts a different per-signal dense lane to FARTHEST.
+        "anti_redundant_ri",
+        "anti_redundant_lsa",
+        "anti_redundant_nmf",
         // session_hybrid: session-granularity recall — hybridRecall scoredLane +
         // bounded temporal-window boost + speaker-aware weighting. Added in
         // W1-session-hybrid. Mirrors Swift RecallShape.presetNames.
         "session_hybrid",
+        // Multi-column matrix presets: amplify two matrixAware columns together.
+        "temporal_connection",
+        "field_preference",
     ];
 
     /// Resolve a named preset to its documented signed-weight shape. Mirrors
@@ -807,6 +861,24 @@ impl RecallShape {
                 shape(&[], None).with_binary_metric("jaccard")
             ),
 
+            // Float-lane metric presets: identical fusion to balanced, but the
+            // dense float embedding lane uses L2 or dot-product distance instead
+            // of the default cosine. Mirrors the jaccard/binary_metric pattern:
+            // only the distance function changes; all lane weights remain neutral.
+            "float-l2" => Some(
+                shape(&[], None).with_float_metric("l2")
+            ),
+
+            // Negative dot product (−Σaᵢbᵢ) as the float-lane distance. Useful
+            // for embeddings trained with a dot-product objective.
+            "float-dot" => Some(
+                shape(&[], None).with_float_metric("dot")
+            ),
+
+            // W2.5 S4-C arm: matrixAware O/T signals read the §8.13
+            // exp-decayed projections instead of the counts.
+            "matrix_decayed" => Some(shape(&[], None).with_matrix_weighting("decayed")),
+
             // Suppress the literal lanes: ZERO bm25 + fdc. Complement of lexical.
             "not_lexical" => Some(shape(&[("bm25", 0.0), (Self::DENSE_FDC, 0.0)], None)),
 
@@ -875,6 +947,57 @@ impl RecallShape {
                 None,
             )),
 
+            // Per-signal anti-similarity: same suppression shape as anti_redundant
+            // (bm25/hamming at -0.5, frontier narrowed to the floor) but inverts
+            // the RI, LSA, or NMF dense lane to FARTHEST. Each variant targets
+            // diversity in the corresponding distributional semantic space.
+            "anti_redundant_ri" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_RANDOM_INDEXING.to_string());
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
+            }
+
+            "anti_redundant_lsa" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_LSA.to_string());
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
+            }
+
+            "anti_redundant_nmf" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_NMF.to_string());
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
+            }
+
+            // Multi-column matrix presets: amplify two matrixAware columns together.
+            // These are no-ops under .raw/.rrf (the matrix columns are dark there).
+
+            // Temporal + co-occurrence: surfaces memories that are BOTH recently
+            // relevant AND frequently filed together with the query's neighbourhood.
+            "temporal_connection" => Some(shape(
+                &[("temporal", 1.5), ("coOccurrence", 1.5)],
+                None,
+            )),
+
+            // Field-fit + preference: surfaces memories that BOTH match the query's
+            // filing facets AND have been historically favoured by the user.
+            "field_preference" => Some(shape(
+                &[("fieldFit", 1.5), ("preference", 1.5)],
+                None,
+            )),
+
             _ => None,
         }
     }
@@ -891,6 +1014,9 @@ impl RecallShape {
             "broad" => "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling.",
             "lexical" => "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes.",
             "jaccard" => "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity.",
+            "float-l2" => "L2 float metric — the dense float embedding lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter.",
+            "float-dot" => "Dot-product float metric — the dense float embedding lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective.",
+            "matrix_decayed" => "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts.",
             "not_lexical" => "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide.",
             "associative" => "Loose association — amplify the RI + NMF distributional lanes over a wide frontier.",
             "consensus" => "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree.",
@@ -905,7 +1031,12 @@ impl RecallShape {
             "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
             "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
             "anti_redundant" => "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64.",
+            "anti_redundant_ri" => "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space.",
+            "anti_redundant_lsa" => "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space.",
+            "anti_redundant_nmf" => "Diversity (NMF space) — invert the NMF dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the NMF topic space.",
             "session_hybrid" => "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal.",
+            "temporal_connection" => "Recent + co-filed — amplify temporal (recency) + coOccurrence (shared filing neighbourhood) together; matrixAware scoring only.",
+            "field_preference" => "Filed + preferred — amplify fieldFit (FDC facet match) + preference (learned user preference) together; matrixAware scoring only.",
             _ => "",
         }
     }
@@ -969,6 +1100,42 @@ pub struct GLKRecallRequest {
     /// When None (the default), fusion uses uniform positive weights — every lane
     /// at weight `1.0` — BYTE-IDENTICAL to the pre-6b-modifiers behaviour.
     pub recall_shape: Option<RecallShape>,
+    /// Door identity for the reward-cycle trace rows (W2.5 Track R(a)):
+    /// the tool or recipe that issued this recall (e.g. "memory_search").
+    /// Recorded verbatim into `recall_trace.door` for external-origin
+    /// requests. None writes a NULL door. No query text is ever stored
+    /// (privacy ruling 2026-08-20). Mirrors Swift `GLKRecallRequest.door`.
+    pub door: Option<String>,
+    /// Composition identity for the reward-cycle trace rows: the caller's
+    /// composition name where the caller knows one. When None the
+    /// coordinator records "<mode>/<scoring>". Mirrors Swift
+    /// `GLKRecallRequest.composition`.
+    pub composition: Option<String>,
+    /// Optional per-call candidate-pool depth override.
+    ///
+    /// When non-None this overrides BOTH the coordinator's computed default AND
+    /// any `RecallShape.frontier_k` the request carries — the precedence is:
+    ///
+    ///   request.frontier_k > recall_shape.frontier_k > engine formula
+    ///
+    /// Clamped to `[RecallShape::FRONTIER_K_FLOOR, RecallShape::FRONTIER_K_CEILING]`
+    /// (`[64, 256]`). None falls through to the shape override or the formula
+    /// `min(max(limit * 4, 64), 256)`. Mirrors Swift `GLKRecallRequest.frontierK`.
+    pub frontier_k: Option<usize>,
+
+    // ── Anomalous-flag admission gate (§11.18, 2026-08-20) ──────────────────
+
+    /// Optional anomalous-flag admission gate (§11.18 anomalous-flag recall
+    /// prefilter).
+    ///
+    /// Applied BEFORE scoring at candidate admission in the coordinator:
+    /// - `None`  — no filtering; all candidates admitted (default, back-compat,
+    ///   byte-identical to requests without this parameter).
+    /// - `Some(true)`  — admit ONLY anomalous drawers (bit 26 set).
+    /// - `Some(false)` — EXCLUDE anomalous drawers (bit 26 clear).
+    ///
+    /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
+    pub anomalous_filter: Option<bool>,
 }
 
 impl GLKRecallRequest {
@@ -996,6 +1163,10 @@ impl GLKRecallRequest {
             trace_limit: None,
             origin,
             recall_shape: None,
+            door: None,
+            composition: None,
+            frontier_k: None,
+            anomalous_filter: None,
         }
     }
 
@@ -1021,6 +1192,46 @@ impl GLKRecallRequest {
     /// shape forwards/excludes/suppresses lanes per `RecallShape`.
     pub fn with_recall_shape(mut self, shape: RecallShape) -> Self {
         self.recall_shape = Some(shape);
+        self
+    }
+
+    /// Builder: set the trace-row door identity (W2.5 Track R(a)).
+    /// Mirrors Swift's defaulted `door:` init parameter.
+    pub fn with_door(mut self, door: impl Into<String>) -> Self {
+        self.door = Some(door.into());
+        self
+    }
+
+    /// Builder: set the trace-row composition identity (W2.5 Track R(a)).
+    /// Mirrors Swift's defaulted `composition:` init parameter.
+    pub fn with_composition(mut self, composition: impl Into<String>) -> Self {
+        self.composition = Some(composition.into());
+        self
+    }
+
+    /// Builder: set an optional per-call candidate-pool depth override.
+    ///
+    /// Takes precedence over `recall_shape.frontier_k` and the coordinator's
+    /// computed default `min(max(limit * 4, 64), 256)`. Clamped to
+    /// `[RecallShape::FRONTIER_K_FLOOR, RecallShape::FRONTIER_K_CEILING]` at
+    /// the coordinator; setting an out-of-range value is not an error — the
+    /// value is silently clamped so shapes degrade rather than fail (shape
+    /// contract). Mirrors Swift `GLKRecallRequest.frontierK`.
+    pub fn with_frontier_k(mut self, frontier_k: usize) -> Self {
+        self.frontier_k = Some(frontier_k);
+        self
+    }
+
+    /// Builder: set the anomalous-flag admission gate (§11.18).
+    ///
+    /// `true`  = admit ONLY anomalous drawers (bit 26 set).
+    /// `false` = EXCLUDE anomalous drawers (bit 26 clear).
+    ///
+    /// Not calling this builder (the default) leaves `anomalous_filter` as
+    /// `None`, which is byte-identical to a request without any filter.
+    /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
+    pub fn with_anomalous_filter(mut self, filter: bool) -> Self {
+        self.anomalous_filter = Some(filter);
         self
     }
 }
@@ -1110,6 +1321,33 @@ pub struct GLKRecallResult {
     ///
     /// Mirrors Swift `GLKRecallResult.degradedStages` (GLKRecallResult.swift).
     pub degraded_stages: Vec<String>,
+
+    /// Per-lane 1-based rank of every candidate the active lane(s) surfaced,
+    /// keyed by drawer id, then by lane key ("locus", "bm25", "hamming",
+    /// "dense" — `RecallTraceItem::LANE_RANK_ORDER`). Rank is the candidate's
+    /// position in that lane's final ranked candidate list BEFORE fusion.
+    /// Consumed by `recall_scored`'s external-origin trace write (W2.5 Track
+    /// R(a)). Mirrors Swift `GLKRecallResult.laneRanks`.
+    pub lane_ranks: std::collections::HashMap<String, std::collections::HashMap<String, i64>>,
+
+    /// The query's §8.3 lattice anchor, derived exactly ONCE inside the
+    /// recall director during sketch compilation (M4 single-derivation doctrine).
+    ///
+    /// Mirrors Swift `GLKRecallResult.queryLatticeAnchor`.
+    ///
+    /// `Some((udc_code, qid))` when the query anchors — `udc_code` is the FDC
+    /// code for noun-anchored queries (empty for phrase-anchored queries which
+    /// carry a QID but no FDC code); `qid` is the Wikidata QID ("" if none).
+    ///
+    /// `None` when:
+    ///   - The query was empty or unanchorable (no anchor found by `query_anchor`).
+    ///   - The lane compiled no sketch (`LocusOnly`).
+    ///
+    /// Callers — including CognitionKit's PreciseRecall and TemporalRecall —
+    /// MUST read the anchor here. Do NOT call `brain::enrichment_stage::query_anchor`
+    /// on the same text a second time; the single-derivation doctrine means the
+    /// director's result is the authoritative anchor for the whole recall pipeline.
+    pub query_lattice_anchor: Option<(String, String)>,
 }
 
 impl GLKRecallResult {

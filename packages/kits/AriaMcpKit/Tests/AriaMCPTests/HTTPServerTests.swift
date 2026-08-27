@@ -1473,6 +1473,87 @@ struct FirstPartyLaneSeparationTests {
         #expect(response?.components(separatedBy: "\r\n").first?.contains("415") == true)
     }
 
+    // MARK: - Cooperative shutdown ordering (F6)
+
+    /// Verify that `serve(withFD:)` returns ONLY after the accept thread exits.
+    ///
+    /// The test:
+    ///   1. Binds a real OS-assigned loopback TCP socket so `listenLoopbackTCP` is
+    ///      exercised (the same path production uses).
+    ///   2. Starts `serve(withFD:)` in a Task.
+    ///   3. Waits briefly so the accept thread is guaranteed to be parked in
+    ///      `POSIXSocket.acceptOne()`.
+    ///   4. Cancels the task — triggers the stop-flag + shutdown(2)+close(2) sequence.
+    ///   5. Asserts `serve(withFD:)` returns within 2 seconds (cooperative shutdown
+    ///      must not race, deadlock, or take longer than a bounded window).
+    ///   6. Asserts the fd is closed: a write to the closed fd fails with EBADF.
+    ///
+    /// The 2-second deadline is generous (typical shutdown is < 10 ms on an idle
+    /// socket) but allows for heavily loaded CI runners.  A 2-second overrun is a
+    /// real defect: it means the accept thread is not waking up on shutdown(2), which
+    /// is the defect the F6 fix addresses.
+    @Test("serve(withFD:) returns after accept thread exits on task cancellation")
+    func serveWithFDShutdownOrdering() async throws {
+        let dispatcher = try await makeDispatcher()
+        let server = HTTPServer(
+            dispatcher: dispatcher,
+            port: 0,
+            // Use isolated gate instances so this test cannot affect concurrent tests.
+            concurrencyGate: ConcurrencyGate(maxConcurrent: 4, maxQueued: 8),
+            sseConcurrencyGate: ConcurrencyGate(maxConcurrent: 2, maxQueued: 0)
+        )
+
+        // Bind the listen socket.
+        let (fd, _) = try server.bind()
+
+        // Launch serve(withFD:) in a detached Task.  Detached so the test's own
+        // cancellation context does not propagate here inadvertently.
+        let serveTask = Task.detached {
+            await server.serve(withFD: fd)
+        }
+
+        // Give the accept thread a moment to enter blocking accept(2).
+        // 50 ms is more than sufficient on any supported platform.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        // Cancel the serve task — this triggers the cooperative shutdown sequence:
+        // stopFlag=true → shutdown(fd,SHUT_RDWR) → close(fd) → accept thread wakes,
+        // sees stopFlag, breaks loop, signals threadDone — serve(withFD:) returns.
+        serveTask.cancel()
+
+        // Measure how long it takes for serve(withFD:) to return.
+        // If the accept thread does not wake on shutdown(2), this await would block
+        // indefinitely and the test would time out.  The 2-second guarantee is
+        // expressed via the Task.sleep timeout below.
+        let deadline = Task.detached {
+            // Give the shutdown up to 2 seconds.  On a healthy implementation this
+            // completes in milliseconds; 2 s is a generous CI-safe bound.
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+
+        // await the serve task — it must finish before the deadline.
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await serveTask.value }
+            group.addTask { try? await deadline.value }
+            // First one to finish ends the group; the other task is cancelled.
+            await group.next()
+            group.cancelAll()
+        }
+
+        // If serve(withFD:) returns correctly, the fd is now closed.
+        // Writing to a closed fd returns EBADF; success here means the fd leaked.
+        let dummyByte = [UInt8(0x00)]
+        let writeResult = dummyByte.withUnsafeBytes { ptr in
+            write(fd, ptr.baseAddress!, 1)
+        }
+        // EBADF == fd is closed.  Any other errno or a successful write (>= 0)
+        // means the fd was NOT closed — the shutdown guarantee was violated.
+        #expect(writeResult == -1, "serve(withFD:) must close the fd before returning (F6)")
+        if writeResult == -1 {
+            #expect(errno == EBADF, "expected EBADF after serve(withFD:) returned, got errno \(errno)")
+        }
+    }
+
     @Test("The legacy view reproduces LoopbackHTTP's field handling")
     func legacyViewReproducesFieldHandling() {
         let raw = Data(("POST /x?y=1 HTTP/1.1\r\n"

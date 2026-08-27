@@ -77,6 +77,30 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     lock_memory_from_swap();
     let data = paths::data_dir();
 
+    // Gold miner (ADORNMENTLIB_SPEC 0.5.0): install the resident in-process
+    // engine at startup — resident always, never load-on-demand. The engine
+    // files are configuration, not code: <data>/goldminer/{model.gguf,
+    // tokenizer.json} (any Qwen2-family GGUF plugs in). Absent files mean
+    // no local engine; mints then fall back to the MOOT_MINT_CMD harness
+    // seam or stay in debt. Load failure is LOUD but non-fatal — a serve
+    // that cannot mint must still serve.
+    // Residency note: the hosting launch configuration must set
+    // MallocLargeCache=0 on macOS (see QuantizedLlmEngine::load) so the
+    // allocator's large cache does not double the engine's footprint.
+    {
+        let (gguf, tok) = adornment_lib::gold_miner::default_engine_paths(&data);
+        if gguf.is_file() && tok.is_file() {
+            match adornment_lib::gold_miner::QuantizedLlmEngine::load(&gguf, &tok) {
+                Ok(engine) => {
+                    let id = adornment_lib::gold_miner::GoldMinerEngine::identity(&engine);
+                    adornment_lib::gold_miner::install_engine(Box::new(engine));
+                    eprintln!("mootx01 serve: gold miner resident — {id}");
+                }
+                Err(e) => eprintln!("mootx01 serve: gold miner unavailable — {e}"),
+            }
+        }
+    }
+
     // Estate selection. Explicit backend env vars win over --db; otherwise
     // resolve the named (or active) estate to a SQLite path.
     let postgres_set = env_nonempty("ARIA_MCP_POSTGRES_URL");

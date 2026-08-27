@@ -252,6 +252,9 @@ public extension GeniusLocusKit {
             // No Corpus registered — LocusOnly estate; nothing to reindex.
             return
         }
+        // moot_rebuild_status span: the basis retrain + re-embed window.
+        derivedRebuildSpan(handle, open: true)
+        defer { derivedRebuildSpan(handle, open: false) }
         try await corpus.reindex(now: now)
     }
 }

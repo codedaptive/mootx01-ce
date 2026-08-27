@@ -838,8 +838,60 @@ enum TeachmeGuides {
             mutation=setSubject with a one-sentence AI-facing subject.
             Never backfill silently; the debt line is a reminder, not a
             license.
+
+            \(modesTeachmeGuide)
             """
     }
+
+    /// Modes orientation guide appended to the `moot_estate_status` teachme block.
+    ///
+    /// Covers the five-mode roster, Recall variant set, decision guidance, and
+    /// sticky-state behavior. Derived from `MootMode` data so the roster and
+    /// contracts are always current.
+    ///
+    /// `internal` (not `private`) so `SessionProtocolTests` can assert it against
+    /// the shared `modes_teachme_guide_fixture.json` for byte-identity with the
+    /// Rust port's `modes_teachme_guide()`.
+    static let modesTeachmeGuide: String = {
+        // Build the mode roster lines from the live MootMode definitions.
+        // Uses coreToolsDescription so Lenses shows "(plus the moot_lens_* family)".
+        // The contract already ends in "." so no extra punctuation is added before
+        // "Core:" — omitting the extra dot prevents a double-dot on every line.
+        // Format matches Rust estate_status_guide() for byte-identity.
+        let rosterLines = MootMode.allCases.map { mode -> String in
+            "  \(mode.rawValue) \u{2014} \(mode.contract) Core: \(mode.coreToolsDescription)"
+        }
+
+        return """
+            Modes (advisory session bundles):
+            \(rosterLines.joined(separator: "\n"))
+
+            Recall variants (change the answer default on moot_memory_search):
+              Recall=Auto   — answer:auto  (server decides when to synthesize)
+              Recall=Rows   — answer:never (raw rows only, fastest)
+              Recall=Answer — answer:always (always synthesize)
+              A per-call answer: arg always overrides the sticky variant.
+
+            Decision guidance:
+              Filing session?    Use mode:"Filing"    — keeps you in file+confirm flow.
+              Exploring topics?  Use mode:"Lenses"    — nudges you toward cognition tools.
+              Browsing rows?     Use mode:"Recall=Rows"  — raw recall, no synthesis.
+              Want synthesis?    Use mode:"Recall=Answer" — every search returns a summary.
+              Managing archives? Use mode:"Vault"     — vault tool surface.
+              Building KG?       Use mode:"Curator"   — fact and connection tools.
+
+            Sticky state behavior:
+              — Last mode declared wins for the session (per-call arg always pierces).
+              — Bare mode name ("Recall") clears any prior variant for that mode.
+              — Unknown mode or variant: accepted and hinted, not an error.
+              — Sticky is process-lifetime for stdio; on HTTP the state is currently
+                shared across all clients in the same process (a per-client-id map with
+                TTL is a planned follow-up for the resident HTTP server).
+
+            Declare a mode on any call: mode:"Recall=Auto" (or any tool you are using).
+            The server echoes the active mode in the modes section of estate_status.
+            """
+    }()
 
     private static let estateMapGuide = """
         moot_estate_map — Return the estate's structural map.

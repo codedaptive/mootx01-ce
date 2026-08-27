@@ -9,9 +9,10 @@
 //     distill, distilled_recall; + node_motion
 //     diffusion node-layer lens).
 //
-//   • GeniusLocusKit.defaultStandingSignalNames.count == 11 — 7 baseline
+//   • GeniusLocusKit.defaultStandingSignalNames.count == 13 — 7 baseline
 //     + DistillationSignal (Dg4) + TrainingSignal
-//     + ContradictionScoutSignal (contradiction hunter).
+//     + ContradictionScoutSignal (contradiction hunter)
+//     + ConsolidationSignal + AnomalySweepSignal + AdornmentPassSignal.
 //
 // isRecipeTool assertions for the three distillation tools live in
 // AriaMcpKit/RecipeToolsTests.swift (they require AriaMcpKit scope).
@@ -25,26 +26,28 @@ import GeniusLocusKit
 @Suite("SprintDXAssertionTests — Sprint DX milestone gate")
 struct SprintDXAssertionTests {
 
-    /// CK-DX-1: RecipeCatalog carries all 30 Sprint DX recipes.
+    /// CK-DX-1: RecipeCatalog carries all 30 recipes.
     ///
     /// Baseline 26 + 2 distillation-family recipes (distill,
     /// distilled_recall — recollect retired with the factoid tier,
-    /// SPEC_DISTILLATION_STORAGE §11); + 1 diffusion
-    /// node-layer lens (node_motion, node motion modeling).
+    /// SPEC_DISTILLATION_STORAGE §11); + 1 diffusion node-layer lens
+    /// (node_motion); + 1 escalation-ladder recall recipe (walk_recall, D10).
     @Test("CK-DX-1: RecipeCatalog.all.count == 29 (26 baseline + 2 distillation + node_motion)")
     func recipeCatalogCountIncludesDistillationTriple() {
-        #expect(RecipeCatalog.all.count == 29,
-            "RecipeCatalog must contain exactly 29 recipes: 26 baseline + 2 distillation + node_motion")
+        #expect(RecipeCatalog.all.count == 30,
+            "RecipeCatalog must contain exactly 30 recipes: 26 baseline + 2 distillation + node_motion + walk_recall")
     }
 
-    /// CK-DX-2: defaultStandingSignalNames contains all 11 standing signals.
+    /// CK-DX-2: defaultStandingSignalNames contains all 13 standing signals.
     ///
-    /// Eleven signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
-    /// + ContradictionScoutSignal (contradiction hunter).
+    /// Thirteen signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
+    /// + ContradictionScoutSignal (contradiction hunter) + ConsolidationSignal
+    /// + AnomalySweepSignal (signal 12, P3a anomaly-flag sweep)
+    /// + AdornmentPassSignal (signal 13, GENIUSLOCUSKIT_SPEC 2.0.0 § 16).
     /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
-    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 11 (includes ContradictionScoutSignal)")
-    func defaultStandingSignalNamesCountIsEleven() {
-        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 11,
-            "defaultStandingSignalNames must contain exactly 11 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal + ContradictionScoutSignal")
+    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 13 (includes AdornmentPassSignal)")
+    func defaultStandingSignalNamesCountIsThirteen() {
+        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 13,
+            "defaultStandingSignalNames must contain exactly 13 signals per the GENIUSLOCUSKIT_SPEC inventory (13th: adornment-pass)")
     }
 }

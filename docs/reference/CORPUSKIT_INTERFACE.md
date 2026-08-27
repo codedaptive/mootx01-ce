@@ -2,10 +2,10 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-20
+date: 2026-08-26
 spec_type: kit
-version: 1.24.0
-description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.23.0: TASK-MXE-2026-0358, Swift sentinel API added to CorpusProviderCountsStore; persistCounts/restoreCounts documented in both ports; sentinel-preserving flush described. 1.22.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.21.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
+version: 1.26.1
+description: Public API surface for CorpusKit in both the Swift and Rust ports. 1.26.0: RENAME-EMBED — NeuralEmbedProvider added (engine-neutral model_id neural-embed-v1, seed NEUEMBD1 0x4E45_5545_4D42_4431, NLTagger tokens mean-pooled over NLEmbedding word vectors, UNNORMALIZED; Swift twin of the Rust tools/neural-embed backend; OFF by default, provision-seam opt-in only). 1.25.0: EMBED-PROV-E1 — AppleNLProvider added (model_id apple-nl-v1, seed APNLRAW1 0x4150_4E4C_5241_5731, UNNORMALIZED float output; Swift-only sanctioned divergence). 1.24.0: TASK-MXE-2026-0358, Swift sentinel API added to CorpusProviderCountsStore; persistCounts/restoreCounts documented in both ports; sentinel-preserving flush described. 1.23.0: MG-01, INVALIDATED_COUNTS_SENTINEL and is_invalidated_counts added to corpus_provider_counts_store (Rust only; Swift port gap recorded as F1). 1.22.1: CORPUS-INCREMENTAL-01 F-11 — foldOrderProvenanceUnknown added to CorpusPathReason; standalone RI seam narrative updated.
 package: CorpusKit
 languages: [swift, rust]
 relates_to:
@@ -845,7 +845,7 @@ are at parity (Confirmed; the basis round-trip produces byte-identical blobs —
 > providers (`RandomIndexingProvider`, `PpmiProvider`, `LsaProvider`,
 > `NmfProvider`). The three named CoreML model providers use the same
 > host-inference seam model as Swift: `InferenceFn` (synchronous, token
-> IDs in / pooled float vector out). No ONNX/Candle dependency is added;
+> IDs in / pooled float vector out). No inference-engine dependency is added;
 > the kit owns only the tokenizer and projection; model weights remain
 > the host's concern on every platform.
 
@@ -1029,6 +1029,76 @@ public let nlContextualEmbeddingProjectionSeed: UInt64  // 0x4150_4E4C_4354_5831
 #endif
 ```
 
+**`AppleNLProvider`** — OS-bundled sentence embedding, UNNORMALIZED float output:
+
+```swift
+#if canImport(NaturalLanguage)
+/// model_id "apple-nl-v1", seed appleNLProviderProjectionSeed ("APNLRAW1",
+/// 0x4150_4E4C_5241_5731). Float lane: NLEmbedding.vector(for:) → [Float],
+/// NOT L2-normalised — raw magnitude preserved for l2/dot metric validity.
+///
+/// This is the provider that unblocks l2 and dot float-NN metrics: those
+/// metrics are null-by-construction when all providers normalise to the unit
+/// sphere (cosine = dot for unit vectors), but become distinct and useful
+/// when the embedding magnitude carries information.
+///
+/// Absent lane (no OS model for language): embedFloat → [], embed → .zero.
+/// Distinct from NLEmbeddingProvider (normalised) — different model_id and
+/// projection seed so vectors key to separate storage partitions (I-4).
+/// Rust port: none — sanctioned Swift-only divergence.
+public struct AppleNLProvider: EmbeddingProvider, Sendable {
+    public let modelID: String          // default "apple-nl-v1"
+    public let modelVersion: String     // default "1.0.0"
+    public init(modelID: String = "apple-nl-v1",
+                modelVersion: String = "1.0.0",
+                language: NLLanguage = .english,
+                projectionSeed: UInt64 = appleNLProviderProjectionSeed)
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+    public func embedBatch(_ texts: [String]) async throws -> [Engram]
+}
+
+public let appleNLProviderProjectionSeed: UInt64  // 0x4150_4E4C_5241_5731 ("APNLRAW1")
+#endif
+```
+
+**`NeuralEmbedProvider`** — engine-neutral neural embedding, UNNORMALIZED float output (Swift twin of the Rust `tools/neural-embed` backend):
+
+```swift
+#if canImport(NaturalLanguage)
+/// model_id "neural-embed-v1", seed neuralEmbedProjectionSeed ("NEUEMBD1",
+/// 0x4E45_5545_4D42_4431). Float lane: NLTagger word tokens mean-pooled
+/// over NLEmbedding.wordEmbedding vectors, NOT L2-normalised.
+///
+/// The engine-neutral provider id is shared with the Rust backend
+/// (tools/neural-embed: PROVIDER_ID + resolve(model_id, dir)); the
+/// inference machinery underneath is an invisible per-port backend
+/// detail. The two backends produce different vector spaces (different
+/// models/dimensions); vectors are per-estate, per-port artifacts and
+/// never compared cross-port.
+///
+/// OFF by default: never part of the default ensemble; wired only when
+/// the estate's embedding_provider manifest key is provisioned to
+/// "neural-embed-v1" (same opt-in path as "apple-nl-v1").
+/// Absent lane (no OS word-embedding model, or no covered token):
+/// embedFloat → [], embed → .zero.
+public struct NeuralEmbedProvider: EmbeddingProvider, Sendable {
+    public let modelID: String          // default "neural-embed-v1"
+    public let modelVersion: String     // default "1.0.0"
+    public init(modelID: String = "neural-embed-v1",
+                modelVersion: String = "1.0.0",
+                language: NLLanguage = .english,
+                projectionSeed: UInt64 = neuralEmbedProjectionSeed)
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+}
+
+public let neuralEmbedProjectionSeed: UInt64  // 0x4E45_5545_4D42_4431 ("NEUEMBD1")
+#endif
+```
+
 **`EmbeddingModel` cases (Swift-only, `#if canImport(NaturalLanguage)`):**
 
 ```swift
@@ -1125,7 +1195,7 @@ It surfaces three operations:
   deterministic (no `Date()`/`now`). Driving training through `trainOnCorpus`
   produces the **same trained state** — and therefore the same
   `serializeBasis()` blob byte-for-byte — as the direct 6a-i train/finalize
-  API (the seam-honesty conformance gate). Provider construction config (LSA/NMF
+  API (the seam-equivalence conformance gate). Provider construction config (LSA/NMF
   rank, SVD sweeps, iteration count, seeds) is the caller's choice; the seam
   governs only the training sequence.
 - `serializeBasis()` / `serialize_basis()` — surfaces the 6a-i basis codec.
@@ -1233,7 +1303,7 @@ pub fn reconstruct(&self, basis: &[u8]) -> Result<Box<dyn EmbeddingProvider>, Co
 ### `CorpusEnsemble.defaultEnsemble()` / `default_ensemble()` — the 1.0 default recall ensemble
 
 The single definition of the canonical 1.0 default recall ensemble: the five
-honest signals **RI / PPMI / LSA / NMF / FDC**, in that slot order (slot 0 =
+production signals **RI / PPMI / LSA / NMF / FDC**, in that slot order (slot 0 =
 RandomIndexing is the default signal). It lives in **`CorpusKitProviders` /
 `corpus-kit-providers`** (layering: providers → core) because it NEWs the
 concrete provider types; core's `EmbeddingModel` / `EmbeddingModelConfig` never
@@ -2299,6 +2369,22 @@ both ports — token IDs in, pooled float vector out — so for any shared
 
 ## Changelog
 
+### 1.26.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.26.0 -- 2026-08-26
+
+RENAME-EMBED (#72): added `NeuralEmbedProvider` — engine-neutral neural embedding provider, the Swift twin of the Rust `tools/neural-embed` backend (renamed from the engine-leaking `candle-spike`). Model ID `"neural-embed-v1"`, version `"1.0.0"`, projection seed constant `neuralEmbedProjectionSeed: UInt64` = `0x4E45_5545_4D42_4431` (`"NEUEMBD1"`). Shape: `NLTagger` (.tokenType, word unit) tokens mean-pooled over `NLEmbedding.wordEmbedding` vectors; UNNORMALIZED (raw magnitude preserved, same l2/dot rationale as `AppleNLProvider`). Gated `#if canImport(NaturalLanguage)`. OFF by default — wired only when `embedding_provider` is provisioned to `"neural-embed-v1"`. Absent OS model or zero covered tokens returns empty floats / `.zero` engram. Prose referencing the inference engine by name replaced with engine-neutral wording (the engine is an invisible backend detail).
+
+### 1.25.0 -- 2026-08-21
+
+Added `AppleNLProvider` — OS-bundled sentence embedding provider using `NLEmbedding.vector(for:)`. Returns UNNORMALIZED float vectors (raw magnitude preserved); this is the provider that unblocks l2 and dot float-NN metrics (`Float-NN metrics l2/dot` deliberate-gap row in COVERAGE.md). Model ID `"apple-nl-v1"`, version `"1.0.0"`. Projection seed constant `appleNLProviderProjectionSeed: UInt64` = `0x4150_4E4C_5241_5731` (`"APNLRAW1"`). Methods: `embed`, `embedFloat`, `embedPair`, `embedBatch`. Gated `#if canImport(NaturalLanguage)`. Sanctioned Swift-only divergence — no Rust port (NaturalLanguage.framework is Apple-only). Vectors key to storage partitions separate from `NLEmbeddingProvider` (different model_id and projection seed, per I-4). Absent OS model returns empty floats / `.zero` engram (fail-quiet, not a throw).
+
+### 1.24.0 -- 2026-08-20
+
+Added `TrailerGrammar.lexicalSupplement(fromDenseText:) -> String` (Rust: `trailer_lexical_supplement::lexical_supplement`). Returns a space followed by the inner text of the last well-formed trailer block in the dense text, or `""` when no well-formed block is found (fail-quiet). Delimiter constants `TrailerGrammar.open` / `.close` = `"(*["` / `"]*)"`.
+
 ### 1.23.0 -- 2026-08-15
 
 Extended the `CorpusProviderCountsStore` sentinel contract to both ports (TASK-MXE-2026-0358). Added Swift statics `invalidatedCountsSentinel: Data` and `isInvalidatedCounts(_:) -> Bool` to the actor, matching the existing Rust module-level items. Documented the already-shipping `persistCounts(provider:modelID:modelVersion:documentCount:vocabSize:updatedAt:into:)` / `persist_counts_into` and `restoreCounts(into:modelID:modelVersion:) -> Bool` / `restore_counts_into` in both port blocks; the methods are not new, their sentinel behaviour is. The restore methods intercept the sentinel before the v4 term-row branch. The persist methods include a sentinel-preserving flush guard that skips writing when the provider's maintained vocabulary is empty and the stored row already carries the sentinel. Updated the sentinel-description paragraph to cover both ports and removed the Rust-only framing.
@@ -2583,6 +2669,6 @@ round-trip law, and the cross-port byte-identity contract. Purely additive; no
 existing API changed.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **v1.24.0 (2026-08-20)** — `TrailerGrammar.lexicalSupplement(fromDenseText:) -> String` (Rust `trailer_lexical_supplement::lexical_supplement`): returns " " + inner text of the last well-formed trailer block, or "" (fail-quiet). Delimiter constants `open`/`close` (`(*[`, `]*)`).
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
 
 

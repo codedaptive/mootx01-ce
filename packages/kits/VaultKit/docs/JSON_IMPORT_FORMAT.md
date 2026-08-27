@@ -1,12 +1,12 @@
 ---
 title: VaultKit JSON Seed-File Format
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-08-12
-description: Canonical definition of seed-file schema v1.1 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
+date: 2026-08-20
+description: Canonical definition of seed-file schema v1.2 — the rigid, versioned JSON format consumed by the moot_json_import lane, both ports.
 ---
 
-# VaultKit JSON Seed-File Format (schema v1.1)
+# VaultKit JSON Seed-File Format (schema v1.2)
 
 This document is the authority definition of the seed-file format the
 `moot_json_import` lane consumes. The format belongs to VaultKit, where the
@@ -65,7 +65,8 @@ exactly the failure class this lane eliminates.
   "kind": "prose",
   "sensitivity": "normal",
   "exportability": "private",
-  "subject": "First sentence of the content."
+  "subject": "First sentence of the content.",
+  "capture_date": "2026-01-03T09:00:00Z"
 }
 ```
 
@@ -80,6 +81,7 @@ exactly the failure class this lane eliminates.
 | `sensitivity` | no | One of `normal` (default), `elevated`, `restricted`, `secret`. |
 | `exportability` | no | One of `private` (default), `public`. `public` is NOT allowed together with `sensitivity: secret` (substrate invariant I-22) — the combination is rejected in total validation, never clamped. |
 | `subject` | no | **Schema v1.1.** Optional caller-supplied subject line. Non-empty, ≤120 characters. An empty string is a hard error (omit the key to mark as subject-debt instead). When present, written via `setSubjectRepresentation`/`set_subject_representation` with pipeline version `import-v1` (bottom trust tier — regenerable by the backfill daemon). When absent, the record is subject-debt: the backfill daemon will regenerate a subject. The import receipt carries `subjectsProvided` and `subjectsDebt` counters for the file. |
+| `capture_date` | no | **Schema v1.2.** Optional per-record capture timestamp. UTC ISO8601 with a REQUIRED trailing `Z` (same two accepted shapes as `event_time`; offset forms rejected for cross-port parity). When present, that record's drawer receives this instant as its `filedAt` clock (the ingest clock used for CRDT ordering, audit HLC physical time, and the capture-spread benchmark seam). Absent → the batch wall-clock is used — byte-identical legacy behavior. |
 
 ## `facts[]`
 
@@ -166,6 +168,15 @@ row you are looking for at any search limit.
 
 ## Changelog
 
+- **1.3.0 (2026-08-20)** — Schema v1.2: added optional `capture_date` field on
+  records (mission P2a). UTC ISO8601 instant; same accepted shapes as
+  `event_time`; offset forms rejected. When present, the record's drawer
+  `filedAt` equals this value (enabling spread-capture benchmark estates where
+  records simulate being filed at distinct historical instants). The capture
+  HLC physical time also derives from this value. Absent = batch wall-clock
+  (byte-identical legacy behavior). Both ports, both parser and pipeline.
+  Cross-port golden pin: `capture_date "2026-01-15T10:00:00Z"` → `filedAt`
+  = 1768471200000 ms.
 - **1.2.0 (2026-08-12)** — Added the `return_id_map` argument to
   `moot_json_import` and `drawerIDByRecordID` / `drawer_id_by_record_id` to
   `JsonImportReport`, both ports. The import pipeline already built the

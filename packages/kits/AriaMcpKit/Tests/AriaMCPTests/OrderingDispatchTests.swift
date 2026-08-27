@@ -91,8 +91,9 @@ struct OrderingDispatchTests {
         #expect(!isError, "ordering=byRelevanceDesc must not produce an error result")
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // S1 header: "found 1 candidate memory, one per line" (COMPOSER-02B §11.1)
         #expect(
-            text.contains("found 1 memory"),
+            text.contains("found 1 candidate memory"),
             "byRelevanceDesc must find the filed memory; got: \(text)"
         )
     }
@@ -112,8 +113,9 @@ struct OrderingDispatchTests {
         #expect(!isError, "ordering=byRelevanceDesc on empty estate must not error; got: \(result)")
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // S1 empty header: "found 0 candidate memories, one per line" (COMPOSER-02B §11.1)
         #expect(
-            text.contains("found 0 memory"),
+            text.contains("found 0 candidate memories"),
             "empty estate must return 0 memories; got: \(text)"
         )
     }

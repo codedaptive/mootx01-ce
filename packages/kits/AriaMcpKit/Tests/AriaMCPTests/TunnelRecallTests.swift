@@ -157,8 +157,8 @@ struct TunnelRecallTests {
             "content[0].text must be present"
         )
         #expect(
-            text.hasPrefix("connections from \(fromID): 1"),
-            "result must report one connection; got: \(text)"
+            text.hasPrefix("found 1 outgoing connection"),
+            "result must report one outgoing connection; got: \(text)"
         )
     }
 
@@ -196,8 +196,8 @@ struct TunnelRecallTests {
             "content[0].text must be present"
         )
         #expect(
-            text.hasPrefix("connections from \(isolatedID): 0"),
-            "isolated memory must report zero connections; got: \(text)"
+            text.hasPrefix("found 0 outgoing connections"),
+            "isolated memory must report zero outgoing connections; got: \(text)"
         )
     }
 

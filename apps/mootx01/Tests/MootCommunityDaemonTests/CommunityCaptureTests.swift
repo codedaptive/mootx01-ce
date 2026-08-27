@@ -31,6 +31,7 @@
 
 import Testing
 import Foundation
+import CryptoKit
 @testable import MootCommunityDaemon
 import AriaMCP
 import LocusKit
@@ -195,14 +196,24 @@ private var contractTypesURL: URL {
         .appendingPathComponent("contracts/community/1.1/contract.json")
 }
 
-// MARK: - A4-C18: choices on empty estate
+// MARK: - A4-C18: choices on empty estate seeds the default inbox
 
-@Test("A4-C18: choices on estate with no rooms returns empty destinations")
+// NOTE: This test was updated when the P0 bug (empty-estate → empty
+// defaultPolicy.destinationID, contract violation) was fixed. Previously
+// the test expected an empty destinations array. The fix seeds a
+// "personal/capture" sentinel room on the first captureChoices() call
+// against an empty estate, so the contract invariant
+// (defaultPolicy.destinationID ∈ destinations) is always satisfied.
+// The test now verifies the new correct behavior.
+@Test("A4-C18: choices on estate with no rooms seeds default personal/capture inbox")
 func captureChoicesEmptyEstate() async throws {
     let scratch = try CaptureScratch()
     defer { scratch.remove() }
 
-    // Create an estate without any rooms (just a fresh open/create cycle).
+    // Create an estate without any rooms (just a fresh open/create cycle,
+    // bypassing the daemon's estate-lifecycle coordinator). This simulates
+    // the exact scenario the P0 fix must handle: a pre-existing empty estate
+    // that was not seeded at creation time.
     let config = EstateConfiguration(
         estateID: UUID(),
         backend: .sqlite(url: scratch.estateURL, busyTimeout: 5.0)
@@ -223,7 +234,46 @@ func captureChoicesEmptyEstate() async throws {
         Issue.record("destinations should be an array")
         return
     }
-    #expect(destinations.isEmpty, "empty estate → no destinations")
+
+    // After the fix: captureChoices() seeds "personal/capture" when the estate
+    // has no rooms. Exactly one destination must be returned.
+    #expect(destinations.count == 1,
+            "empty estate → captureChoices seeds personal/capture; expected 1 destination, got \(destinations.count)")
+
+    // Verify the seeded destination is "personal/capture".
+    if case .object(let dest) = destinations.first {
+        guard case .string(let id) = dest["id"] else {
+            Issue.record("destination.id missing or not a string"); return
+        }
+        #expect(id == "personal/capture",
+                "default inbox must be 'personal/capture', got '\(id)'")
+
+        // title must be non-empty (contract: nonempty-string).
+        guard case .string(let title) = dest["title"], !title.isEmpty else {
+            Issue.record("destination.title missing or empty"); return
+        }
+        // detail is "string" (may be empty) in the contract.
+        guard case .string(_) = dest["detail"] else {
+            Issue.record("destination.detail missing or wrong type"); return
+        }
+    }
+
+    // defaultPolicy.destinationID must equal the seeded destination id.
+    guard case .object(let policy) = sc_["defaultPolicy"],
+          case .string(let defaultDest) = policy["destinationID"]
+    else {
+        Issue.record("defaultPolicy.destinationID missing or wrong type"); return
+    }
+    #expect(defaultDest == "personal/capture",
+            "defaultPolicy.destinationID must be 'personal/capture', got '\(defaultDest)'")
+
+    // The core contract invariant: defaultPolicy.destinationID ∈ destinations.
+    let destIDs = destinations.compactMap { dest -> String? in
+        guard case .object(let d) = dest, case .string(let id) = d["id"] else { return nil }
+        return id
+    }
+    #expect(destIDs.contains(defaultDest),
+            "defaultPolicy.destinationID '\(defaultDest)' must be in destinations")
 }
 
 // MARK: - A4-C1 through A4-C4: capture_choices with seeded estate
@@ -923,6 +973,489 @@ func captureOutcomeAppliedShapeMatchesContract() async throws {
     } else {
         Issue.record("effectivePolicy not an object")
     }
+}
+
+// MARK: - P0 fix: default-inbox seeding tests
+//
+// These tests exercise the fix for the P0 bug: CommunityCaptureCoordinator
+// now seeds a "personal/capture" sentinel room on the first captureChoices()
+// call against an empty estate. Test IDs A4-C19 through A4-C23.
+
+/// Helper: open a fresh (no-rooms) estate and return the layout URL.
+///
+/// Creates the estate via raw LocusKit (bypassing the daemon lifecycle) to
+/// simulate an empty estate that was NOT seeded at creation time. This is
+/// the exact scenario that triggered the P0.
+private func makeEmptyEstate() async throws -> CaptureScratch {
+    let scratch = try CaptureScratch()
+    let config = EstateConfiguration(
+        estateID: UUID(),
+        backend: .sqlite(url: scratch.estateURL, busyTimeout: 5.0)
+    )
+    let storage = try SQLiteStorage(configuration: config)
+    _ = try await Estate.open(
+        storage: storage,
+        owner: OwnerCredentials(ownerIdentifier: "empty-estate-seeder"),
+        identityKeyStore: InMemoryEstateIdentityKeyStore()
+    )
+    await storage.close()
+    return scratch
+}
+
+@Test("A4-C19: fresh empty estate → choices() yields non-empty valid default")
+func defaultInboxSeedingYieldsValidDefault() async throws {
+    let scratch = try await makeEmptyEstate()
+    defer { scratch.remove() }
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc = await callTool(dispatcher, name: "moot_community_capture_choices")
+    let sc_ = try #require(sc)
+
+    // Destinations must be non-empty after seeding.
+    guard case .array(let destinations) = sc_["destinations"], !destinations.isEmpty else {
+        Issue.record("A4-C19: destinations must be non-empty after seeding empty estate")
+        return
+    }
+
+    // defaultPolicy.destinationID must be a non-empty string.
+    guard case .object(let policy) = sc_["defaultPolicy"],
+          case .string(let defaultDest) = policy["destinationID"],
+          !defaultDest.isEmpty
+    else {
+        Issue.record("A4-C19: defaultPolicy.destinationID must be non-empty")
+        return
+    }
+
+    // The critical contract invariant: defaultPolicy.destinationID ∈ destinations.
+    let destIDs = destinations.compactMap { d -> String? in
+        guard case .object(let o) = d, case .string(let id) = o["id"] else { return nil }
+        return id
+    }
+    #expect(destIDs.contains(defaultDest),
+            "A4-C19: contract invariant violated — defaultPolicy.destinationID '\(defaultDest)' not in destinations \(destIDs)")
+
+    // Default must be the private-leaning "personal/capture" inbox.
+    #expect(defaultDest == "personal/capture",
+            "A4-C19: default destination must be 'personal/capture', got '\(defaultDest)'")
+
+    // defaultPolicy must be private-leaning: restricted, no export, no LAN.
+    guard case .string(let sensitivity) = policy["sensitivity"] else {
+        Issue.record("A4-C19: defaultPolicy.sensitivity missing"); return
+    }
+    #expect(sensitivity == "restricted", "A4-C19: default sensitivity must be 'restricted'")
+    guard case .bool(let exportEligible) = policy["exportEligible"],
+          case .bool(let lanEligible) = policy["lanEligible"]
+    else {
+        Issue.record("A4-C19: defaultPolicy export/LAN flags missing"); return
+    }
+    #expect(!exportEligible, "A4-C19: default exportEligible must be false")
+    #expect(!lanEligible, "A4-C19: default lanEligible must be false")
+}
+
+@Test("A4-C20: repeated choices() calls on empty estate create no duplicate rooms")
+func defaultInboxSeedingIsIdempotent() async throws {
+    let scratch = try await makeEmptyEstate()
+    defer { scratch.remove() }
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+
+    // Call captureChoices() three times in a row.
+    for callIndex in 1...3 {
+        let sc = await callTool(dispatcher, name: "moot_community_capture_choices")
+        guard let sc_ = sc else {
+            Issue.record("A4-C20: captureChoices call \(callIndex) returned nil"); return
+        }
+        guard case .array(let destinations) = sc_["destinations"] else {
+            Issue.record("A4-C20: call \(callIndex) destinations not an array"); return
+        }
+        // Every call must return exactly one destination (the seeded default inbox).
+        // Duplicate seeding would produce >1 room.
+        #expect(destinations.count == 1,
+                "A4-C20: call \(callIndex) must return exactly 1 destination (no duplicates), got \(destinations.count)")
+    }
+
+    // Verify at the estate level: exactly 1 drawer (the sentinel) in personal/capture.
+    let drawerCount = try await countDrawers(in: scratch.estateURL, wing: "personal", room: "capture")
+    #expect(drawerCount == 1,
+            "A4-C20: exactly 1 sentinel drawer must exist in personal/capture, got \(drawerCount)")
+}
+
+@Test("A4-C21: default inbox survives a new coordinator instance (stable across restarts)")
+func defaultInboxSurvivesNewCoordinatorInstance() async throws {
+    let scratch = try await makeEmptyEstate()
+    defer { scratch.remove() }
+
+    // First coordinator: seeds the default inbox.
+    let (dispatcher1, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc1 = await callTool(dispatcher1, name: "moot_community_capture_choices")
+    guard let sc1_ = sc1,
+          case .array(let dests1) = sc1_["destinations"],
+          case .object(let first1) = dests1.first,
+          case .string(let id1) = first1["id"]
+    else {
+        Issue.record("A4-C21: first coordinator choices() failed"); return
+    }
+    #expect(id1 == "personal/capture", "A4-C21: first coordinator must seed personal/capture")
+
+    // Second coordinator over the SAME layout directory — simulates a daemon restart.
+    // It must find the seeded room without re-seeding.
+    let (dispatcher2, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc2 = await callTool(dispatcher2, name: "moot_community_capture_choices")
+    guard let sc2_ = sc2,
+          case .array(let dests2) = sc2_["destinations"],
+          case .object(let first2) = dests2.first,
+          case .string(let id2) = first2["id"]
+    else {
+        Issue.record("A4-C21: second coordinator choices() failed"); return
+    }
+    #expect(id2 == "personal/capture", "A4-C21: second coordinator must see same default destination")
+
+    // Drawer count must still be 1 (second coordinator must NOT re-seed).
+    let drawerCount = try await countDrawers(in: scratch.estateURL, wing: "personal", room: "capture")
+    #expect(drawerCount == 1,
+            "A4-C21: daemon restart must not create duplicate sentinel drawer, got \(drawerCount)")
+}
+
+@Test("A4-C22: capture to seeded default destination succeeds end-to-end")
+func captureToSeededDefaultSucceeds() async throws {
+    let scratch = try await makeEmptyEstate()
+    defer { scratch.remove() }
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+
+    // Seed by calling choices first (triggers seeding).
+    let choicesSC = await callTool(dispatcher, name: "moot_community_capture_choices")
+    guard let choicesSC_ = choicesSC,
+          case .object(let policy) = choicesSC_["defaultPolicy"],
+          case .string(let defaultDest) = policy["destinationID"],
+          defaultDest == "personal/capture"
+    else {
+        Issue.record("A4-C22: choices() did not seed personal/capture"); return
+    }
+
+    // Capture to the seeded destination. Must succeed (not refused).
+    let captureArgs = JSONValue.object([
+        "requestID": .string("A4C22000-0000-0000-0000-000000000001"),
+        "subject": .string("Default inbox capture test"),
+        "content": .string("Capturing to the seeded default destination."),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("restricted"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+    let sc = await callTool(dispatcher, name: "moot_community_capture", arguments: captureArgs)
+    let sc_ = try #require(sc)
+
+    guard case .string(let outcome) = sc_["outcome"] else {
+        Issue.record("A4-C22: capture outcome missing"); return
+    }
+    #expect(outcome == "applied",
+            "A4-C22: capture to seeded default destination must be applied, got '\(outcome)'")
+
+    guard case .string(let recordIDStr) = sc_["recordID"],
+          UUID(uuidString: recordIDStr) != nil
+    else {
+        Issue.record("A4-C22: applied capture missing or invalid recordID"); return
+    }
+
+    // Downstream check: 2 drawers in personal/capture (1 sentinel + 1 user capture).
+    let drawerCount = try await countDrawers(in: scratch.estateURL, wing: "personal", room: "capture")
+    #expect(drawerCount == 2,
+            "A4-C22: expected 1 sentinel + 1 user drawer in personal/capture, got \(drawerCount)")
+}
+
+@Test("A4-C23: existing non-empty estate behavior unchanged — no spurious seeding")
+func noSpuriousSeedingOnNonEmptyEstate() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    // Use seedEstateRooms to create personal/capture AND work/inbox (2 rooms).
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc = await callTool(dispatcher, name: "moot_community_capture_choices")
+    let sc_ = try #require(sc)
+
+    guard case .array(let destinations) = sc_["destinations"] else {
+        Issue.record("A4-C23: destinations not an array"); return
+    }
+
+    // Non-empty estate: no seeding must occur. Still exactly 2 destinations.
+    #expect(destinations.count == 2,
+            "A4-C23: non-empty estate must retain exactly 2 destinations, got \(destinations.count)")
+
+    // personal/capture room must have exactly 1 drawer (the seed, no sentinel).
+    let capDrawers = try await countDrawers(in: scratch.estateURL, wing: "personal", room: "capture")
+    #expect(capDrawers == 1,
+            "A4-C23: personal/capture must have exactly 1 seeded drawer (no sentinel), got \(capDrawers)")
+
+    // work/inbox must also be unchanged.
+    let inboxDrawers = try await countDrawers(in: scratch.estateURL, wing: "work", room: "inbox")
+    #expect(inboxDrawers == 1,
+            "A4-C23: work/inbox must have exactly 1 seeded drawer, got \(inboxDrawers)")
+}
+
+// MARK: - F5: content-change on same requestID → request-conflict
+
+/// Same requestID + different content (different SHA-256) must produce
+/// "request-conflict" — not silently return the old receipt as if the
+/// content were unchanged. This test verifies the F5 content-hash fix.
+@Test("F5: same requestID with different content returns request-conflict")
+func conflictOnContentChange() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+
+    let requestID = "F5000000-0000-0000-0000-000000000001"
+
+    // First capture: original content.
+    let firstArgs = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("Research notes"),
+        "content": .string("Original content for F5 test."),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("normal"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+    let sc1 = await callTool(dispatcher, name: "moot_community_capture", arguments: firstArgs)
+    guard case .string(let outcome1) = sc1?["outcome"], outcome1 == "applied" else {
+        Issue.record("first capture must return applied, got: \(String(describing: sc1))"); return
+    }
+
+    // Second capture: same requestID, DIFFERENT content.
+    // The content hash will differ → must return request-conflict, not the old receipt.
+    let conflictArgs = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("Research notes"),
+        "content": .string("CHANGED content — different SHA-256 hash."),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("normal"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+    let sc2 = await callTool(dispatcher, name: "moot_community_capture", arguments: conflictArgs)
+    guard case .string(let outcome2) = sc2?["outcome"] else {
+        Issue.record("outcome missing in second capture response"); return
+    }
+    #expect(outcome2 == "refused",
+            "same requestID with different content must return refused, got: \(outcome2)")
+    guard case .string(let reason) = sc2?["reason"] else {
+        Issue.record("reason missing in refused response"); return
+    }
+    #expect(reason == "request-conflict",
+            "refused reason must be request-conflict, got: \(reason)")
+}
+
+@Test("capture ledger persists no plaintext content verifier")
+func captureLedgerContainsNoContentOracle() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let content = "low entropy secret phrase"
+    let subject = "private subject"
+    let args = JSONValue.object([
+        "requestID": .string("F5000000-0000-0000-0000-000000000002"),
+        "subject": .string(subject),
+        "content": .string(content),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("secret"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+    let result = await callTool(dispatcher, name: "moot_community_capture", arguments: args)
+    #expect(result?["outcome"] == .string("applied"))
+
+    let ledger = try Data(contentsOf: scratch.layoutURL.appendingPathComponent("capture-ledger.json"))
+    let ledgerText = String(decoding: ledger, as: UTF8.self)
+    let digest = SHA256.hash(data: Data((content + "\0" + subject).utf8))
+        .map { String(format: "%02x", $0) }.joined()
+    #expect(!ledgerText.contains(content))
+    #expect(!ledgerText.contains(subject))
+    #expect(!ledgerText.contains(digest))
+    #expect(!ledgerText.contains("\"contentHash\""))
+}
+
+@Test("legacy plaintext content verifier is scrubbed while exact retry remains valid")
+func legacyCaptureLedgerVerifierIsScrubbed() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let requestID = "F5000000-0000-0000-0000-000000000003"
+    let args = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("legacy subject"),
+        "content": .string("legacy content"),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("restricted"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+    let (firstDispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let first = await callTool(firstDispatcher, name: "moot_community_capture", arguments: args)
+    guard case .string(let firstID) = first?["recordID"] else {
+        Issue.record("first capture did not return a record ID")
+        return
+    }
+
+    let ledgerURL = scratch.layoutURL.appendingPathComponent("capture-ledger.json")
+    let data = try Data(contentsOf: ledgerURL)
+    var root = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let key = requestID.lowercased()
+    var entry = try #require(root[key] as? [String: Any])
+    entry["contentHash"] = String(repeating: "a", count: 64)
+    root[key] = entry
+    try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: ledgerURL)
+
+    let (secondDispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let retry = await callTool(secondDispatcher, name: "moot_community_capture", arguments: args)
+    #expect(retry?["outcome"] == .string("applied"))
+    #expect(retry?["recordID"] == .string(firstID))
+
+    let scrubbed = String(decoding: try Data(contentsOf: ledgerURL), as: UTF8.self)
+    #expect(!scrubbed.contains("\"contentHash\""))
+    #expect(!scrubbed.contains(String(repeating: "a", count: 64)))
+}
+
+// MARK: - F10: ledger-loss retry does not create a duplicate drawer
+
+/// Simulates the crash window (F10): estate.capture() succeeds but the ledger
+/// write is never reached (crash between the two writes). On retry, the
+/// coordinator must recover by querying the estate for the existing drawer via
+/// the addedBy marker (moot_community_capture/<requestKey>) and MUST NOT write
+/// a second drawer.
+@Test("F10: ledger-loss retry does not create a duplicate drawer in the estate")
+func ledgerLossRetryNoDuplicate() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let requestID = "F10A0000-0000-0000-0000-000000000001"
+    let args = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("Ledger loss recovery subject"),
+        "content": .string("Content captured before simulated crash."),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("normal"),
+        "exportEligible": .bool(false),
+        "lanEligible": .bool(false),
+    ])
+
+    // First capture: succeeds and writes the ledger.
+    let (dispatcher1, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc1 = await callTool(dispatcher1, name: "moot_community_capture", arguments: args)
+    guard case .string(let outcome1) = sc1?["outcome"], outcome1 == "applied",
+          case .string(let recordID1) = sc1?["recordID"] else {
+        Issue.record("first capture failed: \(String(describing: sc1))"); return
+    }
+
+    // Simulate ledger loss: delete capture-ledger.json.
+    let ledgerURL = scratch.layoutURL.appendingPathComponent("capture-ledger.json")
+    try? FileManager.default.removeItem(at: ledgerURL)
+    #expect(!FileManager.default.fileExists(atPath: ledgerURL.path),
+            "ledger must be deleted before retry")
+
+    // Retry: new coordinator instance over the same layout directory (no ledger on disk).
+    // The coordinator must detect the missing ledger entry, query the estate for
+    // an existing drawer with addedBy = "moot_community_capture/<requestKey>",
+    // recover the receipt, and return "applied" — WITHOUT writing a second drawer.
+    let (dispatcher2, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc2 = await callTool(dispatcher2, name: "moot_community_capture", arguments: args)
+    guard case .string(let outcome2) = sc2?["outcome"], outcome2 == "applied",
+          case .string(let recordID2) = sc2?["recordID"] else {
+        Issue.record("retry after ledger loss failed: \(String(describing: sc2))"); return
+    }
+
+    // Recovery must produce the same recordID (same drawer, not a new one).
+    #expect(recordID1 == recordID2,
+            "retry after ledger loss must return the SAME recordID — no second drawer written")
+
+    // The estate must still have exactly 2 drawers in personal/capture:
+    // 1 seed drawer + 1 captured drawer (the retry must not add a third).
+    let drawerCount = try await countDrawers(in: scratch.estateURL, wing: "personal", room: "capture")
+    #expect(drawerCount == 2,
+            "after ledger-loss retry, must have exactly 1 seed + 1 capture (no duplicate), got \(drawerCount)")
+}
+
+@Test("F10: ledger-loss recovery refuses changed destination or LAN policy")
+func ledgerLossRecoveryRejectsChangedPolicy() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    try await seedEstateRooms(at: scratch.estateURL)
+
+    let requestID = "F10A0000-0000-0000-0000-000000000002"
+    let original = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("Recovery binding"),
+        "content": .string("The committed drawer binds the full request policy."),
+        "destinationID": .string("personal/capture"),
+        "sensitivity": .string("normal"),
+        "exportEligible": .bool(true),
+        "lanEligible": .bool(false),
+    ])
+    let (firstDispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let first = await callTool(firstDispatcher, name: "moot_community_capture", arguments: original)
+    #expect(first?["outcome"] == .string("applied"))
+
+    try FileManager.default.removeItem(
+        at: scratch.layoutURL.appendingPathComponent("capture-ledger.json")
+    )
+
+    let changed = JSONValue.object([
+        "requestID": .string(requestID),
+        "subject": .string("Recovery binding"),
+        "content": .string("The committed drawer binds the full request policy."),
+        "destinationID": .string("work/inbox"),
+        "sensitivity": .string("normal"),
+        "exportEligible": .bool(true),
+        "lanEligible": .bool(true),
+    ])
+    let (secondDispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let retry = await callTool(secondDispatcher, name: "moot_community_capture", arguments: changed)
+    #expect(retry?["outcome"] == .string("refused"))
+    #expect(retry?["reason"] == .string("request-conflict"))
+
+    let personalCount = try await countDrawers(
+        in: scratch.estateURL, wing: "personal", room: "capture"
+    )
+    let workCount = try await countDrawers(
+        in: scratch.estateURL, wing: "work", room: "inbox"
+    )
+    #expect(personalCount == 2)
+    #expect(workCount == 1)
+}
+
+// MARK: - F11: captureChoices fails closed when estate.sqlite is absent
+
+/// When estate.sqlite does not exist, captureChoices must return an empty
+/// destinations array — it must NOT create the estate file as a side effect.
+/// This verifies the fail-closed gate added in the F11 requireEstate() fix.
+@Test("F11: captureChoices returns empty destinations when estate.sqlite is absent")
+func captureChoicesFailsClosedOnAbsentEstate() async throws {
+    let scratch = try CaptureScratch()
+    defer { scratch.remove() }
+    // Deliberately do NOT call seedEstateRooms — estate.sqlite must not exist.
+    #expect(!FileManager.default.fileExists(atPath: scratch.estateURL.path),
+            "estate.sqlite must be absent at test start")
+
+    let (dispatcher, _) = makeDispatcher(layoutURL: scratch.layoutURL)
+    let sc = await callTool(dispatcher, name: "moot_community_capture_choices")
+    let sc_ = try #require(sc, "captureChoices must return a response even with absent estate")
+
+    // Must return empty destinations (fail-closed, not crash or auto-create).
+    guard case .array(let destinations) = sc_["destinations"] else {
+        Issue.record("F11: destinations field missing from captureChoices response"); return
+    }
+    #expect(destinations.isEmpty,
+            "F11: captureChoices must return empty destinations when estate is absent, got \(destinations.count)")
+
+    // estate.sqlite must NOT have been created as a side effect.
+    #expect(!FileManager.default.fileExists(atPath: scratch.estateURL.path),
+            "F11: captureChoices must NOT create estate.sqlite (fail-closed gate)")
 }
 
 // MARK: - Helpers

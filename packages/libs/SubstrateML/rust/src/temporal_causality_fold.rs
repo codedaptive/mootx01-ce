@@ -141,6 +141,11 @@ pub struct FoldResult {
     pub deltas: Vec<(TemporalCausalityKey, i64)>,
     /// HLC of the last new entry processed, or startWatermark if none.
     pub new_watermark: HLC,
+    /// DECAYED per-key weights (§8.13, W2.5 S4-C): each pair occurrence
+    /// contributes exp(−age·ln2/τ), age measured from the pair's NEWER
+    /// entry to the decay clock. Empty unless `fold_with_decay` was used.
+    /// Mirrors Swift `FoldResult.weightedDeltas`.
+    pub weighted_deltas: HashMap<TemporalCausalityKey, f64>,
 }
 
 /// Process a sorted entry sequence and return T-matrix deltas.
@@ -158,11 +163,28 @@ pub fn fold(
     window_minutes: i32,
     start_watermark: HLC,
 ) -> FoldResult {
+    fold_with_decay(entries, window_minutes, start_watermark, None, crate::decay::half_lives::TEMPORAL_CAUSALITY_SECONDS)
+}
+
+/// `fold` plus the §8.13 decayed projection (W2.5 S4-C): when
+/// `decay_now_ms` is Some, `weighted_deltas` accumulates
+/// exp(−age·ln2/τ) per pair, age clamped at 0 (future-stamped pairs are
+/// treated as "now" — the TypedDecayWeighting convention). Mirrors the
+/// Swift `fold(entries:windowMinutes:startWatermark:decayNowMs:decayHalfLifeSeconds:)`.
+pub fn fold_with_decay(
+    entries: &[TemporalAuditEntry],
+    window_minutes: i32,
+    start_watermark: HLC,
+    decay_now_ms: Option<i64>,
+    decay_half_life_seconds: f64,
+) -> FoldResult {
     // Rolling buffer of earlier entries within window_minutes.
     let mut buffer: Vec<&TemporalAuditEntry> = Vec::new();
 
     // Aggregated delta map.
     let mut delta_map: HashMap<TemporalCausalityKey, i64> = HashMap::new();
+    // Decayed projection accumulator (§8.13); populated only with a decay clock.
+    let mut weighted_map: HashMap<TemporalCausalityKey, f64> = HashMap::new();
 
     // Stable insertion-order tracking.
     let mut key_order: Vec<TemporalCausalityKey> = Vec::new();
@@ -201,6 +223,14 @@ pub fn fold(
                                 key_index.insert(key.clone(), idx);
                                 key_order.push(key.clone());
                             }
+                            if let Some(now_ms) = decay_now_ms {
+                                let age_seconds =
+                                    ((now_ms - entry.hlc.physical_time) as f64 / 1000.0).max(0.0);
+                                *weighted_map.entry(key.clone()).or_insert(0.0) += (-age_seconds
+                                    * std::f64::consts::LN_2
+                                    / decay_half_life_seconds)
+                                    .exp();
+                            }
                             *delta_map.entry(key).or_insert(0) += 1;
                         }
                     }
@@ -236,6 +266,7 @@ pub fn fold(
     FoldResult {
         deltas,
         new_watermark,
+        weighted_deltas: weighted_map,
     }
 }
 
@@ -421,5 +452,45 @@ mod tests {
         let result = fold(&entries, DEFAULT_WINDOW_MINUTES, wm);
         assert_eq!(result.deltas.len(), 1);
         assert_eq!(result.deltas[0].0.lag_bucket, 128);
+    }
+}
+
+#[cfg(test)]
+mod decay_projection_tests {
+    use super::*;
+
+    fn coord(path: &str, repr: &str) -> TemporalFieldCoord {
+        TemporalFieldCoord { field_path: path.to_string(), value_repr: repr.to_string() }
+    }
+    fn entry(ms: i64, coords: Vec<TemporalFieldCoord>) -> TemporalAuditEntry {
+        TemporalAuditEntry { hlc: HLC { physical_time: ms, logical_count: 0, node_id: 0 }, field_coords: coords }
+    }
+
+    #[test]
+    fn weighted_delta_exact_half_life() {
+        // Mirrors the Swift weightedDeltaExactValue pin: age exactly one
+        // half-life → weight exp(-ln2) = 0.5.
+        let entries = vec![
+            entry(0, vec![coord("src", "bitmap:1")]),
+            entry(600_000, vec![coord("tgt", "bitmap:2")]),
+        ];
+        let now_ms: i64 = 600_000 + 30 * 86_400 * 1000;
+        let result = fold_with_decay(
+            &entries, 256, HLC::ZERO, Some(now_ms),
+            crate::decay::half_lives::TEMPORAL_CAUSALITY_SECONDS);
+        assert_eq!(result.deltas.len(), 1);
+        let w = result.weighted_deltas.get(&result.deltas[0].0).copied().unwrap();
+        assert!((w - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn no_clock_no_weights() {
+        let entries = vec![
+            entry(0, vec![coord("src", "bitmap:1")]),
+            entry(60_000, vec![coord("tgt", "bitmap:2")]),
+        ];
+        let result = fold(&entries, 256, HLC::ZERO);
+        assert!(result.weighted_deltas.is_empty());
+        assert_eq!(result.deltas.len(), 1);
     }
 }

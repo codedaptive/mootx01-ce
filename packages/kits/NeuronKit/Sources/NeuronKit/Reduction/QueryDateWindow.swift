@@ -161,3 +161,76 @@ public func parseQueryDateExpression(_ query: String) -> QueryDateParse {
 public func windowContains(_ window: QueryDateWindow, eventTime: String) -> Bool {
     eventTime >= window.start && eventTime <= window.end
 }
+
+/// Returns the window widened by `days` on each side (the sliding-window
+/// expansion, ruling Q2 2026-08-19: expand ±1 day at a time until enough
+/// candidates exist to compare, hard cap ±10). Pure civil-calendar
+/// arithmetic on the fixed "YYYY-MM-DD…" bound shape; the time-of-day
+/// parts of each bound are preserved (start keeps 00:00:00, end keeps
+/// 23:59:59). `days <= 0` returns the window unchanged.
+public func paddedWindow(_ window: QueryDateWindow, days: Int) -> QueryDateWindow {
+    guard days > 0 else { return window }
+    return QueryDateWindow(
+        start: shiftISODay(window.start, by: -days),
+        end: shiftISODay(window.end, by: days),
+        matchedText: window.matchedText)
+}
+
+/// Shifts the DATE part of a fixed-shape ISO string by `days`, preserving
+/// the time-of-day suffix. Hinnant civil-from-days / days-from-civil pure
+/// integer math — no Calendar, no clock, identical in the Rust twin.
+func shiftISODay(_ iso: String, by days: Int) -> String {
+    let y = Int(iso.prefix(4))!
+    let m = Int(iso.dropFirst(5).prefix(2))!
+    let d = Int(iso.dropFirst(8).prefix(2))!
+    let suffix = String(iso.dropFirst(10))
+    // days_from_civil (Hinnant)
+    let yy = m <= 2 ? y - 1 : y
+    let era = (yy >= 0 ? yy : yy - 399) / 400
+    let yoe = yy - era * 400
+    let mp = (m + 9) % 12
+    let doy = (153 * mp + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    var z = era * 146_097 + doe - 719_468
+    z += days
+    // civil_from_days (Hinnant)
+    let z2 = z + 719_468
+    let era2 = (z2 >= 0 ? z2 : z2 - 146_096) / 146_097
+    let doe2 = z2 - era2 * 146_097
+    let yoe2 = (doe2 - doe2 / 1460 + doe2 / 36_524 - doe2 / 146_096) / 365
+    let yr = yoe2 + era2 * 400
+    let doy2 = doe2 - (365 * yoe2 + yoe2 / 4 - yoe2 / 100)
+    let mp2 = (5 * doy2 + 2) / 153
+    let day = doy2 - (153 * mp2 + 2) / 5 + 1
+    let mon = mp2 < 10 ? mp2 + 3 : mp2 - 9
+    let year = mon <= 2 ? yr + 1 : yr
+    return String(format: "%04d-%02d-%02d", year, mon, day) + suffix
+}
+
+/// True when the query ASKS FOR a date rather than stating one ("When did
+/// Melanie go camping?", "What date was the gala?") — the Gap 3 scanner
+/// fork (DECISION_DENSE_LANE_ENRICHMENT program). Deterministic token-
+/// bigram scan; a query can be date-seeking AND carry an absolute date
+/// ("When in 2023 did…"), in which case the parsed window wins upstream.
+public func isDateSeekingQuery(_ query: String) -> Bool {
+    let tokens = query.lowercased().split(separator: " ").map {
+        $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?;:()'\""))
+    }
+    // "how long ago" — the one trigram form.
+    for i in 0..<max(tokens.count, 2) - 2 where tokens.count >= 3 {
+        if tokens[i] == "how" && tokens[i + 1] == "long" && tokens[i + 2] == "ago" {
+            return true
+        }
+    }
+    guard tokens.count >= 2 else { return false }
+    for i in 0..<(tokens.count - 1) {
+        let a = tokens[i], b = tokens[i + 1]
+        if a == "when" && (b == "did" || b == "was" || b == "will" || b == "is") {
+            return true
+        }
+        if (a == "what" || a == "which") && (b == "date" || b == "day" || b == "year" || b == "month") {
+            return true
+        }
+    }
+    return false
+}

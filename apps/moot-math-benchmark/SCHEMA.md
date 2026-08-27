@@ -285,8 +285,8 @@ and semantic decision.
 
 ## Schema `product-1` — shipped product boundary
 
-Produced by `product-bench.py`, not by a language port. It records the absolute
-binary path, version, SHA-256, git SHA, platform, daemon startup, dataset size,
+Produced by `product-bench.py`, not by a language port. It records the binary
+identifier, version, SHA-256, git SHA, platform, daemon startup, dataset size,
 and the fact that a disposable estate was used. Each named MCP operation has
 the raw wall-clock samples plus `min_ns`, `mean_ns`, `p50_ns`, `p95_ns`,
 `p99_ns`, and `max_ns`. Raw samples make the published percentiles auditable
@@ -297,18 +297,18 @@ are evidence fields, not implicit claims about a one-million-row estate.
 
 ## External schema `gauntlet-v1` — adversarial product retrieval
 
-The historical retrieval gauntlet is owned by the EE
-`tools/mcp-benchmarker`, not by the local language-port schema. Its source-native
-JSON records the seed, columns, every per-query score and latency, retained
-failures, guard result, and superiority verdict. It intentionally remains in
-that native shape so the evidence can be audited with the tool that produced it.
+The historical retrieval gauntlet is owned by `benchmark/ (mcp-benchmarker)`,
+not by the local language-port schema. Its source-native JSON records the seed,
+columns, every per-query score and latency, retained failures, guard result,
+and superiority verdict. It intentionally remains in that native shape so the
+evidence can be audited with the tool that produced it.
 
 The CE evidence bundle adds a `gauntlet-provenance-1` companion that pins the
-tested product version and binary hash, EE harness SHA, historical report path,
+tested product version and binary hash, harness SHA, historical report path,
 corpus dimensions and hashes, isolation, background-work state, and artifact
-hashes. A MOOT-only report must set `mempalace_rerun` and
-`superiority_evaluable` to false; historical competitor rows cannot be promoted
-to a current comparison.
+hashes. Execution metadata records whether a comparative rerun was performed
+and whether superiority is evaluable; historical comparator rows cannot be
+promoted to a current comparison.
 
 ---
 

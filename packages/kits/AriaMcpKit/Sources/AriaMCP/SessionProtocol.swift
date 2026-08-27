@@ -24,9 +24,26 @@ extension ToolDispatcher {
       — Call moot_list_lenses to see available cognition tools.
       — Add teachme:true to any tool to learn it before using it.
       — Watch for hint: lines in responses — they contain coaching for better results.
+      — Declare a mode with mode:"Recall=Auto" on any tool call to set the session default.
       — File memories: moot_file_memory (content + subject + location required).
       — Search memories: moot_memory_search (query required).
       — Write journal entries: moot_write_journal after meaningful sessions.
       — Store structured facts: moot_file_fact (subject + predicate + object).
     """
+
+    /// Modes section appended to every `moot_estate_status` response.
+    ///
+    /// Lists the five advisory mode bundles and their contracts. Static because
+    /// the mode roster is built into the server; it does not vary by estate.
+    /// Add teachme:true to `moot_estate_status` for the full modes guide.
+    static let modesStatusSection: String = {
+        let lines = MootMode.allCases.map { "  " + $0.statusLine }
+        return """
+
+    modes (advisory bundles — add mode:\"Recall=Auto\" etc. to any call):
+    \(lines.joined(separator: "\n"))
+      — Modes change session defaults (e.g. Recall=Auto sets answer:auto on search).
+      — Add teachme:true to moot_estate_status for variants and decision guidance.
+    """
+    }()
 }

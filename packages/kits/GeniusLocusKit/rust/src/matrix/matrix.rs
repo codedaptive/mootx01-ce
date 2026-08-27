@@ -118,6 +118,23 @@ pub struct MatrixTier {
     /// reprocessing of the full log. Initialized to `HLC::ZERO` (no pass
     /// has run yet) and advanced by every `rebuild_temporal` call.
     pub temporal_watermark_hlc: HLC,
+    /// DECAYED O projection (§8.13, W2.5 S4-C): per-pair Σ exp(−age·ln2/τ_O)
+    /// at `decayed_as_of_ms`, τ_O = §6.8 co-activation 60d, age from each
+    /// bundle's capture HLC (the clock `rebuild` keys O on). FULL recompute
+    /// every maintenance pass (exp-factor composition is not fp-associative,
+    /// so an incremental merge cannot equal a recompute bit-for-bit). Arm
+    /// surface only; counts stay the canonical scoring input. NOT persisted
+    /// in the binary snapshot — the load path recomputes projections before
+    /// any consumer reads them, so persisting would be dead bytes. Mirrors
+    /// Swift `MatrixTier.coOccurrenceDecayed`.
+    pub co_occurrence_decayed: HashMap<MatrixCoOccurKey, f64>,
+    /// DECAYED T projection (§8.13): fold-weighted pairs at τ_T = 30d, age
+    /// from each pair's NEWER entry on the substituted event-time clock.
+    /// Mirrors Swift `MatrixTier.temporalCausalityDecayed`.
+    pub temporal_causality_decayed: HashMap<MatrixTemporalKey, f64>,
+    /// The decay clock (epoch ms) the projections were computed at; 0 =
+    /// never computed (both maps empty).
+    pub decayed_as_of_ms: i64,
 }
 
 impl Default for MatrixTier {
@@ -129,6 +146,9 @@ impl Default for MatrixTier {
             live_row_count: 0,
             last_hlc: HLC::ZERO,
             temporal_watermark_hlc: HLC::ZERO,
+            co_occurrence_decayed: HashMap::new(),
+            temporal_causality_decayed: HashMap::new(),
+            decayed_as_of_ms: 0,
         }
     }
 }
@@ -230,35 +250,90 @@ impl MatrixTier {
         *Self::LAG_BUCKETS.last().unwrap_or(&128)
     }
 
-    /// Apply lazy multiplicative decay per cookbook §6.8. F and C do
-    /// not decay; O half-life is 365 days; T half-life is 90 days.
-    pub fn apply_decay(&mut self, elapsed_days: f64, o_half_life_days: f64, t_half_life_days: f64) {
-        if elapsed_days < 1.0 {
-            return;
+    /// Compute the DECAYED O projection (§8.13, W2.5 S4-C): replay the same
+    /// capture/expunge bundles `rebuild` applies, weighting each bundle's
+    /// pair contributions by sign × exp(−age·ln2/τ_O) at `now_ms`, τ_O =
+    /// §6.8 co-activation (60d). Age keys off the bundle's capture HLC —
+    /// the same clock `rebuild` keys O on. FULL recompute by design (see
+    /// the field's fp non-associativity note). Deterministic given
+    /// (log, now_ms). Mirrors Swift `MatrixTier.decayedCoOccurrence`.
+    pub fn decayed_co_occurrence(
+        log: &UnifiedAuditLog,
+        now_ms: i64,
+    ) -> HashMap<MatrixCoOccurKey, f64> {
+        
+        #[derive(Hash, PartialEq, Eq, Clone)]
+        struct RowKey {
+            tier: AuditTier,
+            row_id: EntryUUID,
+            hlc: HLC,
         }
-        let o_factor = 0.5_f64.powf(elapsed_days / o_half_life_days);
-        let t_factor = 0.5_f64.powf(elapsed_days / t_half_life_days);
-
-        let o_keys: Vec<_> = self.co_occurrence.keys().cloned().collect();
-        for k in o_keys {
-            let v = *self.co_occurrence.get(&k).unwrap();
-            let decayed = (v as f64 * o_factor).round() as i64;
-            if decayed > 0 {
-                self.co_occurrence.insert(k, decayed);
-            } else {
-                self.co_occurrence.remove(&k);
+        let mut bundle: HashMap<RowKey, Vec<(String, u64)>> = HashMap::new();
+        let mut value_bundle: HashMap<RowKey, Vec<MatrixValueCoord>> = HashMap::new();
+        let mut bundle_sign: HashMap<RowKey, f64> = HashMap::new();
+        for entry in log.ordered_entries() {
+            match entry.verb {
+                UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge => {
+                    let key = RowKey {
+                        tier: entry.tier,
+                        row_id: entry.row_id,
+                        hlc: entry.hlc,
+                    };
+                    match &entry.after_value {
+                        UnifiedAuditValue::Bitmap(v) => {
+                            bundle.entry(key.clone()).or_default().push((entry.field_path.clone(), *v));
+                        }
+                        other => {
+                            value_bundle.entry(key.clone()).or_default().push(
+                                MatrixValueCoord::new(entry.field_path.clone(), other.clone()));
+                        }
+                    }
+                    bundle_sign.insert(key, if entry.verb == UnifiedAuditVerb::Capture { 1.0 } else { -1.0 });
+                }
+                _ => continue,
             }
         }
-        let t_keys: Vec<_> = self.temporal_causality.keys().cloned().collect();
-        for k in t_keys {
-            let v = *self.temporal_causality.get(&k).unwrap();
-            let decayed = (v as f64 * t_factor).round() as i64;
-            if decayed > 0 {
-                self.temporal_causality.insert(k, decayed);
-            } else {
-                self.temporal_causality.remove(&k);
+        let tau = substrate_ml::decay::half_lives::CO_ACTIVATION_SECONDS;
+        let mut projection: HashMap<MatrixCoOccurKey, f64> = HashMap::new();
+        for (key, sign) in &bundle_sign {
+            // The (field, value) coordinates one bundle contributes — one
+            // coordinate per bitmap field carrying its bitmap value (the
+            // cookbook's O is field-value, not field-bit) plus the
+            // non-bitmap fields directly. Mirrors apply_capture's derivation.
+            let mut coords: Vec<MatrixValueCoord> =
+                value_bundle.get(key).cloned().unwrap_or_default();
+            if let Some(bits) = bundle.get(key) {
+                for (path, bitmap) in bits {
+                    if *bitmap != 0 {
+                        coords.push(MatrixValueCoord::new(
+                            path.clone(),
+                            UnifiedAuditValue::Bitmap(*bitmap)));
+                    }
+                }
+            }
+            if coords.len() < 2 {
+                continue;
+            }
+            // Age computed in f64, not i64: peer-supplied audit HLCs are
+            // content-hashed but not range-bounded, and an extreme
+            // physical_time (e.g. i64::MIN) overflowed the integer
+            // subtraction (debug panic / release wrap — codex finding
+            // 2026-08-26). Float math cannot overflow; .max(0.0) clamps
+            // future-dated entries as before. Twin of the Swift fix.
+            let age_seconds = ((now_ms as f64 - key.hlc.physical_time as f64) / 1000.0).max(0.0);
+            let weight = sign * (-age_seconds * std::f64::consts::LN_2 / tau).exp();
+            for i in 0..coords.len() - 1 {
+                for j in (i + 1)..coords.len() {
+                    *projection
+                        .entry(MatrixCoOccurKey::new(coords[i].clone(), coords[j].clone()))
+                        .or_insert(0.0) += weight;
+                }
             }
         }
+        // Expunge can drive a cell slightly negative in fp; keep only
+        // positive cells (decay only forgets — mirrors Swift).
+        projection.retain(|_, v| *v > 0.0);
+        projection
     }
 
     /// Rebuild from the unified audit log. Replays in HLC order;
@@ -416,6 +491,19 @@ impl MatrixTier {
         start_watermark: HLC,
         event_times: &HashMap<EntryUUID, i64>,
     ) -> Self {
+        Self::rebuild_temporal_from_with_decay(log, start_watermark, event_times, None)
+    }
+
+    /// `rebuild_temporal_from` plus the §8.13 decayed T projection (W2.5
+    /// S4-C): when `decay_now_ms` is Some, `temporal_causality_decayed` is
+    /// populated from the fold's weighted deltas and `decayed_as_of_ms` is
+    /// stamped. Mirrors Swift `rebuildTemporal(from:startWatermark:eventTimes:decayNowMs:)`.
+    pub fn rebuild_temporal_from_with_decay(
+        log: &UnifiedAuditLog,
+        start_watermark: HLC,
+        event_times: &HashMap<EntryUUID, i64>,
+        decay_now_ms: Option<i64>,
+    ) -> Self {
         let mut tier = MatrixTier::new();
 
         // Temporal causality keys off the AUTHORED-IN-WORLD clock (event_time),
@@ -521,10 +609,12 @@ impl MatrixTier {
         // Fold from the supplied watermark: ZERO for a full rebuild (every entry
         // is "new"), or the persisted temporal_watermark_hlc for incremental
         // hydration (only new cross-pairs emitted).
-        let result = tcf_fold(
+        let result = substrate_ml::temporal_causality_fold::fold_with_decay(
             &temporal_entries,
             Self::TEMPORAL_WINDOW_MINUTES as i32,
             start_watermark,
+            decay_now_ms,
+            substrate_ml::decay::half_lives::TEMPORAL_CAUSALITY_SECONDS,
         );
 
         for (fold_key, delta) in result.deltas {
@@ -547,6 +637,25 @@ impl MatrixTier {
         }
 
         tier.temporal_watermark_hlc = result.new_watermark;
+        // S4-C: map the fold's decayed weights the same way the count loop
+        // maps deltas.
+        if let Some(now_ms) = decay_now_ms {
+            for (fold_key, weight) in &result.weighted_deltas {
+                let key = MatrixTemporalKey {
+                    source: MatrixValueCoord::new(
+                        fold_key.source.field_path.clone(),
+                        decode_value_repr(&fold_key.source.value_repr),
+                    ),
+                    target: MatrixValueCoord::new(
+                        fold_key.target.field_path.clone(),
+                        decode_value_repr(&fold_key.target.value_repr),
+                    ),
+                    lag_bucket: fold_key.lag_bucket as u32,
+                };
+                tier.temporal_causality_decayed.insert(key, *weight);
+            }
+            tier.decayed_as_of_ms = now_ms;
+        }
         tier
     }
 
@@ -709,5 +818,60 @@ fn add_signed<K: std::hash::Hash + Eq>(map: &mut HashMap<K, i64>, key: K, delta:
         map.insert(key, next);
     } else {
         map.remove(&key);
+    }
+}
+
+#[cfg(test)]
+mod decayed_projection_tests {
+    use super::*;
+    use crate::audit::{AuditTier, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
+
+    fn capture(row: u8, field: &str, value: UnifiedAuditValue, ms: i64) -> UnifiedAuditEntry {
+        // Route through new() so the content id is computed — add() rejects
+        // entries whose id does not match (AUDIT-ALERT-RESTORE ingress gate).
+        UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            HLC { physical_time: ms, logical_count: 0, node_id: 0 },
+            UnifiedAuditVerb::Capture,
+            EntryUUID([row; 16]),
+            field.to_string(),
+            UnifiedAuditValue::Null,
+            value,
+            None,
+        )
+    }
+
+    #[test]
+    fn decayed_co_occurrence_half_life_pin() {
+        // Mirrors the Swift decayedCoOccurrenceHalfLifePin literal.
+        let mut log = UnifiedAuditLog::new();
+        log.add(capture(1, "bm.x", UnifiedAuditValue::Bitmap(1), 0));
+        log.add(capture(1, "bm.y", UnifiedAuditValue::Bitmap(2), 0));
+        let now_ms: i64 = 60 * 86_400 * 1000;
+        let projection = MatrixTier::decayed_co_occurrence(&log, now_ms);
+        assert_eq!(projection.len(), 1);
+        let key = MatrixCoOccurKey::new(
+            MatrixValueCoord::new("bm.x".to_string(), UnifiedAuditValue::Bitmap(1)),
+            MatrixValueCoord::new("bm.y".to_string(), UnifiedAuditValue::Bitmap(2)),
+        );
+        let w = projection.get(&key).copied().unwrap();
+        assert!((w - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn decayed_temporal_pin() {
+        // Mirrors the Swift decayedTemporalPin literal.
+        let mut log = UnifiedAuditLog::new();
+        log.add(capture(0xA, "bm.x", UnifiedAuditValue::Bitmap(1), 0));
+        log.add(capture(0xB, "bm.x", UnifiedAuditValue::Bitmap(2), 600_000));
+        let now_ms: i64 = 600_000 + 30 * 86_400 * 1000;
+        let tier = MatrixTier::rebuild_temporal_from_with_decay(
+            &log, HLC::ZERO, &std::collections::HashMap::new(), Some(now_ms));
+        assert_eq!(tier.decayed_as_of_ms, now_ms);
+        assert_eq!(tier.temporal_causality_decayed.len(), 1);
+        let w = tier.temporal_causality_decayed.values().next().copied().unwrap();
+        assert!((w - 0.5).abs() < 1e-12);
+        let plain = MatrixTier::rebuild_temporal(&log);
+        assert!(plain.temporal_causality_decayed.is_empty() && plain.decayed_as_of_ms == 0);
     }
 }

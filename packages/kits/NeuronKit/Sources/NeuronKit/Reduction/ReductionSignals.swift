@@ -25,7 +25,9 @@
 
 import Foundation
 import GeniusLocusKit
+import LatticeLib
 import LocusKit
+import SubstrateML
 
 extension NeuronKit {
 
@@ -49,6 +51,10 @@ extension NeuronKit {
         public let score: RecallScoreVector
         /// The candidate's UDC lattice code (`""` when unanchored).
         public let udcCode: String
+        /// The candidate's Wikidata Q-ID (`""` when the drawer carries none).
+        /// The second half of the §8.3 lattice anchor — the `lattice` signal
+        /// measures Q-ID graph distance over the pinned QIDClosure edges.
+        public let qid: String
         /// The candidate's optional UDC facet expression.
         public let udcFacets: String?
         /// The candidate's 0-based rank in the coarse-grab pool. The
@@ -62,6 +68,11 @@ extension NeuronKit {
         /// not `eventTime` — event-time recency is a relative (pool-wide)
         /// comparison and is not used as a per-candidate signal term.
         public let eventTime: Date?
+        /// The drawer's filed-at instant (when it was written). Paired with
+        /// `eventTime` so date-seeking recall can distinguish REAL-dated
+        /// memories (eventTime != filedAt: a two-clock backfilled event) from
+        /// streaming captures (identical clocks). nil when unhydrated.
+        public let filedAt: Date?
         /// Whether the candidate is in a currently-believed state (drawer state
         /// Cluster A: active/pending/contested/accepted) versus a superseded or
         /// terminal one. Read BODY-FREE from the drawer's adjective state
@@ -83,8 +94,10 @@ extension NeuronKit {
         /// Memberwise initializer.
         public init(
             id: String, content: String, room: String,
-            score: RecallScoreVector, udcCode: String, udcFacets: String?,
-            coarseRank: Int, eventTime: Date? = nil, isCurrentlyBelieved: Bool = true,
+            score: RecallScoreVector, udcCode: String, qid: String = "",
+            udcFacets: String?,
+            coarseRank: Int, eventTime: Date? = nil, filedAt: Date? = nil,
+            isCurrentlyBelieved: Bool = true,
             precisionScore: Double = 0
         ) {
             self.id = id
@@ -92,9 +105,11 @@ extension NeuronKit {
             self.room = room
             self.score = score
             self.udcCode = udcCode
+            self.qid = qid
             self.udcFacets = udcFacets
             self.coarseRank = coarseRank
             self.eventTime = eventTime
+            self.filedAt = filedAt
             self.isCurrentlyBelieved = isCurrentlyBelieved
             self.precisionScore = precisionScore
         }
@@ -114,9 +129,11 @@ extension NeuronKit {
                 room: hit.drawer?.parentNodeId ?? "",
                 score: hit.score,
                 udcCode: hit.drawer?.udcCode ?? "",
+                qid: hit.drawer?.wikidataQID ?? "",
                 udcFacets: hit.drawer?.udcFacets,
                 coarseRank: coarseRank,
                 eventTime: hit.drawer?.eventTime,
+                filedAt: hit.drawer?.filedAt,
                 isCurrentlyBelieved: hit.drawer?.state.isClusterA ?? true)
         }
     }
@@ -129,11 +146,15 @@ extension NeuronKit {
         public let text: String
         /// The query's UDC lattice code, or `""` when the query is unanchored.
         public let udcCode: String
+        /// The query's Wikidata Q-ID, or `""` when the query carries none.
+        /// Together with `udcCode` this is the query's §8.3 lattice anchor.
+        public let qid: String
 
-        /// Build a query context. `udcCode` defaults to unanchored.
-        public init(text: String, udcCode: String = "") {
+        /// Build a query context. `udcCode`/`qid` default to unanchored.
+        public init(text: String, udcCode: String = "", qid: String = "") {
             self.text = text
             self.udcCode = udcCode
+            self.qid = qid
         }
     }
 
@@ -153,8 +174,10 @@ extension NeuronKit {
         case hamming
         /// Matrix co-occurrence signal carried from GLK (`score.coOccurrence`).
         case matrix
-        /// Lattice proximity: how close the candidate's UDC code is to the
-        /// query's UDC region. Neutral (0.5) when the query is unanchored.
+        /// Lattice anchor similarity per cookbook §8.3 (`1 − LatticeDistance`):
+        /// αU·UDC-tree distance + αQ·Wikidata graph distance over the pinned
+        /// QIDClosure edges (W2.5 Track S activation). Neutral (0.5) when the
+        /// query is unanchored (no UDC code and no Q-ID).
         case lattice
         /// The raw BM25 lane score, squashed into [0, 1].
         case bm25
@@ -259,7 +282,9 @@ extension NeuronKit {
             // Co-occurrence is already a [0, 1] lane contribution; clamp for safety.
             return clamp01(Double(candidate.score.coOccurrence))
         case .lattice:
-            return latticeProximity(queryCode: query.udcCode, candidateCode: candidate.udcCode)
+            return latticeAnchorSimilarity(
+                queryUDC: query.udcCode, queryQID: query.qid,
+                candidateUDC: candidate.udcCode, candidateQID: candidate.qid)
         case .bm25:
             // BM25 is an unbounded positive score; squash monotonically into
             // [0, 1) with x/(1+x) so larger raw scores rank higher without a
@@ -309,26 +334,44 @@ extension NeuronKit {
     }
 
     /// Lattice proximity of a candidate UDC code to the query's UDC region, in
-    /// [0, 1]. Deterministic, table-free: the score is the length of the shared
-    /// leading prefix (in UDC notation, a longer shared prefix = a closer region)
-    /// over the longer of the two codes. Exact match → 1.0; no shared prefix →
-    /// 0.0. When the QUERY carries no anchor the signal is NEUTRAL (0.5) so an
-    /// unanchored query neither rewards nor punishes on lattice; when the query
-    /// is anchored but the CANDIDATE is not, the candidate scores 0 (it is
-    /// nowhere near the query's region).
-    static func latticeProximity(queryCode: String, candidateCode: String) -> Double {
-        if queryCode.isEmpty { return 0.5 }            // unanchored query → neutral
-        if candidateCode.isEmpty { return 0 }          // anchored query, unanchored candidate → far
-        if queryCode == candidateCode { return 1.0 }
-        let q = Array(queryCode)
-        let c = Array(candidateCode)
-        var shared = 0
-        let bound = min(q.count, c.count)
-        while shared < bound && q[shared] == c[shared] { shared += 1 }
-        let longer = max(q.count, c.count)
-        guard longer > 0 else { return 0 }
-        return Double(shared) / Double(longer)
+    /// Lattice anchor similarity in [0, 1]: `1 − LatticeDistance` per cookbook
+    /// §8.3 (W2.5 Track S activation — the designed anchor distance replaces
+    /// the earlier prefix-share approximation). The distance is
+    /// αU·UDC-tree-distance + αQ·Wikidata-graph-distance with the reference
+    /// alphas (0.5/0.5); the Wikidata half runs a depth-4 BFS over the pinned
+    /// QIDClosure P31/P279 edges (vendored, offline — deterministic and
+    /// byte-identical across ports). §8.3 semantics that differ from a naive
+    /// prefix measure, on purpose:
+    ///   - a missing Q-ID on either side = maximally far ON THAT AXIS (null
+    ///     evidence never reads as closeness), so identical UDC codes without
+    ///     Q-IDs score 0.5, not 1.0;
+    ///   - the QUERY carrying no anchor at all (no UDC code AND no Q-ID) is
+    ///     NEUTRAL (0.5) so unanchored queries neither reward nor punish.
+    static func latticeAnchorSimilarity(
+        queryUDC: String, queryQID: String,
+        candidateUDC: String, candidateQID: String
+    ) -> Double {
+        if queryUDC.isEmpty && queryQID.isEmpty { return 0.5 }  // unanchored query → neutral
+        let distance = LatticeDistance.distance(
+            LatticeAnchorStr(udc: queryUDC, qid: QIDClosure.qidInt(queryQID)),
+            LatticeAnchorStr(udc: candidateUDC, qid: QIDClosure.qidInt(candidateQID)),
+            provider: qidClosureAdjacency)
+        return clamp01(1.0 - distance)
     }
+
+    /// The QIDClosure-backed adjacency for §8.3's Wikidata graph distance:
+    /// direct P31/P279 neighbors in both directions over the pinned edge
+    /// artifact. Numeric Q-IDs at the SubstrateML boundary map to the
+    /// closure's "Q<n>" string form here.
+    struct QIDClosureAdjacency: WikidataAdjacencyProvider {
+        func neighbors(of qid: UInt64) -> Set<UInt64> {
+            Set(QIDClosure.neighbors(of: "Q\(qid)").map(QIDClosure.qidInt))
+        }
+    }
+
+    /// Shared adjacency instance (stateless; the closure artifact is a
+    /// process-global load inside LatticeLib).
+    static let qidClosureAdjacency = QIDClosureAdjacency()
 
     /// Monotonic squash of a non-negative raw score into [0, 1): `x / (1 + x)`.
     /// Negative inputs clamp to 0. Used for BM25, whose raw magnitude is

@@ -104,6 +104,62 @@ public struct GLKRecallResult: Sendable {
     /// stream for per-estate health dashboards.
     public let degradedStages: [String]
 
+    /// Per-lane 1-based rank of every candidate the active lane(s) surfaced,
+    /// keyed by drawer id, then by lane key ("locus", "bm25", "hamming",
+    /// "dense" — `RecallTraceItem.laneRankOrder`). Rank is the candidate's
+    /// position in that lane's final ranked candidate list BEFORE fusion.
+    /// An id absent from a lane's list has no entry under that lane key.
+    ///
+    /// Consumed by the director's external-origin trace write (W2.5 Track
+    /// R(a)): the surfaced hits' entries are packed into
+    /// `recall_trace.laneRanks` so the optimizer can attribute a used
+    /// trace to the lane(s) that found it without re-running the query.
+    /// Empty for lanes that collect no per-lane candidates.
+    public let laneRanks: [String: [String: Int]]
+
+    /// The §8.3 lattice anchor derived from `request.queryText` by
+    /// `QueryLatticeAnchor.derive(from:)` inside the Recall Director's
+    /// query-sketch compiler (M4: single-derivation point).
+    ///
+    /// Non-nil when `queryText` was non-blank AND the derivation produced
+    /// a non-empty anchor (a recognised FDC code or Wikidata Q-ID). nil when
+    /// `queryText` is nil, blank, or unanchorable.
+    ///
+    /// This is the canonical read point for the query's lattice anchor.
+    /// Callers (CognitionKit's PreciseRecall and TemporalRecall) MUST read
+    /// it here rather than calling `QueryLatticeAnchor.derive(from:)` on the
+    /// original query text — the doctrine is one seam, never parallel paths
+    /// to the same leaf.
+    ///
+    /// Not populated by the `locusOnly` and `nodeTreeNative` lanes (nil). The
+    /// corpus, hybrid, and unionBest lanes always populate it when a non-blank
+    /// query text was present. Passthrough constructions (anomalous-filter,
+    /// trace-failure) carry it through unchanged.
+    public let queryLatticeAnchor: QueryLatticeAnchor.Anchor?
+
     /// Convenience accessor — the hydrated `Drawer` for each hit that has one.
     public var drawers: [LocusKit.Drawer] { hits.compactMap(\.drawer) }
+
+    /// Memberwise initializer. All fields are required; callers above the GLK
+    /// layer (e.g. the AriaMcpKit packager wiring path) use this to construct
+    /// a synthetic result without going through the Recall Director.
+    public init(
+        request: GLKRecallRequest,
+        plan: RecallPlan,
+        unionProfile: RecallUnionProfile?,
+        hits: [RecallHit],
+        denseLaneStatus: String?,
+        degradedStages: [String],
+        laneRanks: [String: [String: Int]],
+        queryLatticeAnchor: QueryLatticeAnchor.Anchor?
+    ) {
+        self.request = request
+        self.plan = plan
+        self.unionProfile = unionProfile
+        self.hits = hits
+        self.denseLaneStatus = denseLaneStatus
+        self.degradedStages = degradedStages
+        self.laneRanks = laneRanks
+        self.queryLatticeAnchor = queryLatticeAnchor
+    }
 }

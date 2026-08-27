@@ -77,7 +77,7 @@ public enum LaunchAgent {
     ///     DISABLED-install variant (KONG-4): registered, never auto-started.
     ///   - keepAlive: launchd `KeepAlive`. Defaults true; the bundle plist
     ///     passes false so a manual start of the not-yet-activated resident
-    ///     mode cannot make launchd thrash on its honest refusal exit.
+    ///     mode cannot make launchd thrash on its refusal exit.
     /// - Returns: the complete plist XML document.
     public static func makePlist(
         label: String,
@@ -397,7 +397,7 @@ public enum LaunchAgent {
         return UninstallReport(daemonConfiguration: configStatus, estateData: estateStatus)
     }
 
-    // MARK: - MACD-2c2 — honest status vocabulary (P-c2-10)
+    // MARK: - MACD-2c2 — observed status vocabulary (P-c2-10)
 
     /// What the status surface observed about the bundle registration.
     public enum DaemonRegistrationObservation: String, Sendable, Equatable {
@@ -416,7 +416,7 @@ public enum LaunchAgent {
         case answering
     }
 
-    /// The one honest status line for the daemon provider (P-c2-10).
+    /// The one observed status line for the daemon provider (P-c2-10).
     ///
     /// Registration, PID, or an answering port is NEVER reported as a
     /// running/ready server. Readiness comes exclusively from the provider's
@@ -424,7 +424,7 @@ public enum LaunchAgent {
     /// encoding the signed provider printed) — passed through VERBATIM so
     /// this surface owns no second copy of the arbiter vocabulary
     /// ("parallel copies fail").
-    public static func honestServerStatus(
+    public static func observedServerStatus(
         registration: DaemonRegistrationObservation,
         port: DaemonPortObservation,
         providerReportedState: String?
@@ -445,19 +445,19 @@ public enum LaunchAgent {
     }
 
     /// Convert an `OwnershipProbeOutcome` into the `providerReportedState`
-    /// string for `honestServerStatus` (C5 mandate, P-c2-10).
+    /// string for `observedServerStatus` (C5 mandate, P-c2-10).
     ///
     /// This is the SINGLE authoritative format point for the probe result →
     /// status-vocabulary mapping.  `StatusCommand` must not hold a second
     /// copy of this mapping ("parallel copies fail").
     ///
-    /// `.absent` returns `nil` so `honestServerStatus` falls back to the
+    /// `.absent` returns `nil` so `observedServerStatus` falls back to the
     /// registration/port observation — there is no provider state to report
     /// when no authenticated owner was found.
     ///
     /// The outcome strings are the provider's own wire vocabulary (decoded
     /// from the `owner-status` JSON); this function formats them into the
-    /// one-line summary `honestServerStatus` prepends with `"provider: "`.
+    /// one-line summary `observedServerStatus` prepends with `"provider: "`.
     public static func authenticatedBundledOwner(
         outcome: OwnershipProbeOutcome
     ) -> String? {
@@ -590,6 +590,43 @@ public enum LaunchAgent {
             return .launchctlFailed("daemon bundle plist readback mismatch at \(plistURL.path)")
         }
         return .installedDisabled(plistPath: plistURL.path)
+    }
+
+    /// Write, read back, bootstrap, and start the production daemon-provider
+    /// bundle. The write-only helper remains separately testable; this method
+    /// is the physical installation boundary used by the shipping CLI.
+    public static func activateDaemonBundleEnabled(homeDirectory: URL) -> Status {
+        activateDaemonBundleEnabled(
+            homeDirectory: homeDirectory,
+            bootstrap: { plistURL, label in
+                bootstrapJob(plistURL: plistURL, label: label)
+            }
+        )
+    }
+
+    /// Injectable form used to prove the shipping activation path without
+    /// mutating the caller's live launchd domain in unit tests.
+    static func activateDaemonBundleEnabled(
+        homeDirectory: URL,
+        bootstrap: (URL, String) -> (ok: Bool, detail: String)
+    ) -> Status {
+        let executableURL = DaemonBundle.bundleExecutableURL(homeDirectory: homeDirectory)
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            return .binaryNotFound
+        }
+        switch installDaemonBundleEnabled(homeDirectory: homeDirectory) {
+        case let .installed(plistPath, dashboardURL):
+            let plistURL = URL(fileURLWithPath: plistPath)
+            let result = bootstrap(plistURL, DaemonBundle.launchAgentLabel)
+            guard result.ok else { return .launchctlFailed(result.detail) }
+            return .installed(plistPath: plistPath, dashboardURL: dashboardURL)
+        case let .launchctlFailed(message):
+            return .launchctlFailed(message)
+        case .binaryNotFound:
+            return .binaryNotFound
+        case .installedDisabled:
+            return .launchctlFailed("enabled daemon bundle installation returned disabled status")
+        }
     }
 
     /// bootout → bootstrap (legacy load fallback) → kickstart for a written
@@ -745,6 +782,22 @@ public enum LaunchAgent {
         let fm = FileManager.default
         let plistURL = MootPaths.daemonPlistURL(homeDirectory: homeDirectory)
         let target = "gui/\(getuid())/\(MootPaths.daemonLabel)"
+
+        _ = runLaunchctl(["bootout", target])
+
+        if (try? fm.destinationOfSymbolicLink(atPath: plistURL.path)) != nil
+            || fm.fileExists(atPath: plistURL.path) {
+            try? fm.removeItem(at: plistURL)
+        }
+    }
+
+    /// Stop and remove the bundle-form Community daemon registration. The
+    /// bundle itself is removed later with the placed binary tree; estate and
+    /// Keychain data are deliberately untouched.
+    public static func uninstallDaemonBundle(homeDirectory: URL) {
+        let fm = FileManager.default
+        let plistURL = DaemonBundle.launchAgentPlistURL(homeDirectory: homeDirectory)
+        let target = "gui/\(getuid())/\(DaemonBundle.launchAgentLabel)"
 
         _ = runLaunchctl(["bootout", target])
 

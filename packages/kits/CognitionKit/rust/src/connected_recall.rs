@@ -89,6 +89,13 @@ pub fn run_connected_recall(
         trace_limit: Some(safe_limit),
         origin: genius_locus_kit::recall::RecallOrigin::Internal,
         recall_shape: None,
+        // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+        // written, so door/composition stay None.
+        door: None,
+        composition: None,
+        frontier_k: None,
+        // §11.18: internal recall — no anomalous-flag filter applied.
+        anomalous_filter: None,
     };
     let anchor = coord
         .recall_scored(handle, request, now)

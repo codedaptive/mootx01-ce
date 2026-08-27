@@ -226,7 +226,84 @@ pub fn run(
             // coordinator inside `register_default_standing_signals`, so no
             // throwaway store is fabricated when none is registered. The model
             // id matches the Swift resident default ("minilm-v6").
-            match governor.register_default_standing_signals("minilm-v6", SystemTime::now()) {
+            //
+            // Live hunt closure (signal 10 — ContradictionScoutSignal): mirrors
+            // Swift resident's `huntCycle: { now in kit.huntContradictions(...) }`.
+            // Fires one incremental hunt pass over the last four hourly windows so
+            // drawers filed between fires are never missed. `filed_after` is
+            // DEFAULT_CADENCE_SECONDS * 4 ms ago. The hunt persists proposed
+            // contradicts tunnels itself; the closure returns counts only
+            // (single-write invariant, same as dreamingCycle).
+            let hunt_coord = Arc::clone(&coord_for_hnsw);
+            let hunt_handle = handle_for_hnsw;
+            let hunt_cycle: Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync> =
+                Arc::new(move || {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    // Four-cadence lookback: matches Swift resident's
+                    // `filedAfter: now.addingTimeInterval(-ContradictionScoutSignal.defaultCadenceSeconds * 4)`.
+                    // ContradictionScoutSignal::DEFAULT_CADENCE_SECONDS = 3 600 (1 hour).
+                    let filed_after = now_ms.saturating_sub(
+                        (genius_locus_kit::brain::signals::ContradictionScoutSignal::DEFAULT_CADENCE_SECONDS
+                            * 4
+                            * 1_000) as i64,
+                    );
+                    match hunt_coord.lock() {
+                        Ok(coord) => coord
+                            .hunt_contradictions(
+                                &hunt_handle,
+                                "minilm-v6",
+                                50,  // probe_limit: DEFAULT_PROBE_LIMIT from VectorSimilaritySignal
+                                Some(filed_after),
+                                64,  // proximity_threshold: architecture-spec Hamming cap
+                                now_ms,
+                            )
+                            .map(|report| (report.proposed.len(), report.borderline.len()))
+                            .map_err(|e| format!("{e:?}")),
+                        Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                    }
+                });
+            // Live anomaly closure (signal 12 — AnomalySweepSignal, P3a):
+            // mirrors Swift resident's `anomalyCycle: { now in
+            // kit.anomalyFlagSweep(handle:now:) }`. Uses the architecture-spec
+            // default threshold (ANOMALY_SWEEP_DEFAULT_THRESHOLD = 2.0),
+            // matching Swift's default-threshold parameter path. Returns the
+            // count of drawers whose bit 26 (is_anomalous) changed state.
+            let anomaly_coord = Arc::clone(&coord_for_hnsw);
+            let anomaly_handle = handle_for_hnsw;
+            let anomaly_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
+                Arc::new(move || {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    match anomaly_coord.lock() {
+                        Ok(coord) => coord
+                            .anomaly_flag_sweep(
+                                &anomaly_handle,
+                                genius_locus_kit::brain::anomaly_flag_sweep::ANOMALY_SWEEP_DEFAULT_THRESHOLD,
+                                now_ms,
+                            )
+                            .map(|count| count as i64)
+                            .map_err(|e| format!("{e:?}")),
+                        Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                    }
+                });
+            // Adornment cycle (SPEC_ADORNMENT §4): no-op (None) in the Rust
+            // resident — the Rust resident does not run AdornmentPass
+            // directly (the pass calls the Swift LocusKit estate actor). The
+            // signal is still registered so the count stays at 13 on both
+            // ports; a real Rust adornment pass would be wired here when the
+            // Rust resident is extended with a DrawerStore handle.
+            match governor.register_default_standing_signals(
+                "minilm-v6",
+                SystemTime::now(),
+                Some(hunt_cycle),
+                Some(anomaly_cycle),
+                None, // adornment_cycle: no live Rust pass in this resident
+            ) {
                 Ok(registered) => {
                     eprintln!(
                         "AriaResident standing signals registered ({} defaults)",

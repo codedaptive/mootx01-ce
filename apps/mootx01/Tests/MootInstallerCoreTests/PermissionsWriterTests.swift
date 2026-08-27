@@ -134,7 +134,9 @@ struct PermissionsWriterTests {
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
             "moot_palace_import",
-            "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recall_vague",
+            "moot_read_journal", "moot_recall_connected", "moot_recall_distilled",
+            "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal",
+            "moot_recall_vague", "moot_recall_walk",
             "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact", "moot_timing_report",
             "moot_review_tunnel", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
@@ -153,7 +155,10 @@ struct PermissionsWriterTests {
         // +1 (MXE-JI-1): moot_json_import — seed-file JSON lane, Ask tier.
         // +1 (C3/A6 benchmark reset): moot_timing_report — audit-derived
         // timing metrics, pure read, Allow tier.
-        #expect(realTools.count == 73, "pinned tool inventory drifted from the real surface count")
+        // +3 (ADORN-STORE-02 pin repair): moot_recall_connected (1.33.0),
+        // moot_recall_temporal (1.39.0), moot_recall_walk (1.47.0) — real
+        // shipped recall recipes the pin had missed; all Allow-tier reads.
+        #expect(realTools.count == 76, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

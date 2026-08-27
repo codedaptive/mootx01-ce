@@ -102,7 +102,7 @@ use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 ///
 /// Redaction (M0 §8, ceiling = MAX endpoint sensitivity, no grant
 /// plumbing in v0.1 — same fixed posture as the lexical hunter):
-/// ceiling ≤ elevated (raw 16) → full block incl. dense rows;
+/// ceiling ≤ elevated (raw 16) → full block incl. S2 candidate rows;
 /// restricted (raw 32) → one line naming only the coordinate DIGEST;
 /// secret (raw 48) → counted in `proven: N`, no block at all.
 ///
@@ -139,7 +139,7 @@ pub(crate) fn conflict_projection_section(
             .cloned()
             .collect()
     };
-    let dense_by_id = dense_rows_by_id(coord, handle, &visible_ids);
+    let dense_by_id = s2_rows_by_id(coord, handle, &visible_ids);
 
     let mut lines: Vec<String> = vec![
         format!("proven: {}", sweep.counts.proven_contradiction),
@@ -220,13 +220,16 @@ pub(crate) fn conflict_projection_section(
     lines
 }
 
-/// Structured-tier by-id dense-row fetch behind the default-gated
-/// RecallFrame — the ONE drawer-content path every contradiction
-/// renderer uses (the typed projection section above AND the tiered
-/// digest below share it, so there is no parallel rendering path to the
-/// same data). Gated rows are simply ABSENT from the map; callers fall
-/// through to the opaque row. Mirrors Swift `RecipeTools.denseRowsByID`.
-fn dense_rows_by_id(
+/// Structured-tier by-id S2-row fetch behind the default-gated RecallFrame —
+/// the ONE drawer-content path every contradiction renderer uses. Gated rows
+/// are ABSENT from the map; callers fall through to the unhydrated-row fallback.
+/// Twin of Swift `RecipeTools.s2RowsByID`. Replaces the legacy `denseRowsByID`.
+///
+/// THE EMPTY `RecallFrame` FILTER CHAIN IS LOAD-BEARING. `BitmapEvaluator::insert_defaults`
+/// inserts `SensitivityAtMost(Elevated)` into any chain carrying no sensitivity filter,
+/// so restricted/secret drawers never reach the renderer. Do NOT replace with
+/// a raw `store.get_drawer` loop.
+pub(crate) fn s2_rows_by_id(
     coord: &genius_locus_kit::coordinator::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
     visible_ids: &[String],
@@ -244,7 +247,9 @@ fn dense_rows_by_id(
                     f.admissible
                         .into_iter()
                         .map(|d| {
-                            let row = crate::dense_row::render(&d);
+                            let row = crate::result_composer::render_s2_row(
+                                &crate::result_composer::candidate_from_drawer(&d),
+                            );
                             (d.id.clone(), row)
                         })
                         .collect()
@@ -273,7 +278,7 @@ pub(crate) const TIER3_HEADER: &str = "TIER 3 — DIVERGENCE";
 /// finding is counted by the lane counts only (no block), a restricted
 /// finding renders ONLY the coordinate-digest line, and a finding at or
 /// below elevated renders result essentials plus the SAME gated dense
-/// rows (`dense_rows_by_id`). The tiered verb already ceiling-filters
+/// rows (`s2_rows_by_id`). The tiered verb already ceiling-filters
 /// findings above elevated out of its tier-1 section
 /// (`tier1_ceiling_filtered`), so the secret/restricted arms here are
 /// defense in depth, not the primary gate.
@@ -290,7 +295,7 @@ pub(crate) const TIER3_HEADER: &str = "TIER 3 — DIVERGENCE";
 /// Mirrors Swift `RecipeTools.tieredSectionLines`.
 fn tiered_section_lines(
     report: &genius_locus_kit::brain::tiered_contradiction_search::TieredContradictionReport,
-    dense_rows: &BTreeMap<String, String>,
+    s2_rows: &BTreeMap<String, String>,
     lane_seconds: Option<&[(&str, f64)]>,
 ) -> Vec<String> {
     use genius_locus_kit::brain::tiered_contradiction_search::{
@@ -352,7 +357,7 @@ fn tiered_section_lines(
                     for id in [&finding.drawer_a, &finding.drawer_b] {
                         lines.push(format!(
                             "    {}",
-                            dense_rows
+                            s2_rows
                                 .get(id)
                                 .cloned()
                                 .unwrap_or_else(|| format!("{id} · - · - · - · -"))
@@ -387,7 +392,7 @@ fn tiered_section_lines(
     lines
 }
 
-/// Hydrate the gated dense rows for a tiered report's fully visible
+/// Hydrate the gated S2 candidate rows for a tiered report's fully visible
 /// tier-1 findings and render its sections. Mirrors Swift
 /// `RecipeTools.renderTieredSections`.
 fn render_tiered_sections(
@@ -408,8 +413,8 @@ fn render_tiered_sections(
             .filter(|id| seen.insert(id.clone()))
             .collect()
     };
-    let dense_rows = dense_rows_by_id(coord, handle, &visible_ids);
-    tiered_section_lines(report, &dense_rows, lane_seconds)
+    let s2_rows = s2_rows_by_id(coord, handle, &visible_ids);
+    tiered_section_lines(report, &s2_rows, lane_seconds)
 }
 
 /// Recipe tool names — mirrors Swift `RecipeTools` static constants.
@@ -421,6 +426,7 @@ const RUN_MIGRATION: &str = "moot_run_migration";
 const CONFIRM_MIGRATION: &str = "moot_confirm_migration";
 /// Precise-recall tool — mirrors Swift `RecipeTools.preciseRecallToolName`.
 const RECALL_PRECISE: &str = "moot_recall_precise";
+const RECALL_TEMPORAL: &str = "moot_recall_temporal";
 /// Connected recall: multi-hop retrieval by graph diffusion (scored anchor
 /// seeds a walk-with-restart over tunnels ∪ pending associations). The
 /// EXPENSIVE recall path — callers escalate here for bridge questions.
@@ -445,6 +451,11 @@ const RECOLLECT: &str = "moot_recollect";
 /// On-demand contradiction-hunt sweep — mirrors Swift
 /// `RecipeTools.huntContradictionsToolName`.
 const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
+/// Escalation-ladder recall (D10) — mirrors Swift
+/// `RecipeTools.walkRecallToolName`. Stage 1 (session_hybrid, cheap) stops
+/// when confident (topGap ≥ 0.25); Stage 2 (hamming+text) fires only when
+/// Stage 1 is insufficient.
+const RECALL_WALK: &str = "moot_recall_walk";
 
 /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
 ///
@@ -470,15 +481,6 @@ const DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE: usize = 10_000;
 // callers cannot observe which server port handled the request.
 // ---------------------------------------------------------------------------
 
-/// Notice returned when moot_recall_distilled is called without ack: "recall_distilled/v2".
-/// Byte-identical to Swift `RecipeTools.recallDistilledContractNotice`.
-const RECALL_DISTILLED_CONTRACT_NOTICE: &str = concat!(
-    "CONTRACT CHANGE NOTICE: you called moot_recall_distilled. Its behavior changed: ",
-    "v2 returns normal exact-search results hydrated with distilled representations; ",
-    "it no longer queries a separate distilled tier; run moot_distill first if rows are undistilled. ",
-    r#"If the new behavior is what you want, reissue with ack: "recall_distilled/v2"."#,
-);
-
 /// Notice returned for every call to the removed moot_recollect tool.
 /// Byte-identical to Swift `RecipeTools.recollectRemovedNotice`.
 const RECOLLECT_REMOVED_NOTICE: &str = concat!(
@@ -499,6 +501,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RUN_MIGRATION
             | CONFIRM_MIGRATION
             | RECALL_PRECISE
+            | RECALL_TEMPORAL
             | RECALL_CONNECTED
             | RECALL_VAGUE
             | RECALL_SHAPED
@@ -507,6 +510,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECALL_DISTILLED
             | RECOLLECT
             | HUNT_CONTRADICTIONS
+            | RECALL_WALK
     )
 }
 
@@ -526,14 +530,6 @@ pub fn dispatch(
         return Ok(text_result(RECOLLECT_REMOVED_NOTICE));
     }
 
-    // moot_recall_distilled — ACK-gated (v2 contract). Normal exact-search
-    // geometry + distilled hydration; no separate distilled tier.
-    if name == RECALL_DISTILLED
-        && args.get("ack").and_then(|v| v.as_str()) != Some("recall_distilled/v2")
-    {
-        return Ok(text_result(RECALL_DISTILLED_CONTRACT_NOTICE));
-    }
-
     match name {
         LIST_LENSES => run_list_recipes(args),
         LIST_RECIPES_CATALOG => run_list_recipes_catalog(args),
@@ -541,6 +537,7 @@ pub fn dispatch(
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
+        RECALL_TEMPORAL => run_temporal_recall_tool(args, registry),
         RECALL_CONNECTED => run_connected_recall_tool(args, registry),
         RECALL_VAGUE => run_vague_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
@@ -550,6 +547,7 @@ pub fn dispatch(
         // was present (ACK gate above).
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
         HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
+        RECALL_WALK => run_walk_recall_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -755,6 +753,14 @@ fn run_grounded_synthesis_tool(
         .map(|d| d.parent_node_id.clone())
         .collect();
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &all_node_ids);
+    // Clone the frame before it moves into GroundedSynthesis: the packager
+    // seam below needs the same frame for its own recall request.
+    // The packager/candidate pool needs content-bearing drawers: the
+    // candidate section's first-sentence column (§ 11.4) is body-derived,
+    // and the synthesis recipe reads bodies anyway — Full hydration here
+    // costs nothing new and keeps the rows informative.
+    let mut frame_for_packager = frame.clone();
+    frame_for_packager.hydration_level = HydrationLevel::Full;
     let out = run_grounded_synthesis_with_provenance_gate(
         &coord,
         &estate.handle,
@@ -768,22 +774,128 @@ fn run_grounded_synthesis_tool(
     )
     .map_err(error_from_recipe)?;
 
-    let doc = &out.context;
-    // The cue is part of the document's identity: a grounded synthesis and an
-    // estate digest are different measurements, so the response names which
-    // one it is (line appears only when a query was given). Twin of Swift.
-    let query_line = query.map(|q| format!("query: {q}\n")).unwrap_or_default();
-    let body = format!(
-        "grounded_synthesis: {} drawer(s)\n{}summary: {}\npatterns: {}\nsuccessRate: {:.1}\nrecommendations:\n{}\nkeyInsights:\n{}",
-        out.drawer_count,
-        query_line,
-        doc.summary,
-        doc.patterns.join(", "),
-        doc.success_rate,
-        doc.recommendations.iter().map(|r| format!("  - {r}")).collect::<Vec<_>>().join("\n"),
-        doc.key_insights.iter().map(|i| format!("  - {i}")).collect::<Vec<_>>().join("\n"),
-    );
-    Ok(text_result(&body))
+    // One-seam guarantee (PACKAGER mission): moot_synthesize routes through the
+    // same GLKResultsPackager path as moot_memory_search. A real scored recall
+    // provides genuine gate signals (m1/m2/m3/m4) rather than an empty-hit stub.
+    // The packager's answer projection is consumed: the answer block's text
+    // (== out.context.summary when confidence is not WEAK, passed as
+    // composed_answer) drives the summary line. When confidence is WEAK the
+    // answer block is absent and the summary falls back to out.context.summary
+    // directly — same text, same output shape. Mirrors Swift RecipeTools.
+    let synth_recall = {
+        use genius_locus_kit::recall::{
+            GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
+            RecallFallbackPolicy, RecallOrigin,
+        };
+        let synth_request = GLKRecallRequest::new(
+            frame_for_packager,
+            GLKRecallMode::UnionBest,
+            GLKRecallScoring::MatrixAware,
+            user_limit,
+            RecallFallbackPolicy::AllowDegraded,
+            RecallOrigin::Internal,
+        )
+        .with_query_text(query.as_deref().unwrap_or(""));
+        coord.recall_scored(&estate.handle, synth_request, now)
+    };
+    let synthesis_text = {
+        match &synth_recall {
+            Ok(synth_result) => {
+                let thresholds = coord
+                    .provisioned_recall_tuning(&estate.handle)
+                    .unwrap_or_default()
+                    .packager_thresholds();
+                let packaged = genius_locus_kit::GLKResultsPackager::new().package(
+                    &synth_result,
+                    genius_locus_kit::PackagerAnswerMode::Always,
+                    Some(&out.context.summary),
+                    thresholds,
+                );
+                // Consume the packager's answer projection: gate-verified synthesis text.
+                // Falls back to out.context.summary when confidence is WEAK (no answer block).
+                packaged
+                    .answer_block
+                    .as_ref()
+                    .filter(|b| !b.answer.is_empty())
+                    .map(|b| b.answer.clone())
+                    .unwrap_or_else(|| out.context.summary.clone())
+            }
+            // Recall failure: fall back to the GroundedSynthesis summary unchanged.
+            Err(_) => out.context.summary.clone(),
+        }
+    };
+
+    // Candidate section (ARIA_MCP_SPEC 2.0.0 § 11.4): the synthesized pool's
+    // rows in canonical S1 form. Scaffold fields (patterns / successRate /
+    // recommendations / keyInsights) are NOT part of the payload — the
+    // composed summary + candidate rows are the document. Twin of Swift.
+    // The candidate rows render the RECIPE'S ranked pool (out.ranked_ids),
+    // never the packager recall's hits: § 8.7 makes the two-lane ranking a
+    // payload guarantee, and the packager recall (a separate scored pass for
+    // the summary gate) can order differently — e.g. on an unsettled estate
+    // whose lexical index has not drained yet. The pool carries no per-row
+    // scores, so the score column renders `-`. Twin of Swift.
+    let mut candidate_rows: Vec<crate::result_composer::CandidateRowData> = Vec::new();
+    {
+        let id_refs: Vec<&str> = out.ranked_ids.iter().map(|s| s.as_str()).collect();
+        let pooled = coord
+            .get_drawers(&estate.handle, &id_refs)
+            .unwrap_or_default();
+        let by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            pooled.iter().map(|d| (d.id.as_str(), d)).collect();
+        // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2).
+        let adornment_map = coord
+            .estate_for(&estate.handle)
+            .ok()
+            .and_then(|e| e.active_adornments(&id_refs).ok())
+            .unwrap_or_default();
+        for id in &out.ranked_ids {
+            if let Some(d) = by_id.get(id.as_str()) {
+                // Synthesis pool-removal gate: the recipe already excluded
+                // provenance-restricted/secret rows; this backstop keeps the
+                // redaction boundary local to the render site. Gated rows are
+                // silently removed, never rendered redacted — the synthesize
+                // surface discloses no marker for gated rows.
+                use locus_kit::provenance::Sensitivity;
+                match d.sensitivity() {
+                    Sensitivity::Restricted | Sensitivity::Secret => continue,
+                    _ => {}
+                }
+                let mut row = crate::result_composer::candidate_from_drawer(d);
+                let mut entries: Vec<crate::result_composer::AdornmentEntry> = adornment_map
+                    .get(&d.id)
+                    .map(|v| v.iter().map(|sa| crate::result_composer::AdornmentEntry {
+                        minter_id: sa.minter_id.clone(),
+                        text: sa.text.clone(),
+                    }).collect())
+                    .unwrap_or_default();
+                // Ascending minter-ID order (caller's responsibility per the
+                // composer contract; the composer never re-sorts).
+                entries.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
+                row.active_adornments = entries;
+                candidate_rows.push(row);
+            }
+        }
+    }
+    // The cue line carries the NORMALIZED extracted terms (grounded form) and
+    // is absent for the whole-estate digest — the two measurements must be
+    // distinguishable from the text alone (spec 1.30.0 invariant, § 8.7).
+    let data = crate::result_composer::SynthesisData {
+        drawer_count: out.drawer_count,
+        cue_terms: if cue_terms.is_empty() { None } else { Some(cue_terms.clone()) },
+        summary: synthesis_text,
+        rows: candidate_rows,
+        control: crate::result_composer::ControlSignals::default(),
+    };
+    let composed = crate::result_composer::render_synthesis(&data);
+    match composed.structured {
+        Some(structured) => Ok(serde_json::json!({
+            "content": [{ "type": "text", "text": composed.text }],
+            "structuredContent": structured,
+            "isError": false
+        })),
+        None => Ok(text_result(&composed.text)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -791,7 +903,7 @@ fn run_grounded_synthesis_tool(
 // ---------------------------------------------------------------------------
 
 /// Run the PreciseRecall recipe and serialize its matches in the SAME
-/// plain-text shape `moot_memory_search` emits: a `found N memory(s)` header
+/// plain-text shape `moot_memory_search` emits: a `found N candidate memories, one per line` header
 /// line then one `id  [room]  preview` line per ranked match (120-char preview).
 /// Mirroring that shape keeps every mootText parser working unchanged.
 ///
@@ -805,9 +917,10 @@ fn run_grounded_synthesis_tool(
 /// `RecipeTools.runVagueRecall`: D12 bounds clamped at the boundary, vague
 /// summaries first with level tags, hydrated originals after, no-hits hint.
 /// moot_recall_connected — the ConnectedRecall recipe over MCP. Serializes
-/// matches in the SAME shape moot_memory_search emits (found-N header +
-/// dense rows) plus a trailing `connected: anchor/walk/both` provenance
-/// line. Twin of Swift `runConnectedRecall`.
+/// matches in the SAME shape moot_memory_search emits (canonical S1
+/// candidate rows, no tool-specific text line — ARIA_MCP_SPEC 2.0.0
+/// § 8.4; graph provenance travels as structured data). Twin of Swift
+/// `runConnectedRecall`.
 fn run_connected_recall_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -864,12 +977,12 @@ fn run_connected_recall_tool(
     let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
         gated_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
 
-    let mut lines = vec![format!("found {} memory(s)", matches.len())];
+    let mut lines = vec![if matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", matches.len()) }];
     let mut results: Vec<StructuredRow> = Vec::new();
     for m in matches.iter().take(50) {
         match by_id.get(m.id.as_str()) {
             Some(d) => {
-                lines.push(crate::dense_row::render(d));
+                lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
                 let room = node_names
                     .get(&m.room)
                     .map(|(_, room)| room.clone());
@@ -877,17 +990,14 @@ fn run_connected_recall_tool(
                     &m.id, room, Some(m.content.clone()), d));
             }
             None => {
-                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&m.id));
                 results.push(opaque_structured_row(&m.id));
             }
         }
     }
-    let anchor_count = matches.iter().filter(|m| m.source == "anchor").count();
-    let walk_count = matches.iter().filter(|m| m.source == "walk").count();
-    let both_count = matches.iter().filter(|m| m.source == "both").count();
-    lines.push(format!(
-        "connected: anchor={anchor_count} walk={walk_count} both={both_count}"
-    ));
+    // No text control line for connected recall (ARIA_MCP_SPEC 2.0.0
+    // § 8.4): graph provenance is per-result structured data, never a
+    // payload line — the text rows stay byte-identical to memory_search.
     Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
@@ -917,7 +1027,7 @@ fn run_vague_recall_tool(
         })?;
 
     // Dense-row reply (PR-03): both the vague hits and the hydrated
-    // originals travel as dense rows — the AI winnows on subjects and
+    // originals travel as canonical candidate rows — the AI winnows on subjects and
     // pinpoints via moot_memory_get depth:distilled/full. The vague hits
     // keep a [vague L<n>] tier marker. Mirrors Swift runVagueRecall.
     let mut lines: Vec<String> = vec![format!(
@@ -926,18 +1036,140 @@ fn run_vague_recall_tool(
     for hit in &out.vague_hits {
         lines.push(format!(
             "{}  [vague L{}]",
-            crate::dense_row::render(hit), hit.vague_level()));
+            crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(hit)), hit.vague_level()));
     }
     if !out.constituents.is_empty() {
         lines.push("originals:".to_string());
         for c in &out.constituents {
-            lines.push(crate::dense_row::render(c));
+            lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(c)));
         }
     }
     if out.vague_hits.is_empty() {
         lines.push("hint: no vague tier hits — the estate has no consolidated summaries matching this query. Normal recall (moot_memory_search / moot_recall_precise) covers current memories.".to_string());
     }
     Ok(text_result(&lines.join("\n")))
+}
+
+/// moot_recall_temporal — the query-date window recipe (twin of Swift
+/// RecipeTools.runTemporalRecall). Parses the query's absolute date (or takes
+/// an explicit from/to window), coarse-grabs a wide pool, applies the window
+/// (loose = boost, tight = filter), and replies in the house dense-row shape
+/// with a trailing `temporal:` narration line.
+fn run_temporal_recall_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use locus_kit::filter::Filter;
+    let estate = registry.resolve_direct(args)?;
+    let query = require_string(args, "query")?;
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
+    )?;
+    let pool = crate::dispatch::clamp_limit(
+        optional_integer(args, "pool")?,
+        "pool",
+        cognition_kit::TEMPORAL_DEFAULT_POOL,
+        crate::dispatch::LIMIT_HARD_CEILING,
+    )?;
+    let base_filter = decode_precise_filter(args)?;
+    let filter = match optional_string(args, "wing")? {
+        Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
+        None => base_filter,
+    };
+    let mode = match cognition_kit::TemporalWindowMode::parse(optional_string(args, "window")?) {
+        Ok(m) => m,
+        Err(e) => return Ok(error_result(&e)),
+    };
+    let from = optional_string(args, "from")?.map(str::to_string);
+    let to = optional_string(args, "to")?.map(str::to_string);
+    let grab = match cognition_kit::TemporalGrab::parse(optional_string(args, "grab")?) {
+        Ok(g) => g,
+        Err(e) => return Ok(error_result(&e)),
+    };
+
+    let now = crate::dispatch::wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        all_drawers.iter()
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
+    let outcome = match cognition_kit::run_temporal_recall(
+        &coord,
+        &estate.handle,
+        &query,
+        filter,
+        limit,
+        pool,
+        mode,
+        grab,
+        from.as_deref(),
+        to.as_deref(),
+        now,
+        &node_names,
+    ) {
+        Ok(o) => o,
+        // Caller misuse (tight without a window, malformed from/to) surfaces
+        // as a tool error with the exact reason, never an empty result.
+        Err(e) => return Ok(error_result(&format!("{e}"))),
+    };
+    let matches = outcome.matches;
+
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+    let mut lines = vec![if matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", matches.len()) }];
+    let mut results: Vec<StructuredRow> = Vec::new();
+    for m in matches.iter().take(50) {
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
+                results.push(structured_recall_row(
+                    &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
+            }
+            None => {
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
+    }
+    // The temporal narration line: window mode, source, and bounds.
+    if outcome.windows.is_empty() {
+        if outcome.window_source == "date-seeking" {
+            lines.push(format!(
+                "temporal: {} date-seeking — no date stated; real-dated memories \
+                 first, read the answer from each row's event_time",
+                outcome.mode.as_str()));
+        } else {
+            lines.push(format!(
+                "temporal: {} — no date stated or parsed; coarse order unchanged",
+                outcome.mode.as_str()));
+        }
+    } else {
+        let bounds: Vec<String> = outcome.windows.iter()
+            .map(|w| {
+                // char-boundary-safe date prefix: bounds are all-ASCII by
+                // explicit_bound's validation, but a byte-indexed slice on
+                // an unexpected value must degrade, never panic (codex
+                // finding 2026-08-26).
+                let day = |s: &str| s.get(0..10).unwrap_or(s).to_string();
+                format!("{}..{}", day(&w.start), day(&w.end))
+            })
+            .collect();
+        let pad = if outcome.applied_pad > 0 {
+            format!(" \u{00b1}{}d", outcome.applied_pad)
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "temporal: {} ({}, {}) window {}{}",
+            outcome.mode.as_str(), outcome.window_source, outcome.grab.as_str(),
+            bounds.join(", "), pad));
+    }
+    Ok(structured_text_result(&lines.join("\n"), &results))
 }
 
 fn run_precise_recall_tool(
@@ -1032,7 +1264,7 @@ fn run_precise_recall_tool(
         // outputSchema, so every success reply carries the typed twin,
         // including the deliberate zero-result shape.
         let lines = vec![
-            "found 0 memory(s)".to_string(),
+            "found 0 candidate memories, one per line".to_string(),
             crate::recall_discrimination::result_line(
                 crate::recall_discrimination::DiscriminationLevel::NotFound,
             )
@@ -1057,17 +1289,17 @@ fn run_precise_recall_tool(
     // as opaque in the structured block.
     let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
         all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
-    let mut lines = vec![format!("found {} memory(s)", matches.len())];
+    let mut lines = vec![if matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", matches.len()) }];
     let mut results: Vec<StructuredRow> = Vec::new();
     for m in matches.iter().take(50) {
         match by_id.get(m.id.as_str()) {
             Some(d) => {
-                lines.push(crate::dense_row::render(d));
+                lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
                 results.push(structured_recall_row(
                     &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
             }
             None => {
-                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&m.id));
                 results.push(opaque_structured_row(&m.id));
             }
         }
@@ -1203,6 +1435,15 @@ fn run_shaped_recall_tool(
         None => "balanced".to_string(),
     };
 
+    // Optional per-call candidate-pool depth override. Absent or null → None
+    // (engine default formula min(max(limit × 4, 64), 256), byte-identical to
+    // today's behaviour). Present but not an integer → clear error from
+    // optional_integer. The GLK engine clamps to [64, 256]; out-of-range
+    // values are silently clamped rather than rejected at this boundary.
+    // Mirrors Swift runShapedRecall `frontier_k` decode.
+    let frontier_k = optional_integer(args, "frontier_k")?
+        .map(|v| v as usize);
+
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
     // resolve parentNodeIds to room display names via the
@@ -1216,7 +1457,7 @@ fn run_shaped_recall_tool(
             .collect()
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now, &node_names)
+    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now, &node_names, frontier_k)
         .map_err(error_from_recipe)?;
 
     // Compute discrimination over the full ordered list before the display prefix.
@@ -1233,7 +1474,7 @@ fn run_shaped_recall_tool(
     let shown: Vec<_> = out.matches.iter()
         .filter(|m| anchor_id.as_deref().map(|a| m.id != a).unwrap_or(true))
         .collect();
-    let mut lines = vec![format!("found {} memory(s)", shown.len())];
+    let mut lines = vec![if shown.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", shown.len()) }];
     // Structured twin (MXE-SS): rows built in the SAME loop as the text
     // lines. m.content is PRE-redaction; structured_recall_row's provenance
     // switch decides whether it enters the structured block. An id the text
@@ -1242,12 +1483,12 @@ fn run_shaped_recall_tool(
     for m in shown.iter().take(50) {
         match by_id.get(m.id.as_str()) {
             Some(d) => {
-                lines.push(crate::dense_row::render(d));
+                lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
                 results.push(structured_recall_row(
                     &m.id, Some(m.room.clone()), Some(m.content.clone()), d));
             }
             None => {
-                lines.push(crate::dense_row::render_unhydrated(&m.id));
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&m.id));
                 results.push(opaque_structured_row(&m.id));
             }
         }
@@ -1674,6 +1915,15 @@ fn run_dream_tool(
                         "\nassociationsWritten: {} (probed: {}, deduplicated: {})",
                         sweep.written, sweep.probed, sweep.deduplicated
                     );
+                    // Ladder rung 4 disclosure (Bob ruling 2026-08-26): probes
+                    // whose whole neighbour pool was one tie group contributed
+                    // zero pairs; the count is visible, never silently absorbed.
+                    if sweep.non_unique_probes > 0 {
+                        assoc_line.push_str(&format!(
+                            "\nassociationsNonUniqueProbes: {}",
+                            sweep.non_unique_probes
+                        ));
+                    }
                 }
             }
             Err(e) => {
@@ -1961,6 +2211,114 @@ fn run_hunt_contradictions_tool(
     Ok(text_result(&lines.join("\n")))
 }
 
+// ---------------------------------------------------------------------------
+// moot_recall_walk (D10)
+// ---------------------------------------------------------------------------
+
+/// Run `moot_recall_walk`: escalation-ladder recall.
+///
+/// Stage 1 (ShapedRecall / session_hybrid, pool 20) runs first. When its
+/// top-gap reaches the confidence threshold (≥ 0.25) the result is returned
+/// immediately (stopped_early: true). Otherwise Stage 2 (PreciseRecall /
+/// hamming+text) runs and its result is returned (stopped_early: false).
+///
+/// Mirrors Swift `RecipeTools.runWalkRecall(_:kit:handle:)`. Returns the
+/// same dense-row shape as moot_memory_search plus a `walk:` line naming
+/// the stage and the stopped_early flag.
+fn run_walk_recall_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use locus_kit::filter::Filter;
+    use cognition_kit::{run_walk_recall, WalkStage};
+
+    let estate = registry.resolve_direct(args)?;
+    let query = require_string(args, "query")?;
+    // Clamp to [1, 500]: DoS prevention at the MCP boundary.
+    let limit = crate::dispatch::clamp_limit(
+        optional_integer(args, "limit")?,
+        "limit",
+        20,
+        crate::dispatch::LIMIT_HARD_CEILING,
+    )?;
+    // optional `wing` scopes recall to a single wing.
+    let base_filter = decode_precise_filter(args)?;
+    let filter = match optional_string(args, "wing")? {
+        Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
+        None => base_filter,
+    };
+    // Deterministic `now` when supplied; wall clock otherwise.
+    // same parse contract as run_dream_tool.
+    let now = if let Some(raw) = optional_string(args, "now")? {
+        parse_iso8601_to_epoch(raw).unwrap_or_else(crate::dispatch::wall_now)
+    } else {
+        crate::dispatch::wall_now()
+    };
+
+    let coord = estate.coord.lock().unwrap();
+    // Resolve room display names from the node tree — same path as shaped recall.
+    let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
+    let parent_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        all_drawers
+            .iter()
+            .filter(|d| seen.insert(d.parent_node_id.clone()))
+            .map(|d| d.parent_node_id.clone())
+            .collect()
+    };
+    let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
+
+    let outcome = run_walk_recall(&coord, &estate.handle, query, filter, limit, now, &node_names)
+        .map_err(error_from_recipe)?;
+
+    // Dense-row reply (house shape): same row shape as moot_memory_search.
+    // outcome.matches is Vec<PreciseMatch>; m.room is the resolved room display
+    // name from the node_names map built above.
+    let by_id: std::collections::BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+    let mut lines = vec![if outcome.matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", outcome.matches.len()) }];
+    let mut results: Vec<StructuredRow> = Vec::new();
+    for m in outcome.matches.iter().take(50) {
+        match by_id.get(m.id.as_str()) {
+            Some(d) => {
+                lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
+                results.push(structured_recall_row(
+                    &m.id,
+                    Some(m.room.clone()),
+                    Some(m.content.clone()),
+                    d,
+                ));
+            }
+            None => {
+                lines.push(crate::result_composer::render_s2_row_unhydrated(&m.id));
+                results.push(opaque_structured_row(&m.id));
+            }
+        }
+    }
+    // Discrimination over the stage's scores (deviation-only narration:
+    // only on low/medium; high/single stay silent).
+    let walk_scores: Vec<f64> = outcome.matches.iter().map(|m| m.score).collect();
+    let discrimination = crate::recall_discrimination::classify(&walk_scores);
+    if matches!(
+        discrimination,
+        crate::recall_discrimination::DiscriminationLevel::Low
+            | crate::recall_discrimination::DiscriminationLevel::Medium
+    ) {
+        lines.push(crate::recall_discrimination::result_line(discrimination).to_string());
+    }
+    // Walk-specific narration: which stage produced the result and whether
+    // escalation was needed. Always emitted — the tool's unique datum.
+    let stage_label = match outcome.stage {
+        WalkStage::Stage1SessionHybrid => "stage1_session_hybrid",
+        WalkStage::Stage2PreciseHamming => "stage2_precise_hamming",
+    };
+    let stopped_label = if outcome.stopped_early { "yes" } else { "no" };
+    lines.push(format!(
+        "walk: stage={stage_label} stoppedEarly={stopped_label}"
+    ));
+    Ok(structured_text_result(&lines.join("\n"), &results))
+}
+
 /// Parse an ISO8601 UTC instant string (e.g. "2026-06-11T00:00:00Z") to Unix
 /// epoch seconds. Returns `None` for any malformed or out-of-range input.
 ///
@@ -2109,7 +2467,7 @@ fn run_distill_tool(
 /// Mirrors Swift `RecipeTools.runRecallDistilled`. Routes through the
 /// CognitionKit `run_distilled_recall` library recipe (exact-search
 /// geometry + §10.1 hydration). Output format matches the Swift handler:
-///   found N memory(s) [distilled]
+///   found N candidate memories, one per line [distilled]
 ///   {id}  [{room}]  {distilled text or content fallback}
 ///       tokens: N | source: distilled
 ///       tokens: — | source: content (not yet distilled)
@@ -2169,7 +2527,7 @@ fn run_recall_distilled_tool(
                     locus_estate
                         .get_drawers_matching_frame(&ids, &frame)
                         .map(|f| f.admissible.into_iter()
-                            .map(|d| { let row = crate::dense_row::render(&d); (d.id.clone(), row) })
+                            .map(|d| { let row = crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(&d)); (d.id.clone(), row) })
                             .collect())
                         .unwrap_or_default()
                 }
@@ -2179,15 +2537,15 @@ fn run_recall_distilled_tool(
     };
 
     let header = if echo_query {
-        format!("found {} memory(s) for: {}", out.matches.len(), query)
+        if out.matches.len() == 1 { format!("found 1 candidate memory for: {}", query) } else { format!("found {} candidate memories for: {}", out.matches.len(), query) }
     } else {
-        format!("found {} memory(s)", out.matches.len())
+        if out.matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", out.matches.len()) }
     };
     let mut lines = vec![header];
     let mut any_fallback = false;
     for m in out.matches.iter().take(50) {
         lines.push(dense_by_id.get(&m.id).cloned()
-            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id)));
+            .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(&m.id)));
         if m.served_from_content {
             any_fallback = true;
             // Fallback marker on fallback hits ONLY (§10.2): the text below

@@ -80,6 +80,12 @@ eidetic-lib      = { path = "../../../libs/EideticLib/rust" }
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 
 [dev-dependencies]
+# adornment-lib: dev-only — adornment_render_tests.rs provisions via
+# AdornmentMinterDescriptor + StoredAdornment (the normalized store API,
+# ADORN-STORE-02 Part C). No layering inversion: adornment-lib is upstream
+# of locus-kit in the dependency graph. Dev-only because the production path
+# reads adornments via the DrawerStore trait (already a transitive dep).
+adornment-lib    = { path = "../../../libs/AdornmentLib/rust" }
 # convergence-kit: EstateStatusSyncTests (Rust) directly names NoSyncEngine and
 # SyncManifest to force-test the OP-1 honest sync vocabulary on the Rust port.
 # genius-locus-kit carries convergence-kit as a transitive dep; naming it here

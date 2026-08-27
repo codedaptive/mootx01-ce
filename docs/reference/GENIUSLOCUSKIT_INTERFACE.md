@@ -2,10 +2,10 @@
 title: GeniusLocusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-08-20
-version: 1.37.0
+date: 2026-08-26
+version: 2.2.1
 spec_type: kit
-description: Public API surface for GeniusLocusKit in both the Swift and Rust ports. 1.29.0: VectorSimilaritySignal probe window parameterized (probeLimit / probe_limit, default 50).
+description: "Public API surface for GeniusLocusKit in both ports. 2.0.0 exposes active-minter registration, dreaming, and batched result-composition reads over normalized adornment storage; 2.2.0 adds the engine-neutral neural-embed-v1 wireSubstores selection."
 package: GeniusLocusKit
 languages: [swift, rust]
 relates_to:
@@ -130,7 +130,7 @@ public actor GeniusLocusKit {
     // unaffected by Corpus cleanup; broad destroyAllVectors is forbidden.
     // embeddingModels defaults to the canonical 1.0 five-signal recall ensemble
     // (CorpusEnsemble.defaultEnsemble(): RI/PPMI/LSA/NMF/FDC). Every provisioned
-    // estate gets the honest multi-signal default; the trainable signals train and
+    // estate gets the production multi-signal default; the trainable signals train and
     // persist on first ingest/reindex. Pass an explicit single-element list (e.g.
     // [.deterministic]) only when one signal is specifically wanted. The Rust
     // `provision` takes `embedding_models: Vec<EmbeddingModelConfig>` (no default
@@ -200,7 +200,7 @@ public actor GeniusLocusKit {
         // §B-2a audit-seal ordering: success audit seals ONLY after Step 2
         // (cross-kit vector delete) succeeds. On Step-2 failure an
         // "expungeOrphan" substrate event is sealed and the throw fires —
-        // the audit is honest, never a false success. If the orphan-seal
+        // the audit records the actual outcome, never a false success. If the orphan-seal
         // also fails, the seal error is logged at .fault level (Swift) or
         // folded into the CrossKitVectorDeleteFailed.reason string (Rust).
         //
@@ -215,7 +215,7 @@ public actor GeniusLocusKit {
         // this and raise .underlyingEstateFailure on a partial cascade.
         // Rust: EstateCoordinator::expunge(...) -> Result<ExpungeVerbOutcome, VerbDispatchError>.
 
-    // ExpungeVerbOutcome: partial-expunge honesty carrier (SPEC B-8b, MXE-FA).
+    // ExpungeVerbOutcome: partial-expunge outcome carrier (SPEC B-8b, MXE-FA).
     public struct ExpungeVerbOutcome: Sendable, Equatable {       // Rust: genius_locus_kit::ExpungeVerbOutcome
         public let refusedSiblingIDs: [String]                    // Rust: refused_sibling_ids: Vec<String>, walk order
     }
@@ -386,7 +386,7 @@ public actor GeniusLocusKit {
     // Standing-signals API (SignalAPI.swift / DefaultStandingSignals.swift) — SPEC B-5/B-6:
     public func registerStandingSignal(_ spec: SignalSpec, in handle: EstateHandle, now: Date) async throws -> SignalID
     @discardableResult
-    public func registerDefaultStandingSignals(in handle: EstateHandle, vectorStore: VectorStore, modelID: String = "minilm-v6", now: Date) async throws -> [String: SignalID]
+    public func registerDefaultStandingSignals(in handle: EstateHandle, vectorStore: VectorStore, dreamingCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 }, distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 }, trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" }, huntCycle: @escaping @Sendable (Date) async throws -> (proposed: Int, borderline: Int) = { _ in (0, 0) }, anomalyCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 }, modelID: String = "minilm-v6", now: Date) async throws -> [String: SignalID]
     public func signalStatus(in handle: EstateHandle) async throws -> [SignalReport]
     public func signalTick(in handle: EstateHandle, now: Date) async throws
     public func signalRequestFire(_ signalID: SignalID, in handle: EstateHandle, now: Date) async throws
@@ -1025,12 +1025,14 @@ role, source file. Full signatures live in the cited file.
   GENIUSLOCUSKIT_SPEC.md):** `DreamingSignal`, `MaintenanceSignal`,
   `VectorSimilaritySignal`, `ContradictionScoutSignal`, `DecaySweepSignal`,
   `ByReferenceValiditySignal`, `EndOfDayTournamentSignal`,
-  `TemporalCausalitySignal`, `DistillationSignal`, `TrainingSignal` — each
+  `TemporalCausalitySignal`, `DistillationSignal`, `TrainingSignal`,
+  `ConsolidationSignal`, `AnomalySweepSignal` — each
   `Brain/Signals/*.swift`; registered together by
   `registerDefaultStandingSignals` (Tier 1). Names: `dreaming-daemon`,
   `maintenance-daemon`, `vector-similarity`, `contradiction-scout`,
   `decay-sweep`, `by-reference-validity`, `end-of-day-tournament`,
-  `temporal-causality-fold`, `distillation-sweep`, `training-daemon`.
+  `temporal-causality-fold`, `distillation-sweep`, `training-daemon`,
+  `consolidation-sweep`, `anomaly-flag-sweep`.
   `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:probeLimit:corpus:)` —
   production factory; captures `VectorStore` (and the estate's `Corpus`
   when registered), scans row embeddings via `findNearest` on each
@@ -1203,16 +1205,16 @@ the crate root. The Swift originals are in
 | Swift type | Rust type | Rust location | Notes |
 |---|---|---|---|
 | `GLKRecallMode` | `GLKRecallMode` | `recall::GLKRecallMode` | 5 variants (incl. `.nodeTreeNative` — see that concordance section below); `raw_value()` matches Swift rawValue strings |
-| `GLKRecallScoring` | `GLKRecallScoring` | `recall::GLKRecallScoring` | 3 variants |
+| `GLKRecallScoring` | `GLKRecallScoring` | `recall::GLKRecallScoring` | 4 variants: `raw`, `rrf`, `matrixAware`, `discriminative` (M3) |
 | `RecallEvidencePath` | `RecallEvidencePath` | `recall::RecallEvidencePath` | 10 variants; `raw_value()` matches Swift |
 | `RecallFallbackPolicy` | `RecallFallbackPolicy` | `recall::RecallFallbackPolicy` | 2 variants |
 | `RecallScoreVector` | `RecallScoreVector` | `recall::RecallScoreVector` | All 10 fields present; `locus(_:)` → `locus(v: f32)` factory; `ZERO` constant |
 | `RecallWeights` | `RecallWeights` | `recall::RecallWeights` | 7 fields; `uniform` → `UNIFORM` constant |
 | `RecallPlan` | `RecallPlan` | `recall::RecallPlan` | `effectiveMode` → `effective_mode`; `frontierK` → `frontier_k` |
 | `RecallHit` | `RecallHit` | `recall::RecallHit` | `drawer: Drawer?` → `drawer: Option<Drawer>`; `sources: Set<RecallEvidencePath>` → `sources: Vec<RecallEvidencePath>` |
-| `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | All five behaviour-selecting parameters (`mode`, `scoring`, `limit`, `fallback`, `origin`) are required constructor arguments in both ports — no defaults, no overriding builders. The three nil-defaulted optionals (`queryText`/`query_text`, `traceLimit`/`trace_limit`, `recallShape`/`recall_shape`) stay optional and are set via chained builder methods. Optional `recallShape`/`recall_shape` carries the signed per-lane fusion steering (6b-modifiers) |
+| `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | All five behaviour-selecting parameters (`mode`, `scoring`, `limit`, `fallback`, `origin`) are required constructor arguments in both ports — no defaults, no overriding builders. The nil-defaulted optionals (`queryText`/`query_text`, `traceLimit`/`trace_limit`, `recallShape`/`recall_shape`, `frontierK`/`frontier_k`, `anomalousFilter`/`anomalous_filter`) stay optional and are set via defaulted init params (Swift) or chained builder methods (Rust). Optional `recallShape`/`recall_shape` carries the signed per-lane fusion steering (6b-modifiers). Optional `frontierK`/`frontier_k` is a per-call candidate-pool depth override with highest precedence (request > shape > engine formula), clamped to `[64, 256]`; `nil`/`None` defers to shape or engine. Optional `anomalousFilter`/`anomalous_filter` (Swift `Bool?` / Rust `Option<bool>`) is an admission gate applied BEFORE scoring: `nil` = passthrough, `true` = anomalous-only, `false` = exclude-anomalous (§11.18). Rust builder: `with_anomalous_filter(filter: bool) -> Self`. |
 | `RecallShape` | `RecallShape` | `recall::RecallShape` | Signed per-lane fusion weights (`laneWeights`/`lane_weights`, keys `locus`/`bm25`/`hamming`/`dense:<modelID>` and the aggregate `dense`, PLUS the matrix/graph/preference columns `fieldFit`/`coOccurrence`/`temporal`/`graph`/`preference`; missing key ⇒ 1.0) + `antiSimilarLanes`/`anti_similar_lanes` (dense lane keys that invert objective to FARTHEST) + optional clamped `frontierK`/`frontier_k`. `w>0` forward, `w==0` exclude, `w<0` suppress (demote). Steers the Hybrid + CorpusOnly RRF lanes AND the UnionBest lane (per-signal `dense:<modelID>` weights steer the dense consensus fold; `locus`/`bm25`/`hamming`/`dense` AND the five matrix/graph/preference keys steer the UnionBest `.matrixAware` weighted columns — the matrix keys are a no-op under `.raw`/`.rrf`, where those columns are dark). A `dense:<modelID>` key in `antiSimilarLanes` queries CorpusKit `floatFarthestPerSignal` for that lane — the dissimilar candidates become its voters (DISTINCT from a negative weight; the two compose). nil/absent ⇒ uniform nearest fusion (byte-identical to pre-6b-modifiers) |
-| `GLKRecallResult` | `GLKRecallResult` | `recall::GLKRecallResult` | `.drawers()` convenience accessor; `degradedStages`/`degraded_stages` carries named stage failures, incl. the four `locus.*` recall internal-read stages merged from `RecallStream` (SPEC § degradedStages) |
+| `GLKRecallResult` | `GLKRecallResult` | `recall::GLKRecallResult` | `.drawers()` convenience accessor; `degradedStages`/`degraded_stages` carries named stage failures, incl. the four `locus.*` recall internal-read stages merged from `RecallStream` (SPEC § degradedStages); `queryLatticeAnchor`/`query_lattice_anchor` — pre-computed §8.3 anchor, derived exactly once in the recall director (M4 single-derivation; `nil`/`None` for locusOnly and unanchorable queries) |
 | `RecallUnionProfile` | `RecallUnionProfile` | `recall::RecallUnionProfile` | 6 fields; `ZERO` constant |
 | (implicit) `RecallLane` | `RecallLane` | `recall::RecallLane` | Not a separate Swift file; distilled from `RecallCandidateBuffer` source-bit constants |
 
@@ -2105,7 +2107,7 @@ section above.
 | Sync-engine entry | — | `SyncEngineEntry` (`rust/src/coordinator.rs`) | — / pub struct | Rust-only coordinator state record for the sync engine; no Swift parallel (sync lifecycle managed via actor state) | coordinator tests | Confirmed (Rust-only) |
 | Distillation brain signal | `DistillationSignal` (`Brain/Signals/DistillationSignal.swift:30`, `public enum`) | `DistillationSignal` (`rust/src/brain/signals/distillation.rs:18`, `pub struct`) | public / pub | Swift uses a caseless `public enum` as a namespace; Rust uses a zero-size `pub struct` — same idiom for a type that is only a factory for `SignalSpec`. Both expose `spec(distillationCycle:)`/`spec(distillation_cycle)` (production wiring) and `defaultSpec()`/`default_spec()` (no-op diagnostic variant). Signal name `"distillation-sweep"`, hourly cadence (3 600 s). Wired in DG5. NT-DOC-1. | `DistillationSignalTests.swift` ↔ `distillation_signal_tests.rs` | Confirmed |
 | Training brain signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift:42`, `public enum`) | `TrainingSignal` (`rust/src/brain/signals/training.rs:24`, `pub struct`) | public / pub | Same Swift-enum/Rust-struct namespace idiom as `DistillationSignal`. Both expose `spec(trainingCycle:)`/`spec(training_cycle)` and `defaultSpec()`/`default_spec()`. Signal name `"training-daemon"`, hourly cadence (3 600 s). Wired per the brain-layer ownership contract F1. NT-DOC-1. | `StandingSignalsTests.swift` ↔ `distillation_signal_tests.rs` (covers both brain signals) | Confirmed |
-| Contradiction hunt pass | `GeniusLocusKit.huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)` (`Brain/ContradictionHunt.swift`) | `EstateCoordinator::hunt_contradictions(handle, model_id, probe_limit, filed_after, proximity_threshold, now)` (`rust/src/coordinator.rs`) | public / pub | identical pass: candidates from `recentItemIDs` newest-first probes mined on TWO lanes — Lane 1 drawer-keyed binary Hamming kNN under the caller's modelID (`getVector` → `findNearest` limit 5, proximity ≤ 64) for bespoke/test-planted vectors; Lane 2 (when a Corpus is registered — the ONLY lane production estates populate) LEXICAL via the corpus's persistent BM25 inverted index (`Corpus.bm25TopKBySource(query:limit:)`, `huntBM25CandidateK` = 20 per probe, query capped to `huntBM25QueryCharLimit` = 240 chars), which returns SOURCE drawer IDs directly. BM25 not vectors on the corpus lane: contradictions are lexically similar (the shared-term notion ConflictCue screens on), and the binary SimHash space is degenerate at estate scale (109k estate buried a true twin at rank #399) while a whole-partition float scan is ~3 s/probe. Both lanes dedupe on drawer-pair keys, then SubstrateML conflict-cue screen; strong cue (≥ 0.70) → `capture(TunnelCaptureFrame(kind: .contradicts, lifecycle: .proposed, originClass: .derived))`, borderline (≥ 0.45) → returned with ≤ 160-char snippets, never persisted; durable dedup vs ALL contradicts tunnels incl. withdrawn; `filedAfter` watermark; `vectorStoreAvailable` honesty flag | `ContradictionHuntTests.swift` (incl. corpus-lane test) ↔ `coordinator.rs` hunt tests | Confirmed |
+| Contradiction hunt pass | `GeniusLocusKit.huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)` (`Brain/ContradictionHunt.swift`) | `EstateCoordinator::hunt_contradictions(handle, model_id, probe_limit, filed_after, proximity_threshold, now)` (`rust/src/coordinator.rs`) | public / pub | identical pass: candidates from `recentItemIDs` newest-first probes mined on TWO lanes — Lane 1 drawer-keyed binary Hamming kNN under the caller's modelID (`getVector` → `findNearest` limit 5, proximity ≤ 64) for bespoke/test-planted vectors; Lane 2 (when a Corpus is registered — the ONLY lane production estates populate) LEXICAL via the corpus's persistent BM25 inverted index (`Corpus.bm25TopKBySource(query:limit:)`, `huntBM25CandidateK` = 20 per probe, query capped to `huntBM25QueryCharLimit` = 240 chars), which returns SOURCE drawer IDs directly. BM25 not vectors on the corpus lane: contradictions are lexically similar (the shared-term notion ConflictCue screens on), and the binary SimHash space is degenerate at estate scale (109k estate buried a true twin at rank #399) while a whole-partition float scan is ~3 s/probe. Both lanes dedupe on drawer-pair keys, then SubstrateML conflict-cue screen; strong cue (≥ 0.70) → `capture(TunnelCaptureFrame(kind: .contradicts, lifecycle: .proposed, originClass: .derived))`, borderline (≥ 0.45) → returned with ≤ 160-char snippets, never persisted; durable dedup vs ALL contradicts tunnels incl. withdrawn; `filedAfter` watermark; `vectorStoreAvailable` status flag | `ContradictionHuntTests.swift` (incl. corpus-lane test) ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction hunt report | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`Brain/ContradictionHunt.swift`) | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`rust/src/coordinator.rs`) | public / pub | identical field sets (vectorStoreAvailable/probesScanned/pairsScreened/proposed/borderline/deduplicated; borderline adds sourceSnippet/targetSnippet) | `ContradictionHuntTests.swift` ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction-scout brain signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`, `public enum`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs:19`, `pub struct`) | public / pub | Same namespace idiom as `DistillationSignal`. Both expose `spec(huntCycle:)`/`spec(hunt_cycle)` (production wiring; the hunt persists its own writes, the signal emits one summary diagnostic) and `defaultSpec()`/`default_spec()`. Signal name `"contradiction-scout"`, hourly cadence (3 600 s). Registered 4th in `registerDefaultStandingSignals`. | `StandingSignalsTests.swift` ↔ `standing_signals_parity.rs` | Confirmed |
 | Tiered contradiction search | `GeniusLocusKit.tieredContradictionSearch(in:tier:topK:modelID:probeLimit:now:)` (`Brain/TieredContradictionSearch.swift`) | `EstateCoordinator::tiered_contradiction_search(handle, tier: Option<ContradictionTier>, top_k, model_id, probe_limit, now)` (`rust/src/coordinator.rs`) | public / pub | one search verb, two modes: `tier` nil/None runs SYNTHESIS (all three lanes, promote-to-highest-tier dedup on the case-canonical pair key, over-fetch backfill K/2K/3K, sections always in tier order 1-2-3, never interleaved); a specific tier runs ONLY that lane with no cross-tier dedup (purpose-run answers its own question). Tier 1 = typed proving sweep (`conflictProjectionSweep`), ranked by endpoint-event recency (no lexical score — the absence is load-bearing); tiers 2/3 share ONE lexical retrieval pass (`lexicalTierScan` / `lexical_tier_scan`, the hunter's retrieval + ConflictCue screen factored out). `topK` clamped to `TieredContradictionCore.topKCeiling` / `TIERED_TOP_K_CEILING` = 50; non-positive → deterministic empty report. Tier-1 findings above the Elevated raw sensitivity ceiling are filtered and counted (`tier1CeilingFiltered`). Read-and-report ONLY: no writes. `now` unconsumed (signature stability). | `TieredContradictionSearchTests.swift` ↔ `tiered_contradiction_search.rs` tests | Confirmed |
@@ -2118,9 +2120,444 @@ section above.
 
 ---
 
+## Active-minter adornment orchestration
+
+Swift:
+
+```swift
+public struct AdornmentPassResult: Sendable, Equatable {
+    public let adornedPairs: Int
+    public let failedPairs: Int
+    public let skippedPairs: Int
+}
+
+public func registerAdornmentMinter(
+    in handle: EstateHandle,
+    minter: AdornmentMinterDescriptor
+) async throws
+
+public func setAdornmentMinterActive(
+    in handle: EstateHandle,
+    minterID: String,
+    active: Bool
+) async throws -> Int
+
+public func setActiveAdornmentMinters(
+    in handle: EstateHandle,
+    minterIDs: Set<String>
+) async throws -> Int
+
+public func activeAdornments(
+    in handle: EstateHandle,
+    drawerIDs: [String]
+) async throws -> [String: [StoredAdornment]]
+
+public func runAdornmentPass(
+    handle: EstateHandle,
+    batchSize: Int = AdornmentPass.defaultBatchSize,
+    maxAdornmentLength: Int? = nil,
+    now: Date
+) async throws -> AdornmentPassResult
+```
+
+Rust:
+
+```rust
+pub struct AdornmentPassResult {
+    pub adorned_pairs: usize,
+    pub failed_pairs: usize,
+    pub skipped_pairs: usize,
+}
+
+pub fn register_adornment_minter(
+    &self,
+    handle: &EstateHandle,
+    minter: AdornmentMinterDescriptor,
+) -> Result<(), VerbDispatchError>;
+
+pub fn set_adornment_minter_active(
+    &self,
+    handle: &EstateHandle,
+    minter_id: &str,
+    active: bool,
+) -> Result<usize, VerbDispatchError>;
+
+pub fn set_active_adornment_minters(
+    &self,
+    handle: &EstateHandle,
+    minter_ids: &BTreeSet<String>,
+) -> Result<usize, VerbDispatchError>;
+
+pub fn active_adornments(
+    &self,
+    handle: &EstateHandle,
+    drawer_ids: &[String],
+) -> Result<BTreeMap<String, Vec<StoredAdornment>>, VerbDispatchError>;
+
+pub fn run_adornment_pass(
+    &self,
+    handle: &EstateHandle,
+    batch_size: usize,
+    max_adornment_length: Option<usize>,
+    now: i64,
+) -> Result<AdornmentPassResult, VerbDispatchError>;
+```
+
+The coordinator delegates registration, activation, and active reads to the
+open estate. `activeAdornments` is the only result-composition read: it accepts
+all result IDs at once and returns zero, one, or many active-minter outputs per
+Drawer in minter-ID order. It never returns inactive rows.
+
+`AdornmentPass` consumes LocusKit `AdornmentDebt` pairs. Its injected generator
+resolver receives the full minter descriptor and Drawer, so model choice is
+data-driven. The old scalar `setAdornment(...bitmaskCode:)` and engine-family
+mismatch path are absent from the 2.0 surface.
+
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 2.2.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.2.0 -- 2026-08-26
+
+RENAME-EMBED (#72): `wireSubstores` provisioned-provider selection gains
+the engine-neutral id `neural-embed-v1` → `NeuralEmbedProvider` (Swift
+only, opt-in, `#if canImport(NaturalLanguage)`; the Rust backend is the
+standalone `tools/neural-embed` crate, renamed from `candle-spike`; the
+Rust GLK provenance-only ruling is unchanged). Absent/unknown manifest
+key remains byte-identical to the default ensemble.
+
+### 2.0.0 -- 2026-08-25
+
+Added minter registration and runtime activation, per-pair AdornmentPass
+results, and the batched `activeAdornments` result-composition seam. Removed
+the scalar Drawer adornment and bitmask-selected generator assumptions from
+the target interface.
+
+### 1.61.0 -- 2026-08-24
+
+SCORE-ORDERING mission (Score-Transparent Ordering contract).
+
+**`GLKRecallResult.degradedStages` gains a new sentinel value:**
+- `"tie.nonDeterminate"` — appended when the 4N window contains a tie group
+  at the presentation boundary and the pool has additional items beyond 4N.
+  The caller (AriaMCP) renders this as a user-steering message.
+
+**`recallUnionBest` now implements windowed tie-resolution:**
+Both Swift and Rust ports implement `(score DESC, subject ASC)` presentation
+ordering with the two-phase windowed algorithm (see GENIUSLOCUSKIT_SPEC.md
+§ 1.50.0). The `limit` parameter is a relevance floor, not an exact count.
+
+**`recallCorpusOnly` now applies `(score DESC, subject ASC)` sort:**
+The corpusOnly lane's output is sorted in the same presentation order as
+unionBest before being returned to the caller.
+
+**`RecallHit.score.final` (Swift) / `RecallHit.score.final_score` (Rust):**
+Both fields were already present; this mission ensures they are non-zero for
+every hit from a scoring-enabled lane (BM25, vector, locus) and used as the
+primary presentation sort key.
+
+### 1.60.0 -- 2026-08-23
+
+ADORNMENT mission.
+
+**`registerDefaultStandingSignals` signature change (both ports):**
+Now takes three Option closures: `huntCycle`, `anomalyCycle`,
+`adornmentCycle`. The third closure re-adds the AdornmentPass signal 13
+removed during the gold rollback. Rust: `register_default_standing_signals`
+in `autonomic_governor.rs` gains `adornment_cycle: Option<...>` third param.
+All call sites (ResidentDaemon.swift, runtime.rs, governor tests in both
+ports) updated in the same commit.
+
+**New GLK actor methods:**
+- `runAdornmentPass(handle:now:) async throws -> Int` — production path,
+  returns adorned count, uses `ADORNMENT_MAX_LENGTH` product constant.
+- `runAdornmentPass(handle:batchSize:maxAdornmentLength?:now:) async throws -> AdornmentPass.Result`
+  — harness-only overload; `maxAdornmentLength: Int?` threads a custom
+  length ceiling through the minter closure (nil = product default).
+  Used by `moot_run_adornment_pass` dark MCP tool.
+
+**`AdornmentPass.run` static method (public):**
+`AdornmentPass.run(estate:batchSize:minter:now:) async throws -> Result`.
+`Result` carries `adorned`, `rejected`, `skipped` counts.
+`AdornmentPass.defaultBatchSize` public constant.
+
+### 1.57.0 -- 2026-08-22
+
+Structural fix — one seam for `door_config` manifest reads:
+
+`GeniusLocusKit.provisionedDoorConfig(for:)` (`VerbSurface.swift`) now
+delegates to `RecallDirector.provisionedDoorConfig(estate:)` instead of
+independently re-implementing the same six-line manifest-key decode. Call graph:
+
+  `ToolDispatch.swift` → `kit.provisionedDoorConfig(for:)` → `provisionedDoorConfig(estate:)`
+
+`RecallDirector.provisionedDoorConfig(estate:)` is now the single decode
+implementation for the `door_config` key. The public surface and all call
+signatures are unchanged; this is an internal structural fix only.
+
+Also: `DoorManifestTests.swift` added to `GeniusLocusKitTests` covering
+spec-default, round-trip, absent-key, partial JSON, unknown-scoring-string
+fallback, golden pin, and estate verb round-trips. Rust: provisioned-config
+test added to `dispatch_tests.rs` (`memory_search_door_guess_with_provisioned_config_uses_manifest_scoring`);
+door-overrides-scoring gate test strengthened with a discriminating assertion
+(`degraded_stages:[unionBest.rrf]` proves precedence); tool-description text
+aligned between ports ("→ rrf or thorough (future);" restored in Rust).
+
+### 1.56.0 -- 2026-08-22
+
+Additive (front-door family — `DoorManifest` and `door_config` manifest key):
+
+**Swift public surface (`GeniusLocusKit` actor, `VerbSurface.swift`):**
+- `DoorManifest` struct: `Sendable`, `Equatable`, `Codable`; single field
+  `scoring: GLKRecallScoring` (default `.matrixAware`); JSON key `"scoring"`;
+  custom `init(from:)` for fail-quiet decode of unknown scoring strings;
+  `static let default = DoorManifest(scoring: .matrixAware)`.
+- `GeniusLocusKit.provisionDoorConfig(_ config: DoorManifest, for handle: EstateHandle) async throws`
+- `GeniusLocusKit.provisionedDoorConfig(for handle: EstateHandle) async throws -> DoorManifest`
+
+**Swift private surface (`RecallDirector`):**
+- `RecallDirector.doorConfigMetaKey: String` (`"door_config"`)
+- `RecallDirector.provisionedDoorConfig(estate:) async -> DoorManifest`
+
+**Rust (`EstateCoordinator`, `coordinator.rs`):**
+- `DoorManifest` struct with `serde::Serialize`/`Deserialize` (via custom
+  `serialize_with`/`deserialize_with` helpers, since `GLKRecallScoring` has no
+  serde derive; helpers use `raw_value()` and string-match round-trip).
+- `EstateCoordinator::DOOR_CONFIG_META_KEY: &str` (`"door_config"`)
+- `EstateCoordinator::provision_door_config(&self, handle, config: &DoorManifest) -> Result<(), VerbDispatchError>`
+- `EstateCoordinator::provisioned_door_config(&self, handle) -> Result<DoorManifest, VerbDispatchError>`
+
+All methods follow the fail-quiet pattern of `provisioned_recall_tuning` and
+`provisioned_lane_weights`: absent key and malformed JSON both return the spec
+default. No estate migration required.
+
+### 1.55.0 -- 2026-08-21
+
+Float-metric presets: `RecallShape.presetNames` / `RecallShape::PRESET_NAMES` gains
+two new names — `"float-l2"` and `"float-dot"`. Both resolve to shapes identical to
+`balanced` except `floatMetric` is set to `"l2"` or `"dot"` respectively. The
+roster grows from 27 to 29 entries. No new struct fields or method signatures are
+added — the change is entirely in the switch tables of `preset()` and
+`presetDescription()` / `preset_description()`. `moot_recall_shaped` picks up the
+two new names automatically.
+
+### 1.54.0 -- 2026-08-21
+
+W2.5 M1 float unlock: new and updated public API signatures for the float/dense
+metric-selection surface.
+
+**`RecallShape` (GeniusLocusKit)**
+
+```swift
+// New stored property (Codable-additive, absent key → "cosine")
+public let floatMetric: String  // "cosine" | "l2" | "dot"; unknown → cosine at director
+// New memberwise init parameter
+init(..., floatMetric: String = "cosine")
+```
+
+Rust twin: `pub float_metric: String` on `RecallShape`; `pub fn with_float_metric(self, metric: &str) -> Self` builder.
+
+**`CorpusContentEngine` (CorpusKit)**
+
+```swift
+// metric parameter added; default preserves existing behaviour byte-for-byte
+func floatNearestPerSignal(query: String, limit: Int, metric: FloatMetric = .cosine) async throws -> [CorpusSignalResult]
+func floatFarthestPerSignal(query: String, limit: Int, metric: FloatMetric = .cosine) async throws -> [CorpusSignalResult]
+func floatNearestPerSignalWithDiscrimination(query: String, limit: Int, metric: FloatMetric = .cosine) async throws -> [CorpusSignalResult]
+```
+
+Rust: `float_nearest_per_signal`, `float_farthest_per_signal`,
+`float_nearest_per_signal_with_discrimination` all gain `metric: FloatMetric`.
+
+**`VectorStore` (VectorKit)**
+
+```swift
+// metric parameter added; default preserves existing behaviour byte-for-byte
+func findNearestFloat(probe: [Float], modelID: String, limit: Int, metric: FloatMetric = .cosine) throws -> [VectorMatch]
+func findFarthestFloat(probe: [Float], modelID: String, limit: Int, metric: FloatMetric = .cosine) throws -> [VectorMatch]
+```
+
+Rust: same signatures with `metric: FloatMetric`. Both ramResident (via
+`FloatBruteForceIndex.search(metric:)`) and diskBacked (`_floatScanFromTable`) paths
+dispatch on the metric.
+
+**`RecallDirector` (GeniusLocusKit, private)**
+
+`floatMetric(for:) -> FloatMetric` added as a private mapping function beside the
+existing `binaryMetric(for:)`. Called at the float-lane construction site and passes
+the resolved metric through the CorpusContentEngine calls.
+
+Additive on all call sites — default `.cosine` preserves pre-1.54.0 behaviour.
+
+### 1.53.0 -- 2026-08-21
+
+EMBED-PROV-E2: embedding_provider manifest key consumption in wireSubstores (Swift);
+Rust provenance recording; `apply_provisioned_embedding_provider` (Rust).
+
+**Swift consumption (new behavior in `wireSubstores`):**
+
+`GeniusLocusKit.wireSubstores(for:kind:backingStorage:embeddingModels:)` now reads
+the `embedding_provider` manifest key at wire time (the moment an estate's Corpus
+is constructed — called by both `provision` and the serve entry points). The base
+`embeddingModels` argument is augmented when a known provider ID is found:
+
+- Absent key or empty string: `baseModels` returned unchanged. Byte-identical to
+  pre-EMBED-PROV-E2 behavior for every existing estate. No side effects.
+- `"apple-nl-v1"`: appends `.nlEmbedding(provider: AppleNLProvider())` to
+  `baseModels`. Gated `#if canImport(NaturalLanguage)` — no-op on non-Apple platforms.
+- Unknown ID: logs one `OSLog.warning` including the unrecognised ID and estate UUID,
+  returns `baseModels` unchanged.
+
+Private helper added to `GeniusLocusKit` (not public API):
+```
+private func applyProvisionedEmbeddingProvider(
+    baseModels: [EmbeddingModel],
+    for handle: EstateHandle
+) async -> [EmbeddingModel]
+```
+Called from both `.glk` and `.corpusOnly` branches of `wireSubstores`. Not callable
+by external consumers; documented here for completeness.
+
+**Rust provenance recording (new method on `EstateCoordinator`):**
+
+```rust
+pub fn apply_provisioned_embedding_provider(&self, handle: &EstateHandle)
+```
+
+Reads `embedding_provider` from the estate manifest. If present and non-empty, emits
+one stderr line per estate open:
+```
+mootx01 embed-prov: estate {uuid} provisioned embedding_provider '{model_id}' — Rust port records provenance but selects nothing …
+```
+
+Returns without modifying any ensemble. Called from `EstateCoordinator::provision`
+after wiring (before wing seeding). Fail-quiet on estate lookup errors.
+
+**Parity ruling (sanctioned divergence):**
+
+Swift resolves `embedding_provider` to a concrete `EmbeddingProvider`
+(`AppleNLProvider` for `"apple-nl-v1"`, `NeuralEmbedProvider` for
+`"neural-embed-v1"`). Rust reads the key for provenance and manifest
+consistency only — it never instantiates an ML provider in-process because
+NaturalLanguage is Apple-only. The engine-neutral Rust backend for
+`"neural-embed-v1"` is the standalone `tools/neural-embed` crate, reached
+as an external subprocess seam; it is not linked into any product crate.
+
+### 1.52.0 -- 2026-08-21
+
+EMBED-PROV-E1: optimizer-owned embedding-provider selection surface (both ports).
+
+New estate manifest key constant `GeniusLocusKit.embeddingProviderMetaKey` /
+`EstateCoordinator::EMBEDDING_PROVIDER_META_KEY` (`"embedding_provider"`). Follows
+the same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey` and
+`recallTuningMetaKey`: the benchmarker/optimizer selects the provider ID; the
+product only reads the selection.
+
+New verb methods (purely additive; zero existing callers):
+- Swift `provisionEmbeddingProvider(_ modelID: String, for handle: EstateHandle) async throws` on `GeniusLocusKit`
+- Swift `provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String?` on `GeniusLocusKit`
+  — returns `nil` when the key is absent (sentinel: use deterministic default ensemble)
+- Rust `provision_embedding_provider(&self, &EstateHandle, &str) -> Result<(), VerbDispatchError>` on `EstateCoordinator`
+- Rust `provisioned_embedding_provider(&self, &EstateHandle) -> Result<Option<String>, VerbDispatchError>` on `EstateCoordinator`
+
+The value is a plain string (`EmbeddingProvider.modelID`, e.g. `"apple-nl-v1"`),
+not JSON — no encode/decode step. Absent key → deterministic default ensemble
+(RI/PPMI/LSA/NMF/FDC). No estate migration required.
+
+Rust port note: ML embedding providers are a sanctioned Swift-only divergence
+(`#if canImport(NaturalLanguage)`). The Rust twins exist so the manifest key is
+consistent between ports and the provision/read surface is available to any future
+Rust consumer (e.g. a federation relay reading estate config). ADDITIVE.
+
+### 1.51.0 -- 2026-08-20
+
+Rust resident live-closure wiring for standing signals 10 and 12 (Mission C):
+
+- `default_standing_signal_specs` (Rust, `brain/signals/default_set.rs`) gains two
+  optional parameters: `hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>`
+  and `anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>`.
+  When `Some`, the live `ContradictionScoutSignal::spec(hunt_cycle)` /
+  `AnomalySweepSignal::spec(anomaly_cycle)` factories are used; when `None`, the
+  diagnostic-only `default_spec()` is used (unchanged behavior for callers passing `None, None`).
+  Mirrors the Swift `registerDefaultStandingSignals(huntCycle:anomalyCycle:)` default-parameter
+  pattern.
+
+- `AutonomicGovernor::register_default_standing_signals` (Rust, NeuronKit) gains the same two
+  optional parameters and forwards them to `default_standing_signal_specs`.
+
+- `runtime.rs` (AriaMcpKit) now passes live closures wrapping
+  `EstateCoordinator::hunt_contradictions` (four-hourly lookback window, probe_limit=50,
+  proximity_threshold=64, model_id="minilm-v6") and `EstateCoordinator::anomaly_flag_sweep`
+  (ANOMALY_SWEEP_DEFAULT_THRESHOLD=2.0) to the governor's registration call, completing
+  Rust parity with the Swift resident's `huntCycle` and `anomalyCycle` wiring.
+
+- Parity gate: two new tests in `standing_signals_parity.rs`
+  (`live_hunt_closure_emits_complete_diagnostic_not_noop_fired`,
+  `live_anomaly_closure_emits_complete_diagnostic_not_noop_fired`) assert that injecting live
+  closures selects the `spec(…)` factory (emitting `.pass.complete` / `.complete` diagnostic titles)
+  rather than `default_spec()` (emitting `.fired` no-op titles). Golden pin matches the Swift
+  spec factory's diagnostic-title and detail-string format.
+
+### 1.50.0 -- 2026-08-20
+
+- P3a: `AnomalySweepSignal` wired as signal 12 in the default standing-signal
+  set (both ports). `registerDefaultStandingSignals` signature gains an
+  optional `anomalyCycle: @escaping @Sendable (Date) async throws -> Int`
+  parameter (default no-op), forwarded to `AnomalySweepSignal.spec`. The
+  prior §1.47.0 entry for `anomalyFlagSweep` no longer carries "Swift-only":
+  the Rust port now has `EstateCoordinator::anomaly_flag_sweep` and the full
+  signal factory (`AnomalySweepSignal::spec`/`default_spec`). Parity tested
+  in `standing_signals_parity.rs` (4 new AnomalySweepSignal tests) and
+  `AnomalySweepSignalTests.swift` (7 new cycle-level tests).
+
+### 1.49.0 -- 2026-08-20
+
+- M4 single-derivation: `GLKRecallResult` gains
+  `queryLatticeAnchor: QueryLatticeAnchor.Anchor?` (Swift) /
+  `query_lattice_anchor: Option<(String, String)>` (Rust).
+  The recall director derives the §8.3 lattice anchor exactly once per
+  request (corpus/hybrid/unionBest/locus-ranked paths call `query_anchor`;
+  locusOnly carries `nil`/`None`). Callers MUST NOT call
+  `QueryLatticeAnchor.derive(from:)` / `query_anchor()` on the same
+  query text a second time. The field is `nil`/`None` when the query is
+  empty, unanchorable (both udc_code and qid would be empty), or when the
+  locusOnly lane ran (no sketch compiled). The anomalous-filter passthrough
+  carries the anchor unchanged from the wrapped result.
+
+### 1.47.0 -- 2026-08-20
+
+- §11.18 anomalous-flag recall prefilter.
+  1. `GLKRecallRequest.anomalousFilter: Bool?` / `anomalous_filter:
+     Option<bool>` — additive optional field defaulting to `nil`/`None`
+     (passthrough). Swift: `init` parameter after `frontierK:`. Rust:
+     `with_anomalous_filter(filter: bool) -> Self` builder (struct field
+     `anomalous_filter: Option<bool>`). Gate applied BEFORE scoring in
+     `recall`/`recall_scored`.
+  2. `GeniusLocusKit.anomalyFlagSweep(handle:threshold:now:) async throws -> Int`
+     / `EstateCoordinator::anomaly_flag_sweep(handle, threshold, now)` —
+     room-cohesion sweep (both ports, P3a): sets/clears bit 26 (`isAnomalous`)
+     on each drawer based on char-3-shingle Jaccard z-score against room peers.
+     Constants: `GeniusLocusKit.anomalySweepMinRoomSize: Int = 3` /
+     `ANOMALY_SWEEP_MIN_ROOM_SIZE: usize = 3`;
+     `GeniusLocusKit.anomalySweepDefaultThreshold: Float32 = 2.0` /
+     `ANOMALY_SWEEP_DEFAULT_THRESHOLD: f32 = 2.0`. Returns count of changed
+     drawers. Idempotent; skip-write when bit already correct. Wired as
+     signal 12 (`AnomalySweepSignal`) in the default standing-signal set.
+
+### 1.44.0 -- 2026-08-20
+
+- W2.5 Track R(a): `GLKRecallRequest` gains optional `door` and
+  `composition` (Swift init parameters defaulted to nil; Rust
+  `with_door`/`with_composition` builders). `GLKRecallResult` gains
+  `laneRanks` (`[String: [String: Int]]` / `HashMap<String,
+  HashMap<String, i64>>`) — per-lane 1-based candidate ranks keyed by
+  drawer id then lane key ("locus", "bm25", "hamming", "dense").
+  Populated by every lane; consumed by the director's external-origin
+  trace write (see SPEC 1.38.0).
 
 ### 1.35.0 -- 2026-08-14
 `GLKRecallRequest.init` (Swift) and `GLKRecallRequest::new` (Rust): all five
@@ -2180,14 +2617,41 @@ basis-retrain duty (NEURONKIT_SPEC § 12.6.1 / NEURONKIT_INTERFACE 1.11.0).
   `endorse_tunnel`/`object_to_tunnel` (endorse never activates);
   `ReviewQueueRanking` ↔ `review_queue`.
 
+### 2.1.0 -- 2026-08-26
+
+- `AssociateSweepReport` gains `nonUniqueProbes: Int` ↔
+  `non_unique_probes: usize` (SPEC 2.1.0 ladder cut; Swift init takes
+  the new parameter with default 0). `ProximityScanCore.candidates` ↔
+  `proximity_scan_candidates` return the pair list plus the
+  non-unique-probe count.
+
 ### 1.30.0 -- 2026-08-05
 
 - `associateSweep(in:probeLimit:now:)` ↔
   `associate_sweep(handle, probe_limit: Option<usize>, now)` — returns
-  probed / candidatePairs / written / deduplicated
-  (AssociateSweepReport both ports).
+  probed / candidatePairs / written / deduplicated / nonUniqueProbes
+  (AssociateSweepReport both ports; SPEC 2.1.0 ladder cut — the
+  nonUniqueProbes count is rung 4's zero-pair disclosure).
 
 ### 1.29.0 -- 2026-08-05
+
+- **1.43.0 (2026-08-20)** — RecallShape preset roster gains "matrix_decayed" (22nd — matrixWeighting decayed; W2.5 S4-C arm), both ports; moot_recall_shaped roster enum follows automatically.
+
+- **1.42.0 (2026-08-20)** — MatrixTier.coOccurrenceDecayed/temporalCausalityDecayed/decayedAsOfMs + decayedCoOccurrence(from:nowMs:) + rebuildTemporal(...decayNowMs:); RecallShape.matrixWeighting; RecallMatrixScorer.coOccurrenceDecayed/temporalDecayed (Rust: decayed_co_occurrence, rebuild_temporal_from_with_decay, with_matrix_weighting; apply_decay removed).
+
+- **1.41.0 (2026-08-20)** — CorefStage (public): resolve(rendering:pool:), contributedEntities(from:), Antecedent, windowItems/windowMinutes; distillItem gains corefPool (Rust: brain::coref_stage, distill_item/render_distillation coref_pool param).
+
+- **1.53.0 (2026-08-21)** — EMBED-PROV-E2: wireSubstores reads embedding_provider key at wire time; "apple-nl-v1" → appends AppleNLProvider to ensemble (Swift, #if canImport(NaturalLanguage)); absent/unknown key → byte-identical fallback; Rust apply_provisioned_embedding_provider records provenance to stderr, never selects (sanctioned divergence; see PART_E_RUST_SEAM_DESIGN.md).
+
+- **1.52.0 (2026-08-21)** — EMBED-PROV-E1: embeddingProviderMetaKey / EMBEDDING_PROVIDER_META_KEY ("embedding_provider"); provisionEmbeddingProvider(_:for:) / provisionedEmbeddingProvider(for:) -> String? (Rust: provision_embedding_provider / provisioned_embedding_provider -> Option<String>). Absent key → nil (deterministic default ensemble). Plain string, no JSON. Purely additive.
+
+- **1.46.0 (2026-08-20)** — RecallTuningManifest type (both ports; 4 optimizer knobs: rrf_k, mmr_lambda, rrf_bm25_weight, rrf_vector_weight); recallTuningMetaKey / RECALL_TUNING_META_KEY; provisionRecallTuning(_:for:) / provisionedRecallTuning(for:) (Rust: provision_recall_tuning / provisioned_recall_tuning). Fail-quiet on absent/malformed JSON.
+
+- **1.40.0 (2026-08-20)** — provisionLaneWeights(_:for:) / provisionedLaneWeights(for:) (Rust: provision_lane_weights / provisioned_lane_weights, LANE_WEIGHTS_META_KEY); GeniusLocusKit.mergedLaneWeights precedence helper.
+
+- **1.39.0 (2026-08-20)** — GeniusLocusKit.sentenceTimestamps(sentences:pieces:separator:combined:) internal helper (Rust EstateCoordinator::sentence_timestamps); DistillationInput.memoryTimestamps now populated on the consolidation path (Rust epoch-seconds f64 from event_time ms).
+
+- **1.38.0 (2026-08-20)** — QueryLatticeAnchor.derive(from:) -> Anchor{udcCode, qid} (Rust: query_anchor(text) -> (String, String)).
 
 - **1.37.0 (2026-08-20)** — `RecallShape.init(laneWeights:antiSimilarLanes:frontierK:binaryMetric:)`; preset "jaccard" + description; Rust `RecallShape.binary_metric` + `with_binary_metric`, PRESET_NAMES len 21.
 
@@ -2563,6 +3027,40 @@ provision site, so recall is the multi-signal default rather than a single
 deterministic hash lane. The trainable signals train and persist on first
 ingest/reindex. Callers wanting one signal pass an explicit single-element list.
 
+### 1.46.0 -- 2026-08-20
+W4 optimizer-owned recall tuning surface (both ports). New public type
+`RecallTuningManifest` (Swift struct / Rust pub struct) carrying four optimizer-
+tunable recall knobs: `rrfK`/`rrf_k` (Int/u32, default 60), `mmrLambda`/`mmr_lambda`
+(Float/f32, default 0.7), `rrfBm25Weight`/`rrf_bm25_weight` (Float/f32, default 0.3),
+`rrfVectorWeight`/`rrf_vector_weight` (Float/f32, default 0.7). Conforms to
+`Sendable + Equatable + Codable` / `Serialize + Deserialize + PartialEq`. JSON wire
+format uses snake_case keys (`rrf_k`, `mmr_lambda`, `rrf_bm25_weight`,
+`rrf_vector_weight`); partial JSON fills absent keys with spec defaults (custom
+`Decodable` / `#[serde(default = …)]`). New estate manifest key constant
+`GeniusLocusKit.recallTuningMetaKey` / `EstateCoordinator::RECALL_TUNING_META_KEY`
+(`"recall_tuning"`). New verb methods: Swift `provisionRecallTuning(_:for:) async throws`
+and `provisionedRecallTuning(for:) async throws -> RecallTuningManifest` on
+`GeniusLocusKit`; Rust `provision_recall_tuning(&self, &EstateHandle, &RecallTuningManifest)
+-> Result<(), VerbDispatchError>` and `provisioned_recall_tuning(&self, &EstateHandle)
+-> Result<RecallTuningManifest, VerbDispatchError>` on `EstateCoordinator`. Absent or
+malformed JSON returns `.default` / `RecallTuningManifest::default()` (fail-quiet,
+same contract as provisioned lane weights). All changes are purely additive; no
+existing callers change.
+
+### 1.45.0 -- 2026-08-20
+W3 additive selector registrations (both ports). (a) Five new named presets on
+`RecallShape.preset(_:)` / `RecallShape::preset`: `anti_redundant_ri`,
+`anti_redundant_lsa`, `anti_redundant_nmf` (per-signal anti-similarity variants
+with same bm25/hamming suppression as `anti_redundant` but inverting RI/LSA/NMF
+to FARTHEST); `temporal_connection` (temporal 1.5 + coOccurrence 1.5);
+`field_preference` (fieldFit 1.5 + preference 1.5). `presetNames`/`PRESET_NAMES`
+grows from 22 to 27 entries. (b) New optional `frontierK: Int?` field on Swift
+`GLKRecallRequest` (defaulted `nil` in the existing init so all callers remain
+source-compatible); new Rust `frontier_k: Option<usize>` on `GLKRecallRequest`
+with `with_frontier_k(usize)` builder. Both ports apply three-level precedence:
+request > shape > engine formula, clamped to `[64, 256]`. No existing call sites
+change; all changes are purely additive.
+
 ### 1.1.1 -- 2026-06-17
 Clarification (6b-modifiers-core-2): `RecallShape` now steers the **UnionBest**
 lane too — the only lane where the per-signal dense float signals fuse. The
@@ -2592,3 +3090,64 @@ anti-similarity (true farthest-K) selector is deferred to a follow-up
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 1.59.0 -- 2026-08-22
+MODES-PREFS mission: estate-stored modes preferences (both ports).
+
+**New type `ModesManifest`** (Swift: `public struct ModesManifest: Sendable, Equatable, Codable`; Rust: `pub struct ModesManifest` with `serde::Serialize, Deserialize`):
+- `stickyEnabled: Bool` / `sticky_enabled: bool` — when false, mode declarations are accepted-and-hinted but not stored in sticky state. Wire key: `sticky_enabled`. Default: `true`.
+- `coachingCalls: Int` / `coaching_calls: usize` — how many tool calls between coaching blocks; 0 = off. Wire key: `coaching_calls`. Default: `25`.
+- Manifest JSON key: `"modes_config"`.
+- Fail-quiet decode: absent key or malformed JSON returns `ModesManifest.default` (stickyEnabled=true, coachingCalls=25).
+
+**New VerbSurface methods (Swift):**
+```swift
+public func provisionModesConfig(_ config: ModesManifest, for handle: EstateHandle) async throws
+public func provisionedModesConfig(for handle: EstateHandle) async throws -> ModesManifest
+```
+Both delegate to `RecallDirector` (one seam, same pattern as `provisionedDoorConfig`).
+
+**New `RecallDirector` internal methods (Swift):**
+```swift
+func provisionedModesConfig(estate: LocusKit.Estate) async -> ModesManifest
+static var modesConfigMetaKey: String { "modes_config" }
+```
+
+**New `EstateCoordinator` methods (Rust):**
+```rust
+pub const MODES_CONFIG_META_KEY: &str = "modes_config";
+pub fn provision_modes_config(&self, handle: &EstateHandle, config: &ModesManifest) -> Result<(), VerbDispatchError>
+pub fn provisioned_modes_config(&self, handle: &EstateHandle) -> Result<ModesManifest, VerbDispatchError>
+```
+
+### 1.58.0 -- 2026-08-22
+PACKAGER mission: new public types exported from GeniusLocusKit (both ports).
+
+**New enums:**
+- `PackagerAnswerMode` — `never` / `always` / `auto`. Rust: `PackagerAnswerMode::from_str(&str) -> Option<Self>`.
+- `PackagerConfidenceLevel` — `Confident` / `Intermediate` / `Weak`.
+- `GLKResponseLevel` — `L0AnswerOnly` / `L1Full` / `RowsOnly`.
+
+**New structs:**
+- `GLKConfidenceSignals` — `m1: Double`, `m2: Double`, `m3: Double`, `m4: Bool`.
+- `GLKAnswerBlock` — `answer: String`, `confidenceLabel: String`, `confidenceLevel: PackagerConfidenceLevel`, `citationIds: [String]`, `signals: GLKConfidenceSignals`.
+- `GLKPackagedResult` — `level: GLKResponseLevel`, `answerBlock: GLKAnswerBlock?`, `rows: [RecallHit]`, `totalCount: Int`.
+- `PackagerThresholds` — `t1: Double`, `t2: Double`, `t1Prime: Double`, `t3Prime: Double`, `c: Double`, `kMin: Int`, `kMax: Int`. Static `default` with spec constants.
+
+**New type:**
+- `GLKResultsPackager` — stateless packager. Entry point:
+  ```swift
+  func package(result: GLKRecallResult, mode: PackagerAnswerMode, composedAnswer: String?, thresholds: PackagerThresholds = .default) -> GLKPackagedResult
+  ```
+
+**`RecallTuningManifest` additions:**
+`packagerThresholds: PackagerThresholds` computed property extracting the seven new threshold fields from the manifest JSON. Fields: `packager_t1`, `packager_t2`, `packager_t1_prime`, `packager_t3_prime`, `packager_c`, `packager_k_min`, `packager_k_max` — all fail-quiet with spec defaults.
+
+**`GLKRecallResult` additions:**
+Public memberwise init (Swift: all fields explicit; Rust: public struct fields already public) so AriaMcpKit can construct synthetic results without going through the Recall Director.
+
+**`RecallPlan` additions:**
+Public memberwise `init(effectiveMode:frontierK:weights:)` (Swift). Rust: struct fields already public.
+
+### 1.48.0 -- 2026-08-20
+M3: `GLKRecallScoring` gains a fourth variant `discriminative` (Swift) / `Discriminative` (Rust). The new mode computes RRF fusion identically to `.rrf`, then scales every composite score by `denseDiscriminationFactor` ∈ [0, 1] — the same dense-lane saturation discount used by `.matrixAware`, but without any matrix steer, fieldFit, graph, or preference signals. When no dense lane runs (corpus absent or empty query), the factor is 1.0 and the result is byte-identical to `.rrf`. Scoring-fallback stages `locusOnly.discriminative`, `corpusOnly.discriminative`, and `hybrid.discriminative` added; `unionBest + discriminative` is a real implementation with no fallback. Both ports updated. Concordance table variant count updated from 3 → 4.

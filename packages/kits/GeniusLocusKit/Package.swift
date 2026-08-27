@@ -68,6 +68,12 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
+        // AdornmentLib: dream-time adornment generation and certification.
+        // The AdornmentPass (GLK Brain standing signal 13) uses AdornmentLib's
+        // MOOT_MINT_CMD seam and AdornmentValidators to mint and certify
+        // adornment strings for drawer rows. Layering: AdornmentLib is BELOW
+        // GeniusLocusKit (zero kit deps); no inversion. Per BRR Group 10.
+        .package(name: "AdornmentLib", path: "../../libs/AdornmentLib"),
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(name: "LocusKit", path: "../LocusKit"),
@@ -81,6 +87,11 @@ let package = Package(
         // here). Per in-repository dependency direction; layering is
         // EideticLib → LatticeLib (below GLK), no inversion.
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
+        // LatticeLib: QID/FDC taxonomy and word-class symbols are imported
+        // directly by the search/adornment implementation. A transitive path
+        // through EideticLib is insufficient when GeniusLocusKit is linked as
+        // a dynamic product by an Xcode application target.
+        .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
         // QueueKit is the twelfth kit in the graph.
         // GLK-04 consumes it as the single-serial-dispatch substrate for
         // standing signals: scheduler enqueues jobs through QueueKit; a
@@ -211,6 +222,15 @@ let package = Package(
                 // EideticLib: used by the capture_with_mode seam to classify the
                 // lattice anchor at the one capture door (one-door principle).
                 .product(name: "EideticLib", package: "EideticLib"),
+                // LatticeLib is referenced directly by QID/FDC search paths.
+                // Keep it direct so dynamic application linkage exports the
+                // symbols instead of relying on EideticLib's transitive edge.
+                .product(name: "LatticeLib", package: "LatticeLib"),
+                // AdornmentLib: used by AdornmentPass (Brain standing signal 13)
+                // to invoke the MOOT_MINT_CMD seam and certify generated adornments
+                // via AdornmentValidators before writing to the drawer row.
+                // (BRR Group 10 — GLK Package.swift MUST_UPDATE)
+                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Sources/GeniusLocusKit"
         ),

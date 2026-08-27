@@ -119,6 +119,13 @@ let package = Package(
         // no inversion. WorkPacketKit depends only on LocusKit, which AriaMcpKit
         // already carries transitively via GeniusLocusKit.
         .package(name: "WorkPacketKit", path: "../WorkPacketKit"),
+        // AdornmentLib: AdornmentMinterDescriptor and StoredAdornment value types.
+        // Used by the AriaMCP target (the moot_register_adornment_minter dark
+        // tool constructs AdornmentMinterDescriptor, MINTCLI-78) and by
+        // AdornmentRenderTests, which provision minters and adornments directly
+        // via the normalized store (ADORN-STORE-02 Part C). No layering
+        // inversion: AdornmentLib is upstream of LocusKit and GeniusLocusKit.
+        .package(name: "AdornmentLib", path: "../../libs/AdornmentLib"),
     ],
     targets: [
         .target(
@@ -149,6 +156,9 @@ let package = Package(
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
                 // WorkPacketKit backs the four moot_*_packet tools (FAB5-I2).
                 .product(name: "WorkPacketKit", package: "WorkPacketKit"),
+                // AdornmentLib: the moot_register_adornment_minter dark tool
+                // constructs AdornmentMinterDescriptor (MINTCLI-78).
+                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Sources/AriaMCP",
             // Privacy manifest (M-MXA-5): deriveBuildSerial reads the running
@@ -238,6 +248,9 @@ let package = Package(
                 // prevention predicate (test 4 — second dreamer must stand down while
                 // first holds a fresh lease).  / recall-driven dreaming dream path.
                 .product(name: "QueueKit", package: "QueueKit"),
+                // AdornmentLib: AdornmentRenderTests provision minters and adornments
+                // directly via the normalized store (ADORN-STORE-02 Part C).
+                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Tests/AriaMCPTests"
         ),

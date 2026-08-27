@@ -1,0 +1,4 @@
+{
+  "_comment": "Byte-identity pin for modesStatusSection / modes_status_section(). Both ports read this fixture. Update when the mode roster or contract text changes — update BOTH ports simultaneously.",
+  "expected": "\nmodes (advisory bundles — add mode:\"Recall=Auto\" etc. to any call):\n  Recall [Auto|Rows|Answer]: Find and read memories; hydrate only winners.\n  Filing: Capture and organize; one fact per drawer.\n  Lenses: Analyze the estate's shape; read-only.\n  Vault: Import/export/reconcile; verify counts.\n  Curator: Review, confirm, retire; supersede not delete.\n  — Modes change session defaults (e.g. Recall=Auto sets answer:auto on search).\n  — Add teachme:true to moot_estate_status for variants and decision guidance."
+}

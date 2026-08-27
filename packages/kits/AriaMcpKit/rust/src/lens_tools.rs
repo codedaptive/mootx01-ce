@@ -164,7 +164,7 @@ pub fn dispatch(
             // from the TUNNEL graph, whose edges carry the sensitivity their
             // endpoints had at link time, so a since-restricted endpoint is
             // still reachable here and must not render its subject.
-            let dense_by_id = crate::dense_row::rows_by_id(
+            let dense_by_id = crate::recipe_tools::s2_rows_by_id(
                 &coord,
                 &estate.handle,
                 &filtered.iter().map(|k| k.id.clone()).collect::<Vec<_>>(),
@@ -177,7 +177,7 @@ pub fn dispatch(
                         let row = dense_by_id
                             .get(&k.id)
                             .cloned()
-                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&k.id));
+                            .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(&k.id));
                         format!("{} centrality={}", row, k.centrality)
                     })
                     .collect(),
@@ -230,7 +230,7 @@ pub fn dispatch(
             // Hydration goes through the shared gated boundary: this is a walk
             // over the TUNNEL graph, so a since-restricted drawer is reachable
             // through an edge that still carries its old classification.
-            let fa_dense_by_id = crate::dense_row::rows_by_id(
+            let fa_dense_by_id = crate::recipe_tools::s2_rows_by_id(
                 &coord,
                 &estate.handle,
                 &out.iter().map(|a| a.drawer_id.clone()).collect::<Vec<_>>(),
@@ -243,7 +243,7 @@ pub fn dispatch(
                             .get(&a.drawer_id)
                             .cloned()
                             .unwrap_or_else(|| {
-                                crate::dense_row::render_unhydrated(&a.drawer_id)
+                                crate::result_composer::render_s2_row_unhydrated(&a.drawer_id)
                             });
                         format!("{} activation={}", row, a.activation)
                     })
@@ -508,7 +508,7 @@ pub fn dispatch(
             // boundary so every lens arm reads the same way and a future arm
             // copying this one inherits the gate rather than a raw store read.
             let coh_dense_by_id =
-                crate::dense_row::rows_by_id(&coord, &estate.handle, &out.outliers);
+                crate::recipe_tools::s2_rows_by_id(&coord, &estate.handle, &out.outliers);
             let outlier_rows: Vec<String> = out
                 .outliers
                 .iter()
@@ -516,7 +516,7 @@ pub fn dispatch(
                     coh_dense_by_id
                         .get(id)
                         .cloned()
-                        .unwrap_or_else(|| crate::dense_row::render_unhydrated(id))
+                        .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id))
                 })
                 .collect();
             Ok(list(
@@ -595,7 +595,7 @@ pub fn dispatch(
                         if !drawer.adjective_sensitivity().is_bulk_exportable() {
                             hidden.insert(id.clone());
                         } else {
-                            dense.insert(id.clone(), crate::dense_row::render(&drawer));
+                            dense.insert(id.clone(), crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(&drawer)));
                         }
                         if drawer.has_feature_flag(DrawerFeatureFlags::IS_KEYSTONE) {
                             keystones.insert(id.clone());
@@ -635,7 +635,7 @@ pub fn dispatch(
                         Some(id) => contradiction_dense_by_id
                             .get(id)
                             .cloned()
-                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                            .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id)),
                         None => t.source_wing.clone(),
                     };
                     let tgt = match t.target_drawer_id.as_deref() {
@@ -643,7 +643,7 @@ pub fn dispatch(
                         Some(id) => contradiction_dense_by_id
                             .get(id)
                             .cloned()
-                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(id)),
+                            .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id)),
                         None => t.target_wing.clone(),
                     };
                     let tier = if t.lifecycle() == TunnelLifecycle::Proposed {
@@ -767,7 +767,7 @@ pub fn dispatch(
             // Frame-fed ids (see the cohesion arm above) — routed through the
             // shared gated boundary for uniformity, not because they leak.
             let ts_dense_by_id =
-                crate::dense_row::rows_by_id(&coord, &estate.handle, &out.ranked_ids);
+                crate::recipe_tools::s2_rows_by_id(&coord, &estate.handle, &out.ranked_ids);
             let mut ts_lines = vec![format!(
                 "trust_grounded_synthesis: {} drawer(s), {} high-trust",
                 out.ranked_ids.len(),
@@ -777,7 +777,7 @@ pub fn dispatch(
                 let row = ts_dense_by_id
                     .get(id)
                     .cloned()
-                    .unwrap_or_else(|| crate::dense_row::render_unhydrated(id));
+                    .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(id));
                 ts_lines.push(format!("  {row}"));
             }
             ts_lines.push(format!("summary: {}", out.context.summary));
@@ -799,7 +799,7 @@ pub fn dispatch(
                     // Frame-fed ids (see the cohesion arm above) — routed through
                     // the shared gated boundary for uniformity, not because they
                     // leak.
-                    let pc_dense_by_id = crate::dense_row::rows_by_id(
+                    let pc_dense_by_id = crate::recipe_tools::s2_rows_by_id(
                         &coord,
                         &estate.handle,
                         &matches.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
@@ -814,7 +814,7 @@ pub fn dispatch(
                             let row = pc_dense_by_id
                                 .get(&m.id)
                                 .cloned()
-                                .unwrap_or_else(|| crate::dense_row::render_unhydrated(&m.id));
+                                .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(&m.id));
                             format!("{} score={}", row, m.score)
                         })
                         .collect();
@@ -900,7 +900,7 @@ pub fn dispatch(
             // Hydration goes through the shared gated boundary: successors are
             // read straight off the TUNNEL graph, so an endpoint restricted
             // after the edge was created is still reachable here.
-            let suc_dense_by_id = crate::dense_row::rows_by_id(
+            let suc_dense_by_id = crate::recipe_tools::s2_rows_by_id(
                 &coord,
                 &estate.handle,
                 &out.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
@@ -912,7 +912,7 @@ pub fn dispatch(
                         let row = suc_dense_by_id
                             .get(&s.id)
                             .cloned()
-                            .unwrap_or_else(|| crate::dense_row::render_unhydrated(&s.id));
+                            .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(&s.id));
                         format!("{} weight={}", row, s.weight)
                     })
                     .collect(),

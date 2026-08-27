@@ -220,7 +220,7 @@ public extension GeniusLocusKit {
         // Steps 4 + 5 — Matrix tier: LOAD from disk and fold the tail forward,
         // else cold-start full rebuild.
         let store = try await matrixSnapshotStore(for: handle)
-        let tier: MatrixTier
+        var tier: MatrixTier
         if let snapshot = try await store.load(estateID: handle.estateUUID) {
             // Persisted snapshot present: fold only the entries past its watermark
             // onto the loaded tier. incrementalUpdate is conformance-proven equal
@@ -244,6 +244,21 @@ public extension GeniusLocusKit {
             tier = MatrixTier.fullRebuild(from: log_, eventTimes: eventTimes)
             log.info("rebuildDerivedAccelerators: matrix tier full-rebuilt (no snapshot) for \(handle.estateUUID, privacy: .public)")
         }
+
+        // S4-C (§8.13, Bob's Option C ruling): compute the DECAYED O/T
+        // projections at this maintenance pass's clock. Full recompute
+        // every pass by design (fp non-associativity of exp-factor
+        // composition rules out an exact incremental merge); O(log), the
+        // same cost class as the temporal backdated-row fallback. The
+        // count matrices stay the canonical scoring input — the decayed
+        // projections are the arm surface (RecallShape.matrixWeighting).
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        tier.coOccurrenceDecayed = MatrixTier.decayedCoOccurrence(
+            from: log_, nowMs: nowMs)
+        tier.temporalCausalityDecayed = MatrixTier.rebuildTemporal(
+            from: log_, eventTimes: eventTimes, decayNowMs: nowMs)
+            .temporalCausalityDecayed
+        tier.decayedAsOfMs = nowMs
 
         // Install the tier so RecallDirector scoring is live from the first recall.
         // Before this call matrixTiers[handle] is nil and all matrix score columns

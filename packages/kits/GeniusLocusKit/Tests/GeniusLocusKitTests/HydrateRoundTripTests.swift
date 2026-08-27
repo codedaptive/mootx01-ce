@@ -503,7 +503,17 @@ struct MatrixSnapshotPersistenceTests {
                 oracleEventTimes[rowUUID] = Int64(d.eventTime.timeIntervalSince1970 * 1000)
             }
         }
-        let fromScratch = MatrixTier.fullRebuild(from: fullLog, eventTimes: oracleEventTimes)
+        var fromScratch = MatrixTier.fullRebuild(from: fullLog, eventTimes: oracleEventTimes)
+        // S4-C: hydration also computes the decayed O/T projections at the
+        // pass clock — mirror them on the oracle so the equality covers the
+        // projections too (a stronger invariant than counts alone).
+        let decayNowMs = Int64(t0.timeIntervalSince1970 * 1000)
+        fromScratch.coOccurrenceDecayed = MatrixTier.decayedCoOccurrence(
+            from: fullLog, nowMs: decayNowMs)
+        fromScratch.temporalCausalityDecayed = MatrixTier.rebuildTemporal(
+            from: fullLog, eventTimes: oracleEventTimes, decayNowMs: decayNowMs)
+            .temporalCausalityDecayed
+        fromScratch.decayedAsOfMs = decayNowMs
         #expect(registered == fromScratch)
         #expect(registered?.liveRowCount == 5)
 

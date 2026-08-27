@@ -12,7 +12,7 @@ use engram_lib::Engram;
 use std::sync::Arc;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use vectorkit::{engine::metric::FloatMetric, VectorStore};
 
 const FILED_AT_1: i64 = 1_700_000_000;
 const FILED_AT_2: i64 = 1_700_000_100;
@@ -230,18 +230,37 @@ fn find_nearest_indices_map_to_correct_item_ids() {
     }
 }
 
+/// SPEC 1.9.0: equal-distance ties order by vec_hash — the FNV-1a content
+/// hash of the payload bytes — so the order is identical across estate
+/// provisionings regardless of which item drew which id. item_id remains
+/// the final backstop for byte-identical payloads (see the engine tests).
+/// Twin of Swift `findNearestTieBreakByVecHashIsStable`.
 #[test]
-fn find_nearest_equal_distance_tiebreak_by_item_id_ascending() {
+fn find_nearest_equal_distance_tiebreak_by_vec_hash() {
     let store = fresh_store();
     // Two items with the same Hamming distance from the zero probe.
-    // Both have popcount 1: bit 0 vs bit 1.
-    store.add_vector("yyy-item", &Engram::new(0x1, 0, 0, 0), "m", "1", FILED_AT_1).unwrap();
-    store.add_vector("aaa-item", &Engram::new(0x2, 0, 0, 0), "m", "1", FILED_AT_1).unwrap();
+    // Both have popcount 1: bit 0 vs bit 1 — different content.
+    let e_yyy = Engram::new(0x1, 0, 0, 0);
+    let e_aaa = Engram::new(0x2, 0, 0, 0);
+    store.add_vector("yyy-item", &e_yyy, "m", "1", FILED_AT_1).unwrap();
+    store.add_vector("aaa-item", &e_aaa, "m", "1", FILED_AT_1).unwrap();
     let probe = Engram::new(0, 0, 0, 0);
     let matches = store.find_nearest(&probe, "m", 2).unwrap();
     assert_eq!(matches.len(), 2);
-    assert_eq!(matches[0].item_id, "aaa-item");
-    assert_eq!(matches[1].item_id, "yyy-item");
+    // Derive the expected winner from the content hashes alone (the same
+    // FNV-1a the engines use; constants pinned by fnv1a64_golden_pin).
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); }
+        h
+    }
+    let first = if fnv(&e_yyy.wire_bytes()) < fnv(&e_aaa.wire_bytes()) {
+        "yyy-item"
+    } else {
+        "aaa-item"
+    };
+    assert_eq!(matches[0].item_id, first);
+    assert_ne!(matches[1].item_id, first);
 }
 
 #[test]
@@ -745,7 +764,7 @@ fn find_nearest_float_routes_through_hnsw_above_threshold() {
 
     // Probe is item-0's vector: it must rank first under cosine distance.
     let probe = first_vector.unwrap();
-    let results = store.find_nearest_float(&probe, model_id, 5)
+    let results = store.find_nearest_float(&probe, model_id, 5, FloatMetric::Cosine)
         .expect("find_nearest_float");
 
     assert!(!results.is_empty(), "find_nearest_float must return results after HNSW crossover");

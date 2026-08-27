@@ -296,6 +296,21 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Escalation-ladder recall recipe (D10): runs cheap-first stages and
+        // stops at the first confident result. Stage 1 = session_hybrid preset,
+        // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.
+        // Description matches Swift RecipeCatalog.swift byte-for-byte.
+        RecipeDescriptor {
+            name: "walk_recall".into(),
+            version: "1.0.0".into(),
+            description:
+                "Escalation-ladder recall: run a cheap session_hybrid stage first and stop \
+                when the top-gap is confident (≥ 0.25); escalate to a precise hamming+text \
+                re-rank only when Stage 1 is insufficient. Faster than precise recall for \
+                the common case; falls back gracefully when the estate needs the extra precision."
+                    .into(),
+            required_capabilities: vec![],
+        },
     ]
 }
 
@@ -327,7 +342,8 @@ mod tests {
         // plus the exploratory-recall recipe (recall_exploratory)
         // plus 2 distillation recipes (distill, distilled_recall —
         // recollect retired with the factoid tier, SPEC §11)
-        // = 29 total.
+        // plus the escalation-ladder recipe (walk_recall, D10)
+        // = 30 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -362,6 +378,7 @@ mod tests {
                 "theme_weather",
                 "trust_grounded_synthesis",
                 "tunnel_successor",
+                "walk_recall",
             ]
         );
     }

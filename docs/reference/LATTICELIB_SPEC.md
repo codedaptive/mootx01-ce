@@ -1,6 +1,6 @@
 ---
 title: LatticeLib Specification
-version: v0.2
+version: v0.3
 status: active
 date: 2026-08-20
 description: "Behavioral specification for LatticeLib: the FDC encoder, QID closure, and novel-token learning loop."
@@ -408,5 +408,7 @@ The Snowball/Porter2 stemmer conformance is gated by
 *End of LatticeLib Specification.*
 
 ## Changelog
+
+- **v0.3 (2026-08-20)** — QIDClosure gains undirected direct adjacency: `neighbors(of:)` returns direct P31/P279 parents plus children over the pinned edge artifact (reverse index built once per process), and `qidInt(_:)` is now public — together they back SubstrateML's WikidataAdjacencyProvider for LatticeDistance §8.3 (W2.5 Track S activation).
 
 - **v0.2 (2026-08-20)** — QIDFacts: vendored Wikidata property subset (en labels + P17 country) for the canon QID universe (38,503 entries / 3,595 with country; run-once fetch tool tools/wikidata-subset/fetch_wikidata_facts.py — the runtime never queries Wikidata). Loaded once per process from the shared bundled artifact, twin ports, Paris/France cross-port pins.

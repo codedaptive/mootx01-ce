@@ -33,9 +33,10 @@ S8 QID-adjacency) landed. Previous audit: 2026-07-22 against
 - The shipped product is covered separately by `product-bench.py`; it measures
   resident loopback MCP requests and does not substitute microbenchmarks for
   product latency.
-- Adversarial product retrieval is covered by the historical EE gauntlet retest:
-  200 queries across lexical, semantic, temporal, split-fact, and scatter tiers
-  over 1,040 records. Its current result is MOOT-only; MemPalace was not rerun.
+- Adversarial product retrieval is covered by the historical gauntlet retest
+  (`benchmark/ (mcp-benchmarker)`): 200 queries across lexical, semantic,
+  temporal, split-fact, and scatter tiers over 1,040 records. Its current
+  result is MOOT-only.
 
 ## Coverage map
 

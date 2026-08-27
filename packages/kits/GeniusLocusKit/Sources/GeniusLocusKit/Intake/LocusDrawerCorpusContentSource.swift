@@ -90,11 +90,31 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
         .empty
     }
 
-    /// Every active Drawer ID with non-empty content, ascending — the
-    /// deterministic streaming order rebuilds use. Paged so no single call
-    /// materializes an unbounded drawer set.
+    /// Every active Drawer ID with non-empty content in a deterministic order
+    /// suitable for training. Paged so no single call materializes an
+    /// unbounded drawer set.
+    ///
+    /// Sort key: `(filedAt ascending, content ascending)`. UUID order is NOT
+    /// used because drawer UUIDs are random per fresh estate — sorting by UUID
+    /// produces a non-deterministic encounter order for `TermDocumentCounts`,
+    /// which assigns vocabulary indices as terms are first seen across the
+    /// training sequence. Non-deterministic vocabulary indices produce different
+    /// model weights (RI random projections, PPMI PMI scores, LSA/NMF factor
+    /// matrices) across runs from the same corpus, causing recall scores to
+    /// drift between replay runs even when the corpus and capture timestamps
+    /// are bit-identical.
+    ///
+    /// `filedAt` is seed-derived when `MOOT_BENCH_EPOCH_NOW` is active (set to
+    /// `captureDate` from the seed file), making it stable across replay runs.
+    /// `content` is the stable tiebreak for same-`filedAt` records (e.g.
+    /// contradiction pairs that share an event_time): it is a pure function of
+    /// the corpus and does not depend on drawer identity.
+    ///
+    /// Rust twin: `intake.rs` `active_content_ids`.
     public func activeContentIDs() async throws -> [CorpusContentID] {
-        var ids: [CorpusContentID] = []
+        // Collect (filedAt, content, id) tuples so the final sort uses the
+        // stable keys rather than the random drawer UUID.
+        var entries: [(filedAt: Date, content: String, id: String)] = []
         var cursor: String?
         let pageSize = 2_000
         while true {
@@ -105,10 +125,17 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
                 && drawer.contentKind != .dataset
                 && drawer.embeddingModelID != datasetHandleEmbeddingModelID
             {
-                ids.append(drawer.id)
+                entries.append((drawer.filedAt, drawer.content, drawer.id))
             }
             if page.count < pageSize { break }
         }
-        return ids.sorted()
+        // filedAt ascending, then content ascending as a stable tiebreak for
+        // same-instant records. Content comparison only fires for the rare
+        // same-filedAt case (e.g. two drawers in a contradiction pair), so the
+        // overhead of carrying the content string here is negligible in practice.
+        return entries.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt < $1.filedAt }
+            return $0.content < $1.content
+        }.map { $0.id }
     }
 }

@@ -116,8 +116,11 @@ public enum PermissionsWriter {
         "moot_list_lenses", "moot_list_recipes",
         "moot_vault_status", "moot_vault_job",
         "moot_memory_search", "moot_memory_get", "moot_memory_list",
-        "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
-        "moot_recall_vague",
+        "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped",
+        "moot_recall_distilled", "moot_recall_vague",
+        // D10 walk ladder + temporal recall: read-only recall recipes, same
+        // class as their recall_* siblings above (Rust twin: permissions.rs).
+        "moot_recall_walk", "moot_recall_temporal",
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
         "moot_estate_map", "moot_read_journal", "moot_federated_search",

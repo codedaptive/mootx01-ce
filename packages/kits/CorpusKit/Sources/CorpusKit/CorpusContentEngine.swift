@@ -1131,7 +1131,17 @@ public actor CorpusContentEngine {
         //   (3) fold-in — stable basis, no retrain.
         // Called once per batch (not per job); decisions are serialized here
         // before the Phase 2 parallel embed fan-out.
-        let batchNow = Date()
+        //
+        // The batch instant is DERIVED FROM THE JOBS, never from Date():
+        // the MAX of the batch's submission HLC physical times (each job's
+        // capture instant — the same clock the per-job workNow uses below).
+        // A wall-clock read here stamped drain-worker training and embeds
+        // with load-dependent times, breaking the pass-`now`-in determinism
+        // rule for every caller whose clock is pinned (the bench-clock seam
+        // rides tool calls; this background worker never sees it) —
+        // REPLAY_DRIFT_RCA 2026-08-26, kinsta facts 11–12.
+        let batchNow = Date(timeIntervalSince1970:
+            Double(jobs.map(\.submittedAt.physicalTime).max() ?? 0) / 1000.0)
         try await batchTrainIfNeeded(now: batchNow)
         // registerClaims: idempotent — upserts claims only when absent; calling
         // once per batch eliminates N×slots unconditional upserts (Cause 2 fix).
@@ -3479,10 +3489,18 @@ public actor CorpusContentEngine {
     /// `(modelID, outcome)` pair per held slot, in slot order. Hit item IDs
     /// are canonical content IDs (passage keys aggregate to their content
     /// ID before ranking).
+    /// Per-signal dense float NEAREST recall.
+    ///
+    /// - Parameters:
+    ///   - query: the natural-language query string.
+    ///   - limit: the candidate-pool depth per signal.
+    ///   - metric: the distance function to use. Defaults to `.cosine` so
+    ///     callers that do not pass a metric (pre-floatMetric call sites) see
+    ///     byte-identical behaviour — no silent behaviour change.
     public func floatNearestPerSignal(
-        query: String, limit: Int
+        query: String, limit: Int, metric: FloatMetric = .cosine
     ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .nearest)
+        await floatPerSignal(query: query, limit: limit, direction: .nearest, metric: metric)
     }
 
     /// Single-signal dense float nearest recall — the DEFAULT slot's
@@ -3492,10 +3510,15 @@ public actor CorpusContentEngine {
     }
 
     /// Per-signal dense float FARTHEST (anti-similarity) recall.
+    ///
+    /// - Parameters:
+    ///   - query: the natural-language query string.
+    ///   - limit: the candidate-pool depth per signal.
+    ///   - metric: the distance function to use. Defaults to `.cosine`.
     public func floatFarthestPerSignal(
-        query: String, limit: Int
+        query: String, limit: Int, metric: FloatMetric = .cosine
     ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .farthest)
+        await floatPerSignal(query: query, limit: limit, direction: .farthest, metric: metric)
     }
 
     /// Per-signal dense float nearest recall WITH per-query discrimination signal.
@@ -3510,10 +3533,15 @@ public actor CorpusContentEngine {
     /// for their own fusion decisions.
     ///
     /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
+    ///
+    /// - Parameters:
+    ///   - query: the natural-language query string.
+    ///   - limit: the candidate-pool depth per signal.
+    ///   - metric: the distance function to use. Defaults to `.cosine`.
     public func floatNearestPerSignalWithDiscrimination(
-        query: String, limit: Int
+        query: String, limit: Int, metric: FloatMetric = .cosine
     ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
-        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
+        let perSignal = await floatNearestPerSignal(query: query, limit: limit, metric: metric)
         return perSignal.map { entry in
             (modelID: entry.modelID,
              outcome: entry.outcome,
@@ -3571,7 +3599,7 @@ public actor CorpusContentEngine {
     }
 
     private func floatPerSignal(
-        query: String, limit: Int, direction: SearchDirection
+        query: String, limit: Int, direction: SearchDirection, metric: FloatMetric = .cosine
     ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
         guard limit > 0, !query.isEmpty else {
             return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
@@ -3623,10 +3651,10 @@ public actor CorpusContentEngine {
                 switch direction {
                 case .nearest:
                     matches = try await vectorStore.findNearestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4)
+                        probe: probe, modelID: provider.modelID, limit: limit * 4, metric: metric)
                 case .farthest:
                     matches = try await vectorStore.findFarthestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4)
+                        probe: probe, modelID: provider.modelID, limit: limit * 4, metric: metric)
                 }
             } catch {
                 Intellectus.report(.metric(

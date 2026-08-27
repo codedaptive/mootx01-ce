@@ -16,6 +16,7 @@
 //
 // Use --check to query the latest release without downloading.
 
+import AdornmentLib
 import AriaMCP
 import ArgumentParser
 import Foundation
@@ -43,6 +44,13 @@ struct UpgradeCommand: AsyncParsableCommand {
 
             Use --check to print the latest available version without downloading:
               mootx01 upgrade --check
+
+            Use --backfill-only to run only the data-directory migration steps
+            (kg_facts identity, adornment store migration, shared-content reclaim)
+            against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
+            no download, no plugin convergence, no encryption offer, no restartAgents
+            cycle — each step quiesces and restores the daemon itself:
+              mootx01 upgrade --backfill-only
             """
     )
 
@@ -75,6 +83,21 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
+
+    /// Run ONLY the data-directory migration steps: kg_facts identity,
+    /// adornment store migration, and shared-content reclaim. Intended for
+    /// scripted and benchmark estates where the caller owns the estate via
+    /// MOOTX01_DATA_DIR. No network, no download, no plugin convergence, no
+    /// encryption offer, no restartAgents cycle. Each step handles its own
+    /// daemon quiesce and restore so the caller need not manage service state.
+    ///
+    /// Ordering matches `runConvergence`: kg_facts identity first (correctness
+    /// migration), adornment store migration second (schema v17 + data move),
+    /// shared-content reclaim last (VACUUM-backed, most I/O).
+    @Flag(
+        name: .customLong("backfill-only"),
+        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself.")
+    var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
     /// download and the binary placement.
@@ -125,6 +148,19 @@ struct UpgradeCommand: AsyncParsableCommand {
             await runConvergence(
                 home: home,
                 binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
+            return
+        }
+
+        // --backfill-only: headless data-dir convergence for scripted and
+        // benchmark estates. Runs only the three data-directory migration steps
+        // (kg_facts identity, adornment store migration, shared-content reclaim)
+        // against the estate resolved via MOOTX01_DATA_DIR. No network,
+        // no download, no plugin convergence, no encryption offer, no
+        // restartAgents cycle. Each step owns its daemon quiesce+restore inline.
+        if backfillOnly {
+            await runKGFactIdentityBackfill(home: home)
+            await runAdornmentStoreMigration(home: home)
+            await runSharedContentReclaimIfPending(home: home)
             return
         }
 
@@ -244,6 +280,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // may have placed a new binary but left the Claude Code plugin
                 // cache stale (version_skew advisory firing on every ping).
                 await runKGFactIdentityBackfill(home: home)
+                await runAdornmentStoreMigration(home: home)
                 await runSharedContentReclaimIfPending(home: home)
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
@@ -395,9 +432,11 @@ struct UpgradeCommand: AsyncParsableCommand {
         // Quiesce first (single-writer discipline, same direction as the
         // encryption migration): if the daemon will not stop, skip —
         // nothing is half-done, and the next `mootx01 upgrade` retries.
-        // restartAgents (the very next step in run()) starts the daemon
-        // again over the migrated estate, so there is no start here.
-        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
+        // The daemon is restarted inline after the work (per-function
+        // shape, mirrors Rust) so --backfill-only restores the daemon
+        // after each step without relying on any caller-side restart.
+        let wasRunning = LaunchAgent.isDaemonRunning()
+        if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
             return
         }
@@ -432,6 +471,152 @@ struct UpgradeCommand: AsyncParsableCommand {
                     Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
                 """)
         }
+
+        // Put the daemon back over the (possibly migrated) estate, mirroring
+        // the Rust per-function shape: was_running capture → inline daemon_start.
+        // This fires for both success and failure so the caller (including
+        // --backfill-only) never needs to know which functions quiesce the daemon.
+        if wasRunning {
+            _ = LaunchAgent.startDaemon(homeDirectory: home)
+        }
+        #endif
+    }
+
+    /// ADORN-STORE-02 Part C: move legacy `drawers.adornment` TEXT rows into
+    /// the normalized `adornments` table that landed in schema v17. Estates
+    /// written before v17 carry per-drawer adornment text directly in the
+    /// `drawers` table; the new dream cycle reads only from `adornments` and
+    /// never touches `drawers.adornment`. This migration closes the gap so
+    /// existing adorned drawers remain visible after the upgrade.
+    ///
+    /// Strategy:
+    ///   1. Open `SQLiteStorage` — `Estate.open` runs `DrawerStore(storage:)`,
+    ///      which calls `storage.open(schema:)` and applies the v17 migration
+    ///      (creates `adornment_minters` + `adornments` tables) before any data
+    ///      is touched. Idempotent: a second run on a v17+ estate is a no-op
+    ///      because the SELECT below returns zero rows with a non-empty text.
+    ///   2. Register a single "legacy-v16-adornment" minter (idempotent upsert)
+    ///      so that the migrated adornment rows have a valid FK into
+    ///      `adornment_minters` and are returned by `activeAdornments`.
+    ///   3. Read every `drawers` row whose `adornment` TEXT column is non-empty
+    ///      via `storage.rowStore.query(table: "drawers", ...)` — the column is
+    ///      physically retained in the schema so existing estates can be read even
+    ///      before the dream cycle re-mints them from the new store.
+    ///   4. For each such row, write a `StoredAdornment` (idempotent — PK on
+    ///      `(drawer_id, minter_id)` makes a second run produce zero net changes).
+    ///
+    /// Failure posture mirrors the kg_facts identity backfill: each INSERT OR
+    /// REPLACE is one row, so a crash mid-run leaves the estate in a valid
+    /// partial state; the next `mootx01 upgrade` completes the rest.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    private func runAdornmentStoreMigration(home: URL) async {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        // Absent estate means first run — new estates start on v17 and have
+        // no legacy adornment text; nothing to migrate.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+
+        // Same key custody as the kg_facts identity backfill: existing key
+        // for an encrypted estate, plaintext posture preserved for a
+        // plaintext one. Never prompts, never migrates encryption.
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ adornment store migration skipped — estate key unavailable: \(error)")
+            return
+        }
+
+        // Quiesce first (single-writer discipline): if the daemon will not
+        // stop, skip — nothing is half-done, and the next upgrade retries.
+        // The daemon is restarted inline after the work (per-function
+        // shape, mirrors Rust) so --backfill-only restores the daemon
+        // after each step without relying on any caller-side restart.
+        let wasRunning = LaunchAgent.isDaemonRunning()
+        if wasRunning && !LaunchAgent.stopDaemon() {
+            print("  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
+            return
+        }
+
+        do {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption
+            )
+            let storage = try SQLiteStorage(configuration: configuration)
+            // Estate.open calls DrawerStore(storage:) → storage.open(schema:),
+            // which runs the v17 schema ladder before any row is touched.
+            let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+            let estate = try await LocusKit.Estate.open(storage: storage, owner: owner)
+
+            // Scan for legacy adornment text in the (now-dead) drawers.adornment
+            // column. The column is physically retained post-v17 but the dream
+            // cycle never writes to it; values present here pre-date schema v17.
+            let drawerRows = try await storage.rowStore.query(
+                table: "drawers",
+                where: nil,
+                orderBy: [],
+                limit: nil,
+                offset: nil
+            )
+            let legacyRows = drawerRows.filter { row in
+                if case .text(let t) = row["adornment"] { return !t.isEmpty }
+                return false
+            }
+
+            if legacyRows.isEmpty {
+                print("  ✓ adornment store migration: no legacy adornments to migrate")
+            } else {
+                // Register the single synthetic minter that owns all legacy text.
+                // `registerAdornmentMinter` is an upsert — running twice changes nothing.
+                // isActive = true ensures activeAdornments() returns the migrated rows.
+                let legacyMinter = AdornmentMinterDescriptor(
+                    id: "legacy-v16-adornment",
+                    name: "Legacy v16 Adornment",
+                    family: "legacy",
+                    modelID: "unknown-v16",
+                    modelVersion: "2026",
+                    promptDigest: "legacy-pre-adornment-store",
+                    parameters: [:],
+                    isActive: true
+                )
+                try await estate.registerAdornmentMinter(legacyMinter)
+
+                // Move each legacy row. putAdornment is INSERT OR REPLACE on
+                // (drawer_id, minter_id), so a second run produces zero net writes.
+                var moved = 0
+                for row in legacyRows {
+                    guard case .text(let drawerID) = row["id"],
+                          case .text(let text) = row["adornment"]
+                    else { continue }
+                    let adornment = StoredAdornment(
+                        drawerID: drawerID,
+                        minterID: legacyMinter.id,
+                        text: text
+                    )
+                    _ = try await estate.putAdornment(adornment)
+                    moved += 1
+                }
+                print("  ✓ adornment store migration: \(moved) legacy adornment(s) moved to normalized store")
+            }
+            await storage.close()
+        } catch {
+            print(
+                "  ✗ adornment store migration failed: \(error)\n" +
+                "    Legacy adornments remain readable via drawers.adornment until resolved." +
+                " Run `mootx01 upgrade` to retry."
+            )
+        }
+
+        // Put the daemon back over the (possibly migrated) estate, mirroring
+        // the kg_facts identity backfill ordering and the Rust per-function shape.
+        if wasRunning {
+            _ = LaunchAgent.startDaemon(homeDirectory: home)
+        }
         #endif
     }
 
@@ -463,9 +648,12 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        // Quiesce before VACUUM (single-writer discipline). The daemon is
-        // restarted by restartAgents(), the very next step in run().
-        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
+        // Quiesce before VACUUM (single-writer discipline): if the daemon will
+        // not stop, skip — nothing is half-done, and the next upgrade retries.
+        // The daemon is restarted inline after the work (per-function shape,
+        // mirrors Rust) so --backfill-only restores the daemon after each step.
+        let wasRunning = LaunchAgent.isDaemonRunning()
+        if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
             return
         }
@@ -536,6 +724,12 @@ struct UpgradeCommand: AsyncParsableCommand {
                   ✗ shared-content reclaim failed: \(error)
                     The estate is unaffected. Run `mootx01 upgrade` to retry.
                 """)
+        }
+
+        // Put the daemon back before returning, mirroring the kg_facts
+        // identity backfill ordering and the Rust per-function shape.
+        if wasRunning {
+            _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
         #endif
     }
@@ -733,6 +927,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         migratePermissionTiers(home: home)
         removeRedundantCodexDirectEntry(home: home)
         await runKGFactIdentityBackfill(home: home)
+        await runAdornmentStoreMigration(home: home)
         await runSharedContentReclaimIfPending(home: home)
         convergeDaemonBundle(home: home)
         restartAgents(home: home)
@@ -740,17 +935,9 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     // MARK: - MACD-2c2 daemon-bundle convergence (macOS)
 
-    /// Converge the daemon provider bundle registration on upgrade, matching
-    /// the install path exactly: when the bundle artifact is present, write
-    /// the DISABLED bundle-form LaunchAgent plist (readback-verified) and
-    /// report the provider's read-only census.
-    ///
-    /// Deliberately NOT a takeover: the legacy raw-serve `com.mootx01.daemon`
-    /// registration, its plist, and its running job are RETAINED untouched
-    /// (different label — `DaemonBundle.launchAgentLabel`), because the bundle
-    /// provider does not prove authenticated readiness until estate hosting
-    /// activates. Nothing is bootstrapped or started here, and the arbiter —
-    /// never install source — decides any future duplicate.
+    /// Converge the daemon provider bundle on upgrade. Once the signed bundle
+    /// is present it supersedes the legacy raw-serve registration; booting the
+    /// legacy job out first prevents concurrent writers during takeover.
     ///
     /// Idempotent: re-writing the same plist is the readback contract, and the
     /// census creates nothing.
@@ -808,20 +995,19 @@ struct UpgradeCommand: AsyncParsableCommand {
             print("    Upgrading normally; the existing process is not stopped (C3).")
         }
         print("\nConverging the daemon provider bundle\u{2026}")
-        switch LaunchAgent.installDaemonBundleDisabled(homeDirectory: home) {
-        case let .installedDisabled(plistPath):
-            print("  \u{2713} Daemon provider bundle registered DISABLED (launchd: \(DaemonBundle.launchAgentLabel))")
+        LaunchAgent.uninstallDaemon(homeDirectory: home)
+        switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
+        case let .installed(plistPath, endpointURL):
+            print("  \u{2713} Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    MCP endpoint: \(endpointURL)")
             print("    LaunchAgent: \(plistPath)")
-            if FileManager.default.fileExists(
-                atPath: MootPaths.daemonPlistURL(homeDirectory: home).path
-            ) {
-                print("    The existing resident daemon registration (\(MootPaths.daemonLabel)) is retained until the provider proves readiness.")
-            }
         case let .launchctlFailed(message):
-            print("  \u{2717} Could not register the daemon provider bundle: \(message)")
+            print("  \u{2717} Could not start the daemon provider bundle: \(message)")
             return
-        case .installed, .binaryNotFound:
-            // installDaemonBundleDisabled never returns these cases.
+        case .binaryNotFound:
+            print("  \u{2717} Daemon provider bundle executable is missing.")
+            return
+        case .installedDisabled:
             return
         }
         let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)

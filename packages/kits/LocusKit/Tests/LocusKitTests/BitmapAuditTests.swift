@@ -110,8 +110,9 @@ struct BitmapAuditTests {
 
         let loaded = try await store.getDrawer(id: "11111111-1111-4111-8111-111111111111")
         #expect(loaded?.adjectiveBitmap == newValue)
-        // Operational bitmap untouched — adjective and operational
-        // axes are independent per spec § 5.6.
+        // Operational bitmap is untouched by an adjective mutation (axes are independent
+        // per spec § 5.6). sampleDrawer uses operationalBitmap = 0; drawerValues stores
+        // it as-is (no OR-at-persist hack). Adjective mutation does not touch it.
         #expect(loaded?.operationalBitmap == 0)
     }
 
@@ -182,6 +183,9 @@ struct BitmapAuditTests {
         )
 
         let loaded = try await store.getDrawer(id: "11111111-1111-4111-8111-111111111111")
+        // The gate RMW applies the caller-supplied value across all declared operational
+        // slots. sampleDrawer uses operationalBitmap = 0, so prior bit 27 = 0, and
+        // newValue (0x102) has bit 27 = 0. Stored value = newValue exactly.
         #expect(loaded?.operationalBitmap == newValue)
         // Adjective bitmap untouched — independent axis per spec § 5.6.
         #expect(loaded?.adjectiveBitmap == 0)
@@ -206,6 +210,9 @@ struct BitmapAuditTests {
         let events = try await auditEvents(store, "11111111-1111-4111-8111-111111111111")
         #expect(events.count == 2)
         guard let ev = events.last else { return }
+        // The gate RMW applies declared slots from the new value onto the prior bitmap.
+        // sampleDrawer starts at operationalBitmap = 0; 0x102 is the expected value.
+        // Bits 27-30 are FREE (ADORN-STORE-02 v17) — no adornment bits involved.
         #expect(ev.afterBitmaps.operational == 0x102)
         #expect(ev.actor == "test")
     }
@@ -230,6 +237,8 @@ struct BitmapAuditTests {
         }
 
         let untouched = try await store.getDrawer(id: "eeeeeeee-1111-4111-8111-111111111111")
+        // sampleDrawer was created with operationalBitmap = 0. drawerValues stores
+        // it as-is; the failed mutateOperational on a different id did not touch it.
         #expect(untouched?.operationalBitmap == 0)
         #expect(try await auditEventCount(store, "11111111-1111-4111-8111-111111111111") == 0)
     }
@@ -323,6 +332,8 @@ struct BitmapAuditTests {
         guard events.count == 3 else { return }
         // events[0] = genesis capture; [1] = adjective write; [2] = operational write.
         #expect(events[1].afterBitmaps.adjective == 0x400)
+        // The gate RMW applies declared slots from 0x40 onto prior operational = 0.
+        // 0x40 sets content_kind = 1; bit 27 = 0 in 0x40, so it stays 0 after the write.
         #expect(events[2].afterBitmaps.operational == 0x40)
         // adjective axis preserved across the operational write:
         #expect(events[2].afterBitmaps.adjective == 0x400)

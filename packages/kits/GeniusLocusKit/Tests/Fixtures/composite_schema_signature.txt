@@ -1,3 +1,21 @@
+table=adornment_minters
+  col=id type=text null=0 default=- role=-
+  col=name type=text null=0 default=- role=-
+  col=family type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=prompt_digest type=text null=0 default=- role=-
+  col=parameters type=text null=0 default=- role=-
+  col=is_active type=int null=0 default=int role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=adornments
+  col=drawer_id type=text null=0 default=- role=-
+  col=minter_id type=text null=0 default=- role=-
+  col=text type=text null=0 default=- role=-
+  pk=drawer_id,minter_id
+  appendOnly=0 hashable=0
 table=associations
   col=id type=text null=0 default=- role=-
   col=sourceWing type=text null=0 default=- role=-
@@ -158,6 +176,7 @@ table=drawers
   col=subject type=text null=1 default=- role=-
   col=subject_pipeline_version type=text null=1 default=- role=-
   col=subject_at type=timestamp null=1 default=- role=-
+  col=adornment type=text null=1 default=- role=-
   gen=g_state_cluster type=int
   gen=g_provenance_source type=int
   gen=g_provenance_confirmation type=int
@@ -319,6 +338,9 @@ table=recall_trace
   col=recalledAt type=timestamp null=0 default=- role=-
   col=score type=float null=1 default=- role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=door type=text null=1 default=- role=-
+  col=composition type=text null=1 default=- role=-
+  col=laneRanks type=text null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
@@ -402,6 +424,8 @@ table=vectors
   pk=id
   unique=item_id,vector_index,model_id,generation
   appendOnly=0 hashable=0
+index=idx_adornment_minters_active table=adornment_minters cols=is_active unique=0
+index=idx_adornments_minter_id table=adornments cols=minter_id unique=0
 index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
 index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
 index=idx_associations_udcCode table=associations cols=udcCode unique=0

@@ -52,8 +52,29 @@ import SubstrateKernel
 import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
+import AdornmentLib
 
 private let drawerStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit")
+
+/// One (drawer, minter) pair that does not yet have an adornment row.
+///
+/// Returned by `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)` to describe
+/// work that the AdornmentPass in GeniusLocusKit must perform. The minter holds
+/// the full descriptor so the caller can immediately invoke the minter without
+/// a separate registry lookup.
+///
+/// Per LOCUSKIT_INTERFACE 2.0.1 § normalized adornment storage.
+public struct AdornmentDebt: Sendable, Equatable {
+    /// The drawer that needs an adornment from `minter`.
+    public let drawer: Drawer
+    /// The active minter that has not yet produced an adornment for `drawer`.
+    public let minter: AdornmentMinterDescriptor
+
+    public init(drawer: Drawer, minter: AdornmentMinterDescriptor) {
+        self.drawer = drawer
+        self.minter = minter
+    }
+}
 
 public actor DrawerStore {
 
@@ -560,7 +581,10 @@ public actor DrawerStore {
         // Subject trio (PR-01): the subject IS structured-tier data — it
         // exists precisely so candidate rows can be judged without
         // hydrating content, so the structured projection carries it.
-        "subject", "subject_pipeline_version", "subject_at"
+        "subject", "subject_pipeline_version", "subject_at",
+        // Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
+        // Adornments now live in the adornments table (drawer_id, minter_id, text);
+        // retrieve via DrawerStore.adornments(drawerID:) or activeAdornments(drawerIDs:).
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -631,7 +655,14 @@ public actor DrawerStore {
                 .in(Column(table: "drawers", name: "parent_node_id"), roomNodeIds.map { TypedValue.text($0) }),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
-            orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
+            orderBy: [
+                // Content-stable tie key (DECISION_SCORE_TRANSPARENT_ORDERING):
+                // without a secondary, filedAt-tied rows ordered by backend
+                // insertion order — deterministic per estate but not across
+                // same-data builds. Content is identical across builds.
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: .ascending),
+            ],
             limit: nil, offset: nil, columns: nil
         )
         let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:)")
@@ -667,7 +698,14 @@ public actor DrawerStore {
                 .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNodeId)),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
-            orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
+            orderBy: [
+                // Content-stable tie key (DECISION_SCORE_TRANSPARENT_ORDERING):
+                // without a secondary, filedAt-tied rows ordered by backend
+                // insertion order — deterministic per estate but not across
+                // same-data builds. Content is identical across builds.
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: .ascending),
+            ],
             limit: nil, offset: nil, columns: nil
         )
         let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:room:)")
@@ -763,19 +801,25 @@ public actor DrawerStore {
         // millisecond epoch was stored where seconds were expected) are skipped
         // at the storage cursor level and do not abort the entire corpus scan.
         //
-        // Compound sort key: (filedAt, id) in `direction`. The id secondary
-        // term breaks ties within the same filedAt so the result is a
-        // deterministic total order — DESC is exactly reverse(ASC). `id` is
-        // the declared TEXT primary key of the drawers table, present in all
-        // three backends (SQLite, PostgreSQL, InMemory). This replaces the
-        // previous SQLite-only `rowid` pseudo-column, which is undefined in
-        // PostgreSQL and caused an undefined-column error on Postgres estates
-        // (c-recall-portable fix). Mirrors Rust's (filed_at, id) ordering.
+        // Compound sort key: (filedAt, content, id) in `direction` — a
+        // deterministic total order; DESC is exactly reverse(ASC).
+        // CONTENT is the tie key (DECISION_SCORE_TRANSPARENT_ORDERING,
+        // 2026-08-24): `id` is a UUID minted fresh per estate build, so an
+        // id tie-break made two estates built from the same data order
+        // filedAt-tied rows differently — batch-imported estates share ONE
+        // import instant across every row, so the entire candidate order was
+        // build-dependent (measured: 12/25 same-recipe synthesize outputs
+        // differed on this alone). Content is content-derived and identical
+        // across builds. `id` remains only as the last resort between
+        // identical-content duplicates, whose mutual order is meaningless
+        // (ruling 3). All clauses share `direction` so reversal stays exact.
+        // Rust twin mirrors this ordering (mission SCORE-ORDERING).
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: nil,
             orderBy: [
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: direction),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: direction),
                 OrderClause(column: Column(table: "drawers", name: "id"), direction: direction),
             ],
             limit: limit.map { $0 }, offset: nil, columns: columns
@@ -1014,7 +1058,14 @@ public actor DrawerStore {
 
         // Pre-compute HLC stamps and row UUIDs outside the @Sendable transaction
         // closure (both access actor-isolated state: hlc and UUID parsing).
-        let stamps = drawers.map { _ in hlc.send(now: nowMillis) }
+        // Each drawer's stamp derives from its own filedAt (not a single batch
+        // nowMillis) so that per-record capture_date values (schema v1.2) produce
+        // distinct HLC physical times. For batches where all drawers share the
+        // same filedAt (no capture_date on any record), every stamp derives from
+        // the same millisecond — byte-identical to the prior single-nowMillis path.
+        let stamps = drawers.map { d in
+            hlc.send(now: Int64(d.filedAt.timeIntervalSince1970 * 1000))
+        }
         let rowUuids = try drawers.map { d in try Self.requireUuid(d.id, label: "id") }
         // One families instance for the whole batch (same estate); computed
         // once per drawer, outside the @Sendable closure. See gatedCaptureBody
@@ -1355,8 +1406,10 @@ public actor DrawerStore {
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt. The
             // distilled representation is content-derived text — the scrub
-            // clears it (and the has_current_representation bit) in the
-            // same statement (destruction contract, cookbook §2.4.1).
+            // clears it (and the has_current_representation bit) in the same
+            // statement (destruction contract, cookbook §2.4.1).
+            // Adornment rows for this drawer are deleted from the adornments
+            // table in the same transaction (see DELETE below).
             let clearedOp = priorOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
             _ = try await txn.rowStore.update(
                 table: "drawers",
@@ -1367,6 +1420,13 @@ public actor DrawerStore {
                     "tombstonedAt": .timestamp(now),
                 ]),
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+            // Delete adornment rows for this drawer (ADORN-STORE-02 v17 estate verbs rule):
+            // adornments are content-derived and the drawer is being tombstoned —
+            // remove them in the same transaction so no orphan rows remain.
+            _ = try await txn.rowStore.delete(
+                table: "adornments",
+                where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawerId))
             )
             try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
 
@@ -3795,7 +3855,14 @@ public actor DrawerStore {
     /// replaces the old recompute-on-every-read path in
     /// `fingerprintsCaptured`/`fingerprintBitSeries`).
     private static func drawerValues(_ d: Drawer, fingerprint: Fingerprint256) -> [String: TypedValue] {
-        [
+        // Use the drawer struct's operationalBitmap directly. All bits are now
+        // managed by the write paths that own them (gatedCaptureBody,
+        // clearedRepresentationValues) before calling drawerValues. Bits 27-30
+        // are FREE (retired by ADORN-STORE-02 v17). OR-ing them here would
+        // write a different value than the audit event recorded in
+        // afterBitmaps.operational, causing AuditLogFold reconstruction to diverge.
+        let opBitmap: Int64 = d.operationalBitmap
+        return [
             "id": .text(d.id),
             "content": .text(d.content),
             "parent_node_id": .text(d.parentNodeId),
@@ -3812,7 +3879,7 @@ public actor DrawerStore {
             "removedByBatch": d.removedByBatch.map { TypedValue.text($0) } ?? .null,
             "provenance": .bitmap(d.provenance),
             "adjectiveBitmap": .bitmap(d.adjectiveBitmap),
-            "operationalBitmap": .bitmap(d.operationalBitmap),
+            "operationalBitmap": .bitmap(opBitmap),
             "lineageID": .text(d.lineageID.uuidString),
             "udcCode": .text(d.udcCode),
             "udcFacets": d.udcFacets.map { TypedValue.text($0) } ?? .null,
@@ -3833,7 +3900,11 @@ public actor DrawerStore {
             // rider populate the rest via setSubjectRepresentation.
             "subject": d.subject.map { TypedValue.text($0) } ?? .null,
             "subject_pipeline_version": d.subjectPipelineVersion.map { TypedValue.text($0) } ?? .null,
-            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null
+            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null,
+            // Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
+            // Adornment rows live in the adornments table keyed by (drawer_id, minter_id).
+            // The legacy drawers.adornment column remains physically in the schema
+            // (SQLite cannot DROP COLUMN) but is no longer written or read here.
         ]
     }
 
@@ -4070,6 +4141,9 @@ public actor DrawerStore {
             subject: optString(row["subject"]),
             subjectPipelineVersion: optString(row["subject_pipeline_version"]),
             subjectAt: optDate(row["subject_at"])
+            // Adornment text is no longer a Drawer field (ADORN-STORE-02 v17).
+            // Adornment rows live in the adornments table keyed by (drawer_id, minter_id);
+            // retrieve via DrawerStore.adornments(drawerID:) or activeAdornments(drawerIDs:).
         )
     }
 
@@ -4608,6 +4682,11 @@ public actor DrawerStore {
             // same contract as the un-wrapped call). Compute the cleared
             // bitmap using the prior value, or 0 if the row is not found.
             let currentOp = rows.first.map { Self.int64($0["operationalBitmap"]) } ?? 0
+            // Clear hasCurrentRepresentation (bit 19) — content changed so
+            // the prior representations are stale. Adornment rows are not cleared
+            // here; they remain until explicitly replaced via putAdornment or
+            // deleted by expunge. The adornment debt queue is pair-based
+            // (adornmentDebtBatch), not bit-27 based (ADORN-STORE-02 v17).
             let clearedOp = currentOp & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
             return try await txn.rowStore.update(
                 table: "drawers",
@@ -5073,6 +5152,11 @@ public actor DrawerStore {
     /// and the erasure scrub: distilled text and the subject line are both
     /// content-derived, so zeroing content must scrub them in the same
     /// statement). Covers the distilled quad and the subject trio (PR-01).
+    ///
+    /// Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
+    /// Adornment rows in the adornments table are NOT cleared on content edit;
+    /// they remain until replaced via putAdornment or deleted by expunge.
+    /// The adornment debt queue is pair-based, not bit-based.
     private static let clearedRepresentationValues: [String: TypedValue] = [
         "distilled": .null,
         "distilled_pipeline_version": .null,
@@ -5150,6 +5234,57 @@ public actor DrawerStore {
                     "distilled_at": .timestamp(generatedAt),
                     "operationalBitmap": .bitmap(setOp),
                 ],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
+    }
+
+    // ── Anomalous flag write (§11.18 anomalous-flag recall prefilter) ────────
+
+    /// Set or clear bit 26 (`isAnomalous`) on one drawer's `operationalBitmap`.
+    ///
+    /// This is a DERIVED SIGNAL write — it carries no audit event, no
+    /// supersession cascade, no lifecycle or lineage field touched, and no
+    /// content digest or revision bump. The anomaly flag is computed by
+    /// GeniusLocusKit's room-cohesion sweep, not asserted by a user or
+    /// belief-state change.
+    ///
+    /// Implemented as a read-modify-write within a single serializable
+    /// transaction, matching the `setDistilledRepresentation` pattern for
+    /// bitmap-bit changes: the read and the write are atomic so two
+    /// concurrent sweep iterations on the same drawer cannot interleave.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose bit should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+            )
+            guard let row = rows.first else { return 0 }
+            let currentOp = Self.int64(row["operationalBitmap"])
+            let updatedOp: Int64
+            if anomalous {
+                // Set bit 26 — drawer is a low-cohesion outlier.
+                updatedOp = currentOp | DrawerFeatureFlags.isAnomalous.rawValue
+            } else {
+                // Clear bit 26 — drawer is not anomalous (or room too small).
+                updatedOp = currentOp & ~DrawerFeatureFlags.isAnomalous.rawValue
+            }
+            // Skip the write if the bitmap is unchanged — avoids spurious
+            // UPDATE traffic when the sweep re-runs on a stable estate.
+            guard updatedOp != currentOp else { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers",
+                values: ["operationalBitmap": .bitmap(updatedOp)],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
         }
@@ -5614,6 +5749,468 @@ public actor DrawerStore {
             orderBy: [], limit: nil, offset: nil, columns: ["id"]
         )
         return rows.count
+    }
+
+    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
+
+    // MARK: - Minter registry
+
+    /// Return all registered adornment minters, ordered by name ascending.
+    ///
+    /// Mirrors Rust `list_adornment_minters`. The active flag on each
+    /// descriptor reflects the current is_active value in the store;
+    /// call `setAdornmentMinterActive` or `setActiveAdornmentMinters` to
+    /// change activation state without re-registering.
+    public func listAdornmentMinters() async throws -> [AdornmentMinterDescriptor] {
+        let rows = try await storage.rowStore.query(
+            table: "adornment_minters",
+            where: nil,
+            orderBy: [OrderClause(
+                column: Column(table: "adornment_minters", name: "name"),
+                direction: .ascending
+            )],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map { try Self.minterDescriptorFromRow($0) }
+    }
+
+    /// Register one adornment minter (immutable-configuration contract).
+    ///
+    /// A minter row is an immutable configuration identity
+    /// (LOCUSKIT_SPEC § ADORNMENT_STORE): re-registering the same `id`
+    /// with identical configuration is an idempotent no-op; re-registering
+    /// with ANY changed configuration field throws — a configuration
+    /// change requires a NEW minter id. The `isActive` value is initial
+    /// state only: registration never retoggles an existing row
+    /// (activation is the exclusive domain of `setAdornmentMinterActive`
+    /// / `setActiveAdornmentMinters`). Executed in a serializable
+    /// transaction so concurrent registrations on the same id do not
+    /// interleave.
+    ///
+    /// Mirrors Rust `register_adornment_minter`.
+    ///
+    /// - Parameter minter: The minter descriptor to register. `id` and
+    ///   `name` must be non-empty.
+    public func registerAdornmentMinter(_ minter: AdornmentMinterDescriptor) async throws {
+        try Self.validateNonEmpty(minter.id, label: "minter.id")
+        try Self.validateNonEmpty(minter.name, label: "minter.name")
+        // Serialize parameters to JSON with sorted keys so the stored form
+        // is deterministic regardless of insertion order (matches the Rust
+        // BTreeMap iteration guarantee for the twin port).
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let parametersJSON: String
+        if minter.parameters.isEmpty {
+            parametersJSON = "{}"
+        } else {
+            let data = try encoder.encode(minter.parameters)
+            parametersJSON = String(data: data, encoding: .utf8) ?? "{}"
+        }
+        let values: [String: TypedValue] = [
+            "id": .text(minter.id),
+            "name": .text(minter.name),
+            "family": .text(minter.family),
+            "model_id": .text(minter.modelID),
+            "model_version": .text(minter.modelVersion),
+            "prompt_digest": .text(minter.promptDigest),
+            "parameters": .text(parametersJSON),
+            "is_active": .int(minter.isActive ? 1 : 0),
+        ]
+        try await storage.transaction(isolation: .serializable) { txn in
+            let existing = try await txn.rowStore.query(
+                table: "adornment_minters",
+                where: .eq(Column(table: "adornment_minters", name: "id"), .text(minter.id)),
+                orderBy: [], limit: 1, offset: nil
+            )
+            if existing.isEmpty {
+                _ = try await txn.rowStore.insert(table: "adornment_minters", values: values)
+                return
+            }
+            // Existing row: configuration is IMMUTABLE. Compare every
+            // configuration field (is_active deliberately excluded — it is
+            // runtime state owned by the activation setters, and
+            // registration must never retoggle it).
+            let stored = try Self.minterDescriptorFromRow(existing[0])
+            let sameConfiguration = stored.name == minter.name
+                && stored.family == minter.family
+                && stored.modelID == minter.modelID
+                && stored.modelVersion == minter.modelVersion
+                && stored.promptDigest == minter.promptDigest
+                && stored.parameters == minter.parameters
+            guard sameConfiguration else {
+                throw LocusKitError.invalidContent(
+                    "minter \(minter.id): configuration change rejected — "
+                    + "a configuration change creates a NEW minter row")
+            }
+            // Identical configuration: idempotent no-op. No UPDATE runs,
+            // so the stored is_active flag is untouched.
+        }
+    }
+
+    /// Set the active flag for one minter by id.
+    ///
+    /// The `is_active` column is the only mutable field on a registered
+    /// minter; all other fields are set at registration time. Returns the
+    /// number of rows updated (0 = minter id not found; 1 = success).
+    ///
+    /// Mirrors Rust `set_adornment_minter_active`.
+    ///
+    /// - Parameters:
+    ///   - id: The minter id to update.
+    ///   - active: The new activation state.
+    /// - Returns: Count of rows updated (0 or 1).
+    public func setAdornmentMinterActive(id: String, active: Bool) async throws -> Int {
+        try Self.validateNonEmpty(id, label: "id")
+        return try await storage.rowStore.update(
+            table: "adornment_minters",
+            values: ["is_active": .int(active ? 1 : 0)],
+            where: .eq(Column(table: "adornment_minters", name: "id"), .text(id))
+        )
+    }
+
+    /// Atomically replace the active minter set.
+    ///
+    /// In one serializable transaction: verify all ids exist (fails with
+    /// `LocusKitError.invalidContent` on the first unknown id, rolling back
+    /// the whole transaction), deactivate every minter, then activate the
+    /// minters in `ids`. Returns the total number of UPDATE operations
+    /// applied (deactivations + activations).
+    ///
+    /// Mirrors Rust `set_active_adornment_minters`.
+    ///
+    /// - Parameter ids: The exact set of minter ids that should be active
+    ///   after this call completes. An empty set deactivates all.
+    /// - Returns: Total update count (deactivations + activations).
+    public func setActiveAdornmentMinters(ids: Set<String>) async throws -> Int {
+        return try await storage.transaction(isolation: .serializable) { txn in
+            // Phase 1: verify every id exists; fail atomically on the first unknown.
+            for id in ids {
+                let rows = try await txn.rowStore.query(
+                    table: "adornment_minters",
+                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(id)),
+                    orderBy: [], limit: 1, offset: nil, columns: ["id"]
+                )
+                guard !rows.isEmpty else {
+                    throw LocusKitError.invalidContent("unknown adornment minter id: \(id)")
+                }
+            }
+            // Phase 2: fetch all minter ids so we can deactivate each explicitly
+            // (no nil-where UPDATE path required).
+            let allRows = try await txn.rowStore.query(
+                table: "adornment_minters",
+                where: nil,
+                orderBy: [], limit: nil, offset: nil, columns: ["id"]
+            )
+            var totalUpdated = 0
+            // Deactivate all minters.
+            for row in allRows {
+                guard let rowID = Self.optString(row["id"]) else { continue }
+                totalUpdated += try await txn.rowStore.update(
+                    table: "adornment_minters",
+                    values: ["is_active": .int(0)],
+                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(rowID))
+                )
+            }
+            // Activate the requested minters.
+            for id in ids {
+                totalUpdated += try await txn.rowStore.update(
+                    table: "adornment_minters",
+                    values: ["is_active": .int(1)],
+                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(id))
+                )
+            }
+            return totalUpdated
+        }
+    }
+
+    // MARK: - Adornment debt queue
+
+    /// Fetch a bounded batch of (drawer, minter) pairs that do not yet have
+    /// an adornment row in the adornments table.
+    ///
+    /// Eligibility criteria: drawer is not tombstoned, has non-empty content,
+    /// and the (drawer.id, minter.id) pair is absent from the adornments table.
+    /// Only active minters are included. Ordered by `drawers.filedAt ASC,
+    /// drawers.id ASC` (oldest first) then by minter name within each drawer.
+    ///
+    /// Implementation: loads all active minters first (expected to be a tiny
+    /// set), then pages through eligible drawers, then filters out pairs that
+    /// already have an adornment row. Application-level join is correct here
+    /// because the minter set is small and the adornments lookup is indexed by
+    /// (drawer_id, minter_id) primary key.
+    ///
+    /// Mirrors Rust `adornment_debt_batch`.
+    ///
+    /// - Parameters:
+    ///   - limit: Maximum (drawer, minter) pairs to return per call.
+    ///   - afterDrawerID: Exclusive lower bound on `drawer.id` for cursor paging;
+    ///     `nil` starts from the beginning of the queue.
+    /// - Returns: Pairs of (Drawer, AdornmentMinterDescriptor) without an
+    ///   existing adornment, oldest drawer first, up to `limit` total pairs.
+    public func adornmentDebtBatch(
+        limit: Int,
+        afterDrawerID: String? = nil
+    ) async throws -> [AdornmentDebt] {
+        // Load all active minters — expected to be a small set (single digits).
+        let allMinterRows = try await storage.rowStore.query(
+            table: "adornment_minters",
+            where: .eq(Column(table: "adornment_minters", name: "is_active"), .int(1)),
+            orderBy: [OrderClause(
+                column: Column(table: "adornment_minters", name: "name"),
+                direction: .ascending
+            )],
+            limit: nil,
+            offset: nil
+        )
+        guard !allMinterRows.isEmpty else { return [] }
+        let activeMinters = try allMinterRows.map { try Self.minterDescriptorFromRow($0) }
+
+        // Page through eligible drawers (not tombstoned, has content, past cursor).
+        let tombstoneClause = StoragePredicate.isNull(Column(table: "drawers", name: "tombstonedAt"))
+        let contentClause = StoragePredicate.neq(Column(table: "drawers", name: "content"), .text(""))
+        let drawerPredicate: StoragePredicate
+        if let after = afterDrawerID {
+            drawerPredicate = .and([
+                tombstoneClause,
+                contentClause,
+                .gt(Column(table: "drawers", name: "id"), .text(after)),
+            ])
+        } else {
+            drawerPredicate = .and([tombstoneClause, contentClause])
+        }
+        // Fetch more drawers than limit ÷ minterCount to fill the batch,
+        // capped at limit * minterCount to avoid unbounded reads.
+        let drawerFetchLimit = limit * max(1, activeMinters.count)
+        let drawerRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: drawerPredicate,
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+            ],
+            limit: drawerFetchLimit,
+            offset: nil
+        )
+        let drawers = try Self.decodeDrawerRowsSkipCorrupt(drawerRows, scan: "adornmentDebtBatch")
+
+        // For each drawer, check which minters already have an adornment row.
+        var result: [AdornmentDebt] = []
+        for drawer in drawers {
+            if result.count >= limit { break }
+            // Load existing adornment minter ids for this drawer.
+            let adornmentRows = try await storage.rowStore.query(
+                table: "adornments",
+                where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawer.id)),
+                orderBy: [], limit: nil, offset: nil, columns: ["minter_id"]
+            )
+            let mintedIDs = Set(adornmentRows.compactMap { Self.optString($0["minter_id"]) })
+            for minter in activeMinters {
+                if result.count >= limit { break }
+                if !mintedIDs.contains(minter.id) {
+                    result.append(AdornmentDebt(drawer: drawer, minter: minter))
+                }
+            }
+        }
+        return result
+    }
+
+    // MARK: - Adornment rows
+
+    /// Write one (drawer, minter) adornment row, inserting or replacing.
+    ///
+    /// The `adornments` table has a composite primary key (drawer_id, minter_id),
+    /// so calling putAdornment twice for the same pair replaces the text.
+    /// This is a derived-signal write — no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched.
+    ///
+    /// - Returns: Count of rows inserted or updated (always 1 on success).
+    public func putAdornment(_ adornment: StoredAdornment) async throws -> Int {
+        try Self.validateNonEmpty(adornment.drawerID, label: "adornment.drawerID")
+        try Self.validateNonEmpty(adornment.minterID, label: "adornment.minterID")
+        try Self.validateNonEmpty(adornment.text, label: "adornment.text")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let existing = try await txn.rowStore.query(
+                table: "adornments",
+                where: .and([
+                    .eq(Column(table: "adornments", name: "drawer_id"), .text(adornment.drawerID)),
+                    .eq(Column(table: "adornments", name: "minter_id"), .text(adornment.minterID)),
+                ]),
+                orderBy: [], limit: 1, offset: nil, columns: ["drawer_id"]
+            )
+            if existing.isEmpty {
+                _ = try await txn.rowStore.insert(
+                    table: "adornments",
+                    values: [
+                        "drawer_id": .text(adornment.drawerID),
+                        "minter_id": .text(adornment.minterID),
+                        "text": .text(adornment.text),
+                    ]
+                )
+                return 1
+            } else {
+                return try await txn.rowStore.update(
+                    table: "adornments",
+                    values: ["text": .text(adornment.text)],
+                    where: .and([
+                        .eq(Column(table: "adornments", name: "drawer_id"), .text(adornment.drawerID)),
+                        .eq(Column(table: "adornments", name: "minter_id"), .text(adornment.minterID)),
+                    ])
+                )
+            }
+        }
+    }
+
+    /// Return all adornment rows for one drawer, ordered by minter_id.
+    ///
+    /// Returns an empty array if the drawer has no adornment rows. The caller
+    /// is responsible for correlating minter_id values with AdornmentMinterDescriptors
+    /// via listAdornmentMinters() if descriptor details are needed.
+    ///
+    /// Mirrors Rust `adornments`.
+    public func adornments(drawerID: String) async throws -> [StoredAdornment] {
+        try Self.validateNonEmpty(drawerID, label: "drawerID")
+        let rows = try await storage.rowStore.query(
+            table: "adornments",
+            where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawerID)),
+            orderBy: [OrderClause(
+                column: Column(table: "adornments", name: "minter_id"),
+                direction: .ascending
+            )],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map { try Self.storedAdornmentFromRow($0) }
+    }
+
+    /// Return the active adornments for a batch of drawers.
+    ///
+    /// Fetches all adornment rows for the supplied drawer ids whose minter is
+    /// currently active. Returns a dictionary keyed by drawer id; drawers with
+    /// no active adornment are absent from the map (not present with empty array).
+    ///
+    /// Implementation: loads active minter ids, then queries the adornments table
+    /// filtered to those minter ids and the supplied drawer ids. Application-level
+    /// join is correct here because both sets are small.
+    ///
+    /// Mirrors Rust `active_adornments`.
+    ///
+    /// - Parameter drawerIDs: The drawer ids to load adornments for.
+    /// - Returns: Dictionary of drawerID → [StoredAdornment] (active minters only).
+    public func activeAdornments(drawerIDs: [String]) async throws -> [String: [StoredAdornment]] {
+        guard !drawerIDs.isEmpty else { return [:] }
+        // Fetch active minter ids to filter adornment rows.
+        let minterRows = try await storage.rowStore.query(
+            table: "adornment_minters",
+            where: .eq(Column(table: "adornment_minters", name: "is_active"), .int(1)),
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        let activeMinterIDs = Set(minterRows.compactMap { Self.optString($0["id"]) })
+        guard !activeMinterIDs.isEmpty else { return [:] }
+
+        // Sensitivity gate (codex finding 2026-08-26): adornment text is a
+        // content-derived pre-minted claim, so it inherits the drawer's
+        // access posture. Restricted/secret drawers get NO adornments from
+        // this projection — the render layers redact subject/firstSentence
+        // for those rows, and an attached adornment would hand back the very
+        // content the markers withhold. Gated HERE, at the one
+        // result-composition read, so every surface in both ports inherits
+        // the rule (legacy-migrated and freshly minted rows alike).
+        let idColumn = Column(table: "drawers", name: "id")
+        let drawerRows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .or(drawerIDs.map { .eq(idColumn, .text($0)) }),
+            orderBy: [], limit: nil, offset: nil,
+            columns: ["id", "provenance"]
+        )
+        var sensitiveDrawerIDs: Set<String> = []
+        for row in drawerRows {
+            guard let id = Self.optString(row["id"]),
+                  let provenance = Self.optInt64(row["provenance"]) else { continue }
+            // Bits 30–35 of provenance: sensitivity raw (cookbook §2.5).
+            // restricted = 32, secret = 48 — both withhold content-derived
+            // columns; unrecognised raws fall back to normal, matching the
+            // drawer accessor.
+            let raw = Int(BitField.extractField(provenance, shift: 30, width: 6))
+            if raw >= Sensitivity.restricted.rawValue {
+                sensitiveDrawerIDs.insert(id)
+            }
+        }
+
+        // ONE batch statement for all requested drawer ids (the interface's
+        // one-batch-join contract): an OR-chain of drawer_id equalities is a
+        // single query; rows are grouped client-side and filtered to the
+        // active minter set read above.
+        let drawerColumn = Column(table: "adornments", name: "drawer_id")
+        let rows = try await storage.rowStore.query(
+            table: "adornments",
+            where: .or(drawerIDs.map { .eq(drawerColumn, .text($0)) }),
+            orderBy: [OrderClause(
+                column: Column(table: "adornments", name: "minter_id"),
+                direction: .ascending
+            )],
+            limit: nil,
+            offset: nil
+        )
+        var result: [String: [StoredAdornment]] = [:]
+        for row in rows {
+            let stored = try Self.storedAdornmentFromRow(row)
+            guard activeMinterIDs.contains(stored.minterID) else { continue }
+            guard !sensitiveDrawerIDs.contains(stored.drawerID) else { continue }
+            result[stored.drawerID, default: []].append(stored)
+        }
+        // Rows arrived in minter_id order globally; per-drawer grouping
+        // preserves that ascending order within each drawer's array.
+        return result
+    }
+
+    // MARK: - Adornment row decode helpers
+
+    /// Decode one row from `adornment_minters` into an `AdornmentMinterDescriptor`.
+    ///
+    /// The `parameters` column is a JSON object string (sorted keys). An absent
+    /// or malformed value decodes to an empty dictionary rather than throwing, to
+    /// tolerate rows written by older tooling.
+    private static func minterDescriptorFromRow(_ row: StorageRow) throws -> AdornmentMinterDescriptor {
+        guard let id = optString(row["id"]), !id.isEmpty else {
+            throw LocusKitError.corruptStoredValue(
+                table: "adornment_minters", column: "id", storedText: "(null)")
+        }
+        let parametersJSON = optString(row["parameters"]) ?? "{}"
+        let parameters: [String: String]
+        if let data = parametersJSON.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            parameters = decoded
+        } else {
+            parameters = [:]
+        }
+        return AdornmentMinterDescriptor(
+            id: id,
+            name: optString(row["name"]) ?? "",
+            family: optString(row["family"]) ?? "",
+            modelID: optString(row["model_id"]) ?? "",
+            modelVersion: optString(row["model_version"]) ?? "",
+            promptDigest: optString(row["prompt_digest"]) ?? "",
+            parameters: parameters,
+            isActive: int64(row["is_active"]) != 0
+        )
+    }
+
+    /// Decode one row from `adornments` into a `StoredAdornment`.
+    private static func storedAdornmentFromRow(_ row: StorageRow) throws -> StoredAdornment {
+        guard let drawerID = optString(row["drawer_id"]), !drawerID.isEmpty else {
+            throw LocusKitError.corruptStoredValue(
+                table: "adornments", column: "drawer_id", storedText: "(null)")
+        }
+        guard let minterID = optString(row["minter_id"]), !minterID.isEmpty else {
+            throw LocusKitError.corruptStoredValue(
+                table: "adornments", column: "minter_id", storedText: "(null)")
+        }
+        return StoredAdornment(
+            drawerID: drawerID,
+            minterID: minterID,
+            text: optString(row["text"]) ?? ""
+        )
     }
 
     // MARK: - Validation

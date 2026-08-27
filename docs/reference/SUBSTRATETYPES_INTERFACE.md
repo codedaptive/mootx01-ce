@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Interface
-version: 1.4.0
+version: 1.5.0
 status: active
-date: 2026-07-16
+date: 2026-08-21
 description: Public API surface for SubstrateTypes in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -43,7 +43,7 @@ purpose: |
   `bit_tensor.rs`, `time_range.rs`, `recall_types.rs`,
   `content_hash.rs`, `merkle_root.rs`, `snapshot_id.rs`,
   `as_of_coordinate.rs`, `merkle_domain.rs`,
-  `float_simhash_planes.rs`).
+  `float_simhash_planes.rs`, `jaccard.rs`).
 - `tests/` — conformance tests, shared vectors.
 - `Cargo.toml` — declares only `serde`, `serde_json`, `uuid`,
   standard library.
@@ -1171,6 +1171,37 @@ pub fn hash32(s: &str) -> u32;
 pub fn hash16(s: &str) -> u16;
 ```
 
+### `Jaccard`
+
+Jaccard set similarity and distance over 256-bit fingerprints.
+SPEC § 5.7. Conformance CRC `0x2fe8941e` (34 test cases, cookbook
+§ 8.21). Empty-union convention: two all-zero fingerprints return
+similarity `0.0` (not `1.0`).
+
+**Swift** (`Sources/SubstrateTypes/Jaccard.swift:20`):
+
+```swift
+public enum Jaccard {
+    /// Jaccard similarity: popcount(a AND b) / popcount(a OR b).
+    /// Returns 0.0 when both operands are the zero fingerprint (empty union).
+    public static func similarity(_ a: Fingerprint256, _ b: Fingerprint256) -> Double
+
+    /// Jaccard distance: 1.0 − similarity(a, b).
+    public static func distance(_ a: Fingerprint256, _ b: Fingerprint256) -> Double
+}
+```
+
+**Rust** (`src/jaccard.rs`, module free functions):
+
+```rust
+/// Jaccard similarity: popcount(a AND b) / popcount(a OR b).
+/// Returns 0.0 when both operands are the zero fingerprint (empty union).
+pub fn similarity(a: &Fingerprint256, b: &Fingerprint256) -> f64;
+
+/// Jaccard distance: 1.0 − similarity(a, b).
+pub fn distance(a: &Fingerprint256, b: &Fingerprint256) -> f64;
+```
+
 ## § 4 — Errors
 
 The package raises only these errors:
@@ -1201,6 +1232,7 @@ shared vectors. Test entry points:
   - `FNVTests.swift`
   - `GSetAuditLogTests.swift`
   - `BitwiseArithmeticTests.swift`
+  - `JaccardTests.swift`
 - **Rust:** `tests/` plus per-module `#[cfg(test)] mod tests` blocks
   inside each `src/<family>.rs`.
 
@@ -1319,6 +1351,7 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Bitwise fingerprint algebra | `BitwiseArithmetic` namespace (`BitwiseArithmetic.swift:21`) | `bitwise::intersect`/`difference`/`prototype` free fns (`bitwise.rs:29`,`:42`,`:59`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical AND/XOR/weighted-majority | `BitwiseArithmeticTests.swift`; `bitwise.rs` tests (6) | Confirmed |
 | OR-reduce | `ORReduce` namespace (`ORReduce.swift:22`) | `or_reduce::reduce`/`reduce_blocks` free fns (`or_reduce.rs:29`,`:43`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical bitwise OR fold | `ORReduceTests.swift`; `or_reduce.rs` tests (4) | Confirmed |
 | FNV-1a hash | `FNV` namespace (`FNV.swift:18`) | `fnv::hash64`/`hash32`/`hash16` free fns (`fnv.rs:18`,`:31`,`:45`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical FNV-1a output | `FNVTests.swift`; `fnv.rs` tests (6) | Confirmed |
+| Jaccard similarity/distance | `Jaccard` namespace (`Jaccard.swift:20`) | `jaccard::similarity`/`jaccard::distance` free fns (`jaccard.rs:10`,`:20`) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions; identical Jaccard set similarity `popcount(AND)/popcount(OR)`, empty-union → `0.0`; conformance CRC `0x2fe8941e` (34 cases) | `JaccardTests.swift`; `jaccard.rs` tests | Confirmed |
 | Content hash | `ContentHash` (`ContentHash.swift`) | `ContentHash` (`content_hash.rs`) | both public | identical — 32-byte SHA-256 leaf digest; `tombstone`/`TOMBSTONE` sentinel byte-identical; hex display + Codable/serde | `ContentHashTests.swift`; `content_hash.rs` tests (7) | Confirmed |
 | Content hash error | `ContentHashError` (`ContentHash.swift`) | `ContentHashError` (`content_hash.rs`) | both public | identical — `invalidHexLength`/`invalidHexCharacter` ↔ `InvalidHexLength`/`InvalidHexCharacter` | `ContentHashTests.swift`; `content_hash.rs` tests | Confirmed |
 | Merkle root | `MerkleRoot` (`MerkleRoot.swift`) | `MerkleRoot` (`merkle_root.rs`) | both public | identical — 32-byte subtree root hash; `empty`/`EMPTY` sentinel byte-identical; hex display + Codable/serde | `MerkleRootTests.swift`; `merkle_root.rs` tests (6) | Confirmed |
@@ -1329,6 +1362,12 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Domain tags | `MerkleDomain` (`MerkleDomain.swift`) | `MerkleDomain` (`merkle_domain.rs`) | both public | identical — `leaf`/`interior`/`tombstone`/`commitment` = 0x00/0x01/0x02/0x03; conformance-frozen | `MerkleDomainTests.swift`; `merkle_domain.rs` tests (2) | Confirmed |
 
 ## Changelog
+
+### 1.5.0 -- 2026-08-21
+Added `Jaccard` algebra primitive, present in both ports since the W2.5/L7 Jaccard activation wave (M1). (1) §3: new `Jaccard` section documenting `similarity` and `distance` in both Swift (`Jaccard.swift:20`) and Rust (`jaccard.rs:10`), with the empty-union convention (both-zero → `0.0`) and conformance CRC `0x2fe8941e`. (2) §5: `JaccardTests.swift` added to the Swift conformance test entry point list. (3) §7: concordance row for `Jaccard namespace / jaccard::*` with parity note and vector binding. (4) §1 Rust module list updated to include `jaccard.rs`.
+
+### 1.4.0 -- 2026-07-16
+Concordance table corrections and parity additions adopted from CE develop/1.1.x backport. (1) `Row` concordance row corrected: both ports inline three bitmap fields directly; no `RowBitmaps` carrier; no `createdAt` field. (2) `FingerprintBuilder` concordance row added for both ports. (3) `RowState` concordance row expanded to include cluster helpers and `description`/`token()` detail. (4) `RowStateCluster.isActive` / `is_active()` parity note added. (5) `RowVerb::token()` Rust-only detail moved to concordance table.
 
 ### 1.3.0 -- 2026-07-16
 Added missing public surface found during full audit. (1) `FloatSimHashPlanes` — a public type in both ports absent from the doc (Swift 30th file, Rust `float_simhash_planes.rs`; §1 file count corrected, §2 new section, §7 concordance row added). (2) `HLC.advanced()` / `HLC.physicalSecondsSinceEpoch()` — present in both ports since initial commit, not documented; added to §2 HLC block and concordance. (3) `HLC.init(physicalTime:logicalCount:nodeId:)` — Swift-only back-compat alias; documented with note. (4) `RowState` cluster helpers — `cluster`, `isActiveCluster`, `activeClusterUpperBoundRaw`, `cluster(ofRawState:)` and `description` conformance (Swift); Rust `ACTIVE_CLUSTER_UPPER_BOUND_RAW`, `from_raw`, `cluster`, `is_active_cluster`, `cluster_of_raw_state` equivalents added with parity notes. (5) `RowVerb::token()` — Rust-only method returning the lowercase verb string; documented with parity note. (6) `LatticeAnchor.udcQid(_:qid:)` / `udc_qid()` — both ports, omitted since initial doc; added to §2 and concordance. (7) `LatticeAnchor::fnv1a64()` — Rust-only helper; documented with parity note. (8) `RowStateError.description` — `CustomStringConvertible` conformance; added to §2.

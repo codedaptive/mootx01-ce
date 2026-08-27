@@ -238,6 +238,129 @@ struct PreciseRecallTests {
         }
     }
 
+    // CK-PR-8: provisioned non-default mmr_lambda wires through to the
+    // composition and changes ordering on a text+mmr run.
+    //
+    // The test plants two groups of drawers: a HIGH-SIMILARITY cluster (very
+    // similar wording — high cosine similarity, low MMR diversity value) and
+    // a LOW-SIMILARITY drawer that uses different vocabulary but mentions the
+    // query term. MMR with a LOW lambda (λ≈0.0 → pure diversity) pushes the
+    // high-similarity cluster aside and surfaces the diverse outlier. A HIGH
+    // lambda (λ=1.0 → pure relevance) keeps the most-similar hit first.
+    //
+    // We run "text+mmr" composition twice on the same estate:
+    //   (a) no manifest provisioned → default λ=0.7 (relevance-dominant)
+    //   (b) manifest provisioned with mmrLambda=0.01 (diversity-dominant)
+    // The diversity-dominant run must change which item ranks second, proving
+    // the provisioned manifest flows through PreciseRecall.run into
+    // CompositionGrid.named(_:applyingTuning:).
+    //
+    // NOTE: this test exercises ordering change, not absolute rank-1 identity,
+    // because the text+mmr formula uses both text similarity and diversity:
+    // at λ=0.01 the second position changes from the next most-similar clone
+    // to the diverse outlier — a measurable ordering delta.
+    @Test("provisioned mmr_lambda wires through and changes text+mmr ordering")
+    func provisionedMmrLambdaChangesOrdering() async throws {
+        try await withCognitionLock {
+            // Three near-duplicate drawers (the "similar cluster") and one
+            // diverse outlier that mentions the query term but uses completely
+            // different vocabulary.
+            let (kit, handle, ids) = try await makeSeededEstate(capturing: [
+                "revenue report for Berlin division: 42 million euros for fiscal quarter",
+                "revenue report for Berlin division: 42 million euros second quarter",
+                "revenue report for Berlin division: 42 million euros third quarter",
+                "berlin quarterly earnings totalled forty-two million",  // diverse outlier
+            ])
+            let outlierID = ids[3]
+
+            // (a) Default manifest (λ=0.7, relevance-dominant): run text+mmr.
+            let defaultMatches = try await PreciseRecall.run(
+                kit: kit, handle: handle,
+                query: "Berlin division 42 million",
+                filter: .unconfirmed, limit: 4, pool: 30,
+                composition: "text+mmr")
+
+            // (b) Provision mmrLambda=0.01 (pure diversity). The diverse outlier
+            // must be ranked HIGHER than under the default (it may appear at rank
+            // 2 when the cluster dominates rank 1 regardless of λ).
+            let diversityManifest = RecallTuningManifest(
+                rrfK: 60, mmrLambda: 0.01, rrfBm25Weight: 0.3, rrfVectorWeight: 0.7)
+            try await kit.provisionRecallTuning(diversityManifest, for: handle)
+
+            let diverseMatches = try await PreciseRecall.run(
+                kit: kit, handle: handle,
+                query: "Berlin division 42 million",
+                filter: .unconfirmed, limit: 4, pool: 30,
+                composition: "text+mmr")
+
+            // At pure-diversity λ the outlier ranks higher than under default.
+            let defaultOutlierRank = defaultMatches.firstIndex { $0.id == outlierID }
+            let diverseOutlierRank  = diverseMatches.firstIndex  { $0.id == outlierID }
+
+            #expect(defaultOutlierRank != nil,
+                    "outlier must appear in default run (recall gate)")
+            #expect(diverseOutlierRank != nil,
+                    "outlier must appear in diversity run (recall gate)")
+            #expect(
+                (diverseOutlierRank ?? Int.max) < (defaultOutlierRank ?? Int.max),
+                "pure-diversity manifest must push the outlier to a higher rank than relevance-dominant default (diverse rank \(String(describing: diverseOutlierRank)), default rank \(String(describing: defaultOutlierRank)))")
+        }
+    }
+
+    // CK-PR-9: absent manifest (never provisioned) is byte-identical to the
+    // default manifest path. Running PreciseRecall.run on an estate with no
+    // provisioned recall_tuning must produce the same matches and in the same
+    // order as running with the default manifest explicitly provisioned.
+    //
+    // This pins the guarantee that the W4 consumption wire has no observable
+    // effect on unprovisioned estates.
+    @Test("absent manifest produces byte-identical results to default manifest")
+    func absentManifestIsByteIdenticalToDefault() async throws {
+        try await withCognitionLock {
+            // Two parallel estates seeded with the same content. One is never
+            // provisioned (absent manifest); the other is provisioned with the
+            // explicit .default manifest. Both must return identical match IDs
+            // in identical order.
+
+            // Estate A: no manifest provisioned.
+            let (kitA, handleA, _) = try await makeSeededEstate(capturing: [
+                "the war indemnity imposed by the treaty was 11 million gold marks",
+                "the war indemnity imposed by the treaty was 46 million gold marks",
+                "the war indemnity imposed by the treaty was 23 million gold marks",
+            ])
+
+            // Estate B: same content, manifest explicitly set to .default.
+            let (kitB, handleB, _) = try await makeSeededEstate(capturing: [
+                "the war indemnity imposed by the treaty was 11 million gold marks",
+                "the war indemnity imposed by the treaty was 46 million gold marks",
+                "the war indemnity imposed by the treaty was 23 million gold marks",
+            ])
+            try await kitB.provisionRecallTuning(.default, for: handleB)
+
+            let query = "the war indemnity was 46 million marks"
+            let matchesA = try await PreciseRecall.run(
+                kit: kitA, handle: handleA,
+                query: query, filter: .unconfirmed, limit: 10, pool: 30,
+                composition: "text+mmr")
+            let matchesB = try await PreciseRecall.run(
+                kit: kitB, handle: handleB,
+                query: query, filter: .unconfirmed, limit: 10, pool: 30,
+                composition: "text+mmr")
+
+            // Same number of matches (recall parity).
+            #expect(matchesA.count == matchesB.count,
+                    "absent and explicit-default manifests must produce the same match count")
+            // Same content in the same rank order. IDs cannot be compared across
+            // two different estates (each capture gets a unique UUID), so content
+            // is the position-independent parity signal: same content at same
+            // rank means the two paths produce the same ordering.
+            for (index, (a, b)) in zip(matchesA, matchesB).enumerated() {
+                #expect(a.content == b.content,
+                        "absent and explicit-default manifests must rank the same content at position \(index) (got '\(a.content.prefix(40))' vs '\(b.content.prefix(40))')")
+            }
+        }
+    }
+
     // CK-PR-7: the trace budget is the final limit, not the coarse pool.
     //
     // Before the F3 fix, a PreciseRecall with pool=50 and limit=3 wrote up to

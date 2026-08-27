@@ -190,7 +190,7 @@ public enum VectorSimilaritySignal {
             proximityThreshold: proximityThreshold,
             corpus: corpus,
             neighboursPerProbe: ProximityScanCore.neighboursPerProbe
-        )
+        ).pairs
 
         // FINDING-3 optimization: filter out pairs that already have a
         // persisted association. The DB-level INSERT-OR-IGNORE in

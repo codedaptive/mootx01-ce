@@ -73,9 +73,12 @@ struct ToolProjectionTests {
         // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) + moot_recall_connected
         // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated)
         // + moot_timing_report (C3+A6 audit-derived timing metrics)
-        // + moot_recall_temporal (query-date window recipe) = 79.
-        #expect(ToolProjection.tools(environment: [:]).count == 79,
-                "tools() must return exactly 79 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // + moot_recall_temporal (query-date window recipe)
+        // + moot_recall_walk (D10 walk-recall escalation ladder)
+        // + moot_rebuild_status (derived-state rebuild status, Bob ruling
+        //   2026-08-26) = 81.
+        #expect(ToolProjection.tools(environment: [:]).count == 81,
+                "tools() must return exactly 81 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -317,7 +320,7 @@ struct TierDecompositionTests {
         let tier4 = ToolProjection.journalTools().count              // 2
         let tier5 = ToolProjection.estateTools().count               // 10 (8 always + 2 vault-gated)
         let tier6 = 4 + LensTools.tools().count                      // 27 (4 recipe + 23 lens)
-        let tier7 = RecipeTools.tools().count - 4                    // 9 (remaining recipe)
+        let tier7 = RecipeTools.tools().count - 4                    // 11 (remaining recipe)
         let tier8 = DatasetTools.tools().count                       // 3
         let tier9 = VaultTools.vaultToolNames.count                  // 5 (vault-on only)
         let tier10 = 1                                               // federation
@@ -331,10 +334,10 @@ struct TierDecompositionTests {
                 "tier decomposition (\(decomposed)) no longer sums to the live vault-on surface (\(liveVaultOn)) — update SPEC §12, TeachmeGuides, and the ToolProjection header together")
         // The specific figures the prose layer states today. When a tool is
         // added, these move — and so must every prose copy.
-        #expect(tier5 == 10)
-        #expect(tier7 == 10)
-        #expect(RecipeTools.tools().count == 14)
+        #expect(tier5 == 11)
+        #expect(tier7 == 11)
+        #expect(RecipeTools.tools().count == 15)
         #expect(packet == 4)
-        #expect(liveVaultOn == 79)
+        #expect(liveVaultOn == 81)
     }
 }

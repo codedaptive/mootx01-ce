@@ -1,8 +1,8 @@
 ---
 title: QueueKit Specification
-version: 1.5.0
+version: 1.6.0
 status: active
-date: 2026-08-17
+date: 2026-08-26
 description: "Behavioral specification for QueueKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -336,11 +336,11 @@ live in INTERFACE § 4.
 | Stale tmp file | A file lingers in `tmp/` past the stale threshold. | Cleanup heuristic; swept on init, not a fatal error in normal flow. |
 | Invalid identifier | A caller-supplied `StreamID`, `JobID`, or other identifier used as a filename component contains a path separator (`/`, `\`), equals `.` or `..`, or contains an ASCII control character. | Rejected by the backend before any storage mutation. Surface `invalidIdentifier`; caller must sanitise. |
 
-**Telemetry depth honesty:** the self-report path
+**Telemetry depth accuracy:** the self-report path
 (`QueueKitTelemetry.reportQueueStats`, Swift-only — telemetry is the
 Apple-only IntellectusLib sink) must NOT report `queue.depth = 0` when the
 `pendingCount()` read fails. A fabricated zero is indistinguishable from a
-genuinely empty queue and would signal "all drained" when the truth is "could
+genuinely empty queue and would signal "all drained" when the actual state is "could
 not read the depth". On a `pendingCount` read failure no `queue.depth` metric
 is emitted; instead a `queue.depth_unavailable` error counter is emitted, and
 the depth-derived metrics (`queue.idle_nonempty`, the idle branch of
@@ -397,6 +397,9 @@ deterministically on external APFS volumes: 105–116 claims of 100 jobs).
 `claim/` joins the maildir subdirs; mount-time reclaim sweeps stranded
 claim files back to `new/` under their original names. I-2 notes the
 transient slot. Wire format, filenames, and public API are unchanged.
+### 1.4.3 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.4.2 -- 2026-07-16
 Added "Invalid identifier" row to the § 6 error model table: a `StreamID`, `JobID`,

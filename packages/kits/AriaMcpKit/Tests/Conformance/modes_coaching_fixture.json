@@ -1,0 +1,20 @@
+{
+  "_comment": "Golden-pin fixture for PeriodicCoach.renderBlock() — shared by Swift and Rust ports. Both ports must produce identical output for the given snapshot. See PeriodicCoachTests.swift and modes_tests.rs.",
+  "snapshot": {
+    "totalCalls": 25,
+    "toolCounts": {
+      "moot_memory_search": 6,
+      "moot_memory_get": 2,
+      "moot_estate_status": 3,
+      "moot_file_memory": 1
+    },
+    "bigramCounts": {
+      "moot_memory_search→moot_memory_get": 2
+    },
+    "modeAttributionCounts": {
+      "Recall": 8,
+      "Filing": 1
+    }
+  },
+  "expected_block": "[Moot coaching · call 25]\nNice run: 6 searches and every hydration you made was on a row you'd already ranked — that's the cheap-pile pattern working. I bet recall_precise earns a place when you know the subject exactly.\nModes available: Recall (88%), Filing (11%), Lenses (unused), Vault (unused)."
+}

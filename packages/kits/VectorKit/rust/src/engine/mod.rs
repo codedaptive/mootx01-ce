@@ -62,3 +62,31 @@ pub use float_brute_force::FloatBruteForceIndex;
 pub use hnsw_index::{GraphRow, HNSWIndex, HNSW_DEFAULT_THRESHOLD};
 // Lane E1 re-exports
 pub use max_sim::{MaxSimHit, MaxSimScorer};
+
+/// FNV-1a 64 over a byte slice — the `vec_hash` content-derived tie key
+/// (VECTORKIT_SPEC 1.9.0 B-6), shared by the binary and float engines.
+/// Same content → same deterministic embedding → same bytes → same hash,
+/// so tied candidates order identically across estate provisionings
+/// (item UUIDs do not). Twin of Swift `fnv1a64` in ContentTieBreak.swift;
+/// standard FNV-1a offset basis and prime, bit-identical across ports.
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tie_break_tests {
+    /// Cross-port golden pin: the vec_hash of Fingerprint256::new(1, 0, 0, 0)'s
+    /// wire bytes is this exact literal in BOTH ports (Swift twin:
+    /// `fnv1a64GoldenPin` in BruteForceIndexTests.swift). A drift here means
+    /// the ports' tie orders have silently diverged.
+    #[test]
+    fn fnv1a64_golden_pin() {
+        let e = substrate_types::fingerprint256::Fingerprint256::new(1, 0, 0, 0);
+        assert_eq!(super::fnv1a64(&e.wire_bytes()), 0x0729_5d91_aa94_b524);
+    }
+}

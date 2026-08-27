@@ -19,6 +19,14 @@
 //!   correctly; the Swift and Rust graphs legitimately differ (HNSW_DESIGN §7).
 //! - Within-port reproducibility IS required. SplitMix64 seeded at index
 //!   creation so the same seed + insertion order yields the same graph.
+//! - CROSS-RUN identity for BULK builds (SPEC 1.10.0): every bulk rebuild
+//!   (`compact()` here; `VectorStore::rebuild_hnsw_index` at the store)
+//!   inserts rows in content-stable order — (fnv1a64(payload bytes) ASC,
+//!   item_id ASC) — so identical content yields an identical graph across
+//!   independent builds even though item UUIDs differ per provisioning.
+//!   Incremental single-row inserts keep ARRIVAL order: only bulk rebuilds
+//!   guarantee cross-run identity; the next THETA rebuild converges an
+//!   incrementally-grown graph.
 //! - Crossover threshold: 5,000 vectors per modelID partition. Below this
 //!   count `FloatBruteForceIndex` is faster (see §Crossover below).
 //! - Nearest only. Farthest queries still use `FloatBruteForceIndex` regardless
@@ -157,6 +165,13 @@ struct Node {
     model_id: String,
     /// IEEE-754 LE float32 bytes (same format as VectorPayload.bytes).
     vector_bytes: Vec<u8>,
+    /// FNV-1a 64 over `vector_bytes` — the content-derived tie key shared
+    /// with every k-NN engine (SPEC 1.10.0). Computed once at node
+    /// construction; used by the neighbour-truncation cuts in `insert`
+    /// and by the content-stable bulk rebuild order in `compact`.
+    /// Placeholder tombstones (empty bytes) carry the hash of the empty
+    /// sequence — never compared, because tombstones are skipped.
+    vec_hash: u64,
     /// `neighbours[l]` = array of node indices (i32) at layer l.
     /// Layer 0 (the densest) has up to M0 connections; layers ≥1 have up to M.
     neighbours: Vec<Vec<i32>>,
@@ -332,6 +347,33 @@ impl HNSWIndex {
         1.0 - sim
     }
 
+    // MARK: - Truncation total order
+
+    /// Total order used wherever a candidate list is CUT to a neighbour cap
+    /// during graph construction: (dist ASC, vec_hash ASC, item_id ASC).
+    ///
+    /// This is the universal tie-break key (SPEC 1.10.0): a raw index-order
+    /// cut at the cap boundary would break ties by internal node index —
+    /// i.e. by arrival order — making the wired topology depend on which of
+    /// two equidistant nodes happened to be inserted first. The content hash
+    /// makes the cut identical across independent builds of the same content;
+    /// item_id remains the final backstop for byte-identical vectors, which
+    /// are interchangeable for every ordering consumer. An incomparable
+    /// distance (NaN) falls straight to the tie key, matching the previous
+    /// `unwrap_or(Equal)` behaviour.
+    fn truncation_cmp(&self, a: &(f32, i32), b: &(f32, i32)) -> std::cmp::Ordering {
+        match a.0.partial_cmp(&b.0) {
+            Some(std::cmp::Ordering::Equal) | None => {
+                let na = &self.nodes[a.1 as usize];
+                let nb = &self.nodes[b.1 as usize];
+                na.vec_hash
+                    .cmp(&nb.vec_hash)
+                    .then_with(|| na.item_id.cmp(&nb.item_id))
+            }
+            Some(ord) => ord,
+        }
+    }
+
     // MARK: - searchLayer (core graph traversal)
 
     /// Greedy best-first search within one HNSW layer.
@@ -475,10 +517,12 @@ impl HNSWIndex {
 
         // Allocate the node with `level + 1` empty neighbour layers.
         let empty_layers: Vec<Vec<i32>> = vec![Vec::new(); level + 1];
+        let vec_hash = super::fnv1a64(&bytes);
         self.nodes.push(Node {
             item_id: item_id.clone(),
             model_id,
             vector_bytes: bytes,
+            vec_hash,
             neighbours: empty_layers,
             tombstoned: false,
         });
@@ -511,7 +555,9 @@ impl HNSWIndex {
         let top_wire_layer = level.min(cur_max_layer);
         for lc in (0..=top_wire_layer).rev() {
             let mut cands = self.search_layer(&vector, &[cur_ep], HNSW_EF_CONSTRUCTION, lc);
-            cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            // Truncation cut at m_max: (dist, vec_hash, item_id) total order so
+            // ties at the cap boundary do not fall to arrival order.
+            cands.sort_by(|a, b| self.truncation_cmp(a, b));
             let m_max = if lc == 0 { HNSW_M0 } else { HNSW_M };
             let selected: Vec<(f32, i32)> = cands.into_iter().take(m_max).collect();
 
@@ -550,9 +596,8 @@ impl HNSWIndex {
                         self.cosine_distance_to_node(&n_probe, new_idx as usize),
                         new_idx,
                     ));
-                    conns.sort_by(|a, b| {
-                        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    // Same truncation total order as the forward-edge cut above.
+                    conns.sort_by(|a, b| self.truncation_cmp(a, b));
                     self.nodes[n_i].neighbours[lc] =
                         conns.into_iter().take(m_max).map(|(_, idx)| idx).collect();
                 }
@@ -715,16 +760,19 @@ impl HNSWIndex {
     /// Rebuild the graph from live nodes, dropping all tombstones (BETA duty).
     ///
     /// O(n log n) where n is the live count. Dead nodes and their inbound edges
-    /// are permanently removed. The graph is deterministically rebuilt using the
-    /// same seed and in the order of the original live insertions.
+    /// are permanently removed. The graph is rebuilt in the CONTENT-STABLE bulk
+    /// build order (SPEC 1.10.0): live rows sorted by (vec_hash ASC, item_id ASC)
+    /// before re-insertion, so a bulk rebuild from the same row set produces the
+    /// identical graph regardless of the original arrival order.
     pub fn compact(&mut self) {
         // Snapshot live nodes before clearing.
-        let live: Vec<(String, String, Vec<f32>)> = self
+        let mut live: Vec<(u64, String, String, Vec<f32>)> = self
             .nodes
             .iter()
             .filter(|n| !n.tombstoned)
             .map(|n| {
                 (
+                    n.vec_hash,
                     n.item_id.clone(),
                     n.model_id.clone(),
                     bytes_to_floats(&n.vector_bytes),
@@ -737,8 +785,14 @@ impl HNSWIndex {
             return;
         }
 
+        // Content-stable bulk build order: (fnv1a64(payload bytes) ASC, item_id
+        // ASC). Identical content yields an identical insertion sequence — and
+        // therefore an identical graph — across independent rebuilds; item_id is
+        // the backstop only for byte-identical (interchangeable) vectors.
+        live.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
         self.clear();
-        for (item_id, model_id, floats) in live {
+        for (_, item_id, model_id, floats) in live {
             self.insert(item_id, model_id, floats);
         }
     }
@@ -937,6 +991,7 @@ impl HNSWIndex {
                 self.nodes.push(Node {
                     item_id: item_id.clone(),
                     model_id: model_id.to_string(),
+                    vec_hash: super::fnv1a64(bytes),
                     vector_bytes: bytes.clone(),
                     neighbours: empty_layers,
                     tombstoned: false,
@@ -947,6 +1002,8 @@ impl HNSWIndex {
                 self.nodes.push(Node {
                     item_id: String::new(),
                     model_id: model_id.to_string(),
+                    // Hash of the empty sequence — never compared (tombstones skipped).
+                    vec_hash: super::fnv1a64(&[]),
                     vector_bytes: Vec::new(),
                     neighbours: empty_layers,
                     tombstoned: true,
@@ -1246,5 +1303,90 @@ mod tests {
             hnsw_results.iter().map(|r| &r.item_id).collect::<Vec<_>>(),
             bf_results.iter().map(|h| &h.key.item_id).collect::<Vec<_>>(),
         );
+    }
+
+    // MARK: - Content-stable bulk build order (HNSW-DETERMINISM)
+
+    /// Bulk path: same rows, two different arrival orders → identical graph.
+    ///
+    /// `compact()` (and `VectorStore::rebuild_hnsw_index`, which applies the
+    /// same ordering before insertion) sorts rows by
+    /// (fnv1a64(payload bytes) ASC, item_id ASC) before inserting, so a bulk
+    /// rebuild from the same row set is order-independent. Twin of Swift
+    /// `bulkRebuildIsContentStableAcrossArrivalOrders`.
+    #[test]
+    fn bulk_rebuild_is_content_stable_across_arrival_orders() {
+        // SplitMix64 (same algorithm as the index RNG) for deterministic vectors.
+        let mut rng: u64 = 7;
+        let mut next = |state: &mut u64| -> u64 {
+            *state = state.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = *state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        };
+        let dim = 8;
+        let n = 60;
+        let corpus: Vec<(String, Vec<f32>)> = (0..n)
+            .map(|i| {
+                let mut v: Vec<f32> = (0..dim)
+                    .map(|_| (next(&mut rng) >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0)
+                    .collect();
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for x in v.iter_mut() {
+                        *x /= norm;
+                    }
+                }
+                (format!("item-{:03}", i), v)
+            })
+            .collect();
+
+        // Arrival order 1: natural. Arrival order 2: reversed. Both consume the
+        // same number of RNG draws before compact(), so the level-assignment
+        // sequence at rebuild time is identical — any graph difference can only
+        // come from insertion ORDER.
+        let mut idx1 = make_index();
+        for (id, v) in &corpus {
+            idx1.insert(id.clone(), "model-x".into(), v.clone());
+        }
+        idx1.compact();
+
+        let mut idx2 = make_index();
+        for (id, v) in corpus.iter().rev() {
+            idx2.insert(id.clone(), "model-x".into(), v.clone());
+        }
+        idx2.compact();
+
+        // Graph identity: row-for-row identical (node_id, layer, neighbour blob).
+        let rows1 = idx1.graph_rows();
+        let rows2 = idx2.graph_rows();
+        assert_eq!(rows1.len(), rows2.len(), "graph row counts differ");
+        for (r1, r2) in rows1.iter().zip(rows2.iter()) {
+            assert_eq!(r1.node_id, r2.node_id, "node order differs");
+            assert_eq!(r1.layer, r2.layer, "layer structure differs");
+            assert_eq!(
+                r1.neighbours_blob, r2.neighbours_blob,
+                "neighbour list differs for node {} layer {}",
+                r1.node_id, r1.layer
+            );
+        }
+
+        // Probe identity: identical (item_id, distance) sequence from both graphs.
+        let mut prng: u64 = 99;
+        let mut probe: Vec<f32> = (0..dim)
+            .map(|_| (next(&mut prng) >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0)
+            .collect();
+        let p_norm: f32 = probe.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if p_norm > 0.0 {
+            for x in probe.iter_mut() {
+                *x /= p_norm;
+            }
+        }
+        let h1 = idx1.search(&probe, "model-x", 10).unwrap();
+        let h2 = idx2.search(&probe, "model-x", 10).unwrap();
+        let seq1: Vec<(String, i32)> = h1.iter().map(|m| (m.item_id.clone(), m.distance)).collect();
+        let seq2: Vec<(String, i32)> = h2.iter().map(|m| (m.item_id.clone(), m.distance)).collect();
+        assert_eq!(seq1, seq2, "probe result sequences differ");
     }
 }

@@ -159,9 +159,14 @@ struct LexiconGapsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         )
         #expect(text.contains("iron"), "fact_search must return filed facts; got: \(text)")
-        // Part 6: evaluation fields — filed= and source= must appear in each fact line.
-        #expect(text.contains("filed="), "fact_search must include filed= timestamp; got: \(text)")
-        #expect(text.contains("source="), "fact_search must include source= drawer ID; got: \(text)")
+        // S4 row format: factID · subject · predicate · object · source · filedAt
+        // (COMPOSER-02B §11.7). No label prefixes; verify canonical columns exist.
+        #expect(text.hasPrefix("found 1 fact"), "fact_search header must start with 'found 1 fact'; got: \(text)")
+        // The source column contains the drawer UUID or '-' for a sourceless fact.
+        // The filedAt column contains an ISO-8601 timestamp. Both are present in
+        // the S4 row via the · separator — verify the separator appears at least 5 times.
+        let dotCount = text.components(separatedBy: " · ").count - 1
+        #expect(dotCount >= 5, "S4 row must have 5 separators for 6 columns; got: \(dotCount) in: \(text)")
     }
 
     @Test("moot_fact_search exact fields do not accept substring or provenance collisions")
@@ -237,7 +242,8 @@ struct LexiconGapsTests {
         )
         #expect(text.contains("calendar.event.ev-1"))
         #expect(!text.contains("calendar.event.ev-10"))
-        #expect(text.hasPrefix("facts: 1"))
+        // S4 header is "found N facts, one per line" (COMPOSER-02B §11.7).
+        #expect(text.hasPrefix("found 1 fact"), "S4 header must be 'found 1 fact, one per line'; got: \(text)")
     }
 
     // MARK: - Tier 3: moot_retire_fact
@@ -322,8 +328,11 @@ struct LexiconGapsTests {
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         )
-        // Part 6: source= evaluation field must appear on every fact line.
-        #expect(text.contains("source="), "fact_timeline must include source= field; got: \(text)")
+        // Part 6: S4 time-major row has 7 columns separated by " · " (no "source=" label).
+        // Format: filedAt · lifecycle · factID · subject · predicate · object · source|-
+        // COMPOSER-02B §11.7: source column is included but appears without a label prefix.
+        let dotCount = text.components(separatedBy: " · ").count - 1
+        #expect(dotCount >= 6, "S4 time-major row must have ≥6 separators (7 columns); got: \(text)")
         #expect(text.contains("copper"), "fact_timeline must include filed facts; got: \(text)")
     }
 

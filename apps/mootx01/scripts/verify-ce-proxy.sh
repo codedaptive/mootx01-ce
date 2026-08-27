@@ -14,8 +14,8 @@
 #   (MootDaemonFederation, ConvergenceKit, CloudKit) in its SPM declarations.
 #
 # WHY THE PREVIOUS EVIDENCE WAS FAIL-OPEN:
-#   The verifier found that the prior ce-proxy tree at
-#   /Volumes/dev/builds/mootx01-ee/MACD-3D/ce-proxy/apps/mootx01/Package.swift
+#   The verifier found that the prior ce-proxy tree's
+#   apps/mootx01/Package.swift
 #   still CONTAINED the string "MootDaemonFederation" — proving the proxy was
 #   built from the EE Package.swift, NOT Package.community.swift. The gate
 #   therefore did not validate CE isolation at all.
@@ -27,8 +27,11 @@
 #   the expected value and fails closed.
 #
 # USAGE:
-#   export TMPDIR=/Volumes/dev/builds/mootx01-ee/MACD-3D/tmp
 #   bash apps/mootx01/scripts/verify-ce-proxy.sh
+#
+#   Scratch defaults under the caller's own cache. Set CE_PROXY_ROOT to put
+#   the proxy tree and its build scratch on a different volume — a big build
+#   disk, for instance. Nothing here assumes a particular machine's layout.
 #
 # EXIT CODES:
 #   0  — proxy tree assembled, assertions passed, swift build succeeded
@@ -39,9 +42,10 @@ set -euo pipefail
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PROXY_ROOT="/Volumes/dev/builds/mootx01-ee/MACD-3D/ce-proxy"
+CE_PROXY_ROOT="${CE_PROXY_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/mootx01/ce-proxy}"
+PROXY_ROOT="${CE_PROXY_ROOT}/tree"
 PROXY_PKG="${PROXY_ROOT}/apps/mootx01"
-BUILD_SCRATCH="/Volumes/dev/builds/mootx01-ee/MACD-3D/scratch/ce-proxy-mootx01"
+BUILD_SCRATCH="${CE_PROXY_ROOT}/scratch/ce-proxy-mootx01"
 
 echo "=== CE-proxy verify-ce-proxy.sh ==="
 echo "REPO_ROOT   : ${REPO_ROOT}"
@@ -193,7 +197,7 @@ echo ""
 
 echo "[5] Running swift build on CE proxy (scratch: ${BUILD_SCRATCH})..."
 mkdir -p "${BUILD_SCRATCH}"
-mkdir -p "/Volumes/dev/builds/mootx01-ee/MACD-3D/tmp"
+mkdir -p "${TMPDIR:-${CE_PROXY_ROOT}/tmp}"
 
 set +e
 swift build \

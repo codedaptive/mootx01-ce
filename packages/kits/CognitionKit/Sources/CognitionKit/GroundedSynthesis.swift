@@ -94,18 +94,25 @@ public struct GroundedSynthesis: Recipe {
     /// what feeds synthesis, not this.
     public static let groundingPoolBound = 200
 
-    /// Recipe output: the synthesized context document and the number
-    /// of drawers it was grounded on.
+    /// Recipe output: the synthesized context document, the number of
+    /// drawers it was grounded on, and the grounded pool's drawer IDs in
+    /// rank order.
     public struct Output: Sendable {
         /// The synthesized, provenance-grounded context document. Never
         /// persisted (NeuronKit C-9) — handed to a foundation model.
         public let context: ContextDocument
         /// How many recalled drawers fed the synthesis.
         public let drawerCount: Int
+        /// Drawer IDs of the ranked, capped, provenance-gated pool that fed
+        /// the synthesis, in rank order (ARIA_MCP_SPEC 2.0.0 § 8.7: the
+        /// candidate section renders THIS pool — the two-lane ranking is a
+        /// guarantee the presentation layer must not re-derive).
+        public let rankedIDs: [String]
 
-        public init(context: ContextDocument, drawerCount: Int) {
+        public init(context: ContextDocument, drawerCount: Int, rankedIDs: [String]) {
             self.context = context
             self.drawerCount = drawerCount
+            self.rankedIDs = rankedIDs
         }
     }
 
@@ -253,6 +260,9 @@ public struct GroundedSynthesis: Recipe {
         // the output whether monitoring is on or off (C-Det: additive telemetry).
         emitRecipeComplete(name: name, stepCount: rowsToSynthesize.count, ts: startTs)
 
-        return Output(context: context, drawerCount: rowsToSynthesize.count)
+        return Output(
+            context: context,
+            drawerCount: rowsToSynthesize.count,
+            rankedIDs: rowsToSynthesize.map(\.id))
     }
 }

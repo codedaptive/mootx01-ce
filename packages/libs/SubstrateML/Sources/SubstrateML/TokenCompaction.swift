@@ -65,7 +65,7 @@ public enum DistillationPipelineVersion {
     /// p2.2: multi-word entity anchoring — the categorizer greedy-matches
     /// content n-grams against the vendored multi-word labels before the
     /// single-token pass ("rio de janeiro" anchors as a phrase).
-    public static let current = "p2.2-det"
+    public static let current = "p2.3-det"
 }
 
 /// The §7.6 token-compaction transform and §6 token estimator. No

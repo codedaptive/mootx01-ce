@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Specification
-version: 1.5.0
+version: 1.7.1
 status: active
-date: 2026-08-20
+date: 2026-08-26
 description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -327,7 +327,7 @@ criterion and floored SplitMix64 initialization (`max(raw, 1e-3)`).
 This is an alternate, double-precision NMF algorithm to
 `NMFAlternatingLeastSquares` (the canonical f32 RMS algorithm). The
 canonical algorithm is `NMFAlternatingLeastSquares`; this f64/Frobenius²
-variant is provided so the two approaches can be benchmarked honestly.
+variant is provided so the two approaches can be benchmarked on equal terms.
 
 Do not wire any production consumer to this variant until it has passed
 `docs/validation/substrate_math_performance/` benchmarking:
@@ -1083,7 +1083,7 @@ digesting, so pair order can never change contradiction identity.
 closed and overlaps by standard closed-interval intersection; malformed (`a > b`)
 is `InvalidInput`. `unknown` is distinct from all-time; every v0.1 rule uses
 `unknown-pair-concurrent`, so two unknowns at the same coordinate are treated as
-concurrent (both filed as current truth) with `validity_unknown` recorded, while
+concurrent (both filed as currently valid) with `validity_unknown` recorded, while
 unknown versus known is `CandidateReview` — never proof.
 
 **Outcome precedence (first match wins).** `InvalidInput`, `Irrelevant`,
@@ -1271,6 +1271,10 @@ verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
 
 ## Changelog
 
+### 1.7.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
 ### 1.2.0 -- 2026-08-06
 
 - § 5.5b: set overload for `ShingleSimilarity` (Swift set-typed
@@ -1307,7 +1311,11 @@ DeltaFeatureExtractor, DistillationScorer, DistillationPipeline, conformance);
 conformance). § 6 error model extended with JacobiSVD preconditions.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.5.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2.1-det" → "p2.2-det" (multi-word entity anchoring).
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.7.0 (2026-08-20)** — TemporalCausalityFold gains the §8.13 decayed projection (W2.5 S4 Option C, Bob's ruling): FoldResult.weightedDeltas accumulates exp(−age·ln2/τ) per pair (age from the pair's NEWER entry to the decay clock, clamped ≥0) when a decay clock is passed; counts stay the canonical output. Swift: additive decayNowMs/decayHalfLifeSeconds params; Rust: fold_with_decay beside fold. Half-life default = §6.8 temporal-causality 30d.
+
+- **1.6.0 (2026-08-20)** — DistillationPipelineVersion.current → p2.3-det (coref stage A lands in the GLK distillation contract; the version constant lives here).
+
+- **1.5.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2.1-det" → "p2.2-det" (multi-word entity anchoring).
 
 - **1.4.0 (2026-08-20)** — DistillationPipelineVersion.current: "p2-det" → "p2.1-det" (Wikidata-subset fact upgrade in the GLK categorizer).
 
