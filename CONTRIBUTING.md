@@ -45,10 +45,10 @@ they apply, and describe what the change does and why.
 Code contributions require a signed **Contributor License Agreement (CLA)**
 before they can be merged. The full text is in [`CLA.md`](CLA.md).
 
-This is not a formality imposed for its own sake. The community edition is
-source-available under the Functional Source License (FSL-1.1-ALv2; see
-`LICENSE` and `LICENSING.md`), it converts to Apache 2.0 on the schedule the
-license sets, and a commercial edition is built from the same substrate. For
+This is not a formality imposed for its own sake. The repository is open
+source under the Apache License, Version 2.0 (see `LICENSE` and
+`LICENSING.md`), and commercial products (MOOTx01 Pro, MOOTx01 Enterprise,
+and Enterprise Edition offerings) are built from the same substrate. For
 all of that to hold together, the project needs clear, documented rights to
 include a contribution in the community edition, to relicense it under the
 future Apache license on schedule, and to include it in the commercial

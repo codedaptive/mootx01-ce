@@ -112,11 +112,10 @@ EideticLib consumes FDC. `EideticLib.lookup` delegates to `FDC.encodeAnchor`: a 
 
 ## Licensing
 
-Free to build and share, licensed to sell — source-available under the Functional Source
-License (FSL-1.1-ALv2, with Apache 2.0 as the future license). The full model and the
-current tier ladder live in [`LICENSING.md`](../../LICENSING.md), the single source of truth
-(kept in step with mootx01.ai); this architecture map deliberately does not duplicate the
-price table.
+Open source under the Apache License, Version 2.0 — free to build, share, embed,
+host, and sell with. The full model lives in [`LICENSING.md`](../../LICENSING.md),
+the single source of truth (kept in step with mootx01.ai); this architecture map
+deliberately does not duplicate it.
 
 EideticLib is licensed independently: Apache for code plus CC for data, as a separate repository. The substrate kits sit under the core license.
 

@@ -129,7 +129,7 @@ With the four venues you can build, on your own terms:
   deterministic kernel
 
 That is a complete engine room. Storage, retrieval, grounding, math. Apache
-licensed, commercial use welcome, no Competing Use restriction, no timer.
+licensed, commercial use welcome, no use restriction, no timer.
 
 ## What MOOTx01 adds
 
@@ -179,14 +179,12 @@ AI to have one?*
 
 ## Licensing, in one paragraph
 
-Which license governs is determined by where you obtain the code. Code from a
-venue repository is Apache-2.0 — everything that license permits, including
-commercial and hosted use. The same package source obtained as part of this
-repository is governed by this repository's FSL grant (FSL-1.1-ALv2:
-source-available, free to build and share, pay to profit, each version
-converting to Apache 2.0 two years after release). The product core —
-GeniusLocusKit, NeuronKit, CognitionKit, VaultKit, and the applications — is
-FSL in this repository. The full plain-language model and tier ladder is in
+Everything is Apache-2.0 — the venue repositories and this repository grant
+identical rights: everything that license permits, including commercial,
+embedded, and hosted use. The product core — GeniusLocusKit, NeuronKit,
+CognitionKit, VaultKit, and the Community application — carries no use
+restriction and no timer, and the relicense is retroactive over every prior
+release ([`RELICENSE.md`](RELICENSE.md)). The full plain-language model is in
 [`LICENSING.md`](LICENSING.md); the editions story is in
 [`EDITIONS.md`](EDITIONS.md).
 

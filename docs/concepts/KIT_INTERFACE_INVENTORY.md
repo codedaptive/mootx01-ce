@@ -387,7 +387,7 @@ description: A per-kit inventory of every kit's public interface — types, func
 **Role:** Behaviour recipes (named, composable workflows).  
 **Language:** Swift + Rust
 
-**Status:** Implemented (Swift + Rust, conformance-gated). Source-available Brain layer in CE.
+**Status:** Implemented (Swift + Rust, conformance-gated). Open source (Apache-2.0) Brain layer in CE.
 
 **Interface:**
 - `Workflow` protocol

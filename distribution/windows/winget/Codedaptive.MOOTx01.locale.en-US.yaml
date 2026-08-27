@@ -12,9 +12,9 @@ PublisherUrl: https://github.com/codedaptive/mootx01-ce
 PublisherSupportUrl: https://github.com/codedaptive/mootx01-ce/issues
 PackageName: MOOTx01
 PackageUrl: https://github.com/codedaptive/mootx01-ce
-# SPDX identifier for the Functional Source License 1.1 (Apache-2.0 future
-# grant) that governs this repo — see LICENSE.
-License: FSL-1.1-ALv2
+# SPDX identifier for the Apache License, Version 2.0 that governs this
+# repo — see LICENSE.
+License: Apache-2.0
 Copyright: Copyright (c) Codedaptive LLC
 ShortDescription: A persistent, private, on-device memory for your AI clients.
 Description: >-

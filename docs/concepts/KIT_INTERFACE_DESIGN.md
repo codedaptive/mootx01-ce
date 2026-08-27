@@ -535,7 +535,7 @@ aggregation families listed below.
 
 **Dependencies:** NeuronKit, GeniusLocusKit
 
-**Maturity:** Implemented (Swift + Rust, conformance-gated). Source-available Brain layer in CE.
+**Maturity:** Implemented (Swift + Rust, conformance-gated). Open source (Apache-2.0) Brain layer in CE.
 
 ---
 
