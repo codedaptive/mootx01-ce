@@ -67,8 +67,14 @@ Icon
 # Makefile and scripts/moot-test). Replaces the 30 per-workspace target/ dirs.
 cargo-target/
 
-# Cargo lockfiles are not tracked, any depth
-**/Cargo.lock
+# Cargo lockfiles ARE tracked for reproducible builds (owner decision
+# 2026-06-29), matching EE. Do not re-add a **/Cargo.lock ignore: this
+# repository already tracks 29 of them force-added past the rule that
+# used to sit here, and the ignore made CE unable to receive a NEW
+# lockfile through the port. The file landed on disk, `git add -A`
+# skipped it, and SHARED parity reported it "missing from staging" with
+# nothing naming the ignore as the cause — a silent failure, once per
+# new crate.
 
 # Security-audit Finder-flag manifest (local triage sidecar)
 packages/.audit-flagged
