@@ -220,4 +220,92 @@ struct EstateIdentityKeyStoreTests {
         let raw = await second.retrievePrivateSigningKeyData()
         #expect(raw == nil, "private key must be nil when the key store does not contain it")
     }
+
+    // MARK: - 7. federate:false skips the identity step entirely
+
+    /// A declared non-federating open (MOOTX01_ESTATE_FEDERATE=false, injected
+    /// here as `federate: false`) skips the whole identity-establishment step:
+    /// no keypair is minted, nothing is written to the identity key store, no
+    /// public key lands in the manifest, and no in-memory signing key exists.
+    @Test("federate:false mints nothing and touches no key store")
+    func federateFalseSkipsIdentityMint() async throws {
+        let storage = makeStorage()
+        let keyStore = InMemoryEstateIdentityKeyStore()
+
+        _ = try await Estate.create(storage: storage, owner: testOwner)
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: false
+        )
+        let estateID = await estate.estateUUID
+        defer { Task { try? await estate.close() } }
+
+        #expect(
+            try await estate.manifest.ed25519PublicKey == nil,
+            "non-federating open must not write a public key to the manifest"
+        )
+        #expect(
+            keyStore._storedPrivateKey(forEstateID: estateID) == nil,
+            "non-federating open must not store a private key"
+        )
+        #expect(
+            await estate.retrievePrivateSigningKeyData() == nil,
+            "non-federating open must not cache a signing key"
+        )
+    }
+
+    // MARK: - 8. federate is per-open, not a persistent estate property
+
+    /// An estate first opened with `federate: false` and later reopened with
+    /// the default posture mints then — the declaration governs only the open
+    /// it is passed to.
+    @Test("federating reopen after a federate:false open mints the identity")
+    func federatingReopenMintsAfterNonFederatingOpen() async throws {
+        let storage = makeStorage()
+        let keyStore = InMemoryEstateIdentityKeyStore()
+
+        _ = try await Estate.create(storage: storage, owner: testOwner)
+        let first = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: false
+        )
+        try await first.close()
+
+        let second = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: true
+        )
+        defer { Task { try? await second.close() } }
+
+        #expect(
+            try await second.manifest.ed25519PublicKey != nil,
+            "federating reopen must mint the identity"
+        )
+        #expect(
+            await second.retrievePrivateSigningKeyData()?.count == 32,
+            "federating reopen must cache the freshly-minted signing key"
+        )
+    }
+
+    // MARK: - 9. Environment-value parse contract
+
+    /// Only the exact value "false" (any case) disables federation; absence
+    /// and every other value keep the default minting behavior. The parse is
+    /// a pure function so this test never mutates process environment.
+    @Test("MOOTX01_ESTATE_FEDERATE parse: only \"false\" disables")
+    func federationEnvironmentValueParseContract() {
+        #expect(Estate.federationEnabled(fromEnvironmentValue: nil))
+        #expect(Estate.federationEnabled(fromEnvironmentValue: ""))
+        #expect(Estate.federationEnabled(fromEnvironmentValue: "true"))
+        #expect(Estate.federationEnabled(fromEnvironmentValue: "0"))
+        #expect(!Estate.federationEnabled(fromEnvironmentValue: "false"))
+        #expect(!Estate.federationEnabled(fromEnvironmentValue: "FALSE"))
+        #expect(!Estate.federationEnabled(fromEnvironmentValue: "False"))
+    }
 }

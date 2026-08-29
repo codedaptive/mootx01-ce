@@ -71,6 +71,9 @@ pub fn permission_entries() -> Vec<String> {
 /// Reads: no estate content is created, changed, or removed.
 const READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_ping", "moot_drain_status",
+    // Rebuild OPERATIONS are mutating; this is the read-only progress poll
+    // for them (same split as moot_drain_status over the drain workers).
+    "moot_rebuild_status",
     // C3/A6: audit-derived timing metrics — pure audit-log read.
     "moot_timing_report",
     "moot_list_lenses", "moot_list_recipes",

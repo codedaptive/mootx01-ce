@@ -228,3 +228,72 @@ fn corrupt_filed_at_returns_error_not_epoch_zero() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// MINT-DEBT-WINDOW: debt paging must survive a poison row (2026-08-27)
+// ---------------------------------------------------------------------------
+
+/// A corrupt row inside a scan window must neither duplicate nor hide debt.
+///
+/// The debt fetch pages the drawer scan with OFFSET, and the SQL cursor
+/// consumes corrupt rows too — so the offset must advance by clean + skipped
+/// counts. An advance by the clean count alone re-enters the window tail and
+/// returns duplicate `AdornmentDebt` pairs, silently consuming `limit`.
+///
+/// Layout: four drawers in fixed id order, drawer 2's filedAt poisoned
+/// (Timestamp decode fails → query_skip_corrupt skips it), drawer 1 already
+/// minted, limit 2 (= chunk size with one active minter). The batch must
+/// return exactly drawers 3 and 4, no duplicates.
+#[test]
+fn adornment_debt_batch_pages_correctly_over_poison_row() {
+    use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
+    use std::collections::BTreeMap;
+
+    let db = TempDb::new();
+    let uid = |i: u32| format!("00000000000040008000000000{:06}", i);
+
+    {
+        let store = open_sqlite(db.path());
+        store
+            .register_adornment_minter(&AdornmentMinterDescriptor {
+                id: "m-1".to_string(),
+                name: "M1".to_string(),
+                family: "test-family".to_string(),
+                model_id: "model-001".to_string(),
+                model_version: "1.0".to_string(),
+                prompt_digest: "abc123".to_string(),
+                parameters: BTreeMap::new(),
+                is_active: true,
+            })
+            .unwrap();
+        for i in 1..=4 {
+            store.add_drawer(&sample_drawer(&uid(i)), NOW).unwrap();
+        }
+        store
+            .put_adornment(&StoredAdornment {
+                drawer_id: uid(1),
+                minter_id: "m-1".to_string(),
+                text: "adorned".to_string(),
+            })
+            .unwrap();
+    } // store drops → WAL checkpointed
+
+    // Poison drawer 2's filedAt: Timestamp decode fails, so the row-level
+    // skip in the SQLite backend counts it as skipped, not returned.
+    raw_exec(
+        db.path(),
+        &format!(
+            r#"UPDATE "drawers" SET "filedAt" = 'NOT-A-DATE' WHERE "id" = '{}'"#,
+            uid(2)
+        ),
+    );
+
+    let store2 = open_sqlite(db.path());
+    let debt = store2.adornment_debt_batch(2, None).expect("debt");
+    let ids: Vec<String> = debt.iter().map(|d| d.drawer.id.clone()).collect();
+    assert_eq!(
+        ids,
+        vec![uid(3), uid(4)],
+        "poison row must not duplicate or hide debt (got {ids:?})"
+    );
+}
