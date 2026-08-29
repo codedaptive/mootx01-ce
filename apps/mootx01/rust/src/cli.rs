@@ -63,7 +63,7 @@ pub enum Command {
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
     ///              [--mode server|skills|plugin]
     ///              [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon]
-    ///              [--vault-on | --vault-off] [--reuse-db | --replace-db]
+    ///              [--vault-on | --vault-off] [--reuse-db | --replace-db] [--no-encrypt]
     Install {
         target: Option<Vec<String>>,
         location: Location,
@@ -90,6 +90,11 @@ pub enum Command {
         /// default estate and the moot-mgr store to the platform trash so a
         /// fresh database is created on first serve.
         db: Option<ExistingDbArg>,
+        /// Record the at-rest encryption opt-out for the DEFAULT estate
+        /// (marker file beside the estate; honored on first create only).
+        /// Default is encrypted; `mootx01 upgrade` encrypts an opted-out
+        /// estate later. Same flag shape as `db create --no-encrypt`.
+        no_encrypt: bool,
     },
     /// §4.3 uninstall [--target <ids>] [--location global|local] [--yes] [--purge]
     Uninstall {
@@ -165,7 +170,9 @@ pub enum HttpMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbCommand {
-    Create { name: String },
+    /// `no_encrypt` mirrors `install --no-encrypt` deliberately: the two
+    /// estate-creating surfaces must not disagree about the default.
+    Create { name: String, no_encrypt: bool },
     List,
     Open { name: String },
     Delete { name: String, force: bool },
@@ -425,6 +432,9 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
     let mut location = Location::Global;
     let (mut yes, mut grant_permissions, mut no_permissions, mut no_mgr, mut no_daemon) =
         (false, false, false, false, false);
+    // At-rest encryption opt-out for the default estate. Encrypted is the
+    // default; the flag records a marker the open posture honors on create.
+    let mut no_encrypt = false;
     // vault_on tracks the net choice: true = vault enabled (the default).
     // --vault-off sets it false; --vault-on is a no-op but is accepted for
     // symmetry. If both appear, --vault-off wins (last-write wins in the loop,
@@ -473,6 +483,7 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             "--no-permissions" => no_permissions = true,
             "--no-mgr" => no_mgr = true,
             "--no-daemon" => no_daemon = true,
+            "--no-encrypt" => no_encrypt = true,
             // vault surface toggle. --vault-off wins over --vault-on
             // when both are present (the safer choice). --vault-on is explicit
             // opt-in to the default and is accepted for symmetry / scripting.
@@ -491,7 +502,7 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             other => return Err(unexpected(other, "install")),
         }
     }
-    Ok(Command::Install { target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db })
+    Ok(Command::Install { target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt })
 }
 
 fn parse_uninstall(it: &mut Args) -> Result<Command, UsageError> {
@@ -542,10 +553,18 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
     match sub {
         "create" => {
             let name = take_value(it, "db create <name>")?;
-            if let Some(h) = expect_help_or_end(it, "db")? {
-                return Ok(h);
+            // create takes flags, so it parses a flag loop rather than
+            // expect_help_or_end: --no-encrypt is the same opt-out shape
+            // as `install --no-encrypt`.
+            let mut no_encrypt = false;
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--no-encrypt" => no_encrypt = true,
+                    "--help" | "-h" => return Ok(Command::HelpFor("db")),
+                    other => return Err(unexpected(other, "db create")),
+                }
             }
-            Ok(Command::Db(DbCommand::Create { name }))
+            Ok(Command::Db(DbCommand::Create { name, no_encrypt }))
         }
         "list" => {
             if let Some(h) = expect_help_or_end(it, "db")? {
@@ -962,7 +981,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.".into(),
         "install" => "Wire mootx01 into MCP clients.\n\
             \n\
-            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off] [--reuse-db | --replace-db]\n\
+            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off] [--reuse-db | --replace-db] [--no-encrypt]\n\
             \n\
             OPTIONS:\n\
             \x20 --target <ids>          Comma-separated client ids to install (e.g. claude,cursor). Default: interactive picker.\n\
@@ -976,7 +995,8 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
             \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.\n\
             \x20 --reuse-db              When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).\n\
-            \x20 --replace-db            When an estate database already exists: move it and the moot-mgr history to the platform trash so a fresh database is created on first serve. Asks for a typed confirmation unless --yes.".into(),
+            \x20 --replace-db            When an estate database already exists: move it and the moot-mgr history to the platform trash so a fresh database is created on first serve. Asks for a typed confirmation unless --yes.\n\
+            \x20 --no-encrypt            Create the default estate WITHOUT at-rest encryption (records a marker honored on first create; an existing estate is never re-postured). Default is encrypted. Run `mootx01 upgrade` at any time to encrypt an unencrypted estate.".into(),
         "uninstall" => "Remove mootx01 from MCP clients.\n\
             \n\
             USAGE: mootx01 uninstall [--target <ids>] [--location <scope>] [--yes] [--purge]\n\
@@ -991,7 +1011,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             USAGE: mootx01 db <create|list|open|delete>\n\
             \n\
             SUBCOMMANDS:\n\
-            \x20 create <name>           Create a new named estate.\n\
+            \x20 create <name> [--no-encrypt]  Create a new named estate. --no-encrypt creates it WITHOUT at-rest encryption (default is encrypted); run `mootx01 upgrade` at any time to encrypt it later.\n\
             \x20 list                    List all known estates.\n\
             \x20 open <name>             Set the active estate (used by serve and status).\n\
             \x20 delete <name> [-f]      Delete a named estate and its database files. Cannot delete 'default' (use uninstall --purge).".into(),
@@ -1268,6 +1288,7 @@ mod tests {
                 vault_on: true, // default when neither --vault-on nor --vault-off is passed
                 depth: None,    // default when --mode is not passed
                 db: None,      // default when --reuse-db/--replace-db is not passed
+                no_encrypt: false, // default when --no-encrypt is not passed
             }
         );
         // --grant-permissions flips the opt-in flag on.
@@ -1284,6 +1305,7 @@ mod tests {
                 vault_on: true,
                 depth: None,
                 db: None,
+                no_encrypt: false,
             }
         );
     }
@@ -1309,6 +1331,7 @@ mod tests {
                     vault_on: true,
                     depth: Some(want),
                     db: None,
+                    no_encrypt: false,
                 }
             );
         }
@@ -1337,6 +1360,7 @@ mod tests {
                 vault_on: false,
                 depth: None,
                 db: None,
+                no_encrypt: false,
             }
         );
         // --vault-on is explicit opt-in to the default
@@ -1353,6 +1377,7 @@ mod tests {
                 vault_on: true,
                 depth: None,
                 db: None,
+                no_encrypt: false,
             }
         );
         // default (neither flag) is vault-on
@@ -1369,6 +1394,7 @@ mod tests {
                 vault_on: true,
                 depth: None,
                 db: None,
+                no_encrypt: false,
             }
         );
     }
@@ -1396,9 +1422,27 @@ mod tests {
     }
 
     #[test]
+    fn install_no_encrypt_flag() {
+        // --no-encrypt flips the opt-out on; absent, encrypted is the default.
+        assert!(matches!(
+            p(&["install", "--no-encrypt"]).unwrap(),
+            Command::Install { no_encrypt: true, .. }
+        ));
+        assert!(matches!(
+            p(&["install"]).unwrap(),
+            Command::Install { no_encrypt: false, .. }
+        ));
+    }
+
+    #[test]
     fn db_surface() {
         assert_eq!(p(&["db", "create", "work"]).unwrap(),
-                   Command::Db(DbCommand::Create { name: "work".into() }));
+                   Command::Db(DbCommand::Create { name: "work".into(), no_encrypt: false }));
+        // Same opt-out shape as install --no-encrypt: the two estate-creating
+        // surfaces must not disagree about the default.
+        assert_eq!(p(&["db", "create", "work", "--no-encrypt"]).unwrap(),
+                   Command::Db(DbCommand::Create { name: "work".into(), no_encrypt: true }));
+        assert!(p(&["db", "create", "work", "--bogus"]).is_err());
         assert_eq!(p(&["db", "list"]).unwrap(), Command::Db(DbCommand::List));
         assert_eq!(p(&["db", "open", "work"]).unwrap(),
                    Command::Db(DbCommand::Open { name: "work".into() }));

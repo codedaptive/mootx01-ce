@@ -16,3 +16,8 @@ path = "src/main.rs"
 [dependencies]
 # The server-logic library lives in AriaMcpKit; this binary just wires it to I/O.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
+# Resident gold-miner engine install at startup (DEFAULT-MINT-01): the dev
+# binary mirrors the product serve's engine block so the two Rust entry
+# points do not diverge on minting. In-repo kit dependency; layering holds
+# (app -> lib).
+adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }

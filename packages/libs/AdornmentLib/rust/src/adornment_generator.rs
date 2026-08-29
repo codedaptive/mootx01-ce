@@ -97,8 +97,13 @@ pub const ADORNMENT_CHUNK_THRESHOLD: usize = 16_000;
 /// into <=threshold pieces, each piece is minted, the piece-summaries
 /// are concatenated and re-summarized for the final blob line.
 ///
-/// Returns `None` when every mint attempt returned `None` (record
-/// stays in debt).
+/// Never returns `None` for non-blank content: when the model refuses
+/// or its output normalizes to empty, the return is the MECHANICAL
+/// fallback — claim-line extraction over the record content, truncated
+/// to `max_length` (Bob ruling 2026-08-27: a null adornment is not
+/// allowed for a non-blank drawer; coverage is guaranteed structurally
+/// by mechanical truncation). `None` only when the content itself
+/// normalizes to empty. Twin of the Swift behavior.
 pub fn mint_adornment_map_reduce(
     drawer_content: &str,
     event_date: Option<&str>,
@@ -106,9 +111,26 @@ pub fn mint_adornment_map_reduce(
     chunk_threshold: usize,
     mut mint: impl FnMut(&str) -> Option<String>,
 ) -> Option<String> {
+    // Mechanical coverage backstop: deterministic adornment derived from
+    // the record itself, used whenever generation fails (guardrail
+    // refusal, empty normalized output) so a non-blank drawer always
+    // mints. Deterministic per content — identical across ports.
+    let mechanical_fallback = |content: &str| -> Option<String> {
+        let line = crate::minter_recipe::extract_claim_line(content);
+        if line.is_empty() {
+            return None;
+        }
+        Some(line.chars().take(max_length).collect())
+    };
+
     if drawer_content.chars().count() <= chunk_threshold {
         let prompt = build_adornment_prompt(drawer_content, event_date, max_length);
-        return mint(&prompt);
+        if let Some(minted) = mint(&prompt) {
+            if !minted.is_empty() {
+                return Some(minted);
+            }
+        }
+        return mechanical_fallback(drawer_content);
     }
 
     // Split on line boundaries into <=threshold pieces; a single line
@@ -138,13 +160,24 @@ pub fn mint_adornment_map_reduce(
         }
     }
     if piece_summaries.is_empty() {
-        return None;
+        return mechanical_fallback(drawer_content);
     }
 
     // Reduce: summarize the combined piece-summaries into the final line.
     let combined = piece_summaries.join("\n");
     let final_prompt = build_adornment_prompt(&combined, event_date, max_length);
-    mint(&final_prompt)
+    if let Some(reduced) = mint(&final_prompt) {
+        if !reduced.is_empty() {
+            return Some(reduced);
+        }
+    }
+    // Reduce failed but piece summaries exist: they are model output —
+    // prefer them over the mechanical line, truncated to the contract.
+    let joined = piece_summaries.join("; ");
+    if !joined.is_empty() {
+        return Some(joined.chars().take(max_length).collect());
+    }
+    mechanical_fallback(drawer_content)
 }
 
 // MARK: - Generator seam
@@ -355,5 +388,60 @@ fn resident_mint(prompt: &str, command: &str) -> Option<String> {
             let _ = old.child.wait();
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    // Golden pin (both ports assert the identical literal): a refusing
+    // generator yields the mechanical claim-line adornment, never None.
+    const CONTENT: &str =
+        "user: The quarterly planning meeting moved to Thursday.\nassistant: Noted.";
+    const FALLBACK: &str = "user: The quarterly planning meeting moved to Thursday.";
+
+    #[test]
+    fn refusing_generator_yields_mechanical_fallback() {
+        let out = mint_adornment_map_reduce(CONTENT, None, 280, 16_000, |_| None);
+        assert_eq!(out.as_deref(), Some(FALLBACK));
+    }
+
+    #[test]
+    fn empty_generator_output_yields_mechanical_fallback() {
+        let out =
+            mint_adornment_map_reduce(CONTENT, None, 280, 16_000, |_| Some(String::new()));
+        assert_eq!(out.as_deref(), Some(FALLBACK));
+    }
+
+    #[test]
+    fn successful_generation_is_unchanged() {
+        let out = mint_adornment_map_reduce(CONTENT, None, 280, 16_000, |_| {
+            Some("planning meeting; Thursday move".to_string())
+        });
+        assert_eq!(out.as_deref(), Some("planning meeting; Thursday move"));
+    }
+
+    #[test]
+    fn fallback_respects_max_length() {
+        let long = format!("user: {}", "x".repeat(500));
+        let out = mint_adornment_map_reduce(&long, None, 280, 16_000, |_| None);
+        let s = out.expect("fallback");
+        assert_eq!(s.chars().count(), 280);
+    }
+
+    #[test]
+    fn oversized_record_with_refusing_generator_falls_back() {
+        // Content above the chunk threshold; every piece mint and the
+        // reduce mint refuse — the mechanical line still mints.
+        let big = format!("First durable fact line.\n{}", "filler line\n".repeat(30));
+        let out = mint_adornment_map_reduce(&big, None, 280, 64, |_| None);
+        assert_eq!(out.as_deref(), Some("First durable fact line."));
+    }
+
+    #[test]
+    fn blank_content_stays_none() {
+        let out = mint_adornment_map_reduce("   \n  ", None, 280, 16_000, |_| None);
+        assert!(out.is_none());
     }
 }

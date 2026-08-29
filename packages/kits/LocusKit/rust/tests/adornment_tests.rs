@@ -387,6 +387,41 @@ fn test_adornment_debt_batch_ignores_inactive_minters() {
     assert!(debt.is_empty(), "inactive minter generates no debt");
 }
 
+/// Regression guard (MINT-DEBT-WINDOW, 2026-08-27): a debt fetch that scans
+/// only the first `limit × active_minters` drawers in filedAt order returns
+/// empty once that prefix is fully minted, hiding real debt further down —
+/// the drain loop then falsely concludes the estate is complete. The fetch
+/// must keep scanning until the batch fills or the drawer table is
+/// exhausted. Twin of Swift `adornmentDebtBatchScansPastMintedPrefix`.
+#[test]
+fn test_adornment_debt_batch_scans_past_minted_prefix() {
+    let store = new_store();
+    store.register_adornment_minter(&make_minter("m-1", "M1")).expect("reg");
+    // 12 drawers; identical filedAt so scan order falls to id ASC, and the
+    // fixed zero-padded UUIDs make that order match the numeric order.
+    let uid = |i: u32| format!("00000000-0000-4000-8000-0000000000{i:02}");
+    for i in 1..=12 {
+        store.add_drawer(&sample_drawer(&uid(i)), NOW).expect("add_drawer");
+    }
+    // Mint the oldest 10 — more than limit × minters (4 × 1), so the whole
+    // first scan window is already complete.
+    for i in 1..=10 {
+        store
+            .put_adornment(&StoredAdornment {
+                drawer_id: uid(i),
+                minter_id: "m-1".to_string(),
+                text: "adorned".to_string(),
+            })
+            .expect("put");
+    }
+    let debt = store.adornment_debt_batch(4, None).expect("debt");
+    // The two unminted drawers past the minted prefix MUST surface.
+    assert_eq!(debt.len(), 2, "debt beyond the minted prefix must surface");
+    let ids: std::collections::BTreeSet<String> =
+        debt.iter().map(|d| d.drawer.id.clone()).collect();
+    assert!(ids.contains(&uid(11)) && ids.contains(&uid(12)), "got {ids:?}");
+}
+
 // ─── bitmap hygiene (ADORN-STORE-02 v17) ────────────────────────────────────
 
 /// Fresh capture does NOT set bits 27-30 (they are FREE in v17).

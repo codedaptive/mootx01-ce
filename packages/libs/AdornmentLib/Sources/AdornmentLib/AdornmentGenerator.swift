@@ -125,8 +125,13 @@ public let ADORNMENT_CHUNK_THRESHOLD: Int = 16_000
 ///   - maxLength: Contract ceiling; the seam truncates mechanically.
 ///   - chunkThreshold: Piece-size bound (default ADORNMENT_CHUNK_THRESHOLD).
 ///   - mint: Single-call seam: prompt in, raw adornment (or nil) out.
-/// - Returns: The final adornment, or nil when every mint attempt
-///   returned nil (record stays in debt).
+/// - Returns: The final adornment. Never nil for non-blank content: when
+///   the model refuses or its output normalizes to empty, the return is
+///   the MECHANICAL fallback — claim-line extraction over the record
+///   content, truncated to `maxLength` (Bob ruling 2026-08-27: a null
+///   adornment is not allowed for a non-blank drawer; coverage is
+///   guaranteed structurally by mechanical truncation). Nil only when
+///   `drawerContent` itself normalizes to empty.
 public func mintAdornmentMapReduce(
     drawerContent: String,
     eventDate: String?,
@@ -134,10 +139,21 @@ public func mintAdornmentMapReduce(
     chunkThreshold: Int = ADORNMENT_CHUNK_THRESHOLD,
     mint: (String) async -> String?
 ) async -> String? {
+    // Mechanical coverage backstop: deterministic adornment derived from
+    // the record itself. Used whenever generation fails (guardrail
+    // refusal, empty normalized output) so a non-blank drawer always
+    // mints. Deterministic per content — safe across ports and retries.
+    func mechanicalFallback() -> String? {
+        let line = extractClaimLine(drawerContent)
+        guard !line.isEmpty else { return nil }
+        return String(line.prefix(maxLength))
+    }
+
     if drawerContent.count <= chunkThreshold {
         let prompt = buildAdornmentPrompt(
             drawerContent: drawerContent, eventDate: eventDate, maxLength: maxLength)
-        return await mint(prompt)
+        if let minted = await mint(prompt), !minted.isEmpty { return minted }
+        return mechanicalFallback()
     }
 
     // Split on line boundaries into ≤threshold pieces; a single line
@@ -163,13 +179,18 @@ public func mintAdornmentMapReduce(
             pieceSummaries.append(summary)
         }
     }
-    guard !pieceSummaries.isEmpty else { return nil }
+    guard !pieceSummaries.isEmpty else { return mechanicalFallback() }
 
     // Reduce: summarize the combined piece-summaries into the final line.
     let combined = pieceSummaries.joined(separator: "\n")
     let finalPrompt = buildAdornmentPrompt(
         drawerContent: combined, eventDate: eventDate, maxLength: maxLength)
-    return await mint(finalPrompt)
+    if let reduced = await mint(finalPrompt), !reduced.isEmpty { return reduced }
+    // Reduce failed but piece summaries exist: they are model output —
+    // prefer them over the mechanical line, truncated to the contract.
+    let joined = pieceSummaries.joined(separator: "; ")
+    if !joined.isEmpty { return String(joined.prefix(maxLength)) }
+    return mechanicalFallback()
 }
 
 // MARK: - Generator seam
