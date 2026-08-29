@@ -49,6 +49,9 @@ public enum ToolProvenance: Sendable, Equatable {
     /// These tools are dispatched through CommunityToolHandler rather than
     /// through ToolDispatcher; no GeniusLocusKit actor is required.
     case community
+    /// A tool supplied by an authenticated product attached to the resident
+    /// daemon. Product tools are never present on the ordinary HTTP lane.
+    case product
 }
 
 /// A single tool advertised in `tools/list`.
