@@ -65,6 +65,10 @@ import Security
 /// to exit (SIGTERM received or activation failed).
 public enum CommunityResidentMain {
 
+    /// Stable MCP identity consumed by signed Community/Pro clients during
+    /// their authenticated readiness handshake.
+    public static let dispatcherServerName = "ARIA_MCP"
+
     /// Run the production resident loop.
     ///
     /// On non-Darwin platforms or when the Security framework is absent,
@@ -252,7 +256,7 @@ public enum CommunityResidentMain {
 
         let dispatcher = ARIA_MCPDispatcher(
             info: ARIA_MCPDispatcher.ServerInfo(
-                name: "mootx01",
+                name: dispatcherServerName,
                 version: activation.descriptor.binaryVersion
             ),
             communityHandler: communityDispatch,
@@ -269,7 +273,7 @@ public enum CommunityResidentMain {
         let authServer = FirstPartyAuthServer(
             rootProvider: rootProvider,
             descriptor: activation.descriptor,
-            serverName: "mootx01",
+            serverName: dispatcherServerName,
             now: { UInt64(Date().timeIntervalSince1970) },
             randomBytes: ProductionRandomness.secRandomBytes
         )
