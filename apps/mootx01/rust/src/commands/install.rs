@@ -18,7 +18,7 @@ use crate::cli::{ExistingDbArg, InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::depth::{self, DepthOutcome, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::desktop_ext;
-use crate::core::{mcp_ownership, merge, paths, permissions};
+use crate::core::{encrypt_optout, mcp_ownership, merge, paths, permissions};
 use crate::exit;
 
 pub fn run(
@@ -32,6 +32,7 @@ pub fn run(
     vault_on: bool,
     depth_arg: Option<InstallDepthArg>,
     db_arg: Option<ExistingDbArg>,
+    no_encrypt: bool,
 ) -> ExitCode {
     let home = home_dir();
     let registry = clients::supported();
@@ -53,6 +54,70 @@ pub fn run(
     // failure) aborts the install with nothing half-done.
     if let Err(code) = handle_existing_database(db_arg, yes) {
         return code;
+    }
+
+    // At-rest encryption posture for the DEFAULT estate (twin of Swift
+    // InstallCommand). install does not create the estate file — the substrate
+    // writes it lazily on first serve — so --no-encrypt cannot act now; it
+    // records the choice as a marker beside the estate, and the shared open
+    // posture (core::encrypt_optout::prepare_estate_key) honors it when the
+    // file is finally created. Encrypted is the default: absent the marker,
+    // first serve mints db.key and creates an encrypted estate.
+    {
+        let data = paths::data_dir();
+        let estate = paths::estate_sqlite_path(&data, "default");
+        use aria_mcp::estate_migration::{detect_estate_file_state, EstateFileState};
+        if no_encrypt {
+            match detect_estate_file_state(&estate) {
+                EstateFileState::Absent => {
+                    if let Err(e) = encrypt_optout::write_opt_out(&estate) {
+                        // Failing to record the choice must not silently
+                        // produce the opposite posture — the user would get an
+                        // encrypted estate after asking for a plaintext one.
+                        eprintln!(
+                            "mootx01: could not record the --no-encrypt choice at {}: {e}",
+                            encrypt_optout::marker_path(&estate).display()
+                        );
+                        return ExitCode::from(exit::FAILURE);
+                    }
+                    println!("Estate encryption: DISABLED (--no-encrypt). The estate will be stored unencrypted.");
+                    println!("  Run `mootx01 upgrade` at any time to encrypt it.");
+                }
+                EstateFileState::Plaintext => {
+                    println!("Estate encryption: already unencrypted; --no-encrypt has nothing to change.");
+                }
+                EstateFileState::Ciphertext => {
+                    // Refuse to imply that --no-encrypt decrypts an existing
+                    // estate. It does not, and there is deliberately no path
+                    // that does.
+                    println!("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.");
+                }
+            }
+        } else if detect_estate_file_state(&estate) == EstateFileState::Absent {
+            // Encrypted is the default for THIS install. A stale --no-encrypt
+            // marker left by an earlier estate at the same path must not
+            // survive to downgrade the estate this install just promised
+            // would be encrypted: the open posture honors the marker for an
+            // ABSENT estate, so first serve would silently create plaintext
+            // (stale-marker downgrade). Only the absent case is touched — an
+            // existing estate's posture is a fact about the file, never the
+            // marker.
+            match encrypt_optout::remove_opt_out(&estate) {
+                Ok(true) => println!("Estate encryption: removed a stale --no-encrypt marker; the new estate will be created ENCRYPTED (the default)."),
+                Ok(false) => {}
+                Err(e) => {
+                    // Failing to enact the default must not silently produce
+                    // the opposite posture — the same rule the opt-out branch
+                    // applies to recording the choice.
+                    eprintln!(
+                        "mootx01: could not remove a stale --no-encrypt marker at {}: {e}. \
+                         Remove it manually, or pass --no-encrypt if plaintext was intended.",
+                        encrypt_optout::marker_path(&estate).display()
+                    );
+                    return ExitCode::from(exit::FAILURE);
+                }
+            }
+        }
     }
 
     // Resolve the global integration depth (§4.4). Precedence:

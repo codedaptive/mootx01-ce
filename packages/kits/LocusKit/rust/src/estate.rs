@@ -27,6 +27,22 @@ use rand_core::OsRng;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Whether estate opens establish the Ed25519 federation identity, read
+/// from `MOOTX01_ESTATE_FEDERATE`. Only the exact value "false" (any case)
+/// disables federation — absence and every other value keep the default
+/// minting behavior, so the variable is a declaration, never an inference
+/// (same contract as `MOOTX01_ESTATE_LIFETIME`). Twin of Swift
+/// `Estate.federationEnabledFromEnvironment()`.
+fn federation_enabled_from_environment() -> bool {
+    federation_enabled_from_value(std::env::var("MOOTX01_ESTATE_FEDERATE").ok().as_deref())
+}
+
+/// Pure parse behind `federation_enabled_from_environment`, split out so
+/// tests cover the contract without mutating shared process environment.
+fn federation_enabled_from_value(value: Option<&str>) -> bool {
+    value.map(str::to_lowercase).as_deref() != Some("false")
+}
+
 // MARK: - Bitmap layout compatibility
 
 /// The bitmap layout version this kit speaks. `Estate::open` refuses
@@ -163,6 +179,22 @@ impl Estate {
         store: Arc<dyn DrawerStore>,
         owner: OwnerCredentials,
     ) -> Result<Estate, EstateError> {
+        Estate::open_with_federation(store, owner, federation_enabled_from_environment())
+    }
+
+    /// `open` with the federation posture supplied explicitly instead of
+    /// read from `MOOTX01_ESTATE_FEDERATE`. Twin of the Swift
+    /// `Estate.open(storage:owner:identityKeyStore:federate:)` optional
+    /// parameter: tests and callers that already resolved the posture pass
+    /// it here directly, so nothing needs to mutate shared process
+    /// environment under parallel test execution. `federate == false`
+    /// skips the identity-establishment step entirely — no keypair, no
+    /// manifest public key (see `from_manifest`).
+    pub fn open_with_federation(
+        store: Arc<dyn DrawerStore>,
+        owner: OwnerCredentials,
+        federate: bool,
+    ) -> Result<Estate, EstateError> {
         if owner.owner_identifier.is_empty() {
             return Err(EstateError::EmptyOwnerIdentifier);
         }
@@ -181,7 +213,7 @@ impl Estate {
                 expected: EXPECTED_BITMAP_LAYOUT_VERSION.to_string(),
             });
         }
-        Estate::from_manifest(store, manifest)
+        Estate::from_manifest(store, manifest, federate)
     }
 
     // -----------------------------------------------------------------
@@ -233,7 +265,7 @@ impl Estate {
         let manifest = store
             .read_manifest()
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
-        Estate::from_manifest(store, manifest)
+        Estate::from_manifest(store, manifest, federation_enabled_from_environment())
     }
 
     // -----------------------------------------------------------------
@@ -329,6 +361,7 @@ impl Estate {
     fn from_manifest(
         store: Arc<dyn DrawerStore>,
         manifest: ManifestValues,
+        federate: bool,
     ) -> Result<Estate, EstateError> {
         let uuid =
             Uuid::parse_str(&manifest.estate_uuid).map_err(|_| EstateError::ManifestMismatch {
@@ -347,7 +380,14 @@ impl Estate {
         // a normal key/value table and row encryption does not protect
         // manifest.value, so storing raw key bytes here would expose the
         // estate identity to database/backup readers. Mirrors Swift Estate.open.
-        if manifest.ed25519_public_key.is_none() {
+        // Federation opt-out (MOOTX01_ESTATE_FEDERATE=false, 2026-08-28
+        // ruling): grant issuance is the only consumer of the estate
+        // identity, so a declared non-federating open (benchmark artifacts,
+        // bulk plaintext estates) skips the mint entirely — no keypair, no
+        // manifest public key. Per-open declaration, never a persistent
+        // estate property: a federate-false estate opened later without the
+        // declaration mints then. Twin of the Swift `federate:` parameter.
+        if federate && manifest.ed25519_public_key.is_none() {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD;
             let signing_key = SigningKey::generate(&mut OsRng);
@@ -1171,6 +1211,50 @@ mod tests {
             m2.ed25519_private_key_wrapped.is_none(),
             "private key remains absent across re-opens"
         );
+    }
+
+    /// A declared non-federating open skips the identity step entirely:
+    /// no public key lands in the manifest, and a later federating open
+    /// of the same store mints then (per-open declaration, not a
+    /// persistent estate property). Twin of the Swift
+    /// `EstateKeyLifetimeTests` federate-false coverage.
+    #[test]
+    fn open_with_federation_false_skips_identity_mint() {
+        let store = Arc::new(FakeStore::new(
+            "v1.0",
+            "77777777-7777-7777-7777-777777777777",
+        ));
+        let estate =
+            Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), false)
+                .unwrap();
+        let m = estate.manifest().unwrap();
+        assert!(
+            m.ed25519_public_key.is_none(),
+            "non-federating open must not mint a public key"
+        );
+        // A later federating open of the same store mints normally.
+        let estate2 =
+            Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), true)
+                .unwrap();
+        let m2 = estate2.manifest().unwrap();
+        assert!(
+            m2.ed25519_public_key.is_some(),
+            "federating reopen mints the identity"
+        );
+    }
+
+    /// The env-value parse: only the exact value "false" (any case)
+    /// disables federation — absence and every other value keep the
+    /// default. Pure function, so no process-environment mutation here.
+    #[test]
+    fn federation_env_value_parse_contract() {
+        assert!(federation_enabled_from_value(None));
+        assert!(federation_enabled_from_value(Some("")));
+        assert!(federation_enabled_from_value(Some("true")));
+        assert!(federation_enabled_from_value(Some("0")));
+        assert!(!federation_enabled_from_value(Some("false")));
+        assert!(!federation_enabled_from_value(Some("FALSE")));
+        assert!(!federation_enabled_from_value(Some("False")));
     }
 
     /// Manifest accessor re-reads through the store each call so
