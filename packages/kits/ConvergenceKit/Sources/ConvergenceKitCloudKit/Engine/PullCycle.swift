@@ -236,10 +236,10 @@ extension CloudKitStateActor {
             appliedCount += 1
         }
 
-        // Post-apply integrity hook (R3): invoked once per batch when at least
-        // one record was applied. Hook throws count as one additional conflict
-        // but never abort the cycle. Hook writes carry origin == .local and
-        // flow into the outbox (hook-writes-must-ship, Kong Q2).
+        // Post-apply boundaries: the integrity hook remains a non-fatal repair
+        // seam. The commit barrier is a must-succeed semantic boundary and runs
+        // before cursor persistence; a throw leaves the cursor uncommitted so
+        // the already-applied, idempotent batch is offered again.
         if appliedCount > 0 {
             let batch = AppliedBatch(
                 storage: storage,
@@ -247,6 +247,7 @@ extension CloudKitStateActor {
                 deletedByTable: deletedByTable
             )
             conflicts += await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch)
+            try await manifest.postApplyCommitBarrier?(batch)
         }
 
         serverChangeToken = newToken
