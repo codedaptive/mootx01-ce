@@ -6,6 +6,11 @@ import PersistenceKit
 
 @Suite("Community resident identity custody")
 struct CommunityResidentIdentityCustodyTests {
+    @Test("production dispatcher identity matches the signed client contract")
+    func productionDispatcherIdentityMatchesClientContract() {
+        #expect(CommunityResidentMain.dispatcherServerName == "ARIA_MCP")
+    }
+
     @Test("temporary composition uses the injected identity store")
     func injectedIdentityStoreReceivesTheOnlyIdentityKey() async throws {
         let layout = FileManager.default.temporaryDirectory
