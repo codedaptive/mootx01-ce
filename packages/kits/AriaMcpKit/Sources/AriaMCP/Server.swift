@@ -40,6 +40,21 @@ public protocol CommunityToolHandler: Sendable {
     func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
 }
 
+/// Dynamic tools contributed by a product attached to the resident daemon.
+/// The dispatcher consults this surface only on a successfully authenticated
+/// first-party request; the ordinary HTTP lane strips it before dispatch.
+public protocol FirstPartyToolHandler: Sendable {
+    func isFirstPartyTool(_ name: String) async -> Bool
+    var firstPartyToolList: [ProjectedTool] { get async }
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
+}
+
+/// A first-party handler that owns resident-process lifecycle.
+public protocol FirstPartyToolHost: FirstPartyToolHandler {
+    func start() async throws
+    func stop() async
+}
+
 /// The method router. Owns the tool registry and the estate
 /// dispatcher, calls each on the right inbound method, and converts
 /// thrown JSON-RPC errors into response payloads.
@@ -128,6 +143,9 @@ public struct ARIA_MCPDispatcher: Sendable {
     /// surface. Callers read the handler; they never write it.
     public private(set) var communityHandler: (any CommunityToolHandler)?
 
+    /// Dynamic product-tool surface. Nil on the ordinary HTTP lane.
+    public private(set) var firstPartyHandler: (any FirstPartyToolHandler)?
+
     /// The authenticated first-party identity this dispatcher reports, or `nil`
     /// on the ordinary third-party lane.
     ///
@@ -154,6 +172,7 @@ public struct ARIA_MCPDispatcher: Sendable {
         self.tools = ToolProjection.tools()
         self.tooling = tooling
         self.communityHandler = nil
+        self.firstPartyHandler = nil
         self.firstPartyIdentity = nil
     }
 
@@ -161,11 +180,16 @@ public struct ARIA_MCPDispatcher: Sendable {
     /// `tooling` is nil; all tool dispatch goes through `communityHandler`.
     /// Non-community tool names return methodNotFound. The `tools` list is
     /// populated from `communityHandler.communityToolList` only.
-    public init(info: ServerInfo, communityHandler: any CommunityToolHandler) {
+    public init(
+        info: ServerInfo,
+        communityHandler: any CommunityToolHandler,
+        firstPartyHandler: (any FirstPartyToolHandler)? = nil
+    ) {
         self.info = info
         self.tools = communityHandler.communityToolList
         self.tooling = nil
         self.communityHandler = communityHandler
+        self.firstPartyHandler = firstPartyHandler
         self.firstPartyIdentity = nil
     }
 
@@ -212,6 +236,7 @@ public struct ARIA_MCPDispatcher: Sendable {
             copy.communityHandler = nil
             copy.tools = copy.tools.filter { !$0.name.hasPrefix("moot_community_") }
         }
+        copy.firstPartyHandler = nil
         return copy
     }
 
@@ -264,7 +289,7 @@ public struct ARIA_MCPDispatcher: Sendable {
             // The keep-alive shape is fixed by the spec.
             return .object([:])
         case "tools/list":
-            return toolsList()
+            return await toolsList()
         case "tools/call":
             return try await toolsCall(params: request.params)
         case "resources/list":
@@ -385,7 +410,7 @@ public struct ARIA_MCPDispatcher: Sendable {
 
     // MARK: - tools/list
 
-    private func toolsList() -> JSONValue {
+    private func toolsList() async -> JSONValue {
         // Lane separation for community tools is enforced upstream in publicLane,
         // which strips communityHandler (and filters tools) before HTTP plain-lane
         // dispatch reaches here. No firstPartyIdentity check is needed at this level:
@@ -407,7 +432,11 @@ public struct ARIA_MCPDispatcher: Sendable {
             //      community-only mode).
             allTools = tools
         }
-        let entries: [JSONValue] = allTools.map { tool in
+        var effectiveTools = allTools
+        if firstPartyIdentity != nil, let firstPartyHandler {
+            effectiveTools.append(contentsOf: await firstPartyHandler.firstPartyToolList)
+        }
+        let entries: [JSONValue] = effectiveTools.map { tool in
             var entry: [String: JSONValue] = [
                 "name": .string(tool.name),
                 "description": .string(tool.description),
@@ -457,6 +486,11 @@ public struct ARIA_MCPDispatcher: Sendable {
         //   - Unit test:        communityHandler set by test → dispatch as expected.
         if let handler = communityHandler, handler.isCommunityTool(name) {
             return try await handler.dispatch(name: name, arguments: arguments)
+        }
+        if firstPartyIdentity != nil,
+           let firstPartyHandler,
+           await firstPartyHandler.isFirstPartyTool(name) {
+            return try await firstPartyHandler.dispatch(name: name, arguments: arguments)
         }
         guard let tooling else {
             // Community-only mode: no ToolDispatcher present; non-community tool is unknown.
