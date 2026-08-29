@@ -456,6 +456,10 @@ const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 /// when confident (topGap ≥ 0.25); Stage 2 (hamming+text) fires only when
 /// Stage 1 is insufficient.
 const RECALL_WALK: &str = "moot_recall_walk";
+// Dark harness-only mint tools (MINTCLI-78 twins). Never listed in
+// tools/list; the benchmark mint driver calls them by name.
+const REGISTER_ADORNMENT_MINTER: &str = "moot_register_adornment_minter";
+const RUN_ADORNMENT_PASS: &str = "moot_run_adornment_pass";
 
 /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
 ///
@@ -511,6 +515,8 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECOLLECT
             | HUNT_CONTRADICTIONS
             | RECALL_WALK
+            | REGISTER_ADORNMENT_MINTER
+            | RUN_ADORNMENT_PASS
     )
 }
 
@@ -548,6 +554,8 @@ pub fn dispatch(
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
         HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
         RECALL_WALK => run_walk_recall_tool(args, registry),
+        REGISTER_ADORNMENT_MINTER => run_register_adornment_minter_tool(args, registry),
+        RUN_ADORNMENT_PASS => run_adornment_pass_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -2742,4 +2750,130 @@ fn decode_precise_filter(args: &BTreeMap<String, JsonValue>) -> Result<Filter, J
 /// (RecipeRunError::Substrate, etc.) leak to the agent boundary.
 fn error_from_recipe(e: cognition_kit::RecipeRunError) -> JSONRPCError {
     JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Dark harness-only mint tools (MINTCLI-78 twins of Swift RecipeTools)
+// ---------------------------------------------------------------------------
+
+/// moot_register_adornment_minter: register one minter descriptor and
+/// atomically replace the active set with exactly this minter, so the
+/// following adornment pass sees one active minter (GENIUSLOCUSKIT_SPEC
+/// §16.1 — composition observes the complete old or new set, never a
+/// partial intermediate). Twin of the Swift dark tool: same eight fields.
+fn run_register_adornment_minter_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use crate::dispatch::{require_string, text_result};
+    let estate = registry.resolve_direct(args)?;
+    let id = require_string(args, "minter_id")?;
+    let name = require_string(args, "minter_name")?;
+    let family = require_string(args, "minter_family")?;
+    let model_id = require_string(args, "minter_model_id")?;
+    let model_version = require_string(args, "minter_model_version")?;
+    let prompt_digest = require_string(args, "minter_prompt_digest")?;
+    // minter_parameters: optional object whose values must all be strings
+    // (the descriptor's parameters map is string→string by contract).
+    let mut parameters = std::collections::BTreeMap::new();
+    if let Some(raw) = args.get("minter_parameters") {
+        let JsonValue::Object(map) = raw else {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "minter_parameters must be an object of string values".to_string(),
+            ));
+        };
+        for (k, v) in map {
+            let JsonValue::String(sv) = v else {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("minter_parameters.{k} must be a string"),
+                ));
+            };
+            parameters.insert(k.clone(), sv.clone());
+        }
+    }
+    let descriptor = adornment_lib::AdornmentMinterDescriptor {
+        id: id.to_string(),
+        name: name.to_string(),
+        family: family.to_string(),
+        model_id: model_id.to_string(),
+        model_version: model_version.to_string(),
+        prompt_digest: prompt_digest.to_string(),
+        parameters,
+        is_active: true,
+    };
+    estate.store.register_adornment_minter(&descriptor).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::INTERNAL_ERROR,
+            format!("register_adornment_minter: {e:?}"),
+        )
+    })?;
+    let activated = estate.store.set_active_adornment_minters(&[id]).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::INTERNAL_ERROR,
+            format!("set_active_adornment_minters: {e:?}"),
+        )
+    })?;
+    Ok(text_result(&format!(
+        "moot_register_adornment_minter: registered '{id}' (active set replaced; {activated} row(s) updated)"
+    )))
+}
+
+/// moot_run_adornment_pass: execute one adornment pass against every
+/// registered active minter. Twin of the Swift dark tool — same four
+/// arguments and the SAME plain-text result shape (the benchmark mint
+/// driver parses the adorned/rejected/skipped counts from this text).
+///
+/// `now` is accepted for wire parity with the Swift tool but unused: the
+/// Rust pass writes no timestamps itself (row timestamps are the store's
+/// concern at put time).
+fn run_adornment_pass_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    use crate::dispatch::text_result;
+    // String-or-integer numeric args: the Swift dark tool's schema types
+    // these as STRINGS (its harness callers pass "500"), while raw JSON
+    // integers are equally valid on the wire. Accept both — the Swift
+    // twin's contract, not `optional_integer`'s integer-only rule.
+    fn count_arg(
+        args: &BTreeMap<String, JsonValue>,
+        key: &str,
+    ) -> Result<Option<i64>, JSONRPCError> {
+        match args.get(key) {
+            None => Ok(None),
+            Some(JsonValue::Integer(n)) => Ok(Some(*n)),
+            Some(JsonValue::String(raw)) => raw.parse::<i64>().map(Some).map_err(|_| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("{key} must be a positive count; got '{raw}'"),
+                )
+            }),
+            Some(_) => Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("{key} must be a string or integer count"),
+            )),
+        }
+    }
+    let estate = registry.resolve_direct(args)?;
+    let _now = args.get("now"); // wire parity only — see doc comment.
+    let batch_size = match count_arg(args, "batch_size")? {
+        Some(n) if n > 0 => n as usize,
+        Some(_) | None => genius_locus_kit::brain::adornment_pass::DEFAULT_BATCH_SIZE,
+    };
+    let max_len = match count_arg(args, "adornment_max_length")? {
+        Some(n) if n > 0 => Some(n as usize),
+        _ => None,
+    };
+    let result = genius_locus_kit::brain::adornment_pass::run_adornment_pass(
+        estate.store.as_ref(),
+        batch_size,
+        max_len,
+    )
+    .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, e))?;
+    Ok(text_result(&format!(
+        "moot_run_adornment_pass: pass complete\nadorned: {}\nrejected: {}\nskipped: {}",
+        result.adorned_pairs, result.failed_pairs, result.skipped_pairs
+    )))
 }

@@ -281,6 +281,16 @@ struct AriaMCPMain {
             exit(1)
         }
 
+        // Platform-default adornment minter (Bob ruling 2026-08-28): register
+        // apple-fm active so the adornment pass mints inline. Idempotent
+        // upsert; never retoggles an operator's deactivation. Best-effort —
+        // the server must never fail to start over minter registration.
+        do {
+            try await kit.ensureDefaultAdornmentMinter(in: handle)
+        } catch {
+            Logging.stderr.log("default adornment minter registration failed (pass will no-op): \(error)")
+        }
+
         // Semantic recall wiring (all backends: in-memory, SQLite, PostgreSQL).
         //
         // `kit.open` admits the estate and issues the handle, but it does NOT

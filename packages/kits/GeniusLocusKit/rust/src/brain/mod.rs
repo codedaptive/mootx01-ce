@@ -17,6 +17,7 @@
 // submission order. Parity is on the surface vocabulary and drain
 // ordering semantics, not the storage substrate.
 
+pub mod adornment_pass;
 pub mod anomaly_flag_sweep;
 pub mod conflict_projection_pass;
 pub mod conflict_projection_sweep;

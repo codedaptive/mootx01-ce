@@ -5979,36 +5979,49 @@ public actor DrawerStore {
         } else {
             drawerPredicate = .and([tombstoneClause, contentClause])
         }
-        // Fetch more drawers than limit ÷ minterCount to fill the batch,
-        // capped at limit * minterCount to avoid unbounded reads.
-        let drawerFetchLimit = limit * max(1, activeMinters.count)
-        let drawerRows = try await storage.rowStore.query(
-            table: "drawers",
-            where: drawerPredicate,
-            orderBy: [
-                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
-                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
-            ],
-            limit: drawerFetchLimit,
-            offset: nil
-        )
-        let drawers = try Self.decodeDrawerRowsSkipCorrupt(drawerRows, scan: "adornmentDebtBatch")
-
-        // For each drawer, check which minters already have an adornment row.
+        // Scan eligible drawers in chunks until the batch fills or the table
+        // is exhausted. The scan MUST NOT stop at a fixed drawer count: a
+        // fully-minted prefix (e.g. after an earlier pass over the oldest
+        // drawers) would otherwise hide real debt further down the filedAt
+        // order and the fetch would falsely report the estate drained
+        // (MINT-DEBT-WINDOW, 2026-08-27). Chunked OFFSET paging is stable
+        // within one call because this method only reads — adornment writes
+        // happen after the batch returns, and minted drawers still match the
+        // drawer predicate either way.
+        let chunkSize = limit * max(1, activeMinters.count)
         var result: [AdornmentDebt] = []
-        for drawer in drawers {
-            if result.count >= limit { break }
-            // Load existing adornment minter ids for this drawer.
-            let adornmentRows = try await storage.rowStore.query(
-                table: "adornments",
-                where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawer.id)),
-                orderBy: [], limit: nil, offset: nil, columns: ["minter_id"]
+        var offset = 0
+        while result.count < limit {
+            let drawerRows = try await storage.rowStore.query(
+                table: "drawers",
+                where: drawerPredicate,
+                orderBy: [
+                    OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                    OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+                ],
+                limit: chunkSize,
+                offset: offset
             )
-            let mintedIDs = Set(adornmentRows.compactMap { Self.optString($0["minter_id"]) })
-            for minter in activeMinters {
+            if drawerRows.isEmpty { break }
+            offset += drawerRows.count
+            let drawers = try Self.decodeDrawerRowsSkipCorrupt(drawerRows, scan: "adornmentDebtBatch")
+
+            // For each drawer, check which minters already have an adornment
+            // row. Application-level join: the minter set is tiny and the
+            // adornments lookup is indexed by (drawer_id, minter_id) PK.
+            for drawer in drawers {
                 if result.count >= limit { break }
-                if !mintedIDs.contains(minter.id) {
-                    result.append(AdornmentDebt(drawer: drawer, minter: minter))
+                let adornmentRows = try await storage.rowStore.query(
+                    table: "adornments",
+                    where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawer.id)),
+                    orderBy: [], limit: nil, offset: nil, columns: ["minter_id"]
+                )
+                let mintedIDs = Set(adornmentRows.compactMap { Self.optString($0["minter_id"]) })
+                for minter in activeMinters {
+                    if result.count >= limit { break }
+                    if !mintedIDs.contains(minter.id) {
+                        result.append(AdornmentDebt(drawer: drawer, minter: minter))
+                    }
                 }
             }
         }

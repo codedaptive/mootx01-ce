@@ -505,8 +505,21 @@ public extension GeniusLocusKit {
             // role is to coordinate the two kits — it never performs the encode.
             // The regular capture path enqueues into the Corpus queue; the
             // Corpus drain worker ingests, lighting the semantic recall lanes.
-            try await corpus.mountIngestQueue()
+            //
+            // Install the onEncoded drain-stage rider (room rollup + distillation
+            // + dense recompose + A2 marker) BEFORE the mount below: the mount
+            // opens the persisted queue.sqlite and starts the drain worker
+            // immediately, so at serve open a resumed encode backlog can begin
+            // draining on the worker's first pass. Those resumed batches must
+            // find the rider already installed or they encode without distilling
+            // — violating "a fully drained estate is a fully distilled estate"
+            // (SPEC_DISTILLATION_STORAGE §7.1) for exactly those rows. Rust
+            // twin: estate_registry.rs wire_sqlite_semantic_recall installs the
+            // rider (wire_corpus_on_encoded) before its eager mount for the
+            // same reason. Provision mounts an empty queue, so this ordering is
+            // equally correct there.
             await wireCorpusRoomRollup(corpus, for: handle)
+            try await corpus.mountIngestQueue()
             Self.lifecycleLog.info(
                 "wired GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue)"
             )
@@ -529,10 +542,14 @@ public extension GeniusLocusKit {
                 models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
-            // A CorpusOnly estate also feeds its Corpus from capture: mount the
-            // Corpus-owned ingest queue + drain worker and wire the room rollup.
-            try await corpus.mountIngestQueue()
+            // A CorpusOnly estate also feeds its Corpus from capture: wire the
+            // room rollup and mount the Corpus-owned ingest queue + drain
+            // worker. Rider BEFORE mount, same ordering rule as the .glk case
+            // above: the mount starts the drain worker on the persisted queue,
+            // and a resumed serve-open backlog must never encode ahead of the
+            // drain-stage rider (SPEC_DISTILLATION_STORAGE §7.1).
             await wireCorpusRoomRollup(corpus, for: handle)
+            try await corpus.mountIngestQueue()
             Self.lifecycleLog.info(
                 "wired CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue)"
             )

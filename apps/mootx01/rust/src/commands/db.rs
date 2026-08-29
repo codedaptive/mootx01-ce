@@ -10,13 +10,13 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 use crate::cli::DbCommand;
-use crate::core::paths;
+use crate::core::{encrypt_optout, paths};
 use crate::exit;
 
 pub fn run(cmd: DbCommand) -> ExitCode {
     let data = paths::data_dir();
     match cmd {
-        DbCommand::Create { name } => create(&data, &name),
+        DbCommand::Create { name, no_encrypt } => create(&data, &name, no_encrypt),
         DbCommand::List => list(&data),
         DbCommand::Open { name } => open(&data, &name),
         DbCommand::Delete { name, force } => delete(&data, &name, force),
@@ -36,7 +36,7 @@ fn valid_name(name: &str) -> bool {
         && !name.contains('\\')
 }
 
-fn create(data: &std::path::Path, name: &str) -> ExitCode {
+fn create(data: &std::path::Path, name: &str, no_encrypt: bool) -> ExitCode {
     if !valid_name(name) {
         eprintln!("Estate name '{name}' is not valid (no path separators).");
         return ExitCode::from(exit::FAILURE);
@@ -50,7 +50,53 @@ fn create(data: &std::path::Path, name: &str) -> ExitCode {
         eprintln!("Cannot create estate '{name}': {e}");
         return ExitCode::from(exit::FAILURE);
     }
-    println!("Created estate '{name}'.");
+
+    // create makes the estate DIRECTORY; the substrate writes the SQLite file
+    // lazily on first serve. So the encryption posture is settled here, before
+    // the file exists, in the same two ways install settles it (twin of Swift
+    // DbCreateCommand).
+    let estate = paths::estate_sqlite_path(data, name);
+    if no_encrypt {
+        if let Err(e) = encrypt_optout::write_opt_out(&estate) {
+            // Failing to record the choice must not silently produce the
+            // opposite posture. Leave nothing behind so the create can be
+            // retried cleanly.
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("Cannot record the --no-encrypt choice for estate '{name}': {e}. Nothing was created.");
+            return ExitCode::from(exit::FAILURE);
+        }
+        println!("Created estate '{name}' (UNENCRYPTED, --no-encrypt).");
+        println!("  Run `mootx01 upgrade` at any time to encrypt it.");
+    } else {
+        // A re-created estate name can inherit a stale --no-encrypt marker
+        // from an earlier estate at the same path. The open posture honors
+        // the marker for an absent file — so without this sweep, first serve
+        // would create the estate PLAINTEXT even though the user did not opt
+        // out (stale-marker downgrade).
+        match encrypt_optout::remove_opt_out(&estate) {
+            Ok(true) => println!("Removed a stale --no-encrypt marker for '{name}'; the estate will be encrypted (the default)."),
+            Ok(false) => {}
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                eprintln!("Cannot remove a stale --no-encrypt marker for estate '{name}': {e}. Nothing was created.");
+                return ExitCode::from(exit::FAILURE);
+            }
+        }
+        // Mint db.key NOW rather than at first open. Two reasons: a failure
+        // surfaces here, while `db create` can still be retried and nothing
+        // has been half-made; and delete disposes of the key with the estate
+        // directory, so minting eagerly keeps create and delete symmetric.
+        if let Err(e) = aria_mcp::ensure_install_key(&dir) {
+            // Fail closed and leave nothing behind: an estate directory whose
+            // key could not be minted would otherwise be created plaintext on
+            // first serve, silently contradicting the default the user did
+            // not opt out of.
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("Cannot prepare the encryption key for estate '{name}': {e}. Nothing was created. Use --no-encrypt to create an unencrypted estate.");
+            return ExitCode::from(exit::FAILURE);
+        }
+        println!("Created estate '{name}' (encrypted at rest).");
+    }
     println!("Run `mootx01 db open {name}` to make it the active estate.");
     ExitCode::from(exit::OK)
 }
@@ -195,6 +241,36 @@ mod tests {
         // delete the whole databases/ directory; the validation gate stops it.
         let code = delete(&data, "../databases", true);
         assert_ne!(code, ExitCode::from(exit::OK), "delete should reject traversal names");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// `db create --no-encrypt` records the opt-out marker beside the estate
+    /// and mints NO key; the first serve then creates the estate plaintext.
+    #[test]
+    fn create_no_encrypt_writes_marker_and_mints_no_key() {
+        let data = tmp_data("create-optout");
+        let code = create(&data, "work", true);
+        assert_eq!(code, ExitCode::from(exit::OK));
+        let dir = estate_dir(&data, "work");
+        assert!(dir.join(crate::core::encrypt_optout::ENCRYPTION_OPT_OUT_MARKER_NAME).exists());
+        assert!(!dir.join(aria_mcp::INSTALL_KEY_FILE).exists(), "--no-encrypt must not mint a key");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Default `db create` mints db.key eagerly (a failure surfaces at create
+    /// time, and delete disposes of the key with the directory — symmetric)
+    /// and leaves no opt-out marker behind.
+    #[test]
+    fn create_default_mints_key_and_leaves_no_marker() {
+        let data = tmp_data("create-default");
+        let code = create(&data, "work", false);
+        assert_eq!(code, ExitCode::from(exit::OK));
+        let dir = estate_dir(&data, "work");
+        assert!(
+            !dir.join(crate::core::encrypt_optout::ENCRYPTION_OPT_OUT_MARKER_NAME).exists(),
+            "default create must not leave an opt-out marker"
+        );
+        assert!(dir.join(aria_mcp::INSTALL_KEY_FILE).exists(), "default create mints db.key eagerly");
         let _ = std::fs::remove_dir_all(&data);
     }
 

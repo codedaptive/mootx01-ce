@@ -24,6 +24,11 @@
 //! 4. `postgres_wiring_shape_proof` — env-gated (skipped when
 //!    `ARIA_MCP_POSTGRES_URL` is absent). When the env var is set, the full
 //!    capture → search e2e runs against a live PG server using `new_postgres`.
+//!
+//! 5. `drained_estate_is_distilled` — the drain-stage distillation rider is
+//!    installed by the registry wiring path (not only by GLK `provision`):
+//!    a regular capture that rides the encode drain carries its distilled
+//!    representation once the drain settles, with NO `moot_distill` call.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -286,5 +291,74 @@ fn postgres_wiring_shape_proof() {
     assert!(
         text.contains("marsh harrier"),
         "search result should contain captured content on PG estate; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Drain-stage distillation rider on the registry wiring path
+// ---------------------------------------------------------------------------
+
+/// A fully drained estate is a fully distilled estate — on the SERVE wiring
+/// path (`EstateRegistry` → `wire_*_semantic_recall`), not only on the GLK
+/// `provision` path.
+///
+/// Swift twin: `DistillationDrainStageTests` "a fully drained estate is a
+/// fully distilled estate" (`drainedEstateIsDistilled`). In Swift, serve
+/// reaches the rider via `wireGLKSubstores` → `wireCorpusRoomRollup`, which
+/// installs the Corpus `onEncoded` callback that distills each encoded
+/// drawer before the drain unit replies. The Rust registry wiring built its
+/// own `CorpusContentEngine` and never installed the `on_encoded` rider, so
+/// a served estate's distillation lane sat at `pending: N` forever unless a
+/// client called `moot_distill` (observed live 2026-08-27: pending 272 held
+/// for 3 hours). This test pins the parity: NO `moot_distill` dispatch
+/// appears anywhere below — the drain-stage rider is the only distillation
+/// vehicle.
+#[test]
+fn drained_estate_is_distilled() {
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+
+    // Regular (non-impatient) capture — enqueues onto the encode queue. The
+    // drain worker encodes, then the on_encoded rider distills BEFORE the
+    // batch replies, so the drain barrier below covers distillation too.
+    let capture_args = args![
+        "content" => "The launch review moved to Friday. Ops signed off. Legal pending.",
+        "subject" => "launch review schedule ops legal",
+        "location" => "memories/work",
+    ];
+    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+        .expect("moot_file_memory dispatch must not fail");
+    assert!(
+        is_success(&capture_result),
+        "regular moot_file_memory should succeed; got: {capture_result:?}"
+    );
+
+    // Drain the encode queue. This is the ONLY settling step — the test
+    // must never call moot_distill.
+    {
+        let mut coord = registry.default.coord.lock().unwrap();
+        coord
+            .await_encode_drain(&registry.default.handle)
+            .expect("await_encode_drain must succeed");
+    }
+
+    // Post-drain, the distillation lane must read idle: `pending` is the
+    // row-level eligibility count (count_undistilled), so 0 here proves the
+    // capture above AND the seeded default-wing hints all carry a current
+    // representation — background debt payoff, no explicit sweep.
+    let coord = registry.default.coord.lock().unwrap();
+    let statuses = coord
+        .drain_statuses(&registry.default.handle)
+        .expect("drain_statuses must succeed");
+    let distillation = statuses
+        .iter()
+        .find(|s| s.name == "distillation")
+        .expect("distillation drain lane must be reported");
+    assert_eq!(
+        distillation.pending, 0,
+        "post-drain the distillation lane must be idle without a moot_distill \
+         call (drain-stage rider, SPEC_DISTILLATION_STORAGE §7.1); \
+         still pending: {}",
+        distillation.pending
     );
 }

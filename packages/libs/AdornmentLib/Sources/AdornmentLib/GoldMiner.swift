@@ -69,17 +69,15 @@ public actor GoldMiner {
     public var engineIdentity: String? { engine?.identity }
 
     /// Resolve the effective engine: an installed engine wins; otherwise
-    /// the platform default is created and installed on first use —
-    /// Apple's on-device model (the ONLY engine on iOS, the DEFAULT on
-    /// macOS), else the command-seam engine when MOOT_MINT_CMD is set
-    /// (macOS harness vehicle), else nil (miner inactive).
+    /// an EXPLICIT `MOOT_MINT_CMD` (the harness audition vehicle — an
+    /// operator who injected a minter command means it) beats the
+    /// self-defaulting platform engine; otherwise Apple's on-device model
+    /// (the ONLY engine on iOS, the platform DEFAULT on macOS); else nil
+    /// (miner inactive). Ordering matters for auditions: with apple ahead
+    /// of the command seam, an audition's injected minter was silently
+    /// ignored on every Apple-capable machine (DEFAULT-MINT-01).
     private func effectiveEngine() -> (any GoldMinerEngine)? {
         if let engine { return engine }
-        if let apple = AppleFoundationEngine.ifAvailable() {
-            engine = apple
-            log.info("GoldMiner: defaulted to \(apple.identity)")
-            return apple
-        }
         #if os(macOS)
         if let cmd = ProcessInfo.processInfo.environment["MOOT_MINT_CMD"], !cmd.isEmpty {
             let cmdEngine = CommandEngine(command: cmd)
@@ -88,6 +86,11 @@ public actor GoldMiner {
             return cmdEngine
         }
         #endif
+        if let apple = AppleFoundationEngine.ifAvailable() {
+            engine = apple
+            log.info("GoldMiner: defaulted to \(apple.identity)")
+            return apple
+        }
         return nil
     }
 
