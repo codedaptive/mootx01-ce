@@ -143,25 +143,27 @@ impl QuantizedLlmEngine {
         Self::load_with_recipe(gguf_path, tokenizer_path, QUANTIZED_RECIPE)
     }
 
-    /// Load the engine under a specific recipe (comparison builds; the
-    /// benchmark judge-off bakes one recipe per binary). The recipe
-    /// supplies identity, prompt contract, and output kind; the model
-    /// files must be the artifact the recipe's model token names.
+    /// Load the engine under a specific recipe, for builds that bake a
+    /// non-default recipe at compile time. The recipe supplies identity,
+    /// prompt contract, and output kind; the model files must be the
+    /// artifact the recipe's model token names.
     pub fn load_with_recipe(
         gguf_path: &Path,
         tokenizer_path: &Path,
         recipe: MinterRecipe,
     ) -> Result<Self, String> {
-        // Device selection is a BUILD feature: the `metal` feature (macOS
-        // developer/harness builds) runs candle's Metal kernels; product
-        // builds compile without it and stay on CPU. Metal falling over at
-        // runtime degrades to CPU rather than failing the load.
-        #[cfg(feature = "metal")]
+        // Device selection is BUILD-conditional: every macOS build lights
+        // the Metal arm (the Cargo target block enables candle's metal
+        // kernels there — Bob ruling 2026-08-29), and the explicit `metal`
+        // feature covers non-macOS harness builds. Metal falling over at
+        // runtime degrades to CPU rather than failing the load; Windows and
+        // Linux product builds compile the CPU arm only.
+        #[cfg(any(feature = "metal", target_os = "macos"))]
         let device = Device::new_metal(0).unwrap_or_else(|e| {
             let _ = writeln!(std::io::stderr(), "gold miner: metal unavailable ({e}); using CPU");
             Device::Cpu
         });
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", target_os = "macos")))]
         let device = Device::Cpu;
         let mut file = std::fs::File::open(gguf_path)
             .map_err(|e| format!("gold miner: open {}: {e}", gguf_path.display()))?;

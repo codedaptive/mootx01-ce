@@ -95,8 +95,8 @@ public enum AdornmentPass {
     ///     generator is unavailable, exits non-zero, or produces empty output —
     ///     the pair is counted as `failedPairs` and retried on the next pass.
     ///     The default resolver drives the resident `GoldMiner` (installed
-    ///     engine, else the platform default — Apple's on-device model on
-    ///     iOS/macOS, else the macOS MOOT_MINT_CMD harness engine) via
+    ///     engine, else the explicit MOOT_MINT_CMD harness engine, else the
+    ///     platform default — Apple's on-device model on iOS/macOS) via
     ///     `AdornmentLib.mintAdornmentMapReduce` with the product
     ///     `ADORNMENT_MAX_LENGTH` ceiling.
     ///   - now: deterministic clock from the scheduler context.
