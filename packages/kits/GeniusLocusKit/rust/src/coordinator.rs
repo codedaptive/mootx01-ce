@@ -2035,6 +2035,142 @@ impl EstateCoordinator {
         self.vector_stores.insert(*handle, store);
     }
 
+    /// Install the registered Corpus's `on_encoded` drain-stage rider for
+    /// `handle`: (1) room rollup, (2) drain-stage distillation of each
+    /// newly-encoded eligible drawer (SPEC_DISTILLATION_STORAGE §7.1 —
+    /// "a fully drained estate is a fully distilled estate"), (3) dense
+    /// recompose over the fresh distillate (Stream F), and (4) the A2
+    /// encode-completion audit marker. Mirrors Swift
+    /// `wireCorpusRoomRollup` (EncodeIntake.swift), which Swift installs on
+    /// BOTH the provision path and the serve-open path (`wireGLKSubstores`).
+    ///
+    /// Call AFTER `register_corpus` / `register_vector_store` and BEFORE any
+    /// eager `mount_ingest_queue` that could resume a persisted encode
+    /// backlog — the resumed batches must find the rider already installed
+    /// or they encode without distilling (the serve-parity defect this seam
+    /// closes: a served Rust estate held `distillation: pending N` forever
+    /// while the Swift serve converged to idle unattended).
+    ///
+    /// No-op when no Corpus or no estate is registered for the handle
+    /// (LocusOnly estates run no encode drain). Idempotent: `set_on_encoded`
+    /// replaces any previously installed callback.
+    pub fn wire_corpus_on_encoded(&self, handle: &EstateHandle) {
+        let Some(corpus) = self.corpus_kits.get(handle).cloned() else {
+            return;
+        };
+        let Some(estate) = self.registry.get(handle).cloned() else {
+            return;
+        };
+        // Capture cheap clones (Arc-backed, Send+Sync) so the Corpus drain
+        // worker's callback can distill and recompose without re-entering
+        // the coordinator (the worker thread must never take the
+        // coordinator lock — the drain can run while a tool call holds it).
+        let corpus_for_callback = corpus.clone();
+        // VectorStore for the fingerprint lane (§8); may be absent — the
+        // representation columns are still written (lane dark, matching the
+        // estate's semantic-tier wiring).
+        let vector_store_for_callback = self.vector_stores.get(handle).cloned();
+        corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
+            use substrate_ml::token_compaction;
+
+            // Marker timestamp is captured at CALLBACK ENTRY — the
+            // moment the drain unit's encode work completed — never
+            // after rollup or distillation, so the A2 marker anchors
+            // on encode-end in BOTH ports (the C3 INGEST derivation
+            // depends on this alignment; Swift twin captures its
+            // encodeCompletedAt at the same boundary).
+            let encode_completed_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+
+            // (1) Room-rollup — always best-effort.
+            let _ = estate.rollup_rooms_for_drawers(drawer_ids);
+
+            // (2) Drain-stage distillation + (3) dense recompose.
+            // The wall clock at drain time is the process boundary
+            // where `now` legitimately enters; `distilled_at` is
+            // audit-only (§4), so the epoch-millis timestamp here
+            // carries no behavioral weight. Mirrors Swift's use of
+            // `Date()` at the head of the on_encoded loop.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+
+            for drawer_id in drawer_ids {
+                // Fetch the current drawer row.
+                let drawer = match estate.drawer_by_id(drawer_id) {
+                    Ok(Some(d)) => d,
+                    _ => continue,
+                };
+                if drawer.content.is_empty() {
+                    continue;
+                }
+                // Eligibility: bit 19 (has_current_representation)
+                // clear, OR pipeline version mismatch.
+                if drawer.has_current_representation()
+                    && drawer.distilled_pipeline_version.as_deref()
+                        == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
+                {
+                    continue;
+                }
+
+                // Distillation through the shared seam — the
+                // same call tree `distill_items_sweep` and the
+                // seeding path take.
+                if EstateCoordinator::distill_item(
+                    &estate,
+                    vector_store_for_callback.as_ref(),
+                    &drawer.id,
+                    &drawer.content,
+                    now_ms,
+                    // Single-item callback: no session
+                    // context — identity on empty pool.
+                    &[],
+                ) {
+                    // (3) Dense-over-distillate (Stream F): recompose
+                    // the dense float vector from the new distillate.
+                    // The idempotence gate keys on content digest (not
+                    // on dense_composition_text), so a normal index
+                    // call would be skipped — recompose_dense_vector
+                    // passes force=true to bypass it.
+                    // Swift parity: on_encoded in wireCorpusRoomRollup.
+                    let _ = corpus_for_callback
+                        .recompose_dense_vector(&drawer.id, now_ms);
+                }
+            }
+
+            // (4) A2 encode-completion audit marker: exactly one
+            // per drain unit, anchored on the unit's first drawer,
+            // carrying the queue session id and row count in the
+            // reason column. Flag-gated ON by default
+            // (MOOTX01_ENCODE_MARKERS=off disables); "markers
+            // present" is a provenance input to the artifact
+            // build (B2). Best-effort like the rollup: a marker
+            // failure must never fail the drain. Swift parity:
+            // wireCorpusRoomRollup marker block.
+            if encode_markers_enabled() {
+                if let Some(first_id) = drawer_ids.first() {
+                    // Best-effort, but a swallowed failure is still
+                    // LOGGED: silent forever-failure would make
+                    // artifacts unmeasurable with no operator signal
+                    // (B7's hard-fail depends on markers existing).
+                    if let Err(e) = estate.append_encode_complete_marker(
+                        first_id,
+                        drawer_ids.len(),
+                        unit_session_id,
+                        encode_completed_at_ms,
+                    ) {
+                        eprintln!(
+                            "[glk] encode-completion marker failed for unit {unit_session_id}: {e:?}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     /// Register a `NodeTopologyProvider` for the given estate handle.
     ///
     /// The provider gives the coordinator access to the host's parent-child
@@ -9533,123 +9669,15 @@ impl EstateCoordinator {
                             reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
                         }
                     })?;
-                    // Capture cheap clones (Arc-backed, Send+Sync) so the
-                    // Corpus drain worker's callback can (1) roll up rooms,
-                    // (2) distill each newly-encoded drawer that is still
-                    // eligible (SPEC_DISTILLATION_STORAGE §7.1 drain path —
-                    // Wave 1 Rust parity gap now closed), and (3) recompose
-                    // the dense float vector from the new distillate
-                    // (MISSION_11X_RECALL_GAP_01 Stream F). Mirrors Swift's
-                    // wireCorpusRoomRollup on_encoded callback. Best-effort:
-                    // all steps are non-fatal — the next distill sweep and
-                    // retrain recover any misses.
-                    if let Some(estate) = self.registry.get(&handle).cloned() {
-                        let corpus_for_callback = corpus.clone();
-                        // VectorStore for fingerprint lane (§8); may be absent.
-                        let vector_store_for_callback =
-                            self.vector_stores.get(&handle).cloned();
-                        corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
-                            use substrate_ml::token_compaction;
-
-                            // Marker timestamp is captured at CALLBACK ENTRY — the
-                            // moment the drain unit's encode work completed — never
-                            // after rollup or distillation, so the A2 marker anchors
-                            // on encode-end in BOTH ports (the C3 INGEST derivation
-                            // depends on this alignment; Swift twin captures its
-                            // encodeCompletedAt at the same boundary).
-                            let encode_completed_at_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0);
-
-                            // (1) Room-rollup — always best-effort.
-                            let _ = estate.rollup_rooms_for_drawers(drawer_ids);
-
-                            // (2) Drain-stage distillation + (3) dense recompose.
-                            // The wall clock at drain time is the process boundary
-                            // where `now` legitimately enters; `distilled_at` is
-                            // audit-only (§4), so the epoch-millis timestamp here
-                            // carries no behavioral weight. Mirrors Swift's use of
-                            // `Date()` at the head of the on_encoded loop.
-                            let now_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0);
-
-                            for drawer_id in drawer_ids {
-                                // Fetch the current drawer row.
-                                let drawer = match estate.drawer_by_id(drawer_id) {
-                                    Ok(Some(d)) => d,
-                                    _ => continue,
-                                };
-                                if drawer.content.is_empty() {
-                                    continue;
-                                }
-                                // Eligibility: bit 19 (has_current_representation)
-                                // clear, OR pipeline version mismatch.
-                                if drawer.has_current_representation()
-                                    && drawer.distilled_pipeline_version.as_deref()
-                                        == Some(
-                                            token_compaction::DISTILLATION_PIPELINE_VERSION,
-                                        )
-                                {
-                                    continue;
-                                }
-
-                                // Distillation through the shared seam — the
-                                // same call tree `distill_items_sweep` and the
-                                // seeding path take.
-                                if EstateCoordinator::distill_item(
-                                    &estate,
-                                    vector_store_for_callback.as_ref(),
-                                    &drawer.id,
-                                    &drawer.content,
-                                    now_ms,
-                                    // Single-item callback: no session
-                                    // context — identity on empty pool.
-                                    &[],
-                                ) {
-                                    // (3) Dense-over-distillate (Stream F): recompose
-                                    // the dense float vector from the new distillate.
-                                    // The idempotence gate keys on content digest (not
-                                    // on dense_composition_text), so a normal index
-                                    // call would be skipped — recompose_dense_vector
-                                    // passes force=true to bypass it.
-                                    // Swift parity: on_encoded in wireCorpusRoomRollup.
-                                    let _ = corpus_for_callback
-                                        .recompose_dense_vector(&drawer.id, now_ms);
-                                }
-                            }
-
-                            // (4) A2 encode-completion audit marker: exactly one
-                            // per drain unit, anchored on the unit's first drawer,
-                            // carrying the queue session id and row count in the
-                            // reason column. Flag-gated ON by default
-                            // (MOOTX01_ENCODE_MARKERS=off disables); "markers
-                            // present" is a provenance input to the artifact
-                            // build (B2). Best-effort like the rollup: a marker
-                            // failure must never fail the drain. Swift parity:
-                            // wireCorpusRoomRollup marker block.
-                            if encode_markers_enabled() {
-                                if let Some(first_id) = drawer_ids.first() {
-                                    // Best-effort, but a swallowed failure is still
-                                    // LOGGED: silent forever-failure would make
-                                    // artifacts unmeasurable with no operator signal
-                                    // (B7's hard-fail depends on markers existing).
-                                    if let Err(e) = estate.append_encode_complete_marker(
-                                        first_id,
-                                        drawer_ids.len(),
-                                        unit_session_id,
-                                        encode_completed_at_ms,
-                                    ) {
-                                        eprintln!(
-                                            "[glk] encode-completion marker failed for unit {unit_session_id}: {e:?}"
-                                        );
-                                    }
-                                }
-                            }
-                        });
-                    }
+                    // Install the on_encoded drain-stage rider (rollup +
+                    // distillation + dense recompose + A2 marker) through the
+                    // shared seam. The SAME seam serves the AriaMcpKit
+                    // registry wiring path, so provision and serve-open run
+                    // one identical rider (Swift twin: wireCorpusRoomRollup,
+                    // called from wireSubstores on both paths). The queue was
+                    // mounted empty just above, so mount-then-wire cannot
+                    // race a resumed backlog here.
+                    self.wire_corpus_on_encoded(&handle);
                 }
             }
             Err(e) => {

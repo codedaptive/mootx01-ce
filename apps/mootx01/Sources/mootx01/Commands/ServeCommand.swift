@@ -310,6 +310,16 @@ struct ServeCommand: AsyncParsableCommand {
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            // Platform-default adornment minter (Bob ruling 2026-08-28):
+            // register apple-fm active so the resident adornment pass mints
+            // inline. Idempotent upsert; never retoggles an operator's
+            // deactivation. Best-effort — a served estate must never fail
+            // to start over minter registration.
+            do {
+                try await kit.ensureDefaultAdornmentMinter(in: handle)
+            } catch {
+                Logging.stderr.log("default adornment minter registration failed (pass will no-op): \(error)")
+            }
             // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
             // and skips wings that are already seeded, so calling it on every open
