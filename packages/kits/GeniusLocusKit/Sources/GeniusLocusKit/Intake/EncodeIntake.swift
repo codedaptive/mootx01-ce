@@ -637,9 +637,13 @@ public extension GeniusLocusKit {
     /// distillation failure is non-fatal — the drawer rows are durable and
     /// the next `moot_distill` sweep repopulates by the NULL predicate.
     ///
-    /// Called from `wireSubstores` at provision (for `.glk`/`.corpusOnly`
-    /// estates). The closure captures the GLK actor weakly so a torn-down estate
-    /// leaves no retain cycle through the Corpus.
+    /// Called from `wireSubstores` (for `.glk`/`.corpusOnly` estates) on both
+    /// the provision and serve-open paths, BEFORE `mountIngestQueue`: the mount
+    /// starts the drain worker on the persisted queue, and a serve-open resumed
+    /// backlog must find this rider already installed or its batches encode
+    /// without distilling (SPEC_DISTILLATION_STORAGE §7.1). The closure captures
+    /// the GLK actor weakly so a torn-down estate leaves no retain cycle through
+    /// the Corpus.
     internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
         await corpus.setOnEncoded { [weak self] drawerIDs, unitSessionID in
             guard let self else { return }
