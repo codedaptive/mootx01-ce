@@ -739,3 +739,117 @@ struct ServerFirstPartyIdentityTests {
         #expect((try? JSONValue.object(result).encoded()) != nil)
     }
 }
+
+// MARK: - Resident product-tool lane
+
+private struct EmptyCommunityHandler: CommunityToolHandler {
+    func isCommunityTool(_ name: String) -> Bool { false }
+    var communityToolList: [ProjectedTool] { [] }
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+        throw JSONRPCError(code: JSONRPCErrorCode.methodNotFound, message: "not found")
+    }
+}
+
+private actor FirstPartyToolHandlerSpy: FirstPartyToolHandler {
+    private(set) var calls: [String] = []
+
+    func isFirstPartyTool(_ name: String) -> Bool {
+        name == "fulcrum.context.read"
+    }
+
+    var firstPartyToolList: [ProjectedTool] {
+        get async {
+            [ProjectedTool(
+                name: "fulcrum.context.read",
+                description: "Read planning context.",
+                inputSchema: .object(["type": .string("object")]),
+                provenance: .product
+            )]
+        }
+    }
+
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+        calls.append(name)
+        return .object(["source": .string("product")])
+    }
+}
+
+@Suite("Server dispatch — resident product tools", .serialized)
+struct ServerFirstPartyProductToolTests {
+    typealias Vectors = FirstPartyAuthProtocolTests
+
+    private func dispatcher(_ handler: any FirstPartyToolHandler) -> ARIA_MCPDispatcher {
+        ARIA_MCPDispatcher(
+            info: .init(name: "mootx01", version: "test"),
+            communityHandler: EmptyCommunityHandler(),
+            firstPartyHandler: handler
+        )
+    }
+
+    private func identity() -> FirstPartyServerIdentity {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        return FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "mootx01")
+    }
+
+    private func listedNames(_ dispatcher: ARIA_MCPDispatcher) async throws -> [String] {
+        let response = try #require(await dispatcher.handle(JSONRPCRequest(
+            id: .integer(1), method: "tools/list", params: nil
+        )))
+        guard case .result(let value) = response.payload else { return [] }
+        return value.objectValue?["tools"]?.arrayValue?.compactMap {
+            $0.objectValue?["name"]?.stringValue
+        } ?? []
+    }
+
+    @Test("Product tools are absent and uncallable without first-party identity")
+    func productToolsAreDarkOnOrdinaryDispatch() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let base = dispatcher(spy)
+        #expect(try await listedNames(base).isEmpty)
+        let response = try #require(await base.handle(JSONRPCRequest(
+            id: .integer(2), method: "tools/call",
+            params: .object([
+                "name": .string("fulcrum.context.read"),
+                "arguments": .object([:]),
+            ])
+        )))
+        guard case .error(let error) = response.payload else {
+            Issue.record("ordinary lane unexpectedly called a product tool")
+            return
+        }
+        #expect(error.code == JSONRPCErrorCode.methodNotFound)
+        #expect(await spy.calls.isEmpty)
+    }
+
+    @Test("Authenticated first-party dispatch lists and calls the attached product")
+    func firstPartyDispatchRoutesProductTools() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let authenticated = dispatcher(spy).withFirstPartyIdentity(identity())
+        #expect(try await listedNames(authenticated) == ["fulcrum.context.read"])
+        let response = try #require(await authenticated.handle(JSONRPCRequest(
+            id: .integer(3), method: "tools/call",
+            params: .object([
+                "name": .string("fulcrum.context.read"),
+                "arguments": .object(["outline": .string("life")]),
+            ])
+        )))
+        guard case .result(let value) = response.payload else {
+            Issue.record("first-party product call did not return a result")
+            return
+        }
+        #expect(value.objectValue?["source"]?.stringValue == "product")
+        #expect(await spy.calls == ["fulcrum.context.read"])
+    }
+
+    @Test("publicLane strips product tools even from an identity-bearing dispatcher")
+    func publicLaneStripsProductTools() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let publicLane = dispatcher(spy).withFirstPartyIdentity(identity()).publicLane
+        #expect(publicLane.firstPartyHandler == nil)
+        #expect(try await listedNames(publicLane).isEmpty)
+    }
+}
