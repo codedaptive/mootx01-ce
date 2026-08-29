@@ -99,6 +99,7 @@ use crate::tunnel::Tunnel;
 use crate::tunnel_operational::{TunnelKind, TunnelLifecycle};
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
+use persistence_kit::row_store::RowStore;
 use persistence_kit::storage::{IsolationLevel, Storage};
 use persistence_kit::types::{Column, StorageRow, TypedValue};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1031,26 +1032,13 @@ impl DrawerStoreCore {
         if parent_node_ids.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let unique: BTreeSet<_> = parent_node_ids.iter().cloned().collect();
+        let unique: BTreeSet<String> = parent_node_ids.iter().cloned().collect();
         let row_store = self.storage.row_store();
-        let room_predicates: Vec<StoragePredicate> = unique
-            .iter()
-            .map(|id| {
-                StoragePredicate::Eq(
-                    Column::new(T_NODES, "id"),
-                    TypedValue::Text(id.to_string()),
-                )
-            })
-            .collect();
-        let room_rows = row_store
-            .query(
-                T_NODES,
-                Some(&StoragePredicate::any(room_predicates)),
-                &[],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
+        // Chunked at 900 ids per query: a large-wing estate resolves
+        // thousands of room ids here at estate open (rebuild_container_
+        // fingerprints), and an unchunked Or-chain exceeds SQLite's
+        // ~1000 expression-depth cap. See ID_BATCH_CHUNK_SIZE.
+        let room_rows = query_by_id_chunks(&*row_store, T_NODES, "id", &unique, &[])?;
         let mut room_map: BTreeMap<String, (String, String)> = BTreeMap::new();
         let mut wing_ids: BTreeSet<String> = BTreeSet::new();
         for row in &room_rows {
@@ -1062,24 +1050,9 @@ impl DrawerStoreCore {
         }
         let mut wing_names: BTreeMap<String, String> = BTreeMap::new();
         if !wing_ids.is_empty() {
-            let wing_predicates: Vec<StoragePredicate> = wing_ids
-                .iter()
-                .map(|id| {
-                    StoragePredicate::Eq(
-                        Column::new(T_NODES, "id"),
-                        TypedValue::Text(id.to_string()),
-                    )
-                })
-                .collect();
-            let wing_rows = row_store
-                .query(
-                    T_NODES,
-                    Some(&StoragePredicate::any(wing_predicates)),
-                    &[],
-                    None,
-                    None,
-                )
-                .map_err(map_storage_err)?;
+            // Same 900-id chunking as the room lookup above: a 5000-wing
+            // estate yields >1000 distinct parent wing ids in one call.
+            let wing_rows = query_by_id_chunks(&*row_store, T_NODES, "id", &wing_ids, &[])?;
             for row in &wing_rows {
                 wing_names.insert(
                     string_value_of(row.get("id")),
@@ -2845,56 +2818,110 @@ impl DrawerStore for DrawerStoreCore {
         } else {
             StoragePredicate::And(vec![tombstone_clause, content_clause])
         };
-        // Fetch enough drawers to fill the batch across all minters.
-        let drawer_fetch = limit * active_minters.len().max(1);
-        let (drawer_rows, _) = self
-            .storage
-            .row_store()
-            .query_skip_corrupt(
-                T_DRAWERS,
-                Some(&drawer_predicate),
-                &[
-                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
-                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
-                ],
-                Some(drawer_fetch),
-                None,
-            )
-            .map_err(map_storage_err)?;
-        let drawers = decode_rows_skip_corrupt(&drawer_rows, "adornment_debt_batch")?;
-
+        // Scan eligible drawers in chunks until the batch fills or the table
+        // is exhausted. The scan MUST NOT stop at a fixed drawer count: a
+        // fully-minted prefix (e.g. after an earlier pass over the oldest
+        // drawers) would otherwise hide real debt further down the filedAt
+        // order and the fetch would falsely report the estate drained
+        // (MINT-DEBT-WINDOW, 2026-08-27). Chunked OFFSET paging is stable
+        // within one call because this method only reads — adornment writes
+        // happen after the batch returns, and minted drawers still match the
+        // drawer predicate either way. Mirrors Swift `adornmentDebtBatch`.
+        let chunk_size = limit * active_minters.len().max(1);
         let row_store = self.storage.row_store();
         let mut result = Vec::new();
-        'outer: for drawer in &drawers {
-            if result.len() >= limit {
-                break;
-            }
-            // Fetch existing adornment minter ids for this drawer.
-            let adornment_rows = row_store
-                .query(
-                    "adornments",
-                    Some(&StoragePredicate::Eq(
-                        Column::new("adornments", "drawer_id"),
-                        TypedValue::Text(drawer.id.clone()),
-                    )),
-                    &[],
-                    None,
-                    None,
+        let mut offset = 0usize;
+        'scan: while result.len() < limit {
+            let (drawer_rows, corrupt_skipped) = self
+                .storage
+                .row_store()
+                .query_skip_corrupt(
+                    T_DRAWERS,
+                    Some(&drawer_predicate),
+                    &[
+                        OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                        OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                    ],
+                    Some(chunk_size),
+                    Some(offset),
                 )
                 .map_err(map_storage_err)?;
-            let minted_ids: std::collections::BTreeSet<String> = adornment_rows
-                .iter()
-                .filter_map(|r| opt_string_value_of(r.get("minter_id")))
-                .collect();
-            for minter in &active_minters {
-                if result.len() >= limit {
-                    break 'outer;
+            // The SQL cursor consumed clean + corrupt rows, so the offset must
+            // advance by BOTH counts — advancing by the clean count alone would
+            // re-enter the tail of this window next iteration and return
+            // duplicate debt pairs. An empty result is "table exhausted" only
+            // when nothing was skipped either.
+            if drawer_rows.is_empty() && corrupt_skipped == 0 {
+                break;
+            }
+            let drawers = if drawer_rows.is_empty() {
+                // Whole-window drop: the trait-default query_skip_corrupt (no
+                // row-level skipping — InMemory, Postgres) discards every clean
+                // row that shares a window with a corrupt one. Salvage the
+                // window one raw row at a time so those clean rows are not
+                // silently lost from the debt scan; each probe consumes exactly
+                // one raw cursor row whether it decodes or not.
+                let mut salvaged = Vec::new();
+                for _ in 0..chunk_size {
+                    let (one, one_skipped) = self
+                        .storage
+                        .row_store()
+                        .query_skip_corrupt(
+                            T_DRAWERS,
+                            Some(&drawer_predicate),
+                            &[
+                                OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                                OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                            ],
+                            Some(1),
+                            Some(offset),
+                        )
+                        .map_err(map_storage_err)?;
+                    if one.is_empty() && one_skipped == 0 {
+                        break; // genuinely exhausted
+                    }
+                    offset += 1;
+                    salvaged.extend(one);
                 }
-                if !minted_ids.contains(&minter.id) {
-                    result.push(AdornmentDebt {
-                        drawer: drawer.clone(),
-                        minter: minter.clone(),
-                    });
+                decode_rows_skip_corrupt(&salvaged, "adornment_debt_batch")?
+            } else {
+                offset += drawer_rows.len() + corrupt_skipped;
+                decode_rows_skip_corrupt(&drawer_rows, "adornment_debt_batch")?
+            };
+
+            for drawer in &drawers {
+                if result.len() >= limit {
+                    break 'scan;
+                }
+                // Fetch existing adornment minter ids for this drawer.
+                // Application-level join: the minter set is tiny and the
+                // adornments lookup is indexed by (drawer_id, minter_id) PK.
+                let adornment_rows = row_store
+                    .query(
+                        "adornments",
+                        Some(&StoragePredicate::Eq(
+                            Column::new("adornments", "drawer_id"),
+                            TypedValue::Text(drawer.id.clone()),
+                        )),
+                        &[],
+                        None,
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                let minted_ids: std::collections::BTreeSet<String> = adornment_rows
+                    .iter()
+                    .filter_map(|r| opt_string_value_of(r.get("minter_id")))
+                    .collect();
+                for minter in &active_minters {
+                    if result.len() >= limit {
+                        break 'scan;
+                    }
+                    if !minted_ids.contains(&minter.id) {
+                        result.push(AdornmentDebt {
+                            drawer: drawer.clone(),
+                            minter: minter.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -3012,20 +3039,14 @@ impl DrawerStore for DrawerStoreCore {
         // result-composition read, so every surface inherits the rule
         // (legacy-migrated and freshly minted rows alike). Twin of the
         // Swift `DrawerStore.activeAdornments` gate.
-        let drawer_pred = StoragePredicate::Or(
-            drawer_ids
-                .iter()
-                .map(|id| {
-                    StoragePredicate::Eq(
-                        Column::new(T_DRAWERS, "id"),
-                        TypedValue::Text((*id).to_string()),
-                    )
-                })
-                .collect(),
-        );
-        let drawer_rows = row_store
-            .query(T_DRAWERS, Some(&drawer_pred), &[], None, None)
-            .map_err(map_storage_err)?;
+        // De-duplicate once for both batch reads below; chunked at 900
+        // ids per query because mint-in-place hands this surface
+        // thousands of drawer ids and an unchunked Or-chain exceeds
+        // SQLite's ~1000 expression-depth cap. See ID_BATCH_CHUNK_SIZE.
+        let unique_ids: BTreeSet<String> =
+            drawer_ids.iter().map(|id| (*id).to_string()).collect();
+        let drawer_rows =
+            query_by_id_chunks(&*row_store, T_DRAWERS, "id", &unique_ids, &[])?;
         let mut sensitive_ids: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
         for row in &drawer_rows {
@@ -3040,33 +3061,23 @@ impl DrawerStore for DrawerStoreCore {
                 sensitive_ids.insert(id);
             }
         }
-        // ONE batch statement for all requested drawer ids (the interface's
-        // one-batch-join contract): an OR-chain of drawer_id equalities is a
-        // single query; rows are grouped client-side and filtered to the
-        // active minter set read above.
-        let batch_pred = StoragePredicate::Or(
-            drawer_ids
-                .iter()
-                .map(|id| {
-                    StoragePredicate::Eq(
-                        Column::new("adornments", "drawer_id"),
-                        TypedValue::Text((*id).to_string()),
-                    )
-                })
-                .collect(),
-        );
-        let rows = row_store
-            .query(
-                "adornments",
-                Some(&batch_pred),
-                &[OrderClause::new(
-                    Column::new("adornments", "minter_id"),
-                    OrderDirection::Ascending,
-                )],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
+        // One Or-of-Eq batch statement per 900-id chunk of the requested
+        // drawer ids (SQLite expression-depth cap — see
+        // ID_BATCH_CHUNK_SIZE); rows are grouped client-side and filtered
+        // to the active minter set read above. minter_id ordering is
+        // per-chunk, which preserves the per-drawer ascending contract:
+        // ids are de-duplicated, so all of one drawer's rows come from
+        // exactly one chunk.
+        let rows = query_by_id_chunks(
+            &*row_store,
+            "adornments",
+            "drawer_id",
+            &unique_ids,
+            &[OrderClause::new(
+                Column::new("adornments", "minter_id"),
+                OrderDirection::Ascending,
+            )],
+        )?;
         let mut result: BTreeMap<String, Vec<StoredAdornment>> = BTreeMap::new();
         for row in &rows {
             let Ok(stored) = stored_adornment_from_row(row) else { continue };
@@ -8053,6 +8064,57 @@ fn validate_non_empty(value: &str, label: &str) -> Result<(), LocusKitError> {
 
 fn map_storage_err(e: persistence_kit::error::StorageError) -> LocusKitError {
     LocusKitError::DatabaseUnavailable(e.to_string())
+}
+
+/// Batch ceiling for Or-of-Eq id lookups. Why 900: the SQLite predicate
+/// compiler renders an N-arm `StoragePredicate::Or` as a flat
+/// `(a OR b OR ...)` SQL string, which SQLite parses as a left-deep
+/// expression tree and rejects at ~1000 terms with "Expression tree is
+/// too large (maximum depth 1000)". 900 stays strictly below that cap
+/// with headroom for any wrapping predicate, mirroring the Swift twin's
+/// `chunkSize = 900` ceiling (`DrawerStore.swift`, `getDrawers(ids:)`).
+const ID_BATCH_CHUNK_SIZE: usize = 900;
+
+/// Query `table` for rows whose `column` equals any id in `ids`, issuing
+/// one Or-of-Eq query per chunk of at most [`ID_BATCH_CHUNK_SIZE`] ids
+/// and concatenating the row sets across chunks.
+///
+/// Takes a `BTreeSet` so the id set is de-duplicated by construction: a
+/// repeated id must not fetch its rows twice (an unchunked single Or
+/// query never duplicated rows, and chunking must preserve that).
+///
+/// Ordering contract: `order_by` applies PER CHUNK, not globally. All
+/// rows for one id come from exactly one chunk (ids are unique), so any
+/// per-id row ordering survives; callers needing a global cross-id sort
+/// must sort the merged result themselves. Every current caller either
+/// ignores order or groups rows per id, so per-chunk ordering suffices.
+fn query_by_id_chunks(
+    row_store: &dyn RowStore,
+    table: &str,
+    column: &str,
+    ids: &BTreeSet<String>,
+    order_by: &[OrderClause],
+) -> Result<Vec<StorageRow>, LocusKitError> {
+    let unique: Vec<&String> = ids.iter().collect();
+    let mut out: Vec<StorageRow> = Vec::new();
+    // Chunk at 900 ids per query — below SQLite's ~1000 expression-depth
+    // cap, mirroring the Swift twin's ceiling (see ID_BATCH_CHUNK_SIZE).
+    for chunk in unique.chunks(ID_BATCH_CHUNK_SIZE) {
+        let predicates: Vec<StoragePredicate> = chunk
+            .iter()
+            .map(|id| {
+                StoragePredicate::Eq(
+                    Column::new(table, column),
+                    TypedValue::Text((*id).clone()),
+                )
+            })
+            .collect();
+        let rows = row_store
+            .query(table, Some(&StoragePredicate::any(predicates)), order_by, None, None)
+            .map_err(map_storage_err)?;
+        out.extend(rows);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
