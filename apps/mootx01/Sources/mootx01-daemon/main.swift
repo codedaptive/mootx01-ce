@@ -31,14 +31,35 @@ import MootCommunityDaemon
 // at compile time based on the SPM target dependency graph.
 #if canImport(MootDaemonFederation)
 import MootDaemonFederation
-private let eeExtraCapabilities: [String] = [FederationSyncCapabilities.token]
+private let federationCapabilities: [String] = [FederationSyncCapabilities.token]
 #else
-private let eeExtraCapabilities: [String] = []
+private let federationCapabilities: [String] = []
 #endif
+
+#if canImport(MootProductDock)
+import MootProductDock
+private let productDockCapabilities: [String] = [ProductDock.capabilityToken]
+private func runResident() async -> (code: Int32, output: String) {
+    await CommunityResidentMain.run(
+        additionalCapabilities: eeExtraCapabilities,
+        firstPartyToolHost: ProductDock.shared
+    )
+}
+#else
+private let productDockCapabilities: [String] = []
+private func runResident() async -> (code: Int32, output: String) {
+    await CommunityResidentMain.run(additionalCapabilities: eeExtraCapabilities)
+}
+#endif
+
+// Every descriptor-producing shell path must make the same edition claim.
+// ProductDock is process infrastructure, not a resident-mode-only feature, so
+// race/census probes and the real resident descriptor receive one exact list.
+private let eeExtraCapabilities = federationCapabilities + productDockCapabilities
 
 let exitCode = await DaemonShellMain.run(
     arguments: Array(CommandLine.arguments.dropFirst()),
     extraCapabilities: eeExtraCapabilities,
-    residentActivate: CommunityResidentMain.run
+    residentActivate: runResident
 )
 exit(exitCode)
