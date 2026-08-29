@@ -25,6 +25,7 @@ use std::process::ExitCode;
 
 use crate::cli::HttpMode;
 use crate::core::daemon_client;
+use crate::core::encrypt_optout;
 use crate::core::mcp_ownership;
 use crate::core::paths;
 use crate::core::release;
@@ -98,6 +99,16 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
                 }
                 Err(e) => eprintln!("mootx01 serve: gold miner unavailable — {e}"),
             }
+        } else {
+            // Loud skip (Smythe DEFAULT-MINT-01): with no engine the
+            // adornment pass falls back to the deterministic mechanical
+            // adornment for every pair — coverage holds, model quality does
+            // not. The operator should know which mode this serve is in.
+            eprintln!(
+                "mootx01 serve: gold miner model not found at {} — adornment \
+                 pass will use the mechanical fallback",
+                gguf.display()
+            );
         }
     }
 
@@ -133,16 +144,32 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
                 eprintln!("mootx01: cannot create estate directory {}: {e}", dir.display());
                 return ExitCode::from(exit::FAILURE);
             }
-            // Ensure the shared whole-file database key exists in the estate
-            // directory before the estate is opened, so the estate is encrypted
-            // at rest. Any process opening a file in this directory resolves the
-            // same db.key, so the daemon and moot-mgr share the key.
-            if let Err(e) = aria_mcp::ensure_install_key(dir) {
-                eprintln!(
-                    "mootx01: cannot prepare estate encryption key in {}: {e}",
-                    dir.display()
-                );
-                return ExitCode::from(exit::FAILURE);
+            // Settle key custody by open posture (Rust twin of Swift
+            // EstateKeyProvider.resolveOpenPosture) instead of unconditionally
+            // minting: absent estate → mint db.key (encrypted default) UNLESS
+            // a no-encrypt marker opted out; existing plaintext → untouched;
+            // existing ciphertext → the EXISTING key only, fail closed when it
+            // is missing. Any process opening a file in this directory
+            // resolves the same db.key, so the daemon and moot-mgr share it.
+            //
+            // The marker is honored beside the estate AND at the data-dir
+            // root: a root marker covers every estate this serve creates
+            // under that data dir (the estate lives at
+            // <data>/databases/<name>/estate.sqlite, so a harness that
+            // provisions a scratch data dir drops one marker at the root).
+            match encrypt_optout::prepare_estate_key(&estate, &data) {
+                Ok(encrypt_optout::OpenPosture::NewPlaintextByOptOut) => {
+                    eprintln!(
+                        "mootx01: estate encryption DISABLED by no-encrypt marker — \
+                         the estate will be created unencrypted. \
+                         Run `mootx01 upgrade` to encrypt it."
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("mootx01: {e}");
+                    return ExitCode::from(exit::FAILURE);
+                }
             }
         }
         std::env::set_var("ARIA_MCP_SQLITE_PATH", &estate);
