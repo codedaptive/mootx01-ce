@@ -220,6 +220,22 @@ public struct SyncManifest: Sendable {
     /// Not `Codable` — closures cannot be serialised; set at construction only.
     public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
 
+    /// Optional must-succeed boundary invoked after inbound rows and the
+    /// non-fatal integrity hook have run, but before the CloudKit change cursor
+    /// and successful-pull state are committed.
+    ///
+    /// Use this when accepting a transport batch requires a second durable,
+    /// semantic operation. A throw aborts the pull cycle before cursor
+    /// advancement, so the same CloudKit changes are offered again on the next
+    /// pull. The callback is not invoked for an empty batch.
+    ///
+    /// The row writes have already happened and are not rolled back. Callers
+    /// must therefore make this callback idempotent. This differs deliberately
+    /// from `postApplyIntegrityHook`, whose failures remain non-fatal conflicts.
+    ///
+    /// CloudKit-only execution directive; not wire-carried or `Codable`.
+    public var postApplyCommitBarrier: (@Sendable (AppliedBatch) async throws -> Void)?
+
     public init(
         kitID: String,
         schemaVersion: Int,
@@ -234,7 +250,8 @@ public struct SyncManifest: Sendable {
         // generic schemaVersion-2/3 callers already exist with legacyPacked
         // zones (see HLCWireRepresentation doc for details).
         hlcWireRepresentation: HLCWireRepresentation = .legacyPacked,
-        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil
+        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil,
+        postApplyCommitBarrier: (@Sendable (AppliedBatch) async throws -> Void)? = nil
     ) {
         self.kitID = kitID
         self.schemaVersion = schemaVersion
@@ -243,6 +260,7 @@ public struct SyncManifest: Sendable {
         self.encryptedContentColumns = encryptedContentColumns
         self.hlcWireRepresentation = hlcWireRepresentation
         self.postApplyIntegrityHook = postApplyIntegrityHook
+        self.postApplyCommitBarrier = postApplyCommitBarrier
     }
 
     /// Validate `encryptedContentColumns` entries before use.
