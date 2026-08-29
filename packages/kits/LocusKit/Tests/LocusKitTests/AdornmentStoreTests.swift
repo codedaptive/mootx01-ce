@@ -367,6 +367,42 @@ struct AdornmentStoreTests {
         #expect(debt.isEmpty)
     }
 
+    @Test("adornmentDebtBatch finds debt beyond a fully-minted oldest prefix")
+    func adornmentDebtBatchScansPastMintedPrefix() async throws {
+        // Regression (MINT-DEBT-WINDOW, 2026-08-27): the old implementation
+        // scanned only the first `limit × activeMinters` drawers in filedAt
+        // order. Once that prefix was fully minted the fetch returned empty
+        // while unminted drawers existed further down — the drain loop then
+        // falsely concluded the estate was complete.
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        try await store.registerAdornmentMinter(minter(id: "m1", isActive: true))
+        // 12 drawers with strictly ascending filedAt so scan order is fixed.
+        for i in 1...12 {
+            try await store.addDrawer(Drawer(
+                id: TestStorage.tid(String(format: "d%02d", i)),
+                content: "content-d\(i)",
+                parentNodeId: "test-parent",
+                addedBy: "bilby",
+                filedAt: t(1_000 + TimeInterval(i)),
+                embeddingModelID: "minilm-v6",
+                operationalBitmap: 0
+            ))
+        }
+        // Mint the oldest 10 — more than limit × minters (4 × 1), so the
+        // whole first scan window is already complete.
+        for i in 1...10 {
+            _ = try await store.putAdornment(StoredAdornment(
+                drawerID: TestStorage.tid(String(format: "d%02d", i)),
+                minterID: "m1", text: "adorned"))
+        }
+        let debt = try await store.adornmentDebtBatch(limit: 4)
+        // The two unminted drawers past the minted prefix MUST surface.
+        #expect(debt.count == 2)
+        #expect(Set(debt.map { $0.drawer.id })
+            == [TestStorage.tid("d11"), TestStorage.tid("d12")])
+    }
+
     @Test("adornmentDebtBatch excludes tombstoned drawers")
     func adornmentDebtBatchExcludesTombstoned() async throws {
         let (store, url) = try await makeStore()

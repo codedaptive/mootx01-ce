@@ -168,6 +168,7 @@ impl EstateRegistry {
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "in-memory");
+        register_default_minter_non_fatal(store.as_ref(), "in-memory");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -327,6 +328,7 @@ impl EstateRegistry {
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, path);
+        register_default_minter_non_fatal(store.as_ref(), path);
 
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
@@ -482,6 +484,7 @@ impl EstateRegistry {
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "postgres");
+        register_default_minter_non_fatal(store.as_ref(), "postgres");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -654,6 +657,22 @@ impl EstateRegistry {
 // Default wing seeding helper
 // ---------------------------------------------------------------------------
 
+/// Platform-default adornment minter (Bob ruling 2026-08-28): register the
+/// Rust quantized recipe active so the dream-time adornment pass mints
+/// inline, on EVERY estate-open path (SQLite, in-memory, Postgres — Adams
+/// DEFAULT-MINT-01 finding #1). Idempotent upsert; NEVER retoggles an
+/// operator's deactivation (LocusKit registration contract). Best-effort —
+/// an open estate must never fail over minter registration. Mirrors the
+/// Swift ServeCommand/AriaMCPMain ensureDefaultAdornmentMinter call.
+fn register_default_minter_non_fatal(store: &dyn DrawerStore, label: &str) {
+    let recipe = &adornment_lib::QUANTIZED_RECIPE;
+    if let Err(e) = store.register_adornment_minter(&recipe.descriptor(&recipe.id(), true)) {
+        eprintln!(
+            "aria-mcp: default adornment minter registration failed for {label} (pass will no-op): {e:?}"
+        );
+    }
+}
+
 /// Idempotently seed the seven default wings for `handle`.
 ///
 /// Reads existing `AI_Charter_Hint` drawers and skips wings that are already
@@ -758,6 +777,12 @@ fn wire_inmemory_semantic_recall(
     let mut guard = coord.lock().unwrap();
     guard.register_corpus(handle, Arc::clone(&corpus));
     guard.register_vector_store(handle, vector_store);
+    // Install the on_encoded drain-stage rider (room rollup + distillation +
+    // dense recompose + A2 marker) so a drained estate is a fully distilled
+    // estate on THIS wiring path too — Swift twin: wireGLKSubstores →
+    // wireCorpusRoomRollup at serve open. Without it the distillation lane
+    // reads `pending: N` forever unless a client calls moot_distill.
+    guard.wire_corpus_on_encoded(handle);
     drop(guard);
 
     Ok(())
@@ -852,6 +877,9 @@ fn wire_postgres_semantic_recall(
     let mut guard = coord.lock().unwrap();
     guard.register_corpus(handle, Arc::clone(&corpus));
     guard.register_vector_store(handle, vector_store);
+    // Install the on_encoded drain-stage rider — same rationale as the
+    // in-memory wiring above (Swift twin: wireCorpusRoomRollup).
+    guard.wire_corpus_on_encoded(handle);
     drop(guard);
 
     Ok(())
@@ -934,6 +962,17 @@ fn wire_sqlite_semantic_recall(
     let mut guard = coord.lock().unwrap();
     guard.register_corpus(handle, Arc::clone(&corpus));
     guard.register_vector_store(handle, vector_store);
+    // Install the on_encoded drain-stage rider (room rollup + distillation +
+    // dense recompose + A2 marker) BEFORE the eager mount below: the mount
+    // resumes any persisted encode backlog on its own worker, and those
+    // resumed batches must find the rider already installed or they encode
+    // without distilling — exactly the serve-parity defect this call closes
+    // (a served Rust estate held `distillation: pending N` indefinitely
+    // while the Swift serve converged to idle unattended). Swift twin:
+    // wireGLKSubstores → wireCorpusRoomRollup, which installs the rider
+    // before mounting the ingest queue (EstateLifecycle.wireSubstores);
+    // both ports share the rider-before-mount order.
+    guard.wire_corpus_on_encoded(handle);
     drop(guard);
 
     // EAGER mount of the Corpus ingest queue + drain worker (mirrors Swift

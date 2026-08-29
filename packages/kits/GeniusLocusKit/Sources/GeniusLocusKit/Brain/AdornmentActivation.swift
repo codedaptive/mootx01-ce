@@ -165,7 +165,14 @@ public extension GeniusLocusKit {
         // callers forward nil when no override is set.
         let length = maxAdornmentLength ?? ADORNMENT_MAX_LENGTH
         // Custom generator resolver threads the resolved ceiling so the
-        // harness ceiling override is honored end-to-end.
+        // harness ceiling override is honored end-to-end. Generation drives
+        // the resident GoldMiner exactly like AdornmentPass.run's default
+        // resolver: installed engine, else the explicit MOOT_MINT_CMD
+        // harness engine, else the platform default (Apple's on-device
+        // model), else nil
+        // (pair counted failed, retried next pass). This is the inline
+        // default-minter path (Bob ruling 2026-08-28) — the command seam is
+        // one engine the miner can resolve, never the only one.
         return try await AdornmentPass.run(
             estate: estateObj,
             batchSize: batchSize,
@@ -175,9 +182,37 @@ public extension GeniusLocusKit {
                     eventDate: drawer.eventTime.ISO8601Format(),
                     maxLength: length
                 ) { prompt in
-                    await invokeAdornmentCommand(prompt: prompt, maxLength: length)
+                    guard let raw = await GoldMiner.shared.mintOne(prompt: prompt) else {
+                        return nil
+                    }
+                    // Mechanical truncation at the resolved ceiling: engines
+                    // return raw text; the seam owns the ceiling.
+                    let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return candidate.isEmpty ? nil : String(candidate.prefix(length))
                 }
             },
             now: now)
+    }
+
+    // MARK: - Default-minter registration
+
+    /// Ensure the platform-default adornment minter is registered in the
+    /// estate (Bob ruling 2026-08-28: default minters run inline — Swift's
+    /// default is the Apple FoundationModels recipe).
+    ///
+    /// Idempotent per open: `registerAdornmentMinter` is an upsert that
+    /// NEVER retoggles `is_active` on an existing row, so a fresh estate
+    /// gets the default registered ACTIVE, while an operator who
+    /// deactivated it stays deactivated across reopens. The row id is the
+    /// composed recipe id (`apple-fm-p<N>-s<N>`), the same identity the
+    /// engine stamps on its adornment rows.
+    ///
+    /// - Parameter handle: the open estate.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func ensureDefaultAdornmentMinter(in handle: EstateHandle) async throws {
+        let recipe = MinterRecipe.apple
+        try await registerAdornmentMinter(
+            in: handle,
+            minter: recipe.descriptor(id: recipe.id, isActive: true))
     }
 }
