@@ -76,9 +76,15 @@ public enum CommunityResidentMain {
     /// lives in the dedicated mootx01-daemon-contract-host executable, which the
     /// ContractDaemonHarness spawns. activate(), the provider lock, and Keychain
     /// custody are always exercised here.
-    public static func run() async -> (code: Int32, output: String) {
+    public static func run(
+        additionalCapabilities: [String] = [],
+        firstPartyToolHost: (any FirstPartyToolHost)? = nil
+    ) async -> (code: Int32, output: String) {
         #if canImport(Security)
-        return await runProduction()
+        return await runProduction(
+            additionalCapabilities: additionalCapabilities,
+            firstPartyToolHost: firstPartyToolHost
+        )
         #else
         let refusal: [String: Any] = [
             "mode": "resident",
@@ -97,7 +103,10 @@ public enum CommunityResidentMain {
 
     #if canImport(Security)
     /// The production resident loop body (Darwin/macOS only).
-    private static func runProduction() async -> (code: Int32, output: String) {
+    private static func runProduction(
+        additionalCapabilities: [String],
+        firstPartyToolHost: (any FirstPartyToolHost)?
+    ) async -> (code: Int32, output: String) {
         // ── Step 1: pre-bind the TCP socket ──────────────────────────────────
         // A minimal HTTPServer (no dispatcher involvement, no firstPartyAuth)
         // is constructed solely to call bind() and reserve port 4242.
@@ -150,11 +159,11 @@ public enum CommunityResidentMain {
             configuration: DaemonProviderConfiguration(
                 instanceIdentifier: instanceID,
                 binaryVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1.0",
-                capabilities: [
+                capabilities: Array(Set([
                     DescriptorPublisher.authenticatedFirstPartyCapability,
                     "resident-estate",
                     "tool-surface",
-                ],
+                ] + additionalCapabilities)).sorted(),
                 proofContext: nil  // nil = production credential custody (P-c2-1)
             ),
             readback: SecCodeEntitlementReadback(),
@@ -178,6 +187,20 @@ public enum CommunityResidentMain {
         } catch {
             let out = encodedFailure("activation-failed: \(error)")
             return (DaemonShellMain.ExitCode.failure.rawValue, out)
+        }
+
+        // Product tools are process infrastructure, so startup belongs to the
+        // resident daemon after provider activation and before the HTTP server
+        // begins accepting requests. A listener failure tears the provider down
+        // and fails startup; the daemon never advertises partial readiness.
+        if let firstPartyToolHost {
+            do {
+                try await firstPartyToolHost.start()
+            } catch {
+                _ = try? await provider.shutdown()
+                let out = encodedFailure("first-party-tool-host-start-failed: \(error)")
+                return (DaemonShellMain.ExitCode.failure.rawValue, out)
+            }
         }
 
         // ── Step 4: build real dispatcher + auth server + HTTP server ────────
@@ -221,6 +244,8 @@ public enum CommunityResidentMain {
                 state: providerState
             )
         } catch {
+            await firstPartyToolHost?.stop()
+            _ = try? await provider.shutdown()
             let out = encodedFailure("coordinator-init-failed: \(error)")
             return (DaemonShellMain.ExitCode.failure.rawValue, out)
         }
@@ -230,7 +255,8 @@ public enum CommunityResidentMain {
                 name: "mootx01",
                 version: activation.descriptor.binaryVersion
             ),
-            communityHandler: communityDispatch
+            communityHandler: communityDispatch,
+            firstPartyHandler: firstPartyToolHost
         )
         // DataProtectionKeychainRootProvider: the production FirstPartyRootProviding
         // conformer. Requires the fully expanded Keychain access group (team prefix
@@ -269,6 +295,7 @@ public enum CommunityResidentMain {
 
         // ── Step 6: wait for shutdown ─────────────────────────────────────────
         await shutdownTask.value
+        await firstPartyToolHost?.stop()
         _ = try? await provider.shutdown()
 
         let result: [String: Any] = [

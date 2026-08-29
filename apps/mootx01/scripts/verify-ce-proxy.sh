@@ -11,7 +11,8 @@
 # WHAT THIS SCRIPT PROVES:
 #   The Community Edition manifest (Package.community.swift) builds a clean
 #   apps/mootx01 package that contains NO reference to the EE-only surfaces
-#   (MootDaemonFederation, ConvergenceKit, CloudKit) in its SPM declarations.
+#   (MootDaemonFederation, MootProductDock, ConvergenceKit, CloudKit) in its
+#   SPM declarations or source tree.
 #
 # WHY THE PREVIOUS EVIDENCE WAS FAIL-OPEN:
 #   The verifier found that the prior ce-proxy tree's
@@ -90,9 +91,13 @@ echo "[3] Removing EE-only paths from proxy..."
 
 EE_SRC="${PROXY_PKG}/Sources/MootDaemonFederation"
 EE_TESTS="${PROXY_PKG}/Tests/MootDaemonFederationTests"
+PRODUCT_DOCK_SRC="${PROXY_PKG}/Sources/MootProductDock"
+PRODUCT_DOCK_TESTS="${PROXY_PKG}/Tests/MootProductDockTests"
 
 echo "    Expected absent: ${EE_SRC}"
 echo "    Expected absent: ${EE_TESTS}"
+echo "    Expected absent: ${PRODUCT_DOCK_SRC}"
+echo "    Expected absent: ${PRODUCT_DOCK_TESTS}"
 
 if [ -d "${EE_SRC}" ]; then
     rm -rf "${EE_SRC}"
@@ -106,6 +111,20 @@ if [ -d "${EE_TESTS}" ]; then
     echo "    Removed: ${EE_TESTS}"
 else
     echo "    (MootDaemonFederationTests already absent)"
+fi
+
+if [ -d "${PRODUCT_DOCK_SRC}" ]; then
+    rm -rf "${PRODUCT_DOCK_SRC}"
+    echo "    Removed: ${PRODUCT_DOCK_SRC}"
+else
+    echo "    (MootProductDock Sources already absent)"
+fi
+
+if [ -d "${PRODUCT_DOCK_TESTS}" ]; then
+    rm -rf "${PRODUCT_DOCK_TESTS}"
+    echo "    Removed: ${PRODUCT_DOCK_TESTS}"
+else
+    echo "    (MootProductDockTests already absent)"
 fi
 echo ""
 
@@ -137,7 +156,7 @@ echo ""
 # we have a violation.  Use grep -c (count) and test that it is zero.
 
 echo "[4b] Asserting EE tokens absent from SPM declaration lines in proxy Package.swift..."
-echo "     Expected: MootDaemonFederation, ConvergenceKit, CloudKit appear ONLY in comments"
+echo "     Expected: MootDaemonFederation, MootProductDock, ConvergenceKit, CloudKit appear ONLY in comments"
 echo "     Checking: non-comment lines only (lines not matching ^\s*//)"
 echo ""
 
@@ -146,7 +165,7 @@ MANIFEST_CHECK="${ACTIVE_MANIFEST}"
 # Strip comment lines for the assertion.
 NONCOMMENT_CONTENT=$(grep -v '^\s*//' "${MANIFEST_CHECK}" || true)
 
-FORBIDDEN_TOKENS=("MootDaemonFederation" "ConvergenceKit" "CloudKit")
+FORBIDDEN_TOKENS=("MootDaemonFederation" "MootProductDock" "ConvergenceKit" "CloudKit")
 ASSERTION_FAILED=0
 
 for TOKEN in "${FORBIDDEN_TOKENS[@]}"; do
@@ -168,6 +187,8 @@ done
 echo "[4c] Asserting EE-only directories are absent from proxy tree..."
 echo "     Expected absent: ${EE_SRC}"
 echo "     Expected absent: ${EE_TESTS}"
+echo "     Expected absent: ${PRODUCT_DOCK_SRC}"
+echo "     Expected absent: ${PRODUCT_DOCK_TESTS}"
 
 if [ -d "${EE_SRC}" ]; then
     echo "FAIL: EE Source directory still present: ${EE_SRC}" >&2
@@ -181,6 +202,21 @@ if [ -d "${EE_TESTS}" ]; then
     ASSERTION_FAILED=1
 else
     echo "    PASS: MootDaemonFederationTests absent"
+fi
+
+
+if [ -d "${PRODUCT_DOCK_SRC}" ]; then
+    echo "FAIL: EE Source directory still present: ${PRODUCT_DOCK_SRC}" >&2
+    ASSERTION_FAILED=1
+else
+    echo "    PASS: MootProductDock Sources absent"
+fi
+
+if [ -d "${PRODUCT_DOCK_TESTS}" ]; then
+    echo "FAIL: EE Tests directory still present: ${PRODUCT_DOCK_TESTS}" >&2
+    ASSERTION_FAILED=1
+else
+    echo "    PASS: MootProductDockTests absent"
 fi
 echo ""
 
@@ -221,6 +257,7 @@ echo "Summary of values checked:"
 echo "  Proxy root            : ${PROXY_ROOT}"
 echo "  Active manifest       : ${ACTIVE_MANIFEST}"
 echo "  Token 'MootDaemonFederation' in declaration lines: 0  [EXPECTED: 0]"
+echo "  Token 'MootProductDock' in declaration lines:      0  [EXPECTED: 0]"
 echo "  Token 'ConvergenceKit' in declaration lines:       0  [EXPECTED: 0]"
 echo "  Token 'CloudKit' in declaration lines:             0  [EXPECTED: 0]"
 echo "  EE Sources directory absent:                       YES [EXPECTED: YES]"
