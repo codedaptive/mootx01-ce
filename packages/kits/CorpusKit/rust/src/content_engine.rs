@@ -1512,11 +1512,24 @@ impl CorpusContentEngine {
         })?;
         drop(guards);
 
+        // ONE transaction for the whole batch's BM25 writes (DRAIN-BATCH-TXN,
+        // 2026-08-29): index() upserts one row per TERM, and autocommitted
+        // per-term writes made SQLite's WAL autocheckpoint fsync per ~1000
+        // frames — the drain sat in checkpoint fsync while encode backfills
+        // froze. The ingest paths already bracket (Corpus::ingest_batch);
+        // this is the queue-drain path gaining the same bracket.
+        self.inverted_index
+            .begin_batch()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         for (record, tokens, _, _) in &prepared {
-            self.inverted_index
-                .index(&record.id, tokens, "")
-                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            if let Err(error) = self.inverted_index.index(&record.id, tokens, "") {
+                let _ = self.inverted_index.rollback_batch();
+                return Err(CorpusKitError::StoreUnavailable(format!("{error:?}")));
+            }
         }
+        self.inverted_index
+            .commit_batch()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         let rows: Vec<_> = prepared
             .iter()
             .flat_map(|item| item.2.iter().cloned())
