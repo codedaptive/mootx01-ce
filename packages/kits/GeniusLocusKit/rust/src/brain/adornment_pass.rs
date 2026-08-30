@@ -22,7 +22,7 @@
 // the store's concern; the caller owns cadence.
 
 use adornment_lib::{
-    ADORNMENT_CHUNK_THRESHOLD, ADORNMENT_MAX_LENGTH, StoredAdornment, gold_miner,
+    ADORNMENT_CHUNK_THRESHOLD, ADORNMENT_MAX_LENGTH, StoredAdornment,
     mint_adornment_map_reduce,
 };
 use locus_kit::tunnel_review_ledger::iso8601_from_millis;
@@ -84,18 +84,24 @@ pub fn run_adornment_pass(
             Some(&event_date),
             length,
             ADORNMENT_CHUNK_THRESHOLD,
-            |prompt| {
-                gold_miner::mint_one(prompt).and_then(|raw| {
-                    // Mechanical truncation at the resolved ceiling:
-                    // engines return raw text; the seam owns the ceiling.
-                    let candidate = raw.trim();
-                    if candidate.is_empty() {
-                        None
-                    } else {
-                        Some(candidate.chars().take(length).collect())
-                    }
-                })
-            },
+            // Full engine chain, twin of the Swift pass: the resident
+            // gold-miner engine wins when installed; otherwise the
+            // MOOT_MINT_CMD subprocess seam (the harness audition
+            // vehicle) mints; None only when both are absent or fail.
+            // invoke_adornment_command owns the trim and the ceiling.
+            // Calling gold_miner::mint_one directly here skipped the
+            // subprocess seam entirely — a serve with MOOT_MINT_CMD set
+            // and no resident engine minted mechanical fallback for
+            // every pair (2026-08-30, rust wing auditions).
+            //
+            // Width note (Swift-pass parity): the Swift pass fans pairs
+            // out to the engine's declared mint width
+            // (GoldMinerEngine.maxConcurrentMints — Apple's inference
+            // service pipelines concurrent requests). Every Rust engine
+            // is width-1 (one resident GGUF context, one subprocess
+            // pipe), so this serial loop IS the width-bounded behavior;
+            // a width seam lands here with the first >1 Rust engine.
+            |prompt| adornment_lib::invoke_adornment_command(prompt, length),
         );
 
         let Some(text) = text else {
