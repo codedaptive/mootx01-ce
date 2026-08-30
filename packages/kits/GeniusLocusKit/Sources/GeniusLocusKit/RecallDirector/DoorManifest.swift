@@ -11,8 +11,8 @@
 // current spec constant) — no estate migration required. Partial JSON fills
 // absent keys with spec defaults at decode time.
 //
-// Wire format: {"scoring":"rrf"} (snake_case; same output as the
-// quality-optimizer door-recommend tool at benchmark-ee/configs/door/*.json)
+// Wire format: {"scoring":"rrf"} (snake_case; the quality optimizer's
+// door-recommend output format).
 
 import Foundation
 
@@ -22,11 +22,10 @@ import Foundation
 /// `"door_config"` manifest key as a JSON object.
 ///
 /// The quality optimizer emits this value via
-/// `GeniusLocusKit.provisionDoorConfig(_:for:)` from the evidence
-/// accumulated in benchmark-ee/configs/door/<lane>.json. The product reads
-/// it on every `moot_memory_search` call when no explicit `door` or `scoring`
-/// argument is supplied (the A1 per-corpus static config tier of the
-/// front-door family).
+/// `GeniusLocusKit.provisionDoorConfig(_:for:)` after a full-coverage arm
+/// comparison. The product reads it on every `moot_memory_search` call when
+/// no explicit `door` or `scoring` argument is supplied (the A1 per-corpus
+/// static config tier of the front-door family).
 ///
 /// An estate with no `"door_config"` key behaves exactly as before
 /// (defaults to `matrixAware`). The optimizer emits this value after a
