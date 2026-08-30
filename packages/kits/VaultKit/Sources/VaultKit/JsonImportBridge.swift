@@ -929,11 +929,15 @@ extension JsonImportBridge {
             }
         }
 
-        // Phase 7 — ONE deferred encode-enqueue sweep (delta-aware), the
-        // exact `importNotes` seam (`VaultBridge.importNotes` phase). The
+        // Phase 7 — deferred encode backfill. The import returns when its
+        // rows are durable; `reindexMissingDeferred` counts the missing set
+        // for the report and runs the auto-continued backfill (passes,
+        // retrain tail, Merkle rollup) on a detached task — the
+        // `moot_palace_import` background contract. Callers watch
+        // `moot_drain_status` / `moot_rebuild_status` converge; the
         // importer adds no drain barrier of its own and never dreams —
         // those are caller protocol steps in the seed-run protocol.
-        report.enqueuedForEncode = try await kit.reindexMissing(handle: handle, now: now)
+        report.enqueuedForEncode = try await kit.reindexMissingDeferred(handle: handle, now: now)
 
         // Phase 8 — audit receipt in the established receipt shape plus
         // `seedSha256` over the exact input bytes, so any estate is

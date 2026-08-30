@@ -1404,8 +1404,8 @@ public extension GeniusLocusKit {
     /// The estate-manifest key carrying the OPTIMIZER-OWNED door-selection
     /// config: a JSON object with the `scoring` field storing the winning
     /// `GLKRecallScoring` rawValue for this corpus. The quality optimizer
-    /// emits it via `GeniusLocusKit.provisionDoorConfig(_:for:)` from
-    /// arm-comparison evidence (benchmark-ee/configs/door/*.json).
+    /// emits it via `GeniusLocusKit.provisionDoorConfig(_:for:)` from its
+    /// full-coverage arm-comparison evidence.
     ///
     /// Same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey`,
     /// `recallTuningMetaKey`, and `embeddingProviderMetaKey`: the optimizer

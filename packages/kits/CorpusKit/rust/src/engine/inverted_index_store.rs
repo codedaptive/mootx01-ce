@@ -206,8 +206,10 @@ impl InvertedIndexStore {
     // Corpus.storage), and SQLite is single-writer: a held `BEGIN IMMEDIATE`
     // takes the file write lock, so `Corpus::ingest_batch` sequences this
     // window AFTER the storage-connection transaction has committed — the two
-    // connections never hold overlapping write locks. Mirrors the Swift twin's
-    // beginBatch/commitBatch/rollbackBatch.
+    // connections never hold overlapping write locks. The Swift twin batches
+    // the same writes through `storage.transaction` with an `into: rowStore`
+    // parameter on `index()` — same one-commit-per-batch contract, different
+    // mechanism because the Swift store shares the estate connection.
 
     /// Open a write transaction on the sidecar connection. Caller MUST pair with
     /// `commit_batch` (success) or `rollback_batch` (error). `BEGIN IMMEDIATE`

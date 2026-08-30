@@ -212,9 +212,20 @@ public actor InvertedIndexStore {
     ///   - itemID: stable item identifier (chunk UUID string or any unique string).
     ///   - tokens: tokenized keyword terms using the same vocabulary as query time.
     ///   - now: present for deterministic-date discipline; not currently read — only term frequencies and document length are persisted.
-    public func index(itemID: String, tokens: [String], now: Date) async throws {
+    ///   - rowStore: destination for the durable writes. Pass a transaction's
+    ///     `txn.rowStore` to batch many index() calls into ONE commit — the
+    ///     per-term upserts otherwise autocommit individually, and SQLite's
+    ///     WAL autocheckpoint then fsyncs per ~1000 frames, which measured as
+    ///     98% of encode-drain wall time on an external volume
+    ///     (DRAIN-BATCH-TXN, 2026-08-29). nil = the store's own rowStore
+    ///     (single-document callers, unchanged behavior).
+    public func index(
+        itemID: String, tokens: [String], now: Date,
+        into rowStore: (any RowStore)? = nil
+    ) async throws {
+        let rows = rowStore ?? storage.rowStore
         // Remove existing state for this item first (idempotent re-index).
-        try await deleteFromStorage(itemID: itemID)
+        try await deleteFromStorage(itemID: itemID, rows: rows)
 
         // ramResident cache coherence (SECURITY): the durable delete above
         // does not touch the RAM mirror, and the re-add below only writes the
@@ -238,7 +249,7 @@ public actor InvertedIndexStore {
 
         // Persist term frequencies — durable SQLite only, no in-memory mirror.
         for (term, freq) in tf {
-            try await storage.rowStore.upsert(
+            try await rows.upsert(
                 table: "iix_termfreqs",
                 values: [
                     "term": .text(term),
@@ -249,7 +260,7 @@ public actor InvertedIndexStore {
             )
         }
         // Persist doc length.
-        try await storage.rowStore.upsert(
+        try await rows.upsert(
             table: "iix_doclens",
             values: [
                 "item_id": .text(itemID),
@@ -305,12 +316,15 @@ public actor InvertedIndexStore {
         markDirty()
     }
 
-    private func deleteFromStorage(itemID: String) async throws {
-        _ = try await storage.rowStore.delete(
+    private func deleteFromStorage(
+        itemID: String, rows: (any RowStore)? = nil
+    ) async throws {
+        let rows = rows ?? storage.rowStore
+        _ = try await rows.delete(
             table: "iix_termfreqs",
             where: .eq(Column(table: "iix_termfreqs", name: "item_id"), .text(itemID))
         )
-        _ = try await storage.rowStore.delete(
+        _ = try await rows.delete(
             table: "iix_doclens",
             where: .eq(Column(table: "iix_doclens", name: "item_id"), .text(itemID))
         )
