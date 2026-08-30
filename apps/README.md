@@ -12,7 +12,7 @@ never the reverse.
 | [`Mootx01-App`](Mootx01-App/) | The native **Apple presentation and local-host app** (macOS · iOS · iPadOS): capture/recall, Foundation Models, Siri/Shortcuts/App Intents, Share Sheet, widget, opt-in CloudKit sync, owner-gated LAN MCP, miners, and on-demand federation. |
 | [`moot-bridge`](moot-bridge/) | A **forking MCP memory server** that fans a client's MCP traffic out across multiple backends. |
 | [`moot-agent-skills`](moot-agent-skills/) | A **harness support kit** — starter integrations (Claude, Cline, Codex, Cursor, …) teaching AI harnesses to use MOOTx01 as an automatic memory/reasoning substrate. |
-| [`moot-math-benchmark`](moot-math-benchmark/) | Cross-platform **performance benchmarks** for the substrate math primitives (Swift in `swift-bench/`, Rust in `rust-bench/`). |
+| [`moot-math-speedtest`](moot-math-speedtest/) | Cross-platform **substrate and kernel speed test** for the math primitives (Swift in `swift-bench/`, Rust in `rust-bench/`); distinct from the end-to-end [`benchmarks/`](../benchmarks/) suite. |
 
 The engine that the `mootx01` CLI and the Apple app build on — `AriaMcpKit` (the
 ARIA-over-MCP server library) — lives in `packages/kits/AriaMcpKit`, not here.
