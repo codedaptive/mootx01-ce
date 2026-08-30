@@ -53,8 +53,10 @@ questions. For product operation, use:
 - [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) for the manager/dashboard;
 - [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) for the optional
   two-backend MCP bridge;
-- [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) for
-  benchmark evidence;
+- [`apps/moot-math-speedtest/README.md`](apps/moot-math-speedtest/README.md) for
+  substrate and kernel speed-test evidence;
+- [`benchmarks/README.md`](benchmarks/README.md) for the reproducible end-to-end
+  memory benchmark suite;
 - [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) for
   vault import, export, and resync.
 
