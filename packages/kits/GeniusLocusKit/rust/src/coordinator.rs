@@ -1004,7 +1004,7 @@ impl RecallTuningManifest {
 /// bad provision degrades gracefully rather than breaking recall.
 ///
 /// Wire format: `{"scoring":"rrf"}` — snake_case keys matching the
-/// quality-optimizer's emitted format (benchmark-ee/configs/door/*.json).
+/// quality optimizer's emitted door-config format.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DoorManifest {
     /// Scoring strategy to apply when no explicit `door` or `scoring`
