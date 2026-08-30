@@ -104,6 +104,11 @@ public enum AdornmentPass {
     public static func run(
         estate: LocusKit.Estate,
         batchSize: Int = defaultBatchSize,
+        /// Fan-out width override. Nil (the default, every production call
+        /// site) asks the resident engine for its declared width; tests
+        /// pass an explicit width so the pass's concurrency is
+        /// environment-independent.
+        width widthOverride: Int? = nil,
         generatorResolver: @escaping @Sendable (
             AdornmentMinterDescriptor, LocusKit.Drawer
         ) async -> String? = { minter, drawer in
@@ -146,7 +151,28 @@ public enum AdornmentPass {
         var failed = 0
         var skipped = 0
 
-        for pair in pairs {
+        // Fan-out width: the resident engine declares how many concurrent
+        // mint calls it serves (GoldMinerEngine.maxConcurrentMints — Apple's
+        // service pipelines concurrent requests; resident GGUF contexts and
+        // command pipes declare 1, which keeps this loop serial for them).
+        // Pairs are fully independent — the (drawerID, minterID) composite
+        // key isolates every write and putAdornment serializes through the
+        // estate — so a bounded task group changes only wall clock, never
+        // the stored result set.
+        let engineWidth: Int
+        if let widthOverride {
+            engineWidth = widthOverride
+        } else {
+            engineWidth = await GoldMiner.shared.mintWidth()
+        }
+        let width = min(max(1, engineWidth), pairs.count)
+
+        /// One pair's full journey: guard → generate → write. Returns the
+        /// pair's outcome for the counters; all failure isolation is
+        /// per-pair, exactly as the serial loop kept it.
+        @Sendable func process(
+            _ pair: LocusKit.AdornmentDebt
+        ) async -> (adorned: Int, failed: Int, skipped: Int) {
             let drawer = pair.drawer
             let minter = pair.minter
 
@@ -156,8 +182,7 @@ public enum AdornmentPass {
                 // structurally excludes empty-content rows, so this guard is defensive.
                 log.debug(
                     "AdornmentPass: skipping empty-content drawer \(drawer.id) / minter \(minter.id)")
-                skipped += 1
-                continue
+                return (0, 0, 1)
             }
 
             // Invoke the generator resolver for this (minter, drawer) pair.
@@ -167,8 +192,7 @@ public enum AdornmentPass {
             guard let text = await generatorResolver(minter, drawer) else {
                 log.debug(
                     "AdornmentPass: generator returned nil for drawer \(drawer.id) / minter \(minter.id)")
-                failed += 1
-                continue
+                return (0, 1, 0)
             }
 
             // Write StoredAdornment(drawerID, minterID, text) via LocusKit.
@@ -181,20 +205,19 @@ public enum AdornmentPass {
                         minterID: minter.id,
                         text: text))
                 if rows == 1 {
-                    adorned += 1
                     let preview = String(text.prefix(60))
                     log.info(
                         "AdornmentPass: adorned drawer \(drawer.id) minter \(minter.id) '\(preview)...' at \(now.ISO8601Format())"
                     )
-                } else {
-                    // Torn write: drawer was expunged between the debt fetch and
-                    // the putAdornment call. Log and count as failed — not a hard
-                    // error; the pair vanishes from debt on the next scan.
-                    log.warning(
-                        "AdornmentPass: putAdornment returned \(rows) for drawer \(drawer.id) / minter \(minter.id)"
-                    )
-                    failed += 1
+                    return (1, 0, 0)
                 }
+                // Torn write: drawer was expunged between the debt fetch and
+                // the putAdornment call. Log and count as failed — not a hard
+                // error; the pair vanishes from debt on the next scan.
+                log.warning(
+                    "AdornmentPass: putAdornment returned \(rows) for drawer \(drawer.id) / minter \(minter.id)"
+                )
+                return (0, 1, 0)
             } catch {
                 // Per-pair failure isolation: a persistence error on one pair
                 // leaves only that pair missing, never disables the minter,
@@ -202,7 +225,26 @@ public enum AdornmentPass {
                 log.error(
                     "AdornmentPass: putAdornment threw for drawer \(drawer.id) / minter \(minter.id): \(error)"
                 )
-                failed += 1
+                return (0, 1, 0)
+            }
+        }
+
+        // Sliding-window task group: at most `width` pairs in flight; each
+        // completion admits the next pair, so the engine stays saturated
+        // for the whole batch instead of running in width-sized waves.
+        await withTaskGroup(of: (adorned: Int, failed: Int, skipped: Int).self) { group in
+            var iterator = pairs.makeIterator()
+            for _ in 0..<width {
+                guard let pair = iterator.next() else { break }
+                group.addTask { await process(pair) }
+            }
+            while let outcome = await group.next() {
+                adorned += outcome.adorned
+                failed += outcome.failed
+                skipped += outcome.skipped
+                if let pair = iterator.next() {
+                    group.addTask { await process(pair) }
+                }
             }
         }
 
