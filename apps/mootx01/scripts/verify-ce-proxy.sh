@@ -73,12 +73,10 @@ fi
 # .git and the build outputs directory) so those relative paths resolve
 # correctly within the proxy root.
 
-echo "[2] Rsyncing full repo tree into proxy (excluding .git, benchmarks, build outputs)..."
+echo "[2] Rsyncing the repo tree into proxy (excluding .git and build outputs)..."
 mkdir -p "${PROXY_ROOT}"
 rsync -a \
     --exclude='.git' \
-    --exclude='benchmark/' \
-    --exclude='benchmark-ee/' \
     --exclude='*.xcodeproj' \
     "${REPO_ROOT}/" \
     "${PROXY_ROOT}/"
