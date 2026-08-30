@@ -16,20 +16,33 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-RUST_DIR="$REPO/packages/libs/EstateEncryption/rust"
-SWIFT_BIN="$REPO/benchmark/.build/debug/mcp-benchmarker"
+BENCHMARKS_DIR="$REPO/benchmarks"
+RUST_SOURCE_DIR="$REPO/packages/libs/EstateEncryption/rust"
+REQUESTED_WORK_ROOT="${BENCH_WORK_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/mootx01/benchmarks/$(basename "$REPO")}"
+BENCH_WORK_ROOT="$(python3 "$BENCHMARKS_DIR/scripts/work-root.py" prepare \
+  --repo "$REPO" --work "$REQUESTED_WORK_ROOT")" || exit 2
+SWIFT_BIN="$BENCH_WORK_ROOT/build/harness-swift/release/mcp-benchmarker"
+export CARGO_TARGET_DIR="$BENCH_WORK_ROOT/build/estate-encryption-conformance-rust"
 
 # A fixed key: these databases live for the length of this script.
 KEY="4d6f6f7478303120636f6e666f726d616e63652d6b65792d33322d6279746573"
 
-[[ -x "$SWIFT_BIN" ]] || { echo "build the harness first: (cd benchmark && swift build)"; exit 2; }
 [[ $# -ge 1 ]] || { echo "usage: $0 <source.sqlite> [...]"; exit 2; }
 
-work="$(mktemp -d)"
+make -C "$BENCHMARKS_DIR" swift-harness BENCH_WORK_ROOT="$BENCH_WORK_ROOT"
+[[ -x "$SWIFT_BIN" ]] || { echo "harness build did not produce $SWIFT_BIN"; exit 2; }
+
+mkdir -p "$BENCH_WORK_ROOT/tmp"
+work="$(mktemp -d "$BENCH_WORK_ROOT/tmp/estate-encryption-cross-port.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+rust_build_dir="$work/estate-encryption-rust"
+mkdir -p "$rust_build_dir"
+cp "$RUST_SOURCE_DIR/Cargo.toml" "$rust_build_dir/Cargo.toml"
+cp -R "$RUST_SOURCE_DIR/src" "$rust_build_dir/src"
+cp -R "$RUST_SOURCE_DIR/examples" "$rust_build_dir/examples"
 failures=0
 
-digest() { (cd "$RUST_DIR" && cargo run --offline -q --example digest -- "$@" 2>/dev/null | tail -1); }
+digest() { cargo run --manifest-path "$rust_build_dir/Cargo.toml" --offline -q --example digest -- "$@" 2>/dev/null | tail -1; }
 
 for source in "$@"; do
   name="$(basename "$source" .sqlite)"
@@ -40,8 +53,8 @@ for source in "$@"; do
 
   "$SWIFT_BIN" convert --source "$work/$name-swift-src.sqlite" \
                        --dest "$work/$name-swift.enc" --key-hex "$KEY" > /dev/null
-  (cd "$RUST_DIR" && cargo run --offline -q --example convert -- \
-       "$work/$name-rust-src.sqlite" "$work/$name-rust.enc" "$KEY" > /dev/null)
+  cargo run --manifest-path "$rust_build_dir/Cargo.toml" --offline -q --example convert -- \
+       "$work/$name-rust-src.sqlite" "$work/$name-rust.enc" "$KEY" > /dev/null
 
   src_d="$(digest "$source")"
   sw_d="$(digest "$work/$name-swift.enc" "$KEY")"

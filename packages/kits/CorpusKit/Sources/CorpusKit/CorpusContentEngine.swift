@@ -1308,10 +1308,23 @@ public actor CorpusContentEngine {
             pendingWork.map(\.record), slotScope: .all, cap: cap, now: batchNow)
 
         // Phase 3: serial storage writes for the embedded batch.
-        // BM25 — one index call per record.
-        for (work, item) in zip(pendingWork, embedded) {
-            try await invertedIndex.index(
-                itemID: item.record.id, tokens: item.tokens, now: work.workNow)
+        // BM25 — one index call per record, ALL inside ONE storage
+        // transaction (DRAIN-BATCH-TXN, 2026-08-29): index() upserts one row
+        // per TERM, and autocommitted per-term writes made SQLite's WAL
+        // autocheckpoint fsync the volume every ~1000 frames — sampled at
+        // 98% of drain wall time on an external drive, freezing large-estate
+        // encode backfills. One commit per batch = one checkpoint's worth of
+        // WAL growth, and the batch lands atomically.
+        let batchIndex = self.invertedIndex
+        let batchPairs = zip(pendingWork, embedded).map {
+            (id: $1.record.id, tokens: $1.tokens, now: $0.workNow)
+        }
+        try await storage.transaction(isolation: .serializable) { txn in
+            for pair in batchPairs {
+                try await batchIndex.index(
+                    itemID: pair.id, tokens: pair.tokens, now: pair.now,
+                    into: txn.rowStore)
+            }
         }
         // Vector rows — ONE addPayloads call for the entire batch (Cause 5 fix).
         let allVectorRows = embedded.flatMap(\.vectorRows)

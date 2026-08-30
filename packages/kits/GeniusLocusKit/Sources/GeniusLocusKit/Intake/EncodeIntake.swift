@@ -386,9 +386,11 @@ public extension GeniusLocusKit {
     ///
     /// Use this after deploying the dual-path intake fix to backfill the existing
     /// drawers that were captured before the encode pipeline was wired. Each
-    /// missing drawer is enqueued onto the Corpus ingest queue — the Corpus
-    /// drain worker ingests them (BM25 + vector) asynchronously, so this call
-    /// returns quickly regardless of estate size.
+    /// missing drawer is enqueued onto the Corpus ingest queue in bounded
+    /// passes, and THIS CALL BLOCKS until every pass has drained and the
+    /// retrain tail has run — call it from a background task (the
+    /// `moot_reindex` / `moot_palace_import` pattern), or use
+    /// `reindexMissingDeferred` which schedules that task for you.
     ///
     /// **Idempotent:** drawers already in the BundleStore (identified by
     /// `Corpus.indexedSourceIDs()`) are skipped. Calling this multiple times is
@@ -413,6 +415,67 @@ public extension GeniusLocusKit {
     /// - Returns: The number of drawers enqueued for re-encoding (≤ reindexMaxJobs).
     /// - Throws: An estate-not-open error if the handle is stale; a corpus query
     ///   error if the indexed-source-IDs query fails; an estate recall error.
+    /// Deferred variant of `reindexMissing` for bulk-import tails: counts
+    /// the missing set synchronously (the caller's report number), then
+    /// runs the full backfill — auto-continued passes, retrain tail,
+    /// Merkle rollup, C3 marker — on a DETACHED task and returns. This is
+    /// the `moot_palace_import`/`moot_reindex` background contract applied
+    /// at the kit seam: an import returns when its rows are durable;
+    /// encode convergence is watched via `moot_drain_status` /
+    /// `moot_rebuild_status`. A synchronous Phase-7 `reindexMissing` call
+    /// blocked `moot_json_import` for the corpus's entire drain-and-retrain
+    /// — 17 hours at 185k drawers (2026-08-30) — while the Rust port
+    /// already backfilled in the background.
+    ///
+    /// The derived-rebuild span is opened BEFORE this returns and closed by
+    /// the detached task, so `moot_rebuild_status` never reads idle in the
+    /// scheduling gap between return and the backfill's first pass (spans
+    /// are a count, so this one nests over `reindexMissing`'s own).
+    ///
+    /// - Returns: The number of drawers that still need encoding — for a
+    ///   fresh import, exactly the non-empty records just written.
+    func reindexMissingDeferred(
+        handle: EstateHandle,
+        now: Date
+    ) async throws -> Int {
+        guard let corpus = corpusKits[handle] else { return 0 }
+        let estate = try estate(for: handle)
+
+        // Exact pending count: one bounded paged walk against a single
+        // indexed-IDs snapshot — the backfill's sweep shape, counting only.
+        let indexedIDs = try await corpus.indexedSourceIDs()
+        var pending = 0
+        var cursor: String?
+        while true {
+            let page = try await estate.activeDrawersAfter(id: cursor, limit: Self.reindexScanPageSize)
+            if page.isEmpty { break }
+            cursor = page.last?.id
+            for drawer in page where !drawer.content.isEmpty && !indexedIDs.contains(drawer.id) {
+                pending += 1
+            }
+            if page.count < Self.reindexScanPageSize { break }
+        }
+        if pending == 0 {
+            Self.intakeLog.info(
+                "reindexMissingDeferred: nothing to index for estate \(handle.estateUUID, privacy: .public) — no backfill scheduled")
+            return 0
+        }
+
+        derivedRebuildSpan(handle, open: true)
+        Task.detached { [self] in
+            do {
+                let n = try await reindexMissing(handle: handle, now: now)
+                Self.intakeLog.info(
+                    "reindexMissingDeferred: background backfill complete — \(n, privacy: .public) drawers to full coverage for estate \(handle.estateUUID, privacy: .public)")
+            } catch {
+                Self.intakeLog.error(
+                    "reindexMissingDeferred: background backfill failed for estate \(handle.estateUUID, privacy: .public): \(error, privacy: .public)")
+            }
+            await derivedRebuildSpan(handle, open: false)
+        }
+        return pending
+    }
+
     func reindexMissing(
         handle: EstateHandle,
         now: Date

@@ -43,6 +43,22 @@ public protocol GoldMinerEngine: Sendable {
     /// Mint one claim. Nil = per-prompt failure; the caller records a
     /// failed pair and continues.
     func mint(prompt: String) async -> String?
+    /// How many `mint` calls this engine serves CONCURRENTLY without
+    /// degrading — the fan-out width mint drivers (AdornmentPass) bound
+    /// their task groups to. 1 = the engine is serial (a single resident
+    /// model context or a single subprocess pipe); >1 requires `mint` to
+    /// be safe and productive under that many in-flight calls. The Apple
+    /// engine is request-per-call against the OS inference service, which
+    /// pipelines concurrent client requests (fleet builds sustained ~60
+    /// concurrent minting processes); resident GGUF contexts and command
+    /// pipes are 1.
+    var maxConcurrentMints: Int { get }
+}
+
+public extension GoldMinerEngine {
+    /// Serial by default: an engine that does not declare a width is a
+    /// single-context engine.
+    var maxConcurrentMints: Int { 1 }
 }
 
 // MARK: - Resident owner
@@ -67,6 +83,14 @@ public actor GoldMiner {
 
     /// The active engine's identity, or nil when no engine is installed.
     public var engineIdentity: String? { engine?.identity }
+
+    /// The effective engine's declared mint fan-out width (resolving the
+    /// engine if needed), or 1 when no engine is available. Mint drivers
+    /// bound their task groups to this — see
+    /// `GoldMinerEngine.maxConcurrentMints`.
+    public func mintWidth() -> Int {
+        max(1, effectiveEngine()?.maxConcurrentMints ?? 1)
+    }
 
     /// Resolve the effective engine: an installed engine wins; otherwise
     /// an EXPLICIT `MOOT_MINT_CMD` (the harness audition vehicle — an
@@ -131,6 +155,21 @@ public final class AppleFoundationEngine: GoldMinerEngine {
     /// The composed recipe ID (`apple-fm-p<N>-s<N>`) — the cross-device
     /// minter identity stamped on this engine's adornment rows.
     public let identity = MinterRecipe.apple.id
+
+    /// Mint fan-out width. Each `mint` call is an independent
+    /// session-per-request against the OS inference service, which
+    /// pipelines concurrent clients (single-request latency ~2s at ~10%
+    /// service utilization; fleet builds sustained ~60 concurrent minting
+    /// processes). 12 balances throughput against starving the service's
+    /// other clients; `MOOT_MINT_WIDTH` overrides for ops tuning (read
+    /// here beside the established MOOT_MINT_CMD env seam).
+    public let maxConcurrentMints: Int = {
+        if let raw = ProcessInfo.processInfo.environment["MOOT_MINT_WIDTH"],
+           let width = Int(raw), width >= 1 {
+            return width
+        }
+        return 12
+    }()
 
     /// Nil when the platform or runtime cannot serve the model (pre-26 OS,
     /// model disabled/not downloaded, non-Apple toolchain).
