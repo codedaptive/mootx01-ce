@@ -10,10 +10,11 @@
 //! minted (rows are interchangeable across ports and sync freely; the
 //! port is the executor, never part of the contract).
 //!
-//! Model choice is a DEVELOPER BUILD-TIME decision (Bob, 2026-08-26):
-//! the recipes below are plain constants, flippable at compile time via
-//! the Makefile/sed. There is no runtime model discovery and no
-//! user-facing swap surface in this edition.
+//! Model choice is an OPERATOR START-TIME decision (Bob D4 ruling,
+//! 2026-08-31, superseding the 2026-08-26 build-time ruling): the serve
+//! process selects a recipe from the registry below via `MOOT_MINT_MODEL`
+//! (default `qwen2-0.5b-q4km`). There is no runtime model discovery and
+//! no user-facing swap surface in this edition.
 //!
 //! ── RECIPE VERSION LEDGER ──────────────────────────────────────────────
 //! Git is the history: this block always states ONLY the current recipes;
@@ -21,7 +22,10 @@
 //! IDs live forever in every estate's `adornment_minters` rows (with
 //! digests proving which recipe they were).
 //!
-//!   qwen2-0.5b-q4km   p1  s1   (quantized in-process engine default GGUF)
+//!   qwen2-0.5b-q4km      p2  s1   (quantized in-process engine default GGUF)
+//!   qwen2.5-0.5b-q4km    p2  s1
+//!   nuextract-tiny-q4km  p1  s1   (native extraction template, no chat frame)
+//!   qwen2.5-1.5b-q4km    p2  s1   (quality-ceiling reference arm)
 //!
 //! RULES (mirror of the bitmap-bit doctrine):
 //!   - NEVER reuse a version number. A retired p2 means the next prompt is
@@ -149,22 +153,29 @@ impl MinterRecipe {
 
 // ── Built-in recipes (the compile-time constants block) ─────────────────────
 
-/// The Qwen2-family chatml wrapper: system + user turns, ending at the
-/// assistant sentinel so the model generates the turn directly.
-pub const CHATML_TEMPLATE: &str = "<|im_start|>system\n{system}\n<|im_end|>\n<|im_start|>user\n{input}\n<|im_end|>\n<|im_start|>assistant\n";
+/// The Qwen2-family chatml wrapper: a single USER turn ending at the
+/// assistant sentinel so the model generates the turn directly. No
+/// system turn — the minting instruction rides inside the user prompt
+/// (`build_adornment_prompt`), and the frame is byte-identical to the
+/// Swift Core AI `.chat` frame (D1 frame ruling, Bob 2026-08-31: the
+/// user-only frame won; the system-turn wrapper is retired as p1).
+pub const CHATML_TEMPLATE: &str = "<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n";
 
-/// The Rust port's quantized in-process engine recipe. The GGUF at
-/// `<data>/goldminer/model.gguf` is EXPECTED to be the artifact this
-/// model token names; swapping the artifact is a build-time decision
-/// that changes this constant in the same commit.
+/// The Rust port's DEFAULT quantized in-process engine recipe. The GGUF
+/// at `<data>/goldminer/model.gguf` is EXPECTED to be the artifact the
+/// selected recipe's model token names: the recipe is selected at serve
+/// start (`MOOT_MINT_MODEL`, default this constant), and pairing the
+/// matching artifact with the selection is the operator's contract —
+/// the minter identity row records which recipe minted every claim.
 pub const QUANTIZED_RECIPE: MinterRecipe = MinterRecipe {
     model: "qwen2-0.5b-q4km",
-    prompt_version: 1,
+    // p2 (2026-08-31): user-only frame — the p1 system-turn wrapper is
+    // retired; estates carry p1 rows forever, digests disambiguate.
+    prompt_version: 2,
     settings_version: 1,
-    system_prompt: "You are a precise knowledge minter. \
-Given a memory record and a minting instruction, output exactly ONE \
-short, dense claim line. No preamble, no explanation, no markdown \
-fences, no list markers. Output the claim and nothing else.",
+    // Empty by the D1 ruling: chat recipes carry no system text; the
+    // whole instruction lives in the assembled user prompt.
+    system_prompt: "",
     chat_template: CHATML_TEMPLATE,
     parameters: &[
         ("max_length", "280"),
@@ -174,6 +185,72 @@ fences, no list markers. Output the claim and nothing else.",
     output: MintOutputKind::Text,
     family: "quantized",
 };
+
+/// Qwen2.5-0.5B-Instruct Q4_K_M: same architecture and prompt contract
+/// as the default — a pure model-token change.
+pub const QWEN25_05B_RECIPE: MinterRecipe = MinterRecipe {
+    model: "qwen2.5-0.5b-q4km",
+    ..QUANTIZED_RECIPE
+};
+
+/// NuExtract-tiny v1.5 Q4_K_M: extraction-specialized Qwen2.5-0.5B.
+/// Trained on its own plain input/output format (no chatml, no system
+/// turn) and emits JSON against the template — the normalizer's Json
+/// branch flattens it to the claim line deterministically.
+pub const NUEXTRACT_TINY_RECIPE: MinterRecipe = MinterRecipe {
+    model: "nuextract-tiny-q4km",
+    // Pinned p1: the native template is unchanged by the D1 frame
+    // ruling (it never had a chat frame), so inheriting the chat
+    // recipes' p2 would falsely retire a prompt that never changed.
+    prompt_version: 1,
+    system_prompt: "",
+    chat_template: "<|input|>\n### Template:\n{\"claim\": \"\", \"entities\": [], \"dates\": [], \"quantities\": []}\n### Text:\n{input}\n<|output|>\n",
+    output: MintOutputKind::Json,
+    ..QUANTIZED_RECIPE
+};
+
+/// Qwen2.5-1.5B-Instruct Q4_K_M: the quality-ceiling reference arm.
+/// Same contract as the 0.5B chat recipes; ~3x the compute per token
+/// and over the 1 GiB product residency budget.
+pub const QWEN25_15B_RECIPE: MinterRecipe = MinterRecipe {
+    model: "qwen2.5-1.5b-q4km",
+    ..QUANTIZED_RECIPE
+};
+
+/// Resolve a swappable engine recipe by its model token. The registry
+/// is the vocabulary of models the port can run — selection happens at
+/// serve start; an unknown token is a configuration error the caller
+/// surfaces loudly (never a silent fallback).
+pub fn recipe_for_model(token: &str) -> Option<MinterRecipe> {
+    match token {
+        "qwen2-0.5b-q4km" => Some(QUANTIZED_RECIPE),
+        "qwen2.5-0.5b-q4km" => Some(QWEN25_05B_RECIPE),
+        "nuextract-tiny-q4km" => Some(NUEXTRACT_TINY_RECIPE),
+        "qwen2.5-1.5b-q4km" => Some(QWEN25_15B_RECIPE),
+        _ => None,
+    }
+}
+
+/// The serve-start recipe selection: `MOOT_MINT_MODEL` names a registry
+/// token (unset/empty = the default `QUANTIZED_RECIPE`). An unknown
+/// token is a configuration error returned as `Err` — the caller
+/// surfaces it loudly and installs NO engine; there is never a silent
+/// fallback to a different model, because the minter identity row must
+/// record exactly what the operator selected.
+pub fn selected_recipe() -> Result<MinterRecipe, String> {
+    match std::env::var("MOOT_MINT_MODEL") {
+        Err(std::env::VarError::NotPresent) => Ok(QUANTIZED_RECIPE),
+        Err(e) => Err(format!("MOOT_MINT_MODEL unreadable: {e}")),
+        Ok(token) if token.trim().is_empty() => Ok(QUANTIZED_RECIPE),
+        Ok(token) => recipe_for_model(token.trim()).ok_or_else(|| {
+            format!(
+                "MOOT_MINT_MODEL={token:?} is not a registered model token \
+                 (known: qwen2-0.5b-q4km, qwen2.5-0.5b-q4km, \
+                 nuextract-tiny-q4km, qwen2.5-1.5b-q4km)"
+            )
+        }),
+    }
+}
 
 // ── Digest (FNV-1a 64) ──────────────────────────────────────────────────────
 
@@ -324,11 +401,11 @@ mod tests {
 
     #[test]
     fn composed_id_and_descriptor() {
-        assert_eq!(QUANTIZED_RECIPE.id(), "qwen2-0.5b-q4km-p1-s1");
+        assert_eq!(QUANTIZED_RECIPE.id(), "qwen2-0.5b-q4km-p2-s1");
         let d = QUANTIZED_RECIPE.descriptor("row-7", true);
-        assert_eq!(d.name, "qwen2-0.5b-q4km-p1-s1");
+        assert_eq!(d.name, "qwen2-0.5b-q4km-p2-s1");
         assert_eq!(d.model_id, "qwen2-0.5b-q4km");
-        assert_eq!(d.model_version, "p1-s1");
+        assert_eq!(d.model_version, "p2-s1");
         assert_eq!(d.family, "quantized");
         assert_eq!(d.prompt_digest, QUANTIZED_RECIPE.prompt_digest());
         assert_eq!(
@@ -337,6 +414,36 @@ mod tests {
         );
         assert_eq!(d.parameters.get("sampling"), Some(&"greedy".to_string()));
         assert!(d.is_active);
+    }
+
+    /// The D1 user-only frame, byte-pinned against the Swift Core AI
+    /// `.chat` frame (CoreAIEngine.frameFor): identical rendered bytes
+    /// for the same user prompt is the cross-port frame contract.
+    #[test]
+    fn user_only_frame_matches_swift_chat_frame() {
+        assert_eq!(
+            QUANTIZED_RECIPE.assemble_prompt("PROMPT"),
+            "<|im_start|>user\nPROMPT<|im_end|>\n<|im_start|>assistant\n"
+        );
+        // No system turn anywhere in the chat recipes' rendered prompt.
+        assert!(!QUANTIZED_RECIPE.assemble_prompt("x").contains("<|im_start|>system"));
+    }
+
+    /// Registry contract: every shipped token resolves; unknown tokens
+    /// are None (the caller errors loudly, never falls back silently).
+    #[test]
+    fn recipe_registry_resolves_known_tokens_only() {
+        assert_eq!(recipe_for_model("qwen2-0.5b-q4km"), Some(QUANTIZED_RECIPE));
+        assert_eq!(recipe_for_model("qwen2.5-0.5b-q4km"), Some(QWEN25_05B_RECIPE));
+        assert_eq!(recipe_for_model("nuextract-tiny-q4km"), Some(NUEXTRACT_TINY_RECIPE));
+        assert_eq!(recipe_for_model("qwen2.5-1.5b-q4km"), Some(QWEN25_15B_RECIPE));
+        assert_eq!(recipe_for_model("qwen9-77b"), None);
+        // Chat descendants share the p2 frame contract; NuExtract's
+        // native template never changed, so it stays p1 (explicit pin —
+        // struct-update inheritance must not bump it).
+        assert_eq!(QWEN25_05B_RECIPE.id(), "qwen2.5-0.5b-q4km-p2-s1");
+        assert_eq!(QWEN25_15B_RECIPE.id(), "qwen2.5-1.5b-q4km-p2-s1");
+        assert_eq!(NUEXTRACT_TINY_RECIPE.id(), "nuextract-tiny-q4km-p1-s1");
     }
 
     /// Shared normalizer fixtures — same inputs and expected outputs are

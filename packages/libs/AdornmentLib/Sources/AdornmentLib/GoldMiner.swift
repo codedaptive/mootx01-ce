@@ -2,7 +2,7 @@
 //
 // The resident gold-miner seam (ADORNMENTLIB_SPEC 0.5.0 § Gold miner).
 //
-// Requirements (Bob, 2026-08-26 — verbatim constraints):
+// Requirements (operator ruling 2026-08-26 — verbatim constraints):
 //   - EVERY record in the database must be adorned; coverage is a MUST.
 //   - Sustained single-record ingest (hundreds/hour) and bulk import both
 //     feed the miner; it is NOT a lightly used tool.
@@ -37,7 +37,7 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
 public protocol GoldMinerEngine: Sendable {
     /// Stable identity for logs, run provenance, and the minter master.
     /// Product engines use their recipe's composed ID (e.g.
-    /// "apple-fm-p1-s1", "qwen2-0.5b-q4km-p1-s1"); the harness command
+    /// "apple-fm-p1-s1", "qwen2-0.5b-q4km-p2-s1"); the harness command
     /// engine uses its command name. Never a user-facing name.
     var identity: String { get }
     /// Mint one claim. Nil = per-prompt failure; the caller records a
@@ -53,12 +53,36 @@ public protocol GoldMinerEngine: Sendable {
     /// concurrent minting processes); resident GGUF contexts and command
     /// pipes are 1.
     var maxConcurrentMints: Int { get }
+    /// Row-batch transport (operator design 2026-08-30): an engine that can
+    /// hold a task-instructed session and answer batches of records as
+    /// row data declares true and implements `mintRows`. Transport only —
+    /// the minter identity and prompt digest are unchanged. A protocol
+    /// REQUIREMENT, never extension-only: `GoldMiner` reads it through
+    /// `any GoldMinerEngine`, where an extension-only member statically
+    /// dispatches to the default and every concrete override is
+    /// unreachable (2026-08-30: rows mode silently fell to singles on
+    /// every drain because of exactly that).
+    var supportsRowBatching: Bool { get }
+    /// Mint one batch of row payloads (see `buildAdornmentRow`). Position
+    /// k carries row k's claim, nil for a per-row failure. A protocol
+    /// requirement for the same existential-dispatch reason as
+    /// `supportsRowBatching`.
+    func mintRows(_ rows: [String], maxLength: Int) async -> [String?]
 }
 
 public extension GoldMinerEngine {
     /// Serial by default: an engine that does not declare a width is a
     /// single-context engine.
     var maxConcurrentMints: Int { 1 }
+
+    /// Engines that do not speak the row-batch transport inherit these
+    /// defaults; the nil-array reply is unreachable behind
+    /// `supportsRowBatching == false`.
+    var supportsRowBatching: Bool { false }
+
+    func mintRows(_ rows: [String], maxLength: Int) async -> [String?] {
+        Array(repeating: nil, count: rows.count)
+    }
 }
 
 // MARK: - Resident owner
@@ -72,13 +96,120 @@ public actor GoldMiner {
 
     private var engine: (any GoldMinerEngine)?
 
-    /// Install the process's engine. The composition layer calls this once
-    /// at startup (or on minter-family activation). Installing a different
-    /// engine replaces the old one; the old engine's residency is released
-    /// by its own deinit.
+    #if MOOTX01_MULTI_MODEL
+    /// Per-minter engine registry (multi-model mode, operator ruling
+    /// 2026-08-31). DEVELOPER-ONLY, compile-time gated: build with
+    /// `-Xswiftc -DMOOTX01_MULTI_MODEL` to enable. The shipped product
+    /// runs ONE resident engine (the resident rule bounds memory on user
+    /// machines); multi-arm minting is a bench/dev capability. A pair
+    /// whose minter id is registered here mints through its own engine;
+    /// unregistered minters fall through to the default engine. Engines
+    /// on different silicon (FM service / in-process Metal) naturally
+    /// overlap under the pass's width fan-out — multi-arm concurrency
+    /// needs no orchestration beyond this routing table.
+    private var minterEngines: [String: any GoldMinerEngine] = [:]
+    #endif
+
+    /// Install the process's DEFAULT engine. The composition layer calls
+    /// this once at startup (or on minter-family activation). Installing
+    /// a different engine replaces the old one; the old engine's
+    /// residency is released by its own deinit.
     public func install(engine: any GoldMinerEngine) {
         log.info("GoldMiner: engine installed — \(engine.identity)")
         self.engine = engine
+    }
+
+    #if MOOTX01_MULTI_MODEL
+    /// Whether MOOT_MINT_ARMS has been parsed for this process (one-shot;
+    /// explicit installs are never overwritten by the env pass).
+    private var armsLoaded = false
+
+    /// Load per-minter arm engines from MOOT_MINT_ARMS, once per process.
+    ///
+    /// Format: `minterID=<engine>[;minterID=<engine>...]` where <engine>
+    /// is either a minter-command path (CommandEngine — prompt on stdin,
+    /// claim on stdout) or `coreai:<asset.aimodel>:<tokenizer.json>`
+    /// (CoreAIEngine — in-process greedy decode, macOS 27+). Explicitly
+    /// installed engines win over env entries. Developer-only wiring:
+    /// the variable is only read in MOOTX01_MULTI_MODEL builds, and a
+    /// shipped product build has no code that looks at it.
+    private func loadArmsIfNeeded() async {
+        guard !armsLoaded else { return }
+        armsLoaded = true
+        guard let spec = ProcessInfo.processInfo.environment["MOOT_MINT_ARMS"],
+              !spec.isEmpty else { return }
+        for entry in spec.split(separator: ";") {
+            let parts = entry.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else {
+                log.error("GoldMiner: malformed MOOT_MINT_ARMS entry '\(entry)' — skipped")
+                continue
+            }
+            let minterID = String(parts[0])
+            let value = String(parts[1])
+            guard minterEngines[minterID] == nil else { continue }
+            if value.hasPrefix("coreai:") {
+                #if canImport(CoreAI)
+                guard #available(macOS 27.0, *) else {
+                    log.error("GoldMiner: coreai arm \(minterID) needs macOS 27 — skipped")
+                    continue
+                }
+                // coreai:<style>:<asset.aimodel>:<tokenizer.json>
+                let paths = value.dropFirst("coreai:".count).split(separator: ":")
+                guard paths.count == 3,
+                      let style = CoreAIPromptStyle(rawValue: String(paths[0]))
+                else {
+                    log.error("GoldMiner: coreai arm \(minterID) wants <chat|plain|nuextract>:<asset>:<tokenizer> — skipped")
+                    continue
+                }
+                do {
+                    let engine = try await CoreAIEngine(
+                        assetPath: String(paths[1]),
+                        tokenizerPath: String(paths[2]),
+                        identity: minterID,
+                        style: style)
+                    minterEngines[minterID] = engine
+                    log.info("GoldMiner: coreai arm loaded for \(minterID)")
+                } catch {
+                    log.error("GoldMiner: coreai arm \(minterID) failed to load — \(error)")
+                }
+                #else
+                log.error("GoldMiner: coreai arm \(minterID) — CoreAI unavailable in this build")
+                #endif
+            } else {
+                let engine = CommandEngine(command: value)
+                minterEngines[minterID] = engine
+                log.info("GoldMiner: arm engine loaded for \(minterID) — \(engine.identity)")
+            }
+        }
+    }
+
+    /// Install an engine for ONE minter id (multi-model mode). Replaces
+    /// any prior engine for that minter; the default engine is untouched.
+    public func install(engine: any GoldMinerEngine, for minterID: String) {
+        log.info("GoldMiner: engine installed for \(minterID) — \(engine.identity)")
+        minterEngines[minterID] = engine
+    }
+
+    /// Remove one minter's engine registration (its residency is
+    /// released by the engine's own deinit). The default engine is
+    /// never removed this way.
+    public func uninstallEngine(for minterID: String) {
+        minterEngines[minterID] = nil
+    }
+    #endif
+
+    /// Resolve the engine for a minter id: the multi-model registry
+    /// first (when compiled in), then the default resolution chain. In
+    /// the shipped product build this is exactly the default chain — the
+    /// minter id changes nothing.
+    private func engine(for minterID: String?) async -> (any GoldMinerEngine)? {
+        #if MOOTX01_MULTI_MODEL
+        await loadArmsIfNeeded()
+        if let minterID, let dedicated = minterEngines[minterID] { return dedicated }
+        #else
+        _ = minterID
+        #endif
+        return effectiveEngine()
     }
 
     /// The active engine's identity, or nil when no engine is installed.
@@ -88,8 +219,36 @@ public actor GoldMiner {
     /// engine if needed), or 1 when no engine is available. Mint drivers
     /// bound their task groups to this — see
     /// `GoldMinerEngine.maxConcurrentMints`.
-    public func mintWidth() -> Int {
-        max(1, effectiveEngine()?.maxConcurrentMints ?? 1)
+    public func mintWidth() async -> Int {
+        let base = effectiveEngine()?.maxConcurrentMints ?? 1
+        #if MOOTX01_MULTI_MODEL
+        // Sum, not max: each registered arm runs its own lane in the
+        // pass, so the total in-flight bound is every engine's width
+        // together (engines sit on different silicon; one engine's wait
+        // is another's runtime).
+        await loadArmsIfNeeded()
+        let dedicated = minterEngines.values.map(\.maxConcurrentMints).reduce(0, +)
+        return max(1, base + dedicated)
+        #else
+        return max(1, base)
+        #endif
+    }
+
+    /// The declared width of the engine that serves `minterID` — the
+    /// pass sizes each minter's lane with this.
+    public func mintWidth(for minterID: String) async -> Int {
+        max(1, await engine(for: minterID)?.maxConcurrentMints ?? 1)
+    }
+
+    /// Row-batch mint through the effective engine, or nil when the
+    /// engine does not speak the row-batch transport — the caller then
+    /// mints those rows through the single-record path. See
+    /// `GoldMinerEngine.mintRows`.
+    public func mintRows(
+        _ rows: [String], maxLength: Int, for minterID: String? = nil
+    ) async -> [String?]? {
+        guard let engine = await engine(for: minterID), engine.supportsRowBatching else { return nil }
+        return await engine.mintRows(rows, maxLength: maxLength)
     }
 
     /// Resolve the effective engine: an installed engine wins; otherwise
@@ -118,10 +277,20 @@ public actor GoldMiner {
         return nil
     }
 
+    /// The resolved engine for a minter, for callers that mint OUTSIDE
+    /// this actor (the pass's per-minter lanes): holding the actor for
+    /// the duration of a generation serializes every lane through one
+    /// mutex — with multi-model arms that collapses all concurrency
+    /// (measured 2026-08-31: four active lanes produced ~4 mints in six
+    /// minutes while queued behind each other).
+    public func engineRef(for minterID: String? = nil) async -> (any GoldMinerEngine)? {
+        await engine(for: minterID)
+    }
+
     /// One-off mint for the impatient write path. Resident engine makes
     /// this sub-second; there is no load cost on this path by design.
-    public func mintOne(prompt: String) async -> String? {
-        guard let engine = effectiveEngine() else {
+    public func mintOne(prompt: String, for minterID: String? = nil) async -> String? {
+        guard let engine = await engine(for: minterID) else {
             log.debug("GoldMiner: no engine — mint skipped")
             return nil
         }
@@ -156,20 +325,14 @@ public final class AppleFoundationEngine: GoldMinerEngine {
     /// minter identity stamped on this engine's adornment rows.
     public let identity = MinterRecipe.apple.id
 
-    /// Mint fan-out width. Each `mint` call is an independent
-    /// session-per-request against the OS inference service, which
-    /// pipelines concurrent clients (single-request latency ~2s at ~10%
-    /// service utilization; fleet builds sustained ~60 concurrent minting
-    /// processes). 12 balances throughput against starving the service's
-    /// other clients; `MOOT_MINT_WIDTH` overrides for ops tuning (read
-    /// here beside the established MOOT_MINT_CMD env seam).
-    public let maxConcurrentMints: Int = {
-        if let raw = ProcessInfo.processInfo.environment["MOOT_MINT_WIDTH"],
-           let width = Int(raw), width >= 1 {
-            return width
-        }
-        return 12
-    }()
+    /// Width 1: FoundationModels serializes every in-process session
+    /// through the process's single inference-service connection —
+    /// measured 2026-08-30: a width-12 in-process task group gained
+    /// nothing, while 8 SEPARATE processes scaled 8x at unchanged
+    /// per-call latency. Process-level fan-out lives in `CommandEngine`
+    /// (a pool of resident minter subprocesses); this engine stays the
+    /// serial in-process default.
+    public let maxConcurrentMints: Int = 1
 
     /// Nil when the platform or runtime cannot serve the model (pre-26 OS,
     /// model disabled/not downloaded, non-Apple toolchain).
@@ -203,6 +366,54 @@ public final class AppleFoundationEngine: GoldMinerEngine {
         return nil
         #endif
     }
+
+    // MARK: Row-batch transport
+
+    public var supportsRowBatching: Bool { true }
+
+    public func mintRows(_ rows: [String], maxLength: Int) async -> [String?] {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, iOS 26.0, *) else {
+            return Array(repeating: nil, count: rows.count)
+        }
+        return await mintRowFrame(rows, maxLength: maxLength)
+        #else
+        return Array(repeating: nil, count: rows.count)
+        #endif
+    }
+
+    #if canImport(FoundationModels)
+    /// One batch = one independent light request (operator ruling 2026-08-30:
+    /// batches are stateless by protocol — the previous batch is
+    /// answered and gone, never context for the next). Each frame runs
+    /// against ONLY the standing instructions plus its own records, so
+    /// every request stays at minimum prompt weight; an accumulating
+    /// transcript made each frame heavier, forced cache-destroying
+    /// resets, and collapsed service throughput (measured 2026-08-30).
+    /// The service caches the shared instruction prefix across sessions,
+    /// so a fresh session per frame re-pays only its own rows.
+    @available(macOS 26.0, iOS 26.0, *)
+    private func mintRowFrame(_ rows: [String], maxLength: Int) async -> [String?] {
+        let prompt = formatAdornmentBatchPrompt(rows: rows)
+        let session = LanguageModelSession(
+            instructions: adornmentBatchInstructions(maxLength: maxLength))
+        do {
+            let raw = try await session.respond(
+                to: prompt, options: GenerationOptions(sampling: .greedy)).content
+            return parseAdornmentBatchReply(raw, expectedRows: rows.count).map { claim in
+                guard let claim else { return nil }
+                let normalized = normalizeMintOutput(claim, kind: MinterRecipe.apple.output)
+                return normalized.isEmpty ? nil : normalized
+            }
+        } catch {
+            // A batch-level failure (guardrail, context, model error)
+            // fails every row; the caller retries them through the
+            // single-record path.
+            log.error("AppleFoundationEngine batch: \(error)")
+            return Array(repeating: nil, count: rows.count)
+        }
+    }
+    #endif
 }
 
 #if os(macOS)
@@ -217,13 +428,88 @@ public final class CommandEngine: GoldMinerEngine {
     public let identity: String
     private let command: String
 
+    /// Process-level fan-out: the OS inference service pipelines SEPARATE
+    /// minter processes (measured 2026-08-30: 8 concurrent apple-mint
+    /// processes scaled 8x at unchanged per-call latency, while in-process
+    /// session concurrency gained nothing). Width comes from
+    /// MOOT_MINT_WIDTH (default 1 — the end-user product needs no
+    /// environment wiring); width > 1 runs a pool of resident batch
+    /// sessions, each owning its own child process, with callers
+    /// distributed round-robin. Batch capability is probed per session;
+    /// a one-shot minter (no batch protocol) stays width-1 through the
+    /// module seam regardless of the requested width.
+    public let maxConcurrentMints: Int
+
+    /// Dedicated resident sessions for width > 1 (index 0 unused at
+    /// width 1 — the module seam's shared session serves that shape,
+    /// keeping the single-worker path identical to the pre-pool code).
+    private let pool: [ResidentMintSession]
+    private let picker = PoolPicker()
+
+    /// Round-robin distributor. An actor so the counter is race-free
+    /// under the pass's task-group callers.
+    private actor PoolPicker {
+        private var next = 0
+        func index(of count: Int) -> Int {
+            defer { next = (next + 1) % max(count, 1) }
+            return next % max(count, 1)
+        }
+    }
+
     public init(command: String) {
         self.command = command
         self.identity = "command:\((command as NSString).lastPathComponent)"
+        let width: Int
+        if let raw = ProcessInfo.processInfo.environment["MOOT_MINT_WIDTH"],
+           let parsed = Int(raw), parsed >= 1 {
+            width = parsed
+        } else {
+            width = 1
+        }
+        self.maxConcurrentMints = width
+        self.pool = width > 1 ? (0..<width).map { _ in ResidentMintSession() } : []
     }
 
     public func mint(prompt: String) async -> String? {
-        await invokeAdornmentCommand(prompt: prompt, command: command)
+        guard !pool.isEmpty else {
+            return await invokeAdornmentCommand(prompt: prompt, command: command)
+        }
+        let session = pool[await picker.index(of: pool.count)]
+        if await session.supportsBatch(command: command) {
+            return await session.mint(prompt: prompt, command: command)
+        }
+        // One-shot minters cannot hold a resident child; serve the call
+        // through the module seam (spawn-per-prompt) instead.
+        return await invokeAdornmentCommand(prompt: prompt, command: command)
+    }
+
+    // MARK: Row-batch transport over the pool
+
+    /// Row batching engages only when MOOT_MINT_ROWS=1 marks the command
+    /// as speaking the `--rows` frame protocol (apple-fm-mint does; a
+    /// generic minter command does not). Combined with width > 1 this is
+    /// the batches-x-slots shape: each pool child holds one row-protocol
+    /// session and every frame carries a whole multi-record prompt.
+    public var supportsRowBatching: Bool {
+        !pool.isEmpty
+            && ProcessInfo.processInfo.environment["MOOT_MINT_ROWS"] == "1"
+    }
+
+    public func mintRows(_ rows: [String], maxLength: Int) async -> [String?] {
+        guard supportsRowBatching else {
+            return Array(repeating: nil, count: rows.count)
+        }
+        let prompt = formatAdornmentBatchPrompt(rows: rows)
+        let session = pool[await picker.index(of: pool.count)]
+        guard let raw = await session.mint(prompt: prompt, command: command, extraArgument: "--rows")
+        else {
+            return Array(repeating: nil, count: rows.count)
+        }
+        return parseAdornmentBatchReply(raw, expectedRows: rows.count).map { claim in
+            guard let claim else { return nil }
+            let normalized = normalizeMintOutput(claim, kind: MinterRecipe.apple.output)
+            return normalized.isEmpty ? nil : normalized
+        }
     }
 }
 #endif

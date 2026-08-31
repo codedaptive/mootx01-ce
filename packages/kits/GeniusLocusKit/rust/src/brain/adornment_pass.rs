@@ -77,7 +77,7 @@ pub fn run_adornment_pass(
         }
 
         // Event date threads through so relative references are calculable
-        // (Bob ruling 2026-08-25). Drawer event_time is epoch millis.
+        // (operator ruling 2026-08-25). Drawer event_time is epoch millis.
         let event_date = iso8601_from_millis(drawer.event_time);
         let text = mint_adornment_map_reduce(
             &drawer.content,
@@ -101,6 +101,14 @@ pub fn run_adornment_pass(
             // is width-1 (one resident GGUF context, one subprocess
             // pipe), so this serial loop IS the width-bounded behavior;
             // a width seam lands here with the first >1 Rust engine.
+            //
+            // Multi-model note (GENIUSLOCUSKIT_SPEC 2.4.0): the Swift
+            // pass routes each pair's generation by minter id through a
+            // developer-only, compile-gated engine registry
+            // (MOOTX01_MULTI_MODEL). The Rust port has one engine seam
+            // (the adornment command), so every minter resolves to it;
+            // a per-minter registry lands here with the first second
+            // Rust engine.
             |prompt| adornment_lib::invoke_adornment_command(prompt, length),
         );
 
@@ -162,7 +170,7 @@ mod tests {
 
     /// End-to-end pass over an in-memory estate with no engine installed:
     /// the mechanical fallback guarantees a non-blank drawer still mints
-    /// (never-nil-for-non-blank, Bob ruling 2026-08-27), so the pass
+    /// (never-nil-for-non-blank, operator ruling 2026-08-27), so the pass
     /// adorns every debt pair deterministically, and a second pass finds
     /// no debt. Twin of the Swift behavior through AdornmentPass.run's
     /// default GoldMiner resolver.

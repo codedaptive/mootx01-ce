@@ -32,5 +32,5 @@ mod quantized_qwen2_lean;
 pub use adornment_validators::{contains_word_boundary, validate_count, validate_date};
 pub use adornment_generator::{ADORNMENT_CHUNK_THRESHOLD, ADORNMENT_MAX_LENGTH, build_adornment_prompt, invoke_adornment_command, mint_adornment_map_reduce};
 pub use adornment_identity::{AdornmentMinterDescriptor, StoredAdornment};
-pub use minter_recipe::{CHATML_TEMPLATE, MintOutputKind, MinterRecipe, QUANTIZED_RECIPE, extract_claim_line, fnv1a64_hex, normalize_mint_output};
+pub use minter_recipe::{CHATML_TEMPLATE, MintOutputKind, MinterRecipe, NUEXTRACT_TINY_RECIPE, QUANTIZED_RECIPE, QWEN25_05B_RECIPE, QWEN25_15B_RECIPE, extract_claim_line, fnv1a64_hex, normalize_mint_output, recipe_for_model, selected_recipe};
 pub use gold_miner::{GoldMinerEngine, QuantizedLlmEngine};
