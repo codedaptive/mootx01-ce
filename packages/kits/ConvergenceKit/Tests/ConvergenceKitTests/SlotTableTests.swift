@@ -56,6 +56,90 @@ private func ghostSlot(number: Int, claimedAt: Date, epoch: Int64 = 1) -> Device
 
 // MARK: - Free slot tests
 
+@Suite("SlotTable: existing device ownership")
+struct SlotTableExistingOwnershipTests {
+
+    @Test("an existing device slot is reused before any free slot")
+    func existingOwnershipPrecedesFreeSlot() {
+        let now = Date()
+        let deviceUUID = UUID()
+        let owned = DeviceSlot(
+            slot: 9,
+            epoch: 4,
+            deviceUUID: deviceUUID,
+            lastActiveHLC: HLC.zero,
+            claimedAt: now
+        )
+        let table = SlotTable(slots: [owned])
+
+        let decision = table.claimSlot(
+            for: deviceUUID,
+            preferring: nil,
+            now: fixedClock(now)
+        )
+
+        #expect(decision == .alreadyOwned(owned))
+    }
+
+    @Test("the preferred owned slot wins when historical duplicates exist")
+    func preferredOwnedDuplicateWins() {
+        let now = Date()
+        let deviceUUID = UUID()
+        let lower = DeviceSlot(
+            slot: 2,
+            epoch: 1,
+            deviceUUID: deviceUUID,
+            lastActiveHLC: HLC.zero,
+            claimedAt: now.addingTimeInterval(-60)
+        )
+        let preferred = DeviceSlot(
+            slot: 11,
+            epoch: 3,
+            deviceUUID: deviceUUID,
+            lastActiveHLC: HLC.zero,
+            claimedAt: now
+        )
+        let table = SlotTable(slots: [lower, preferred])
+
+        let decision = table.claimSlot(
+            for: deviceUUID,
+            preferring: preferred.slot,
+            now: fixedClock(now)
+        )
+
+        #expect(decision == .alreadyOwned(preferred))
+    }
+
+    @Test("the lowest owned slot is deterministic when no preference exists")
+    func lowestOwnedDuplicateWinsWithoutPreference() {
+        let now = Date()
+        let deviceUUID = UUID()
+        let higher = DeviceSlot(
+            slot: 12,
+            epoch: 2,
+            deviceUUID: deviceUUID,
+            lastActiveHLC: HLC.zero,
+            claimedAt: now
+        )
+        let lower = DeviceSlot(
+            slot: 3,
+            epoch: 7,
+            deviceUUID: deviceUUID,
+            lastActiveHLC: HLC.zero,
+            claimedAt: now.addingTimeInterval(-60)
+        )
+        let table = SlotTable(slots: [higher, lower])
+
+        let decision = table.claimSlot(
+            for: deviceUUID,
+            preferring: nil,
+            now: fixedClock(now)
+        )
+
+        #expect(decision == .alreadyOwned(lower))
+    }
+}
+
 @Suite("SlotTable: claim on free registry")
 struct SlotTableFreeTests {
 

@@ -11,13 +11,14 @@
 // the CAS check; saving a different instance for the same slot ID fails with
 // serverRecordChanged, matching production behavior.
 //
-// Coverage (6 test cases + 1 helper):
+// Coverage includes:
 //   1. claim-free-slot        — empty registry → slot 1 claimed
-//   2. claim-race-retries     — two concurrent claims → each wins a distinct slot
-//   3. exhaustion             — all 15 slots active → slotExhausted thrown
-//   4. eviction+epoch-bump    — ghost slot → evicted, epoch bumped
-//   5. fence-epoch-mismatch   — epoch advanced on server → reenrollRequired
-//   6. remint-on-reenroll     — OutboxStore.remintAll changes nodeIDs in outbox
+//   2. same-device reuse      — existing and saturated registries perform zero writes
+//   3. claim-race-retries     — two concurrent claims → each wins a distinct slot
+//   4. exhaustion             — all 15 slots active → slotExhausted thrown
+//   5. eviction+epoch-bump    — ghost slot → evicted, epoch bumped
+//   6. fence-epoch-mismatch   — epoch advanced on server → reenrollRequired
+//   7. remint-on-reenroll     — OutboxStore.remintAll changes nodeIDs in outbox
 
 import Testing
 import Foundation
@@ -315,6 +316,67 @@ struct SlotClaimTests {
         #expect(claimed.epoch == 1, "fresh claim starts at epoch 1")
         #expect(claimed.deviceUUID == deviceUUID)
         #expect(claimed.lastActiveHLC == HLC.zero, "heartbeat happens at push time, not claim time")
+    }
+
+    @Test("an existing device claim is reused without a CloudKit mutation")
+    func existingDeviceClaimIsReused() async throws {
+        let db = FakeCloudKitDatabase()
+        let deviceUUID = UUID()
+        let existing = makeSlot(
+            slotNumber: 7,
+            epoch: 5,
+            deviceUUID: deviceUUID,
+            claimedAt: Date().addingTimeInterval(-300)
+        )
+        await db.seed(record: SlotRecordMapping.record(
+            from: existing,
+            zoneID: testZoneID
+        ))
+        let op = makeClaimOp(database: db, deviceUUID: deviceUUID)
+
+        let claimed = try await op.claim(preferring: existing.slot)
+
+        #expect(claimed.slot == existing.slot)
+        #expect(claimed.epoch == existing.epoch)
+        #expect(claimed.deviceUUID == existing.deviceUUID)
+        #expect(claimed.lastActiveHLC == existing.lastActiveHLC)
+        #expect(abs(claimed.claimedAt.timeIntervalSince(existing.claimedAt)) < 1)
+        #expect(await db.modifyCallCount() == 0)
+    }
+
+    @Test("a saturated registry still reuses this device's existing claim")
+    func saturatedRegistryReusesExistingDeviceClaim() async throws {
+        let db = FakeCloudKitDatabase()
+        let deviceUUID = UUID()
+        let now = Date()
+        var expectedSlot: DeviceSlot?
+        for slotNumber in 1...15 {
+            let slot = makeSlot(
+                slotNumber: slotNumber,
+                epoch: slotNumber == 13 ? 9 : 1,
+                deviceUUID: slotNumber == 13 ? deviceUUID : UUID(),
+                lastActiveHLC: HLC.zero,
+                claimedAt: now
+            )
+            if slotNumber == 13 { expectedSlot = slot }
+            await db.seed(record: SlotRecordMapping.record(
+                from: slot,
+                zoneID: testZoneID
+            ))
+        }
+        let expected = try #require(expectedSlot)
+        let op = makeClaimOp(database: db, deviceUUID: deviceUUID)
+
+        let claimed = try await op.claim(preferring: 13)
+
+        #expect(claimed.slot == expected.slot)
+        #expect(claimed.epoch == expected.epoch)
+        #expect(claimed.deviceUUID == expected.deviceUUID)
+        #expect(claimed.lastActiveHLC == expected.lastActiveHLC)
+        #expect(
+            abs(claimed.claimedAt.timeIntervalSince(expected.claimedAt)) < 1
+        )
+        #expect(await db.modifyCallCount() == 0)
     }
 
     /// Two concurrent claims on an empty registry.
