@@ -171,18 +171,20 @@ public extension GeniusLocusKit {
         // harness engine, else the platform default (Apple's on-device
         // model), else nil
         // (pair counted failed, retried next pass). This is the inline
-        // default-minter path (Bob ruling 2026-08-28) — the command seam is
+        // default-minter path (operator ruling 2026-08-28) — the command seam is
         // one engine the miner can resolve, never the only one.
         return try await AdornmentPass.run(
             estate: estateObj,
             batchSize: batchSize,
+            maxAdornmentLength: length,
             generatorResolver: { minter, drawer in
                 await mintAdornmentMapReduce(
                     drawerContent: drawer.content,
                     eventDate: drawer.eventTime.ISO8601Format(),
                     maxLength: length
                 ) { prompt in
-                    guard let raw = await GoldMiner.shared.mintOne(prompt: prompt) else {
+                    guard let engine = await GoldMiner.shared.engineRef(for: minter.id),
+                          let raw = await engine.mint(prompt: prompt) else {
                         return nil
                     }
                     // Mechanical truncation at the resolved ceiling: engines
@@ -197,7 +199,7 @@ public extension GeniusLocusKit {
     // MARK: - Default-minter registration
 
     /// Ensure the platform-default adornment minter is registered in the
-    /// estate (Bob ruling 2026-08-28: default minters run inline — Swift's
+    /// estate (operator ruling 2026-08-28: default minters run inline — Swift's
     /// default is the Apple FoundationModels recipe).
     ///
     /// Idempotent per open: `registerAdornmentMinter` is an upsert that

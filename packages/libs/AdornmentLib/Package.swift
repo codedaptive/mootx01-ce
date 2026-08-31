@@ -56,7 +56,8 @@ let package = Package(
             dependencies: [
                 "AdornmentLib",
             ],
-            path: "Tests/AdornmentLibTests"
+            path: "Tests/AdornmentLibTests",
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
