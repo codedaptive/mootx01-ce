@@ -658,14 +658,27 @@ impl EstateRegistry {
 // ---------------------------------------------------------------------------
 
 /// Platform-default adornment minter (Bob ruling 2026-08-28): register the
-/// Rust quantized recipe active so the dream-time adornment pass mints
-/// inline, on EVERY estate-open path (SQLite, in-memory, Postgres — Adams
-/// DEFAULT-MINT-01 finding #1). Idempotent upsert; NEVER retoggles an
-/// operator's deactivation (LocusKit registration contract). Best-effort —
-/// an open estate must never fail over minter registration. Mirrors the
-/// Swift ServeCommand/AriaMCPMain ensureDefaultAdornmentMinter call.
+/// SELECTED Rust quantized recipe active so the dream-time adornment pass
+/// mints inline, on EVERY estate-open path (SQLite, in-memory, Postgres —
+/// Adams DEFAULT-MINT-01 finding #1). Selection follows the serve engine
+/// install (`MOOT_MINT_MODEL`, D4 swappability 2026-08-31): registering a
+/// DIFFERENT identity than the installed engine would stamp rows with the
+/// wrong minter, so an invalid selection registers nothing (the engine was
+/// not installed either; the pass falls back mechanically). Idempotent
+/// upsert; NEVER retoggles an operator's deactivation (LocusKit
+/// registration contract). Best-effort — an open estate must never fail
+/// over minter registration. Mirrors the Swift ServeCommand/AriaMCPMain
+/// ensureDefaultAdornmentMinter call.
 fn register_default_minter_non_fatal(store: &dyn DrawerStore, label: &str) {
-    let recipe = &adornment_lib::QUANTIZED_RECIPE;
+    let recipe = match adornment_lib::selected_recipe() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "aria-mcp: {e} — default adornment minter not registered for {label}"
+            );
+            return;
+        }
+    };
     if let Err(e) = store.register_adornment_minter(&recipe.descriptor(&recipe.id(), true)) {
         eprintln!(
             "aria-mcp: default adornment minter registration failed for {label} (pass will no-op): {e:?}"
