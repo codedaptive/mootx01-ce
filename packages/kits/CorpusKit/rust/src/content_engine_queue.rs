@@ -326,6 +326,14 @@ impl CorpusContentEngine {
         let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
         let mut checkpoints: Vec<CorpusIndexState> = Vec::new();
         let mut prepared_upserts: HashSet<(String, i64, String)> = HashSet::new();
+        // Per-record write amplification on this path is held down inside
+        // InvertedIndexStore::index itself (one savepoint per record —
+        // DRAIN-BATCH-TXN, 2026-08-29). A loop-level index-store bracket is
+        // WRONG here: that store holds a private connection whose
+        // BEGIN IMMEDIATE takes the FILE write lock, and this loop's
+        // prepare_queue_job also writes through the storage connection —
+        // holding the bracket across the loop starves those writes into
+        // "database is locked".
         for job in &batch {
             let payload: ContentIndexJob = match serde_json::from_slice(&job.payload) {
                 Ok(p) => p,
@@ -396,7 +404,6 @@ impl CorpusContentEngine {
                 completions.push((job.id.clone(), ObservationStatus::Blocked));
             }
         }
-
         // Batch-boundary last write: maintained counts and the checkpoints
         // proving those folds are committed atomically (never per record —
         // that was O(N·vocab) write amplification). It MUST precede terminal

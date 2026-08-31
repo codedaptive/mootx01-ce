@@ -101,6 +101,7 @@ struct AdornmentPassFanOutTests {
         let result = try await AdornmentPass.run(
             estate: estate,
             width: 4,
+            rowBatching: false,
             generatorResolver: { minter, drawer in
                 await gate.arriveAndWait()
                 return "adorned:\(drawer.id):\(minter.id)"
@@ -133,6 +134,7 @@ struct AdornmentPassFanOutTests {
         let result = try await AdornmentPass.run(
             estate: estate,
             width: 1,
+            rowBatching: false,
             generatorResolver: { minter, drawer in
                 await witness.enter()
                 // A real window in which a second concurrent call would be
