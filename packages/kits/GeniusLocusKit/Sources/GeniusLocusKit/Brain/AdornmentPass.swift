@@ -109,12 +109,21 @@ public enum AdornmentPass {
         /// pass an explicit width so the pass's concurrency is
         /// environment-independent.
         width widthOverride: Int? = nil,
+        /// Claim-length ceiling for the row-batch transport. Nil resolves
+        /// to the product constant; the harness ceiling override arrives
+        /// from `runAdornmentPass`.
+        maxAdornmentLength: Int? = nil,
+        /// Row-batch transport engagement. Nil (every production call
+        /// site) lets the resident engine decide via
+        /// `supportsRowBatching`; tests pass false so pass behavior never
+        /// depends on the machine's engine availability.
+        rowBatching: Bool? = nil,
         generatorResolver: @escaping @Sendable (
             AdornmentMinterDescriptor, LocusKit.Drawer
         ) async -> String? = { minter, drawer in
             // Default resolver: the resident GoldMiner via AdornmentLib
             // map-reduce. Supplies the full drawer content and event date so
-            // relative references are calculable (Bob ruling 2026-08-25).
+            // relative references are calculable (operator ruling 2026-08-25).
             // The miner's engine is RESIDENT — one-off pairs on the write
             // path and batch pairs on the dream path share one model
             // residency; there is no per-pair load cost.
@@ -123,10 +132,11 @@ public enum AdornmentPass {
                 eventDate: drawer.eventTime.ISO8601Format(),
                 maxLength: ADORNMENT_MAX_LENGTH
             ) { prompt in
-                guard let raw = await GoldMiner.shared.mintOne(prompt: prompt) else {
+                guard let engine = await GoldMiner.shared.engineRef(for: minter.id),
+                      let raw = await engine.mint(prompt: prompt) else {
                     return nil
                 }
-                // Mechanical truncation at the contract length (Bob ruling
+                // Mechanical truncation at the contract length (operator ruling
                 // 2026-08-24): engines return raw text; the seam owns the
                 // ceiling.
                 let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -151,21 +161,15 @@ public enum AdornmentPass {
         var failed = 0
         var skipped = 0
 
-        // Fan-out width: the resident engine declares how many concurrent
-        // mint calls it serves (GoldMinerEngine.maxConcurrentMints — Apple's
-        // service pipelines concurrent requests; resident GGUF contexts and
-        // command pipes declare 1, which keeps this loop serial for them).
-        // Pairs are fully independent — the (drawerID, minterID) composite
-        // key isolates every write and putAdornment serializes through the
-        // estate — so a bounded task group changes only wall clock, never
-        // the stored result set.
-        let engineWidth: Int
-        if let widthOverride {
-            engineWidth = widthOverride
-        } else {
-            engineWidth = await GoldMiner.shared.mintWidth()
-        }
-        let width = min(max(1, engineWidth), pairs.count)
+        // Fan-out runs in PER-MINTER LANES: each minter's pairs mint
+        // through the engine resolved for that minter, in a lane sized to
+        // THAT engine's declared width (GoldMinerEngine.maxConcurrentMints;
+        // widthOverride pins every lane for tests). Lanes run concurrently,
+        // so engines on different silicon overlap — one engine's await is
+        // another's runtime. Pairs are fully independent — the
+        // (drawerID, minterID) composite key isolates every write and
+        // putAdornment serializes through the estate — so lane concurrency
+        // changes only wall clock, never the stored result set.
 
         /// One pair's full journey: guard → generate → write. Returns the
         /// pair's outcome for the counters; all failure isolation is
@@ -229,22 +233,173 @@ public enum AdornmentPass {
             }
         }
 
-        // Sliding-window task group: at most `width` pairs in flight; each
-        // completion admits the next pair, so the engine stays saturated
-        // for the whole batch instead of running in width-sized waves.
-        await withTaskGroup(of: (adorned: Int, failed: Int, skipped: Int).self) { group in
-            var iterator = pairs.makeIterator()
-            for _ in 0..<width {
-                guard let pair = iterator.next() else { break }
-                group.addTask { await process(pair) }
+        // ── Row-batch transport (operator design 2026-08-30) ─────────────────
+        // Short-content pairs mint in batches of ADORNMENT_BATCH_ROWS
+        // through the resident engine's persistent batch session — the
+        // task stated once, records fed as row data, answers returned as
+        // row data — amortizing the per-request service overhead across
+        // the batch. Rows the engine fails (or when no engine speaks the
+        // transport — GoldMiner.mintRows nil) fall through to the
+        // single-record path below, which keeps the map-reduce chunking
+        // and the mechanical-fallback coverage guarantee. Transport only:
+        // minter identity and stored-row shape are unchanged.
+        let length = maxAdornmentLength ?? ADORNMENT_MAX_LENGTH
+        var singles: [LocusKit.AdornmentDebt] = []
+        var batchables: [LocusKit.AdornmentDebt] = []
+        for pair in pairs {
+            if rowBatching ?? true,
+               !pair.drawer.content.isEmpty,
+               pair.drawer.content.count <= ADORNMENT_BATCH_ROW_CHAR_LIMIT {
+                batchables.append(pair)
+            } else {
+                singles.append(pair)  // empties are counted skipped in process()
             }
-            while let outcome = await group.next() {
-                adorned += outcome.adorned
-                failed += outcome.failed
-                skipped += outcome.skipped
-                if let pair = iterator.next() {
-                    group.addTask { await process(pair) }
+        }
+
+        // A frame is ONE minter's rows: the engine that answers a frame is
+        // resolved by minter id (multi-model mode routes minters to
+        // dedicated engines), so rows for different minters never share a
+        // frame. Bucket per minter, then chunk each bucket by the row and
+        // character budgets.
+        var byMinter: [String: [LocusKit.AdornmentDebt]] = [:]
+        for pair in batchables { byMinter[pair.minter.id, default: []].append(pair) }
+        var groups: [[LocusKit.AdornmentDebt]] = []
+        for (_, minterPairs) in byMinter.sorted(by: { $0.key < $1.key }) {
+            var group: [LocusKit.AdornmentDebt] = []
+            var groupChars = 0
+            for pair in minterPairs {
+                if group.count == ADORNMENT_BATCH_ROWS
+                    || (groupChars + pair.drawer.content.count > ADORNMENT_BATCH_CHAR_BUDGET
+                        && !group.isEmpty) {
+                    groups.append(group)
+                    group = []
+                    groupChars = 0
                 }
+                group.append(pair)
+                groupChars += pair.drawer.content.count
+            }
+            if !group.isEmpty { groups.append(group) }
+        }
+
+        /// Mint one row frame; returns per-frame outcomes plus the pairs
+        /// that fall to the single-record path (per-row failures, or a nil
+        /// frame when this minter's engine lacks the row transport).
+        @Sendable func processGroup(
+            _ batch: [LocusKit.AdornmentDebt]
+        ) async -> (adorned: Int, failed: Int, fallback: [LocusKit.AdornmentDebt])? {
+            let rowPayloads = batch.map {
+                buildAdornmentRow(
+                    drawerContent: $0.drawer.content,
+                    eventDate: $0.drawer.eventTime.ISO8601Format())
+            }
+            guard let engine = await GoldMiner.shared.engineRef(for: batch[0].minter.id),
+                  engine.supportsRowBatching
+            else { return nil }
+            let claims = await engine.mintRows(rowPayloads, maxLength: length)
+            var groupAdorned = 0
+            var groupFailed = 0
+            var fallback: [LocusKit.AdornmentDebt] = []
+            for (pair, claim) in zip(batch, claims) {
+                guard let claim, !claim.isEmpty else {
+                    fallback.append(pair)  // per-row failure → single path
+                    continue
+                }
+                let text = String(claim.prefix(length))
+                do {
+                    let written = try await estate.putAdornment(
+                        StoredAdornment(
+                            drawerID: pair.drawer.id,
+                            minterID: pair.minter.id,
+                            text: text))
+                    if written == 1 { groupAdorned += 1 } else { groupFailed += 1 }
+                } catch {
+                    log.error(
+                        "AdornmentPass: batch putAdornment threw for drawer \(pair.drawer.id) / minter \(pair.minter.id): \(error)"
+                    )
+                    groupFailed += 1
+                }
+            }
+            return (groupAdorned, groupFailed, fallback)
+        }
+
+        // ── Per-minter lanes ────────────────────────────────────────────
+        // One concurrent lane per minter: the lane runs its minter's row
+        // frames first (a nil frame means that ENGINE does not speak the
+        // row transport — only its own pairs fall to the single path; the
+        // nil answer is a guard check, not a model call), then its
+        // singles, each through a sliding window sized to its engine's
+        // width. Lanes overlap freely — with per-minter engines this is
+        // what keeps every piece of silicon loaded at once.
+        var laneGroups: [String: [[LocusKit.AdornmentDebt]]] = [:]
+        for batch in groups { laneGroups[batch[0].minter.id, default: []].append(batch) }
+        var laneSingles: [String: [LocusKit.AdornmentDebt]] = [:]
+        for pair in singles { laneSingles[pair.minter.id, default: []].append(pair) }
+        let laneIDs = Set(laneGroups.keys).union(laneSingles.keys).sorted()
+
+        await withTaskGroup(of: (adorned: Int, failed: Int, skipped: Int).self) { lanes in
+            for minterID in laneIDs {
+                let myGroups = laneGroups[minterID] ?? []
+                let seededSingles = laneSingles[minterID] ?? []
+                lanes.addTask {
+                    let laneWidth: Int
+                    if let widthOverride {
+                        laneWidth = widthOverride
+                    } else {
+                        laneWidth = await GoldMiner.shared.mintWidth(for: minterID)
+                    }
+                    var laneAdorned = 0
+                    var laneFailed = 0
+                    var laneSkipped = 0
+                    var mySingles = seededSingles
+
+                    await withTaskGroup(
+                        of: (batch: [LocusKit.AdornmentDebt],
+                             outcome: (adorned: Int, failed: Int,
+                                       fallback: [LocusKit.AdornmentDebt])?).self
+                    ) { taskGroup in
+                        var iterator = myGroups.makeIterator()
+                        for _ in 0..<max(1, min(laneWidth, myGroups.count)) {
+                            guard let batch = iterator.next() else { break }
+                            taskGroup.addTask { (batch, await processGroup(batch)) }
+                        }
+                        while let (batch, outcome) = await taskGroup.next() {
+                            if let outcome {
+                                laneAdorned += outcome.adorned
+                                laneFailed += outcome.failed
+                                mySingles.append(contentsOf: outcome.fallback)
+                            } else {
+                                mySingles.append(contentsOf: batch)
+                            }
+                            if let next = iterator.next() {
+                                taskGroup.addTask { (next, await processGroup(next)) }
+                            }
+                        }
+                    }
+
+                    await withTaskGroup(
+                        of: (adorned: Int, failed: Int, skipped: Int).self
+                    ) { taskGroup in
+                        var iterator = mySingles.makeIterator()
+                        for _ in 0..<max(1, min(laneWidth, mySingles.count)) {
+                            guard let pair = iterator.next() else { break }
+                            taskGroup.addTask { await process(pair) }
+                        }
+                        while let outcome = await taskGroup.next() {
+                            laneAdorned += outcome.adorned
+                            laneFailed += outcome.failed
+                            laneSkipped += outcome.skipped
+                            if let pair = iterator.next() {
+                                taskGroup.addTask { await process(pair) }
+                            }
+                        }
+                    }
+                    return (laneAdorned, laneFailed, laneSkipped)
+                }
+            }
+            while let lane = await lanes.next() {
+                adorned += lane.adorned
+                failed += lane.failed
+                skipped += lane.skipped
             }
         }
 
