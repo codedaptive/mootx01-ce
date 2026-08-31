@@ -90,25 +90,46 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // allocator's large cache does not double the engine's footprint.
     {
         let (gguf, tok) = adornment_lib::gold_miner::default_engine_paths(&data);
-        if gguf.is_file() && tok.is_file() {
-            match adornment_lib::gold_miner::QuantizedLlmEngine::load(&gguf, &tok) {
-                Ok(engine) => {
-                    let id = adornment_lib::gold_miner::GoldMinerEngine::identity(&engine);
-                    adornment_lib::gold_miner::install_engine(Box::new(engine));
-                    eprintln!("mootx01 serve: gold miner resident — {id}");
-                }
-                Err(e) => eprintln!("mootx01 serve: gold miner unavailable — {e}"),
+        // Model selection (D4 swappability, 2026-08-31): MOOT_MINT_MODEL
+        // names a registry token; unset = the default recipe. An unknown
+        // token installs NO engine — loud config error, never a silent
+        // fallback to a different model, because the minter identity row
+        // must record exactly what the operator selected. Pairing the
+        // GGUF at the fixed path with the selected recipe is the
+        // operator's contract.
+        match (adornment_lib::selected_recipe(), gguf.is_file() && tok.is_file()) {
+            (Err(e), _) => {
+                // Unknown token: NO engine, loud config error. Never a
+                // silent fallback to a different model.
+                eprintln!(
+                    "mootx01 serve: {e} — no gold miner engine installed; \
+                     adornment pass will use the mechanical fallback"
+                );
             }
-        } else {
-            // Loud skip (Smythe DEFAULT-MINT-01): with no engine the
-            // adornment pass falls back to the deterministic mechanical
-            // adornment for every pair — coverage holds, model quality does
-            // not. The operator should know which mode this serve is in.
-            eprintln!(
-                "mootx01 serve: gold miner model not found at {} — adornment \
-                 pass will use the mechanical fallback",
-                gguf.display()
-            );
+            (Ok(recipe), true) => {
+                match adornment_lib::gold_miner::QuantizedLlmEngine::load_with_recipe(
+                    &gguf, &tok, recipe,
+                ) {
+                    Ok(engine) => {
+                        let id = adornment_lib::gold_miner::GoldMinerEngine::identity(&engine);
+                        adornment_lib::gold_miner::install_engine(Box::new(engine));
+                        eprintln!("mootx01 serve: gold miner resident — {id}");
+                    }
+                    Err(e) => eprintln!("mootx01 serve: gold miner unavailable — {e}"),
+                }
+            }
+            (Ok(_), false) => {
+                // Loud skip (Smythe DEFAULT-MINT-01): with no engine the
+                // adornment pass falls back to the deterministic mechanical
+                // adornment for every pair — coverage holds, model quality
+                // does not. The operator should know which mode this serve
+                // is in.
+                eprintln!(
+                    "mootx01 serve: gold miner model not found at {} — adornment \
+                     pass will use the mechanical fallback",
+                    gguf.display()
+                );
+            }
         }
     }
 

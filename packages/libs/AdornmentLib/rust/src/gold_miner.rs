@@ -38,7 +38,7 @@ use tokenizers::Tokenizer;
 pub trait GoldMinerEngine: Send {
     /// Stable identity for logs, run provenance, and the minter master.
     /// Product engines use their recipe's composed ID (e.g.
-    /// "qwen2-0.5b-q4km-p1-s1"). Never a user-facing name.
+    /// "qwen2-0.5b-q4km-p2-s1"). Never a user-facing name.
     fn identity(&self) -> String;
     /// Mint one claim. None = per-prompt failure.
     fn mint(&mut self, prompt: &str) -> Option<String>;
@@ -127,8 +127,9 @@ pub struct QuantizedLlmEngine {
     tokenizer: Tokenizer,
     device: Device,
     /// The engine's generation contract: prompt template, settings, output
-    /// kind, and the composed minter identity. Compile-time constant
-    /// (QUANTIZED_RECIPE) — the GGUF at the load path is expected to be
+    /// kind, and the composed minter identity. Selected at load time
+    /// (registry default, or the operator's `MOOT_MINT_MODEL` choice via
+    /// `selected_recipe`) — the GGUF at the load path is expected to be
     /// the artifact the recipe's model token names.
     recipe: MinterRecipe,
 }
@@ -143,10 +144,11 @@ impl QuantizedLlmEngine {
         Self::load_with_recipe(gguf_path, tokenizer_path, QUANTIZED_RECIPE)
     }
 
-    /// Load the engine under a specific recipe, for builds that bake a
-    /// non-default recipe at compile time. The recipe supplies identity,
-    /// prompt contract, and output kind; the model files must be the
-    /// artifact the recipe's model token names.
+    /// Load the engine under a specific recipe — the serve-start
+    /// selection path (`selected_recipe` / `recipe_for_model`) and the
+    /// benchmark contender builds both come through here. The recipe
+    /// supplies identity, prompt contract, and output kind; the model
+    /// files must be the artifact the recipe's model token names.
     pub fn load_with_recipe(
         gguf_path: &Path,
         tokenizer_path: &Path,
