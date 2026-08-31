@@ -69,6 +69,10 @@ public let SlotGhostWindow: TimeInterval = 60 * 60   // 1 hour
 
 /// The outcome of `SlotTable.claimSlot(for:preferring:now:)`.
 public enum ClaimDecision: Sendable, Equatable {
+    /// This device already owns a registry slot. The caller must reuse the
+    /// fetched server claim without creating, evicting, or rewriting a record.
+    case alreadyOwned(DeviceSlot)
+
     /// A specific slot number (1–15) is free for immediate claim.
     /// The caller should write a CloudKit record for this slot.
     case freeSlot(Int)
@@ -126,17 +130,19 @@ public struct SlotTable: Sendable {
     /// Determine the best slot claim action for `deviceUUID`.
     ///
     /// Decision priority (first matching rule wins):
-    /// 1. If `preferring` is given and that slot is free → `.freeSlot(preferring)`
-    /// 2. Lowest-numbered free slot → `.freeSlot(n)`
-    /// 3. Best ghost-fast-path eviction candidate → `.evictionCandidate(slot)`
-    /// 4. Best long-inactivity eviction candidate → `.evictionCandidate(slot)`
-    /// 5. No eligible candidate → `.exhausted`
+    /// 1. If `preferring` is already owned by this device → `.alreadyOwned(slot)`
+    /// 2. Lowest-numbered slot already owned by this device → `.alreadyOwned(slot)`
+    /// 3. If `preferring` is free → `.freeSlot(preferring)`
+    /// 4. Lowest-numbered free slot → `.freeSlot(n)`
+    /// 5. Best ghost-fast-path eviction candidate → `.evictionCandidate(slot)`
+    /// 6. Best long-inactivity eviction candidate → `.evictionCandidate(slot)`
+    /// 7. No eligible candidate → `.exhausted`
     ///
     /// - Parameters:
     ///   - deviceUUID: The UUID of the device requesting a slot.
     ///   - preferring: Optional preferred slot (the caller's provisionally
-    ///     persisted slot, if any). Honoured when the slot is free; ignored
-    ///     otherwise to avoid infinite collision loops.
+    ///     persisted slot, if any). Honoured when already owned or free;
+    ///     ignored when another device owns it.
     ///   - now: Injected clock. Must not call `Date()` — callers supply the
     ///     current time so tests can reproduce any scenario deterministically.
     public func claimSlot(
@@ -145,6 +151,23 @@ public struct SlotTable: Sendable {
         now: @Sendable () -> Date
     ) -> ClaimDecision {
         let currentTime = now()
+
+        // A stable device identity survives relaunch. Reusing its fetched
+        // server claim must precede allocation, including when the registry is
+        // full. Historical versions omitted this check and consumed a fresh
+        // slot on every enable until all 15 entries were occupied.
+        if let preferred = preferredSlot,
+           let owned = slots.first(where: {
+               $0.slot == preferred && $0.deviceUUID == deviceUUID
+           }) {
+            return .alreadyOwned(owned)
+        }
+        if let owned = slots
+            .filter({ $0.deviceUUID == deviceUUID })
+            .min(by: { $0.slot < $1.slot }) {
+            return .alreadyOwned(owned)
+        }
+
         let occupiedSlotNumbers = Set(slots.map { $0.slot })
         let allSlotNumbers = Set(1...15)
         let freeSlotNumbers = allSlotNumbers.subtracting(occupiedSlotNumbers)
