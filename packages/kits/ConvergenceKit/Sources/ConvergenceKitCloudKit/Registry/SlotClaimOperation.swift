@@ -5,7 +5,8 @@
 // CLAIM FLOW:
 // 1. Fetch all 15 slot records from the manifest's zone in one round-trip.
 // 2. Build a DeviceSlot snapshot and run SlotTable.claimSlot() for a decision.
-// 3. On .freeSlot(n): create a new CKRecord for slot n and save with
+// 3. On .alreadyOwned(existing): return the fetched server claim without a
+//    write. On .freeSlot(n): create a new CKRecord for slot n and save with
 //    .ifServerRecordUnchanged. A nil change tag means "only insert if absent."
 //    On .evictionCandidate(existing): take the fetched record for that slot
 //    (which carries the server's change tag), bump the epoch, update all
@@ -109,12 +110,14 @@ public struct SlotClaimOperation: Sendable {
     /// Claim a registry slot for `deviceUUID`, preferring `preferredSlot` if free.
     ///
     /// The caller supplies a preferred slot (the previously persisted slot, if any)
-    /// to reduce unnecessary slot changes across process restarts. If the preferred
-    /// slot is occupied or if none is given, the lowest free slot is used. If all
-    /// slots are occupied, an eviction candidate is chosen per SlotTable logic.
+    /// to preserve the same server claim across process restarts. Any slot
+    /// already owned by this stable device UUID is reused before allocation.
+    /// Otherwise the lowest free slot is used. If all slots are occupied, an
+    /// eviction candidate is chosen per SlotTable logic.
     ///
     /// - Parameter preferredSlot: Optional preferred slot number (1–15), typically
-    ///   loaded from DeviceIdentityStore. Ignored when the slot is occupied.
+    ///   loaded from DeviceIdentityStore. Reused when this device owns it and
+    ///   ignored when another device owns it.
     /// - Returns: The claimed DeviceSlot (slot, epoch, deviceUUID, claimedAt populated;
     ///   lastActiveHLC is HLC.zero — the first heartbeat happens at the start of the
     ///   next push cycle via EpochFence).
@@ -150,6 +153,13 @@ public struct SlotClaimOperation: Sendable {
             )
 
             switch decision {
+
+            case .alreadyOwned(let existing):
+                // The fetched record is already authoritative for this stable
+                // device UUID. Returning it without a write preserves its
+                // epoch and heartbeat while avoiding a needless CAS race.
+                logger.info("slot claim: reusing owned slot \(existing.slot)")
+                return existing
 
             case .freeSlot(let slotNumber):
                 // Step 3a: Create a new slot record and CAS-insert it.
