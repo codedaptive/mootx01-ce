@@ -22,8 +22,12 @@
 // IDs live forever in every estate's `adornment_minters` rows (with
 // digests proving which recipe they were).
 //
-//   apple-fm          p1  s1   (Apple FoundationModels; OS-resident weights)
-//   qwen2-0.5b-q4km   p1  s1   (Rust quantized engine default GGUF)
+//   apple-fm             p1  s1   (Apple FoundationModels; OS-resident weights)
+//   qwen2-0.5b-q4km      p2  s1   (Rust quantized engine default GGUF;
+//                                  p2 = user-only frame, D1 ruling 2026-08-31)
+//   qwen2.5-0.5b-q4km    p2  s1   (Rust registry)
+//   nuextract-tiny-q4km  p1  s1   (Rust registry; native template unchanged)
+//   qwen2.5-1.5b-q4km    p2  s1   (Rust registry; reference arm)
 //
 // RULES (mirror of the bitmap-bit doctrine):
 //   - NEVER reuse a version number. A retired p2 means the next prompt is

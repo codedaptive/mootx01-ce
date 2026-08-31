@@ -389,13 +389,16 @@ actor ResidentMintSession {
     }
 
     /// Mint one prompt through the resident child, spawning it on demand.
-    func mint(prompt: String, command: String) async -> String? {
+    func mint(prompt: String, command: String, extraArgument: String = "--batch") async -> String? {
         useGeneration &+= 1
         let generationAtStart = useGeneration
 
-        if process == nil || process?.isRunning != true || spawnedCommand != command {
+        // The spawn key includes the protocol argument: a child serving
+        // --rows frames must never answer --batch prompts and vice versa.
+        let spawnKey = command + " " + extraArgument
+        if process == nil || process?.isRunning != true || spawnedCommand != spawnKey {
             teardown()
-            guard spawn(command: command) else { return nil }
+            guard spawn(command: command, argument: extraArgument, key: spawnKey) else { return nil }
         }
         guard let stdinHandle, let stdoutHandle else { return nil }
 
@@ -433,10 +436,10 @@ actor ResidentMintSession {
         }
     }
 
-    private func spawn(command: String) -> Bool {
+    private func spawn(command: String, argument: String = "--batch", key: String? = nil) -> Bool {
         let child = Process()
         child.executableURL = URL(fileURLWithPath: command)
-        child.arguments = ["--batch"]
+        child.arguments = [argument]
         let inPipe = Pipe()
         let outPipe = Pipe()
         child.standardInput = inPipe
@@ -454,7 +457,7 @@ actor ResidentMintSession {
         stdinHandle = inPipe.fileHandleForWriting
         stdoutHandle = outPipe.fileHandleForReading
         buffer.removeAll()
-        spawnedCommand = command
+        spawnedCommand = key ?? (command + " " + argument)
         log.info("ResidentMintSession: resident minter started (pid \(child.processIdentifier))")
         return true
     }
@@ -494,3 +497,90 @@ actor ResidentMintSession {
     }
 }
 #endif
+
+// MARK: - Row batching (transport, not recipe — identity unchanged)
+
+/// Rows per batch round trip (Bob design 2026-08-30): the session is told
+/// the task once, then receives batches of records as row data and
+/// answers as row data, amortizing the per-request service overhead
+/// across the batch while the persistent session preserves the KV cache.
+public let ADORNMENT_BATCH_ROWS: Int = 5
+
+/// Per-row payload ceiling for the batch path. Rows above this mint
+/// through the single-record path (map-reduce chunking). Sized against
+/// the same window the single path proves daily (single prompts up to
+/// ADORNMENT_CHUNK_THRESHOLD = 16k chars generate fine): 8k covers
+/// 96-98%% of convomem/membench drawers and 92%% of the complete
+/// estate (measured 2026-08-30) while a full batch stays inside the
+/// window.
+public let ADORNMENT_BATCH_ROW_CHAR_LIMIT: Int = 8_000
+
+/// Combined payload ceiling for one batch prompt (a batch packs rows
+/// until either ADORNMENT_BATCH_ROWS or this budget is reached) —
+/// ~3.5k tokens at the 4-chars/token floor, leaving instruction and
+/// answer headroom inside the 8k-token window.
+public let ADORNMENT_BATCH_CHAR_BUDGET: Int = 14_000
+
+/// The batch session's standing instructions: the SAME density contract
+/// as `buildAdornmentPrompt`, stated once for the whole session, plus
+/// the row protocol. The per-record prompt shape is transport detail —
+/// identity (minter id, prompt digest) is unchanged (Bob ruling
+/// 2026-08-30: the shape of the prompt does not matter).
+public func adornmentBatchInstructions(maxLength: Int = ADORNMENT_MAX_LENGTH) -> String {
+    """
+    You summarize memory records into adornments. Each user message is a batch \
+    of records separated by "--- record N ---" markers. For EACH record produce \
+    ONE dense line of word blobs: 2-3 word chunks separated by "; " — not \
+    sentences, no grammar, just the densest possible chunks of the record's \
+    knowledge (example: "tomato saplings planted; straw mulch; 12 count"). \
+    Requirements for every line:
+    - Name every entity in full (no pronouns, no relative references like "the user" or "it").
+    - Only include dates if available in the record: dates stated in the record, \
+    or calculable from a natural-language reference plus the record's date line. Never invent a date.
+    - State counts and quantities as numbers only when the record states them.
+    - Do not include any opinion, narrative, or commentary.
+    - Keep each line under \(maxLength) characters, less is better; list blobs in decreasing order of importance.
+
+    Answer with EXACTLY one line per record, in record order, each in the form \
+    "N| <adornment>" where N is the record number. Nothing else — no preamble, \
+    no blank lines. Then wait for the next batch.
+    """
+}
+
+/// One record's row payload for the batch path: the record date line
+/// (when available — same date rule as the single-record prompt) and the
+/// verbatim content.
+public func buildAdornmentRow(drawerContent: String, eventDate: String? = nil) -> String {
+    let dateLine = eventDate.map { "Record date: \($0)\n" } ?? ""
+    return dateLine + drawerContent
+}
+
+/// Assemble one batch prompt from row payloads.
+public func formatAdornmentBatchPrompt(rows: [String]) -> String {
+    var parts: [String] = ["Batch of \(rows.count) record(s):"]
+    for (i, row) in rows.enumerated() {
+        parts.append("--- record \(i + 1) ---")
+        parts.append(row)
+    }
+    return parts.joined(separator: "\n")
+}
+
+/// Parse a batch reply back into per-row claims. Position `k` carries row
+/// `k+1`'s claim, nil when the reply omitted that row — the caller
+/// retries omitted rows through the single-record path, so a partially
+/// well-formed reply still lands its good rows. Tolerates surrounding
+/// noise lines; last occurrence of a row number wins (models sometimes
+/// restate).
+public func parseAdornmentBatchReply(_ reply: String, expectedRows: Int) -> [String?] {
+    var out: [String?] = Array(repeating: nil, count: expectedRows)
+    for line in reply.split(separator: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let bar = trimmed.firstIndex(of: "|"),
+              let n = Int(trimmed[trimmed.startIndex..<bar].trimmingCharacters(in: .whitespaces)),
+              n >= 1, n <= expectedRows else { continue }
+        let claim = String(trimmed[trimmed.index(after: bar)...])
+            .trimmingCharacters(in: .whitespaces)
+        if !claim.isEmpty { out[n - 1] = claim }
+    }
+    return out
+}
