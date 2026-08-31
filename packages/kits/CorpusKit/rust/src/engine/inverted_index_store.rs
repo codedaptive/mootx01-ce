@@ -169,29 +169,49 @@ impl InvertedIndexStore {
     ) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
 
-        // Remove existing state from durable tables only.
-        Self::delete_from_db(&state.conn, item_id)?;
-
-        if tokens.is_empty() { state.cached = None; return Ok(()); }
-
-        // Compute term frequencies.
-        let mut tf: HashMap<String, usize> = HashMap::new();
-        for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
-        let doc_len = tokens.len();
-
-        // Persist to SQLite only — no in-memory mirror.
-        for (term, freq) in &tf {
-            state.conn.execute(
-                "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
-                params![term, item_id, *freq as i64],
+        // One savepoint per record (DRAIN-BATCH-TXN, 2026-08-29): a record
+        // indexes one row per TERM, and per-term autocommits made the queue
+        // drain spend its wall clock in commit/checkpoint fsync (sampled
+        // 46-68% on external volumes). A savepoint self-commits at RELEASE
+        // when no enclosing transaction is open (the queue-drain path) and
+        // nests silently inside `begin_batch`/`ingest_batch` brackets — so
+        // every caller gets at most one durable commit per record without
+        // this store's private write lock ever spanning foreign writes.
+        state.conn.execute_batch("SAVEPOINT iix_index")?;
+        let write_all = |conn: &rusqlite::Connection| -> Result<(), rusqlite::Error> {
+            // Remove existing state from durable tables only.
+            Self::delete_from_db(conn, item_id)?;
+            if tokens.is_empty() { return Ok(()); }
+            // Compute term frequencies.
+            let mut tf: HashMap<String, usize> = HashMap::new();
+            for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
+            let doc_len = tokens.len();
+            // Persist to SQLite only — no in-memory mirror.
+            for (term, freq) in &tf {
+                conn.execute(
+                    "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
+                    params![term, item_id, *freq as i64],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
+                params![item_id, doc_len as i64],
             )?;
+            Ok(())
+        };
+        match write_all(&state.conn) {
+            Ok(()) => {
+                state.conn.execute_batch("RELEASE iix_index")?;
+                state.cached = None;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = state
+                    .conn
+                    .execute_batch("ROLLBACK TO iix_index; RELEASE iix_index");
+                Err(error)
+            }
         }
-        state.conn.execute(
-            "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
-            params![item_id, doc_len as i64],
-        )?;
-        state.cached = None;
-        Ok(())
     }
 
     // MARK: — Batch transaction bracket
