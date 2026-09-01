@@ -352,7 +352,7 @@ public final class AppleFoundationEngine: GoldMinerEngine {
         do {
             // Greedy sampling: minting requires deterministic output.
             // (Recipe parameter "sampling": "greedy".)
-            let options = GenerationOptions(sampling: .greedy)
+            let options = GenerationOptions(samplingMode: .greedy)
             let session = LanguageModelSession(
                 instructions: MinterRecipe.apple.systemPrompt)
             let raw = try await session.respond(to: prompt, options: options).content
