@@ -184,6 +184,14 @@ pub struct QuantizedLlmEngine {
     /// `selected_recipe`) — the GGUF at the load path is expected to be
     /// the artifact the recipe's model token names.
     recipe: MinterRecipe,
+    /// Harness override for the per-recipe generation budget (spec-v2
+    /// finish-or-retry). None = recipe parameter / MAX_NEW_TOKENS
+    /// fallback governs, which is every product path.
+    max_new_tokens_override: Option<usize>,
+    /// (generated tokens, budget-capped-without-EOS) from the most
+    /// recent successful `generate` — the harness binaries' per-mint
+    /// telemetry read-back. Product paths ignore it.
+    last_telemetry: (usize, bool),
 }
 
 impl QuantizedLlmEngine {
@@ -202,6 +210,12 @@ impl QuantizedLlmEngine {
     /// benchmark contender builds both come through here. The recipe
     /// supplies identity, prompt contract, and output kind; the model
     /// files must be the artifact the recipe's model token names.
+    ///
+    /// Harness note (spec-v2, 2026-09-01): `set_max_new_tokens` lets the
+    /// candle-mint `--max-new-tokens` flag override the recipe budget for
+    /// finish-or-retry runs, and `last_mint_telemetry` reports the most
+    /// recent mint's generated-token count and cap-hit flag. Product
+    /// paths touch neither.
     pub fn load_with_recipe(
         gguf_path: &Path,
         tokenizer_path: &Path,
@@ -243,8 +257,18 @@ impl QuantizedLlmEngine {
                     .map_err(|e| format!("gold miner: gguf load {}: {e}", gguf_path.display()))?,
             )
         };
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| format!("gold miner: tokenizer {}: {e}", tokenizer_path.display()))?;
+        // Some checkpoints bake a truncation stanza into tokenizer.json
+        // (NuExtract-tiny: max_length 2500). Honoring it silently drops
+        // the tail of long prompts inside the engine — prompt bounding
+        // is the CALLER's job (chunking upstream, the probe's documented
+        // last-resort cap). Disable it so encode() always sees the full
+        // prompt. The Swift port's custom BPE never read the stanza, so
+        // this also restores cross-port encode parity on long inputs.
+        tokenizer
+            .with_truncation(None)
+            .map_err(|e| format!("gold miner: tokenizer truncation reset: {e}"))?;
         // Return load-time transients to the OS (Linux). GGUF loading frees
         // large per-tensor buffers; glibc retains them without a trim.
         // On macOS the equivalent retention is the allocator's LARGE-chunk
@@ -263,7 +287,22 @@ impl QuantizedLlmEngine {
             tokenizer,
             device,
             recipe,
+            max_new_tokens_override: None,
+            last_telemetry: (0, false),
         })
+    }
+
+    /// Override the per-recipe generation budget (spec-v2 harness runs
+    /// only; None restores recipe governance).
+    pub fn set_max_new_tokens(&mut self, n: Option<usize>) {
+        self.max_new_tokens_override = n;
+    }
+
+    /// Telemetry from the most recent successful mint: (generated
+    /// tokens, cap-hit). Cap-hit = the budget ran out before a stop
+    /// token — the spec-v2 finish-or-retry trigger.
+    pub fn last_mint_telemetry(&self) -> (usize, bool) {
+        self.last_telemetry
     }
 
     /// Greedy incremental decode: full prompt at position 0 (which resets
@@ -272,7 +311,10 @@ impl QuantizedLlmEngine {
     fn generate(&mut self, prompt: &str) -> Result<String, String> {
         // Per-mint isolation (see ArchWeights::reset_mint_state): every
         // mint starts from an empty KV cache regardless of architecture.
+        // Telemetry resets with it so a failed mint never reports the
+        // previous mint's numbers.
         self.model.reset_mint_state();
+        self.last_telemetry = (0, false);
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -280,15 +322,20 @@ impl QuantizedLlmEngine {
         let mut all_ids: Vec<u32> = encoding.get_ids().to_vec();
         let prompt_len = all_ids.len();
 
-        // Per-recipe generation budget (see MAX_NEW_TOKENS doc comment).
-        let max_new_tokens = self
-            .recipe
-            .parameters
-            .iter()
-            .find(|(k, _)| *k == "max_new_tokens")
-            .and_then(|(_, v)| v.parse::<usize>().ok())
-            .unwrap_or(MAX_NEW_TOKENS);
+        // Per-recipe generation budget (see MAX_NEW_TOKENS doc comment);
+        // a harness override (spec-v2 finish-or-retry) wins when set.
+        let max_new_tokens = self.max_new_tokens_override.unwrap_or_else(|| {
+            self.recipe
+                .parameters
+                .iter()
+                .find(|(k, _)| *k == "max_new_tokens")
+                .and_then(|(_, v)| v.parse::<usize>().ok())
+                .unwrap_or(MAX_NEW_TOKENS)
+        });
 
+        // Cap-hit ledger: true unless a stop token ends the generation
+        // inside the budget.
+        let mut hit_cap = true;
         for step in 0..max_new_tokens {
             let (input_ids, offset): (&[u32], usize) = if step == 0 {
                 (all_ids.as_slice(), 0)
@@ -320,10 +367,12 @@ impl QuantizedLlmEngine {
                 .and_then(|t| t.to_scalar::<u32>())
                 .map_err(|e| format!("gold miner: argmax: {e}"))?;
             if next_token == IM_END_TOKEN_ID || next_token == ENDOFTEXT_TOKEN_ID {
+                hit_cap = false;
                 break;
             }
             all_ids.push(next_token);
         }
+        self.last_telemetry = (all_ids.len() - prompt_len, hit_cap);
 
         self.tokenizer
             .decode(&all_ids[prompt_len..], true)
