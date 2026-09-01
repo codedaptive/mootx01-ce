@@ -19,7 +19,7 @@
 # Invoked from .githooks/pre-push. Checks the index (tracked files only);
 # untracked local noise is not a publication risk.
 
-EE_ONLY_RE='^(ee-edition|tools|port|docs_internal|\.claude|\.agents|\.codex|CLAUDE\.md|CLAUDE-EE\.md|CLAUDE-CE\.md|docs/AGENTS\.md|docs/CLAUDE\.md|\.worktreeinclude|codex-code-comment-audit\.md|EDITION_BOUNDARY\.md|docs/archive|docs/missions|docs/findings|docs/articles|docs/analysis|docs/status|apps/moot-math-benchmark/HINTS-GO\.md|apps/moot-math-benchmark/HINTS-PYTHON\.md|packages/apple/MootFoundationModelsKit|packages/apple/MootIntentKit/Package\.community\.swift|packages/apple/MootIntentKit/Sources/MootIntentKit|packages/apple/MootIntentKit/Tests/MootIntentKitTests|apps/mootx01/Package\.community\.swift|apps/mootx01/Sources/MootDaemonFederation|apps/mootx01/Tests/MootDaemonFederationTests|benchmark-ee|benchmark)(/|$)'
+EE_ONLY_RE='^(ee-edition|tools|port|docs_internal|\.claude|\.agents|\.codex|CLAUDE\.md|CLAUDE-EE\.md|CLAUDE-CE\.md|docs/AGENTS\.md|docs/CLAUDE\.md|\.worktreeinclude|codex-code-comment-audit\.md|EDITION_BOUNDARY\.md|docs/archive|docs/missions|docs/findings|docs/articles|docs/analysis|docs/status|apps/moot-math-benchmark/HINTS-GO\.md|apps/moot-math-benchmark/HINTS-PYTHON\.md|packages/apple/MootFoundationModelsKit|packages/apple/MootIntentKit/Package\.community\.swift|packages/apple/MootIntentKit/Sources/MootIntentKit|packages/apple/MootIntentKit/Tests/MootIntentKitTests|apps/mootx01/Package\.community\.swift|apps/mootx01/Sources/MootDaemonFederation|apps/mootx01/Tests/MootDaemonFederationTests|apps/mootx01/Sources/MootProductDock|apps/mootx01/Tests/MootProductDockTests|benchmark-ee|benchmark)(/|$)'
 
 leak=$(git ls-files | grep -E "$EE_ONLY_RE")
 if [ -n "$leak" ]; then
