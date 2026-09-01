@@ -47,6 +47,24 @@ public enum CoreAIPromptStyle: String, Sendable {
     case nuextract
 }
 
+/// Per-row result of a batched `mintPrompts` call: the normalized claim
+/// (nil = per-row failure), the number of tokens generated, and whether
+/// the generation budget or cache limit cut it off before a stop token.
+/// `hitCap` is the spec-v2 finish-or-retry trigger — the harness retries
+/// capped rows at a doubled budget rather than accepting a truncated
+/// claim silently.
+public struct MintOutcome: Sendable {
+    public let text: String?
+    public let generatedTokens: Int
+    public let hitCap: Bool
+
+    public init(text: String?, generatedTokens: Int, hitCap: Bool) {
+        self.text = text
+        self.generatedTokens = generatedTokens
+        self.hitCap = hitCap
+    }
+}
+
 /// Process-wide serial gate over Core AI graph executions. Three
 /// engines submitting concurrently wedged the shared runtime after
 /// ~60 claims each (all lanes suspended on awaits that never resumed;
@@ -112,17 +130,22 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
     private let headDim: Int
     private let tokenizer: QwenTokenizer
     private let stopIDs: Set<Int32>
-    /// Claim-length budget: adornments are one dense line; 96 tokens is
-    /// ~3x the observed claim length, so the budget never truncates a
-    /// well-formed claim and bounds a runaway generation.
-    private let maxNewTokens = 96
+    /// Per-mint generation budget in tokens. Adornments are one dense
+    /// line; the 96-token default is ~3x the observed claim length, so
+    /// it never truncates a well-formed claim and bounds a runaway
+    /// generation. Callers running the spec-v2 finish-or-retry regime
+    /// (the harness probe's --max-new-tokens flag) pass a per-process
+    /// override; per-row cap-hits surface via `MintOutcome.hitCap`.
+    private let maxNewTokens: Int
     private let style: CoreAIPromptStyle
     private let outputKind: MintOutputKind
 
     public init(assetPath: String, tokenizerPath: String, identity: String,
-                style: CoreAIPromptStyle = .chat) async throws {
+                style: CoreAIPromptStyle = .chat,
+                maxNewTokens: Int = 96) async throws {
         self.identity = identity
         self.style = style
+        self.maxNewTokens = maxNewTokens
         self.outputKind = style == .nuextract ? .json : .text
         self.tokenizer = try QwenTokenizer(
             tokenizerJSON: URL(fileURLWithPath: tokenizerPath))
@@ -169,12 +192,44 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
             // Single mints ride the batch graph with dummy passenger
             // rows — the batch shape is static.
             let outs = try await generate([frameFor(prompt)])
-            return finish(outs[0])
+            return finish(outs[0].tokens)
         } catch {
             // Per-prompt failure contract: nil, never throw.
             log.error("CoreAIEngine \(self.identity): mint failed — \(error)")
             return nil
         }
+    }
+
+    /// Batched mint over caller-built INNER prompts (the engine applies
+    /// only the style frame). This is the harness seam for the spec-v2
+    /// regime, where flavor/loop/retry/shorten wording is composed
+    /// outside the engine: prompts chunk into consecutive `batchWidth`
+    /// graph batches, and every row reports its generated-token count
+    /// and whether the budget capped it before a stop token (the
+    /// finish-or-retry trigger). Product mint paths keep using
+    /// `mint`/`mintRows`; behavior there is unchanged.
+    public func mintPrompts(_ prompts: [String]) async -> [MintOutcome] {
+        let frames = prompts.map(frameFor)
+        var results: [MintOutcome] = []
+        var start = 0
+        while start < frames.count {
+            let group = Array(frames[start..<min(start + batchWidth, frames.count)])
+            do {
+                let outs = try await generate(group)
+                results.append(contentsOf: outs.map {
+                    MintOutcome(text: finish($0.tokens),
+                                generatedTokens: $0.tokens.count,
+                                hitCap: $0.hitCap)
+                })
+            } catch {
+                log.error("CoreAIEngine \(self.identity): batch failed — \(error)")
+                results.append(contentsOf: group.map { _ in
+                    MintOutcome(text: nil, generatedTokens: 0, hitCap: false)
+                })
+            }
+            start += group.count
+        }
+        return results
     }
 
     /// Row batching: each row payload mints as its OWN independent
@@ -193,7 +248,7 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
             let group = Array(frames[start..<min(start + batchWidth, frames.count)])
             do {
                 let outs = try await generate(group)
-                claims.append(contentsOf: outs.map(finish))
+                claims.append(contentsOf: outs.map { finish($0.tokens) })
             } catch {
                 log.error("CoreAIEngine \(self.identity): batch failed — \(error)")
                 claims.append(contentsOf: Array(repeating: nil, count: group.count))
@@ -223,8 +278,11 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
     /// Greedy-decode up to `batchWidth` framed prompts through the
     /// batched entrypoints. Rows beyond `prompts.count` are dummy slots
     /// (single pad token) whose outputs are discarded. Returns one
-    /// token array per real prompt.
-    private func generate(_ prompts: [String]) async throws -> [[Int32]] {
+    /// token array per real prompt, plus whether that row's generation
+    /// was cut off by the budget or the cache limit rather than a stop
+    /// token (spec-v2 cap-hit telemetry).
+    private func generate(_ prompts: [String]) async throws
+        -> [(tokens: [Int32], hitCap: Bool)] {
         let width = batchWidth
         // Tokenize with the hard cap: prompt + generation budget must
         // fit the static cache. Over-long records truncate here as a
@@ -280,6 +338,11 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         var dmask = [Int32](repeating: 0, count: width * maxCache)
         var cachePos = [Int32](repeating: 0, count: width)
         var done = [Bool](repeating: false, count: width)
+        // Cap-hit ledger: a row is capped when generation ends without a
+        // stop token — either the budget loop exhausts while the row is
+        // still live, or the static cache fills. Stop-token completions
+        // clear the flag.
+        var capped = [Bool](repeating: true, count: width)
         var out: [[Int32]] = Array(repeating: [], count: width)
         for (r, row) in rowIDs.enumerated() {
             for i in 0..<row.count { dmask[r * maxCache + i] = 1 }
@@ -288,7 +351,10 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         }
         for _ in 0..<maxNewTokens {
             for r in 0..<width where !done[r] {
-                if stopIDs.contains(next[r]) || Int(cachePos[r]) >= maxCache {
+                if stopIDs.contains(next[r]) {
+                    done[r] = true
+                    capped[r] = false
+                } else if Int(cachePos[r]) >= maxCache {
                     done[r] = true
                 } else {
                     out[r].append(next[r])
@@ -316,7 +382,7 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
                 next[r] = stepNext[r]
             }
         }
-        return Array(out.prefix(prompts.count))
+        return (0..<prompts.count).map { (tokens: out[$0], hitCap: capped[$0]) }
     }
 
     private func finish(_ out: [Int32]) -> String? {
