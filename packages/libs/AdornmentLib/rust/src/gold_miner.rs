@@ -25,7 +25,8 @@ use std::sync::Mutex;
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use crate::minter_recipe::{normalize_mint_output, MinterRecipe, QUANTIZED_RECIPE};
-use crate::quantized_qwen2_lean::ModelWeights;
+use crate::quantized_qwen2_lean::ModelWeights as Qwen2LeanWeights;
+use candle_transformers::models::quantized_qwen3::ModelWeights as Qwen3Weights;
 use tokenizers::Tokenizer;
 
 // ── Engine plug ─────────────────────────────────────────────────────────────
@@ -99,31 +100,82 @@ pub fn mint_batch(prompts: &[String]) -> Vec<Option<String>> {
 
 // ── Quantized in-process engine ─────────────────────────────────────────────
 
-/// Maximum new tokens generated per minting call. Claims are short (one
-/// dense line). Capping prevents runaway generation when the model fails
-/// to emit an EOS token. Mirrored in QUANTIZED_RECIPE's "max_new_tokens"
-/// setting — a change here is an sN bump there, same commit.
+/// Default maximum new tokens generated per minting call. Claims are
+/// short (one dense line). Capping prevents runaway generation when the
+/// model fails to emit an EOS token. The effective cap is PER-RECIPE:
+/// the engine reads the recipe's "max_new_tokens" setting at load
+/// (NUEXTRACT-TAIL finding 2026-08-31: JSON-emitting recipes need more
+/// headroom than one prose line — a 96-token cap truncated NuExtract's
+/// JSON on long records, and the truncated object salvaged to a bare
+/// "{" claim ~28% of the time). This constant is the fallback when a
+/// recipe carries no such setting.
 const MAX_NEW_TOKENS: usize = 96;
 
-/// Qwen2 vocabulary token ID for `<|im_end|>` (end of assistant turn).
+/// Vocabulary token ID for `<|im_end|>` (end of assistant turn).
+/// Identical across every supported architecture — Qwen2, Qwen3, and
+/// the Qwen3-based fine-tunes share the Tiktoken vocabulary (verified
+/// against each checkpoint's tokenizer.json, 2026-08-31).
 const IM_END_TOKEN_ID: u32 = 151645;
-/// Qwen2 vocabulary token ID for `<|endoftext|>` (EOS fallback).
+/// Vocabulary token ID for `<|endoftext|>` (EOS fallback). Same
+/// cross-architecture note as `IM_END_TOKEN_ID`.
 const ENDOFTEXT_TOKEN_ID: u32 = 151643;
 
-/// The Rust port's small local engine: a GGUF-quantized Qwen2-family
-/// model run in-process through candle's quantized kernels.
+/// The quantized weight graphs this engine can run, dispatched by the
+/// recipe's model token at load (QWEN3-ENGINE, 2026-08-31). Qwen2-family
+/// models use the lean vendored module (F16 embedding table — the
+/// sub-GiB residency trick); Qwen3-family models use upstream candle,
+/// which dequantizes its embedding table to F32 at load (~600 MB on the
+/// 151k vocabulary) — acceptable for workshop/benchmark use, and the
+/// lean-vendor treatment is a follow-up gated on a product-residency
+/// need, never applied speculatively.
+enum ArchWeights {
+    Qwen2Lean(Qwen2LeanWeights),
+    Qwen3(Qwen3Weights),
+}
+
+impl ArchWeights {
+    /// Uniform forward: both candle modules share the exact
+    /// `(input, offset) -> logits` contract (verified signatures,
+    /// Smythe QWEN3-ENGINE pre-flight).
+    fn forward(&mut self, input: &Tensor, offset: usize) -> candle_core::Result<Tensor> {
+        match self {
+            ArchWeights::Qwen2Lean(m) => m.forward(input, offset),
+            ArchWeights::Qwen3(m) => m.forward(input, offset),
+        }
+    }
+
+    /// Reset per-mint state. The KV-cache contract DIFFERS between the
+    /// modules: the lean Qwen2 module discards its cache itself whenever
+    /// a forward runs at position 0, but upstream quantized_qwen3's
+    /// ConcatKvCache appends UNCONDITIONALLY — without this explicit
+    /// clear, a second mint would decode against the previous mint's
+    /// cache (wrong claims, unbounded growth). Called at the top of
+    /// every generate().
+    fn reset_mint_state(&mut self) {
+        match self {
+            ArchWeights::Qwen2Lean(_) => {} // self-resetting at position 0
+            ArchWeights::Qwen3(m) => m.clear_kv_cache(),
+        }
+    }
+}
+
+/// The Rust port's small local engine: a GGUF-quantized model run
+/// in-process through candle's quantized kernels, dispatched across the
+/// supported architectures (`ArchWeights`: Qwen2-family lean module,
+/// Qwen3-family upstream module).
 ///
 /// Memory contract (the reason this engine exists):
-///   - Weights load from a Q4 GGUF (~350 MB for a 0.5B model) and compute
-///     runs directly on the quantized blocks — a full-precision copy of
-///     the model NEVER exists (the f32 up-conversion that produced the
-///     10 GB benchmark minter is structurally impossible here).
-///   - The KV cache resets on every mint: candle's quantized_qwen2
-///     discards its cache when `index_pos == 0`, and every mint feeds the
-///     full prompt at position 0. No growth across a day of ingest.
+///   - Weights load from a quantized GGUF (~350 MB for a 0.5B Q4 model)
+///     and compute runs directly on the quantized blocks — a
+///     full-precision copy of the model NEVER exists (the f32
+///     up-conversion that produced the 10 GB benchmark minter is
+///     structurally impossible here). Exception: upstream modules
+///     dequantize the embedding table at load (see ArchWeights doc).
+///   - The KV cache resets on every mint (`reset_mint_state`). No
+///     growth across a day of ingest.
 ///   - One instance per process, shared by every mint path.
 pub struct QuantizedLlmEngine {
-    model: ModelWeights,
+    model: ArchWeights,
     tokenizer: Tokenizer,
     device: Device,
     /// The engine's generation contract: prompt template, settings, output
@@ -137,9 +189,10 @@ pub struct QuantizedLlmEngine {
 impl QuantizedLlmEngine {
     /// Load a quantized engine from a GGUF file plus its HF tokenizer.json.
     ///
-    /// The GGUF path selects the model — 0.5B Q4 is the product default,
-    /// but ANY Qwen2-family GGUF plugs in here without code changes (the
-    /// engine-swap requirement).
+    /// Convenience wrapper for the DEFAULT recipe (Qwen2-family lean
+    /// path): any Qwen2-family GGUF plugs in here without code changes.
+    /// Other architectures come through `load_with_recipe`, which
+    /// dispatches by the recipe's model token.
     pub fn load(gguf_path: &Path, tokenizer_path: &Path) -> Result<Self, String> {
         Self::load_with_recipe(gguf_path, tokenizer_path, QUANTIZED_RECIPE)
     }
@@ -171,8 +224,25 @@ impl QuantizedLlmEngine {
             .map_err(|e| format!("gold miner: open {}: {e}", gguf_path.display()))?;
         let content = gguf_file::Content::read(&mut file)
             .map_err(|e| format!("gold miner: gguf parse {}: {e}", gguf_path.display()))?;
-        let model = ModelWeights::from_gguf(content, &mut file, &device)
-            .map_err(|e| format!("gold miner: gguf load {}: {e}", gguf_path.display()))?;
+        // Architecture dispatch by the recipe's MODEL TOKEN, never by
+        // re-reading GGUF metadata: the recipe is the contract, and a
+        // GGUF whose architecture disagrees with the selected recipe
+        // should fail the load loudly rather than silently run under
+        // the wrong identity. Qwen3-based fine-tunes (osmosis-*) share
+        // the qwen3 graph.
+        let model = if recipe.model.starts_with("qwen3-")
+            || recipe.model.starts_with("osmosis-")
+        {
+            ArchWeights::Qwen3(
+                Qwen3Weights::from_gguf(content, &mut file, &device)
+                    .map_err(|e| format!("gold miner: gguf load {}: {e}", gguf_path.display()))?,
+            )
+        } else {
+            ArchWeights::Qwen2Lean(
+                Qwen2LeanWeights::from_gguf(content, &mut file, &device)
+                    .map_err(|e| format!("gold miner: gguf load {}: {e}", gguf_path.display()))?,
+            )
+        };
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| format!("gold miner: tokenizer {}: {e}", tokenizer_path.display()))?;
         // Return load-time transients to the OS (Linux). GGUF loading frees
@@ -200,6 +270,9 @@ impl QuantizedLlmEngine {
     /// the internal KV cache), then one token per step at its cached
     /// offset. Deterministic for a given model file.
     fn generate(&mut self, prompt: &str) -> Result<String, String> {
+        // Per-mint isolation (see ArchWeights::reset_mint_state): every
+        // mint starts from an empty KV cache regardless of architecture.
+        self.model.reset_mint_state();
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -207,7 +280,16 @@ impl QuantizedLlmEngine {
         let mut all_ids: Vec<u32> = encoding.get_ids().to_vec();
         let prompt_len = all_ids.len();
 
-        for step in 0..MAX_NEW_TOKENS {
+        // Per-recipe generation budget (see MAX_NEW_TOKENS doc comment).
+        let max_new_tokens = self
+            .recipe
+            .parameters
+            .iter()
+            .find(|(k, _)| *k == "max_new_tokens")
+            .and_then(|(_, v)| v.parse::<usize>().ok())
+            .unwrap_or(MAX_NEW_TOKENS);
+
+        for step in 0..max_new_tokens {
             let (input_ids, offset): (&[u32], usize) = if step == 0 {
                 (all_ids.as_slice(), 0)
             } else {
