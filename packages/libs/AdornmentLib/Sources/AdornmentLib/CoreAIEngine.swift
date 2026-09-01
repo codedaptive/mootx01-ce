@@ -37,6 +37,12 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
 /// on every OS even though the engine itself needs macOS 27.
 public enum CoreAIPromptStyle: String, Sendable {
     case chat
+    /// Qwen3-family frame: the chat frame plus the empty think-block
+    /// prefix after the assistant sentinel. Qwen3 models THINK by
+    /// default — without the prefix, generation opens a <think> block
+    /// instead of the claim (observed at rust bring-up, QWEN3-ENGINE).
+    /// Byte-twin of the rust QWEN3_06B_RECIPE chat_template.
+    case chat3
     case plain
     case nuextract
 }
@@ -201,6 +207,9 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         switch style {
         case .chat:
             return "<|im_start|>user\n\(prompt)<|im_end|>\n<|im_start|>assistant\n"
+        case .chat3:
+            // Qwen3 non-thinking form (see CoreAIPromptStyle.chat3).
+            return "<|im_start|>user\n\(prompt)<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         case .plain:
             return prompt
         case .nuextract:
