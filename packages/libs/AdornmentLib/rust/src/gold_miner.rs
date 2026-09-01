@@ -192,6 +192,11 @@ pub struct QuantizedLlmEngine {
     /// recent successful `generate` — the harness binaries' per-mint
     /// telemetry read-back. Product paths ignore it.
     last_telemetry: (usize, bool),
+    /// Raw decoded text of the most recent generation BEFORE
+    /// normalization (Wave-1 protocol-lab evidence: the normalizer's
+    /// first-line extraction hides what a runaway actually produced).
+    /// Product paths ignore it.
+    last_raw: String,
 }
 
 impl QuantizedLlmEngine {
@@ -289,7 +294,35 @@ impl QuantizedLlmEngine {
             recipe,
             max_new_tokens_override: None,
             last_telemetry: (0, false),
+            last_raw: String::new(),
         })
+    }
+
+    /// Raw decoded text of the most recent mint, pre-normalization
+    /// (empty after a failed generate). Diagnostic read-back for the
+    /// candle-mint --raw flag; product paths never call this.
+    pub fn last_mint_raw(&self) -> &str {
+        &self.last_raw
+    }
+
+    /// Mint from a FULLY PRE-ASSEMBLED prompt: the recipe's template is
+    /// NOT applied (the caller framed the prompt completely), while
+    /// generation, normalization, telemetry, and raw capture behave
+    /// exactly as `mint`. Harness protocol-lab seam (candle-mint
+    /// --no-assemble) for testing candidate templates cross-port before
+    /// they become recipe changes; product paths never call this.
+    pub fn mint_preassembled(&mut self, full_prompt: &str) -> Option<String> {
+        match self.generate(full_prompt) {
+            Ok(raw) => {
+                let claim = normalize_mint_output(&raw, self.recipe.output);
+                self.last_raw = raw;
+                if claim.is_empty() { None } else { Some(claim) }
+            }
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "{e}");
+                None
+            }
+        }
     }
 
     /// Override the per-recipe generation budget (spec-v2 harness runs
@@ -315,6 +348,7 @@ impl QuantizedLlmEngine {
         // previous mint's numbers.
         self.model.reset_mint_state();
         self.last_telemetry = (0, false);
+        self.last_raw.clear();
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -391,6 +425,7 @@ impl GoldMinerEngine for QuantizedLlmEngine {
         match self.generate(&assembled) {
             Ok(raw) => {
                 let claim = normalize_mint_output(&raw, self.recipe.output);
+                self.last_raw = raw;
                 if claim.is_empty() {
                     None
                 } else {

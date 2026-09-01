@@ -57,11 +57,17 @@ public struct MintOutcome: Sendable {
     public let text: String?
     public let generatedTokens: Int
     public let hitCap: Bool
+    /// Raw decoded generation BEFORE normalization (Wave-1 protocol-lab
+    /// evidence — the normalizer's first-line extraction hides what a
+    /// runaway actually produced). nil only on a failed batch.
+    public let rawText: String?
 
-    public init(text: String?, generatedTokens: Int, hitCap: Bool) {
+    public init(text: String?, generatedTokens: Int, hitCap: Bool,
+                rawText: String? = nil) {
         self.text = text
         self.generatedTokens = generatedTokens
         self.hitCap = hitCap
+        self.rawText = rawText
     }
 }
 
@@ -219,7 +225,8 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
                 results.append(contentsOf: outs.map {
                     MintOutcome(text: finish($0.tokens),
                                 generatedTokens: $0.tokens.count,
-                                hitCap: $0.hitCap)
+                                hitCap: $0.hitCap,
+                                rawText: tokenizer.decode($0.tokens))
                 })
             } catch {
                 log.error("CoreAIEngine \(self.identity): batch failed — \(error)")
