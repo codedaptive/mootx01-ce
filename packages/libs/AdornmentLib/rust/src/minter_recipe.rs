@@ -24,8 +24,10 @@
 //!
 //!   qwen2-0.5b-q4km      p2  s1   (quantized in-process engine default GGUF)
 //!   qwen2.5-0.5b-q4km    p2  s1
-//!   nuextract-tiny-q4km  p1  s1   (native extraction template, no chat frame)
+//!   nuextract-tiny-q4km  p1  s2   (native extraction template, no chat frame)
 //!   qwen2.5-1.5b-q4km    p2  s1   (quality-ceiling reference arm)
+//!   qwen3-0.6b-q8        p1  s1   (wave-1 roster; candle qwen3 graph)
+//!   osmosis-structure-0.6b-q8  p1  s1  (Qwen3 fine-tune, structured output)
 //!
 //! RULES (mirror of the bitmap-bit doctrine):
 //!   - NEVER reuse a version number. A retired p2 means the next prompt is
@@ -203,8 +205,20 @@ pub const NUEXTRACT_TINY_RECIPE: MinterRecipe = MinterRecipe {
     // ruling (it never had a chat frame), so inheriting the chat
     // recipes' p2 would falsely retire a prompt that never changed.
     prompt_version: 1,
+    // s2 (NUEXTRACT-TAIL, 2026-08-31): JSON emissions scale with record
+    // entity count — at the shared 96-token cap, long records truncated
+    // mid-object and salvaged to a bare "{" claim (~28% of a 272-record
+    // locomo run, length-correlated, identical at F16 and Q8). 256
+    // tokens covers the observed JSON sizes; the engine reads this
+    // setting per recipe.
+    settings_version: 2,
     system_prompt: "",
     chat_template: "<|input|>\n### Template:\n{\"claim\": \"\", \"entities\": [], \"dates\": [], \"quantities\": []}\n### Text:\n{input}\n<|output|>\n",
+    parameters: &[
+        ("max_length", "280"),
+        ("max_new_tokens", "256"),
+        ("sampling", "greedy"),
+    ],
     output: MintOutputKind::Json,
     ..QUANTIZED_RECIPE
 };
@@ -214,6 +228,48 @@ pub const NUEXTRACT_TINY_RECIPE: MinterRecipe = MinterRecipe {
 /// and over the 1 GiB product residency budget.
 pub const QWEN25_15B_RECIPE: MinterRecipe = MinterRecipe {
     model: "qwen2.5-1.5b-q4km",
+    ..QUANTIZED_RECIPE
+};
+
+/// Qwen3-0.6B Q8_0 (QWEN3-ENGINE, roster wave 1): a generation newer in
+/// instruction-following than the qwen2.5 tier at nearly the same size.
+/// Same chatml sentinels and user-only frame as the qwen2 family; the
+/// engine dispatches it to candle's quantized_qwen3 graph by this model
+/// token. p1 starts fresh — its own template history, not the qwen2
+/// ladder's.
+pub const QWEN3_06B_RECIPE: MinterRecipe = MinterRecipe {
+    model: "qwen3-0.6b-q8",
+    prompt_version: 1,
+    // Qwen3 is a THINKING model by default: bare chatml framing makes it
+    // open a <think> block (observed live at bring-up). The empty
+    // think-block prefix after the assistant sentinel is the model's
+    // documented non-thinking form — generation starts directly on the
+    // claim.
+    chat_template: "<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    ..QUANTIZED_RECIPE
+};
+
+/// Osmosis-Structure-0.6B Q8_0 (roster wave 1): a Qwen3-0.6B fine-tune
+/// RL-trained for schema-faithful structured output. Its TRAINED
+/// contract is a SYSTEM turn carrying the JSON schema plus the source
+/// text as the user turn (model card usage) — a model-native format
+/// like NuExtract's bare template, so the D1 user-only ruling for the
+/// shared chat minters does not apply here. Bare-template prompting was
+/// tried first at bring-up and the model echoed schema fragments
+/// instead of data. Empty-think prefix per the Qwen3 base. Normalizer's
+/// Json branch flattens the emission; 256-token budget per the
+/// NUEXTRACT-TAIL finding.
+pub const OSMOSIS_STRUCTURE_RECIPE: MinterRecipe = MinterRecipe {
+    model: "osmosis-structure-0.6b-q8",
+    prompt_version: 1,
+    system_prompt: "You are a helpful assistant that understands and translates text to JSON format according to the following schema. {\"type\": \"object\", \"properties\": {\"claim\": {\"type\": \"string\"}, \"entities\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"dates\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"quantities\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}, \"required\": [\"claim\"]}",
+    chat_template: "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    parameters: &[
+        ("max_length", "280"),
+        ("max_new_tokens", "256"),
+        ("sampling", "greedy"),
+    ],
+    output: MintOutputKind::Json,
     ..QUANTIZED_RECIPE
 };
 
@@ -227,6 +283,8 @@ pub fn recipe_for_model(token: &str) -> Option<MinterRecipe> {
         "qwen2.5-0.5b-q4km" => Some(QWEN25_05B_RECIPE),
         "nuextract-tiny-q4km" => Some(NUEXTRACT_TINY_RECIPE),
         "qwen2.5-1.5b-q4km" => Some(QWEN25_15B_RECIPE),
+        "qwen3-0.6b-q8" => Some(QWEN3_06B_RECIPE),
+        "osmosis-structure-0.6b-q8" => Some(OSMOSIS_STRUCTURE_RECIPE),
         _ => None,
     }
 }
@@ -246,7 +304,8 @@ pub fn selected_recipe() -> Result<MinterRecipe, String> {
             format!(
                 "MOOT_MINT_MODEL={token:?} is not a registered model token \
                  (known: qwen2-0.5b-q4km, qwen2.5-0.5b-q4km, \
-                 nuextract-tiny-q4km, qwen2.5-1.5b-q4km)"
+                 nuextract-tiny-q4km, qwen2.5-1.5b-q4km, \
+                 qwen3-0.6b-q8, osmosis-structure-0.6b-q8)"
             )
         }),
     }
@@ -437,13 +496,26 @@ mod tests {
         assert_eq!(recipe_for_model("qwen2.5-0.5b-q4km"), Some(QWEN25_05B_RECIPE));
         assert_eq!(recipe_for_model("nuextract-tiny-q4km"), Some(NUEXTRACT_TINY_RECIPE));
         assert_eq!(recipe_for_model("qwen2.5-1.5b-q4km"), Some(QWEN25_15B_RECIPE));
+        assert_eq!(recipe_for_model("qwen3-0.6b-q8"), Some(QWEN3_06B_RECIPE));
+        assert_eq!(
+            recipe_for_model("osmosis-structure-0.6b-q8"),
+            Some(OSMOSIS_STRUCTURE_RECIPE)
+        );
         assert_eq!(recipe_for_model("qwen9-77b"), None);
         // Chat descendants share the p2 frame contract; NuExtract's
         // native template never changed, so it stays p1 (explicit pin —
         // struct-update inheritance must not bump it).
         assert_eq!(QWEN25_05B_RECIPE.id(), "qwen2.5-0.5b-q4km-p2-s1");
         assert_eq!(QWEN25_15B_RECIPE.id(), "qwen2.5-1.5b-q4km-p2-s1");
-        assert_eq!(NUEXTRACT_TINY_RECIPE.id(), "nuextract-tiny-q4km-p1-s1");
+        assert_eq!(NUEXTRACT_TINY_RECIPE.id(), "nuextract-tiny-q4km-p1-s2");
+        assert_eq!(QWEN3_06B_RECIPE.id(), "qwen3-0.6b-q8-p1-s1");
+        assert_eq!(OSMOSIS_STRUCTURE_RECIPE.id(), "osmosis-structure-0.6b-q8-p1-s1");
+        // Osmosis mints JSON through the qwen3 chat frame with the
+        // NUEXTRACT-TAIL token budget.
+        assert_eq!(OSMOSIS_STRUCTURE_RECIPE.output, MintOutputKind::Json);
+        assert!(OSMOSIS_STRUCTURE_RECIPE
+            .parameters
+            .contains(&("max_new_tokens", "256")));
     }
 
     /// Shared normalizer fixtures — same inputs and expected outputs are
