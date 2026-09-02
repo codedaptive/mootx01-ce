@@ -756,7 +756,7 @@ public extension GeniusLocusKit {
                       // Replaces the previous `distilled == nil` column-presence
                       // check (cookbook §2.4.1 / SPEC §7.1).
                       !drawer.hasCurrentRepresentation
-                        || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
+                        || drawer.distilledPipelineVersion != GeniusLocusKit.distillationConverterID
                 else { continue }
                 let didDistill = (try? await self.distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
@@ -774,7 +774,7 @@ public extension GeniusLocusKit {
                     // Best-effort: non-fatal; drain completion accounting is
                     // unaffected (distillation is the drain-stage obligation —
                     // recompose is opportunistic post-distillation work).
-                    try? await corpus.recomposeDenseVector(id: drawerID, now: now)
+                    _ = try? await corpus.recomposeDenseVector(id: drawerID, now: now)
                 }
             }
         }
