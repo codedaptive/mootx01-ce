@@ -9,7 +9,7 @@
 //   ContextDistiller.distill(_:converter:) — assembles the full output row
 //   combine(_:trailer:) — mirrors Python's _combine(core, trailer)
 //
-// Design rules (from mission brief):
+// Design rules (from the decision record):
 //   - NO regex engine. All pattern matching is hand-written character scanners.
 //   - Index unit: unicodeScalars (code points).
 //   - Python integer semantics: truncating division (same as Swift for non-negative).
