@@ -221,13 +221,27 @@ public extension GeniusLocusKit {
         //   Mid-session, the AND can only worsen in the safe direction (capture
         //   lowers AND; only rebuildAll raises it).
         let rooms = try await estate.roomLevelFingerprints()
+        // Bit 19 means the representation columns are populated; it does not
+        // encode which pipeline contract produced them. Read the stale-room
+        // set once through a metadata-only projection so a fully represented
+        // room is skipped only when every representation is also current.
+        // Current rooms retain the fast path: no drawer content is hydrated.
+        let staleRooms = try await estate.roomsWithStaleDistilledRepresentations(
+            pipelineVersion: DistillationPipelineVersion.current)
+        let staleRoomKeys = Set(staleRooms.map { "\($0.wing)\u{0}\($0.room)" })
         let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
 
         rooms: for entry in rooms {
             // Skip this room when the AND proves every active drawer already
-            // has bit 19 set.  The AND is an under-approximation so if it
-            // shows 1 for bit 19 the true AND is also 1 — safe to skip.
-            if (entry.fingerprint.operationalAnd & skipBit) == skipBit { continue }
+            // has bit 19 set AND the metadata projection found no stale
+            // pipeline version. The AND is an under-approximation so if it
+            // shows 1 for bit 19 the true AND is also 1; the version check
+            // closes the separate stale-contract eligibility path.
+            let roomKey = "\(entry.wing)\u{0}\(entry.room)"
+            if (entry.fingerprint.operationalAnd & skipBit) == skipBit,
+               !staleRoomKeys.contains(roomKey) {
+                continue
+            }
 
             // Session order for the coref window (W2.2 A1): the room's
             // drawers sorted by (eventTime, filedAt, id) — deterministic and
