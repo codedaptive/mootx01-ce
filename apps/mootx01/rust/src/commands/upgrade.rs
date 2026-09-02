@@ -1498,7 +1498,6 @@ mod tests {
     #[test]
     fn corpus_counts_migration_gate_verifies_sentinel_on_every_row() {
         use corpus_kit::corpus_provider_counts_store::is_invalidated_counts;
-        use persistence_kit::predicate::StoragePredicate;
         use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
         use persistence_kit::sqlite::SqliteStorage;
         use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
