@@ -478,11 +478,17 @@ public extension GeniusLocusKit {
             // configuration initializer rejects standalone or passage-enabled
             // registration structurally (shared-content 1.1 decision lock).
             let estateObj = try estate(for: handle)
+            // CDL-03: Select the index composition policy from the environment.
+            // MOOT_INDEX_COMPOSITION absent or unrecognised → .current (cell A).
+            // Same posture as MOOT_BENCH_GOLD_MINTER — dark scratch-path selector.
+            let compositionPolicy = indexCompositionPolicy()
             let corpus = try await CorpusContentEngine(
                 storage: backingStorage,
                 configuration: CorpusContentConfiguration(
-                    mode: .attached, indexUnit: .wholeContent),
-                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                    mode: .attached, indexUnit: .wholeContent,
+                    compositionPolicy: compositionPolicy),
+                source: LocusDrawerCorpusContentSource(
+                    estate: estateObj, compositionPolicy: compositionPolicy),
                 models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
@@ -534,11 +540,15 @@ public extension GeniusLocusKit {
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
+            // CDL-03: Same policy selection as the .glk case.
+            let compositionPolicy = indexCompositionPolicy()
             let corpus = try await CorpusContentEngine(
                 storage: backingStorage,
                 configuration: CorpusContentConfiguration(
-                    mode: .attached, indexUnit: .wholeContent),
-                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                    mode: .attached, indexUnit: .wholeContent,
+                    compositionPolicy: compositionPolicy),
+                source: LocusDrawerCorpusContentSource(
+                    estate: estateObj, compositionPolicy: compositionPolicy),
                 models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
@@ -831,6 +841,26 @@ public extension GeniusLocusKit {
     }
 
     // MARK: - Private helpers
+
+    /// Read the `MOOT_INDEX_COMPOSITION` environment variable and return the
+    /// corresponding `IndexCompositionPolicy`. Returns `.current` when the
+    /// variable is absent or contains an unrecognised value.
+    ///
+    /// The env-var value must match the `IndexCompositionPolicy.id` format:
+    ///   `"lex=<lexSource>;dense=<denseSource>"`
+    /// e.g. `"lex=originalPlusAdornments;dense=distilled"` (cell B).
+    ///
+    /// Same posture as `MOOT_BENCH_GOLD_MINTER` — dark scratch-path selector
+    /// intended for gauntlet runs. Production estates leave the env-var unset.
+    private func indexCompositionPolicy() -> IndexCompositionPolicy {
+        guard let raw = ProcessInfo.processInfo.environment["MOOT_INDEX_COMPOSITION"],
+              let policy = IndexCompositionPolicy.fromEnvironmentValue(raw) else {
+            return .current
+        }
+        Self.lifecycleLog.info(
+            "index composition policy from env: \(raw, privacy: .public)")
+        return policy
+    }
 
     /// Encode a `SyncMode` to the `active_storage_mode` manifest bitmap value.
     ///
