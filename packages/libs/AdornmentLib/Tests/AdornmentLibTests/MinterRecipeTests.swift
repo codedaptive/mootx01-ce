@@ -75,4 +75,28 @@ struct MinterRecipeTests {
         // (int64-first path both ports): 2^53 + 1.
         #expect(normalizeMintOutput(#"{"n": 9007199254740993}"#, kind: .json) == "9007199254740993")
     }
+
+    @Test("JSON structural stop ignores quoted and nested braces")
+    func jsonStructuralStop() {
+        #expect(topLevelJSONObjectPrefix(
+            #" {"claim":"literal } and \"quoted\"","nested":{"n":1}} trailing"#)
+            == #"{"claim":"literal } and \"quoted\"","nested":{"n":1}}"#)
+        #expect(topLevelJSONObjectPrefix(
+            #"{"claim":"still open","nested":{"n":1}"#) == nil)
+        #expect(topLevelJSONObjectPrefix(
+            #"prose before {"n":1}"#) == nil)
+        #expect(topLevelJSONObjectPrefix(#"{"claim":"x",}"#) == nil)
+        #expect(topLevelJSONObjectPrefix(#"{"a":[1}"#) == nil)
+    }
+
+    @Test("JSON same-token suffixes retain and normalize only the object prefix")
+    func jsonSameTokenSuffixes() {
+        let expectedPrefix = #"{"claim":"kept","nested":[{"literal":"} { \"quoted\""}]}"#
+        let expectedClaim = "kept; } { \"quoted\""
+        for suffix in [".", ",", ");\n"] {
+            let raw = " \(expectedPrefix)\(suffix)"
+            #expect(topLevelJSONObjectPrefix(raw) == expectedPrefix)
+            #expect(normalizeMintOutput(raw, kind: .json) == expectedClaim)
+        }
+    }
 }
