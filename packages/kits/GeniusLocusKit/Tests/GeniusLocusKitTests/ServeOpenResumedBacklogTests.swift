@@ -150,7 +150,7 @@ struct ServeOpenResumedBacklogTests {
             let row = try #require(try await estate2.getDrawers(ids: [id]).first)
             #expect(row.distilled != nil,
                 "resumed backlog drawer \(id) must be distilled after the serve-open drain (§7.1) — an undistilled row means a batch encoded before the rider was installed")
-            #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current,
+            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID,
                 "resumed drawer \(id) must carry the current distillation pipeline version")
         }
 

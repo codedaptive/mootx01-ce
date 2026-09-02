@@ -19,7 +19,7 @@ use std::collections::HashMap;
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 use substrate_ml::temporal_causality_fold::{
-    fold as tcf_fold, TemporalAuditEntry, TemporalFieldCoord,
+    TemporalAuditEntry, TemporalFieldCoord,
 };
 use substrate_types::hlc::HLC;
 

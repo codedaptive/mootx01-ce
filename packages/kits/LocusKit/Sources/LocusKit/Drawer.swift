@@ -190,11 +190,11 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// scrub — derived text must not outlive erased content).
     public let distilled: String?
 
-    /// Identifier of the format + pipeline contract that produced
-    /// `distilled` (Phase 1 value: "p1", see
-    /// `SubstrateML.DistillationPipelineVersion`). A row whose value
-    /// differs from the current build's contract identifier is a
-    /// regeneration candidate for the sweep. Nil iff `distilled` is nil.
+    /// The converter ID that produced `distilled` — the ContextDistillLib
+    /// converter identity of the form `<candidate>@<ruleset-version>`
+    /// (see `GeniusLocusKit.distillationConverterID`). A row whose value
+    /// differs from the current build's converter ID is a regeneration
+    /// candidate for the sweep. Nil iff `distilled` is nil.
     public let distilledPipelineVersion: String?
 
     /// Approximate token count of `distilled` (SPEC §6): deterministic,

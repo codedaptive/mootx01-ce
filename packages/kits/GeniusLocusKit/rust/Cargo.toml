@@ -30,6 +30,11 @@ eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # deferred this dependency ("no new dependencies"); the local types were
 # always built byte-compatible anticipating exactly this wiring.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
+# CDL-02: the deterministic dense-context distiller. render_distillation
+# produces the stored `distilled` text through context_distill_lib, and the
+# library's converter ID is what distill_item writes to
+# distilled_pipeline_version. Foundation tier (no kit deps); no inversion.
+context-distill-lib = { path = "../../../libs/ContextDistillLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # substrate-lib: locus-kit's audit seam (Estate::audit_events, the C3/A6
 # timing-derivation paging surface) returns substrate_lib::verbs::AuditEvent,

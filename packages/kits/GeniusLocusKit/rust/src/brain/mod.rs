@@ -26,7 +26,6 @@ pub mod tiered_contradiction_search;
 pub mod meeting_decision_capture;
 pub mod consolidation_cycle;
 pub mod distillation_cycle;
-pub mod coref_stage;
 pub mod enrichment_stage;
 pub mod event_lag_pairs;
 pub mod scheduler;
