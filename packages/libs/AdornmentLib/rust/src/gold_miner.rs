@@ -218,7 +218,7 @@ impl QuantizedLlmEngine {
 
     /// Load the engine under a specific recipe — the serve-start
     /// selection path (`selected_recipe` / `recipe_for_model`) and the
-    /// benchmark contender builds both come through here. The recipe
+    /// benchmark harness builds both come through here. The recipe
     /// supplies identity, prompt contract, and output kind; the model
     /// files must be the artifact the recipe's model token names.
     ///
