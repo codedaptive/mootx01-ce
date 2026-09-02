@@ -215,6 +215,42 @@ public actor GoldMiner {
     /// The active engine's identity, or nil when no engine is installed.
     public var engineIdentity: String? { engine?.identity }
 
+    /// The minter identity carried by the engine that would serve
+    /// `minterID` — the reference for the adornment pass's provenance
+    /// guard (GENIUSLOCUSKIT_SPEC § 16.1): the pass persists a pair only
+    /// when the pair's minter id equals this value, so an engine's text is
+    /// never stored under a stale active minter's id.
+    ///
+    /// Nil means "no minter identity, do not guard": no engine resolves
+    /// (the pass then mints mechanically), or the resolved engine is the
+    /// harness `CommandEngine`, whose identity is its command name
+    /// (`command:<name>`), not a minter id. The harness that injects a
+    /// minter command owns the active set exactly — the same rule as the
+    /// Rust port, where the MOOT_MINT_CMD subprocess seam has no engine
+    /// identity and `run_adornment_pass` runs unguarded. Product engines
+    /// (Apple's on-device model, CoreAI arms, quantized recipes) carry
+    /// their recipe's composed minter id and are always guarded.
+    public func servingMinterIdentity(for minterID: String) async -> String? {
+        guard let identity = await engine(for: minterID)?.identity else { return nil }
+        return identity.hasPrefix(commandEngineIdentityPrefix) ? nil : identity
+    }
+
+    /// The identity of the engine that would serve `minterID`, or nil when
+    /// no engine resolves — the key the adornment pass groups its
+    /// concurrency lanes by (GENIUSLOCUSKIT_SPEC § 16.1): every minter
+    /// that resolves to one engine shares that engine's
+    /// `maxConcurrentMints` budget instead of each taking the full width.
+    /// Unlike `servingMinterIdentity(for:)` this reports the harness
+    /// `CommandEngine` too: a command pipe is a width-1 sink, and two
+    /// minters sharing it must never drive two subprocess calls at once.
+    /// Identity, not object: the resident rule keeps one engine per
+    /// identity in a process, and two arms deliberately registered under
+    /// one identity serialize together — fewer calls than the engines
+    /// could take, never more.
+    public func servingEngineIdentity(for minterID: String) async -> String? {
+        await engine(for: minterID)?.identity
+    }
+
     /// The effective engine's declared mint fan-out width (resolving the
     /// engine if needed), or 1 when no engine is available. Mint drivers
     /// bound their task groups to this — see
@@ -235,7 +271,9 @@ public actor GoldMiner {
     }
 
     /// The declared width of the engine that serves `minterID` — the
-    /// pass sizes each minter's lane with this.
+    /// pass sizes each engine lane with this, asking once per lane
+    /// through any minter the lane holds (they all resolve to that
+    /// lane's engine).
     public func mintWidth(for minterID: String) async -> Int {
         max(1, await engine(for: minterID)?.maxConcurrentMints ?? 1)
     }
@@ -278,7 +316,7 @@ public actor GoldMiner {
     }
 
     /// The resolved engine for a minter, for callers that mint OUTSIDE
-    /// this actor (the pass's per-minter lanes): holding the actor for
+    /// this actor (the pass's per-engine lanes): holding the actor for
     /// the duration of a generation serializes every lane through one
     /// mutex — with multi-model arms that collapses all concurrency
     /// (measured 2026-08-31: four active lanes produced ~4 mints in six
@@ -416,6 +454,12 @@ public final class AppleFoundationEngine: GoldMinerEngine {
     #endif
 }
 
+/// Identity prefix of every `CommandEngine`: a command engine's identity is
+/// its command name, never a minter id, and `GoldMiner.servingMinterIdentity`
+/// recognizes the harness seam by this prefix. Declared outside the macOS
+/// block because the accessor compiles on every platform.
+let commandEngineIdentityPrefix = "command:"
+
 #if os(macOS)
 // MARK: - Command engine (macOS harness vehicle)
 
@@ -458,7 +502,7 @@ public final class CommandEngine: GoldMinerEngine {
 
     public init(command: String) {
         self.command = command
-        self.identity = "command:\((command as NSString).lastPathComponent)"
+        self.identity = commandEngineIdentityPrefix + (command as NSString).lastPathComponent
         let width: Int
         if let raw = ProcessInfo.processInfo.environment["MOOT_MINT_WIDTH"],
            let parsed = Int(raw), parsed >= 1 {
