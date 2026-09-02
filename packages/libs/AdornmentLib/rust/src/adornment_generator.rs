@@ -94,8 +94,10 @@ pub const ADORNMENT_CHUNK_THRESHOLD: usize = 16_000;
 /// the miner window (Bob miner-shape ruling, 2026-08-25). Twin of
 /// `mintAdornmentMapReduce` in AdornmentGenerator.swift: small records
 /// are one prompt/one mint; oversized records split on line boundaries
-/// into <=threshold pieces, each piece is minted, the piece-summaries
-/// are concatenated and re-summarized for the final blob line.
+/// into <=threshold pieces (a line longer than the threshold is itself
+/// hard-split at threshold char boundaries, so NO piece ever exceeds
+/// the threshold), each piece is minted, the piece-summaries are
+/// concatenated and re-summarized for the final blob line.
 ///
 /// Never returns `None` for non-blank content: when the model refuses
 /// or its output normalizes to empty, the return is the MECHANICAL
@@ -133,20 +135,31 @@ pub fn mint_adornment_map_reduce(
         return mechanical_fallback(drawer_content);
     }
 
-    // Split on line boundaries into <=threshold pieces; a single line
-    // longer than the threshold becomes its own piece. Deterministic.
+    // Split on line boundaries into <=threshold pieces. A single line
+    // longer than the threshold is first hard-split at threshold CHAR
+    // boundaries (Unicode scalars, never bytes — the Swift twin splits
+    // on Character-count prefixes and both ports must cut identically),
+    // and every segment then runs through the same line-packing
+    // accumulator as an ordinary line, so NO piece ever exceeds the
+    // threshold whatever the line structure of the record (Codex
+    // hardening finding a8905b59 — a newline-free record must never
+    // reach the engine as one unbounded prompt). Deterministic: same
+    // content always yields the same pieces.
     let mut pieces: Vec<String> = Vec::new();
     let mut current = String::new();
     for line in drawer_content.split('\n') {
-        if !current.is_empty()
-            && current.chars().count() + line.chars().count() + 1 > chunk_threshold
-        {
-            pieces.push(std::mem::take(&mut current));
+        for segment in hard_split(line, chunk_threshold) {
+            let segment_len = segment.chars().count();
+            if !current.is_empty()
+                && current.chars().count() + segment_len + 1 > chunk_threshold
+            {
+                pieces.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&segment);
         }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
     }
     if !current.is_empty() {
         pieces.push(current);
@@ -277,8 +290,9 @@ pub fn invoke_adornment_command(prompt: &str, max_length: usize) -> Option<Strin
 // ── Resident batch session (twin of Swift ResidentMintSession) ─────────────
 
 /// One resident minter child for the batch protocol: spawned with
-/// `--batch`, prompts written NUL-terminated, responses read
-/// NUL-terminated in order. Any protocol fault (spawn failure, torn
+/// `--batch`, prompts written NUL-terminated (see `batch_frame` for the
+/// NUL-stripping invariant), responses read NUL-terminated in order.
+/// Any protocol fault (spawn failure, torn
 /// frame, child exit) tears the child down and reports None for the
 /// in-flight prompt — the pair counts as failed and the next call
 /// respawns. A caller presenting a DIFFERENT command (minter activation
@@ -297,6 +311,20 @@ struct ResidentMint {
 }
 
 static RESIDENT_MINT: Mutex<Option<ResidentMint>> = Mutex::new(None);
+/// Cut one line into consecutive slices of at most `limit` chars
+/// (Unicode scalars), in order, so the map-reduce accumulator never
+/// sees a line longer than its piece bound. A line at or under the
+/// limit comes back as its single self. A zero `limit` also returns the
+/// line whole: a zero step would never advance, and zero is never a
+/// product threshold. Twin of the Swift `hardSplit(_:every:)`.
+fn hard_split(line: &str, limit: usize) -> Vec<String> {
+    if limit == 0 || line.chars().count() <= limit {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    chars.chunks(limit).map(|c| c.iter().collect()).collect()
+}
+
 static PROBE_CACHE: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 
 /// Whether `command` speaks the batch protocol, probed once per path:
@@ -326,6 +354,22 @@ fn supports_batch(command: &str) -> bool {
         cache.push((command.to_string(), result));
     }
     result
+}
+
+/// Frame one prompt for the batch protocol: the prompt bytes followed by
+/// the single NUL terminator. NUL is the frame delimiter and the prompt
+/// embeds UNTRUSTED drawer content verbatim, so every U+0000 scalar in
+/// the prompt is stripped here, at the framing site — an embedded NUL
+/// would split one logical prompt into several child frames and shift
+/// every later response onto the wrong drawer/minter pair (Codex
+/// hardening finding 765175da). The one-shot path needs no such
+/// normalisation: it writes the prompt then closes stdin, so NUL carries
+/// no protocol meaning there. Twin of the Swift `ResidentMintSession`
+/// frame; both ports pin "ab\0cd" -> b"abcd\0".
+pub(crate) fn batch_frame(prompt: &str) -> Vec<u8> {
+    let mut frame = prompt.replace('\0', "").into_bytes();
+    frame.push(0);
+    frame
 }
 
 fn resident_mint(prompt: &str, command: &str) -> Option<String> {
@@ -362,8 +406,7 @@ fn resident_mint(prompt: &str, command: &str) -> Option<String> {
     }
 
     let session = guard.as_mut()?;
-    let mut frame = prompt.as_bytes().to_vec();
-    frame.push(0);
+    let frame = batch_frame(prompt);
     if session.stdin.write_all(&frame).and_then(|_| session.stdin.flush()).is_err() {
         let mut old = guard.take()?;
         let _ = old.child.kill();
@@ -443,5 +486,89 @@ mod fallback_tests {
     fn blank_content_stays_none() {
         let out = mint_adornment_map_reduce("   \n  ", None, 280, 16_000, |_| None);
         assert!(out.is_none());
+    }
+
+    /// The record body a prompt carries (between the template's record
+    /// header and its trailing cue), for asserting on piece contents.
+    fn record_body(prompt: &str) -> &str {
+        prompt
+            .split_once("Memory record:\n")
+            .and_then(|(_, rest)| rest.rsplit_once("\n\nAdornment:"))
+            .map(|(body, _)| body)
+            .expect("prompt carries a record body")
+    }
+
+    // Golden pin (both ports assert the identical literal): a single
+    // newline-free line of 40_000 chars at threshold 16_000 hard-splits
+    // into pieces of 16_000, 16_000, 8_000 chars in that order; no piece
+    // ever exceeds the threshold.
+    #[test]
+    fn overlong_line_hard_splits_at_threshold_char_boundaries() {
+        let content = "a".repeat(40_000);
+        let mut prompts: Vec<String> = Vec::new();
+        let out = mint_adornment_map_reduce(&content, None, 280, 16_000, |p| {
+            prompts.push(p.to_string());
+            Some("piece".to_string())
+        });
+        assert_eq!(out.as_deref(), Some("piece"));
+        // Three piece mints then one reduce mint.
+        assert_eq!(prompts.len(), 4);
+        let piece_lengths: Vec<usize> = prompts[..3]
+            .iter()
+            .map(|p| record_body(p).chars().count())
+            .collect();
+        assert_eq!(piece_lengths, vec![16_000, 16_000, 8_000]);
+        assert!(prompts[..3].iter().all(|p| record_body(p).chars().all(|c| c == 'a')));
+        assert_eq!(record_body(&prompts[3]), "piece\npiece\npiece");
+    }
+
+    // The hard split counts Unicode scalars, never bytes: a 4-byte
+    // scalar line splits at the same char positions as an ASCII one.
+    #[test]
+    fn overlong_line_hard_split_counts_chars_not_bytes() {
+        let content = "\u{1F600}".repeat(10);
+        let mut bodies: Vec<String> = Vec::new();
+        let _ = mint_adornment_map_reduce(&content, None, 280, 4, |p| {
+            bodies.push(record_body(p).to_string());
+            Some("x".to_string())
+        });
+        let lengths: Vec<usize> = bodies[..3].iter().map(|b| b.chars().count()).collect();
+        assert_eq!(lengths, vec![4, 4, 2]);
+    }
+
+    // Cross-port pin (the Swift twin asserts the identical literal): the
+    // trailing fragment of a hard-split line packs with the following
+    // short line exactly like any other line would.
+    #[test]
+    fn overlong_line_trailing_fragment_packs_with_next_line() {
+        let content = format!("{}\nzz", "b".repeat(7));
+        let mut bodies: Vec<String> = Vec::new();
+        let _ = mint_adornment_map_reduce(&content, None, 280, 6, |p| {
+            bodies.push(record_body(p).to_string());
+            Some("x".to_string())
+        });
+        assert_eq!(&bodies[..2], &["bbbbbb", "b\nzz"]);
+    }
+}
+
+#[cfg(test)]
+mod batch_frame_tests {
+    use super::batch_frame;
+
+    // Golden pin (both ports assert the identical literal): an embedded
+    // NUL is stripped so the frame carries exactly one NUL, the
+    // terminator.
+    #[test]
+    fn embedded_nul_is_stripped_from_the_frame() {
+        assert_eq!(batch_frame("ab\0cd"), b"abcd\0".to_vec());
+    }
+
+    #[test]
+    fn frame_always_ends_in_exactly_one_nul() {
+        for prompt in ["", "\0", "\0\0x\0", "plain"] {
+            let frame = batch_frame(prompt);
+            assert_eq!(frame.iter().filter(|b| **b == 0).count(), 1);
+            assert_eq!(frame.last(), Some(&0u8));
+        }
     }
 }
