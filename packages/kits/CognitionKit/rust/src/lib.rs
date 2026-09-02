@@ -46,6 +46,9 @@ pub mod anticipate_recipe;
 // Rust parity with CognitionKit/Distill.swift. run_distill delegates to
 // EstateCoordinator::distill_items_sweep (parity with Swift's kit.distillItemsSweep).
 pub mod distill;
+// redistill.rs — force re-distillation + full derived-lane reindex (CDL-02).
+// Rust parity with CognitionKit/Redistill.swift.
+pub mod redistill;
 // distilled_recall.rs — DistilledRecallInput/Output/DistilledMatch types AND
 // run_distilled_recall recipe body. Rust parity with CognitionKit/DistilledRecall.swift.
 // Exact-search geometry over originals + distilled hydration (§10.3).
@@ -90,6 +93,7 @@ pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
 pub use distill::{run_distill, DistillInput, DistillOutput};
+pub use redistill::{run_redistill, RedistillInput, RedistillOutput};
 pub use distilled_recall::{
     classify_distilled_discrimination, run_distilled_recall, DistilledDiscriminationLevel,
     DistilledMatch, DistilledRecallInput, DistilledRecallOutput,

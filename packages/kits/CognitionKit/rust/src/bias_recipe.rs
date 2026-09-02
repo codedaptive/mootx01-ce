@@ -195,10 +195,6 @@ mod tests {
         coord.capture(h, frame, NOW).unwrap()
     }
 
-    fn reference(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
-        pairs.iter().map(|(l, n)| (l.to_string(), *n)).collect()
-    }
-
     // CK-BI-1: the estate over-weights philosophy and never touches finance;
     // against a balanced reference, philosophy is bias-for and finance is the
     // most-avoided bias-against. End-to-end over a real estate.
