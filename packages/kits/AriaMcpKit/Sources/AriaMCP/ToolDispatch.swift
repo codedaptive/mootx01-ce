@@ -3494,6 +3494,10 @@ extension ToolDispatcher {
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
             "sync: \(syncToken)",
+            // CDL-03: expose the active index composition policy id so callers
+            // can verify which gauntlet cell the estate is running under.
+            // "none" for locusOnly estates (no Corpus engine wired).
+            "index_composition_policy: \(await kit.indexCompositionPolicy(for: handle)?.id ?? "none")",
             "fdc_recalculation: \(fdcRecalculationState)",
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
