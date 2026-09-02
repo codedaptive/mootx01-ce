@@ -448,6 +448,15 @@ public extension GeniusLocusKit {
         corpusKits[handle] = corpus
     }
 
+    /// Return the index composition policy for the open estate, or nil when
+    /// no Corpus is wired (locusOnly estates have no composition policy).
+    ///
+    /// Called by `moot_estate_status` to expose the recorded policy id
+    /// without requiring callers to reach into CorpusKit internals (CDL-03).
+    public func indexCompositionPolicy(for handle: EstateHandle) -> IndexCompositionPolicy? {
+        corpusKits[handle]?.compositionPolicy
+    }
+
     /// Register a `VectorStore` for the given estate handle.
     ///
     /// The RecallDirector uses this store for Hamming top-K nearest-neighbour

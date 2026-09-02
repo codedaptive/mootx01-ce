@@ -34,6 +34,9 @@ use corpus_kit::content::{
 };
 use corpus_kit::{content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
 use corpus_kit::error::CorpusKitError;
+use corpus_kit::index_composition_policy::{
+    DenseIndexSource, IndexCompositionPolicy, LexicalIndexSource,
+};
 use locus_kit::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID;
 use locus_kit::drawer_operational::ContentKind;
 use locus_kit::estate::Estate;
@@ -47,18 +50,72 @@ use locus_kit::estate::Estate;
 /// every live drawer reports revision 1 with digest = sha256(content).
 /// The estate verbs ARE the change stream — the polling feed is empty.
 ///
-/// DENSE-OVER-DISTILLATE (MISSION_11X_RECALL_GAP_01 Stream F): `record()`
-/// supplies `dense_composition_text = drawer.distilled`. None (pre-sweep)
-/// causes `effective_dense_text()` to fall back to `text` unchanged. Non-None
-/// causes the engine to compose the dense float lane from the distillate while
-/// BM25 continues to index `text`. BM25 isolation is preserved.
+/// INDEX COMPOSITION POLICY (CDL-03): `composition_policy` controls which text
+/// each index lane consumes. The default (`.current()`) matches pre-CDL-03
+/// behaviour: original text for BM25, distillate for dense. Gauntlet cells B-E
+/// substitute adornment-appended text or the original text in one or both lanes.
+/// The policy is selected at estate open via `MOOT_INDEX_COMPOSITION` and
+/// threaded from the coordinator to this source.
+///
+/// The digest always keys on `drawer.content` so the idempotence anchor is
+/// unaffected by policy, adornment, or distillation changes.
 pub struct LocusDrawerContentSource {
     estate: Estate,
+    /// Index composition policy in effect for this estate open (CDL-03).
+    /// Selects what text feeds each index lane. Default: `.current()`.
+    composition_policy: IndexCompositionPolicy,
 }
 
 impl LocusDrawerContentSource {
+    /// Construct with the `.current()` policy — original text for BM25,
+    /// distillate for dense. This matches pre-CDL-03 behaviour.
     pub fn new(estate: Estate) -> Self {
-        LocusDrawerContentSource { estate }
+        LocusDrawerContentSource {
+            estate,
+            composition_policy: IndexCompositionPolicy::current(),
+        }
+    }
+
+    /// Construct with an explicit composition policy (CDL-03).
+    pub fn new_with_policy(estate: Estate, composition_policy: IndexCompositionPolicy) -> Self {
+        LocusDrawerContentSource { estate, composition_policy }
+    }
+
+    // MARK: - Text composition helpers
+
+    /// Base text for the lexical lane under the configured policy.
+    fn lexical_base(&self, content: &str, distilled: Option<&str>) -> String {
+        match self.composition_policy.lexical_source {
+            LexicalIndexSource::Original | LexicalIndexSource::OriginalPlusAdornments => {
+                content.to_string()
+            }
+            LexicalIndexSource::Distilled | LexicalIndexSource::DistilledPlusAdornments => {
+                distilled.map(str::to_string).unwrap_or_else(|| content.to_string())
+            }
+        }
+    }
+
+    /// Base text for the dense lane under the configured policy. Returns None
+    /// when the base is the same as the lexical base (engine uses `text` then).
+    fn dense_base(&self, content: &str, distilled: Option<&str>) -> Option<String> {
+        match self.composition_policy.dense_source {
+            DenseIndexSource::Original => None, // identical to lexical base for cell E
+            DenseIndexSource::Distilled | DenseIndexSource::DistilledPlusAdornments => {
+                Some(distilled.map(str::to_string).unwrap_or_else(|| content.to_string()))
+            }
+        }
+    }
+
+    /// Append active adornment texts to a base string, one per line.
+    fn composed_text(base: &str, adornments: &[adornment_lib::StoredAdornment]) -> String {
+        if adornments.is_empty() {
+            return base.to_string();
+        }
+        let mut parts = vec![base.to_string()];
+        for a in adornments {
+            parts.push(a.text.clone());
+        }
+        parts.join("\n")
     }
 }
 
@@ -77,21 +134,49 @@ impl CorpusContentSource for LocusDrawerContentSource {
         {
             return Ok(None);
         }
+
+        // CDL-03: fetch adornments when the policy needs them (cells B, C, D).
+        // Fetch once per record() call; adornments are returned sorted by minter_id
+        // ascending (matching Swift's ascending minterID order).
+        let adornments: Vec<adornment_lib::StoredAdornment> =
+            if self.composition_policy.needs_adornments() {
+                self.estate
+                    .active_adornments(&[&drawer.id])
+                    .unwrap_or_default()
+                    .remove(&drawer.id)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+        // Lexical lane text: base + optional adornments.
+        let lex_base = self.lexical_base(&drawer.content, drawer.distilled.as_deref());
+        let lexical_adornments: &[adornment_lib::StoredAdornment] =
+            if self.composition_policy.lexical_needs_adornments() { &adornments } else { &[] };
+        let text = Self::composed_text(&lex_base, lexical_adornments);
+
+        // Dense lane text: None means the engine re-uses `text`; Some is the
+        // dense-specific composition.
+        let dense_base_opt = self.dense_base(&drawer.content, drawer.distilled.as_deref());
+        let dense_adornments: &[adornment_lib::StoredAdornment] =
+            if self.composition_policy.dense_needs_adornments() { &adornments } else { &[] };
+        let dense_composition_text = dense_base_opt.map(|base| {
+            if dense_adornments.is_empty() {
+                base
+            } else {
+                Self::composed_text(&base, dense_adornments)
+            }
+        });
+
+        // Digest keys on verbatim content only — the idempotence anchor is
+        // unaffected by policy, adornment, or distillation changes.
+        // Swift parity: LocusDrawerCorpusContentSource.record(for:) (CDL-03).
         Ok(Some(CorpusContentRecord {
             id: drawer.id.clone(),
             revision: 1,
             digest: content_digest(&drawer.content),
-            text: drawer.content,
-            // Dense-over-distillate (MISSION_11X_RECALL_GAP_01 Stream F): supply
-            // the distillate column as dense_composition_text. When `distilled` is
-            // None (pre-sweep / edit-to-regeneration window), None propagates and
-            // `effective_dense_text()` falls back to `text` — zero behavior change
-            // for undistilled rows. When non-None, the engine uses the distillate
-            // for the dense float lane while BM25 indexes `text` unchanged.
-            // The digest keys on `text` only, so the idempotence anchor is
-            // unaffected by distillation writes.
-            // Swift parity: LocusDrawerCorpusContentSource.record(for:).
-            dense_composition_text: drawer.distilled.clone(),
+            text,
+            dense_composition_text,
         }))
     }
 

@@ -1565,6 +1565,7 @@ impl CorpusContentEngine {
                 index_version: CONTENT_ENGINE_INDEX_VERSION,
                 applied_cursor: None,
                 updated_at_millis: now_millis,
+                composition_policy_id: String::new(), // pre-CDL-03 Rust path; policy threaded via GLK intake
                 operational_bitmap: bitmap,
             })?;
         }
@@ -1728,6 +1729,7 @@ impl CorpusContentEngine {
                 applied_cursor: Some(cursor.clone()),
                 updated_at_millis: now_millis,
                 operational_bitmap: 0,
+                composition_policy_id: String::new(), // feed-cursor sentinel; policy inapplicable
             });
         }
         Ok((checkpoints, counts_update))
@@ -2155,6 +2157,7 @@ impl CorpusContentEngine {
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: applied_cursor.map(str::to_string),
             updated_at_millis: now_millis,
+            composition_policy_id: String::new(), // pre-CDL-03 Rust path; policy threaded via GLK intake
             operational_bitmap: bitmap,
         }))
     }
@@ -2384,6 +2387,7 @@ impl CorpusContentEngine {
             applied_cursor: Some(cursor.to_string()),
             updated_at_millis: now_millis,
             operational_bitmap: 0,
+            composition_policy_id: String::new(), // feed-cursor sentinel; policy inapplicable
         })
     }
 
