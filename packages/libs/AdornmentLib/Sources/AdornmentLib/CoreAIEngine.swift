@@ -2,7 +2,7 @@
 // runtime (operator mandate 2026-08-31: the Swift binary mints every
 // model under test; Rust binaries never run under the Swift product).
 //
-// Loads a converted `.aimodel` (see benchmark-ee/minters/coreai-convert)
+// Loads a converted `.aimodel` (the output of the Core AI conversion pipeline)
 // plus its HF tokenizer.json, and greedy-decodes claims in-process.
 // The asset carries TWO entrypoints (convert-qwen-v4.py): `prefill`
 // runs the bucket-padded, attention-masked prompt once and returns the
