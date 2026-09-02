@@ -81,6 +81,31 @@ struct ResidentMintSessionTests {
         #expect(try #require(good).hasSuffix("healthy prompt"))
     }
 
+    @Test("batchFrame strips embedded NUL so exactly one terminator remains")
+    func batchFrameStripsNUL() {
+        // Cross-port pin: the Rust twin asserts the same byte sequence.
+        let frame = ResidentMintSession.batchFrame("ab\u{0}cd")
+        #expect(Array(frame) == [0x61, 0x62, 0x63, 0x64, 0x00])
+    }
+
+    @Test("a NUL inside a prompt does not shift later replies")
+    func embeddedNULKeepsFramesAligned() async throws {
+        let cmd = try makeFakeMinter()
+        setenv("MOOT_MINT_CMD", cmd, 1)
+        defer { unsetenv("MOOT_MINT_CMD") }
+
+        // Untrusted drawer content with U+0000 in the middle: without
+        // stripping, the child would answer TWO frames and the next
+        // logical prompt would receive the second half's reply.
+        let first = await invokeAdornmentCommand(prompt: "left\u{0}right", maxLength: 280)
+        let second = await invokeAdornmentCommand(prompt: "second prompt", maxLength: 280)
+        let pa = try #require(first).split(separator: ":", maxSplits: 1)
+        let pb = try #require(second).split(separator: ":", maxSplits: 1)
+        #expect(pa[1] == "leftright")
+        #expect(pb[1] == "second prompt")
+        #expect(pa[0] == pb[0], "one resident process answered both prompts")
+    }
+
     @Test("truncation applies to batch responses")
     func truncation() async throws {
         let cmd = try makeFakeMinter()
