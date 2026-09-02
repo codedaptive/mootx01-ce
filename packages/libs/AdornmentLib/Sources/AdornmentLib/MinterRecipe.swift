@@ -195,6 +195,77 @@ public func fnv1a64Hex(_ s: String) -> String {
 
 // MARK: - Output normalizer
 
+/// Extract the first complete, strictly valid top-level JSON object.
+/// Leading whitespace is permitted but excluded from the returned prefix;
+/// prose before the opening brace is rejected. Braces inside strings and
+/// escaped quotes do not affect nesting depth. Content after the closing brace
+/// is deliberately excluded: one decoded token can contain both `}` and a
+/// punctuation suffix, and the structural stop and normalizer must consume the
+/// exact same object bytes.
+func topLevelJSONObjectPrefix(_ text: String) -> String? {
+    var started = false
+    var depth = 0
+    var inString = false
+    var escaped = false
+    var candidate = ""
+    var lastStructuralCharacter: Character?
+
+    for character in text {
+        if !started {
+            if character == "{" {
+                started = true
+                depth = 1
+                candidate.append(character)
+            } else if !character.isWhitespace {
+                return nil
+            }
+            continue
+        }
+        candidate.append(character)
+        if inString {
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString = false
+            }
+            continue
+        }
+        switch character {
+        case "\"":
+            inString = true
+            lastStructuralCharacter = character
+        case "{":
+            depth += 1
+            lastStructuralCharacter = character
+        case "]":
+            // Foundation's JSONSerialization accepts trailing commas even
+            // though they are not JSON.  Reject that extension before using
+            // it as the final grammar/type check.
+            if lastStructuralCharacter == "," { return nil }
+            lastStructuralCharacter = character
+        case "}":
+            if lastStructuralCharacter == "," { return nil }
+            depth -= 1
+            if depth == 0 {
+                guard let data = candidate.data(using: .utf8),
+                      let parsed = try? JSONSerialization.jsonObject(
+                        with: data), parsed is [String: Any] else {
+                    return nil
+                }
+                return candidate
+            }
+            lastStructuralCharacter = character
+        default:
+            if !character.isWhitespace {
+                lastStructuralCharacter = character
+            }
+        }
+    }
+    return nil
+}
+
 /// Normalize a raw model emission into the claim line, per the recipe's
 /// output kind. ONE implementation covers every model shape:
 ///   - `.text`: first meaningful prose line (fences, list markers, and
@@ -211,7 +282,8 @@ public func normalizeMintOutput(_ raw: String, kind: MintOutputKind) -> String {
         return extractClaimLine(raw)
     case .json:
         let stripped = stripCodeFences(raw)
-        guard let data = stripped.data(using: .utf8),
+        guard let prefix = topLevelJSONObjectPrefix(stripped),
+              let data = prefix.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         else {
             return extractClaimLine(raw)
