@@ -536,6 +536,16 @@ public actor Estate {
         try await store.countUndistilled(pipelineVersion: pipelineVersion)
     }
 
+    /// Rooms whose populated distilled representation is stale for the
+    /// supplied pipeline contract. Used by the distillation sweep to keep its
+    /// room-level bitmap skip version-aware without loading drawer content.
+    public func roomsWithStaleDistilledRepresentations(
+        pipelineVersion: String
+    ) async throws -> [(wing: String, room: String)] {
+        try await store.roomsWithStaleDistilledRepresentations(
+            pipelineVersion: pipelineVersion)
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore.setSubjectRepresentation` — the seam the filing
     /// surface, backfill, and the (future) subject rider write through.
