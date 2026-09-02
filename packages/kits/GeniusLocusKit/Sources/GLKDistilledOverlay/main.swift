@@ -16,10 +16,11 @@ import PersistenceKit
 import PersistenceKitSQLite
 
 private let disposableMarker = ".distill-overlay-disposable"
-private let forbiddenSourcePrefix = "/Volumes/llm_models/benchmark/wings/"
-private let allowedEstateRoot = URL(
-    fileURLWithPath: "/Users/bob/devlop/benchmark-cache/mootx01-ee-bench/experiments",
-    isDirectory: true)
+// The two safety boundaries are ARGUMENTS, never defaults: the tool ships in
+// a shared product kit, so no machine, volume, or user path may be baked in.
+// `--allowed-estate-root` is the only directory an estate may live under;
+// `--forbidden-source-prefix` names the read-only artifact tree that must be
+// refused even if it is somehow reachable inside the allowed root.
 
 private struct OverlayMetrics: Decodable {
     let distilledTokensEstimate: Int64
@@ -56,6 +57,10 @@ private struct Arguments {
     let overlay: URL
     let converterID: String
     let expectedCount: Int
+    /// Physical directory every estate must sit under (see requireDisposableEstate).
+    let allowedEstateRoot: URL
+    /// Path prefix of the read-only benchmark artifact tree; always refused.
+    let forbiddenSourcePrefix: String
     let preflightOnly: Bool
 
     static func parse(_ values: [String]) throws -> Self {
@@ -81,7 +86,10 @@ private struct Arguments {
             fields[key] = values[index + 1]
             index += 2
         }
-        let known = Set(["--estate", "--overlay", "--converter-id", "--expected-count"])
+        let known = Set([
+            "--estate", "--overlay", "--converter-id", "--expected-count",
+            "--allowed-estate-root", "--forbidden-source-prefix",
+        ])
         let unknown = Set(fields.keys).subtracting(known)
         guard unknown.isEmpty else {
             throw ToolError.usage("unknown argument(s): \(unknown.sorted().joined(separator: ", "))")
@@ -90,16 +98,24 @@ private struct Arguments {
               let overlay = fields["--overlay"],
               let converterID = fields["--converter-id"],
               let countText = fields["--expected-count"],
-              let expectedCount = Int(countText), expectedCount > 0 else {
+              let expectedCount = Int(countText), expectedCount > 0,
+              let allowedRoot = fields["--allowed-estate-root"], !allowedRoot.isEmpty,
+              let forbiddenPrefix = fields["--forbidden-source-prefix"],
+              !forbiddenPrefix.isEmpty else {
             throw ToolError.usage(
                 "required: --estate PATH --overlay JSONL --converter-id ID --expected-count N "
-                    + "[--preflight-only]")
+                    + "--allowed-estate-root DIR --forbidden-source-prefix PATH [--preflight-only]")
         }
+        // Normalize the prefix to end in "/" so it can only match whole path
+        // components ("/a/b" must not also forbid "/a/bc").
+        let normalizedPrefix = forbiddenPrefix.hasSuffix("/") ? forbiddenPrefix : forbiddenPrefix + "/"
         return Self(
             estate: URL(fileURLWithPath: estate).standardizedFileURL,
             overlay: URL(fileURLWithPath: overlay).standardizedFileURL,
             converterID: converterID,
             expectedCount: expectedCount,
+            allowedEstateRoot: URL(fileURLWithPath: allowedRoot, isDirectory: true),
+            forbiddenSourcePrefix: normalizedPrefix,
             preflightOnly: preflightOnly)
     }
 }
@@ -142,7 +158,9 @@ private func readOverlay(_ url: URL) throws -> [OverlayRow] {
         }
 }
 
-private func requireDisposableEstate(_ requestedEstate: URL) throws -> URL {
+private func requireDisposableEstate(
+    _ requestedEstate: URL, allowedEstateRoot: URL, forbiddenSourcePrefix: String
+) throws -> URL {
     // Resolve every symlink before making a safety decision, then keep using
     // this exact canonical URL through SQLite open.  Lexical standardization
     // alone does not prevent an in-root symlink from targeting a live estate.
@@ -163,7 +181,7 @@ private func requireDisposableEstate(_ requestedEstate: URL) throws -> URL {
     let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
     guard path.hasPrefix(rootPrefix) else {
         throw ToolError.invalid(
-            "refusing estate outside benchmark-cache experiments: \(path)")
+            "refusing estate outside --allowed-estate-root \(root.path): \(path)")
     }
 
     let estateValues = try? estate.resourceValues(forKeys: [.isRegularFileKey])
@@ -194,7 +212,10 @@ private struct GLKDistilledOverlayMain {
 
     private static func run() async throws {
         let args = try Arguments.parse(CommandLine.arguments)
-        let estateURL = try requireDisposableEstate(args.estate)
+        let estateURL = try requireDisposableEstate(
+            args.estate,
+            allowedEstateRoot: args.allowedEstateRoot,
+            forbiddenSourcePrefix: args.forbiddenSourcePrefix)
         if args.preflightOnly {
             print("PREFLIGHT estate=\(estateURL.path)")
             return
