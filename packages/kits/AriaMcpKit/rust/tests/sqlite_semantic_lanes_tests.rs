@@ -280,7 +280,6 @@ fn inmemory_semantic_recall_is_wired() {
 fn sqlite_semantic_lanes_lit_after_register_sqlite() {
     // Start with an in-memory default estate.
     let mut registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
 
     // Register a second SQLite-backed estate.
     let path = temp_sqlite_path("register_sqlite_e2e");
