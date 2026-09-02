@@ -275,8 +275,16 @@ public func invokeAdornmentCommand(
 /// contract (batch-resident when the capability probe lists "batch",
 /// one-shot otherwise) and returns the RAW claim text. Truncation and
 /// whitespace policy belong to the callers — engines never truncate.
-func invokeAdornmentCommand(prompt: String, command mintCmd: String) async -> String? {
+func invokeAdornmentCommand(
+    prompt: String,
+    command mintCmd: String,
+    arguments: [String] = []
+) async -> String? {
     #if os(macOS)
+
+    let invocation = ResidentMintCommand(
+        executablePath: mintCmd,
+        baseArguments: arguments)
 
     // Resident batch mode: the minter loads its model ONCE and serves
     // NUL-delimited prompts for the life of the batch. A one-shot spawn
@@ -287,13 +295,13 @@ func invokeAdornmentCommand(prompt: String, command mintCmd: String) async -> St
     // once per command (cached) and uses batch when the minter lists
     // "batch". Minters that do not answer the probe are driven one-shot —
     // the end-user product needs no environment or preference wiring.
-    if await ResidentMintSession.shared.supportsBatch(command: mintCmd) {
-        return await ResidentMintSession.shared.mint(prompt: prompt, command: mintCmd)
+    if await ResidentMintSession.shared.supportsBatch(command: invocation) {
+        return await ResidentMintSession.shared.mint(prompt: prompt, command: invocation)
     }
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: mintCmd)
-    process.arguments = []
+    process.arguments = arguments
 
     let stdinPipe = Pipe()
     let stdoutPipe = Pipe()
@@ -336,6 +344,7 @@ func invokeAdornmentCommand(prompt: String, command mintCmd: String) async -> St
     // on iPhone/iPad the GoldMiner's in-process engines serve this role.
     _ = prompt
     _ = mintCmd
+    _ = arguments
     log.debug("AdornmentGenerator: command seam unavailable on this platform")
     return nil
     #endif
@@ -344,6 +353,104 @@ func invokeAdornmentCommand(prompt: String, command mintCmd: String) async -> St
 #if os(macOS)
 // MARK: - Resident batch session
 
+/// Lifecycle policy for a capability-probed resident mint child.
+///
+/// The standard command seam preserves its historical unbounded session and
+/// no-retry behavior. The Core AI worker policy bounds one child to 16 logical
+/// requests, retries one request after an unexpected child exit, and waits for
+/// the worker's clean EOF shutdown before loading its replacement. That process
+/// boundary contains Core AI runtime memory without changing any iOS path.
+public struct ResidentMintLifecyclePolicy: Sendable, Equatable {
+    public let maxRequestsPerProcess: Int?
+    public let idleSeconds: UInt64
+    public let maxCrashRetries: Int
+    public let gracefulEOFShutdown: Bool
+
+    public init(
+        maxRequestsPerProcess: Int? = nil,
+        idleSeconds: UInt64 = 120,
+        maxCrashRetries: Int = 0,
+        gracefulEOFShutdown: Bool = false
+    ) {
+        precondition(maxRequestsPerProcess == nil || maxRequestsPerProcess! > 0)
+        precondition((0...1).contains(maxCrashRetries))
+        self.maxRequestsPerProcess = maxRequestsPerProcess
+        self.idleSeconds = idleSeconds
+        self.maxCrashRetries = maxCrashRetries
+        self.gracefulEOFShutdown = gracefulEOFShutdown
+    }
+
+    public static let standard = ResidentMintLifecyclePolicy()
+
+    /// Proven containment bound for the macOS Core AI child. Recycling is a
+    /// parent policy, not an engine/model default, and therefore never affects
+    /// the in-process iOS engine.
+    public static let coreAIContainment = ResidentMintLifecyclePolicy(
+        maxRequestsPerProcess: 16,
+        idleSeconds: 120,
+        maxCrashRetries: 1,
+        gracefulEOFShutdown: true)
+}
+
+/// Monotonic lifecycle totals plus current process-pressure gauges for one
+/// resident session (or an aggregate of sessions). Operators can distinguish
+/// normal bounded recycling from child crashes and see whether a resident
+/// model is still consuming memory.
+public struct ResidentMintLifecycleSnapshot: Sendable, Equatable {
+    public let logicalRequests: UInt64
+    public let requestAttempts: UInt64
+    public let processStarts: UInt64
+    public let launchFailures: UInt64
+    public let boundedRecycles: UInt64
+    public let idleReaps: UInt64
+    public let unexpectedExits: UInt64
+    public let crashRetries: UInt64
+    public let perPromptFailures: UInt64
+    public let activeChildren: Int
+    public let requestsInActiveChildren: UInt64
+
+    static let zero = ResidentMintLifecycleSnapshot(
+        logicalRequests: 0,
+        requestAttempts: 0,
+        processStarts: 0,
+        launchFailures: 0,
+        boundedRecycles: 0,
+        idleReaps: 0,
+        unexpectedExits: 0,
+        crashRetries: 0,
+        perPromptFailures: 0,
+        activeChildren: 0,
+        requestsInActiveChildren: 0)
+
+    static func + (
+        lhs: ResidentMintLifecycleSnapshot,
+        rhs: ResidentMintLifecycleSnapshot
+    ) -> ResidentMintLifecycleSnapshot {
+        ResidentMintLifecycleSnapshot(
+            logicalRequests: lhs.logicalRequests + rhs.logicalRequests,
+            requestAttempts: lhs.requestAttempts + rhs.requestAttempts,
+            processStarts: lhs.processStarts + rhs.processStarts,
+            launchFailures: lhs.launchFailures + rhs.launchFailures,
+            boundedRecycles: lhs.boundedRecycles + rhs.boundedRecycles,
+            idleReaps: lhs.idleReaps + rhs.idleReaps,
+            unexpectedExits: lhs.unexpectedExits + rhs.unexpectedExits,
+            crashRetries: lhs.crashRetries + rhs.crashRetries,
+            perPromptFailures: lhs.perPromptFailures + rhs.perPromptFailures,
+            activeChildren: lhs.activeChildren + rhs.activeChildren,
+            requestsInActiveChildren:
+                lhs.requestsInActiveChildren + rhs.requestsInActiveChildren)
+    }
+}
+
+struct ResidentMintCommand: Hashable, Sendable {
+    let executablePath: String
+    let baseArguments: [String]
+
+    func arguments(appending protocolArgument: String) -> [String] {
+        baseArguments + [protocolArgument]
+    }
+}
+
 /// Holds one resident minter child for the batch protocol
 /// (`MOOT_MINT_BATCH=1`): the command is spawned once with `--batch`,
 /// prompts go down its stdin NUL-terminated, responses come back
@@ -351,16 +458,17 @@ func invokeAdornmentCommand(prompt: String, command mintCmd: String) async -> St
 /// `idleSeconds` without a mint, so the model's multi-GB residency is
 /// released between dream-time fires while a bulk mint keeps it warm.
 ///
-/// Failure policy: any protocol fault (spawn failure, torn frame, child
-/// exit) kills the child and reports nil for the in-flight prompt — the
-/// pair counts as failed and retries on the next pass, which respawns.
+/// Failure policy is explicit per session. The standard seam reports a
+/// protocol fault as nil and respawns on the next pass. A contained Core AI
+/// session retries the in-flight request once after unexpected child exit;
+/// there is no unbounded retry loop.
 actor ResidentMintSession {
     static let shared = ResidentMintSession()
 
     /// Idle window before the resident child is reaped. Long enough that a
     /// pass minting at inference speed never trips it; short enough that a
     /// user machine reclaims the model's memory promptly after a fire.
-    private let idleSeconds: UInt64 = 120
+    private let policy: ResidentMintLifecyclePolicy
 
     private var process: Process?
     private var stdinHandle: FileHandle?
@@ -370,29 +478,52 @@ actor ResidentMintSession {
     /// DIFFERENT command (minter activation changed mid-session) tears the
     /// old child down first — replies from the previous minter must never
     /// answer the new minter's prompts.
-    private var spawnedCommand: String?
+    private var spawnedCommand: ResidentMintCommand?
+    private var spawnedProtocolArgument: String?
     /// Monotonic use counter — the reaper only fires if no mint happened
     /// since it was scheduled.
     private var useGeneration: UInt64 = 0
+    private var requestsInCurrentProcess: UInt64 = 0
+
+    private var logicalRequests: UInt64 = 0
+    private var requestAttempts: UInt64 = 0
+    private var processStarts: UInt64 = 0
+    private var launchFailures: UInt64 = 0
+    private var boundedRecycles: UInt64 = 0
+    private var idleReaps: UInt64 = 0
+    private var unexpectedExits: UInt64 = 0
+    private var crashRetries: UInt64 = 0
+    private var perPromptFailures: UInt64 = 0
+
+    // Actor isolation alone is not enough here: `mint` yields while a blocking
+    // pipe read runs off-executor, so another caller could otherwise enter and
+    // read the same ordered byte stream. This lease keeps one complete
+    // request/response transaction in flight per child.
+    private var mintInProgress = false
+    private var mintWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Cached capability-probe results per command path.
-    private var probeCache: [String: Bool] = [:]
+    private var probeCache: [ResidentMintCommand: Bool] = [:]
+
+    init(policy: ResidentMintLifecyclePolicy = .standard) {
+        self.policy = policy
+    }
 
     /// Whether `command` speaks the batch protocol, probed once per path:
     /// `CMD --mint-capabilities` must exit 0 and list "batch" on stdout.
     /// The probe answers before any model load by contract; a minter that
     /// errors on the flag (or hangs past its closed stdin) is one-shot.
-    func supportsBatch(command: String) async -> Bool {
+    func supportsBatch(command: ResidentMintCommand) async -> Bool {
         if let cached = probeCache[command] { return cached }
         let supported = Self.probeBatch(command: command)
         probeCache[command] = supported
         return supported
     }
 
-    private static func probeBatch(command: String) -> Bool {
+    private static func probeBatch(command: ResidentMintCommand) -> Bool {
         let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: command)
-        probe.arguments = ["--mint-capabilities"]
+        probe.executableURL = URL(fileURLWithPath: command.executablePath)
+        probe.arguments = command.arguments(appending: "--mint-capabilities")
         let inPipe = Pipe()
         let outPipe = Pipe()
         probe.standardInput = inPipe
@@ -415,50 +546,142 @@ actor ResidentMintSession {
     }
 
     /// Mint one prompt through the resident child, spawning it on demand.
-    func mint(prompt: String, command: String, extraArgument: String = "--batch") async -> String? {
+    func mint(
+        prompt: String,
+        command: ResidentMintCommand,
+        extraArgument: String = "--batch"
+    ) async -> String? {
+        logicalRequests &+= 1
+        await acquireMintLease()
+        defer { releaseMintLease() }
+
         useGeneration &+= 1
         let generationAtStart = useGeneration
+        var retriesRemaining = policy.maxCrashRetries
 
-        // The spawn key includes the protocol argument: a child serving
-        // --rows frames must never answer --batch prompts and vice versa.
-        let spawnKey = command + " " + extraArgument
-        if process == nil || process?.isRunning != true || spawnedCommand != spawnKey {
-            teardown()
-            guard spawn(command: command, argument: extraArgument, key: spawnKey) else { return nil }
-        }
-        guard let stdinHandle, let stdoutHandle else { return nil }
-
-        // Frame: prompt bytes with every NUL stripped, then ONE NUL
-        // terminator (see `batchFrame` for why stripping is required).
-        let frame = Self.batchFrame(prompt)
-        do {
-            try stdinHandle.write(contentsOf: frame)
-        } catch {
-            log.error("ResidentMintSession: stdin write failed — \(error)")
-            teardown()
-            return nil
-        }
-
-        // Read until the response's NUL terminator. Blocking reads run off
-        // the actor's executor so concurrent callers merely queue on the
-        // actor, they do not stall the cooperative pool.
         while true {
-            if let nulIndex = buffer.firstIndex(of: 0) {
-                let payload = buffer.prefix(upTo: nulIndex)
-                buffer.removeSubrange(...nulIndex)
-                scheduleReaper(after: generationAtStart)
-                // Empty payload = the child's per-prompt failure marker.
-                guard !payload.isEmpty else { return nil }
-                return String(data: Data(payload), encoding: .utf8)
+            // The spawn key includes fixed arguments and the protocol mode: a
+            // child serving --rows must never answer --batch prompts, and two
+            // Core AI assets must never share one child.
+            if let limit = policy.maxRequestsPerProcess,
+               process?.isRunning == true,
+               spawnedCommand == command,
+               spawnedProtocolArgument == extraArgument,
+               requestsInCurrentProcess >= UInt64(limit) {
+                boundedRecycles &+= 1
+                teardown(graceful: policy.gracefulEOFShutdown)
             }
-            let chunk = await Self.blockingRead(stdoutHandle)
-            guard !chunk.isEmpty else {
-                log.error("ResidentMintSession: child EOF mid-response — tearing down")
+
+            if process != nil, process?.isRunning != true {
+                unexpectedExits &+= 1
                 teardown()
-                return nil
             }
-            buffer.append(chunk)
+            if process == nil
+                || spawnedCommand != command
+                || spawnedProtocolArgument != extraArgument {
+                teardown(graceful: policy.gracefulEOFShutdown)
+                guard spawn(command: command, argument: extraArgument) else {
+                    return nil
+                }
+            }
+            guard let stdinHandle, let stdoutHandle else { return nil }
+
+            requestAttempts &+= 1
+            requestsInCurrentProcess &+= 1
+
+            do {
+                try stdinHandle.write(contentsOf: Self.batchFrame(prompt))
+            } catch {
+                log.error("ResidentMintSession: stdin write failed — \(error)")
+                unexpectedExits &+= 1
+                teardown()
+                guard retriesRemaining > 0 else { return nil }
+                retriesRemaining -= 1
+                crashRetries &+= 1
+                continue
+            }
+
+            // Read until the response's NUL terminator. Blocking reads run off
+            // the actor's executor; the mint lease above keeps later callers
+            // queued for this ordered stream without stalling the cooperative
+            // pool.
+            var childExited = false
+            while true {
+                if let nulIndex = buffer.firstIndex(of: 0) {
+                    let payload = buffer.prefix(upTo: nulIndex)
+                    buffer.removeSubrange(...nulIndex)
+                    scheduleReaper(after: generationAtStart)
+                    guard !payload.isEmpty else {
+                        perPromptFailures &+= 1
+                        return nil
+                    }
+                    guard let response = String(data: Data(payload), encoding: .utf8) else {
+                        perPromptFailures &+= 1
+                        return nil
+                    }
+                    return response
+                }
+                let chunk = await Self.blockingRead(stdoutHandle)
+                if chunk.isEmpty {
+                    childExited = true
+                    break
+                }
+                buffer.append(chunk)
+            }
+
+            if childExited {
+                log.error("ResidentMintSession: child EOF mid-response — tearing down")
+                unexpectedExits &+= 1
+                teardown()
+                guard retriesRemaining > 0 else { return nil }
+                retriesRemaining -= 1
+                crashRetries &+= 1
+            }
         }
+    }
+
+    func lifecycleSnapshot() -> ResidentMintLifecycleSnapshot {
+        let running = process?.isRunning == true
+        return ResidentMintLifecycleSnapshot(
+            logicalRequests: logicalRequests,
+            requestAttempts: requestAttempts,
+            processStarts: processStarts,
+            launchFailures: launchFailures,
+            boundedRecycles: boundedRecycles,
+            idleReaps: idleReaps,
+            unexpectedExits: unexpectedExits,
+            crashRetries: crashRetries,
+            perPromptFailures: perPromptFailures,
+            activeChildren: running ? 1 : 0,
+            requestsInActiveChildren: running ? requestsInCurrentProcess : 0)
+    }
+
+    func shutdown() async {
+        // Do not close a protocol stream while its response is in flight.
+        await acquireMintLease()
+        defer { releaseMintLease() }
+        // Invalidate every previously scheduled idle reaper before closing the
+        // child, so a later respawn cannot be reaped by an old generation.
+        useGeneration &+= 1
+        teardown(graceful: policy.gracefulEOFShutdown)
+    }
+
+    private func acquireMintLease() async {
+        guard mintInProgress else {
+            mintInProgress = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            mintWaiters.append(continuation)
+        }
+    }
+
+    private func releaseMintLease() {
+        guard !mintWaiters.isEmpty else {
+            mintInProgress = false
+            return
+        }
+        mintWaiters.removeFirst().resume()
     }
 
     /// Frame one prompt for the resident child's NUL-delimited stdin
@@ -480,10 +703,13 @@ actor ResidentMintSession {
         return frame
     }
 
-    private func spawn(command: String, argument: String = "--batch", key: String? = nil) -> Bool {
+    private func spawn(
+        command: ResidentMintCommand,
+        argument: String = "--batch"
+    ) -> Bool {
         let child = Process()
-        child.executableURL = URL(fileURLWithPath: command)
-        child.arguments = [argument]
+        child.executableURL = URL(fileURLWithPath: command.executablePath)
+        child.arguments = command.arguments(appending: argument)
         let inPipe = Pipe()
         let outPipe = Pipe()
         child.standardInput = inPipe
@@ -494,41 +720,57 @@ actor ResidentMintSession {
         do {
             try child.run()
         } catch {
-            log.error("ResidentMintSession: failed to launch '\(command)' --batch: \(error)")
+            launchFailures &+= 1
+            log.error("ResidentMintSession: failed to launch '\(command.executablePath)' \(argument): \(error)")
             return false
         }
+        processStarts &+= 1
         process = child
         stdinHandle = inPipe.fileHandleForWriting
         stdoutHandle = outPipe.fileHandleForReading
         buffer.removeAll()
-        spawnedCommand = key ?? (command + " " + argument)
+        spawnedCommand = command
+        spawnedProtocolArgument = argument
+        requestsInCurrentProcess = 0
         log.info("ResidentMintSession: resident minter started (pid \(child.processIdentifier))")
         return true
     }
 
-    private func teardown() {
+    private func teardown(graceful: Bool = false) {
         try? stdinHandle?.close()
-        if let process, process.isRunning { process.terminate() }
+        if let process, process.isRunning {
+            if graceful {
+                // Core AI worker exits on stdin EOF. Waiting here prevents the
+                // replacement from briefly overlapping the old model's unified
+                // memory residency during a bounded recycle.
+                process.waitUntilExit()
+            } else {
+                process.terminate()
+            }
+        }
         process = nil
         stdinHandle = nil
         stdoutHandle = nil
         buffer.removeAll()
         spawnedCommand = nil
+        spawnedProtocolArgument = nil
+        requestsInCurrentProcess = 0
     }
 
     /// Reap the child if no mint has happened for `idleSeconds` after the
     /// mint that scheduled this reaper.
     private func scheduleReaper(after generation: UInt64) {
-        Task { [idleSeconds] in
-            try? await Task.sleep(nanoseconds: idleSeconds * 1_000_000_000)
-            await self.reapIfIdle(since: generation)
+        Task { [policy] in
+            try? await Task.sleep(nanoseconds: policy.idleSeconds * 1_000_000_000)
+            self.reapIfIdle(since: generation)
         }
     }
 
     private func reapIfIdle(since generation: UInt64) {
         guard useGeneration == generation, process != nil else { return }
+        idleReaps &+= 1
         log.info("ResidentMintSession: idle — releasing resident minter")
-        teardown()
+        teardown(graceful: policy.gracefulEOFShutdown)
     }
 
     /// One blocking `availableData` call moved off the actor executor.
