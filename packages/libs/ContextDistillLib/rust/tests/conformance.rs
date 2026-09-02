@@ -226,13 +226,13 @@ fn full_row_conformance_blind200() {
 /// `CDL_CROSSPORT_OUT` when that variable is set.
 ///
 /// When the variable is not set the test passes silently — it is a helper
-/// for the orchestrator diff, not a conformance gate.
+/// for the cross-port diff, not a conformance gate.
 ///
 /// Output format: one JSON object per line (JSONL), 509 lines, one per oracle
 /// row in canonical order debug7 → sample30 → locomo → blind200.
 ///
 /// The test helper writes `drawer_id`, `original`, `enrichment_trailer`, and
-/// `candidate` into each row alongside the converter output so the orchestrator
+/// `candidate` into each row alongside the converter output so the cross-port diff
 /// can correlate rows across ports.
 #[test]
 fn crossport_fixture() {
