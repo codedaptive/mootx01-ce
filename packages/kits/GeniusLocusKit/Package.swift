@@ -111,6 +111,12 @@ let package = Package(
         // Layering: GeniusLocusKit (composition) → SubstrateML (algorithms) does
         // NOT invert — SubstrateML is below GeniusLocusKit in the kit graph.
         .package(path: "../../libs/SubstrateML"),
+        // ContextDistillLib: the deterministic dense-context distiller (CDL-02).
+        // GeniusLocusKit's distillation stage produces the stored `distilled`
+        // representation by calling ContextDistiller; the library's converter ID
+        // is the value written to `distilled_pipeline_version`. Layering:
+        // ContextDistillLib is foundation tier (zero kit deps); no inversion.
+        .package(path: "../../libs/ContextDistillLib"),
         // IntellectusLib is the zero-dependency telemetry floor. GeniusLocusKit
         // emits per-estate rollup metrics at open/close/provision/quiesce/drain
         // and at the verb-error boundary (GLK_ROLLUPS_001). When monitoring is
@@ -231,6 +237,7 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                .product(name: "ContextDistillLib", package: "ContextDistillLib"),
                 // IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).
                 // Off-path is a single Atomic<Bool> load — zero cost when disabled.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
