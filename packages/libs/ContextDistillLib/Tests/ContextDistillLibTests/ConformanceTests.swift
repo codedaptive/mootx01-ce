@@ -161,19 +161,19 @@ func fullRowConformance_blind200() throws {
 ///
 /// The fixture path comes from the environment variable CDL_CROSSPORT_OUT.
 /// When the variable is not set this test is skipped — it is a helper for the
-/// orchestrator diff, not a conformance gate.
+/// cross-port diff, not a conformance gate.
 ///
 /// Output format: one JSON object per line (JSONL), 509 lines, one per oracle
 /// row in order debug7 → sample30 → locomo → blind200.
 ///
 /// The Rust port writes its equivalent output to a sibling file (rust-rows.jsonl)
-/// so the orchestrator can diff the two ports against each other and against
+/// so the cross-port diff can compare the two ports against each other and against
 /// the oracle.
 @Test("Cross-port fixture — write swift-rows.jsonl (skipped if CDL_CROSSPORT_OUT unset)")
 func crossPortFixture() throws {
     guard let outPath = ProcessInfo.processInfo.environment["CDL_CROSSPORT_OUT"] else {
         // CDL_CROSSPORT_OUT not set — skip.  The test runner emits no output
-        // for a skipped test; the orchestrator sets the variable explicitly when
+        // for a skipped test; the cross-port run sets the variable explicitly when
         // it wants the fixture written.
         return
     }
@@ -191,7 +191,7 @@ func crossPortFixture() throws {
             let result = distiller.distill(input, converter: .intentSpanV22)
 
             // Include record-identity fields (drawer_id) in the fixture so the
-            // orchestrator can correlate rows across ports.
+            // cross-port diff can correlate rows across ports.
             var dict = result.asDict()
             dict["drawer_id"] = row.drawerID
             dict["original"]  = row.original
