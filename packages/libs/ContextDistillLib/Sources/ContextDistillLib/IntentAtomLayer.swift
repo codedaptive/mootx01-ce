@@ -8,7 +8,7 @@
 //   reindexAtoms(_:)      — mirrors _reindex_atoms
 //   normalizedTerms(_:)   — mirrors _normalized_terms
 //
-// Design rules (from mission brief):
+// Design rules (from the decision record):
 //   - NO regex engine. All pattern matching is hand-written character scanners.
 //   - Index unit: unicodeScalars (code points). Python str indices are code
 //     points; Swift unicodeScalars is the exact same unit.
