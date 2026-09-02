@@ -63,6 +63,7 @@ use crate::telemetry::metric_names;
 use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
+use corpus_kit::index_composition_policy::IndexCompositionPolicy;
 use corpus_kit::{
     CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
@@ -542,6 +543,20 @@ fn encode_markers_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("MOOTX01_ENCODE_MARKERS").map(|v| v != "off").unwrap_or(true)
     })
+}
+
+/// Read `MOOT_INDEX_COMPOSITION` and return the matching policy.
+///
+/// Absent or unrecognised → `IndexCompositionPolicy::current()` (cell A —
+/// `lex=original;dense=distilled`, the pre-CDL-03 default). Called once per
+/// estate open and threaded to `LocusDrawerContentSource` (CDL-03). Mirrors
+/// Swift `EstateLifecycle.indexCompositionPolicy()`.
+fn index_composition_policy_from_env() -> IndexCompositionPolicy {
+    std::env::var("MOOT_INDEX_COMPOSITION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .and_then(|v| IndexCompositionPolicy::from_environment_value(&v))
+        .unwrap_or_else(IndexCompositionPolicy::current)
 }
 
 /// Convert a raw `[u8; 16]` estate UUID to a hyphenated lowercase UUID string.
@@ -9558,7 +9573,7 @@ impl EstateCoordinator {
                         CorpusContentEngine::open(
                             Arc::clone(&backing_storage),
                             config,
-                            Arc::new(LocusDrawerContentSource::new(estate)),
+                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, index_composition_policy_from_env())),
                             embedding_models,
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -9601,7 +9616,7 @@ impl EstateCoordinator {
                         CorpusContentEngine::open(
                             Arc::clone(&backing_storage),
                             config,
-                            Arc::new(LocusDrawerContentSource::new(estate)),
+                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, index_composition_policy_from_env())),
                             embedding_models,
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
