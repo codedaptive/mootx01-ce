@@ -133,7 +133,7 @@ struct DistillTests {
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: ids).first)
         #expect(row.distilled != nil)
-        #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
         #expect(row.distilledTokenCount != nil)
         #expect(row.distilledAt == t0)
         // No factoid drawers, no [DIST| content, anywhere (§13.2).
@@ -163,14 +163,12 @@ struct DistillTests {
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: ids).first)
-        // The §7.6 transform's canonical rendering of the short body, plus
-        // the p2 categorizer trailer (grammar v1) welded to the END of the
-        // dense body. The trailer's exact facts are pipeline-version data,
-        // not a conformance surface — assert the rendering prefix and a
-        // well-formed trailer block.
+        // The stored text is the converter's representation of the short
+        // body: exact source spans plus whatever trailer fields the converter
+        // could anchor in the source (possibly none).
         let distilled = try #require(row.distilled)
-        #expect(distilled.hasPrefix("Alice visited CERN. She left. (*[ "))
-        #expect(distilled.hasSuffix(" ]*)"))
+        #expect(distilled == GeniusLocusKit.distilledRepresentation(forContent: shortBody))
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
     }
 
     // CK-DI-5: Idempotent by the NULL predicate (§7.1).

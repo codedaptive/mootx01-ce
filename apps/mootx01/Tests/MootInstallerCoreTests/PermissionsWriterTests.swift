@@ -141,7 +141,7 @@ struct PermissionsWriterTests {
             "moot_review_tunnel", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
-            "moot_write_journal",
+            "moot_redistill", "moot_write_journal",
         ]
         // Count guard (see doc comment): 71 = 68 (contradiction hunter era) +
         // 3 dataset tools (MX-TAB-7: moot_file_dataset, moot_dataset_query,
@@ -158,7 +158,9 @@ struct PermissionsWriterTests {
         // +3 (ADORN-STORE-02 pin repair): moot_recall_connected (1.33.0),
         // moot_recall_temporal (1.39.0), moot_recall_walk (1.47.0) — real
         // shipped recall recipes the pin had missed; all Allow-tier reads.
-        #expect(realTools.count == 76, "pinned tool inventory drifted from the real surface count")
+        // +1 (CDL-02): moot_redistill — force-redistill all active items +
+        // full laneScope .all reindex; Mutation tier.
+        #expect(realTools.count == 77, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
