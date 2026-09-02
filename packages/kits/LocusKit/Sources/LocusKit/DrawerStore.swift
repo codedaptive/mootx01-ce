@@ -5751,6 +5751,40 @@ public actor DrawerStore {
         return rows.count
     }
 
+    /// Rooms containing at least one active, represented drawer whose stored
+    /// representation was produced by a different distillation pipeline.
+    ///
+    /// This is the version companion to the room-level bit-19 aggregate used
+    /// by `distillItemsSweep`. Bit 19 proves representation presence only; it
+    /// cannot prove that `distilled_pipeline_version` matches the caller's
+    /// current contract. The query projects only `parent_node_id`, then
+    /// resolves the distinct room nodes, so a current estate pays no content
+    /// hydration cost and stale rooms can bypass the otherwise-valid bitmap
+    /// skip.
+    public func roomsWithStaleDistilledRepresentations(
+        pipelineVersion: String
+    ) async throws -> [(wing: String, room: String)] {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .bitmaskAll(
+                    Column(table: "drawers", name: "operationalBitmap"),
+                    mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                ),
+                .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
+                     .text(pipelineVersion)),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["parent_node_id"]
+        )
+        let parentNodeIds = Array(Set(rows.map { Self.string($0["parent_node_id"]) }))
+            .filter { !$0.isEmpty }
+        let names = try await resolveNodeNames(parentNodeIds: parentNodeIds)
+        return parentNodeIds.compactMap { names[$0] }.sorted {
+            $0.wing == $1.wing ? $0.room < $1.room : $0.wing < $1.wing
+        }
+    }
+
     // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
 
     // MARK: - Minter registry
