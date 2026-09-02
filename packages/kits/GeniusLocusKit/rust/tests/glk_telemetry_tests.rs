@@ -637,7 +637,7 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
     use locus_kit::frames::CaptureFrame;
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::estate_types::LatticeAnchor;
-    use corpus_kit::Corpus;
+    
 
     let (store, storage) = make_stores();
     let mut coord = EstateCoordinator::new();

@@ -109,14 +109,12 @@ struct DistilledRecallTests {
             let match = try #require(output.matches.first { $0.id == id })
             #expect(!match.servedFromContent, "a distilled row serves its representation")
             #expect(match.tokenCount != nil, "per-hit token count must be present (§13.4)")
-            // The rendering is the row's distilled column — the dense body
-            // plus the p2 categorizer trailer. The trailer means the payload
-            // is no longer guaranteed strictly smaller than short bodies;
-            // the contract is that the DENSE RENDERING (not the verbatim
-            // body) is served, carrying a well-formed grammar-v1 trailer.
-            #expect(match.text != body)
-            #expect(match.text.contains(" (*[ ") && match.text.hasSuffix(" ]*)"),
-                "distilled payloads carry the p2 trailer on distilled rows")
+            // The payload is the row's distilled column — exactly the
+            // converter's representation of the body. For a short body the
+            // exact-span converter may keep every source byte, so the
+            // contract is identity with the converter, not inequality with
+            // the body.
+            #expect(match.text == GeniusLocusKit.distilledRepresentation(forContent: body))
             #expect(!match.text.hasPrefix("[DIST|"))
         }
     }

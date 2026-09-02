@@ -166,7 +166,6 @@ fn golden_pin_coaching_fixture() {
     //   /path/to/AriaMcpKit/rust/tests/modes_tests.rs
     // The fixture is at:
     //   /path/to/AriaMcpKit/Tests/Conformance/modes_coaching_fixture.json
-    let this_file = file!(); // relative to repo root usually: packages/kits/AriaMcpKit/rust/tests/modes_tests.rs
     // Walk up to find the AriaMcpKit/ directory by looking for the rust/ component.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR must be set during cargo test");

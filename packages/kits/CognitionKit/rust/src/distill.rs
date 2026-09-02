@@ -218,7 +218,7 @@ mod tests {
             assert_eq!(row.distilled.as_deref(), Some("First sentence stands. Second sentence stands."));
             assert_eq!(
                 row.distilled_pipeline_version.as_deref(),
-                Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+                Some(genius_locus_kit::distillation_converter_id())
             );
         }
 

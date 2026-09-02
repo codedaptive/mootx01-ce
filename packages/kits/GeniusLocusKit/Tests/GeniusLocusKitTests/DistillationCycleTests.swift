@@ -145,8 +145,10 @@ struct DistillationCycleTests {
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [itemID]).first)
-        #expect(row.distilled == "First fact. Second fact. Third fact.")
-        #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+        // The stored text is the converter's representation of the content;
+        // the stub's rendering feeds only the fingerprint lane.
+        #expect(row.distilled == GeniusLocusKit.distilledRepresentation(forContent: threeSentenceBody))
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
         #expect(row.distilledTokenCount != nil)
         #expect(row.distilledAt == t0)
         // Content untouched — the representation is a parallel view.
@@ -197,13 +199,14 @@ struct DistillationCycleTests {
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [itemID]).first)
-        // The §7.6 transform's canonical rendering of the §5.4 example,
-        // with the p2 categorizer trailer welded on (any anchoring noun in
-        // the content may contribute; the prefix is the compaction pin).
+        // The stored text is the converter's representation of the short body
+        // (exact source spans plus the projected trailer); the stub sentinel
+        // never reaches the row.
         let distilledText = try #require(row.distilled)
-        #expect(distilledText.hasPrefix("My favorite color blue."))
-        #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
-        #expect(row.distilledTokenCount == TokenCompaction.estimateTokenCount(distilledText))
+        #expect(distilledText == GeniusLocusKit.distilledRepresentation(forContent: shortBody))
+        #expect(!distilledText.contains("MATRIX-PATH-SENTINEL"))
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
+        #expect(row.distilledTokenCount == GeniusLocusKit.distilledTokenCount(distilledText))
     }
 
     // MARK: - §7.5/§8: lane entry independence and re-key
@@ -292,7 +295,7 @@ struct DistillationCycleTests {
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [secretID]).first)
         #expect(row.adjectiveSensitivity == .secret)
-        #expect(row.distilled == "secret rendering")
+        #expect(row.distilled == GeniusLocusKit.distilledRepresentation(forContent: threeSentenceBody))
     }
 
     // MARK: - AND-aggregate room-skip safety tests
@@ -351,7 +354,7 @@ struct DistillationCycleTests {
         #expect((inbox.fingerprint.operationalAnd & skipBit) == skipBit)
 
         let staleRooms = try await reopenedEstate.roomsWithStaleDistilledRepresentations(
-            pipelineVersion: DistillationPipelineVersion.current)
+            pipelineVersion: GeniusLocusKit.distillationConverterID)
         #expect(staleRooms.contains { $0.wing == inbox.wing && $0.room == inbox.room })
 
         let produced = try await kit.distillItemsSweep(
@@ -364,8 +367,11 @@ struct DistillationCycleTests {
 
         let updated = try #require(
             try await reopenedEstate.getDrawers(ids: [itemID]).first)
-        #expect(updated.distilled == "current rendering")
-        #expect(updated.distilledPipelineVersion == DistillationPipelineVersion.current)
+        // The regenerated text is the converter's representation of the
+        // content; the stub's rendering feeds only the fingerprint lane.
+        #expect(updated.distilled == GeniusLocusKit.distilledRepresentation(forContent: updated.content))
+        #expect(updated.distilled != "stale rendering")
+        #expect(updated.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
         try await kit.close(reopened)
     }
 
@@ -396,7 +402,7 @@ struct DistillationCycleTests {
         let inbox = try #require(entries.first(where: { $0.room == "inbox" }))
         #expect((inbox.fingerprint.operationalAnd & skipBit) == skipBit)
         #expect(try await reopenedEstate.roomsWithStaleDistilledRepresentations(
-            pipelineVersion: DistillationPipelineVersion.current).isEmpty)
+            pipelineVersion: GeniusLocusKit.distillationConverterID).isEmpty)
 
         let produced = try await kit.distillItemsSweep(
             handle: reopened, distillFn: distillFn, now: t0, limit: nil)

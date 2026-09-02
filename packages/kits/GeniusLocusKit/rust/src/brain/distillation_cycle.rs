@@ -9,8 +9,9 @@
 // provenance) is retired on 1.1.x (§11).
 //
 // This module supplies the pure decision functions, the pure rendering
-// step (`render_distillation`), and the lane constants that every
-// distillation caller delegates to. Storage I/O lives at the Coordinator
+// step (`render_distillation`, which delegates the stored text to
+// ContextDistillLib), and the lane constants that every distillation
+// caller delegates to. Storage I/O lives at the Coordinator
 // level where the storage handle is available — see `distill_item` there,
 // the single write seam shared by the drain-stage rider, the seeding path,
 // and `distill_items_sweep`.
@@ -52,72 +53,82 @@ pub fn compaction_rendering(content: &str) -> String {
 /// fingerprint — the pure half of `distill_item` (§7.4/§7.5), shared by
 /// every caller so the two paths can never drift apart.
 ///
-/// Segments `content` with the canonical cross-leg delimiter algorithm
-/// (the same segmenter the corpus Chunker uses, so reduction units line up
-/// with the dense index), then takes the MATRIX path when the item has at
-/// least `MIN_INTRA_ITEM_UNITS` units and the short-item compaction path
-/// otherwise. A degenerate matrix (no features extracted at all) falls back
-/// to the short-item transform so §13.1 population holds for every
-/// non-empty item.
+/// The stored text comes from ContextDistillLib (CDL-02): the intent-span
+/// converter receives the verbatim content plus the deterministic
+/// categorizer trailer computed FROM that content, keeps only the trailer
+/// fields it can anchor in the source, and appends them as a grammar-v1
+/// block at the END of the text (where CorpusKit's trailer lexical
+/// supplement scans for BM25 tokens). No pronoun rewriting is applied: the
+/// representation is exact source text by contract, byte-identical to the
+/// Swift port by conformance to the frozen oracle vectors.
+///
+/// The fingerprint is independent of the text (§8): items with at least
+/// `MIN_INTRA_ITEM_UNITS` sentences take the intra-item M×|V| reduction and
+/// keep its OR-reduced feature fingerprint; shorter items use the
+/// query-fingerprint construction over the content.
 ///
 /// Pure: no storage I/O, no clock. Mirrors the rendering half of Swift
 /// `GeniusLocusKit.distillItem(handle:drawerID:content:distillFn:now:)`.
 pub fn render_distillation(
     drawer_id: &str,
     content: &str,
-    coref_pool: &[crate::brain::coref_stage::Antecedent],
 ) -> (String, substrate_types::fingerprint256::Fingerprint256) {
     use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 
     let sentences: Vec<String> = eidetic_lib::segmenter::sentences(content);
-    if item_is_distillable(sentences.len()) {
-        // Matrix path (§7.4): intra-item M×|V| reduction.
-        // memory_timestamps stays None ON PURPOSE (W2.5 S6): the "memories"
-        // here are one item's sentences, which all share the item's single
-        // timestamp — equal ages make TypedDecayWeighting's weights cancel in
-        // the normalizer (wdf ≡ df), so threading the timestamp is a
+    let fingerprint = if item_is_distillable(sentences.len()) {
+        // Matrix path (§7.4): intra-item M×|V| reduction; only its feature
+        // fingerprint is consumed here. memory_timestamps stays None ON
+        // PURPOSE (W2.5 S6): one item's sentences share the item's single
+        // timestamp — equal ages make TypedDecayWeighting's weights cancel
+        // in the normalizer (wdf ≡ df), so threading the timestamp is a
         // mathematical no-op. The decay branch is live in the CROSS-ITEM
-        // consolidation path (coordinator::compose_and_distill).
+        // consolidation path (coordinator::compose_and_distill), which also
+        // consumes the rendered text.
         let input = DistillationInput::new(
             sentences,
             None,
             drawer_id.to_string(),
             vec![drawer_id.to_string()],
         );
-        let output =
-            DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true);
-        let rendering = if output.distilled_text.is_empty() {
-            compaction_rendering(content)
-        } else {
-            output.distilled_text
-        };
-        // Pipeline p2.3 stage A (W2.2, accepted design A1): resolve
-        // third-person pronouns against the session pool BEFORE the trailer
-        // weld — trailer facts stay verbatim-derived and the grammar block
-        // is never rewritten. Empty pool (single-item callers) → identity.
-        let rendering = super::coref_stage::resolve(&rendering, coref_pool);
-        // Pipeline p2: weld the categorizer trailer (facts from the
-        // VERBATIM content) onto the rendering. Twin of Swift distillItem.
-        let rendering = format!(
-            "{rendering}{}",
-            super::enrichment_stage::enrichment_trailer(content)
-        );
-        (rendering, output.feature_fingerprint)
+        DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true)
+            .feature_fingerprint
     } else {
-        // Short-item path (§7.5): token-compaction fallback, fingerprint via
-        // the query-fingerprint construction over the content.
-        (
-            format!(
-                "{}{}",
-                super::coref_stage::resolve(&compaction_rendering(content), coref_pool),
-                super::enrichment_stage::enrichment_trailer(content)
-            ),
-            DistillationPipeline::query_fingerprint(
-                content,
-                DistillationPipeline::default_extractor,
-            ),
-        )
-    }
+        // Short-item path (§7.5): fingerprint via the query-fingerprint
+        // construction over the content.
+        DistillationPipeline::query_fingerprint(content, DistillationPipeline::default_extractor)
+    };
+
+    (distilled_representation(content), fingerprint)
+}
+
+/// The stored distilled representation for one item's content — the pure
+/// text half of `distill_item`, exposed so tests, the trailer-parity report,
+/// and tools can compute exactly what the sweep writes. Twin of Swift
+/// `GeniusLocusKit.distilledRepresentation(forContent:)`: the converter
+/// receives the verbatim content plus the deterministic categorizer trailer
+/// computed FROM that content and appends the anchorable fields as a
+/// grammar-v1 block at the end of the text. Pure: no I/O, no clock.
+pub fn distilled_representation(content: &str) -> String {
+    use context_distill_lib::distiller::ContextDistiller;
+    use context_distill_lib::input::DistillationInput as ConverterInput;
+
+    // enrichment_trailer returns the grammar-v1 block with the leading space
+    // that welded it onto the p2.3 rendering. The converter's trailer grammar
+    // is a full match on the bare `(*[ ... ]*)` block — the form the oracle
+    // rows carry — so the block is trimmed here; with the space it would be
+    // rejected as malformed and silently dropped.
+    let trailer = super::enrichment_stage::enrichment_trailer(content).trim().to_string();
+    ContextDistiller::new()
+        .distill(&ConverterInput::new(content, trailer), crate::DISTILLATION_CONVERTER)
+        .ai_text
+}
+
+/// The token estimate stored in `distilled_token_count` — the library's
+/// estimator, so the stored count equals the oracle's `distilled_tokens_est`
+/// for the same text. Twin of Swift `GeniusLocusKit.distilledTokenCount(_:)`.
+pub fn distilled_token_count(representation: &str) -> i64 {
+    context_distill_lib::digest::estimate_tokens(representation) as i64
 }
 
 // MARK: - Distillation lane constants

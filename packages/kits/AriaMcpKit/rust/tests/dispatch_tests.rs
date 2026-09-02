@@ -6369,8 +6369,6 @@ fn file_memory_with_invalid_event_time_returns_invalid_params() {
 /// must be "memories: N active" (not "drawers: N").
 #[test]
 fn estate_status_active_count_excludes_tombstoned() {
-    use aria_mcp::dispatch::wall_now;
-
     let registry = EstateRegistry::new_inmemory();
     // File two memories.
     file_one_memory(&registry, "first memory", "status/test");

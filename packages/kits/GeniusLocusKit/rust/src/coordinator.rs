@@ -2086,8 +2086,6 @@ impl EstateCoordinator {
         // estate's semantic-tier wiring).
         let vector_store_for_callback = self.vector_stores.get(handle).cloned();
         corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
-            use substrate_ml::token_compaction;
-
             // Marker timestamp is captured at CALLBACK ENTRY — the
             // moment the drain unit's encode work completed — never
             // after rollup or distillation, so the A2 marker anchors
@@ -2126,7 +2124,7 @@ impl EstateCoordinator {
                 // clear, OR pipeline version mismatch.
                 if drawer.has_current_representation()
                     && drawer.distilled_pipeline_version.as_deref()
-                        == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
+                        == Some(crate::distillation_converter_id())
                 {
                     continue;
                 }
@@ -2140,9 +2138,6 @@ impl EstateCoordinator {
                     &drawer.id,
                     &drawer.content,
                     now_ms,
-                    // Single-item callback: no session
-                    // context — identity on empty pool.
-                    &[],
                 ) {
                     // (3) Dense-over-distillate (Stream F): recompose
                     // the dense float vector from the new distillate.
@@ -2436,7 +2431,7 @@ impl EstateCoordinator {
         // Mirrors the Swift drainStatuses entry.
         let estate = self.estate_for(handle)?;
         let undistilled = estate
-            .count_undistilled(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+            .count_undistilled(crate::distillation_converter_id())
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("count_undistilled: {e:?}"),
             })?;
@@ -2444,10 +2439,7 @@ impl EstateCoordinator {
             name: "distillation".to_string(),
             pending: undistilled,
             in_flight: 0,
-            detail: Some(format!(
-                "pipeline: {}",
-                substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION
-            )),
+            detail: Some(format!("converter: {}", crate::distillation_converter_id())),
         });
 
         // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
@@ -3744,22 +3736,22 @@ impl EstateCoordinator {
         drawer_id: &str,
         content: &str,
         now: i64,
-        coref_pool: &[crate::brain::coref_stage::Antecedent],
     ) -> bool {
-        use crate::brain::distillation_cycle::{render_distillation, DISTILLATION_LANE_MODEL_ID};
-        use substrate_ml::token_compaction;
+        use crate::brain::distillation_cycle::{
+            distilled_token_count, render_distillation, DISTILLATION_LANE_MODEL_ID,
+        };
 
         if content.is_empty() {
             return false;
         }
-        let (rendering, fingerprint) = render_distillation(drawer_id, content, coref_pool);
+        let (rendering, fingerprint) = render_distillation(drawer_id, content);
 
         // Write 1 of 2 (§7.2): the four representation columns, atomically.
-        let token_count = token_compaction::estimate_token_count(&rendering);
+        let token_count = distilled_token_count(&rendering);
         match estate.set_distilled_representation(
             drawer_id,
             &rendering,
-            token_compaction::DISTILLATION_PIPELINE_VERSION,
+            crate::distillation_converter_id(),
             token_count,
             now,
         ) {
@@ -3789,8 +3781,6 @@ impl EstateCoordinator {
         now: i64,
         limit: Option<usize>,
     ) -> Result<usize, VerbDispatchError> {
-        use substrate_ml::token_compaction;
-
         let estate = self.estate_for_verb(handle)?;
 
         // Optional VectorStore for fingerprint storage. Absence is non-fatal.
@@ -3837,7 +3827,7 @@ impl EstateCoordinator {
                     .then(a.id.cmp(&b.id))
             });
 
-            for (position, drawer) in room_drawers.iter().enumerate() {
+            for drawer in room_drawers.iter() {
             if let Some(cap) = limit {
                 if produced >= cap {
                         break 'rooms;
@@ -3853,7 +3843,7 @@ impl EstateCoordinator {
             // by the §4 invariant, but the bit is the authoritative indicator.
             if drawer.has_current_representation()
                 && drawer.distilled_pipeline_version.as_deref()
-                    == Some(token_compaction::DISTILLATION_PIPELINE_VERSION)
+                    == Some(crate::distillation_converter_id())
             {
                 continue;
             }
@@ -3862,37 +3852,12 @@ impl EstateCoordinator {
             // — the same call tree the drain-stage rider and the seeding
             // path take. A false return means the row vanished mid-sweep or
             // the write failed: skip it.
-            // Antecedent pool (W2.2 A1): entities contributed by up to
-            // WINDOW_ITEMS preceding same-room items whose event_time lies
-            // within WINDOW_MINUTES. event_time is epoch ms.
-            let window_start = drawer.event_time
-                - crate::brain::coref_stage::WINDOW_MINUTES * 60 * 1000;
-            // Sensitivity ceiling (codex finding 2026-08-26): a predecessor
-            // may contribute antecedents ONLY when its sensitivity is at or
-            // below the drawer being distilled — substitution copies the
-            // predecessor's entity text into THIS drawer's persisted
-            // distillate, and by-id reads gate on the returned drawer's own
-            // sensitivity, so an uphill-sourced antecedent would surface
-            // Restricted/Secret entity text through a Normal row without a
-            // grant. Twin of the Swift DistillationCycle ceiling.
-            let ceiling = drawer.sensitivity().raw_value();
-            let pool: Vec<crate::brain::coref_stage::Antecedent> = room_drawers
-                [..position]
-                .iter()
-                .rev()
-                .take(crate::brain::coref_stage::WINDOW_ITEMS)
-                .rev()
-                .filter(|d| d.event_time >= window_start)
-                .filter(|d| d.sensitivity().raw_value() <= ceiling)
-                .flat_map(|d| crate::brain::coref_stage::contributed_entities(&d.content))
-                .collect();
             if !Self::distill_item(
                 estate,
                 vector_store_opt.as_ref(),
                 &drawer.id,
                 &drawer.content,
                 now,
-                &pool,
             ) {
                 continue;
             }
@@ -3913,6 +3878,81 @@ impl EstateCoordinator {
         } // end 'rooms: for entry in &rooms
 
         Ok(produced)
+    }
+
+    /// Force-redistill EVERY active non-empty item in the estate — the
+    /// `moot_redistill` verb (CDL-02). Twin of Swift
+    /// `GeniusLocusKit.redistillItemsSweep(handle:distillFn:now:limit:)`.
+    ///
+    /// Unlike `distill_items_sweep` this pass ignores bit 19 and the stored
+    /// converter ID, skips the room-level AND short-circuit, and does NOT
+    /// recompose dense vectors per item: the caller runs `reindex_corpus`
+    /// (all derived lanes) once after it returns, which re-embeds every
+    /// dense vector and rebuilds the BM25 posting lists from the new
+    /// distillates, trailer tokens included.
+    pub fn redistill_items_sweep(
+        &self,
+        handle: &EstateHandle,
+        now: i64,
+        limit: Option<usize>,
+    ) -> Result<usize, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let vector_store_opt = self.vector_store_for(handle);
+        let mut produced: usize = 0;
+        let rooms = estate
+            .room_level_fingerprints()
+            .map_err(|e| remap("redistill_items_sweep", "", e))?;
+        'rooms: for entry in &rooms {
+            // Deterministic conversation order (event_time, filed_at, id) so
+            // a capped pass reaches the same rows on both ports.
+            let mut room_drawers = estate
+                .drawers_in_wing_room(&entry.wing, &entry.room)
+                .map_err(|e| remap("redistill_items_sweep", &entry.room, e))?;
+            room_drawers.sort_by(|a, b| {
+                a.event_time
+                    .cmp(&b.event_time)
+                    .then(a.filed_at.cmp(&b.filed_at))
+                    .then(a.id.cmp(&b.id))
+            });
+            for drawer in room_drawers.iter() {
+                if let Some(cap) = limit {
+                    if produced >= cap {
+                        break 'rooms;
+                    }
+                }
+                // Empty content is the only skip; tombstoned rows are
+                // excluded by drawers_in_wing_room at the storage tier.
+                if drawer.content.is_empty() {
+                    continue;
+                }
+                if Self::distill_item(
+                    estate,
+                    vector_store_opt.as_ref(),
+                    &drawer.id,
+                    &drawer.content,
+                    now,
+                ) {
+                    produced += 1;
+                }
+            }
+        }
+        Ok(produced)
+    }
+
+    /// Rebuild every derived lane of the estate's corpus (BM25 and dense)
+    /// from the current content and distillates. Twin of Swift
+    /// `GeniusLocusKit.reindexCorpus(handle:now:)`. A no-op when no corpus
+    /// is registered for the estate (locus-only estate).
+    pub fn reindex_corpus(&self, handle: &EstateHandle, now: i64) -> Result<(), VerbDispatchError> {
+        let Some(corpus) = self.corpus_kits.get(handle) else {
+            return Ok(());
+        };
+        corpus.reindex(now).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "reindex_corpus".to_string(),
+                reason: format!("{e:?}"),
+            })
+        })
     }
 
     // MARK: - anomaly_flag_sweep
@@ -6099,7 +6139,6 @@ impl EstateCoordinator {
     ) -> Result<crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport, VerbDispatchError>
     {
         use crate::brain::meeting_decision_capture::MeetingDecisionCaptureReport;
-        use locus_kit::kg_fact::KGFact;
         use substrate_ml::conflict_projection::ConflictRuleRegistry;
         use substrate_ml::meeting_decision_extractor::extract;
 
@@ -9345,7 +9384,7 @@ impl EstateCoordinator {
                     && !d.content.is_empty()
                     && (!d.has_current_representation()
                         || d.distilled_pipeline_version.as_deref()
-                            != Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION))
+                            != Some(crate::distillation_converter_id()))
             }) {
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside index_content keeps the
@@ -9367,10 +9406,6 @@ impl EstateCoordinator {
                     &hint.id,
                     &hint.content,
                     now,
-                    // Single-item rider: no session context in hand — the
-                    // coref stage is identity on an empty pool; the sweep
-                    // re-distills with context on the next version pass.
-                    &[],
                 ) {
                     let _ = corpus.recompose_dense_vector(&hint.id, now);
                 }
@@ -13660,7 +13695,7 @@ mod tests {
     // trail; a captured drawer produces a non-empty, verifiable chain.
     #[test]
     fn acc4_current_audit_log_feeds_and_verifies() {
-        let (mut coord, h) = open_one();
+        let (coord, h) = open_one();
         coord.capture(&h, cap_frame("alpha"), NOW).expect("capture");
         let log = coord.current_audit_log(&h).expect("current audit log");
         assert!(!log.is_empty(), "a captured drawer yields audit entries");
@@ -14364,7 +14399,7 @@ mod tests {
             assert!(row.distilled.is_some(), "row {id} must carry a representation");
             assert_eq!(
                 row.distilled_pipeline_version.as_deref(),
-                Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+                Some(crate::distillation_converter_id())
             );
             assert!(row.distilled_token_count.is_some());
             assert!(row.distilled_at.is_some());
@@ -14414,7 +14449,7 @@ mod tests {
             estate
                 .set_distilled_representation(
                     id, "rendered",
-                    substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION,
+                    crate::distillation_converter_id(),
                     3, NOW,
                 )
                 .expect("set_distilled_representation");
