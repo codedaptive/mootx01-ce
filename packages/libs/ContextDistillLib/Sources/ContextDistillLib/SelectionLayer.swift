@@ -758,7 +758,7 @@ private func dateREFullmatch(_ value: String) -> Bool {
 
     func isDigit(_ i: Int) -> Bool { i < n && sc[i].value >= 0x30 && sc[i].value <= 0x39 }
 
-    var i = 0
+    let i = 0
     // Try \d{4}-\d{2}-\d{2}(T...)?
     var j = i
     var cnt = 0
