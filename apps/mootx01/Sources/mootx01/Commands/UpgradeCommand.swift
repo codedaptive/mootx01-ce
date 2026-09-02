@@ -46,7 +46,7 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the data-directory migration steps
-            (kg_facts identity, adornment store migration, shared-content reclaim)
+            (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence)
             against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
             cycle — each step quiesces and restores the daemon itself:
@@ -96,7 +96,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// shared-content reclaim last (VACUUM-backed, most I/O).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself.")
+        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -152,8 +152,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // --backfill-only: headless data-dir convergence for scripted and
-        // benchmark estates. Runs only the three data-directory migration steps
-        // (kg_facts identity, adornment store migration, shared-content reclaim)
+        // benchmark estates. Runs only the four data-directory migration steps
+        // (kg_facts identity, adornment store migration, shared-content reclaim,
+        // distilled representation convergence)
         // against the estate resolved via MOOTX01_DATA_DIR. No network,
         // no download, no plugin convergence, no encryption offer, no
         // restartAgents cycle. Each step owns its daemon quiesce+restore inline.
@@ -161,6 +162,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             await runKGFactIdentityBackfill(home: home)
             await runAdornmentStoreMigration(home: home)
             await runSharedContentReclaimIfPending(home: home)
+            await runDistilledRepresentationConvergence(home: home)
             return
         }
 
@@ -282,6 +284,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 await runKGFactIdentityBackfill(home: home)
                 await runAdornmentStoreMigration(home: home)
                 await runSharedContentReclaimIfPending(home: home)
+                await runDistilledRepresentationConvergence(home: home)
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
                 restartAgents(home: home)
@@ -476,6 +479,72 @@ struct UpgradeCommand: AsyncParsableCommand {
         // the Rust per-function shape: was_running capture → inline daemon_start.
         // This fires for both success and failure so the caller (including
         // --backfill-only) never needs to know which functions quiesce the daemon.
+        if wasRunning {
+            _ = LaunchAgent.startDaemon(homeDirectory: home)
+        }
+        #endif
+    }
+
+    /// CDL-02: bring every drawer's stored distilled representation up to the
+    /// current converter (`GeniusLocusKit.distillationConverterID`). Rows whose
+    /// stored converter ID differs — every row written under the p2.3 pipeline
+    /// on an estate that predates ContextDistillLib — are regenerated through
+    /// the standard eligibility sweep, then every derived corpus lane (BM25 and
+    /// dense) is rebuilt once, because the lexical lane admits trailer tokens
+    /// scanned from the distilled text and the dense lane embeds it. Nothing
+    /// is re-ingested, re-mined, or re-dreamed. Idempotent: a converged estate
+    /// regenerates zero rows and skips the reindex.
+    private func runDistilledRepresentationConvergence(home: URL) async {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ distilled representation convergence skipped — estate key unavailable: \(error)")
+            return
+        }
+        // Single-writer discipline, same shape as the other backfill steps:
+        // quiesce the daemon, do the work, restore the daemon inline.
+        let wasRunning = LaunchAgent.isDaemonRunning()
+        if wasRunning && !LaunchAgent.stopDaemon() {
+            print("  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
+            return
+        }
+        do {
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption
+            )
+            let storage = try SQLiteStorage(configuration: configuration)
+            let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+            let kit = GeniusLocusKit()
+            let handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            let now = Date()
+            let regenerated = try await kit.distillItemsSweep(
+                handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now)
+            if regenerated > 0 {
+                try await kit.reindexCorpus(handle: handle, now: now)
+            }
+            try await kit.close(handle)
+            await storage.close()
+            if regenerated == 0 {
+                print("  ✓ distilled representations: already at converter \(GeniusLocusKit.distillationConverterID)")
+            } else {
+                print("  ✓ distilled representation convergence: \(regenerated) row(s) regenerated at converter \(GeniusLocusKit.distillationConverterID); derived lanes reindexed (BM25 + dense)")
+            }
+        } catch {
+            print("""
+                  ✗ distilled representation convergence failed: \(error)
+                    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry.
+                """)
+        }
         if wasRunning {
             _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
@@ -929,6 +998,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         await runKGFactIdentityBackfill(home: home)
         await runAdornmentStoreMigration(home: home)
         await runSharedContentReclaimIfPending(home: home)
+        await runDistilledRepresentationConvergence(home: home)
         convergeDaemonBundle(home: home)
         restartAgents(home: home)
     }

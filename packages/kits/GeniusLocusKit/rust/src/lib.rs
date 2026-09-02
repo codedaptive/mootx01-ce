@@ -45,6 +45,22 @@
 
 pub mod audit;
 pub mod brain;
+
+/// The product's current dense-context converter (CDL-02). Twin of Swift
+/// `GeniusLocusKit.distillationConverter`. Its ID is written to
+/// `distilled_pipeline_version` on every distillation and compared by every
+/// eligibility check, so bumping it re-distills each estate lazily through
+/// the sweep and eagerly through the Redistill recipe. Readers below GLK
+/// (CognitionKit, the CLI) take the ID from here, never from the library
+/// directly, so the choice of converter lives in exactly one place.
+pub const DISTILLATION_CONVERTER: context_distill_lib::converter::ContextDistillConverter =
+    context_distill_lib::converter::ContextDistillConverter::IntentSpanV22;
+
+/// The converter ID written to `distilled_pipeline_version`. Twin of Swift
+/// `GeniusLocusKit.distillationConverterID`.
+pub fn distillation_converter_id() -> &'static str {
+    DISTILLATION_CONVERTER.id()
+}
 // packager.rs — GLKResultsPackager Rust port (PACKAGER mission). Post-recall,
 // pre-presentation packager: gate signals, confidence levels, cliff cutoff,
 // and the packed result type consumed by the ARIA boundary. Mirrors
