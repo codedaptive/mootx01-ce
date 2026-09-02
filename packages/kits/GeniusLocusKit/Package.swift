@@ -52,6 +52,13 @@ let package = Package(
             name: "glk-scale-qual",
             targets: ["GLKScaleQual"]
         ),
+        // Benchmark-only applicator for a mechanically distilled overlay.
+        // It is deliberately a standalone tool: product capture/distillation
+        // behavior is unchanged, and callers must point it at a marked clone.
+        .executable(
+            name: "glk-distilled-overlay",
+            targets: ["GLKDistilledOverlay"]
+        ),
     ],
     traits: [
         // Step traits name concrete historical code. Floor traits are the
@@ -121,6 +128,18 @@ let package = Package(
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
     ],
     targets: [
+        .executableTarget(
+            name: "GLKDistilledOverlay",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKDistilledOverlay"
+        ),
         .executableTarget(
             name: "GLKScaleQual",
             dependencies: [
