@@ -7,8 +7,16 @@ import Testing
 /// the vendored qwen2 tokenizer.json via the reference implementation).
 @Suite struct QwenTokenizerTests {
 
-    static let tokenizerURL = URL(fileURLWithPath:
-        "/Volumes/llm_models/hf/Qwen2-0.5B-Instruct/tokenizer.json")
+    /// The reference qwen2 `tokenizer.json`, named by the environment variable
+    /// `MOOT_QWEN2_TOKENIZER_JSON`. The file is a third-party model asset that
+    /// is not vendored; when the variable is unset or the file is absent the
+    /// golden suite is skipped rather than pinned to any machine's path.
+    static let tokenizerURL: URL? = {
+        guard let path = ProcessInfo.processInfo.environment["MOOT_QWEN2_TOKENIZER_JSON"],
+              !path.isEmpty,
+              FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }()
 
     private struct Fixture: Decodable {
         struct Case: Decodable { let text: String; let ids: [Int32] }
@@ -25,10 +33,10 @@ import Testing
 
     @Test("encode matches the reference on every golden case")
     func encodeGolden() throws {
-        guard FileManager.default.fileExists(atPath: Self.tokenizerURL.path) else {
-            return  // model volume absent (CI machine) — pins run where the vendored tokenizer lives
+        guard let tokenizerURL = Self.tokenizerURL else {
+            return  // MOOT_QWEN2_TOKENIZER_JSON unset — golden pins run where the reference tokenizer lives
         }
-        let tok = try QwenTokenizer(tokenizerJSON: Self.tokenizerURL)
+        let tok = try QwenTokenizer(tokenizerJSON: tokenizerURL)
         let fixture = try loadFixture()
         for c in fixture.cases {
             #expect(tok.encode(c.text) == c.ids, "mismatch for \(c.text.prefix(40))")
@@ -40,8 +48,8 @@ import Testing
 
     @Test("decode round-trips every golden case")
     func decodeGolden() throws {
-        guard FileManager.default.fileExists(atPath: Self.tokenizerURL.path) else { return }
-        let tok = try QwenTokenizer(tokenizerJSON: Self.tokenizerURL)
+        guard let tokenizerURL = Self.tokenizerURL else { return }
+        let tok = try QwenTokenizer(tokenizerJSON: tokenizerURL)
         let fixture = try loadFixture()
         for c in fixture.cases {
             #expect(tok.decode(c.ids) == c.text)
@@ -178,9 +186,8 @@ import Testing
 
     @Test("the vendored qwen2 table agrees with the reference loop on long runs")
     func vendoredTableMatchesReference() throws {
-        let url = QwenTokenizerTests.tokenizerURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return  // model volume absent (CI machine); the synthetic tables above still run
+        guard let url = QwenTokenizerTests.tokenizerURL else {
+            return  // MOOT_QWEN2_TOKENIZER_JSON unset; the synthetic tables above still run
         }
         let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
         let model = root["model"] as! [String: Any]
