@@ -637,8 +637,8 @@ func pipeSpans(_ textSlice: [Unicode.Scalar], base: Int) -> [(Int, Int, String)]
         return trimmedSpan(0, textSlice.count).map { [$0] } ?? []
     }
 
-    var bounds: [Int] = [0] + separators.map(\.end)
-    var ends: [Int] = separators.map(\.start) + [textSlice.count]
+    let bounds: [Int] = [0] + separators.map(\.end)
+    let ends: [Int] = separators.map(\.start) + [textSlice.count]
 
     return zip(bounds, ends).compactMap { trimmedSpan($0, $1) }
 }
@@ -1210,7 +1210,7 @@ private func appendAnswerSubatoms(
     let baseID = atoms.count
 
     for (partIndex, part) in parts.enumerated() {
-        var partDeps = part.dependencies.map { baseID + $0 }
+        let partDeps = part.dependencies.map { baseID + $0 }
         var partKind = part.kind
         if partIndex == 0, let (_, bodyOff) = knownSpeakerAtom(part.text) {
             let afterLabel = String(part.text.unicodeScalars.dropFirst(bodyOff))
