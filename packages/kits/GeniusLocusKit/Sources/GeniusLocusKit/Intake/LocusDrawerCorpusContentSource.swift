@@ -23,24 +23,25 @@
 // surface returns empty; rebuilds stream `activeContentIDs()` +
 // `record(for:)` in deterministic ID order instead.
 //
-// DENSE-OVER-DISTILLATE (MISSION_11X_RECALL_GAP_01 Stream F):
-// `record(for:)` supplies `denseCompositionText: drawer.distilled`. When
-// `distilled` is nil (pre-sweep / edit-to-regeneration window), nil
-// propagates and `CorpusContentRecord.effectiveDenseText` falls back to
-// the verbatim `text` — zero behavior change for undistilled rows. When
-// non-nil, the engine uses the distillate for the dense float vector lane
-// while BM25 continues to index `text` unchanged (BM25 search isolation,
-// SPEC_DISTILLATION_STORAGE §9, is preserved: the content digest keys on
-// `text` and BM25 tokens come from `text`).
+// INDEX COMPOSITION POLICY (CDL-03):
+// `record(for:)` composes the lexical and dense texts according to the
+// `compositionPolicy` supplied at adapter construction time. The default
+// policy — `.current` — preserves the established dense-over-distillate
+// behaviour (Stream F / MISSION_11X_RECALL_GAP_01):
+//   • lexical text = verbatim `drawer.content` (BM25)
+//   • dense text   = `drawer.distilled` (nil → fallback to verbatim via
+//                    `CorpusContentRecord.effectiveDenseText`)
 //
-// Recomposability: on retrain / reindex the engine calls `source.record(for:)`
-// again. If the distillate is present, the re-embedded vector is distillate-
-// based; if swept away (content edit → NULL), the vector reverts to lexical.
-// Either way the persisted `distilled` column is the single source of truth —
-// no additional basis dependency is introduced.
+// When the policy includes adornments (`lexicalNeedsAdornments` or
+// `denseNeedsAdornments`), active adornment texts are fetched from the
+// estate in ascending minter-ID order and appended to the base text on
+// separate lines ("\n"). The digest always keys on the verbatim `text`
+// (content did not change when only the distillate or adornments changed),
+// so the BM25 idempotence anchor is unaffected by policy.
 //
 // Rust twin: `rust/src/intake.rs` (`LocusDrawerContentSource`).
 
+import AdornmentLib
 import CorpusKit
 import Foundation
 import LocusKit
@@ -49,9 +50,14 @@ import LocusKit
 public struct LocusDrawerCorpusContentSource: CorpusContentSource {
 
     private let estate: Estate
+    /// The named index composition policy that controls which texts each lane
+    /// receives (CDL-03). Defaults to `.current` — preserves the established
+    /// dense-over-distillate behaviour before CDL-03.
+    private let compositionPolicy: IndexCompositionPolicy
 
-    public init(estate: Estate) {
+    public init(estate: Estate, compositionPolicy: IndexCompositionPolicy = .current) {
         self.estate = estate
+        self.compositionPolicy = compositionPolicy
     }
 
     /// Resolve the CURRENT canonical record for a Drawer ID. Empty-content
@@ -59,10 +65,11 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
     /// clears derived state for a previously-indexed ID that stops
     /// resolving).
     ///
-    /// Supplies `denseCompositionText: drawer.distilled` so the dense
-    /// float lane is composed from the distillate when available. A nil
-    /// `distilled` column propagates as nil and `effectiveDenseText` falls
-    /// back to the verbatim `text` — the BM25 lane is always `text`.
+    /// Composes lexical and dense texts according to `compositionPolicy`.
+    /// For the `.current` policy (cell A), this is identical to the
+    /// established dense-over-distillate behaviour: BM25 indexes verbatim
+    /// `text`, the dense lane gets `distilled` (nil → `effectiveDenseText`
+    /// fallback to verbatim). The digest always keys on the verbatim `text`.
     public func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
         guard let drawer = try await estate.getDrawers(ids: [id]).first,
               !drawer.content.isEmpty,
@@ -70,17 +77,80 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
               drawer.embeddingModelID != datasetHandleEmbeddingModelID else {
             return nil
         }
+
+        // Fetch adornments only when the policy requires them — avoids the
+        // store read on the common `.current` path.
+        var adornmentTexts: [String] = []
+        if compositionPolicy.needsAdornments {
+            let adornmentMap = try await estate.activeAdornments(drawerIDs: [drawer.id])
+            // Ascending minter-ID order for deterministic composition across
+            // runs with the same corpus and adornment set.
+            adornmentTexts = (adornmentMap[drawer.id] ?? [])
+                .sorted { $0.minterID < $1.minterID }
+                .map(\.text)
+        }
+
+        // Compose the lexical text per policy.
+        let lexicalText = composedText(
+            base: lexicalBase(drawer: drawer),
+            adornments: compositionPolicy.lexicalNeedsAdornments ? adornmentTexts : [])
+
+        // Compose the dense text per policy.
+        // Nil propagates to `effectiveDenseText` fallback in CorpusContentRecord.
+        let denseText: String?
+        let denseBase = denseBase(drawer: drawer)
+        if compositionPolicy.denseNeedsAdornments && !adornmentTexts.isEmpty {
+            denseText = composedText(base: denseBase ?? drawer.content,
+                                     adornments: adornmentTexts)
+        } else {
+            denseText = denseBase
+        }
+
         return CorpusContentRecord(
             id: drawer.id,
             revision: 1,
+            // The digest keys on verbatim content — unchanged when only the
+            // distillate or adornments change, so BM25 idempotence is preserved
+            // (SPEC_DISTILLATION_STORAGE §9).
             digest: CorpusContentDigest.digest(drawer.content),
-            text: drawer.content,
-            // Dense-over-distillate (Stream F): the distillate column is the
-            // dense-composition text when set. Nil = lexical fallback via
-            // effectiveDenseText. The digest always keys on `text` (content
-            // did not change when only the distillate was written), so the
-            // BM25 idempotence anchor is unaffected by distillation.
-            denseCompositionText: drawer.distilled)
+            text: lexicalText,
+            denseCompositionText: denseText)
+    }
+
+    // MARK: - Composition helpers
+
+    /// The base text for the lexical lane under the configured policy.
+    private func lexicalBase(drawer: Drawer) -> String {
+        switch compositionPolicy.lexicalSource {
+        case .original, .originalPlusAdornments:
+            // Verbatim content — the BM25 token source.
+            return drawer.content
+        case .distilled, .distilledPlusAdornments:
+            // Distillate as lexical base; fall back to verbatim when nil.
+            return drawer.distilled ?? drawer.content
+        }
+    }
+
+    /// The base text for the dense lane under the configured policy. Returns
+    /// nil when the policy requests `.distilled` and the distillate is absent
+    /// (nil propagates to `effectiveDenseText` fallback in the record).
+    private func denseBase(drawer: Drawer) -> String? {
+        switch compositionPolicy.denseSource {
+        case .distilled, .distilledPlusAdornments:
+            // Distillate-over-verbatim (Stream F): nil when not yet distilled.
+            return drawer.distilled
+        case .original:
+            // Lexical-only ablation (cell E): dense = verbatim.
+            return drawer.content
+        }
+    }
+
+    /// Append adornment texts to a base string. Each adornment is on its own
+    /// line preceded by "\n". When `adornments` is empty, returns `base` unchanged.
+    private func composedText(base: String, adornments: [String]) -> String {
+        guard !adornments.isEmpty else { return base }
+        // "\n" separator between base and each adornment — identical in both ports.
+        return ([base] + adornments).joined(separator: "\n")
     }
 
     /// The estate verbs are the change stream — the polling feed is empty.
