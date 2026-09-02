@@ -382,7 +382,7 @@ public extension GeniusLocusKit {
             where nodeNames[hint.parentNodeId]?.room == LocusKit.hintRoom
                 && !hint.content.isEmpty
                 && (!hint.hasCurrentRepresentation
-                    || hint.distilledPipelineVersion != DistillationPipelineVersion.current) {
+                    || hint.distilledPipelineVersion != GeniusLocusKit.distillationConverterID) {
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside indexContent keeps the
                 // young basis covering the growing corpus.

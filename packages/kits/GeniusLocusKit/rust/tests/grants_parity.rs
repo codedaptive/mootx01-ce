@@ -986,7 +986,7 @@ fn grt06_secfix_debit_write_failure_is_fail_closed_contract() {
 #[test]
 fn grt06c_budget_debit_clamps_at_zero() {
     use genius_locus_kit::GrantStore;
-    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    
     use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
 
