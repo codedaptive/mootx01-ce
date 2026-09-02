@@ -11,7 +11,7 @@
 //   sentenceInitial(scalars:start:) — mirrors _sentence_initial
 //   projectIntentTrailer(scalars:trailer:) — mirrors project_intent_trailer
 //
-// Design rules (from mission brief):
+// Design rules (from the decision record):
 //   - NO regex engine. All pattern matching is hand-written character scanners.
 //   - Index unit: unicodeScalars (code points). Python str indices are code points.
 //   - Python integer semantics: truncating division (same as Swift for non-negative).
