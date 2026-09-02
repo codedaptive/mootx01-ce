@@ -32,6 +32,10 @@ let package = Package(
             dependencies: ["ContextDistillLib"],
             // Vectors/ is copied into the test bundle so OracleVectors.swift can
             // load them via Bundle.module regardless of build system or test runner.
+            // Oracle/ holds the frozen Python reference implementation and the
+            // vector generators; they are documentation and tooling, not test
+            // sources or resources, so SwiftPM must be told to leave them alone.
+            exclude: ["Oracle"],
             resources: [
                 .copy("Vectors"),
             ]

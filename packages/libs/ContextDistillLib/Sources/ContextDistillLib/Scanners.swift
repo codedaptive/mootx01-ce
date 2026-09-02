@@ -101,34 +101,6 @@ private func asciiEqCI(_ a: UInt32, _ b: UInt32) -> Bool {
     asciiToLower(a) == asciiToLower(b)
 }
 
-/// Returns `true` if `v` is a space or tab (inline whitespace, for `[ \t]`).
-@inline(__always)
-private func isSpaceOrTab(_ v: UInt32) -> Bool { v == 0x20 || v == 0x09 }
-
-// MARK: - Match-prefix helper
-
-/// Attempts to match a fixed ASCII string (case-insensitively) at position
-/// `i` in `scalars`.  Returns the new position after the match or `nil`.
-private func matchASCII(
-    _ scalars: [Unicode.Scalar], at i: Int, _ target: [UInt32], ci: Bool = false
-) -> Int? {
-    guard i + target.count <= scalars.count else { return nil }
-    for (j, t) in target.enumerated() {
-        let sv = scalars[i + j].value
-        let ok = ci ? asciiEqCI(sv, t) : (sv == t)
-        if !ok { return nil }
-    }
-    return i + target.count
-}
-
-/// Convenience: match a Swift String literal (ASCII only) case-insensitively.
-private func matchWord(
-    _ scalars: [Unicode.Scalar], at i: Int, _ word: String, ci: Bool = true
-) -> Int? {
-    let target = word.unicodeScalars.map(\.value)
-    return matchASCII(scalars, at: i, target, ci: ci)
-}
-
 // MARK: - Word-boundary helper (Python \b, ASCII-optimised for most patterns)
 
 /// Python-semantic word boundary at `index` using `isPythonWordChar`.
