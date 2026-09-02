@@ -12,28 +12,31 @@
 // "distillation-daemon", `_distilled_from` tunnels) is retired on 1.1.x
 // (§11).
 //
-// Two rendering paths, every item covered once swept (§7.4/§7.5):
-//   • Matrix path (≥3 sentences): the intra-item M×|V| reduction via the
-//     injected distillFn; Stage 5 renders token-economical prose
-//     (core-first ordering, §7.6 compaction per unit).
-//   • Short-item path (<3 sentences): the §7.6 token-compaction
-//     transform applied to the content directly; the fingerprint is the
-//     queryFingerprint construction over the content. Zero extracted
-//     features ⇒ no lane entry, but the rendering is still stored — the
-//     columns and the lane are independently valid.
+// The stored text is produced by ContextDistillLib (CDL-02): the intent-span
+// converter selects exact source spans around operative intent, appends the
+// projected enrichment trailer, and is byte-identical across the Swift and
+// Rust ports by conformance to the frozen oracle vectors. Its input is the
+// item's content plus the deterministic categorizer trailer computed from
+// that content (EnrichmentStage). No pronoun rewriting is applied: the
+// representation is exact source text by contract.
 //
-// Determinism ("p1", §5.3 rule 6): the stored rendering is a function of
-// (content, pipeline version) only. The p1 contract pins
-// `DistillationPipeline.defaultExtractor` — the extractor present and
-// bit-identical on BOTH legs — for every distillation write path, so the
-// Swift and Rust sweeps produce byte-identical renderings and
-// self-consistent lane fingerprints (queryFingerprint already used the
-// default extractor at recall time). `distillFn` remains injectable for
-// tests; production callers pass `GeniusLocusKit.defaultDistillFn`.
+// The structural fingerprint lane is independent of the text (§8): items
+// with ≥3 sentences take the intra-item M×|V| reduction through the
+// injected distillFn and store its feature fingerprint; shorter items use
+// the queryFingerprint construction over the content. Zero extracted
+// features ⇒ no lane entry, but the representation is still stored — the
+// columns and the lane are independently valid (§7.5).
+//
+// Determinism: the stored representation is a function of (content,
+// converter ID) only; the fingerprint is a function of (content,
+// `DistillationPipeline.defaultExtractor`) only. `distillFn` remains
+// injectable for tests; production callers pass
+// `GeniusLocusKit.defaultDistillFn`.
 //
 // NeuronKit is NOT a GeniusLocusKit dependency; DistillationInput and
 // DistillationOutput come from SubstrateML, which IS one.
 
+import ContextDistillLib
 import EideticLib
 import Foundation
 import LocusKit
@@ -52,10 +55,11 @@ public extension GeniusLocusKit {
     /// recall route consumes it.
     static var distillationLaneModelID: String { "distillation-features-v1" }
 
-    /// The p1 production distillation function: the intra-item pipeline
-    /// with the contract-pinned default extractor. This is what the
-    /// drain-stage and sweep run unless a test injects a stub.
-    static var defaultDistillFn: @Sendable (DistillationInput) -> DistillationOutput {
+    /// The production fingerprint pipeline: the intra-item reduction with
+    /// the contract-pinned default extractor. Its feature fingerprint feeds
+    /// the `distillation-features-v1` lane; the stored text comes from
+    /// ContextDistillLib. Injectable so tests can stub the fingerprint.
+    static var defaultDistillFn: @Sendable (SubstrateML.DistillationInput) -> DistillationOutput {
         {
             DistillationPipeline.run(
                 input: $0,
@@ -76,9 +80,9 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - handle: the estate. Must be open.
     ///   - drawerID: the source item's drawer id.
-    ///   - content: the item's text content (sentence-segmented here).
-    ///   - distillFn: injected distillation function; production callers
-    ///     pass `GeniusLocusKit.defaultDistillFn` (the p1 contract).
+    ///   - content: the item's text content.
+    ///   - distillFn: injected fingerprint pipeline; production callers
+    ///     pass `GeniusLocusKit.defaultDistillFn`.
     ///   - now: deterministic clock, stamped into `distilled_at` and the
     ///     lane entry. Passed in — never read here.
     /// - Returns: true when the representation columns were written
@@ -89,9 +93,8 @@ public extension GeniusLocusKit {
         handle: EstateHandle,
         drawerID: String,
         content: String,
-        distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
-        now: Date,
-        corefPool: [CorefStage.Antecedent] = []
+        distillFn: @escaping @Sendable (SubstrateML.DistillationInput) -> DistillationOutput,
+        now: Date
     ) async throws -> Bool {
         guard storages[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
@@ -99,68 +102,41 @@ public extension GeniusLocusKit {
         guard !content.isEmpty else { return false }
         let estate = try estate(for: handle)
 
-        // Segment the item's own content into sentences — the per-item
-        // reduction units. Same segmenter the corpus Chunker uses, so the
-        // units are consistent with the dense index.
+        // Structural fingerprint (§8). Same segmenter the corpus Chunker
+        // uses, so the reduction units are consistent with the dense index.
         let sentences = EideticLib.sentences(content).map(String.init)
-
-        let rendering: String
         let fingerprint: Fingerprint256
         if sentences.count >= 3 {
-            // Matrix path (§7.4): intra-item M×|V| reduction. Stage 5
-            // renders core-first compacted prose and computes the
-            // OR-reduced structural fingerprint.
-            // memoryTimestamps stays nil ON PURPOSE (W2.5 S6): the
-            // "memories" here are one item's sentences, which all share the
-            // item's single timestamp — equal ages make TypedDecayWeighting's
-            // weights cancel in the normalizer (wdf ≡ df), so threading the
-            // timestamp is a mathematical no-op. The decay branch is live in
-            // the CROSS-ITEM consolidation path (ConsolidationCycle).
-            let output = distillFn(DistillationInput(
+            // Matrix path (§7.4): intra-item M×|V| reduction; only its
+            // OR-reduced structural fingerprint is consumed here.
+            // memoryTimestamps stays nil ON PURPOSE (W2.5 S6): one item's
+            // sentences share the item's single timestamp — equal ages make
+            // TypedDecayWeighting's weights cancel in the normalizer
+            // (wdf ≡ df), so threading the timestamp is a mathematical no-op.
+            // The decay branch is live in the CROSS-ITEM consolidation path
+            // (ConsolidationCycle), which also consumes the rendered text.
+            fingerprint = distillFn(SubstrateML.DistillationInput(
                 memoryContents: sentences,
                 memoryTimestamps: nil,
                 clusterID: drawerID,
-                sourceIDs: [drawerID]))
-            if output.distilledText.isEmpty {
-                // Degenerate matrix (no features extracted at all): fall
-                // back to the short-item transform so §13.1 population
-                // holds for every non-empty item.
-                rendering = Self.compactionRendering(of: content)
-            } else {
-                rendering = output.distilledText
-            }
-            fingerprint = output.featureFingerprint
+                sourceIDs: [drawerID])).featureFingerprint
         } else {
-            // Short-item path (§7.5): token-compaction fallback — rules
-            // 2–5 applied directly, rule 1 trivially preserved (no
-            // proposition is dropped). Fingerprint via the
-            // queryFingerprint construction over the content.
-            rendering = Self.compactionRendering(of: content)
+            // Short-item path (§7.5): fingerprint via the queryFingerprint
+            // construction over the content.
             fingerprint = DistillationPipeline.queryFingerprint(
                 query: content,
                 extractFeatures: DistillationPipeline.defaultExtractor)
         }
 
-        // Pipeline p2.3 stage A (W2.2, accepted design A1): resolve
-        // third-person pronouns in the RENDERING against the session
-        // antecedent pool the sweep hands in (empty for single-item
-        // callers → no-op). Runs BEFORE the trailer weld so trailer facts
-        // stay verbatim-derived and the grammar block is never rewritten.
-        let resolved = CorefStage.resolve(rendering: rendering, pool: corefPool)
-
-        // Pipeline p2 (DECISION_DENSE_LANE_ENRICHMENT): weld the categorizer
-        // trailer onto the rendering. Facts come from the VERBATIM content
-        // (the enrichment source of truth), the trailer rides the distilled
-        // lane only, and CorpusKit's trailer lexical supplement admits its
-        // tokens to BM25 at index time.
-        let enriched = resolved + EnrichmentStage.trailer(forContent: content)
+        // Stored text (CDL-02): see `distilledRepresentation(forContent:)`.
+        let distilled = Self.distilledRepresentation(forContent: content)
 
         // Write 1 of 2 (§7.2): the four representation columns, atomically.
         let updated = try await estate.setDistilledRepresentation(
             drawerId: drawerID,
-            distilled: enriched,
-            pipelineVersion: DistillationPipelineVersion.current,
-            tokenCount: TokenCompaction.estimateTokenCount(enriched),
+            distilled: distilled,
+            pipelineVersion: Self.distillationConverterID,
+            tokenCount: Self.distilledTokenCount(distilled),
             at: now)
         guard updated == 1 else { return false }
 
@@ -201,7 +177,7 @@ public extension GeniusLocusKit {
     ///   populated this sweep.
     func distillItemsSweep(
         handle: EstateHandle,
-        distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+        distillFn: @escaping @Sendable (SubstrateML.DistillationInput) -> DistillationOutput,
         now: Date,
         limit: Int? = nil
     ) async throws -> Int {
@@ -222,75 +198,52 @@ public extension GeniusLocusKit {
         //   lowers AND; only rebuildAll raises it).
         let rooms = try await estate.roomLevelFingerprints()
         // Bit 19 means the representation columns are populated; it does not
-        // encode which pipeline contract produced them. Read the stale-room
+        // encode which converter produced them. Read the stale-room
         // set once through a metadata-only projection so a fully represented
         // room is skipped only when every representation is also current.
         // Current rooms retain the fast path: no drawer content is hydrated.
         let staleRooms = try await estate.roomsWithStaleDistilledRepresentations(
-            pipelineVersion: DistillationPipelineVersion.current)
+            pipelineVersion: Self.distillationConverterID)
         let staleRoomKeys = Set(staleRooms.map { "\($0.wing)\u{0}\($0.room)" })
         let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
 
         rooms: for entry in rooms {
             // Skip this room when the AND proves every active drawer already
             // has bit 19 set AND the metadata projection found no stale
-            // pipeline version. The AND is an under-approximation so if it
-            // shows 1 for bit 19 the true AND is also 1; the version check
-            // closes the separate stale-contract eligibility path.
+            // converter ID. The AND is an under-approximation so if it
+            // shows 1 for bit 19 the true AND is also 1; the ID check
+            // closes the separate stale-converter eligibility path.
             let roomKey = "\(entry.wing)\u{0}\(entry.room)"
             if (entry.fingerprint.operationalAnd & skipBit) == skipBit,
                !staleRoomKeys.contains(roomKey) {
                 continue
             }
 
-            // Session order for the coref window (W2.2 A1): the room's
-            // drawers sorted by (eventTime, filedAt, id) — deterministic and
-            // conversation-shaped. The antecedent pool for item i is the
-            // anchored entities of up to CorefStage.windowItems PRECEDING
-            // items whose eventTime lies within CorefStage.windowMinutes.
+            // Deterministic conversation order: (eventTime, filedAt, id).
+            // A capped sweep must reach the same rows on both ports, so the
+            // order is fixed rather than storage order.
             let drawers = try await estate.drawersIn(wing: entry.wing, room: entry.room)
                 .sorted { a, b in
                     if a.eventTime != b.eventTime { return a.eventTime < b.eventTime }
                     if a.filedAt != b.filedAt { return a.filedAt < b.filedAt }
                     return a.id < b.id
                 }
-            for (position, drawer) in drawers.enumerated() {
+            for drawer in drawers {
                 if let cap = limit, produced >= cap { break rooms }
                 guard !drawer.content.isEmpty else { continue }
                 // Eligibility (§7.1): bit 19 (has_current_representation)
                 // clear means the row has no representation yet; OR the
-                // representation was produced under a different pipeline
-                // contract (cookbook §2.4.1 / SPEC §7.1). The bitmap test
-                // replaces the previous `distilled == nil` column-presence
-                // check — both are correct (§4 invariant), but the bit is
-                // the authoritative indicator and avoids materializing the
-                // text column for the eligibility read.
+                // representation was produced under a different converter
+                // (cookbook §2.4.1 / SPEC §7.1). The bitmap test avoids
+                // materializing the text column for the eligibility read;
+                // the ID comparison is what makes a converter bump
+                // regenerate every legacy row.
                 guard !drawer.hasCurrentRepresentation
-                    || drawer.distilledPipelineVersion != DistillationPipelineVersion.current
+                    || drawer.distilledPipelineVersion != Self.distillationConverterID
                 else { continue }
-                // Antecedent pool: entities contributed by the session
-                // window, oldest first (resolution prefers the pool's ONLY
-                // compatible candidate, so order matters only for the
-                // deterministic first-seen dedup inside the stage).
-                let windowStart = drawer.eventTime.addingTimeInterval(
-                    -Double(CorefStage.windowMinutes) * 60)
-                // Sensitivity ceiling (codex finding 2026-08-26): a
-                // predecessor may contribute antecedents ONLY when its
-                // sensitivity is at or below the drawer being distilled —
-                // substitution copies the predecessor's entity text into
-                // THIS drawer's persisted distillate, and by-id reads gate
-                // on the returned drawer's own sensitivity, so an
-                // uphill-sourced antecedent would surface Restricted/Secret
-                // entity text through a Normal row without a grant.
-                let ceiling = drawer.sensitivity.rawValue
-                let pool = drawers[..<position]
-                    .suffix(CorefStage.windowItems)
-                    .filter { $0.eventTime >= windowStart }
-                    .filter { $0.sensitivity.rawValue <= ceiling }
-                    .flatMap { CorefStage.contributedEntities(from: $0.content) }
                 if try await distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
-                    distillFn: distillFn, now: now, corefPool: pool) {
+                    distillFn: distillFn, now: now) {
                     produced += 1
                     // Dense-over-distillate (Stream F): recompose the dense float
                     // vector from the newly-written distillate. The idempotence gate
@@ -302,8 +255,76 @@ public extension GeniusLocusKit {
                     // Best-effort: non-fatal when the engine is absent (non-corpus
                     // estate) or when the record resolves nil (expunged between
                     // distillation and here).
-                    try? await corpusKits[handle]?.recomposeDenseVector(
+                    _ = try? await corpusKits[handle]?.recomposeDenseVector(
                         id: drawer.id, now: now)
+                }
+            }
+        }
+        return produced
+    }
+
+    /// Force-redistill ALL active non-empty items in the estate — used by the
+    /// `moot_redistill` verb (CDL-02). Unlike `distillItemsSweep`, this sweep:
+    ///
+    ///  • Ignores `hasCurrentRepresentation` and the stored converter ID —
+    ///    every active non-empty drawer is re-distilled unconditionally.
+    ///  • Skips the room-level AND optimisation — no room is short-circuited.
+    ///  • Does NOT call `recomposeDenseVector` per item: the caller is responsible
+    ///    for running `reindexCorpus(handle:now:)` with `laneScope .all` after this
+    ///    sweep returns, which re-embeds all dense vectors and rebuilds the BM25
+    ///    index from the newly-written distillates (including trailer tokens admitted
+    ///    via `TrailerLexicalSupplement`). Per-item recompose would be redundant and
+    ///    would race the full reindex.
+    ///
+    /// Drawers within each room are swept in (eventTime, filedAt, id) order,
+    /// exactly as in `distillItemsSweep`, so a capped pass is deterministic.
+    ///
+    /// - Parameters:
+    ///   - handle: the estate. Must be open.
+    ///   - distillFn: injected distillation function; production callers pass
+    ///     `GeniusLocusKit.defaultDistillFn`.
+    ///   - now: deterministic clock, stamped into `distilled_at`.
+    ///   - limit: optional cap on items redistilled this sweep (nil = all items).
+    /// - Returns: count of drawer rows whose representation columns were
+    ///   (re)populated this sweep.
+    func redistillItemsSweep(
+        handle: EstateHandle,
+        distillFn: @escaping @Sendable (SubstrateML.DistillationInput) -> DistillationOutput,
+        now: Date,
+        limit: Int? = nil
+    ) async throws -> Int {
+        let estate = try estate(for: handle)
+        var produced = 0
+
+        // Enumerate all rooms without the AND-based skip: this is a force sweep,
+        // so every room is scanned regardless of its operationalAND fingerprint.
+        let rooms = try await estate.roomLevelFingerprints()
+
+        rooms: for entry in rooms {
+            // Deterministic conversation order: (eventTime, filedAt, id).
+            // A capped sweep must reach the same rows on both ports, so the
+            // order is fixed rather than storage order.
+            let drawers = try await estate.drawersIn(wing: entry.wing, room: entry.room)
+                .sorted { a, b in
+                    if a.eventTime != b.eventTime { return a.eventTime < b.eventTime }
+                    if a.filedAt != b.filedAt { return a.filedAt < b.filedAt }
+                    return a.id < b.id
+                }
+            for drawer in drawers {
+                if let cap = limit, produced >= cap { break rooms }
+                // Skip only empty content — tombstoned rows are excluded by
+                // drawersIn(wing:room:) at the storage tier. No eligibility
+                // gate: force-distill every active non-empty drawer regardless
+                // of hasCurrentRepresentation or the stored converter ID.
+                if try await distillItem(
+                    handle: handle, drawerID: drawer.id, content: drawer.content,
+                    distillFn: distillFn, now: now) {
+                    produced += 1
+                    // Dense vectors are NOT recomposed per-item here: the caller
+                    // (Redistill recipe) calls reindexCorpus(handle:now:) with
+                    // laneScope .all immediately after this sweep, which re-embeds
+                    // all dense vectors from the updated distillates and rebuilds
+                    // the BM25 posting lists to admit trailer tokens.
                 }
             }
         }

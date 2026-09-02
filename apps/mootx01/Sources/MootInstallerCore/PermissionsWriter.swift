@@ -152,6 +152,10 @@ public enum PermissionsWriter {
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
         "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
+        // Force-redistill all active items + full laneScope .all reindex (CDL-02):
+        // overwrites every active non-empty drawer's representation unconditionally
+        // and rebuilds BM25 + dense indexes. Ask posture: same as moot_distill.
+        "moot_redistill",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Seed-file JSON import (MXE-JI-1): reads a seed file from the
         // filesystem and bulk-writes the estate — same Ask posture as

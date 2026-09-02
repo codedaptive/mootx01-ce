@@ -230,7 +230,7 @@ fn batch_capture_defers_merkle_root_until_reindex() {
 /// the full-tree `rollup_all_merkle_roots`.
 #[test]
 fn rollup_all_merkle_roots_matches_incremental_rollup() {
-    let (mut coord, handle) = open_one();
+    let (coord, handle) = open_one();
     let mut last_parent: Option<String> = None;
     let mut ids: Vec<String> = Vec::new();
     for i in 1..=4 {
@@ -257,7 +257,7 @@ fn rollup_all_merkle_roots_matches_incremental_rollup() {
 /// `rollup_all_merkle_roots` must produce a non-None room root.
 #[test]
 fn rollup_all_merkle_roots_produces_non_nil_roots() {
-    let (mut coord, handle) = open_one();
+    let (coord, handle) = open_one();
     let d = coord.capture(&handle, frame("seed"), NOW).expect("capture");
     let room_uuid = uuid::Uuid::parse_str(&d.parent_node_id).expect("parse");
     let estate = coord.estate_for(&handle).expect("estate_for");

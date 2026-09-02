@@ -39,15 +39,17 @@ pub fn run(
     }
 
     // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs only the three data-directory migration steps (kg_facts identity,
-    // adornment store migration, shared-content reclaim) against the estate resolved via
-    // MOOTX01_DATA_DIR, then exits. No network, no service manager, no prompts.
-    // Ordering matches run_convergence: correctness migration → schema v17 + data
-    // move → VACUUM-backed reclaim.
+    // estates. Runs only the four data-directory migration steps (kg_facts identity,
+    // adornment store migration, shared-content reclaim, distilled representation
+    // convergence) against the estate resolved via MOOTX01_DATA_DIR, then exits.
+    // No network, no service manager, no prompts. Ordering matches run_convergence:
+    // correctness migration → schema v17 + data move → VACUUM-backed reclaim →
+    // distilled representation convergence.
     if backfill_only {
         run_kg_fact_identity_backfill();
         run_adornment_store_migration();
         run_shared_content_reclaim_if_pending();
+        run_distilled_representation_convergence();
         return ExitCode::from(exit::OK);
     }
 
@@ -93,6 +95,7 @@ pub fn run(
             run_kg_fact_identity_backfill();
             run_adornment_store_migration();
             run_shared_content_reclaim_if_pending();
+            run_distilled_representation_convergence();
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
         }
@@ -203,6 +206,7 @@ fn run_convergence() {
     run_kg_fact_identity_backfill();
     run_adornment_store_migration();
     run_shared_content_reclaim_if_pending();
+    run_distilled_representation_convergence();
     run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
 }
@@ -473,6 +477,71 @@ fn run_adornment_store_migration() {
 /// migration-host seam. Encryption is handled automatically:
 /// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
+/// CDL-02: bring every drawer's stored distilled representation up to the
+/// current converter (`genius_locus_kit::distillation_converter_id()`). Rows
+/// whose stored converter ID differs — every row written under the p2.3
+/// pipeline on an estate that predates ContextDistillLib — are regenerated
+/// through the standard eligibility sweep, then every derived corpus lane
+/// (BM25 and dense) is rebuilt once, because the lexical lane admits trailer
+/// tokens scanned from the distilled text and the dense lane embeds it.
+/// Nothing is re-ingested, re-mined, or re-dreamed. Idempotent: a converged
+/// estate regenerates zero rows and skips the reindex. Twin of Swift
+/// `UpgradeCommand.runDistilledRepresentationConvergence`.
+fn run_distilled_representation_convergence() {
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    if !estate.exists() {
+        return;
+    }
+    // Single-writer discipline, same shape as the other backfill steps.
+    let was_running = daemon_is_running();
+    if was_running && !daemon_stop() {
+        println!(
+            "  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
+        );
+        return;
+    }
+    let result = (|| -> Result<usize, String> {
+        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
+            &estate.display().to_string(),
+            "aria-mcp-default",
+        )?;
+        let handle = reg.default.handle.clone();
+        let coord = reg
+            .coord
+            .lock()
+            .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let regenerated = coord
+            .distill_items_sweep(&handle, now_ms, None)
+            .map_err(|e| format!("{e:?}"))?;
+        if regenerated > 0 {
+            coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
+        }
+        Ok(regenerated)
+    })();
+    match result {
+        Ok(0) => println!(
+            "  ✓ distilled representations: already at converter {}",
+            genius_locus_kit::distillation_converter_id()
+        ),
+        Ok(n) => println!(
+            "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
+            genius_locus_kit::distillation_converter_id()
+        ),
+        Err(e) => println!(
+            "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
+        ),
+    }
+    if was_running {
+        let _ = daemon_start();
+    }
+}
+
 fn run_shared_content_reclaim_if_pending() {
     use genius_locus_kit::EstateCoordinator;
     use genius_locus_kit_migrations::SharedContentMigrationExt;

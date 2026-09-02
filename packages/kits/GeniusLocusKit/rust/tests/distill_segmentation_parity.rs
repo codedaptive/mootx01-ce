@@ -252,6 +252,6 @@ fn distill_items_sweep_writes_representation_on_source_row() {
     assert!(row.distilled.is_some(), "the representation rides the source row");
     assert_eq!(
         row.distilled_pipeline_version.as_deref(),
-        Some(substrate_ml::token_compaction::DISTILLATION_PIPELINE_VERSION)
+        Some(genius_locus_kit::distillation_converter_id())
     );
 }

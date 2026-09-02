@@ -102,9 +102,9 @@ struct DistillationIntegrationTests {
             let row = try #require(
                 try await estate.getDrawers(ids: [fixture.sourceID]).first)
             #expect(row.distilled != nil)
-            #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
             #expect(row.distilledTokenCount
-                == TokenCompaction.estimateTokenCount(row.distilled ?? ""))
+                == GeniusLocusKit.distilledTokenCount(row.distilled ?? ""))
             #expect(row.distilledAt == t0)
 
             // Write 2: the lane entry keyed by the SOURCE drawer id (§8).
@@ -136,7 +136,8 @@ struct DistillationIntegrationTests {
                 "the hit is the SOURCE drawer — there is no factoid tier")
             #expect(!match.servedFromContent)
             #expect(match.tokenCount != nil)
-            #expect(match.text != Self.itemBody, "payload is the dense rendering")
+            #expect(match.text == GeniusLocusKit.distilledRepresentation(forContent: Self.itemBody),
+                "payload is the converter's representation of the source body")
         }
     }
 
@@ -163,7 +164,7 @@ struct DistillationIntegrationTests {
 
             let row = try #require(
                 try await estate.getDrawers(ids: [fixture.sourceID]).first)
-            #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
             #expect(row.distilled != "stale rendering from an older contract")
             #expect(row.distilledAt == t0.addingTimeInterval(100))
 

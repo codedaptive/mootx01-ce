@@ -148,9 +148,19 @@ struct DenseOverDistillateTests {
         let (kit, handle) = try await provisionGLKEstate(
             ownerID: "owner-recompose-on-distill")
         // Multiple items in undistilled (organic) state. Dense vectors are
-        // lexical-composed (effectiveDenseText returns `text`).
+        // lexical-composed (effectiveDenseText returns `text`). The converter
+        // preserves short records whole, so the target item is a long,
+        // repetitive log the intent-span converter reduces — the precondition
+        // below proves the distillate differs from the content, otherwise the
+        // dense vector could not be expected to move.
+        let longBody = (1...40).map {
+            "Run \($0): the accelerometer calibration drift exceeded the acceptable margin during run \($0), and the technician logged the reading."
+        }.joined(separator: "\n")
+            + "\nDecision: firmware rollback procedures require supervisor approval at midnight."
+        try #require(GeniusLocusKit.distilledRepresentation(forContent: longBody) != longBody,
+                     "fixture must be a body the converter reduces")
         let contents = [
-            "The accelerometer calibration drift exceeded the acceptable margin.",
+            longBody,
             "Firmware rollback procedures require supervisor approval at midnight.",
             "Temperature sensors in zone three are showing erratic variance.",
         ]
@@ -193,12 +203,17 @@ struct DenseOverDistillateTests {
     func reindexAfterDistillateUsesEffectiveDenseText() async throws {
         let (kit, handle) = try await provisionGLKEstate(
             ownerID: "owner-retrain-recomposes")
-        // Item in organic state (lexical-composed float vector).
-        let drawer = try await kit.capture(
-            handle,
-            captureFrame(
-                "The neutron flux monitoring protocol requires quarterly re-certification."),
-            mode: .impatient)
+        // Item in organic state (lexical-composed float vector). The converter
+        // preserves short records whole, so the item is a long, repetitive log
+        // the intent-span converter reduces; the precondition proves the
+        // distillate differs from the content.
+        let longBody = (1...40).map {
+            "Entry \($0): the neutron flux monitoring protocol requires quarterly re-certification, and reading \($0) was filed with the shift log."
+        }.joined(separator: "\n")
+            + "\nDecision: the re-certification interval moves to monthly for zone three."
+        try #require(GeniusLocusKit.distilledRepresentation(forContent: longBody) != longBody,
+                     "fixture must be a body the converter reduces")
+        let drawer = try await kit.capture(handle, captureFrame(longBody), mode: .impatient)
 
         // Organic dense score (lexical-composed).
         let organicHits = try await denseRecall(

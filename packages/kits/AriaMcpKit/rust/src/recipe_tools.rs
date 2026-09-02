@@ -452,6 +452,9 @@ const DREAM: &str = "moot_dream";
 /// Per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3) — mirrors
 /// Swift `RecipeTools.distillToolName`.
 const DISTILL: &str = "moot_distill";
+/// Force re-distillation of every item + full derived-lane reindex (CDL-02)
+/// — mirrors Swift `RecipeTools.redistillToolName`.
+const REDISTILL: &str = "moot_redistill";
 /// Distilled-payload recall (§10.3): exact-search geometry + distilled
 /// hydration — mirrors Swift `RecipeTools.recallDistilledToolName`.
 /// ACK-GATED: requires ack: "recall_distilled/v2" (Wave 1 contract change).
@@ -575,6 +578,7 @@ pub fn is_recipe_tool_with(name: &str, mint_tools_enabled: bool) -> bool {
             | RECALL_SHAPED
             | DREAM
             | DISTILL
+            | REDISTILL
             | RECALL_DISTILLED
             | RECOLLECT
             | HUNT_CONTRADICTIONS
@@ -636,6 +640,7 @@ pub fn dispatch_with(
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
         DISTILL => run_distill_tool(args, registry),
+        REDISTILL => run_redistill_tool(args, registry),
         // moot_recall_distilled reaches here only when ack: "recall_distilled/v2"
         // was present (ACK gate above).
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
@@ -2548,6 +2553,44 @@ fn run_distill_tool(
     Ok(text_result(&format!(
         "moot_distill: sweep complete\nitemsDistilled: {}",
         out.items_distilled
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// moot_redistill
+// ---------------------------------------------------------------------------
+
+/// Force re-distillation of every active item followed by a full
+/// derived-lane reindex (CDL-02). Handles `moot_redistill`.
+///
+/// Mirrors Swift `RecipeTools.runRedistill`: routes through the CognitionKit
+/// `run_redistill` recipe body, which runs the coordinator's
+/// `redistill_items_sweep` to completion and then `reindex_corpus`.
+/// No arguments: this is an estate-wide operation.
+///
+/// Returns text in the same format as the Swift handler:
+///   "moot_redistill: sweep complete\nitemsRedistilled: N\nreindexed: both lanes (BM25 + dense)"
+fn run_redistill_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let now = crate::dispatch::wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let input = cognition_kit::RedistillInput::default();
+    let out = cognition_kit::run_redistill(&input, &coord, &estate.handle, now)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "moot_redistill: failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+    Ok(text_result(&format!(
+        "moot_redistill: sweep complete\nitemsRedistilled: {}\nreindexed: both lanes (BM25 + dense)",
+        out.items_redistilled
     )))
 }
 

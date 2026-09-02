@@ -164,12 +164,12 @@ extension GeniusLocusKit {
         // boolean "is anything still draining?" barrier).
         let estate = try estate(for: handle)
         let undistilled = try await estate.countUndistilled(
-            pipelineVersion: DistillationPipelineVersion.current)
+            pipelineVersion: GeniusLocusKit.distillationConverterID)
         statuses.append(DrainStatus(
             name: "distillation",
             pending: undistilled,
             inFlight: 0,
-            detail: "pipeline: \(DistillationPipelineVersion.current)"
+            detail: "converter: \(GeniusLocusKit.distillationConverterID)"
         ))
 
         // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when

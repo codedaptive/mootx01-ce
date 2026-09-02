@@ -265,13 +265,13 @@ mod tests {
         let m = out.matches.iter().find(|m| m.id == id).expect("hit for the source row");
         assert!(!m.served_from_content);
         assert!(m.token_count.is_some(), "per-hit token count (§13.4)");
-        assert_ne!(m.text, body, "payload is the dense rendering");
-        // The p2 categorizer trailer is welded to the dense body, so the
-        // payload is no longer guaranteed strictly smaller than short
-        // bodies; the contract is the dense rendering with a well-formed
-        // grammar-v1 trailer. Mirrors the Swift CK-DR-1 assertion.
-        assert!(m.text.contains(" (*[ ") && m.text.ends_with(" ]*)"),
-            "distilled payloads carry the p2 trailer");
+        // The payload is the row's distilled column — exactly the converter's
+        // representation of the body. Mirrors the Swift CK-DR-1 assertion.
+        assert_eq!(
+            m.text,
+            genius_locus_kit::brain::distillation_cycle::distilled_representation(body),
+            "payload is the converter's representation of the source body"
+        );
         assert!(!m.text.starts_with("[DIST|"));
     }
 
