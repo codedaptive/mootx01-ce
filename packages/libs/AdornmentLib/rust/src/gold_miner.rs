@@ -123,6 +123,44 @@ const IM_END_TOKEN_ID: u32 = 151645;
 /// cross-architecture note as `IM_END_TOKEN_ID`.
 const ENDOFTEXT_TOKEN_ID: u32 = 151643;
 
+/// Last-resort ceiling on PROMPT tokens forwarded to the model in one
+/// mint (Codex hardening finding a8905b59, 2026-09-02). Prompt bounding
+/// is normally the caller's job: the adornment map-reduce splits records
+/// into pieces of at most `ADORNMENT_CHUNK_THRESHOLD` (16,000) chars, so
+/// a normal piece encodes to well under this ceiling. The ceiling exists
+/// for the hostile case the chunker cannot see — an arbitrary caller (or
+/// a record whose tokens-per-char ratio is extreme) presenting a prompt
+/// that would otherwise reach the model unbounded. The prefill forward
+/// builds a seq_len × seq_len causal mask, so prompt length is QUADRATIC
+/// in memory; 4096 keeps the worst-case mask at 16 MiB while leaving
+/// several times the headroom a chunked piece ever needs. Twin of the
+/// Swift CoreAIEngine `promptCap` last-resort truncation.
+pub const GOLD_MINER_PROMPT_TOKEN_CEILING: usize = 4096;
+
+/// Effective prompt-token cap for one mint: the smaller of `ceiling` and
+/// the model's context length (when the loaded weights expose one),
+/// minus the generation budget, minus one so the final generated token
+/// still has a rotary position inside the window. Fails closed: a budget
+/// that leaves no room for any prompt token is a misconfiguration and
+/// must surface as an error, never as a silently empty prompt.
+pub fn prompt_cap(
+    ceiling: usize,
+    context_len: Option<usize>,
+    max_new_tokens: usize,
+) -> Result<usize, String> {
+    let window = context_len.map_or(ceiling, |c| c.min(ceiling));
+    // Subtract in i128 so an oversized budget cannot wrap usize.
+    let cap = window as i128 - max_new_tokens as i128 - 1;
+    if cap <= 0 {
+        return Err(format!(
+            "gold miner: prompt budget exhausted — window {window} tokens \
+             (ceiling {ceiling}, context {context_len:?}) leaves no room \
+             after max_new_tokens {max_new_tokens}"
+        ));
+    }
+    Ok(cap as usize)
+}
+
 /// The quantized weight graphs this engine can run, dispatched by the
 /// recipe's model token at load (QWEN3-ENGINE, 2026-08-31). Qwen2-family
 /// models use the lean vendored module (F16 embedding table — the
@@ -187,6 +225,10 @@ pub struct QuantizedLlmEngine {
     /// `selected_recipe`) — the GGUF at the load path is expected to be
     /// the artifact the recipe's model token names.
     recipe: MinterRecipe,
+    /// The model's context window from GGUF metadata
+    /// (`<arch>.context_length`), when the file declares one. Bounds the
+    /// prompt cap together with `GOLD_MINER_PROMPT_TOKEN_CEILING`.
+    context_len: Option<usize>,
     /// Harness override for the per-recipe generation budget (spec-v2
     /// finish-or-retry). None = recipe parameter / MAX_NEW_TOKENS
     /// fallback governs, which is every product path.
@@ -198,6 +240,10 @@ pub struct QuantizedLlmEngine {
     /// recent successful `generate` — the harness binaries' per-mint
     /// telemetry read-back. Product paths ignore it.
     last_telemetry: (usize, bool),
+    /// `Some((prompt tokens before truncation, cap))` when the most recent
+    /// `generate` had to apply the last-resort prompt cap; `None` when the
+    /// prompt fit. Diagnostic read-back; product paths ignore it.
+    last_prompt_truncation: Option<(usize, usize)>,
     /// Raw decoded text of the most recent generation BEFORE
     /// normalization (Wave-1 protocol-lab evidence: the normalizer's
     /// first-line extraction hides what a runaway actually produced).
@@ -255,9 +301,20 @@ impl QuantizedLlmEngine {
         // should fail the load loudly rather than silently run under
         // the wrong identity. Qwen3-based fine-tunes (osmosis-*) share
         // the qwen3 graph.
-        let model = if recipe.model.starts_with("qwen3-")
-            || recipe.model.starts_with("osmosis-")
-        {
+        let is_qwen3 = recipe.model.starts_with("qwen3-")
+            || recipe.model.starts_with("osmosis-");
+        // Context window for the prompt cap, read under the SAME arch
+        // token the dispatch uses (the GGUF key is arch-prefixed). Read
+        // before `content` moves into the weight loader; upstream
+        // quantized_qwen3 keeps its copy private. Absent metadata leaves
+        // the ceiling alone to bound the prompt.
+        let context_key = if is_qwen3 { "qwen3.context_length" } else { "qwen2.context_length" };
+        let context_len = content
+            .metadata
+            .get(context_key)
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize);
+        let model = if is_qwen3 {
             ArchWeights::Qwen3(
                 Qwen3Weights::from_gguf(content, &mut file, &device)
                     .map_err(|e| format!("gold miner: gguf load {}: {e}", gguf_path.display()))?,
@@ -272,11 +329,12 @@ impl QuantizedLlmEngine {
             .map_err(|e| format!("gold miner: tokenizer {}: {e}", tokenizer_path.display()))?;
         // Some checkpoints bake a truncation stanza into tokenizer.json
         // (NuExtract-tiny: max_length 2500). Honoring it silently drops
-        // the tail of long prompts inside the engine — prompt bounding
-        // is the CALLER's job (chunking upstream, the probe's documented
-        // last-resort cap). Disable it so encode() always sees the full
-        // prompt. The Swift port's custom BPE never read the stanza, so
-        // this also restores cross-port encode parity on long inputs.
+        // the tail of long prompts at a per-checkpoint length nobody
+        // chose — prompt bounding is chunking upstream plus the engine's
+        // own documented last-resort cap (`prompt_cap` in `generate`).
+        // Disable it so encode() always sees the full prompt. The Swift
+        // port's custom BPE never read the stanza, so this also restores
+        // cross-port encode parity on long inputs.
         tokenizer
             .with_truncation(None)
             .map_err(|e| format!("gold miner: tokenizer truncation reset: {e}"))?;
@@ -299,9 +357,11 @@ impl QuantizedLlmEngine {
             tokenizer,
             device,
             recipe,
+            context_len,
             max_new_tokens_override: None,
             stop_at_complete_json,
             last_telemetry: (0, false),
+            last_prompt_truncation: None,
             last_raw: String::new(),
         })
     }
@@ -353,6 +413,14 @@ impl QuantizedLlmEngine {
         self.last_telemetry
     }
 
+    /// Prompt-cap telemetry from the most recent mint: `Some((prompt
+    /// tokens as encoded, cap applied))` when the last-resort cap
+    /// truncated the prompt, `None` when the prompt fit. Diagnostic
+    /// read-back for the harness binaries; product paths ignore it.
+    pub fn last_prompt_truncation(&self) -> Option<(usize, usize)> {
+        self.last_prompt_truncation
+    }
+
     /// Greedy incremental decode: full prompt at position 0 (which resets
     /// the internal KV cache), then one token per step at its cached
     /// offset. Deterministic for a given model file.
@@ -363,13 +431,8 @@ impl QuantizedLlmEngine {
         // previous mint's numbers.
         self.model.reset_mint_state();
         self.last_telemetry = (0, false);
+        self.last_prompt_truncation = None;
         self.last_raw.clear();
-        let encoding = self
-            .tokenizer
-            .encode(prompt, false)
-            .map_err(|e| format!("gold miner: encode: {e}"))?;
-        let mut all_ids: Vec<u32> = encoding.get_ids().to_vec();
-        let prompt_len = all_ids.len();
 
         // Per-recipe generation budget (see MAX_NEW_TOKENS doc comment);
         // a harness override (spec-v2 finish-or-retry) wins when set.
@@ -381,6 +444,30 @@ impl QuantizedLlmEngine {
                 .and_then(|(_, v)| v.parse::<usize>().ok())
                 .unwrap_or(MAX_NEW_TOKENS)
         });
+        // Fail-closed prompt bound, resolved BEFORE encoding so a
+        // misconfigured budget errors without touching the prompt.
+        let cap = prompt_cap(GOLD_MINER_PROMPT_TOKEN_CEILING, self.context_len, max_new_tokens)?;
+
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| format!("gold miner: encode: {e}"))?;
+        let mut all_ids: Vec<u32> = encoding.get_ids().to_vec();
+        // Last-resort truncation, enforced here so BOTH weight arms obey
+        // it before any forward: the prefill mask is seq_len², so an
+        // unbounded prompt is unbounded memory. Upstream chunking bounds
+        // normal records first; reaching this branch is recorded in
+        // telemetry and on stderr because it means a record lost its tail.
+        if all_ids.len() > cap {
+            let encoded = all_ids.len();
+            all_ids.truncate(cap);
+            self.last_prompt_truncation = Some((encoded, cap));
+            let _ = writeln!(
+                std::io::stderr(),
+                "gold miner: prompt of {encoded} tokens truncated to the {cap}-token cap"
+            );
+        }
+        let prompt_len = all_ids.len();
 
         // Cap-hit ledger: true unless a stop token ends the generation
         // inside the budget.
@@ -533,6 +620,28 @@ mod tests {
         assert_eq!(out[0].as_deref(), Some("fake-b:one"));
         assert_eq!(out[1], None);
         assert_eq!(out[2].as_deref(), Some("fake-b:three"));
+    }
+
+    // Prompt-cap arithmetic (Codex hardening a8905b59). Pinned literals
+    // mirror the Swift `promptCap = maxCache - maxNewTokens - 1` rule.
+    #[test]
+    fn prompt_cap_uses_ceiling_when_weights_expose_no_context() {
+        assert_eq!(prompt_cap(4096, None, 96), Ok(3999));
+    }
+
+    #[test]
+    fn prompt_cap_takes_the_smaller_of_ceiling_and_context() {
+        assert_eq!(prompt_cap(4096, Some(2048), 256), Ok(1791));
+        assert_eq!(prompt_cap(4096, Some(32_768), 256), Ok(3839));
+    }
+
+    #[test]
+    fn prompt_cap_fails_closed_when_budget_leaves_no_room() {
+        assert!(prompt_cap(4096, None, 4095).is_err());
+        assert!(prompt_cap(4096, None, 4096).is_err());
+        assert!(prompt_cap(4096, None, usize::MAX).is_err());
+        assert!(prompt_cap(4096, Some(0), 0).is_err());
+        assert_eq!(prompt_cap(4096, None, 4094), Ok(1));
     }
 
     /// Footprint + end-to-end gate for the real quantized engine. Requires

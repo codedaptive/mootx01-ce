@@ -12,11 +12,23 @@ import PersistenceKitInMemory
 /// (`GeniusLocusKit.registerAdornmentMinter`) and atomically replaces the
 /// active set with exactly that minter (`setActiveAdornmentMinters`).
 ///
-/// The tool is dark: dispatched by name, never advertised in tools/list.
-/// The benchmark mint subcommand calls it once per restored estate before
-/// looping `moot_run_adornment_pass` to zero debt.
+/// The tool is dark: dispatched by name, never advertised in tools/list, and
+/// only behind the `MOOTX01_MINT_TOOLS=1` launch gate — these tests pass the
+/// gate explicitly to `RecipeTools.dispatch` (see `MintToolsGateTests` for
+/// the gate itself). The benchmark mint subcommand calls it once per
+/// restored estate before looping `moot_run_adornment_pass` to zero debt.
 @Suite("moot_register_adornment_minter dark tool")
 struct MintRegistrationToolTests {
+
+    /// Dispatch through the recipe router with the mint-tool gate open.
+    private func dispatchGated(
+        name: String, arguments: JSONValue, kit: GeniusLocusKit, handle: EstateHandle
+    ) async throws -> JSONValue {
+        try await RecipeTools.dispatch(
+            name: name, args: arguments.objectValue ?? [:], kit: kit,
+            defaultHandle: handle, resolveHandle: { _ in handle },
+            mintToolsEnabled: true)
+    }
 
     // MARK: - Harness (same in-memory pattern as AdornmentRenderTests)
 
@@ -71,13 +83,12 @@ struct MintRegistrationToolTests {
         let owner = OwnerCredentials(ownerIdentifier: "mint-reg")
         let kit = GeniusLocusKit()
         let (handle, storage) = try await openEstate(in: kit, owner: owner)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
+        let result = try await dispatchGated(
             name: "moot_register_adornment_minter",
             arguments: registrationArgs(
                 id: "apple280",
-                parameters: ["adornment_max_length": .string("280")]))
+                parameters: ["adornment_max_length": .string("280")]),
+            kit: kit, handle: handle)
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
@@ -103,14 +114,14 @@ struct MintRegistrationToolTests {
         let owner = OwnerCredentials(ownerIdentifier: "mint-reg-2")
         let kit = GeniusLocusKit()
         let (handle, storage) = try await openEstate(in: kit, owner: owner)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
+        _ = try await dispatchGated(
             name: "moot_register_adornment_minter",
-            arguments: registrationArgs(id: "apple280"))
-        _ = try await dispatcher.dispatch(
+            arguments: registrationArgs(id: "apple280"),
+            kit: kit, handle: handle)
+        _ = try await dispatchGated(
             name: "moot_register_adornment_minter",
-            arguments: registrationArgs(id: "candle200", family: "candle"))
+            arguments: registrationArgs(id: "candle200", family: "candle"),
+            kit: kit, handle: handle)
 
         let minters = try await listMinters(storage: storage, owner: owner)
         #expect(minters.count == 2)
