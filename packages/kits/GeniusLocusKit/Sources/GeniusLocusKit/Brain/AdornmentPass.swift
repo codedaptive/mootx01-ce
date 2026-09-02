@@ -16,7 +16,9 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit
 ///                        `putAdornment` threw; the minter is NOT disabled and
 ///                        the pair will be retried on a subsequent pass.
 ///   - `skippedPairs`  — pairs skipped because the drawer had empty content
-///                        (structural pre-condition failure, not a minting error).
+///                        (structural pre-condition failure, not a minting error)
+///                        or because the pair's minter id is not the identity of
+///                        the engine that would serve it (provenance guard).
 ///
 /// Mirrors Rust `AdornmentPassResult` (snake_case field names).
 public struct AdornmentPassResult: Sendable, Equatable {
@@ -25,7 +27,9 @@ public struct AdornmentPassResult: Sendable, Equatable {
     /// Pairs where minting failed or the generator was unavailable; retried
     /// on the next pass. The minter is never disabled on failure.
     public let failedPairs: Int
-    /// Pairs skipped because the drawer's content was empty.
+    /// Pairs skipped because the drawer's content was empty, or because the
+    /// pair's minter id is not the serving engine's identity (provenance
+    /// guard). Skipped pairs stay in debt.
     public let skippedPairs: Int
 
     public init(adornedPairs: Int, failedPairs: Int, skippedPairs: Int) {
@@ -34,6 +38,20 @@ public struct AdornmentPassResult: Sendable, Equatable {
         self.skippedPairs = skippedPairs
     }
 }
+
+// MARK: - Batch ceiling
+
+/// Hard ceiling on `batchSize` for one `AdornmentPass.run` invocation, in
+/// (drawer, minter) pairs. Mirrors Rust `ADORNMENT_PASS_MAX_BATCH_SIZE`.
+///
+/// One pass runs inside one MCP call and materializes every fetched drawer's
+/// content before minting, so the batch bounds both that call's wall-clock
+/// and its memory. The ceiling holds for every caller — `AdornmentPass.run`
+/// clamps regardless of who requested the batch, so a caller-supplied count
+/// can never turn one call into an estate-wide scan. Larger fleets are paged
+/// by repeated calls (the benchmark mint driver loops the dark tool to debt
+/// exhaustion).
+public let ADORNMENT_PASS_MAX_BATCH_SIZE: Int = 5000
 
 // MARK: - AdornmentPass
 
@@ -55,6 +73,32 @@ public struct AdornmentPassResult: Sendable, Equatable {
 /// The pass NEVER overwrites a different minter's row — the `(drawerID, minterID)`
 /// composite key in the `adornments` table enforces this structurally.
 ///
+/// Provenance guard (codex finding 17, GENIUSLOCUSKIT_SPEC 2.7.0 § 16.1):
+/// the debt batch carries one pair per ACTIVE minter, and registration never
+/// retoggles activation — after an upgrade or a model switch the stale
+/// identity stays active beside the selected one, while the shipped build
+/// resolves every minter id to ONE resident engine. Minting such a pair and
+/// persisting under `pair.minter.id` would stamp the engine's text with a
+/// minter it never was. So, before a pair reaches either transport (row
+/// frame or single record), the pass asks `engineIdentityResolver` for the
+/// minter identity of the engine that would serve the pair's minter id and
+/// persists only when the two are equal; every other pair is counted
+/// skipped and stays in debt (one warning per distinct skipped minter id
+/// per pass). A nil identity — no engine, or the harness `CommandEngine`,
+/// whose identity is a command name — disables the guard for that minter:
+/// the harness owns the active set exactly, the same rule as the Rust pass
+/// with no installed engine (its MOOT_MINT_CMD seam has no identity).
+///
+/// Concurrency lanes (codex finding 21, GENIUSLOCUSKIT_SPEC 2.8.0 § 16.1):
+/// pairs mint in one concurrent lane per RESOLVED ENGINE, each lane a
+/// sliding window sized to that engine's `maxConcurrentMints`. The width
+/// is a per-engine ceiling and the shipped build resolves every active
+/// minter to one resident engine, so lanes are keyed by the identity
+/// `laneEngineResolver` returns for a minter, never by the minter id: N
+/// minters sharing a width-W engine drive at most W calls into it, and a
+/// width-1 command pipe stays serial however many minters it serves.
+/// Distinct engines still overlap freely.
+///
 /// Apple, Candle, port names, and seat counts are NOT branches here. They are
 /// registered minter rows plus runtime generator availability. The
 /// `generatorResolver` closure encapsulates all seat-specific logic; the pass
@@ -70,12 +114,21 @@ public enum AdornmentPass {
 
     // MARK: - Constants
 
-    /// Batch ceiling per pass invocation.
+    /// Default batch size per pass invocation.
     ///
     /// Counts (drawer, minter) PAIRS, not drawers. Two active minters produce
     /// two pairs per drawer. Bounded to 50 per hourly fire so the pass completes
     /// in well under 60 minutes even at slow external seam latency.
     public static let defaultBatchSize = 50
+
+    /// Clamp a requested batch size to `ADORNMENT_PASS_MAX_BATCH_SIZE`.
+    ///
+    /// Clamps rather than rejects: the mint driver passes large counts and
+    /// expects the pass to page, not fail. Same literal behavior as Rust
+    /// `clamped_batch_size`.
+    public static func clampedBatchSize(_ requested: Int) -> Int {
+        min(requested, ADORNMENT_PASS_MAX_BATCH_SIZE)
+    }
 
     // MARK: - Entry point
 
@@ -88,7 +141,9 @@ public enum AdornmentPass {
     /// - Parameters:
     ///   - estate: the `LocusKit.Estate` to scan and write.
     ///   - batchSize: maximum (drawer, minter) pairs to process per invocation.
-    ///     Defaults to `AdornmentPass.defaultBatchSize`.
+    ///     Defaults to `AdornmentPass.defaultBatchSize`; clamped to
+    ///     `ADORNMENT_PASS_MAX_BATCH_SIZE` here, at the entry point, so no
+    ///     caller can exceed the ceiling.
     ///   - generatorResolver: async closure that resolves the adornment text for
     ///     one `(minter, drawer)` pair. Receives the full minter descriptor and
     ///     the drawer so model choice is data-driven. Returns nil when the
@@ -99,6 +154,24 @@ public enum AdornmentPass {
     ///     platform default — Apple's on-device model on iOS/macOS) via
     ///     `AdornmentLib.mintAdornmentMapReduce` with the product
     ///     `ADORNMENT_MAX_LENGTH` ceiling.
+    ///   - engineIdentityResolver: async closure returning the minter identity
+    ///     of the engine that would serve a minter id, for the provenance
+    ///     guard; nil = no identity, no guard for that minter. The default
+    ///     asks the resident `GoldMiner` (`servingMinterIdentity(for:)`).
+    ///     Tests that inject `generatorResolver` inject this too, so the
+    ///     guard never depends on the machine's engine availability.
+    ///   - laneEngineResolver: async closure returning the identity of the
+    ///     engine that would serve a minter id — the key the pass's
+    ///     concurrency lanes are grouped by, so every minter sharing one
+    ///     engine shares that engine's `maxConcurrentMints` budget. Nil =
+    ///     no engine serves the minter: it keeps a lane of its own at
+    ///     width 1, and its pairs take the single-record path where the
+    ///     generator reports the missing engine. The default asks the
+    ///     resident `GoldMiner` (`servingEngineIdentity(for:)`), which,
+    ///     unlike `engineIdentityResolver`, reports the harness
+    ///     `CommandEngine` too — a command pipe is exactly the width-1 sink
+    ///     the lane budget protects. Tests that model several engines with
+    ///     one stand-in inject this to pin lane membership.
     ///   - now: deterministic clock from the scheduler context.
     /// - Returns: pass result (adornedPairs / failedPairs / skippedPairs).
     public static func run(
@@ -144,13 +217,20 @@ public enum AdornmentPass {
                     ? nil : String(candidate.prefix(ADORNMENT_MAX_LENGTH))
             }
         },
+        engineIdentityResolver: @escaping @Sendable (String) async -> String? = { minterID in
+            await GoldMiner.shared.servingMinterIdentity(for: minterID)
+        },
+        laneEngineResolver: @escaping @Sendable (String) async -> String? = { minterID in
+            await GoldMiner.shared.servingEngineIdentity(for: minterID)
+        },
         now: Date
     ) async throws -> AdornmentPassResult {
-        // Fetch up to batchSize (drawer, minter) pairs without an adornment row.
-        // Each active minter produces its own debt entry per drawer, so a two-minter
-        // estate yields up to 2× pairs per batch.
+        // Fetch up to batchSize (drawer, minter) pairs without an adornment row,
+        // never more than ADORNMENT_PASS_MAX_BATCH_SIZE. Each active minter
+        // produces its own debt entry per drawer, so a two-minter estate yields
+        // up to 2× pairs per batch.
         let pairs = try await estate.adornmentDebtBatch(
-            limit: batchSize, afterDrawerID: nil)
+            limit: clampedBatchSize(batchSize), afterDrawerID: nil)
 
         guard !pairs.isEmpty else {
             log.debug("AdornmentPass: no debt pairs at \(now.ISO8601Format())")
@@ -161,15 +241,48 @@ public enum AdornmentPass {
         var failed = 0
         var skipped = 0
 
-        // Fan-out runs in PER-MINTER LANES: each minter's pairs mint
-        // through the engine resolved for that minter, in a lane sized to
-        // THAT engine's declared width (GoldMinerEngine.maxConcurrentMints;
-        // widthOverride pins every lane for tests). Lanes run concurrently,
-        // so engines on different silicon overlap — one engine's await is
-        // another's runtime. Pairs are fully independent — the
-        // (drawerID, minterID) composite key isolates every write and
-        // putAdornment serializes through the estate — so lane concurrency
-        // changes only wall clock, never the stored result set.
+        // ── Provenance guard ─────────────────────────────────────────────
+        // Resolved once per distinct minter id (an actor hop, not a model
+        // call). Runs ahead of the transport split below, so both the
+        // row-frame path and the single-record path only ever see pairs
+        // whose minter id IS the serving engine's identity. A stale active
+        // minter keeps its debt untouched — deactivating it is the
+        // operator's ruling, never the pass's.
+        var identityByMinter: [String: String?] = [:]
+        var reportedMismatch: Set<String> = []
+        var eligible: [LocusKit.AdornmentDebt] = []
+        eligible.reserveCapacity(pairs.count)
+        for pair in pairs {
+            let minterID = pair.minter.id
+            let engineIdentity: String?
+            if let cached = identityByMinter[minterID] {
+                engineIdentity = cached
+            } else {
+                engineIdentity = await engineIdentityResolver(minterID)
+                identityByMinter[minterID] = engineIdentity
+            }
+            if let engineIdentity, engineIdentity != minterID {
+                skipped += 1
+                if reportedMismatch.insert(minterID).inserted {
+                    log.warning(
+                        "AdornmentPass: skipping active minter \(minterID) — the serving engine is \(engineIdentity); deactivate the stale minter to clear its debt"
+                    )
+                }
+                continue
+            }
+            eligible.append(pair)
+        }
+
+        // Fan-out runs in PER-ENGINE LANES: each pair mints through the
+        // engine resolved for its minter, inside the lane of THAT engine,
+        // sized to the engine's declared width
+        // (GoldMinerEngine.maxConcurrentMints; widthOverride pins every
+        // lane for tests). Lanes run concurrently, so engines on different
+        // silicon overlap — one engine's await is another's runtime. Pairs
+        // are fully independent — the (drawerID, minterID) composite key
+        // isolates every write and putAdornment serializes through the
+        // estate — so lane concurrency changes only wall clock, never the
+        // stored result set.
 
         /// One pair's full journey: guard → generate → write. Returns the
         /// pair's outcome for the counters; all failure isolation is
@@ -246,7 +359,7 @@ public enum AdornmentPass {
         let length = maxAdornmentLength ?? ADORNMENT_MAX_LENGTH
         var singles: [LocusKit.AdornmentDebt] = []
         var batchables: [LocusKit.AdornmentDebt] = []
-        for pair in pairs {
+        for pair in eligible {
             if rowBatching ?? true,
                !pair.drawer.content.isEmpty,
                pair.drawer.content.count <= ADORNMENT_BATCH_ROW_CHAR_LIMIT {
@@ -260,7 +373,8 @@ public enum AdornmentPass {
         // resolved by minter id (multi-model mode routes minters to
         // dedicated engines), so rows for different minters never share a
         // frame. Bucket per minter, then chunk each bucket by the row and
-        // character budgets.
+        // character budgets. Every pair here already passed the provenance
+        // guard, so the frame's engine carries the frame's minter id.
         var byMinter: [String: [LocusKit.AdornmentDebt]] = [:]
         for pair in batchables { byMinter[pair.minter.id, default: []].append(pair) }
         var groups: [[LocusKit.AdornmentDebt]] = []
@@ -322,30 +436,95 @@ public enum AdornmentPass {
             return (groupAdorned, groupFailed, fallback)
         }
 
-        // ── Per-minter lanes ────────────────────────────────────────────
-        // One concurrent lane per minter: the lane runs its minter's row
+        // ── Per-engine lanes (codex finding 21) ─────────────────────────
+        // One concurrent lane per RESOLVED ENGINE, never per minter. An
+        // engine's width is a per-engine ceiling, and the shipped build
+        // resolves every active minter to the same resident engine, so
+        // per-minter lanes would drive N minters × width calls into an
+        // engine that promised width (two minters on a serial command
+        // pipe ran two subprocess calls at once). A lane holds every
+        // minter its engine serves and feeds them in minter-id order: row
         // frames first (a nil frame means that ENGINE does not speak the
-        // row transport — only its own pairs fall to the single path; the
-        // nil answer is a guard check, not a model call), then its
-        // singles, each through a sliding window sized to its engine's
-        // width. Lanes overlap freely — with per-minter engines this is
-        // what keeps every piece of silicon loaded at once.
-        var laneGroups: [String: [[LocusKit.AdornmentDebt]]] = [:]
-        for batch in groups { laneGroups[batch[0].minter.id, default: []].append(batch) }
-        var laneSingles: [String: [LocusKit.AdornmentDebt]] = [:]
-        for pair in singles { laneSingles[pair.minter.id, default: []].append(pair) }
-        let laneIDs = Set(laneGroups.keys).union(laneSingles.keys).sorted()
+        // row transport — those pairs fall to the single path; the nil
+        // answer is a guard check, not a model call), then singles, all
+        // through ONE sliding window sized to the engine's width. Lanes
+        // overlap freely — with multi-model arms every engine sits on its
+        // own silicon, and one engine's wait is another's runtime. A
+        // minter no engine serves keeps a lane of its own at width 1:
+        // there is no engine call to bound.
+
+        /// Lane key: the identity of the engine the lane drives, or the
+        /// minter id itself when no engine serves that minter. A product
+        /// engine's identity IS a minter id, so the two cases stay
+        /// distinct rather than sharing one string namespace.
+        enum LaneKey: Hashable, Comparable {
+            case engine(String)
+            case unserved(minterID: String)
+
+            /// Deterministic lane creation order: engine lanes first,
+            /// then unserved minters, each alphabetical.
+            static func < (lhs: LaneKey, rhs: LaneKey) -> Bool {
+                switch (lhs, rhs) {
+                case let (.engine(a), .engine(b)): return a < b
+                case let (.unserved(a), .unserved(b)): return a < b
+                case (.engine, .unserved): return true
+                case (.unserved, .engine): return false
+                }
+            }
+        }
+
+        // Resolve each eligible minter's lane once (an actor hop, not a
+        // model call). Minters are visited sorted, so lane membership —
+        // and with it the order pairs are fed inside a lane — is
+        // deterministic for a given batch.
+        let minterIDs = Set(eligible.map(\.minter.id)).sorted()
+        var laneByMinter: [String: LaneKey] = [:]
+        for minterID in minterIDs {
+            if let engineIdentity = await laneEngineResolver(minterID) {
+                laneByMinter[minterID] = .engine(engineIdentity)
+            } else {
+                laneByMinter[minterID] = .unserved(minterID: minterID)
+            }
+        }
+        func lane(for minterID: String) -> LaneKey {
+            laneByMinter[minterID] ?? .unserved(minterID: minterID)
+        }
+
+        // `groups` is already in minter-id order (built above), so a
+        // lane's frames arrive minter-sorted; singles are bucketed per
+        // minter and appended in the same sorted order.
+        var laneGroups: [LaneKey: [[LocusKit.AdornmentDebt]]] = [:]
+        for batch in groups { laneGroups[lane(for: batch[0].minter.id), default: []].append(batch) }
+        var singlesByMinter: [String: [LocusKit.AdornmentDebt]] = [:]
+        for pair in singles { singlesByMinter[pair.minter.id, default: []].append(pair) }
+        var laneSingles: [LaneKey: [LocusKit.AdornmentDebt]] = [:]
+        var laneMinters: [LaneKey: [String]] = [:]
+        for minterID in minterIDs {
+            let key = lane(for: minterID)
+            laneMinters[key, default: []].append(minterID)
+            laneSingles[key, default: []].append(contentsOf: singlesByMinter[minterID] ?? [])
+        }
+        let laneKeys = laneMinters.keys.sorted()
 
         await withTaskGroup(of: (adorned: Int, failed: Int, skipped: Int).self) { lanes in
-            for minterID in laneIDs {
-                let myGroups = laneGroups[minterID] ?? []
-                let seededSingles = laneSingles[minterID] ?? []
+            for laneKey in laneKeys {
+                // Every lane holds at least one minter by construction;
+                // the width is asked ONCE per lane through any member,
+                // since all of them resolve to this lane's engine.
+                guard let representativeMinter = laneMinters[laneKey]?.first else { continue }
+                let myGroups = laneGroups[laneKey] ?? []
+                let seededSingles = laneSingles[laneKey] ?? []
                 lanes.addTask {
                     let laneWidth: Int
                     if let widthOverride {
                         laneWidth = widthOverride
+                    } else if case .unserved = laneKey {
+                        // No engine to bound; the single path reports the
+                        // missing engine per pair and the pair stays in
+                        // debt.
+                        laneWidth = 1
                     } else {
-                        laneWidth = await GoldMiner.shared.mintWidth(for: minterID)
+                        laneWidth = await GoldMiner.shared.mintWidth(for: representativeMinter)
                     }
                     var laneAdorned = 0
                     var laneFailed = 0

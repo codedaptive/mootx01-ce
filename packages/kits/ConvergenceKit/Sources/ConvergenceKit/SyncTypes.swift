@@ -229,6 +229,12 @@ public struct SyncManifest: Sendable {
     /// advancement, so the same CloudKit changes are offered again on the next
     /// pull. The callback is not invoked for an empty batch.
     ///
+    /// The barrier guards both inbound routes. It runs on the pull path over
+    /// the pulled batch, and on the schema-skew replay path in `enable()` over
+    /// the records replayed from `_ck_pending_skew`. On replay a throw retains
+    /// the queue entries and fails `enable()`, so the same held records are
+    /// offered to the barrier again on the next `enable()`.
+    ///
     /// The row writes have already happened and are not rolled back. Callers
     /// must therefore make this callback idempotent. This differs deliberately
     /// from `postApplyIntegrityHook`, whose failures remain non-fatal conflicts.

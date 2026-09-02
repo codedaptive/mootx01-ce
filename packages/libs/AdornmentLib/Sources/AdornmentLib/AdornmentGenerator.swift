@@ -156,18 +156,25 @@ public func mintAdornmentMapReduce(
         return mechanicalFallback()
     }
 
-    // Split on line boundaries into ≤threshold pieces; a single line
-    // longer than the threshold becomes its own piece (the seam's
-    // truncation still bounds the output). Deterministic: same content
-    // always yields the same pieces.
+    // Split on line boundaries into ≤threshold pieces. A single line
+    // longer than the threshold is first hard-split at chunkThreshold
+    // CHARACTER boundaries (String.count / Character semantics; the Rust
+    // twin counts chars()), so NO piece ever exceeds the threshold: an
+    // unsplit over-long line reached the engine as one prompt, and a
+    // resident engine that forwards every prompt token builds a
+    // seq_len x seq_len attention mask — quadratic memory, daemon OOM
+    // (Codex finding a8905b59). Deterministic: same content always
+    // yields the same pieces.
     var pieces: [String] = []
     var current = ""
     for line in drawerContent.split(separator: "\n", omittingEmptySubsequences: false) {
-        if current.count + line.count + 1 > chunkThreshold, !current.isEmpty {
-            pieces.append(current)
-            current = ""
+        for segment in hardSplit(line, every: chunkThreshold) {
+            if current.count + segment.count + 1 > chunkThreshold, !current.isEmpty {
+                pieces.append(current)
+                current = ""
+            }
+            current += (current.isEmpty ? "" : "\n") + segment
         }
-        current += (current.isEmpty ? "" : "\n") + line
     }
     if !current.isEmpty { pieces.append(current) }
 
@@ -191,6 +198,25 @@ public func mintAdornmentMapReduce(
     let joined = pieceSummaries.joined(separator: "; ")
     if !joined.isEmpty { return String(joined.prefix(maxLength)) }
     return mechanicalFallback()
+}
+
+/// Cut one line into consecutive slices of at most `limit` Characters,
+/// in order, so the map-reduce accumulator never sees a line longer
+/// than its piece bound. A line at or under the limit comes back as
+/// its single self. `limit` ≤ 0 also returns the line whole: the
+/// threshold guard in `mintAdornmentMapReduce` has already routed such
+/// a call here only for non-empty content, and a zero step would never
+/// advance the cursor.
+private func hardSplit(_ line: Substring, every limit: Int) -> [Substring] {
+    guard limit > 0, line.count > limit else { return [line] }
+    var slices: [Substring] = []
+    var start = line.startIndex
+    while start < line.endIndex {
+        let end = line.index(start, offsetBy: limit, limitedBy: line.endIndex) ?? line.endIndex
+        slices.append(line[start..<end])
+        start = end
+    }
+    return slices
 }
 
 // MARK: - Generator seam
@@ -402,10 +428,9 @@ actor ResidentMintSession {
         }
         guard let stdinHandle, let stdoutHandle else { return nil }
 
-        // Frame: prompt bytes + NUL. Prompts are UTF-8 text and never
-        // contain NUL, so the delimiter is unambiguous.
-        var frame = Data(prompt.utf8)
-        frame.append(0)
+        // Frame: prompt bytes with every NUL stripped, then ONE NUL
+        // terminator (see `batchFrame` for why stripping is required).
+        let frame = Self.batchFrame(prompt)
         do {
             try stdinHandle.write(contentsOf: frame)
         } catch {
@@ -434,6 +459,25 @@ actor ResidentMintSession {
             }
             buffer.append(chunk)
         }
+    }
+
+    /// Frame one prompt for the resident child's NUL-delimited stdin
+    /// protocol: the prompt's UTF-8 bytes with every U+0000 stripped,
+    /// followed by exactly one NUL terminator.
+    ///
+    /// Drawer content is untrusted and lands in the prompt verbatim. An
+    /// embedded NUL would split one prompt into two child frames; the
+    /// child answers both, the parent reads one reply per logical
+    /// prompt, and every later reply lands on the wrong drawer/minter
+    /// pair — a claim minted from a restricted drawer stored under a
+    /// normal one (Codex finding 765175da). Stripping at the frame site
+    /// keeps the delimiter unambiguous whatever the content carries; a
+    /// NUL has no meaning inside prompt text, so nothing is lost.
+    /// Pure and deterministic: "ab\u{0}cd" -> [0x61,0x62,0x63,0x64,0x00].
+    static func batchFrame(_ prompt: String) -> Data {
+        var frame = Data(prompt.utf8.filter { $0 != 0 })
+        frame.append(0)
+        return frame
     }
 
     private func spawn(command: String, argument: String = "--batch", key: String? = nil) -> Bool {
