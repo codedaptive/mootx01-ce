@@ -218,7 +218,13 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         self.cacheLayers = cacheDesc.shape[0]
         self.batchWidth = cacheDesc.shape[1]
         self.cacheHeads = cacheDesc.shape[2]
-        self.maxCache = cacheDesc.shape[3]
+        // The cache length is known only now, so this is the earliest
+        // point the generation budget can be checked against it; a
+        // budget the cache cannot hold fails the load instead of
+        // trapping inside `generate` on the first prompt.
+        let cacheLength = cacheDesc.shape[3]
+        try Self.validateGenerationBudget(maxNewTokens: maxNewTokens, maxCache: cacheLength)
+        self.maxCache = cacheLength
         self.headDim = cacheDesc.shape[4]
         self.cacheScalarType = cacheDesc.scalarType
         if case .ndArray(let prefillKeyState)? = prefill.descriptor.stateDescriptor(
@@ -245,6 +251,74 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         }
         self.prefillFunction = prefill
         self.decodeFunction = decode
+    }
+
+    /// Reject a generation budget that leaves no room for a single
+    /// prompt token in the asset's static cache.
+    ///
+    /// `generate` caps every prompt at `maxCache - maxNewTokens - 1`
+    /// tokens and takes `prefix` of that count; a budget at or above
+    /// `maxCache - 1` drives the cap to zero or below, and a negative
+    /// `prefix` count is a Swift precondition failure that no `catch`
+    /// can reach (Codex finding 2296dda3 — the probe's
+    /// `--max-new-tokens 2560` against a 2560-token cache). `init`
+    /// calls this the moment the cache length is read, so the
+    /// arithmetic in `generate` always yields a cap of at least one.
+    ///
+    /// - Parameters:
+    ///   - maxNewTokens: The per-mint generation budget in tokens.
+    ///   - maxCache: The asset's static cache length in tokens.
+    /// - Throws: `EngineError.budgetExceedsCache` naming both numbers
+    ///   when `maxNewTokens >= maxCache - 1`.
+    public static func validateGenerationBudget(maxNewTokens: Int, maxCache: Int) throws {
+        guard maxNewTokens < maxCache - 1 else {
+            throw EngineError.budgetExceedsCache(maxNewTokens: maxNewTokens, maxCache: maxCache)
+        }
+    }
+
+    /// Characters of framed prompt handed to the tokenizer per prompt
+    /// token the cache can hold. A BPE token covers at least one byte,
+    /// so `promptCap` tokens span at least `promptCap` characters; the
+    /// qwen2 vocabulary averages under four characters per token on
+    /// prose, so four per token keeps every character the token cap
+    /// would keep on ordinary text. Only text denser than four
+    /// characters per token AND longer than the bound (long whitespace
+    /// runs, repeated long words) loses a tail the token cap alone would
+    /// have kept, and that tail is the price of bounding tokenizer work.
+    static let tokenizerCharactersPerToken = 4
+
+    /// Upper bound, in Characters, on the framed prompt text that
+    /// `generate` tokenizes for a given prompt cap: `promptCap *
+    /// tokenizerCharactersPerToken`. The token cap alone bounded the
+    /// model but not the tokenizer — every character of an unbounded
+    /// prompt was byte-pair encoded before `prefix(promptCap)` discarded
+    /// the excess (Codex finding 3cf82eb4). Cutting the text to this
+    /// prefix first makes tokenizer work proportional to the cache
+    /// geometry rather than to what a drawer holds.
+    ///
+    /// - Parameter promptCap: `maxCache - maxNewTokens - 1`, the number
+    ///   of prompt tokens the static cache can hold (at least 1 after
+    ///   `validateGenerationBudget`).
+    /// - Returns: The character count the tokenizer input is cut to.
+    public static func tokenizerInputBound(promptCap: Int) -> Int {
+        promptCap * tokenizerCharactersPerToken
+    }
+
+    /// The framed prompt cut to `tokenizerInputBound(promptCap:)`
+    /// Characters; text already within the bound is returned as is.
+    /// The UTF-8 length check is O(1) and Character count never exceeds
+    /// UTF-8 count, so a prompt within the bound costs no grapheme walk.
+    ///
+    /// - Parameters:
+    ///   - prompt: The framed prompt text.
+    ///   - promptCap: The prompt-token cap `generate` applies after
+    ///     encoding.
+    /// - Returns: `prompt` or its leading `tokenizerInputBound` Characters.
+    public static func boundTokenizerInput(_ prompt: String, promptCap: Int) -> String {
+        let bound = tokenizerInputBound(promptCap: promptCap)
+        guard prompt.utf8.count > bound else { return prompt }
+        let cut = prompt.prefix(bound)
+        return cut.endIndex == prompt.endIndex ? prompt : String(cut)
     }
 
     public func mint(prompt: String) async -> String? {
@@ -352,9 +426,15 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         // Tokenize with the hard cap: prompt + generation budget must
         // fit the static cache. Over-long records truncate here as a
         // last resort — upstream chunking bounds normal records first.
+        // The cap is at least 1: `init` validated the budget against
+        // the cache length (`validateGenerationBudget`), so `prefix`
+        // never sees a negative count. The text is cut to
+        // `tokenizerInputBound` Characters BEFORE encoding so the
+        // tokenizer's work is bounded by the cache geometry too, not
+        // only the model's.
         let promptCap = maxCache - maxNewTokens - 1
         var rowIDs: [[Int32]] = prompts.map { p in
-            let ids = tokenizer.encode(p)
+            let ids = tokenizer.encode(Self.boundTokenizerInput(p, promptCap: promptCap))
             return ids.count > promptCap ? Array(ids.prefix(promptCap)) : ids
         }
         while rowIDs.count < width { rowIDs.append([stopIDs.first ?? 0]) }
@@ -539,8 +619,24 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
         return topLevelJSONObjectPrefix(raw) ?? raw
     }
 
-    private enum EngineError: Error {
+    /// `CustomStringConvertible` so a host that prints `\(error)` (the
+    /// probe's stderr report) shows the message, not the case name.
+    private enum EngineError: Error, CustomStringConvertible {
         case badOutput(String)
+        /// The generation budget leaves no cache room for a prompt token
+        /// (`validateGenerationBudget`).
+        case budgetExceedsCache(maxNewTokens: Int, maxCache: Int)
+
+        var description: String {
+            switch self {
+            case .badOutput(let message):
+                return "bad output: \(message)"
+            case .budgetExceedsCache(let maxNewTokens, let maxCache):
+                return "generation budget of \(maxNewTokens) tokens leaves no room for a "
+                    + "prompt token in the \(maxCache)-token cache; the budget must be "
+                    + "below \(maxCache - 1)"
+            }
+        }
     }
 
     /// Copies a bucket-length prefill cache [layers, rows, kv, bucket,
