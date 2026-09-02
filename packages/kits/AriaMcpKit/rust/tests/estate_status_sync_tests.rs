@@ -421,3 +421,51 @@ fn syncing_direction_tokens_are_camelcase_matching_swift_rawvalue() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// CDL-03: index_composition_policy field in estate_status
+//
+// Parity with Swift EstateStatusSyncTests.indexCompositionPolicy_fieldPresent
+// and indexCompositionPolicy_defaultIsCellA.
+//
+// estate_status must expose "index_composition_policy: <id>" for every estate.
+// When MOOT_INDEX_COMPOSITION is absent or blank, the field must report the
+// production-default cell A id: "lex=original;dense=distilled".
+// ---------------------------------------------------------------------------
+
+/// estate_status must always include the "index_composition_policy:" field (CDL-03).
+/// Parity: Swift EstateStatusSyncTests.indexCompositionPolicy_fieldPresent.
+#[test]
+fn index_composition_policy_field_present() {
+    let registry = EstateRegistry::new_inmemory();
+    // Clear the env var for a deterministic result regardless of test-runner env.
+    std::env::remove_var("MOOT_INDEX_COMPOSITION");
+    let result =
+        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
+            .expect("estate_status must not throw");
+    assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("index_composition_policy: "),
+        "estate_status must include 'index_composition_policy:' field (CDL-03); got:\n{text}"
+    );
+}
+
+/// When MOOT_INDEX_COMPOSITION is absent, estate_status must report the
+/// production-default policy id "lex=original;dense=distilled" (cell A).
+/// Parity: Swift EstateStatusSyncTests.indexCompositionPolicy_defaultIsCellA.
+#[test]
+fn index_composition_policy_default_is_cell_a() {
+    let registry = EstateRegistry::new_inmemory();
+    // Ensure the env var is absent so the default policy applies.
+    std::env::remove_var("MOOT_INDEX_COMPOSITION");
+    let result =
+        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
+            .expect("estate_status must not throw");
+    assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("index_composition_policy: lex=original;dense=distilled"),
+        "Default policy must be cell A (lex=original;dense=distilled); got:\n{text}"
+    );
+}
