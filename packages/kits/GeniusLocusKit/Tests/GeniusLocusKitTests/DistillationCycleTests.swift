@@ -23,6 +23,7 @@ import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 import VectorKit
 import SubstrateTypes
 @testable import SubstrateML
@@ -295,6 +296,113 @@ struct DistillationCycleTests {
     }
 
     // MARK: - AND-aggregate room-skip safety tests
+
+    @Test("stale-version all-bit room is re-distilled")
+    func staleVersionAllBitRoomIsRedistilled() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-distill-stale-version")
+        let estateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-distill-stale-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: estateURL)
+            try? FileManager.default.removeItem(
+                at: URL(fileURLWithPath: estateURL.path + "-wal"))
+            try? FileManager.default.removeItem(
+                at: URL(fileURLWithPath: estateURL.path + "-shm"))
+        }
+        let identityKeyStore = InMemoryEstateIdentityKeyStore()
+        let estateStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: estateURL)))
+        _ = try await LocusKit.Estate.create(storage: estateStorage, owner: owner)
+        try await estateStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+        let handle = try await kit.open(
+            storage: estateStorage, owner: owner, identityKeyStore: identityKeyStore)
+        let vsStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await vsStorage.open(schema: VectorStore.schemaDeclaration)
+        await kit.registerVectorStore(VectorStore(storage: vsStorage), for: handle)
+
+        let itemID = try await captureItem(
+            body: threeSentenceBody, kit: kit, handle: handle)
+        let estate = try await kit.estate(for: handle)
+        _ = try await estate.setDistilledRepresentation(
+            drawerId: itemID,
+            distilled: "stale rendering",
+            pipelineVersion: "stale-pipeline-version",
+            tokenCount: 2,
+            at: t0)
+
+        // Reopen tightens operationalAND so bit 19 is genuinely set for the
+        // whole room — the exact state that used to hide stale versions.
+        try await kit.close(handle)
+        let reopenedStorage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: estateURL)))
+        let reopened = try await kit.open(
+            storage: reopenedStorage, owner: owner, identityKeyStore: identityKeyStore)
+        let reopenedVSStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await reopenedVSStorage.open(schema: VectorStore.schemaDeclaration)
+        await kit.registerVectorStore(VectorStore(storage: reopenedVSStorage), for: reopened)
+
+        let reopenedEstate = try await kit.estate(for: reopened)
+        let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+        let entries = try await reopenedEstate.roomLevelFingerprints()
+        let inbox = try #require(entries.first(where: { $0.room == "inbox" }))
+        #expect((inbox.fingerprint.operationalAnd & skipBit) == skipBit)
+
+        let staleRooms = try await reopenedEstate.roomsWithStaleDistilledRepresentations(
+            pipelineVersion: DistillationPipelineVersion.current)
+        #expect(staleRooms.contains { $0.wing == inbox.wing && $0.room == inbox.room })
+
+        let produced = try await kit.distillItemsSweep(
+            handle: reopened,
+            distillFn: stubFn(rendering: "current rendering", fingerprint: nonZeroFingerprint256),
+            now: t0,
+            limit: nil)
+        #expect(produced == 1,
+                "bit 19 must not hide a representation produced by a stale pipeline")
+
+        let updated = try #require(
+            try await reopenedEstate.getDrawers(ids: [itemID]).first)
+        #expect(updated.distilled == "current rendering")
+        #expect(updated.distilledPipelineVersion == DistillationPipelineVersion.current)
+        try await kit.close(reopened)
+    }
+
+    @Test("current-version all-bit room retains the metadata-only skip")
+    func currentVersionAllBitRoomRetainsSkip() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-distill-current-version")
+        let estateStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: estateStorage, owner: owner)
+        try await estateStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+        let handle = try await kit.open(storage: estateStorage, owner: owner)
+        let vsStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        try await vsStorage.open(schema: VectorStore.schemaDeclaration)
+        await kit.registerVectorStore(VectorStore(storage: vsStorage), for: handle)
+
+        _ = try await captureItem(body: threeSentenceBody, kit: kit, handle: handle)
+        let distillFn = stubFn(rendering: "current rendering", fingerprint: nonZeroFingerprint256)
+        #expect(try await kit.distillItemsSweep(
+            handle: handle, distillFn: distillFn, now: t0, limit: nil) == 1)
+
+        try await kit.close(handle)
+        let reopened = try await kit.open(storage: estateStorage, owner: owner)
+        let reopenedEstate = try await kit.estate(for: reopened)
+        let skipBit = DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+        let entries = try await reopenedEstate.roomLevelFingerprints()
+        let inbox = try #require(entries.first(where: { $0.room == "inbox" }))
+        #expect((inbox.fingerprint.operationalAnd & skipBit) == skipBit)
+        #expect(try await reopenedEstate.roomsWithStaleDistilledRepresentations(
+            pipelineVersion: DistillationPipelineVersion.current).isEmpty)
+
+        let produced = try await kit.distillItemsSweep(
+            handle: reopened, distillFn: distillFn, now: t0, limit: nil)
+        #expect(produced == 0,
+                "a fully represented room at the current version must remain prunable")
+    }
 
     /// UNSAFE direction: a room with 199 distilled + 1 undistilled drawer
     /// must NEVER be skipped by the sweep, regardless of how many drawers
