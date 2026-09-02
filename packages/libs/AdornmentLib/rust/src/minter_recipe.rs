@@ -343,16 +343,89 @@ pub fn normalize_mint_output(raw: &str, kind: MintOutputKind) -> String {
         MintOutputKind::Text => extract_claim_line(raw),
         MintOutputKind::Json => {
             let stripped = strip_code_fences(raw);
-            match serde_json::from_str::<serde_json::Value>(&stripped) {
-                Ok(value) => {
+            match top_level_json_object_prefix(&stripped)
+                .and_then(|prefix| serde_json::from_str::<serde_json::Value>(prefix).ok())
+            {
+                Some(value) => {
                     let mut fragments = Vec::new();
                     flatten_json(&value, &mut fragments);
                     fragments.join("; ")
                 }
-                Err(_) => extract_claim_line(raw),
+                None => extract_claim_line(raw),
             }
         }
     }
+}
+
+/// Extract the first complete, strictly valid top-level JSON object.
+///
+/// Leading whitespace is permitted but excluded from the returned prefix;
+/// prose before the opening brace is rejected. Braces inside strings and
+/// escaped quotes do not affect nesting depth. Content after the closing brace
+/// is deliberately excluded because a decoded token can contain both `}` and a
+/// punctuation suffix. The engine stop and normalizer share this exact helper.
+pub(crate) fn top_level_json_object_prefix(text: &str) -> Option<&str> {
+    let mut start = None;
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut last_structural_character = None;
+
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            } else if !ch.is_whitespace() {
+                return None;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                last_structural_character = Some(ch);
+            }
+            '{' => {
+                depth += 1;
+                last_structural_character = Some(ch);
+            }
+            ']' => {
+                if last_structural_character == Some(',') {
+                    return None;
+                }
+                last_structural_character = Some(ch);
+            }
+            '}' => {
+                if last_structural_character == Some(',') {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    let candidate = &text[start.unwrap()..index + ch.len_utf8()];
+                    return matches!(
+                        serde_json::from_str::<serde_json::Value>(candidate),
+                        Ok(serde_json::Value::Object(_))
+                    )
+                    .then_some(candidate);
+                }
+                last_structural_character = Some(ch);
+            }
+            _ if !ch.is_whitespace() => last_structural_character = Some(ch),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// First meaningful prose line: skip fence lines, strip leading list
@@ -561,5 +634,33 @@ mod tests {
             normalize_mint_output(r#"{"n": 9007199254740993}"#, MintOutputKind::Json),
             "9007199254740993"
         );
+    }
+
+    #[test]
+    fn json_same_token_suffixes_retain_and_normalize_only_the_object_prefix() {
+        let prefix = r#"{"claim":"kept","nested":[{"literal":"} { \"quoted\""}]}"#;
+        let expected_claim = "kept; } { \"quoted\"";
+        for suffix in [".", ",", ");\n"] {
+            let raw = format!(" {prefix}{suffix}");
+            assert_eq!(top_level_json_object_prefix(&raw), Some(prefix));
+            assert_eq!(
+                normalize_mint_output(&raw, MintOutputKind::Json),
+                expected_claim
+            );
+        }
+
+        assert_eq!(
+            top_level_json_object_prefix(
+                r#" {"claim":"literal } and \"quoted\"","nested":{"n":1}} trailing"#
+            ),
+            Some(r#"{"claim":"literal } and \"quoted\"","nested":{"n":1}}"#)
+        );
+        assert_eq!(
+            top_level_json_object_prefix(r#"{"claim":"still open","nested":{"n":1}"#),
+            None
+        );
+        assert_eq!(top_level_json_object_prefix("prose before {\"n\":1}"), None);
+        assert_eq!(top_level_json_object_prefix(r#"{"claim":"x",}"#), None);
+        assert_eq!(top_level_json_object_prefix(r#"{"a":[1}"#), None);
     }
 }
