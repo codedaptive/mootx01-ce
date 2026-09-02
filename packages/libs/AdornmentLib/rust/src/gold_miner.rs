@@ -24,7 +24,10 @@ use std::sync::Mutex;
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
-use crate::minter_recipe::{normalize_mint_output, MinterRecipe, QUANTIZED_RECIPE};
+use crate::minter_recipe::{
+    normalize_mint_output, top_level_json_object_prefix, MinterRecipe, MintOutputKind,
+    QUANTIZED_RECIPE,
+};
 use crate::quantized_qwen2_lean::ModelWeights as Qwen2LeanWeights;
 use candle_transformers::models::quantized_qwen3::ModelWeights as Qwen3Weights;
 use tokenizers::Tokenizer;
@@ -188,6 +191,9 @@ pub struct QuantizedLlmEngine {
     /// finish-or-retry). None = recipe parameter / MAX_NEW_TOKENS
     /// fallback governs, which is every product path.
     max_new_tokens_override: Option<usize>,
+    /// JSON recipes stop at the first parseable top-level object in product
+    /// operation. Historical benchmark replays can disable this explicitly.
+    stop_at_complete_json: bool,
     /// (generated tokens, budget-capped-without-EOS) from the most
     /// recent successful `generate` — the harness binaries' per-mint
     /// telemetry read-back. Product paths ignore it.
@@ -287,12 +293,14 @@ impl QuantizedLlmEngine {
             libc::malloc_trim(0);
         }
 
+        let stop_at_complete_json = recipe.output == MintOutputKind::Json;
         Ok(Self {
             model,
             tokenizer,
             device,
             recipe,
             max_new_tokens_override: None,
+            stop_at_complete_json,
             last_telemetry: (0, false),
             last_raw: String::new(),
         })
@@ -329,6 +337,13 @@ impl QuantizedLlmEngine {
     /// only; None restores recipe governance).
     pub fn set_max_new_tokens(&mut self, n: Option<usize>) {
         self.max_new_tokens_override = n;
+    }
+
+    /// Control the parse-validated JSON structural stop. Product JSON recipes
+    /// enable it by default; versioned harnesses set it explicitly so old
+    /// protocol results remain reproducible.
+    pub fn set_stop_at_complete_json(&mut self, enabled: bool) {
+        self.stop_at_complete_json = enabled;
     }
 
     /// Telemetry from the most recent successful mint: (generated
@@ -405,12 +420,30 @@ impl QuantizedLlmEngine {
                 break;
             }
             all_ids.push(next_token);
+            if self.stop_at_complete_json
+                && self.recipe.output == MintOutputKind::Json
+            {
+                let generated = self
+                    .tokenizer
+                    .decode(&all_ids[prompt_len..], true)
+                    .map_err(|e| format!("gold miner: incremental decode: {e}"))?;
+                if top_level_json_object_prefix(&generated).is_some() {
+                    hit_cap = false;
+                    break;
+                }
+            }
         }
         self.last_telemetry = (all_ids.len() - prompt_len, hit_cap);
 
-        self.tokenizer
+        let raw = self.tokenizer
             .decode(&all_ids[prompt_len..], true)
-            .map_err(|e| format!("gold miner: decode: {e}"))
+            .map_err(|e| format!("gold miner: decode: {e}"))?;
+        if self.stop_at_complete_json && self.recipe.output == MintOutputKind::Json {
+            if let Some(prefix) = top_level_json_object_prefix(&raw) {
+                return Ok(prefix.to_string());
+            }
+        }
+        Ok(raw)
     }
 
 }
