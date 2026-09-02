@@ -146,27 +146,90 @@ public final class QwenTokenizer: Sendable {
         return ids
     }
 
+    /// Rank-lookup memo key: two interned symbol ids. Interning the
+    /// symbols once per pre-token means the merge-table probe for a
+    /// given adjacent pair interpolates its `"\(a) \(b)"` key exactly
+    /// once, however many passes re-examine that pair.
+    private struct PairKey: Hashable {
+        let left: Int
+        let right: Int
+    }
+
+    /// Byte-level BPE over one pre-token: the GPT-2 reference loop.
+    /// Each pass picks the lowest-ranked adjacent pair and merges EVERY
+    /// non-overlapping occurrence of it left to right in one sweep, so
+    /// a pass shrinks the symbol array by the whole occurrence count
+    /// rather than by one. A trained merge table is rank-monotone (a
+    /// merge that consumes token T ranks after the merge that produced
+    /// T), so the sweep yields the same ids as merging one occurrence
+    /// per pass; the golden fixture and the oracle test in
+    /// QwenTokenizerTests pin that equivalence. This closes Codex
+    /// finding 3cf82eb4: one merge per full rescan made a long run of a
+    /// mergeable byte quadratic, with a String allocation per candidate
+    /// pair on every rescan.
     private func bpe(_ piece: String) -> [Int32] {
-        // Bytes → mapped characters, one symbol per byte.
-        var symbols: [String] = piece.utf8.map { String(byteToChar[$0]!) }
-        guard symbols.count > 1 else {
-            return symbols.compactMap { vocab[$0] }
+        // Symbol interning: `names[id]` is the vocab string of symbol
+        // `id`; every distinct symbol seen in this pre-token gets one id
+        // so the merge loop compares Ints and only touches Strings when
+        // a pair is probed for the first time or a merge creates a new
+        // symbol.
+        var names: [String] = []
+        var idOf: [String: Int] = [:]
+        func intern(_ name: String) -> Int {
+            if let id = idOf[name] { return id }
+            let id = names.count
+            names.append(name)
+            idOf[name] = id
+            return id
         }
-        while true {
+        // Bytes → mapped characters, one symbol per byte.
+        var symbols: [Int] = piece.utf8.map { intern(String(byteToChar[$0]!)) }
+        guard symbols.count > 1 else {
+            return symbols.compactMap { vocab[names[$0]] }
+        }
+        // Memo of merge-table probes: `nil` records a pair the table
+        // lacks, so a miss is as cheap as a hit on later passes. The
+        // probe key is the table's own `"\(a) \(b)"` form, so vocabulary
+        // and merge semantics are exactly the loaded tokenizer.json's.
+        var rankMemo: [PairKey: Int?] = [:]
+        func rank(_ left: Int, _ right: Int) -> Int? {
+            let key = PairKey(left: left, right: right)
+            if let known = rankMemo[key] { return known }
+            let found = mergeRanks["\(names[left]) \(names[right])"]
+            rankMemo[key] = found
+            return found
+        }
+        while symbols.count > 1 {
             var bestRank = Int.max
-            var bestIndex = -1
+            var bestPair: PairKey? = nil
             for i in 0..<(symbols.count - 1) {
-                if let rank = mergeRanks["\(symbols[i]) \(symbols[i + 1])"],
-                   rank < bestRank {
-                    bestRank = rank
-                    bestIndex = i
+                if let r = rank(symbols[i], symbols[i + 1]), r < bestRank {
+                    bestRank = r
+                    bestPair = PairKey(left: symbols[i], right: symbols[i + 1])
                 }
             }
-            guard bestIndex >= 0 else { break }
-            symbols.replaceSubrange(bestIndex...(bestIndex + 1),
-                                    with: [symbols[bestIndex] + symbols[bestIndex + 1]])
+            guard let pair = bestPair else { break }
+            let merged = intern(names[pair.left] + names[pair.right])
+            // One left-to-right sweep merging every non-overlapping
+            // occurrence: after a merge the scan resumes past the pair,
+            // so "aaa" under (a,a) becomes [aa, a], as the reference
+            // does.
+            var next: [Int] = []
+            next.reserveCapacity(symbols.count)
+            var i = 0
+            while i < symbols.count {
+                if i + 1 < symbols.count,
+                   symbols[i] == pair.left, symbols[i + 1] == pair.right {
+                    next.append(merged)
+                    i += 2
+                } else {
+                    next.append(symbols[i])
+                    i += 1
+                }
+            }
+            symbols = next
         }
-        return symbols.compactMap { vocab[$0] }
+        return symbols.compactMap { vocab[names[$0]] }
     }
 
     // MARK: - Decode
