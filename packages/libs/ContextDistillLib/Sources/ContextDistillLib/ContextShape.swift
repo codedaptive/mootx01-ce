@@ -1,7 +1,7 @@
 // ContextShape.swift
 // Port of record_shape_classifier.py — classify_record and all helpers.
 //
-// Design rules (from mission brief):
+// Design rules (from the decision record):
 //   - NO regex engine (no NSRegularExpression, no Swift Regex).
 //     Each Python `re.compile` pattern is a hand-written Unicode-scalar scanner.
 //   - Index unit: unicodeScalars (Python str uses code points, Swift unicodeScalars
