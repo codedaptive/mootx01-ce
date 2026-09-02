@@ -37,8 +37,8 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
 public protocol GoldMinerEngine: Sendable {
     /// Stable identity for logs, run provenance, and the minter master.
     /// Product engines use their recipe's composed ID (e.g.
-    /// "apple-fm-p1-s1", "qwen2-0.5b-q4km-p2-s1"); the harness command
-    /// engine uses its command name. Never a user-facing name.
+    /// "apple-fm-p1-s1", "qwen2-0.5b-q4km-p2-s1"); a generic harness
+    /// command engine uses its command name. Never a user-facing name.
     var identity: String { get }
     /// Mint one claim. Nil = per-prompt failure; the caller records a
     /// failed pair and continues.
@@ -222,8 +222,8 @@ public actor GoldMiner {
     /// never stored under a stale active minter's id.
     ///
     /// Nil means "no minter identity, do not guard": no engine resolves
-    /// (the pass then mints mechanically), or the resolved engine is the
-    /// harness `CommandEngine`, whose identity is its command name
+    /// (the pass then mints mechanically), or the resolved engine is a
+    /// generic harness `CommandEngine`, whose identity is its command name
     /// (`command:<name>`), not a minter id. The harness that injects a
     /// minter command owns the active set exactly — the same rule as the
     /// Rust port, where the MOOT_MINT_CMD subprocess seam has no engine
@@ -454,23 +454,25 @@ public final class AppleFoundationEngine: GoldMinerEngine {
     #endif
 }
 
-/// Identity prefix of every `CommandEngine`: a command engine's identity is
-/// its command name, never a minter id, and `GoldMiner.servingMinterIdentity`
-/// recognizes the harness seam by this prefix. Declared outside the macOS
-/// block because the accessor compiles on every platform.
+/// Identity prefix of a generic harness `CommandEngine`. The explicit Core AI
+/// worker constructor carries the product minter id instead, so
+/// `GoldMiner.servingMinterIdentity` applies its provenance guard. Declared
+/// outside the macOS block because the accessor compiles on every platform.
 let commandEngineIdentityPrefix = "command:"
 
 #if os(macOS)
-// MARK: - Command engine (macOS harness vehicle)
+// MARK: - Command engine (macOS process boundary)
 
 /// External-command engine over the MOOT_MINT_CMD contract. macOS-only —
-/// iOS cannot spawn processes; this engine exists for the benchmark
-/// harness and for operator-supplied minters, never as the product
-/// default. Batch-capable commands (capability probe) run resident via
-/// ResidentMintSession; others run one-shot.
+/// iOS cannot spawn processes. The generic initializer is the benchmark and
+/// operator seam; the explicit Core AI initializer is the contained product
+/// process boundary. Neither becomes the default here. Batch-capable commands
+/// (capability probe) run resident via ResidentMintSession; others run one-shot.
 public final class CommandEngine: GoldMinerEngine {
     public let identity: String
     private let command: String
+    private let commandArguments: [String]
+    private let allowsEnvironmentRowBatching: Bool
 
     /// Process-level fan-out: the OS inference service pipelines SEPARATE
     /// minter processes (measured 2026-08-30: 8 concurrent apple-mint
@@ -484,9 +486,9 @@ public final class CommandEngine: GoldMinerEngine {
     /// module seam regardless of the requested width.
     public let maxConcurrentMints: Int
 
-    /// Dedicated resident sessions for width > 1 (index 0 unused at
-    /// width 1 — the module seam's shared session serves that shape,
-    /// keeping the single-worker path identical to the pre-pool code).
+    /// Dedicated resident sessions for process fan-out or for a configured
+    /// invocation such as the Core AI worker. The legacy path-only width-1
+    /// command keeps using the module seam's shared session.
     private let pool: [ResidentMintSession]
     private let picker = PoolPicker()
 
@@ -500,9 +502,35 @@ public final class CommandEngine: GoldMinerEngine {
         }
     }
 
-    public init(command: String) {
+    private init(
+        command: String,
+        arguments: [String],
+        identity: String,
+        lifecyclePolicy: ResidentMintLifecyclePolicy,
+        allowsEnvironmentRowBatching: Bool,
+        width: Int
+    ) {
         self.command = command
-        self.identity = commandEngineIdentityPrefix + (command as NSString).lastPathComponent
+        self.commandArguments = arguments
+        self.identity = identity
+        self.allowsEnvironmentRowBatching = allowsEnvironmentRowBatching
+        self.maxConcurrentMints = width
+        let needsOwnedSession = width > 1
+            || !arguments.isEmpty
+            || lifecyclePolicy != .standard
+        self.pool = needsOwnedSession
+            ? (0..<width).map { _ in ResidentMintSession(policy: lifecyclePolicy) }
+            : []
+    }
+
+    /// Generic external command. Fixed arguments precede every protocol flag:
+    /// capability probing appends `--mint-capabilities`, resident operation
+    /// appends `--batch`, and one-shot operation passes only these arguments.
+    public convenience init(
+        command: String,
+        arguments: [String] = [],
+        lifecyclePolicy: ResidentMintLifecyclePolicy = .standard
+    ) {
         let width: Int
         if let raw = ProcessInfo.processInfo.environment["MOOT_MINT_WIDTH"],
            let parsed = Int(raw), parsed >= 1 {
@@ -510,21 +538,89 @@ public final class CommandEngine: GoldMinerEngine {
         } else {
             width = 1
         }
-        self.maxConcurrentMints = width
-        self.pool = width > 1 ? (0..<width).map { _ in ResidentMintSession() } : []
+        self.init(
+            command: command,
+            arguments: arguments,
+            identity: commandEngineIdentityPrefix + (command as NSString).lastPathComponent,
+            lifecyclePolicy: lifecyclePolicy,
+            allowsEnvironmentRowBatching: true,
+            width: width)
     }
+
+    #if canImport(CoreAI)
+    /// Contained macOS Core AI worker using the installed `mootx01` binary.
+    /// This constructor deliberately forces one child even when a harness left
+    /// `MOOT_MINT_WIDTH` set: one model process at a time is the shipping rule.
+    public convenience init(
+        coreAIWorkerExecutable command: String,
+        assetPath: String,
+        tokenizerPath: String,
+        style: CoreAIPromptStyle,
+        maxNewTokens: Int,
+        identity: String
+    ) {
+        self.init(
+            command: command,
+            arguments: [
+                "coreai-mint-worker",
+                "--asset", assetPath,
+                "--tokenizer", tokenizerPath,
+                "--style", style.rawValue,
+                "--max-new-tokens", String(maxNewTokens),
+                "--identity", identity,
+            ],
+            identity: identity,
+            lifecyclePolicy: .coreAIContainment,
+            allowsEnvironmentRowBatching: false,
+            width: 1)
+    }
+    #endif
 
     public func mint(prompt: String) async -> String? {
         guard !pool.isEmpty else {
-            return await invokeAdornmentCommand(prompt: prompt, command: command)
+            return await invokeAdornmentCommand(
+                prompt: prompt,
+                command: command,
+                arguments: commandArguments)
         }
         let session = pool[await picker.index(of: pool.count)]
-        if await session.supportsBatch(command: command) {
-            return await session.mint(prompt: prompt, command: command)
+        let invocation = ResidentMintCommand(
+            executablePath: command,
+            baseArguments: commandArguments)
+        if await session.supportsBatch(command: invocation) {
+            return await session.mint(prompt: prompt, command: invocation)
         }
         // One-shot minters cannot hold a resident child; serve the call
         // through the module seam (spawn-per-prompt) instead.
-        return await invokeAdornmentCommand(prompt: prompt, command: command)
+        return await invokeAdornmentCommand(
+            prompt: prompt,
+            command: command,
+            arguments: commandArguments)
+    }
+
+    /// Aggregate lifecycle and pressure telemetry across this engine's child
+    /// slots. Core AI always has exactly one slot; generic harness commands may
+    /// opt into more through `MOOT_MINT_WIDTH`. A legacy path-only wrapper
+    /// reports the module-wide shared command session by design.
+    public func lifecycleSnapshot() async -> ResidentMintLifecycleSnapshot {
+        guard !pool.isEmpty else {
+            return await ResidentMintSession.shared.lifecycleSnapshot()
+        }
+        var aggregate = ResidentMintLifecycleSnapshot.zero
+        for session in pool {
+            aggregate = aggregate + (await session.lifecycleSnapshot())
+        }
+        return aggregate
+    }
+
+    /// Stop every child owned by this engine. The Core AI parent calls this on
+    /// deactivation; idle reaping remains the automatic backstop. Legacy
+    /// path-only engines use the shared module session and do not own it, so
+    /// shutting one of those wrappers down cannot disrupt another caller.
+    public func shutdown() async {
+        for session in pool {
+            await session.shutdown()
+        }
     }
 
     // MARK: Row-batch transport over the pool
@@ -535,7 +631,8 @@ public final class CommandEngine: GoldMinerEngine {
     /// the batches-x-slots shape: each pool child holds one row-protocol
     /// session and every frame carries a whole multi-record prompt.
     public var supportsRowBatching: Bool {
-        !pool.isEmpty
+        allowsEnvironmentRowBatching
+            && !pool.isEmpty
             && ProcessInfo.processInfo.environment["MOOT_MINT_ROWS"] == "1"
     }
 
@@ -545,7 +642,13 @@ public final class CommandEngine: GoldMinerEngine {
         }
         let prompt = formatAdornmentBatchPrompt(rows: rows)
         let session = pool[await picker.index(of: pool.count)]
-        guard let raw = await session.mint(prompt: prompt, command: command, extraArgument: "--rows")
+        let invocation = ResidentMintCommand(
+            executablePath: command,
+            baseArguments: commandArguments)
+        guard let raw = await session.mint(
+            prompt: prompt,
+            command: invocation,
+            extraArgument: "--rows")
         else {
             return Array(repeating: nil, count: rows.count)
         }
