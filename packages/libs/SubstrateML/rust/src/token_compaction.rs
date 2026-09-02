@@ -10,16 +10,6 @@
 // map. See the Swift file for the full rule rationale (§5.3 priority
 // order; conservative drop tables; fidelity guards).
 
-/// The Phase 1 distillation format + pipeline contract identifier
-/// (SPEC §4). Mirrors Swift `DistillationPipelineVersion.current`.
-// p2 (DECISION_DENSE_LANE_ENRICHMENT, Wave 2): p1 rendering + the
-// deterministic categorizer trailer (enrichment_stage). "-det" names the
-// deterministic engine — the benchmarkable default.
-// p2.1: categorizer facts upgraded with the vendored Wikidata property
-// subset (qid_facts + qid_closure) — rendering contract change.
-// p2.2: multi-word entity anchoring (phrase pre-pass over vendored labels).
-pub const DISTILLATION_PIPELINE_VERSION: &str = "p2.3-det";
-
 /// Single-word drops (rule 2), matched against the lowercase word core.
 /// MUST stay identical to Swift `TokenCompaction.stopwords`.
 const STOPWORDS: &[&str] = &[
