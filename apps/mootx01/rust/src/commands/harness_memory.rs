@@ -1035,19 +1035,6 @@ fn discover_restore_records(daemon: &dyn DaemonHttp, port: u16) -> Vec<EstateRec
     records
 }
 
-/// Extract `(slug, filename)` from `/memories/harness[-import]/<slug>/<file>`.
-///
-/// Used by tests and as a utility for callers that receive the legacy
-/// `/memories/…` path format. Production restore code uses
-/// `parse_restore_location` instead (which takes the bare `location` string).
-fn parse_restore_path(memory_path: &str) -> Option<(String, String)> {
-    // Strip leading /memories/harness[-import]/
-    let after = memory_path
-        .strip_prefix("/memories/harness-import/")
-        .or_else(|| memory_path.strip_prefix("/memories/harness/"))?;
-    parse_restore_location(after)
-}
-
 /// Extract `(slug, filename)` from a bare estate location string of the form
 /// `harness-import/<slug>/<file>` or `harness/<slug>/<file>`.
 ///
@@ -1055,8 +1042,8 @@ fn parse_restore_path(memory_path: &str) -> Option<(String, String)> {
 /// `estate_list` results; slug and filename are extracted from the `location`
 /// field of those records.
 fn parse_restore_location(location: &str) -> Option<(String, String)> {
-    // Strip the optional prefix so we can handle both bare locations from
-    // estate_list records and legacy /memories/ paths (via parse_restore_path).
+    // Strip the optional prefix so bare locations from estate_list records
+    // are accepted with or without the harness[-import]/ prefix.
     let after = if location.starts_with("harness-import/") || location.starts_with("harness/") {
         location
             .strip_prefix("harness-import/")
@@ -2214,23 +2201,6 @@ mod tests {
         assert!(result.is_none(), "unrecognised tool must fall through");
     }
 
-    #[test]
-    fn parse_restore_path_harness_import() {
-        let r = parse_restore_path("/memories/harness-import/my-slug/note.md");
-        assert_eq!(r, Some(("my-slug".to_string(), "note.md".to_string())));
-    }
-
-    #[test]
-    fn parse_restore_path_harness() {
-        let r = parse_restore_path("/memories/harness/my-slug/file.md");
-        assert_eq!(r, Some(("my-slug".to_string(), "file.md".to_string())));
-    }
-
-    #[test]
-    fn parse_restore_path_rejects_hidden() {
-        assert!(parse_restore_path("/memories/harness/slug/.hidden").is_none());
-    }
-
     // ── Consent and daemon-down path (unit-level) ─────────────────────────────
 
     #[test]
@@ -2270,22 +2240,8 @@ mod tests {
         assert!(r.is_none(), "slug with '..' inside must be rejected");
     }
 
-    // parse_restore_path / parse_restore_location — same slug guard on the
-    // estate location string returned by estate_list.
-
-    #[test]
-    fn parse_restore_path_rejects_dotdot_slug() {
-        // /memories/harness-import/../etc → slug = ".." → rejected.
-        let r = parse_restore_path("/memories/harness-import/../etc/passwd");
-        assert!(r.is_none(), "restore slug '..' must be rejected");
-    }
-
-    #[test]
-    fn parse_restore_path_rejects_dotfile_slug() {
-        // /memories/harness/.hidden/file.md → slug = ".hidden" → rejected.
-        let r = parse_restore_path("/memories/harness/.hidden/file.md");
-        assert!(r.is_none(), "restore slug starting with '.' must be rejected");
-    }
+    // parse_restore_location — same slug guard on the estate location string
+    // returned by estate_list.
 
     #[test]
     fn parse_restore_location_rejects_dotdot_slug_bare() {

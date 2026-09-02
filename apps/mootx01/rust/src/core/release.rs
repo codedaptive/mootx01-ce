@@ -552,11 +552,7 @@ pub fn validate_tarball_members(tarball: &Path) -> Result<(), ReleaseError> {
     Ok(())
 }
 
-fn curl_stdout(url: &str) -> Result<Vec<u8>, ReleaseError> {
-    curl_stdout_within(url, None)
-}
-
-/// `curl_stdout` with an optional whole-transfer deadline (`--max-time`).
+/// Fetch `url` with curl, with an optional whole-transfer deadline (`--max-time`).
 /// See `latest_version_within` for why the daemon-side caller bounds it.
 fn curl_stdout_within(url: &str, timeout_secs: Option<u64>) -> Result<Vec<u8>, ReleaseError> {
     let mut cmd = Command::new("curl");

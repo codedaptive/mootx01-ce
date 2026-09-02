@@ -787,8 +787,6 @@ pub(crate) fn home_dir() -> PathBuf {
 /// is unit-testable without a TTY.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DbDecision {
-    /// No existing database — nothing to decide.
-    Fresh,
     /// Proceed without touching anything (with the printed reason).
     Untouched(&'static str),
     /// Adopt the existing database; reset the moot-mgr store.
@@ -1010,7 +1008,6 @@ fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<()
         },
     );
     match decision {
-        DbDecision::Fresh => Ok(()),
         DbDecision::Untouched(reason) => {
             println!("  ⓘ {reason}");
             Ok(())
