@@ -32,6 +32,7 @@
 
 import ArgumentParser
 import Foundation
+import MootCoreAIWorker
 import MootInstallerCore
 
 @main
@@ -105,6 +106,10 @@ struct Mootx01: AsyncParsableCommand {
                 // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
                 // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
                 HookCaptureCommand.self,
+                // Hidden resident child used by the macOS Core AI minter.
+                // The parent owns recycling and idle reaping; this process
+                // owns one asset and exits cleanly when its stdin closes.
+                CoreAIMintWorkerCommand.self,
             ]
         )
         #else
