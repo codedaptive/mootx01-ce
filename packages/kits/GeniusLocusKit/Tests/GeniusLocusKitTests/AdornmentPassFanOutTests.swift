@@ -106,6 +106,10 @@ struct AdornmentPassFanOutTests {
                 await gate.arriveAndWait()
                 return "adorned:\(drawer.id):\(minter.id)"
             },
+            // The injected generator serves every minter under that
+            // minter's own identity, so the provenance guard admits every
+            // pair whatever engine the machine resolves.
+            engineIdentityResolver: { $0 },
             now: Date(timeIntervalSince1970: 1_756_500_000))
 
         #expect(result.adornedPairs == 8, "all 8 pairs mint; got \(result.adornedPairs)")
@@ -143,10 +147,95 @@ struct AdornmentPassFanOutTests {
                 await witness.exit()
                 return "adorned:\(drawer.id):\(minter.id)"
             },
+            engineIdentityResolver: { $0 },
             now: Date(timeIntervalSince1970: 1_756_500_000))
 
         #expect(result.adornedPairs == 6)
         let peak = await witness.peak
         #expect(peak == 1, "width-1 pass must never overlap generator calls; peak was \(peak)")
+    }
+
+    /// Provision `count` drawers and two active minters: 2 × `count` pairs.
+    private func estateWithTwoMinters(drawers count: Int) async throws -> LocusKit.Estate {
+        let estate = try await makeEstate()
+        for i in 0..<count {
+            _ = try await estate.capture(CaptureFrame(
+                content: "two-engine fixture drawer \(i) — deterministic content",
+                channel: .typed,
+                room: "fanout-room",
+                latticeAnchor: LatticeAnchor(udcCode: "004"),
+                addedBy: "fanout-test",
+                embeddingModelID: "no-embedding",
+                lineageID: UUID()))
+        }
+        for id in ["engine-lane-a", "engine-lane-b"] {
+            try await estate.registerAdornmentMinter(AdornmentMinterDescriptor(
+                id: id, name: id, family: "test", modelID: "stub",
+                modelVersion: "1", promptDigest: "feedface-\(id)",
+                parameters: [:], isActive: true))
+        }
+        return estate
+    }
+
+    @Test("minters on distinct width-1 engines still overlap across lanes")
+    func distinctEnginesOverlap() async throws {
+        // The converse of the shared-engine budget (codex finding 21):
+        // lanes are per engine, so two minters served by two different
+        // engines run concurrently even though each engine is serial.
+        // `laneEngineResolver` models the two engines by name — the
+        // shipped build cannot register two engines, so the resolver is
+        // the seam that pins lane membership.
+        let estate = try await estateWithTwoMinters(drawers: 3)
+        let gate = Rendezvous(expected: 2)
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            await gate.release()
+        }
+        defer { watchdog.cancel() }
+
+        let result = try await AdornmentPass.run(
+            estate: estate,
+            width: 1,
+            rowBatching: false,
+            generatorResolver: { minter, drawer in
+                await gate.arriveAndWait()
+                return "adorned:\(drawer.id):\(minter.id)"
+            },
+            engineIdentityResolver: { $0 },
+            laneEngineResolver: { "engine-for-\($0)" },
+            now: Date(timeIntervalSince1970: 1_756_500_000))
+
+        #expect(result.adornedPairs == 6)
+        #expect(result.failedPairs == 0)
+        let peak = await gate.peakSimultaneous
+        #expect(peak >= 2, "two engine lanes must overlap; peak was \(peak)")
+    }
+
+    @Test("minters on one width-1 engine share its budget")
+    func sharedEngineSharesBudget() async throws {
+        // Same estate, same width, one engine identity for both minters:
+        // the lane budget collapses to one in-flight call. Literal twin of
+        // the grouping suite's installed-engine tests, pinned here through
+        // the resolver seam alone.
+        let estate = try await estateWithTwoMinters(drawers: 3)
+        let witness = InFlight()
+
+        let result = try await AdornmentPass.run(
+            estate: estate,
+            width: 1,
+            rowBatching: false,
+            generatorResolver: { minter, drawer in
+                await witness.enter()
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                await witness.exit()
+                return "adorned:\(drawer.id):\(minter.id)"
+            },
+            engineIdentityResolver: { $0 },
+            laneEngineResolver: { _ in "one-shared-engine" },
+            now: Date(timeIntervalSince1970: 1_756_500_000))
+
+        #expect(result.adornedPairs == 6)
+        let peak = await witness.peak
+        #expect(peak == 1, "one engine lane at width 1 must never overlap; peak was \(peak)")
     }
 }

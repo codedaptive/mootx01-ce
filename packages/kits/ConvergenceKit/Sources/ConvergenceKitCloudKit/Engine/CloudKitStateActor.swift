@@ -242,6 +242,16 @@ actor CloudKitStateActor {
         // Echo suppression is active by construction: the observer tasks are
         // not yet started (see below), so replay writes via applyInbound
         // (upsertSync / deleteSync) cannot re-enter the outbox (I-10).
+        //
+        // The replay path runs the same post-apply boundaries as PullCycle.
+        // WHY: a held record skipped the pull cycle's boundaries by design
+        // (it was never applied, so it never counted toward that batch). If
+        // replay applied it without them, a writer on a newer schema could
+        // route rows around the consumer's must-succeed commit barrier just
+        // by waiting for the receiver to upgrade. The barrier therefore runs
+        // over the replayed batch BEFORE the queue entries are deleted; the
+        // queue entry is the replay path's cursor, exactly as the change
+        // token is the pull path's cursor.
         let skewReady = try await SkewReplay.drainReady(
             currentVersion: manifest.schemaVersion,
             from: storage,
@@ -250,14 +260,49 @@ actor CloudKitStateActor {
         if !skewReady.isEmpty {
             logger.info("skew-queue replay: \(skewReady.count) held record(s) ready for schema v\(manifest.schemaVersion)")
             var replayedIDs: [UUID] = []
+            // Row keys per table for the post-apply boundaries, shaped exactly
+            // like PullCycle's batch: tombstones are deletions from the
+            // consumer's point of view and land in deletedByTable.
+            var appliedByTable: [String: [UUID]] = [:]
+            var deletedByTable: [String: [UUID]] = [:]
             for (id, record) in skewReady {
                 guard let syncedTable = manifest.table(named: record.table) else { continue }
                 guard syncedTable.direction != .pushOnly else { continue }
                 do {
-                    try await applyInbound(record.asDecodedRecord(), syncedTable: syncedTable, storage: storage)
+                    let decoded = record.asDecodedRecord()
+                    try await applyInbound(decoded, syncedTable: syncedTable, storage: storage)
                     replayedIDs.append(id)
+                    if decoded.isTombstone {
+                        deletedByTable[decoded.table, default: []].append(decoded.rowKey)
+                    } else {
+                        appliedByTable[decoded.table, default: []].append(decoded.rowKey)
+                    }
                 } catch {
                     logger.warning("skew replay failed for \(record.table)/\(record.rowKey): \(String(describing: error))")
+                }
+            }
+            if !replayedIDs.isEmpty {
+                let batch = AppliedBatch(
+                    storage: storage,
+                    appliedByTable: appliedByTable,
+                    deletedByTable: deletedByTable
+                )
+                // The integrity hook stays non-fatal here as on the pull path.
+                // enable() has no SyncReceipt to carry the conflict count, so
+                // a hook failure is surfaced through the log instead.
+                if await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch) > 0 {
+                    logger.warning("skew-queue replay: post-apply integrity hook failed for \(replayedIDs.count) replayed record(s)")
+                }
+                // Must-succeed boundary. A throw leaves every queue entry in
+                // place and fails enable() closed: the rows are already applied
+                // (idempotently) and are offered to the barrier again on the
+                // next enable(), matching the pull path's uncommitted-cursor
+                // contract.
+                do {
+                    try await manifest.postApplyCommitBarrier?(batch)
+                } catch {
+                    logger.error("skew-queue replay: commit barrier refused \(replayedIDs.count) replayed record(s); queue entries retained: \(String(describing: error))")
+                    throw error
                 }
             }
             try await SkewReplay.deleteApplied(

@@ -4,7 +4,8 @@ import Foundation
 ///
 /// Fires the dream-time adornment-minting pass on each hourly tick and
 /// surfaces the adorned-pair count as a diagnostic.
-/// `AdornmentPass.run(estate:batchSize:generatorResolver:now:)` fetches
+/// `AdornmentPass.run(estate:batchSize:...now:)` (see its declaration
+/// for the resolver and width parameters) fetches
 /// up to `batchSize` `(live Drawer, active minter)` pairs without an
 /// adornment row, invokes the generator for each pair, and writes
 /// `StoredAdornment(drawerID, minterID, text)` via LocusKit's normalized

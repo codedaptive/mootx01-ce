@@ -5,6 +5,18 @@
 //! throw `JSONRPCError`; recipe-level refusals come back as `error_result` (isError
 //! true) so the client keeps the call id.
 //!
+//! # Dark mint tools — launch-time gate
+//!
+//! `moot_register_adornment_minter` and `moot_run_adornment_pass` are the
+//! benchmark mint driver's harness-only tools: never in `tools/list`, and
+//! dispatched ONLY when the serving process was launched with
+//! `MOOTX01_MINT_TOOLS=1` (`mint_tools_enabled`, read once per process).
+//! Without the variable both names are unknown tools: `is_recipe_tool`
+//! returns false and `dispatch_with` returns the same METHOD_NOT_FOUND
+//! "Unknown tool" error as any unregistered name. `moot_run_adornment_pass`
+//! also clamps `batch_size` to `ADORNMENT_PASS_MAX_BATCH_SIZE`. Same
+//! behavior in the Swift twin.
+//!
 //! # moot_dream
 //!
 //! On-demand dream tool: runs one dreaming cycle (latent-alignment proposals +
@@ -457,9 +469,46 @@ const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 /// Stage 1 is insufficient.
 const RECALL_WALK: &str = "moot_recall_walk";
 // Dark harness-only mint tools (MINTCLI-78 twins). Never listed in
-// tools/list; the benchmark mint driver calls them by name.
+// tools/list; the benchmark mint driver calls them by name. Dispatched
+// ONLY when the serving process was launched with MOOTX01_MINT_TOOLS=1
+// (see `mint_tools_enabled`) — omission from tools/list is not
+// authorization.
 const REGISTER_ADORNMENT_MINTER: &str = "moot_register_adornment_minter";
 const RUN_ADORNMENT_PASS: &str = "moot_run_adornment_pass";
+
+/// Launch-time environment variable that enables the two dark mint tools.
+/// Byte-identical to Swift `RecipeTools.mintToolsEnvironmentVariable`.
+pub const MINT_TOOLS_ENV_VAR: &str = "MOOTX01_MINT_TOOLS";
+
+/// Gate decision from one environment lookup: exactly the literal `"1"`
+/// enables; absent, empty, `"0"`, `"true"`, or anything else leaves the
+/// dark tools off. Takes the looked-up value as a parameter so tests can
+/// pin the decision without touching the process environment. Twin of
+/// Swift `RecipeTools.mintToolsEnabled(environment:)`.
+pub fn mint_tools_enabled_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Process-wide dark-mint-tool gate: `MOOTX01_MINT_TOOLS=1` at launch.
+///
+/// Read ONCE per process (`OnceLock`) — the gate is a launch-time
+/// decision, never a per-call environment probe, so a serve cannot be
+/// flipped open after start. The benchmark mint driver sets the variable
+/// on the serve command it launches for auditions; a product serve never
+/// sets it, so a client that knows the dark names gets the same
+/// unknown-tool error it would get for any unregistered name.
+pub fn mint_tools_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        mint_tools_enabled_from(std::env::var(MINT_TOOLS_ENV_VAR).ok().as_deref())
+    })
+}
+
+/// True when `name` is one of the two dark mint tools.
+pub fn is_dark_mint_tool(name: &str) -> bool {
+    matches!(name, REGISTER_ADORNMENT_MINTER | RUN_ADORNMENT_PASS)
+}
 
 /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
 ///
@@ -496,7 +545,22 @@ const RECOLLECT_REMOVED_NOTICE: &str = concat!(
 /// True when `name` is one of the recipe tools (including dispatch-only stubs).
 /// `RECOLLECT` is in this set as a notice-only stub: it must reach dispatch so
 /// callers receive the removal notice; it is NOT listed in tools/list.
+///
+/// The two dark mint tools are in this set ONLY when the process-wide
+/// `mint_tools_enabled` gate is on; otherwise they are unknown names and
+/// `dispatch_tool` returns its standard unknown-tool error for them.
 pub fn is_recipe_tool(name: &str) -> bool {
+    is_recipe_tool_with(name, mint_tools_enabled())
+}
+
+/// `is_recipe_tool` with the dark-mint-tool gate supplied by the caller.
+/// Production routes through `is_recipe_tool` (process gate); tests pass
+/// the gate explicitly so both arms are pinned without environment
+/// mutation.
+pub fn is_recipe_tool_with(name: &str, mint_tools_enabled: bool) -> bool {
+    if is_dark_mint_tool(name) {
+        return mint_tools_enabled;
+    }
     matches!(
         name,
         LIST_LENSES
@@ -515,8 +579,6 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RECOLLECT
             | HUNT_CONTRADICTIONS
             | RECALL_WALK
-            | REGISTER_ADORNMENT_MINTER
-            | RUN_ADORNMENT_PASS
     )
 }
 
@@ -526,6 +588,31 @@ pub fn dispatch(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    dispatch_with(name, args, registry, mint_tools_enabled())
+}
+
+/// `dispatch` with the dark-mint-tool gate supplied by the caller. Production
+/// routes through `dispatch` (process gate); tests pass the gate explicitly.
+pub fn dispatch_with(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    mint_tools_enabled: bool,
+) -> Result<serde_json::Value, JSONRPCError> {
+    // Dark mint tools: launch-time gate (MOOTX01_MINT_TOOLS=1). Hiding a
+    // tool from tools/list is not authorization — a raw client can call
+    // any name — so the gate is enforced HERE as well as in
+    // `is_recipe_tool`, and a gated call gets the byte-identical
+    // unknown-tool error `dispatch_tool` returns for any unregistered
+    // name, so the names stay undiscoverable. The benchmark mint driver
+    // sets the variable on the serve it launches (MintCLI serve command).
+    if is_dark_mint_tool(name) && !mint_tools_enabled {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::METHOD_NOT_FOUND,
+            format!("Unknown tool: {name}"),
+        ));
+    }
+
     // ACK gates and notice-only stubs — fire before any registry/estate access.
     // Mirrors the guard block in Swift RecipeTools.dispatch() that precedes
     // the resolveHandle() call, ensuring zero side effects on missing/wrong ack.
@@ -2761,6 +2848,9 @@ fn error_from_recipe(e: cognition_kit::RecipeRunError) -> JSONRPCError {
 /// following adornment pass sees one active minter (GENIUSLOCUSKIT_SPEC
 /// §16.1 — composition observes the complete old or new set, never a
 /// partial intermediate). Twin of the Swift dark tool: same eight fields.
+/// Reachable only behind the `MOOTX01_MINT_TOOLS=1` launch gate
+/// (`dispatch_with`): every fresh minter id re-creates debt for every live
+/// drawer, so registration is harness-only by construction.
 fn run_register_adornment_minter_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
@@ -2824,6 +2914,9 @@ fn run_register_adornment_minter_tool(
 /// registered active minter. Twin of the Swift dark tool — same four
 /// arguments and the SAME plain-text result shape (the benchmark mint
 /// driver parses the adorned/rejected/skipped counts from this text).
+/// Reachable only behind the `MOOTX01_MINT_TOOLS=1` launch gate
+/// (`dispatch_with`); `batch_size` is clamped to
+/// `ADORNMENT_PASS_MAX_BATCH_SIZE`.
 ///
 /// `now` is accepted for wire parity with the Swift tool but unused: the
 /// Rust pass writes no timestamps itself (row timestamps are the store's
@@ -2858,8 +2951,15 @@ fn run_adornment_pass_tool(
     }
     let estate = registry.resolve_direct(args)?;
     let _now = args.get("now"); // wire parity only — see doc comment.
+    // batch_size is clamped to ADORNMENT_PASS_MAX_BATCH_SIZE (clamped, not
+    // rejected: the mint driver passes large counts and pages by repeated
+    // calls). The pass entry point clamps again so no other caller can
+    // exceed the ceiling; this clamp keeps the tool's own contract explicit.
+    // `try_from` guards the i64→usize narrowing on 32-bit targets.
     let batch_size = match count_arg(args, "batch_size")? {
-        Some(n) if n > 0 => n as usize,
+        Some(n) if n > 0 => genius_locus_kit::brain::adornment_pass::clamped_batch_size(
+            usize::try_from(n).unwrap_or(usize::MAX),
+        ),
         Some(_) | None => genius_locus_kit::brain::adornment_pass::DEFAULT_BATCH_SIZE,
     };
     let max_len = match count_arg(args, "adornment_max_length")? {

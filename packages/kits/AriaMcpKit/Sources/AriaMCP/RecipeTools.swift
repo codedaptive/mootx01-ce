@@ -120,12 +120,18 @@ enum RecipeTools {
     ///
     /// Never listed in tools/list so AI clients cannot discover or call it.
     /// The benchmark mint subcommand invokes it by name through the MCP dispatch
-    /// router (`isRecipeTool` returns true so it routes here). Drives
+    /// router (`isRecipeTool` returns true so it routes here) — only when the
+    /// serving process was launched with `MOOTX01_MINT_TOOLS=1`
+    /// (`processMintToolsEnabled`). `batch_size` is clamped to
+    /// `ADORNMENT_PASS_MAX_BATCH_SIZE`. Drives
     /// `GeniusLocusKit.runAdornmentPass(handle:batchSize:maxAdornmentLength:now:)`.
     static let runAdornmentPassToolName = "moot_run_adornment_pass"
     /// Minter registration + activation: dark harness-only tool (MINTCLI-78).
     ///
-    /// Never listed in tools/list. The benchmark mint subcommand calls it once
+    /// Never listed in tools/list; dispatched only behind the
+    /// `MOOTX01_MINT_TOOLS=1` launch gate (every fresh minter id re-creates
+    /// debt for every live drawer, so registration is harness-only by
+    /// construction). The benchmark mint subcommand calls it once
     /// per restored estate, before the adornment-pass loop: registers the full
     /// minter descriptor (immutable-configuration contract, LOCUSKIT_SPEC
     /// § ADORNMENT_STORE) and atomically replaces the active set with exactly
@@ -133,12 +139,52 @@ enum RecipeTools {
     /// then `GeniusLocusKit.setActiveAdornmentMinters(in:minterIDs:)`.
     static let registerAdornmentMinterToolName = "moot_register_adornment_minter"
 
+    // MARK: - Dark mint tools — launch-time gate
+
+    /// Launch-time environment variable that enables the two dark mint tools.
+    /// Byte-identical to Rust `MINT_TOOLS_ENV_VAR`.
+    static let mintToolsEnvironmentVariable = "MOOTX01_MINT_TOOLS"
+
+    /// Gate decision for a given environment: exactly the literal `"1"`
+    /// enables; absent, empty, `"0"`, `"true"`, or anything else leaves the
+    /// dark tools off. Takes an explicit environment dictionary so the logic
+    /// is testable without mutating `ProcessInfo.processInfo.environment`.
+    /// Twin of Rust `mint_tools_enabled_from`.
+    static func mintToolsEnabled(environment: [String: String]) -> Bool {
+        environment[mintToolsEnvironmentVariable] == "1"
+    }
+
+    /// Process-wide dark-mint-tool gate: `MOOTX01_MINT_TOOLS=1` at launch.
+    ///
+    /// A `static let` is initialized once, on first access — the gate is a
+    /// launch-time decision, never a per-call environment probe, so a serve
+    /// cannot be flipped open after start. The benchmark mint driver sets the
+    /// variable on the serve command it launches for auditions (MintCLI); a
+    /// product serve never sets it, so a client that knows the dark names
+    /// gets the same unknown-tool error it would get for any unregistered
+    /// name. Twin of Rust `mint_tools_enabled`.
+    static let processMintToolsEnabled: Bool =
+        mintToolsEnabled(environment: ProcessInfo.processInfo.environment)
+
+    /// True when `name` is one of the two dark mint tools.
+    static func isDarkMintTool(_ name: String) -> Bool {
+        name == runAdornmentPassToolName || name == registerAdornmentMinterToolName
+    }
+
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     ///
     /// Includes `moot_recollect` (notice-only stub — never executes) and the
-    /// listed recipe tools.
-    static func isRecipeTool(_ name: String) -> Bool {
-        name == listRecipesToolName
+    /// listed recipe tools. The two dark mint tools are in this set ONLY when
+    /// `mintToolsEnabled` is true (default: the process-wide launch gate);
+    /// otherwise they are unknown names and `ToolDispatcher` throws its
+    /// standard unknown-tool error for them. Tests pass the gate explicitly
+    /// so both arms are pinned without environment mutation.
+    static func isRecipeTool(
+        _ name: String,
+        mintToolsEnabled: Bool = processMintToolsEnabled
+    ) -> Bool {
+        if isDarkMintTool(name) { return mintToolsEnabled }
+        return name == listRecipesToolName
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
             || name == preciseRecallToolName
@@ -154,8 +200,6 @@ enum RecipeTools {
             || name == recollectToolName
             || name == huntContradictionsToolName
             || name == walkRecallToolName
-            || name == runAdornmentPassToolName
-            || name == registerAdornmentMinterToolName
     }
 
     // MARK: - tools/list projection
@@ -609,13 +653,31 @@ enum RecipeTools {
     /// tools. Out-of-band faults throw `JSONRPCError`; recipe-level
     /// refusals come back as `errorResult` (isError == true) so the client
     /// keeps the call id, matching the lexicon-tool discipline.
+    ///
+    /// `mintToolsEnabled` is the dark-mint-tool launch gate; production
+    /// callers take the default (the process-wide `MOOTX01_MINT_TOOLS=1`
+    /// read), tests pass it explicitly.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         defaultHandle: EstateHandle,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle
+        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
+        mintToolsEnabled: Bool = processMintToolsEnabled
     ) async throws -> JSONValue {
+        // Dark mint tools: launch-time gate (MOOTX01_MINT_TOOLS=1). Hiding a
+        // tool from tools/list is not authorization — a raw client can call
+        // any name — so the gate is enforced HERE as well as in
+        // `isRecipeTool`, and a gated call throws the byte-identical
+        // unknown-tool error `ToolDispatcher` throws for any unregistered
+        // name, so the names stay undiscoverable. The benchmark mint driver
+        // sets the variable on the serve it launches (MintCLI serve command).
+        if isDarkMintTool(name) && !mintToolsEnabled {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "Unknown tool: \(name)")
+        }
+
         // Recipe discovery needs no estate; answer before resolving a handle
         // so discovery tools work even with no estate targeted.
         if name == listRecipesToolName {
@@ -2640,11 +2702,13 @@ enum RecipeTools {
     /// Descriptor for moot_run_adornment_pass — dark tool, never added to tools().
     ///
     /// The tool is excluded from tools/list so AI clients never discover or call
-    /// it spontaneously. The benchmark mint subcommand invokes it by name through
+    /// it spontaneously, and it dispatches only behind the `MOOTX01_MINT_TOOLS=1`
+    /// launch gate. The benchmark mint subcommand invokes it by name through
     /// the MCP dispatch router (isRecipeTool returns true so it routes here).
     ///
     /// The `batch_size` argument bounds wall-clock per call (default
-    /// `AdornmentPass.defaultBatchSize`). The `adornment_max_length` argument
+    /// `AdornmentPass.defaultBatchSize`, clamped to
+    /// `ADORNMENT_PASS_MAX_BATCH_SIZE`). The `adornment_max_length` argument
     /// is a harness-only audition override for the length gate; absent means
     /// nil is forwarded to the GLK entry point, which resolves the product
     /// default (`ADORNMENT_MAX_LENGTH` from AdornmentLib, currently 280) at
@@ -2659,13 +2723,15 @@ enum RecipeTools {
             description: "Dark harness-only tool: execute one adornment pass "
                 + "using MOOT_MINT_CMD from the environment against every registered "
                 + "active minter. Returns adornedPairs/failedPairs/skippedPairs counts. "
-                + "Never listed in tools/list.",
+                + "Never listed in tools/list; dispatched only when the serve was "
+                + "launched with MOOTX01_MINT_TOOLS=1.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("ISO8601 instant for deterministic drawer "
                         + "timestamps. Omit to use the current wall clock."),
                     "batch_size": stringSchema("Maximum (drawer, minter) pairs to process "
-                        + "in one pass (default \(AdornmentPass.defaultBatchSize)). Bounds "
+                        + "in one pass (default \(AdornmentPass.defaultBatchSize), "
+                        + "clamped to \(ADORNMENT_PASS_MAX_BATCH_SIZE)). Bounds "
                         + "wall-clock per call."),
                     "adornment_max_length": stringSchema("Harness-only: character-count "
                         + "ceiling for accepted adornment text. Overrides the product "
@@ -2706,12 +2772,16 @@ enum RecipeTools {
         }
 
         // batch_size: optional positive integer; absent → pass default.
+        // Clamped to ADORNMENT_PASS_MAX_BATCH_SIZE (clamped, not rejected: the
+        // mint driver passes large counts and pages by repeated calls). The
+        // pass entry point clamps again so no other caller can exceed the
+        // ceiling; this clamp keeps the tool's own contract explicit.
         let batchSize: Int
         if let raw = try optionalString(args["batch_size"], argument: "batch_size"),
            let n = Int(raw), n > 0 {
-            batchSize = n
+            batchSize = AdornmentPass.clampedBatchSize(n)
         } else if let raw = args["batch_size"], case .integer(let n) = raw, n > 0 {
-            batchSize = Int(n)
+            batchSize = AdornmentPass.clampedBatchSize(Int(n))
         } else {
             batchSize = AdornmentPass.defaultBatchSize
         }
