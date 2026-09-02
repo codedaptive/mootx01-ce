@@ -140,14 +140,14 @@ struct DistillationDrainStageTests {
         let row = try #require(try await estate.getDrawers(ids: [drawer.id]).first)
         #expect(row.distilled != nil,
                 "post-drain the representation columns must be populated (§7.1)")
-        #expect(row.distilledPipelineVersion == DistillationPipelineVersion.current)
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
         #expect(row.distilledTokenCount != nil)
         #expect(row.distilledAt != nil)
         // The rendering carries no inline metadata (§5.2).
         #expect(!(row.distilled ?? "").hasPrefix("[DIST|"))
     }
 
-    @Test("drain-stage uses the registered distillFn override when present")
+    @Test("drain-stage stores the converter's representation; the registered distillFn override feeds only the fingerprint lane")
     func drainStageUsesRegisteredOverride() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         await kit.registerDistillationFunction({ _ in
@@ -158,17 +158,19 @@ struct DistillationDrainStageTests {
                 featureFingerprint: DistillationPipeline.featureHash("stub"))
         }, for: handle)
 
-        let drawer = try await kit.capture(
-            handle,
-            captureFrame("Alpha statement holds. Beta statement holds. Gamma statement holds."),
-            mode: .regular)
+        let content = "Alpha statement holds. Beta statement holds. Gamma statement holds."
+        let drawer = try await kit.capture(handle, captureFrame(content), mode: .regular)
         try await kit.awaitEncodeDrain(for: handle, timeout: .seconds(30))
 
         let estate = try await kit.estate(for: handle)
         let row = try #require(try await estate.getDrawers(ids: [drawer.id]).first)
-        // p2 welds the categorizer trailer AFTER the injected rendering —
-        // the override governs the compaction half only.
-        #expect(row.distilled?.hasPrefix("STUB RENDERING") == true)
+        // The stored text is always the converter's representation of the
+        // content; the override's rendering never reaches the row (its
+        // fingerprint governs the distillation lane, covered by
+        // DistillationCycleTests).
+        #expect(row.distilled == GeniusLocusKit.distilledRepresentation(forContent: content))
+        #expect(row.distilled?.contains("STUB RENDERING") == false)
+        #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
     }
 
     // MARK: - §9/§13.3 geometry probe

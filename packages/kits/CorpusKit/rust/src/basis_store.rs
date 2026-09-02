@@ -81,7 +81,7 @@
 use crate::error::{CorpusKitError, CorpusKitResult};
 use persistence_kit::{
     Column, ColumnDeclaration, IsolationLevel, Migration, OrderClause, RowStore,
-    SchemaDeclaration, SchemaOperation, StorageError, StoragePredicate, StorageRow,
+    SchemaDeclaration, SchemaOperation, StorageError, StoragePredicate,
     TableDeclaration, TypedValue,
 };
 use std::collections::BTreeMap;

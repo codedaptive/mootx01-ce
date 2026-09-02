@@ -1600,7 +1600,7 @@ fn run_memory_get(
         }
     }
 
-    let mut lines = memory_get_full_record_lines(&mut coord, &estate.handle, &drawer)?;
+    let lines = memory_get_full_record_lines(&mut coord, &estate.handle, &drawer)?;
 
     // Structured twin (MXE-SS) of the single-id full record. The node tree
     // is consulted a second time here (memory_get_full_record_lines resolves
