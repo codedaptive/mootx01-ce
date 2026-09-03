@@ -59,14 +59,14 @@ public enum CorpusOperatingMode: Sendable, Equatable {
 /// is written.
 ///
 /// The `compositionPolicy` controls which texts each index lane consumes.
-/// See `IndexCompositionPolicy` for the named policies and the
-/// MOOT_INDEX_COMPOSITION environment variable selector (CDL-03).
+/// See `IndexCompositionPolicy` for the named policies. GeniusLocusKit
+/// passes the estate's stored setting here at every open.
 public struct CorpusContentConfiguration: Sendable, Equatable {
     public let mode: CorpusOperatingMode
     public let indexUnit: CorpusIndexUnitPolicy
     /// The named composition policy that controls which texts each index lane
-    /// consumes. Defaults to `.current` (original text for BM25, distillate
-    /// for dense) — matching today's production behaviour before CDL-03.
+    /// consumes and the id recorded on every index row. Defaults to
+    /// `.current` (original text for BM25, distillate for dense).
     public let compositionPolicy: IndexCompositionPolicy
 
     /// Validates the combination:
