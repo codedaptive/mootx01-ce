@@ -52,11 +52,12 @@ struct RecipeToolsTests {
             .sorted()
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 38 total: 15 recipe tools + 23 lens tools. moot_distill is the sole
-        // distillation-sweep name (its compatibility alias is gone — Phase 2 of
-        // SPEC_DISTILLATION_STORAGE §3) and moot_recollect retired with the
-        // factoid tier (§3/§11). moot_recall_connected joined 2026-08-06
-        // (graph-diffusion multi-hop recall). moot_recall_walk joined D10
+        // 39 total: 16 recipe tools + 23 lens tools. moot_distill is the sole
+        // incremental distillation-sweep name (its compatibility alias is gone —
+        // Phase 2 of SPEC_DISTILLATION_STORAGE §3); moot_redistill (CDL-02) is the
+        // force-redistill-all-items + laneScope .all reindex verb. moot_recollect
+        // retired with the factoid tier (§3/§11). moot_recall_connected joined
+        // 2026-08-06 (graph-diffusion multi-hop recall). moot_recall_walk joined D10
         // (escalation-ladder recall: cheap session_hybrid first, precise
         // hamming+text only when Stage 1 is not confident).
         #expect(recipeNames == [
@@ -96,6 +97,7 @@ struct RecipeToolsTests {
             "moot_recall_temporal",
             "moot_recall_vague",
             "moot_recall_walk",
+            "moot_redistill",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -1291,22 +1293,26 @@ struct RecipeToolsTests {
         #expect(RecipeTools.isRecipeTool("moot_recollect"))
         // D10: moot_recall_walk is a listed recipe tool (escalation-ladder recall).
         #expect(RecipeTools.isRecipeTool("moot_recall_walk"))
+        // CDL-02: moot_redistill force-redistills all items + full laneScope .all reindex.
+        #expect(RecipeTools.isRecipeTool("moot_redistill"))
     }
 
     // MARK: - tools() count
 
     @Test func testRecipeToolsCount() {
-        // 15 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // 16 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
         // preciseRecall, temporalRecall, connectedRecall, shapedRecall,
         // vagueRecall, runMigration, confirmMigration, dream, distill,
-        // recallDistilled, huntContradictions, walkRecall (D10).
-        #expect(RecipeTools.tools().count == 15)
+        // redistill (CDL-02), recallDistilled, huntContradictions, walkRecall (D10).
+        #expect(RecipeTools.tools().count == 16)
         let names = RecipeTools.tools().map(\.name)
         #expect(names.contains("moot_distill"))
         #expect(!names.contains("moot_consolidate"))
         #expect(!names.contains("moot_recollect"))
         // D10: moot_recall_walk is in the listed tools set.
         #expect(names.contains("moot_recall_walk"))
+        // CDL-02: moot_redistill is in the listed tools set.
+        #expect(names.contains("moot_redistill"))
     }
 
     // MARK: - moot_distill dispatch
@@ -1328,6 +1334,32 @@ struct RecipeToolsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.contains("moot_distill: sweep complete"))
         #expect(text.contains("itemsDistilled: 0"))
+    }
+
+    // MARK: - moot_redistill dispatch
+
+    @Test func testRedistillDispatchRoutesToRunRedistill() async throws {
+        // CDL-02: moot_redistill dispatches to runRedistill, which calls the
+        // Redistill recipe (redistillItemsSweep + reindexCorpus laneScope .all).
+        // Empty estate: 0 items redistilled; reindex is a no-op on an estate
+        // with no Corpus registered (the in-memory estate opened here has no
+        // CorpusKit — laneScope .all reindex silently returns for LocusOnly estates).
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "redistill-dispatch"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_redistill",
+            arguments: .object([:]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("moot_redistill: sweep complete"))
+        #expect(text.contains("itemsRedistilled: 0"))
+        #expect(text.contains("reindexed: both lanes"))
     }
 
     @Test func testConsolidateNameIsUnknownTool() async throws {

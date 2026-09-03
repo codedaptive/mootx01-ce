@@ -194,6 +194,7 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // moot_recall_distilled: exact-search geometry + distilled hydration (§10.3).
     // (moot_recollect retired with the factoid tier, §11.)
     tools.push(distill_tool());
+    tools.push(redistill_tool());
     tools.push(recall_distilled_tool());
     tools.push(recall_vague_tool());
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
@@ -1088,6 +1089,19 @@ fn distill_tool() -> serde_json::Value {
             }),
             json!([])
         )))
+    })
+}
+
+/// Force-redistill tool — mirrors Swift `RecipeTools.redistillTool()`.
+/// Overwrites every active non-empty drawer's distilled representation
+/// unconditionally, then rebuilds both recall lanes; no required arguments
+/// because the sweep is always estate-wide. Description byte-identical to
+/// the Swift descriptor.
+fn redistill_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_redistill",
+        "description": "Force-redistill all active items in the estate: overwrite every active non-empty item's distilled representation unconditionally (ignores the hasCurrentRepresentation flag), then rebuild both recall indexes (BM25 + dense) so trailer tokens from the distillates are admitted to the BM25 posting lists. Use after a pipeline upgrade or when BM25 scores are suspected stale. Idempotent but slow on large estates — prefer moot_distill for incremental maintenance.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     })
 }
 

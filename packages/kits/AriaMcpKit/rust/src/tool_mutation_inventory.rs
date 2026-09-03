@@ -74,18 +74,11 @@ mod tests {
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .map(String::from)
             .collect();
-        // `moot_redistill` is dispatchable here (recipe_tools) and listed in
-        // the installer tier tables of both ports, but neither port's tool
-        // list advertises it today (the Swift recipe and tool never reached
-        // develop; the Rust list was never extended). A frozen dispatcher
-        // must still refuse a callable mutating tool, so the inventory keeps
-        // the name and this test tolerates exactly that one absence.
-        let known_unadvertised = ["moot_redistill"];
         let stale: Vec<&&str> = ADDITIVE_WRITE_TOOLS
             .iter()
             .chain(MUTATION_TOOLS.iter())
             .chain(DESTRUCTIVE_TOOLS.iter())
-            .filter(|t| !real.contains(**t) && !known_unadvertised.contains(*t))
+            .filter(|t| !real.contains(**t))
             .collect();
         assert!(stale.is_empty(), "inventory names tool(s) not in the projection: {stale:?}");
     }
