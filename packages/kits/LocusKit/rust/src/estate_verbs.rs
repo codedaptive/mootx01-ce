@@ -1507,6 +1507,16 @@ impl Estate {
         self.store.count_undistilled(pipeline_version)
     }
 
+    /// Active, non-empty drawers that carry a distilled representation,
+    /// as `(id, distilled_at_millis)` pairs without hydrating content.
+    /// Estate-level pass-through over `DrawerStore::drawers_with_representations`
+    /// — the metadata projection GeniusLocusKit uses to detect the mid-run
+    /// crash scenario (sweep committed, reindex did not). Mirrors Swift
+    /// `Estate.drawersWithRepresentations`.
+    pub fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.store.drawers_with_representations()
+    }
+
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's
     /// `operational_bitmap`. Estate-level pass-through over
     /// `DrawerStore::set_anomalous_flag` — the write seam for

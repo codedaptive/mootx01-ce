@@ -3133,6 +3133,38 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            // Bit 19 (HAS_CURRENT_REPRESENTATION) set → all four distillation
+            // columns are populated (§4 invariant). Projects only id and
+            // distilled_at — no text column is materialized.
+            StoragePredicate::BitmaskAll {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
+            },
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["id", "distilled_at"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let id = string_value_of(r.get("id"));
+                if id.is_empty() {
+                    return None;
+                }
+                let ts = opt_int_value_of(r.get("distilled_at"))?;
+                Some((id, ts))
+            })
+            .collect())
+    }
+
     fn set_subject_representation(
         &self,
         drawer_id: &str,
@@ -6359,6 +6391,9 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_undistilled(pipeline_version)
+    }
+    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.inner.drawers_with_representations()
     }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.inner.set_anomalous_flag(drawer_id, anomalous)

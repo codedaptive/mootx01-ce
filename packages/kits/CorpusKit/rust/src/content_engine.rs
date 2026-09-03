@@ -775,6 +775,19 @@ impl CorpusContentEngine {
             .collect())
     }
 
+    /// All non-cursor index-state rows for this corpus engine.
+    ///
+    /// GeniusLocusKit calls this to compare each drawer's `distilled_at` instant
+    /// against the corresponding index row's `updated_at_millis`, detecting the
+    /// mid-run crash scenario where the distillation sweep committed but the
+    /// reindex did not. The feed-cursor sentinel row is excluded. Mirrors Swift
+    /// `CorpusContentEngine.allIndexStates`.
+    pub fn all_index_states(
+        &self,
+    ) -> CorpusKitResult<Vec<crate::index_state_store::CorpusIndexState>> {
+        self.index_state_all_states()
+    }
+
     /// Destroy this engine's recall index — OWNERSHIP-SCOPED: exact-key
     /// vector deletes (checkpointed IDs × slots × lanes), wholesale clears
     /// only on corpus-exclusive tables, claim release for the "corpus"

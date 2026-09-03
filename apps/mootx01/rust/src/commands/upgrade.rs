@@ -494,15 +494,25 @@ fn run_adornment_store_migration() -> bool {
 /// migration-host seam. Encryption is handled automatically:
 /// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
-/// CDL-02: bring every drawer's stored distilled representation up to the
-/// current converter (`genius_locus_kit::distillation_converter_id()`). Rows
-/// whose stored converter ID differs — every row written under the p2.3
-/// pipeline on an estate that predates ContextDistillLib — are regenerated
-/// through the standard eligibility sweep, then every derived corpus lane
-/// (BM25 and dense) is rebuilt once, because the lexical lane admits trailer
-/// tokens scanned from the distilled text and the dense lane embeds it.
-/// Nothing is re-ingested, re-mined, or re-dreamed. Idempotent: a converged
-/// estate regenerates zero rows and skips the reindex. Twin of Swift
+///
+/// Bring every drawer's stored distilled representation up to the current
+/// converter (`genius_locus_kit::distillation_converter_id()`). Rows whose
+/// stored converter ID differs — every row written under the p2.3 pipeline on
+/// an estate that predates ContextDistillLib — are regenerated through the
+/// standard eligibility sweep, then every derived corpus lane (BM25 and dense)
+/// is rebuilt once, because the lexical lane admits trailer tokens scanned from
+/// the distilled text and the dense lane embeds it. Nothing is re-ingested,
+/// re-mined, or re-dreamed.
+///
+/// Two-key eligibility: reindex runs when EITHER the sweep regenerated at least
+/// one row, OR at least one drawer's `distilled_at` millis is strictly newer
+/// than its corpus index row's `updated_at_millis`. The second key detects the
+/// mid-run crash scenario — sweep committed, reindex did not — which would
+/// otherwise leave the derived lanes built from the old text. Equal timestamps
+/// (sweep and reindex ran under the same `now`) count as zero — fully indexed.
+///
+/// Idempotent: a fully converged estate regenerates zero rows, has no
+/// index-timestamp gap, and skips the reindex. Twin of Swift
 /// `UpgradeCommand.runDistilledRepresentationConvergence`.
 /// Returns `true` on success or when there is nothing to converge, `false` on failure.
 fn run_distilled_representation_convergence() -> bool {
@@ -520,7 +530,7 @@ fn run_distilled_representation_convergence() -> bool {
         );
         return false;
     }
-    let result = (|| -> Result<usize, String> {
+    let result = (|| -> Result<(usize, usize), String> {
         let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
             &estate.display().to_string(),
             "aria-mcp-default",
@@ -537,20 +547,33 @@ fn run_distilled_representation_convergence() -> bool {
         let regenerated = coord
             .distill_items_sweep(&handle, now_ms, None)
             .map_err(|e| format!("{e:?}"))?;
-        if regenerated > 0 {
+        // Second eligibility key: drawers whose representation postdates their
+        // corpus index row. A non-zero count signals the mid-run crash scenario
+        // (sweep committed, reindex did not). Equal timestamps (sweep and
+        // reindex ran under the same `now`) evaluate to zero — fully indexed.
+        let awaiting = coord
+            .distilled_representations_awaiting_reindex(&handle)
+            .map_err(|e| format!("{e:?}"))?;
+        if regenerated > 0 || awaiting > 0 {
             coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
         }
-        Ok(regenerated)
+        Ok((regenerated, awaiting))
     })();
     let ok = match result {
-        Ok(0) => {
+        Ok((0, 0)) => {
             println!(
                 "  ✓ distilled representations: already at converter {}",
                 genius_locus_kit::distillation_converter_id()
             );
             true
         }
-        Ok(n) => {
+        Ok((0, awaiting)) => {
+            println!(
+                "  ✓ distilled representation convergence: index gap detected ({awaiting} row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)"
+            );
+            true
+        }
+        Ok((n, _)) => {
             println!(
                 "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
                 genius_locus_kit::distillation_converter_id()

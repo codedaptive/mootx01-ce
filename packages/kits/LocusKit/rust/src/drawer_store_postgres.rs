@@ -398,6 +398,9 @@ impl DrawerStore for PostgresDrawerStore {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)
     }
+    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.0.drawers_with_representations()
+    }
     fn list_adornment_minters(
         &self,
     ) -> Result<Vec<adornment_lib::AdornmentMinterDescriptor>, LocusKitError> {

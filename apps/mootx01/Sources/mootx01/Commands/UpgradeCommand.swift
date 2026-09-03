@@ -504,8 +504,16 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// the standard eligibility sweep, then every derived corpus lane (BM25 and
     /// dense) is rebuilt once, because the lexical lane admits trailer tokens
     /// scanned from the distilled text and the dense lane embeds it. Nothing
-    /// is re-ingested, re-mined, or re-dreamed. Idempotent: a converged estate
-    /// regenerates zero rows and skips the reindex.
+    /// is re-ingested, re-mined, or re-dreamed.
+    ///
+    /// Two-key eligibility: reindex runs when EITHER the sweep regenerated at
+    /// least one row, OR at least one drawer's `distilledAt` timestamp is
+    /// strictly newer than its corpus index row's `updatedAt`. The second key
+    /// detects the mid-run crash scenario — sweep committed, reindex did not —
+    /// which would otherwise leave the derived lanes built from the old text.
+    ///
+    /// Idempotent: a fully converged estate regenerates zero rows, has no
+    /// index-timestamp gap, and skips the reindex.
     /// Returns `true` on success or when there is nothing to converge, `false` on failure.
     @discardableResult
     private func runDistilledRepresentationConvergence(home: URL) async -> Bool {
@@ -544,13 +552,21 @@ struct UpgradeCommand: AsyncParsableCommand {
             let now = Date()
             let regenerated = try await kit.distillItemsSweep(
                 handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now)
-            if regenerated > 0 {
+            // Second eligibility key: drawers whose representation postdates
+            // their corpus index row. A non-zero count signals the mid-run
+            // crash scenario (sweep committed, reindex did not). Equal
+            // timestamps (sweep and reindex ran under the same `now`) evaluate
+            // to zero — fully indexed, no reindex needed.
+            let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+            if regenerated > 0 || awaiting > 0 {
                 try await kit.reindexCorpus(handle: handle, now: now)
             }
             try await kit.close(handle)
             await storage.close()
-            if regenerated == 0 {
+            if regenerated == 0 && awaiting == 0 {
                 print("  ✓ distilled representations: already at converter \(GeniusLocusKit.distillationConverterID)")
+            } else if regenerated == 0 {
+                print("  ✓ distilled representation convergence: index gap detected (\(awaiting) row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)")
             } else {
                 print("  ✓ distilled representation convergence: \(regenerated) row(s) regenerated at converter \(GeniusLocusKit.distillationConverterID); derived lanes reindexed (BM25 + dense)")
             }
