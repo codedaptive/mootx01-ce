@@ -296,6 +296,20 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Force-redistill every active item, then a full derived-lane reindex
+        // (`run_redistill` in redistill.rs; MCP surface `moot_redistill`).
+        RecipeDescriptor {
+            name: "redistill".into(),
+            version: "1.0.0".into(),
+            description:
+                "Force-redistill all active items in the estate and rebuild both recall \
+                indexes (BM25 + dense) from the updated distillates. Unlike moot_distill, \
+                this verb ignores the hasCurrentRepresentation flag and overwrites every \
+                active non-empty item unconditionally, then triggers a full laneScope .all \
+                reindex so BM25 can admit trailer tokens from the distilled text."
+                    .into(),
+            required_capabilities: vec![],
+        },
         // Escalation-ladder recall recipe (D10): runs cheap-first stages and
         // stops at the first confident result. Stage 1 = session_hybrid preset,
         // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.
@@ -333,17 +347,17 @@ mod tests {
 
     #[test]
     fn catalog_lists_all_shipped_recipes() {
-        // All 30 catalog entries register in both versions
+        // All 31 catalog entries register in both versions
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
-        // plus 2 distillation recipes (distill, distilled_recall —
+        // plus 3 distillation recipes (distill, distilled_recall, redistill —
         // recollect retired with the factoid tier, SPEC §11)
         // plus the escalation-ladder recipe (walk_recall, D10)
-        // = 30 total.
+        // = 31 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -373,6 +387,7 @@ mod tests {
                 "partial_cue_recall",
                 "precedence",
                 "recall_exploratory",
+                "redistill",
                 "rhythm",
                 "shaped_recall",
                 "theme_weather",
