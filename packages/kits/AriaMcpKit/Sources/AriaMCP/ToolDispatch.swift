@@ -101,6 +101,12 @@ public struct ToolDispatcher: Sendable {
     /// `MonitoringControl` requires `Sendable`.
     let monitoringControl: (any MonitoringControl)?
 
+    /// Host-owned projection of adornment-miner state. Nil means this host did
+    /// not compose an operational status source; it does not mean disabled.
+    /// Product hosts inject a typed snapshot without making AriaMCP depend on
+    /// AdornmentLib or a specific model runtime.
+    let adornmentStatusProvider: AdornmentOperationalStatusProvider?
+
     /// The build serial for this running executable, surfaced by
     /// `moot_estate_ping` so drivers can confirm they are talking to the
     /// most recently compiled build.
@@ -202,6 +208,7 @@ public struct ToolDispatcher: Sendable {
                 versionSkewAdvisory: String? = nil,
                 updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
                 monitoringControl: (any MonitoringControl)? = nil,
+                adornmentStatusProvider: AdornmentOperationalStatusProvider? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 modeSessionState: ModeSessionState = ModeSessionState()) {
         self.kit = kit
@@ -215,6 +222,7 @@ public struct ToolDispatcher: Sendable {
         self.versionSkewAdvisory = versionSkewAdvisory
         self.updateAdvisoryProvider = updateAdvisoryProvider
         self.monitoringControl = monitoringControl
+        self.adornmentStatusProvider = adornmentStatusProvider
         self.environment = environment
         // Bench clock reads MOOT_BENCH_EPOCH_NOW from the injected environment dict.
         // In production this is ProcessInfo.processInfo.environment; tests inject
@@ -238,6 +246,7 @@ public struct ToolDispatcher: Sendable {
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
                               sensitivityUnlockLedger: sensitivityUnlockLedger,
                               monitoringControl: monitoringControl,
+                              adornmentStatusProvider: adornmentStatusProvider,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory,
                               updateAdvisoryProvider: updateAdvisoryProvider,
@@ -256,6 +265,7 @@ public struct ToolDispatcher: Sendable {
                        jobRegistry: jobRegistry, recallLedger: recallLedger,
                        sensitivityUnlockLedger: sensitivityUnlockLedger,
                        monitoringControl: control,
+                       adornmentStatusProvider: adornmentStatusProvider,
                        buildSerial: buildSerial, serverIdentity: serverIdentity,
                        versionSkewAdvisory: versionSkewAdvisory,
                        updateAdvisoryProvider: updateAdvisoryProvider,
@@ -276,6 +286,7 @@ public struct ToolDispatcher: Sendable {
         recallLedger: SurfacedRecallLedger,
         sensitivityUnlockLedger: SensitivityGrantLedger,
         monitoringControl: (any MonitoringControl)?,
+        adornmentStatusProvider: AdornmentOperationalStatusProvider?,
         buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?,
         updateAdvisoryProvider: (@Sendable () async -> String?)?,
         environment: [String: String],
@@ -289,6 +300,7 @@ public struct ToolDispatcher: Sendable {
         self.recallLedger = recallLedger
         self.sensitivityUnlockLedger = sensitivityUnlockLedger
         self.monitoringControl = monitoringControl
+        self.adornmentStatusProvider = adornmentStatusProvider
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -3502,6 +3514,38 @@ extension ToolDispatcher {
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
         ]
+        if let adornmentStatusProvider {
+            let status = await adornmentStatusProvider()
+            let identity = status.identity.map(Self.singleLineStatusValue) ?? "none"
+            var line = "adornment_miner: \(status.state.rawValue), identity: \(identity)"
+            if let pending = status.pendingPairs {
+                line += ", pending_pairs: \(pending)"
+            }
+            if let detail = status.detail {
+                line += ", detail: \(Self.singleLineStatusValue(detail))"
+            }
+            stats.append(line)
+
+            let lifecycle: [(String, String?)] = [
+                ("logical_requests", status.logicalRequests.map(String.init)),
+                ("request_attempts", status.requestAttempts.map(String.init)),
+                ("process_starts", status.processStarts.map(String.init)),
+                ("launch_failures", status.launchFailures.map(String.init)),
+                ("bounded_recycles", status.boundedRecycles.map(String.init)),
+                ("idle_reaps", status.idleReaps.map(String.init)),
+                ("unexpected_exits", status.unexpectedExits.map(String.init)),
+                ("crash_retries", status.crashRetries.map(String.init)),
+                ("per_prompt_failures", status.perPromptFailures.map(String.init)),
+                ("active_children", status.activeChildren.map(String.init)),
+                ("requests_in_active_children", status.requestsInActiveChildren.map(String.init)),
+            ]
+            let rendered = lifecycle.compactMap { key, value in
+                value.map { "\(key): \($0)" }
+            }
+            if !rendered.isEmpty {
+                stats.append("adornment_miner_lifecycle: " + rendered.joined(separator: ", "))
+            }
+        }
         // Shared-content migration/reclaim status (shared-content 1.1 P5):
         // appended only when a migration record exists — fresh estates that
         // never ran detection leave the response shape unchanged. Best-effort:
@@ -3546,6 +3590,14 @@ extension ToolDispatcher {
         let rebuildGuardBusy = await Self.reindexGuard.isBusy
         stats.append("rebuild: \(rebuildSpanOpen || rebuildGuardBusy ? "running" : "idle")")
         return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol + Self.modesStatusSection)
+    }
+
+    /// Keep host-provided status values on one line so an asset error cannot
+    /// forge an additional estate-status field.
+    private static func singleLineStatusValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     /// `moot_monitoring_status` — read or write the daemon's telemetry monitoring flag.
