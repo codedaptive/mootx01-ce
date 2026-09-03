@@ -394,11 +394,19 @@ public actor CorpusContentEngine {
     /// source. Applies the mode's profile declaration plus the VectorKit
     /// and claims schemas (all additive/idempotent). In attached mode NO
     /// canonical content table is created.
+    ///
+    /// `reindexPending`: the caller commits to rebuilding every index lane
+    /// (`reindex(now:)`) before the engine serves a query. The open-time
+    /// composition-policy check is skipped, because rows recorded under
+    /// another policy are exactly what that rebuild replaces. This is the
+    /// path `mootx01 db composition --set` takes after it rewrites the
+    /// estate's stored policy; every serving open leaves it `false`.
     public init(
         storage: any Storage,
         configuration: CorpusContentConfiguration,
         source: any CorpusContentSource,
-        models: [EmbeddingModel] = [.default]
+        models: [EmbeddingModel] = [.default],
+        reindexPending: Bool = false
     ) async throws {
         guard !models.isEmpty else {
             throw CorpusKitError.invalidConfiguration(
@@ -477,13 +485,17 @@ public actor CorpusContentEngine {
         // (no retrain yet). Updated after each trainTrainableSlots call.
         self.currentBasisGeneration = try await indexState.basisGeneration()
 
-        // CDL-03: Validate that any existing checkpoint rows agree with the
+        // Validate that any existing checkpoint rows agree with the
         // configured composition policy. An estate indexed under a different
         // policy has stale indexes for the configured policy and must be
         // reindexed before use. The mismatch check is O(rows) but only runs
         // once per estate open — acceptable for the safety guarantee.
         // Empty compositionPolicyID rows (pre-v3) are treated as .current.
-        if let recorded = try await indexState.mismatchedCompositionPolicy(
+        // Skipped when the caller has committed to a full reindex before
+        // serving (`reindexPending`): the disagreeing rows are the ones that
+        // rebuild replaces.
+        if !reindexPending,
+           let recorded = try await indexState.mismatchedCompositionPolicy(
             configuredPolicyID: configuration.compositionPolicy.id)
         {
             throw CorpusKitError.compositionPolicyMismatch(
