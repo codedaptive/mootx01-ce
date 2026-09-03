@@ -8,6 +8,10 @@
 @_exported import GLKMigrationV1_1ToV1_2
 #endif
 
+#if GLK_MIGRATION_V1_2_TO_V1_3
+@_exported import GLKMigrationV1_2ToV1_3
+#endif
+
 import Foundation
 
 /// Errors owned by the optional migration catalog. The current GLK runtime
@@ -48,11 +52,14 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers both 1.0→1.1 and 1.1→1.2 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, and 1.2→1.3 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_1_TO_V1_2
-        // Floor covers the 1.1→1.2 capsule only.
+        // Floor covers the 1.1→1.2 and 1.2→1.3 capsules.
         .v1_1
+        #elseif GLK_MIGRATION_V1_2_TO_V1_3
+        // Floor covers the 1.2→1.3 capsule only.
+        .v1_2
         #else
         nil
         #endif
@@ -108,16 +115,17 @@ public enum GLKMigrationCatalog {
     }
 
     /// Run the compiled capsules from `found` to the current format as one
-    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1 then 1.1 -> 1.2;
-    /// found == v1_1 runs 1.1 -> 1.2 only. A build that compiles no chain
-    /// reaching the current format cannot serve a historical estate at all.
+    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, then
+    /// 1.2 -> 1.3; found == v1_1 runs 1.1 -> 1.2 then 1.2 -> 1.3; found ==
+    /// v1_2 runs 1.2 -> 1.3 only. A build that compiles no chain reaching the
+    /// current format cannot serve a historical estate at all.
     private static func runCompiledChain(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_1_TO_V1_2
+        #if GLK_MIGRATION_V1_2_TO_V1_3
         var migrated = false
         var migrationState: String? = nil
         #if GLK_MIGRATION_V1_0_TO_V1_1
@@ -134,9 +142,17 @@ public enum GLKMigrationCatalog {
             // SharedContentMigration stamps v1_1; the chain continues to 1.2.
         }
         #endif
-        // Adds composition_policy to corpus_index_state through CorpusKit's own
-        // ladder (idempotent addColumn) and stamps v1_2.
-        try await kit.runIndexCompositionColumnMigration(handle: handle, now: now)
+        #if GLK_MIGRATION_V1_1_TO_V1_2
+        if found < .v1_2 {
+            // Adds composition_policy to corpus_index_state through CorpusKit's
+            // own ladder (idempotent addColumn) and stamps v1_2; the chain
+            // continues to 1.3.
+            try await kit.runIndexCompositionColumnMigration(handle: handle, now: now)
+        }
+        #endif
+        // Adds distilled_source_digest to drawers through LocusKit's own ladder
+        // (idempotent addColumn) and stamps v1_3.
+        try await kit.runDistilledSourceDigestColumnMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,

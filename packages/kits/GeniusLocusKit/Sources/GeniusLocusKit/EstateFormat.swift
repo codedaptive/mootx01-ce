@@ -23,7 +23,10 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// Format 1.2: the corpus_index_state composition_policy column reaches
     /// populated estates through the migration catalog.
     public static let v1_2 = EstateFormatVersion(major: 1, minor: 2)
-    public static let current = v1_2
+    /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
+    /// v18) reaches populated estates through the migration catalog.
+    public static let v1_3 = EstateFormatVersion(major: 1, minor: 3)
+    public static let current = v1_3
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)

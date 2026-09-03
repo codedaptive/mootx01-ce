@@ -300,6 +300,8 @@ private struct GLKDistilledOverlayMain {
                 drawerId: row.drawerID,
                 distilled: row.aiText,
                 pipelineVersion: row.converterID,
+                // Verified above to equal the digest of the drawer's content.
+                sourceDigest: row.sourceSHA256,
                 tokenCount: row.metrics.distilledTokensEstimate,
                 at: generatedAt)
             guard count == 1 else {

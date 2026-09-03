@@ -1,12 +1,18 @@
 // redistill_convergence_tests.rs — Rust twin of RedistillConvergenceTests.swift
 //
-// CDL-02: the product distiller is ContextDistillLib, keyed by converter ID.
+// The product distiller is ContextDistillLib's intent-span v23.2 converter,
+// keyed by converter ID and source digest.
 //  - end-to-end: the Debug-7 oracle originals distill to the oracle
 //    representation under the current converter ID; the forced sweep rewrites
 //    every row; the full derived-lane reindex succeeds.
 //  - trailer parity (REPORTED, not gated): the regenerated enrichment trailer
 //    versus the trailer the artifact estates stored under p2.3, over the
 //    locomo-272 oracle rows.
+//  - currency: a row stamped with the v22 converter id regenerates on the next
+//    sweep and comes back stamped v23.2 with the digest of its content; a row
+//    whose digest disagrees with its content regenerates; a row with the
+//    active id and the matching digest is left alone; identical source gives
+//    identical bytes and an identical digest.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,10 +21,11 @@ use corpus_kit::{
     CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
     EmbeddingModelConfig,
 };
+use context_distill_lib::digest::source_digest;
 use genius_locus_kit::brain::distillation_cycle::{distilled_representation, distilled_token_count};
 use genius_locus_kit::brain::enrichment_stage::enrichment_trailer;
 use genius_locus_kit::intake::LocusDrawerContentSource;
-use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit::{distilled_representation_is_current, EstateCoordinator};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -42,7 +49,7 @@ fn oracle_rows(bed: &str) -> Vec<OracleRow> {
     let path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
         "..", "..", "..", "libs", "ContextDistillLib", "Tests", "ContextDistillLibTests",
-        "Vectors", &format!("{bed}-intent-span-v22.jsonl"),
+        "Vectors", &format!("{bed}-intent-span-v23-attributed.jsonl"),
     ]
     .iter()
     .collect();
@@ -112,6 +119,7 @@ fn debug7_end_to_end() {
         let expected = distilled_representation(&row.original);
         assert_eq!(d.distilled.as_deref(), Some(expected.as_str()), "stored text is the converter's representation for {id}");
         assert_eq!(d.distilled_pipeline_version.as_deref(), Some(genius_locus_kit::distillation_converter_id()));
+        assert_eq!(d.distilled_source_digest.as_deref(), Some(source_digest(&row.original).as_str()));
         assert_eq!(d.distilled_token_count, Some(distilled_token_count(&expected)));
         // Oracle equality holds exactly when the regenerated trailer equals
         // the trailer the artifact stored under p2.3 (the parity report below
@@ -254,6 +262,216 @@ fn locus_only_estate_returns_zero_awaiting() {
         .distilled_representations_awaiting_reindex(&handle)
         .expect("awaiting_reindex");
     assert_eq!(awaiting, 0, "LocusOnly estate must return 0 (no corpus to check)");
+}
+
+
+// MARK: - currency
+
+/// The converter id v22 rows carry: the library's previous ruleset, kept in
+/// the library and never routed to by the product.
+const V22_CONVERTER_ID: &str = "intent-span@intent-span-v22-authority-closure";
+
+#[test]
+fn active_converter_is_v23_attributed() {
+    assert_eq!(
+        genius_locus_kit::DISTILLATION_CONVERTER,
+        context_distill_lib::converter::ContextDistillConverter::IntentSpanV23Attributed
+    );
+    assert_eq!(
+        genius_locus_kit::distillation_converter_id(),
+        "intent-span-v23-attributed@intent-span-v23.2-attributed-prose"
+    );
+    assert_ne!(genius_locus_kit::distillation_converter_id(), V22_CONVERTER_ID);
+}
+
+/// Stamp one row exactly as a v22-era build wrote it: the v22 converter id
+/// beside the digest of the content it distilled.
+fn stamp_v22(coord: &EstateCoordinator, handle: &genius_locus_kit::handle::EstateHandle, id: &str, content: &str) {
+    let estate = coord.estate_for(handle).expect("estate");
+    let written = estate
+        .set_distilled_representation(
+            id,
+            &format!("v22 rendering of {id}"),
+            V22_CONVERTER_ID,
+            &source_digest(content),
+            3,
+            NOW,
+        )
+        .expect("stamp v22");
+    assert_eq!(written, 1);
+}
+
+fn drawer(coord: &EstateCoordinator, handle: &genius_locus_kit::handle::EstateHandle, id: &str) -> locus_kit::drawer::Drawer {
+    coord
+        .get_drawers(handle, &[id])
+        .expect("get_drawers")
+        .into_iter()
+        .next()
+        .expect("row")
+}
+
+#[test]
+fn converter_bump_forces_regeneration() {
+    let (coord, handle) = open_estate_with_drawer_corpus();
+    let alpha = "alpha content that the v22 converter once distilled";
+    let beta = "beta content that the v22 converter once distilled";
+    let alpha_id = capture(&coord, &handle, alpha);
+    let beta_id = capture(&coord, &handle, beta);
+    // Settle the estate under the active converter.
+    coord.distill_items_sweep(&handle, NOW, None).expect("sweep");
+    coord.reindex_corpus(&handle, NOW).expect("reindex");
+    assert_eq!(coord.distill_items_sweep(&handle, NOW, None).expect("sweep"), 0);
+
+    // Rewind the two filed rows to the v22 converter.
+    stamp_v22(&coord, &handle, &alpha_id, alpha);
+    stamp_v22(&coord, &handle, &beta_id, beta);
+    let estate = coord.estate_for(&handle).expect("estate");
+    assert_eq!(estate.count_undistilled(genius_locus_kit::distillation_converter_id()).expect("count"), 2);
+    assert!(!distilled_representation_is_current(&drawer(&coord, &handle, &alpha_id)));
+    assert!(!distilled_representation_is_current(&drawer(&coord, &handle, &beta_id)));
+
+    // The sweep regenerates exactly those two rows. Rooms that carry bit 19
+    // for every row are entered because the stale-room projection names them.
+    let later = NOW + 1_000;
+    assert_eq!(coord.distill_items_sweep(&handle, later, None).expect("sweep"), 2);
+    for (id, content) in [(&alpha_id, alpha), (&beta_id, beta)] {
+        let row = drawer(&coord, &handle, id);
+        assert_eq!(row.distilled_pipeline_version.as_deref(), Some(genius_locus_kit::distillation_converter_id()));
+        assert_eq!(row.distilled_source_digest.as_deref(), Some(source_digest(content).as_str()));
+        assert_eq!(row.distilled.as_deref(), Some(distilled_representation(content).as_str()));
+        assert!(distilled_representation_is_current(&row));
+    }
+    assert_eq!(estate.count_undistilled(genius_locus_kit::distillation_converter_id()).expect("count"), 0);
+
+    // The regenerated rows postdate their index rows until the reindex runs.
+    assert!(coord.distilled_representations_awaiting_reindex(&handle).expect("awaiting") >= 2);
+    coord.reindex_corpus(&handle, later).expect("reindex");
+    assert_eq!(coord.distilled_representations_awaiting_reindex(&handle).expect("awaiting"), 0);
+}
+
+#[test]
+fn converter_bump_is_not_hidden_by_a_fully_represented_room_after_reopen() {
+    // Rust twin of the Swift "stale pipeline version hidden by bit 19" case:
+    // after a reopen, rebuild_all tightens the room's operational AND so bit
+    // 19 reads 1 for a fully represented room, and the sweep would skip the
+    // room on the bit alone. The stale-room projection names the room, so
+    // the v22 row inside it still regenerates.
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::with_storage(storage, NOW, None).unwrap());
+    let mut coord = EstateCoordinator::new();
+    let handle = coord
+        .open(Arc::clone(&store), OwnerCredentials::new("owner-reopen"), 0, 100)
+        .expect("open estate");
+    let alpha = "alpha content whose room reads fully represented after reopen";
+    let alpha_id = capture(&coord, &handle, alpha);
+    assert_eq!(coord.distill_items_sweep(&handle, NOW, None).expect("sweep"), 1);
+    stamp_v22(&coord, &handle, &alpha_id, alpha);
+
+    // Reopen on the same store: rebuild_all recomputes the room AND from
+    // scratch, and every drawer in the room carries bit 19.
+    let mut coord2 = EstateCoordinator::new();
+    let handle2 = coord2
+        .open(Arc::clone(&store), OwnerCredentials::new("owner-reopen"), 0, 100)
+        .expect("reopen estate");
+    let estate2 = coord2.estate_for(&handle2).expect("estate");
+    let skip_bit = locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+    let entries = estate2.room_level_fingerprints().expect("room fingerprints");
+    let room = entries
+        .iter()
+        .find(|e| e.room == "redistill-convergence-tests")
+        .expect("the capture room has a fingerprint entry");
+    assert_eq!(room.fingerprint.operational_and & skip_bit, skip_bit, "bit 19 must read 1 for the room after reopen");
+    let stale = estate2
+        .rooms_with_stale_distilled_representations(genius_locus_kit::distillation_converter_id())
+        .expect("stale rooms");
+    assert!(stale.contains(&(room.wing.clone(), room.room.clone())), "the stale-room projection must name the room: {stale:?}");
+
+    // The sweep enters the room through the projection and regenerates the row.
+    assert_eq!(coord2.distill_items_sweep(&handle2, NOW + 1_000, None).expect("sweep"), 1);
+    let row = drawer(&coord2, &handle2, &alpha_id);
+    assert_eq!(row.distilled_pipeline_version.as_deref(), Some(genius_locus_kit::distillation_converter_id()));
+    assert_eq!(row.distilled_source_digest.as_deref(), Some(source_digest(alpha).as_str()));
+    assert!(distilled_representation_is_current(&row));
+    // And a converged room is skipped again on the next pass.
+    assert_eq!(coord2.distill_items_sweep(&handle2, NOW + 2_000, None).expect("sweep"), 0);
+}
+
+#[test]
+fn digest_mismatch_regenerates() {
+    let (coord, handle) = open_estate();
+    let alpha = "alpha content whose digest will be replaced";
+    let alpha_id = capture(&coord, &handle, alpha);
+    coord.distill_items_sweep(&handle, NOW, None).expect("sweep");
+
+    let estate = coord.estate_for(&handle).expect("estate");
+    estate
+        .set_distilled_representation(
+            &alpha_id,
+            "rendering of other content",
+            genius_locus_kit::distillation_converter_id(),
+            &source_digest("other content"),
+            4,
+            NOW,
+        )
+        .expect("stamp mismatched digest");
+    assert!(!distilled_representation_is_current(&drawer(&coord, &handle, &alpha_id)));
+
+    assert_eq!(coord.distill_items_sweep(&handle, NOW + 1_000, None).expect("sweep"), 1);
+    let row = drawer(&coord, &handle, &alpha_id);
+    assert_eq!(row.distilled_source_digest.as_deref(), Some(source_digest(alpha).as_str()));
+    assert_eq!(row.distilled.as_deref(), Some(distilled_representation(alpha).as_str()));
+    assert!(distilled_representation_is_current(&row));
+}
+
+#[test]
+fn matching_id_and_digest_is_left_alone() {
+    let (coord, handle) = open_estate();
+    let alpha = "alpha content that stays as written";
+    let alpha_id = capture(&coord, &handle, alpha);
+    coord.distill_items_sweep(&handle, NOW, None).expect("sweep");
+
+    // A hand-written representation that satisfies the rule exactly.
+    let estate = coord.estate_for(&handle).expect("estate");
+    estate
+        .set_distilled_representation(
+            &alpha_id,
+            "hand-written but current",
+            genius_locus_kit::distillation_converter_id(),
+            &source_digest(alpha),
+            4,
+            NOW,
+        )
+        .expect("stamp current");
+    assert!(distilled_representation_is_current(&drawer(&coord, &handle, &alpha_id)));
+
+    assert_eq!(coord.distill_items_sweep(&handle, NOW + 1_000, None).expect("sweep"), 0);
+    let row = drawer(&coord, &handle, &alpha_id);
+    assert_eq!(row.distilled.as_deref(), Some("hand-written but current"));
+    assert_eq!(row.distilled_at, Some(NOW));
+}
+
+#[test]
+fn same_source_twice_is_byte_identical() {
+    let gamma = "gamma content distilled twice must store the same bytes";
+    // Pure function level: same content, same converter, same bytes.
+    let first = distilled_representation(gamma);
+    let second = distilled_representation(gamma);
+    assert_eq!(first, second);
+    assert_eq!(source_digest(gamma), source_digest(gamma));
+
+    // Stored level: two forced distillations of one row store the same text
+    // and the same digest.
+    let (coord, handle) = open_estate();
+    let gamma_id = capture(&coord, &handle, gamma);
+    assert_eq!(coord.redistill_items_sweep(&handle, NOW, None).expect("redistill"), 1);
+    let one = drawer(&coord, &handle, &gamma_id);
+    assert_eq!(coord.redistill_items_sweep(&handle, NOW + 1_000, None).expect("redistill"), 1);
+    let two = drawer(&coord, &handle, &gamma_id);
+    assert_eq!(one.distilled, two.distilled);
+    assert_eq!(one.distilled.as_deref(), Some(first.as_str()));
+    assert_eq!(one.distilled_source_digest, two.distilled_source_digest);
+    assert_eq!(one.distilled_source_digest.as_deref(), Some(source_digest(gamma).as_str()));
 }
 
 /// REPORTED, not gated: the regenerated enrichment trailer versus the
