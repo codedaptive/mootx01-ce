@@ -15,6 +15,7 @@
 import Foundation
 import Security
 import ArgumentParser
+import AdornmentLib
 import AriaMCP
 import GeniusLocusKit
 import GeniusLocusKitMigrations
@@ -23,8 +24,21 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import MootInstallerCore
+import MootCoreAIWorker
 import AriaResident
 import Darwin
+
+/// Fail-closed engine installed only when an explicit Core AI selection cannot
+/// compose. Its non-recipe identity makes the adornment pass reject every
+/// active minter before generation, so Apple FM cannot silently replace the
+/// selected provider while the operational status reports blocked.
+private struct BlockedCoreAIAdornmentEngine: GoldMinerEngine {
+    let identity = "coreai-selection-blocked"
+    func mint(prompt: String) async -> String? {
+        _ = prompt
+        return nil
+    }
+}
 
 struct ServeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -50,6 +64,24 @@ struct ServeCommand: AsyncParsableCommand {
             environment: environment,
             homeDirectory: home
         )
+
+        // Core AI is an explicit, fixed product candidate while its real
+        // containment gate is open. Merely providing model paths is not enough:
+        // the named selection must opt in, and the selection fixes model, style,
+        // budget, width, and lifecycle policy. No benchmark volume path is baked
+        // into the binary and this is not an arbitrary-command surface.
+        let coreAIRequested = !(environment[
+            CoreAIProductMinterConfiguration.selectionKey] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        var coreAIConfiguration: CoreAIProductMinterConfiguration?
+        var coreAIConfigurationError: String?
+        do {
+            coreAIConfiguration = try CoreAIProductMinterConfiguration.resolve(
+                environment: environment)
+        } catch {
+            coreAIConfigurationError = String(describing: error)
+        }
+        var coreAIEngine: CommandEngine?
 
         // Resolve estate name: --db flag overrides the active estate pointer.
         let estateName: String
@@ -315,10 +347,90 @@ struct ServeCommand: AsyncParsableCommand {
             // inline. Idempotent upsert; never retoggles an operator's
             // deactivation. Best-effort — a served estate must never fail
             // to start over minter registration.
-            do {
-                try await kit.ensureDefaultAdornmentMinter(in: handle)
-            } catch {
-                Logging.stderr.log("default adornment minter registration failed (pass will no-op): \(error)")
+            if coreAIRequested {
+                // Fail closed when Core AI was explicitly selected: never
+                // silently run Apple FM instead. Existing activation rows are
+                // left untouched on a malformed selection; the identity guard
+                // prevents another engine from minting under their names.
+                if coreAIConfigurationError == nil,
+                   let coreAIConfiguration {
+                    if #available(macOS 27.0, *) {
+                        if let executableURL = Self.resolvedCurrentExecutableURL() {
+                            let engine = CommandEngine(
+                                coreAIWorkerExecutable: executableURL.path,
+                                assetPath: coreAIConfiguration.assetPath,
+                                tokenizerPath: coreAIConfiguration.tokenizerPath,
+                                style: coreAIConfiguration.style,
+                                maxNewTokens: coreAIConfiguration.maxNewTokens,
+                                identity: coreAIConfiguration.identity
+                            )
+                            do {
+                                try await kit.registerAdornmentMinter(
+                                    in: handle,
+                                    minter: coreAIConfiguration.recipe.descriptor(
+                                        id: coreAIConfiguration.identity,
+                                        isActive: true
+                                    )
+                                )
+                                _ = try await kit.setActiveAdornmentMinters(
+                                    in: handle,
+                                    minterIDs: [coreAIConfiguration.identity]
+                                )
+                                let estate = try await kit.estate(for: handle)
+                                try await estate.setMeta(
+                                    key: CoreAIProductMinterConfiguration
+                                        .productSelectionMetaKey,
+                                    value: coreAIConfiguration.identity
+                                )
+                                await GoldMiner.shared.install(engine: engine)
+                                coreAIEngine = engine
+                                Logging.stderr.log(
+                                    "mootx01 serve: Core AI minter selected — \(coreAIConfiguration.identity) (contained worker, width 1, 256-token budget)")
+                            } catch {
+                                coreAIConfigurationError =
+                                    "Core AI minter registration failed: \(error)"
+                            }
+                        } else {
+                            coreAIConfigurationError =
+                                "cannot resolve the installed mootx01 executable"
+                        }
+                    } else {
+                        coreAIConfigurationError =
+                            "Core AI minter requires macOS 27 or newer"
+                    }
+                }
+                if coreAIEngine == nil {
+                    await GoldMiner.shared.install(
+                        engine: BlockedCoreAIAdornmentEngine())
+                    Logging.stderr.log(
+                        "mootx01 serve: Core AI minter blocked — \(coreAIConfigurationError ?? "composition unavailable")")
+                }
+            } else {
+                do {
+                    try await kit.ensureDefaultAdornmentMinter(in: handle)
+                    let estate = try await kit.estate(for: handle)
+                    let priorProductSelection = try await estate.meta(
+                        key: CoreAIProductMinterConfiguration.productSelectionMetaKey)
+                    if priorProductSelection ==
+                        MinterRecipe.nuextractTinyV15B1Q8.id {
+                        // Removing the explicit Core AI selection reverses the
+                        // composition-owned activation change and restores the
+                        // documented platform default. The marker prevents an
+                        // ordinary reopen from retoggling an operator's Apple
+                        // activation choice.
+                        _ = try await kit.setActiveAdornmentMinters(
+                            in: handle,
+                            minterIDs: [MinterRecipe.apple.id]
+                        )
+                        try await estate.setMeta(
+                            key: CoreAIProductMinterConfiguration
+                                .productSelectionMetaKey,
+                            value: MinterRecipe.apple.id
+                        )
+                    }
+                } catch {
+                    Logging.stderr.log("default adornment minter registration failed (pass will no-op): \(error)")
+                }
             }
             // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
@@ -420,12 +532,59 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             updateAdvisoryProvider = nil
         }
+        let installedCoreAIEngine = coreAIEngine
+        let resolvedCoreAIIdentity = coreAIConfiguration?.identity
+        let resolvedCoreAIError = coreAIConfigurationError
+        let adornmentStatusProvider: AdornmentOperationalStatusProvider = {
+            if let engine = installedCoreAIEngine {
+                return { [engine, kit, handle] in
+                    let lifecycle = await engine.lifecycleSnapshot()
+                    let debt: [AdornmentDebt]?
+                    do {
+                        let estate = try await kit.estate(for: handle)
+                        debt = try await estate.adornmentDebtBatch(limit: 1)
+                    } catch {
+                        debt = nil
+                    }
+                    return AdornmentOperationalStatus(
+                        state: debt.map { $0.isEmpty ? .idle : .pending } ?? .blocked,
+                        identity: engine.identity,
+                        detail: debt == nil ? "adornment debt unavailable" : nil,
+                        logicalRequests: lifecycle.logicalRequests,
+                        requestAttempts: lifecycle.requestAttempts,
+                        processStarts: lifecycle.processStarts,
+                        launchFailures: lifecycle.launchFailures,
+                        boundedRecycles: lifecycle.boundedRecycles,
+                        idleReaps: lifecycle.idleReaps,
+                        unexpectedExits: lifecycle.unexpectedExits,
+                        crashRetries: lifecycle.crashRetries,
+                        perPromptFailures: lifecycle.perPromptFailures,
+                        activeChildren: lifecycle.activeChildren,
+                        requestsInActiveChildren: lifecycle.requestsInActiveChildren
+                    )
+                }
+            }
+            if coreAIRequested {
+                let detail = resolvedCoreAIError
+                    ?? "Core AI minter did not compose"
+                return {
+                    AdornmentOperationalStatus(
+                        state: .blocked,
+                        identity: resolvedCoreAIIdentity,
+                        detail: detail
+                    )
+                }
+            }
+            return { AdornmentOperationalStatus(state: .disabled) }
+        }()
+
         // Server identity injected so facts/memories filed via this host are
         // stamped "mootx01" — the product binary running mootx01 serve.
         let tooling = ToolDispatcher(
             kit: kit, handle: handle, serverIdentity: "mootx01",
             versionSkewAdvisory: versionSkewAdvisory,
-            updateAdvisoryProvider: updateAdvisoryProvider
+            updateAdvisoryProvider: updateAdvisoryProvider,
+            adornmentStatusProvider: adornmentStatusProvider
         )
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
@@ -476,9 +635,11 @@ struct ServeCommand: AsyncParsableCommand {
                     dispatcher: dispatcher, kit: kit, handle: handle, config: config
                 )
             } catch {
+                if let coreAIEngine { await coreAIEngine.shutdown() }
                 Logging.stderr.log("mootx01 serve fatal: cannot bind HTTP transport on 127.0.0.1:\(port): \(error)")
                 throw ExitCode.failure
             }
+            if let coreAIEngine { await coreAIEngine.shutdown() }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
             //  — on-startup dreaming trigger: if the
@@ -581,6 +742,7 @@ struct ServeCommand: AsyncParsableCommand {
             }
 
             Logging.stderr.log("mootx01 serve exiting (stdin closed)")
+            if let coreAIEngine { await coreAIEngine.shutdown() }
         }
     }
 
