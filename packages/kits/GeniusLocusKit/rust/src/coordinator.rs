@@ -545,20 +545,6 @@ fn encode_markers_enabled() -> bool {
     })
 }
 
-/// Read `MOOT_INDEX_COMPOSITION` and return the matching policy.
-///
-/// Absent or unrecognised → `IndexCompositionPolicy::current()` (cell A —
-/// `lex=original;dense=distilled`, the pre-CDL-03 default). Called once per
-/// estate open and threaded to `LocusDrawerContentSource` (CDL-03). Mirrors
-/// Swift `EstateLifecycle.indexCompositionPolicy()`.
-fn index_composition_policy_from_env() -> IndexCompositionPolicy {
-    std::env::var("MOOT_INDEX_COMPOSITION")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .and_then(|v| IndexCompositionPolicy::from_environment_value(&v))
-        .unwrap_or_else(IndexCompositionPolicy::current)
-}
-
 /// Convert a raw `[u8; 16]` estate UUID to a hyphenated lowercase UUID string.
 ///
 /// Used by telemetry emit sites to produce a human-readable `estate_id` tag
@@ -3032,6 +3018,230 @@ impl EstateCoordinator {
                 reason: format!("provisioned_embedding_provider meta failed: {e:?}"),
             }))?;
         Ok(value)
+    }
+
+    // MARK: - Index composition policy (stored estate setting)
+    //
+    // Which text each search index lane is built from is a fact about the
+    // rows an estate holds, so it lives in the estate: LocusKit manifest key
+    // `index_composition_policy` (`ManifestKey::IndexCompositionPolicy`),
+    // holding an `IndexCompositionPolicy::id()`. Written once, when the
+    // estate is created (`provision`, the ARIA registry's in-memory estate)
+    // or when the estate-format 1.3 to 1.4 capsule seeds a populated estate;
+    // read at every open (`active_index_composition_policy`, threaded to the
+    // engine configuration and the content source); shown by
+    // `moot_estate_status`; changed only by `set_index_composition_policy`,
+    // whose caller (`mootx01 db composition --set`) rebuilds every index lane
+    // in the same command. `MOOT_INDEX_COMPOSITION` is read in exactly one
+    // place, `seed_index_composition_policy_if_absent`, and only when the
+    // setting is being seeded. Twin of Swift IndexCompositionSetting.swift.
+
+    /// The manifest key the stored setting lives under: `index_composition_policy`.
+    pub fn index_composition_policy_meta_key() -> &'static str {
+        locus_kit::manifest::ManifestKey::IndexCompositionPolicy.as_str()
+    }
+
+    /// The environment variable consulted when the setting is seeded.
+    pub const INDEX_COMPOSITION_POLICY_ENV_KEY: &str = "MOOT_INDEX_COMPOSITION";
+
+    /// The policy a seed writes: `env_value` (the creating process's
+    /// `MOOT_INDEX_COMPOSITION`) when it is a valid policy id, else
+    /// `IndexCompositionPolicy::current()`. Pure. Twin of Swift
+    /// `GeniusLocusKit.indexCompositionPolicyCreationSeed(environment:)`.
+    pub fn index_composition_policy_creation_seed(env_value: Option<&str>) -> IndexCompositionPolicy {
+        match env_value {
+            Some(raw) if !raw.is_empty() => match IndexCompositionPolicy::from_environment_value(raw) {
+                Some(policy) => policy,
+                None => {
+                    eprintln!(
+                        "mootx01 index-composition: {}='{raw}' is not a policy id; seeding {}",
+                        Self::INDEX_COMPOSITION_POLICY_ENV_KEY,
+                        IndexCompositionPolicy::current().id()
+                    );
+                    IndexCompositionPolicy::current()
+                }
+            },
+            _ => IndexCompositionPolicy::current(),
+        }
+    }
+
+    /// The stored setting, or `None` when the estate carries none.
+    ///
+    /// Errors: `EstateNotOpen` for a stale handle; `InvalidManifest` when the
+    /// stored value is not a policy id (the estate is refused rather than
+    /// indexed under a guess). Twin of Swift `storedIndexCompositionPolicy(for:)`.
+    pub fn stored_index_composition_policy(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Option<IndexCompositionPolicy>, GeniusLocusKitError> {
+        let estate = self.estate_for(handle)?;
+        let raw = estate
+            .meta(Self::index_composition_policy_meta_key())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("index_composition_policy meta read failed: {e:?}"),
+            })?;
+        match raw {
+            None => Ok(None),
+            Some(value) if value.is_empty() => Ok(None),
+            Some(value) => IndexCompositionPolicy::from_environment_value(&value)
+                .map(Some)
+                .ok_or_else(|| GeniusLocusKitError::InvalidManifest {
+                    key: Self::index_composition_policy_meta_key().to_string(),
+                    detail: format!(
+                        "'{value}' is not an index composition policy id (expected lex=<source>;dense=<source>)"
+                    ),
+                }),
+        }
+    }
+
+    /// Write the setting. Touches no index row: the caller rebuilds every
+    /// lane under the new policy (`reindex_corpus` on a Corpus wired with
+    /// the new setting) before the estate serves a query. Twin of Swift
+    /// `setIndexCompositionPolicy(_:for:)`.
+    pub fn set_index_composition_policy(
+        &self,
+        handle: &EstateHandle,
+        policy: IndexCompositionPolicy,
+    ) -> Result<(), GeniusLocusKitError> {
+        let estate = self.estate_for(handle)?;
+        estate
+            .set_meta(Self::index_composition_policy_meta_key(), &policy.id())
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("index_composition_policy set_meta failed: {e:?}"),
+            })?;
+        eprintln!(
+            "mootx01 index-composition: estate {} stored policy {}",
+            uuid_to_str(&handle.estate_uuid),
+            policy.id()
+        );
+        Ok(())
+    }
+
+    /// `id` as a normalized policy id when it parses, else `None`. Pure;
+    /// lets a host refuse a malformed `--set` argument before it opens
+    /// anything. Twin of Swift `indexCompositionPolicyID(parsing:)`.
+    pub fn index_composition_policy_id_parsing(id: &str) -> Option<String> {
+        IndexCompositionPolicy::from_environment_value(id).map(|policy| policy.id())
+    }
+
+    /// The stored setting as its id string. `None` when the estate carries
+    /// none. Twin of Swift `storedIndexCompositionPolicyID(for:)`.
+    pub fn stored_index_composition_policy_id(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Option<String>, GeniusLocusKitError> {
+        Ok(self.stored_index_composition_policy(handle)?.map(|policy| policy.id()))
+    }
+
+    /// Validate `id` and write it as the setting; returns the id as stored.
+    /// Refuses before any write when `id` is not a policy id. Twin of Swift
+    /// `setIndexCompositionPolicy(id:for:)`.
+    pub fn set_index_composition_policy_id(
+        &self,
+        handle: &EstateHandle,
+        id: &str,
+    ) -> Result<String, GeniusLocusKitError> {
+        let policy = IndexCompositionPolicy::from_environment_value(id).ok_or_else(|| {
+            GeniusLocusKitError::InvalidManifest {
+                key: Self::index_composition_policy_meta_key().to_string(),
+                detail: format!(
+                    "'{id}' is not an index composition policy id (expected lex=<source>;dense=<source>)"
+                ),
+            }
+        })?;
+        self.set_index_composition_policy(handle, policy)?;
+        Ok(policy.id())
+    }
+
+    /// Seed the setting when the estate carries none and return the policy
+    /// the estate now runs under. Idempotent: a stored setting is returned
+    /// untouched. Called at estate creation and by the 1.3 to 1.4 capsule;
+    /// the only reader of `MOOT_INDEX_COMPOSITION`. Twin of Swift
+    /// `seedIndexCompositionPolicyIfAbsent(for:)`.
+    pub fn seed_index_composition_policy_if_absent(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<IndexCompositionPolicy, GeniusLocusKitError> {
+        if let Some(stored) = self.stored_index_composition_policy(handle)? {
+            return Ok(stored);
+        }
+        let env_value = std::env::var(Self::INDEX_COMPOSITION_POLICY_ENV_KEY).ok();
+        let policy = Self::index_composition_policy_creation_seed(env_value.as_deref());
+        self.set_index_composition_policy(handle, policy)?;
+        Ok(policy)
+    }
+
+    /// The policy every open runs under: the stored setting. An estate that
+    /// carries none (its format stamp predates 1.4 and the catalog has not
+    /// run, or the row was deleted by hand) runs `current()` and says so on
+    /// stderr, because the Corpus must still open; `mootx01 db composition
+    /// --set` or `mootx01 upgrade` seeds it. Twin of Swift
+    /// `activeIndexCompositionPolicy(for:)`.
+    pub fn active_index_composition_policy(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<IndexCompositionPolicy, GeniusLocusKitError> {
+        match self.stored_index_composition_policy(handle)? {
+            Some(stored) => {
+                eprintln!(
+                    "mootx01 index-composition: estate {} runs {} (stored)",
+                    uuid_to_str(&handle.estate_uuid),
+                    stored.id()
+                );
+                Ok(stored)
+            }
+            None => {
+                eprintln!(
+                    "mootx01 index-composition: estate {} has no stored policy; running {} \
+                     (seed it with `mootx01 upgrade` or `mootx01 db composition --set`)",
+                    uuid_to_str(&handle.estate_uuid),
+                    IndexCompositionPolicy::current().id()
+                );
+                Ok(IndexCompositionPolicy::current())
+            }
+        }
+    }
+
+    /// The policy the wired Corpus runs under, or `None` when no Corpus is
+    /// registered for the estate (locus-only). `moot_estate_status` reports
+    /// it. Twin of Swift `indexCompositionPolicy(for:)`.
+    pub fn index_composition_policy(&self, handle: &EstateHandle) -> Option<IndexCompositionPolicy> {
+        self.corpus_kits.get(handle).map(|corpus| corpus.composition_policy())
+    }
+
+    /// Active index rows grouped by the policy id each row was built under.
+    /// Empty for an estate with no Corpus or no indexed rows. A row written
+    /// before the column existed counts under `current()`, the policy it was
+    /// built under. After `reindex_corpus` every row carries the wired
+    /// Corpus's policy id. Twin of Swift `indexCompositionPolicyRowCounts(for:)`.
+    pub fn index_composition_policy_row_counts(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<std::collections::BTreeMap<String, usize>, VerbDispatchError> {
+        if self.registry.get(handle).is_none() {
+            return Err(VerbDispatchError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            });
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        let Some(corpus) = self.corpus_kits.get(handle) else {
+            return Ok(counts);
+        };
+        let states = corpus
+            .all_index_states()
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "index_composition_policy_row_counts".to_string(),
+                reason: format!("{e:?}"),
+            }))?;
+        for state in states.iter().filter(|s| s.is_lexically_indexed() && !s.is_removed()) {
+            let id = if state.composition_policy_id.is_empty() {
+                IndexCompositionPolicy::current().id()
+            } else {
+                state.composition_policy_id.clone()
+            };
+            *counts.entry(id).or_insert(0) += 1;
+        }
+        Ok(counts)
     }
 
     /// Read the provisioned `embedding_provider` manifest key and emit a
@@ -9658,6 +9868,19 @@ impl EstateCoordinator {
             params.zoom_window_high,
         )?;
 
+        // Step 2a: A fresh estate is born with its index composition policy
+        // stored: the creation-time seed (MOOT_INDEX_COMPOSITION when set to a
+        // policy id, else `current()`). Every later open reads this row;
+        // nothing reads the environment again. A seed failure closes the
+        // estate, as a wiring failure does.
+        let composition_policy = match self.seed_index_composition_policy_if_absent(&handle) {
+            Ok(policy) => policy,
+            Err(e) => {
+                let _ = self.close(&handle);
+                return Err(e);
+            }
+        };
+
         // Step 2b: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
         // Wiring runs BEFORE seeding the wings (step 2c) so the hint drawers carry
         // the corpus's real model id, not a sentinel — matching the serve open path
@@ -9692,11 +9915,12 @@ impl EstateCoordinator {
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                             reason: format!("engine configuration: {:?}", e),
-                        })?;
+                        })?
+                        .with_composition_policy(composition_policy);
                         CorpusContentEngine::open(
                             Arc::clone(&backing_storage),
                             config,
-                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, index_composition_policy_from_env())),
+                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
                             embedding_models,
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -9735,11 +9959,12 @@ impl EstateCoordinator {
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                             reason: format!("engine configuration: {:?}", e),
-                        })?;
+                        })?
+                        .with_composition_policy(composition_policy);
                         CorpusContentEngine::open(
                             Arc::clone(&backing_storage),
                             config,
-                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, index_composition_policy_from_env())),
+                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
                             embedding_models,
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -13395,6 +13620,136 @@ mod tests {
 
         assert_eq!(coord.open_estate_count(), 1);
         assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Mounted));
+    }
+
+    // -----------------------------------------------------------------
+    // Index composition policy — the stored estate setting. Rust twin of
+    // Swift IndexCompositionSettingTests.swift. The environment window is
+    // serialized through one lock because every test thread shares it.
+    // -----------------------------------------------------------------
+
+    fn with_creation_seed<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        static SEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serialized = SEED_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = EstateCoordinator::INDEX_COMPOSITION_POLICY_ENV_KEY;
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = body();
+        match previous {
+            Some(p) => std::env::set_var(key, p),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    /// The creation seed is the environment's policy id when valid, else current().
+    #[test]
+    fn index_composition_setting_creation_seed_is_pure() {
+        assert_eq!(
+            EstateCoordinator::index_composition_policy_creation_seed(None),
+            IndexCompositionPolicy::current()
+        );
+        assert_eq!(
+            EstateCoordinator::index_composition_policy_creation_seed(Some("")),
+            IndexCompositionPolicy::current()
+        );
+        assert_eq!(
+            EstateCoordinator::index_composition_policy_creation_seed(Some(
+                "lex=originalPlusAdornments;dense=distilled"
+            )),
+            IndexCompositionPolicy::lexical_adornments()
+        );
+        assert_eq!(
+            EstateCoordinator::index_composition_policy_creation_seed(Some("cell B")),
+            IndexCompositionPolicy::current()
+        );
+        assert_eq!(
+            EstateCoordinator::index_composition_policy_id_parsing("lex=original;dense=original"),
+            Some("lex=original;dense=original".to_string())
+        );
+        assert_eq!(EstateCoordinator::index_composition_policy_id_parsing("cell B"), None);
+    }
+
+    /// provision stores current() without MOOT_INDEX_COMPOSITION and the
+    /// environment's id with it; the wired Corpus runs the seeded policy.
+    #[test]
+    fn index_composition_setting_provision_seeds_the_setting() {
+        with_creation_seed(None, || {
+            let mut coord = EstateCoordinator::new();
+            let (store, storage) = make_provision_stores();
+            let handle = coord
+                .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("SeedAbsent"), vec![EmbeddingModelConfig::Deterministic])
+                .expect("provision");
+            assert_eq!(
+                coord.stored_index_composition_policy(&handle).expect("read"),
+                Some(IndexCompositionPolicy::current())
+            );
+            assert_eq!(coord.index_composition_policy(&handle), Some(IndexCompositionPolicy::current()));
+        });
+        with_creation_seed(Some(&IndexCompositionPolicy::dense_adornments().id()), || {
+            let mut coord = EstateCoordinator::new();
+            let (store, storage) = make_provision_stores();
+            let handle = coord
+                .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("SeedPresent"), vec![EmbeddingModelConfig::Deterministic])
+                .expect("provision");
+            assert_eq!(
+                coord.stored_index_composition_policy(&handle).expect("read"),
+                Some(IndexCompositionPolicy::dense_adornments())
+            );
+            assert_eq!(
+                coord.index_composition_policy(&handle),
+                Some(IndexCompositionPolicy::dense_adornments())
+            );
+        });
+    }
+
+    /// Every index row carries the id of the policy the Corpus was wired
+    /// under; the stored setting can be changed without touching the rows
+    /// (the caller re-wires and rebuilds), and a malformed stored value is
+    /// refused rather than guessed.
+    #[test]
+    fn index_composition_setting_rows_carry_the_wired_policy_id() {
+        with_creation_seed(None, || {
+            let mut coord = EstateCoordinator::new();
+            let (store, storage) = make_provision_stores();
+            let handle = coord
+                .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("RowIds"), vec![EmbeddingModelConfig::Deterministic])
+                .expect("provision");
+            coord.capture(&handle, cap_frame("Alice keeps bees in Lisbon."), NOW).expect("capture");
+            coord.capture(&handle, cap_frame("Bob repairs clocks in Porto."), NOW + 1).expect("capture");
+            coord.reindex_corpus(&handle, NOW + 2).expect("reindex");
+            let counts = coord.index_composition_policy_row_counts(&handle).expect("row counts");
+            assert_eq!(counts.keys().cloned().collect::<Vec<_>>(), vec![IndexCompositionPolicy::current().id()]);
+            assert!(counts[&IndexCompositionPolicy::current().id()] >= 2);
+
+            // The setting changes; the rows keep the id they were built under
+            // until the caller re-wires and rebuilds.
+            let stored = coord
+                .set_index_composition_policy_id(&handle, "lex=originalPlusAdornments;dense=distilled")
+                .expect("set");
+            assert_eq!(stored, IndexCompositionPolicy::lexical_adornments().id());
+            assert_eq!(
+                coord.stored_index_composition_policy(&handle).expect("read"),
+                Some(IndexCompositionPolicy::lexical_adornments())
+            );
+            assert_eq!(coord.index_composition_policy(&handle), Some(IndexCompositionPolicy::current()));
+            assert!(coord.set_index_composition_policy_id(&handle, "cell B").is_err());
+
+            // A malformed stored value is refused at read time.
+            coord
+                .estate_for(&handle)
+                .expect("estate")
+                .set_meta(EstateCoordinator::index_composition_policy_meta_key(), "cell B")
+                .expect("raw write");
+            assert!(matches!(
+                coord.stored_index_composition_policy(&handle),
+                Err(GeniusLocusKitError::InvalidManifest { .. })
+            ));
+            assert!(coord.active_index_composition_policy(&handle).is_err());
+        });
     }
 
     // F3: provision(.glk) registers Corpus's SINGLE shared VectorStore for the

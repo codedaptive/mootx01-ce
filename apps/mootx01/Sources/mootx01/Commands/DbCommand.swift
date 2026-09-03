@@ -1,6 +1,7 @@
 // DbCommand.swift
 //
-// Named estate lifecycle: create, list, open (set active), delete.
+// Named estate lifecycle: create, list, open (set active), delete, and the
+// estate-level settings that live in the estate itself (composition).
 // Estates live at ~/Library/Application Support/MOOTx01/databases/<name>/.
 // The active estate pointer is stored in config.json.
 
@@ -8,6 +9,13 @@ import ArgumentParser
 import Foundation
 import MootInstallerCore
 import PersistenceKitSQLite
+#if os(macOS)
+import AriaMCP
+import GeniusLocusKit
+import GeniusLocusKitMigrations
+import LocusKit
+import PersistenceKit
+#endif
 
 struct DbCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -18,8 +26,17 @@ struct DbCommand: AsyncParsableCommand {
             DbListCommand.self,
             DbOpenCommand.self,
             DbDeleteCommand.self,
-        ]
+        ] + estateSettingSubcommands
     )
+
+    /// Subcommands that open the estate through GeniusLocusKit. macOS-only
+    /// for the same reason as `redistill`: the kits are `.macOS`; the Rust
+    /// port carries the Linux/Windows verb.
+    #if os(macOS)
+    static let estateSettingSubcommands: [ParsableCommand.Type] = [DbCompositionCommand.self]
+    #else
+    static let estateSettingSubcommands: [ParsableCommand.Type] = []
+    #endif
 }
 
 // MARK: - db create <name>
@@ -211,3 +228,138 @@ struct DbDeleteCommand: AsyncParsableCommand {
         print("Estate '\(name)' deleted.")
     }
 }
+
+// MARK: - db composition [--db <name>] [--set <policy-id>]
+
+#if os(macOS)
+/// `mootx01 db composition`: show or change the estate's stored index
+/// composition policy, which names the text each search index lane is built
+/// from (lexical and dense sources; id `lex=<source>;dense=<source>`). The
+/// policy is an estate setting (LocusKit manifest key
+/// `index_composition_policy`), read by GeniusLocusKit at every open.
+///
+/// Without `--set` the command prints the stored id. With `--set` it
+/// validates the id before opening anything, writes the setting, wires the
+/// Corpus under the new policy with the rebuild committed, and runs the same
+/// `reindexCorpus` the upgrade convergence step runs, so the stored policy
+/// and the index rows never disagree; it prints the rows reindexed and exits
+/// non-zero on any failure. Opens the estate the way `redistill` does.
+struct DbCompositionCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "composition",
+        abstract: "Show or change the estate's stored index composition policy (which text each search index lane is built from) and rebuild the lanes under it."
+    )
+
+    @Option(name: .long, help: "Named estate. Default: active estate.")
+    var db: String?
+
+    @Option(name: .long, help: "Store this policy id (lex=<source>;dense=<source>) and rebuild every index lane under it.")
+    var set: String?
+
+    func run() async throws {
+        // A malformed id is refused before anything is opened or written.
+        let requestedID: String?
+        if let set {
+            guard let normalized = GeniusLocusKit.indexCompositionPolicyID(parsing: set) else {
+                Logging.stderr.log("mootx01 db composition fatal: '\(set)' is not an index composition policy id (expected lex=<source>;dense=<source>, e.g. lex=original;dense=distilled)")
+                throw ExitCode.failure
+            }
+            requestedID = normalized
+        } else {
+            requestedID = nil
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
+        let estateName: String
+        if let dbFlag = db {
+            estateName = dbFlag
+        } else {
+            estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
+        }
+        let estateURL: URL
+        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
+            estateURL = URL(fileURLWithPath: envPath)
+        } else {
+            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
+        }
+        // `mootx01 db create` makes the estate directory; the substrate writes
+        // the SQLite file on first open, so a never-opened estate is still a
+        // valid target. A missing directory is a typo or a wrong data directory.
+        guard FileManager.default.fileExists(atPath: estateURL.deletingLastPathComponent().path) else {
+            Logging.stderr.log("mootx01 db composition fatal: estate '\(estateName)' not found at \(estateURL.path)")
+            throw ExitCode.failure
+        }
+
+        // At-rest posture: the same shared decision serve, drain and redistill use.
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            Logging.stderr.log("mootx01 db composition fatal: estate encryption key unavailable: \(error)")
+            throw ExitCode.failure
+        }
+        let storage: SQLiteStorage
+        do {
+            storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: encryption))
+        } catch {
+            Logging.stderr.log("mootx01 db composition fatal: SQLite open failed: \(error)")
+            throw ExitCode.failure
+        }
+
+        let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+        let kit = GeniusLocusKit()
+        let handle: EstateHandle
+        do {
+            handle = try await kit.open(storage: storage, owner: owner)
+            // The catalog seeds the setting on an estate that predates it.
+            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+        } catch {
+            Logging.stderr.log("mootx01 db composition fatal: estate open failed: \(error)")
+            throw ExitCode.failure
+        }
+
+        do {
+            print("estate: \(estateName)")
+            guard let requestedID else {
+                let storedID = try await kit.storedIndexCompositionPolicyID(for: handle)
+                print("index_composition_policy: \(storedID ?? "none")")
+                try await kit.close(handle)
+                await storage.close()
+                return
+            }
+            let start = Date()
+            // 1. Store the setting. 2. Wire the Corpus under it with the
+            // rebuild committed (its rows still carry the old id). 3. Rebuild
+            // every lane. 4. Prove every active row now carries the new id.
+            let storedID = try await kit.setIndexCompositionPolicy(id: requestedID, for: handle)
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, reindexPending: true)
+            try await kit.reindexCorpus(handle: handle, now: Date())
+            let counts = try await kit.indexCompositionPolicyRowCounts(for: handle)
+            let reindexed = counts[storedID] ?? 0
+            let stale = counts.filter { $0.key != storedID }
+            print("index_composition_policy: \(storedID)")
+            print("rows reindexed: \(reindexed)")
+            print(String(format: "elapsed: %.1fs", Date().timeIntervalSince(start)))
+            try await kit.close(handle)
+            await storage.close()
+            if !stale.isEmpty {
+                let detail = stale.map { "\($0.key): \($0.value)" }.sorted().joined(separator: ", ")
+                Logging.stderr.log("mootx01 db composition fatal: rows still carry another policy after the rebuild (\(detail))")
+                throw ExitCode.failure
+            }
+        } catch let exit as ExitCode {
+            throw exit
+        } catch {
+            Logging.stderr.log("mootx01 db composition fatal: \(error)")
+            try? await kit.close(handle)
+            await storage.close()
+            throw ExitCode.failure
+        }
+    }
+}
+#endif

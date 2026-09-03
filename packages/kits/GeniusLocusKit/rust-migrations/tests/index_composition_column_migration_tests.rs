@@ -19,7 +19,9 @@ use genius_locus_kit_migrations::{
     IndexCompositionColumnMigrationExt, IndexCompositionColumnMigrationError,
 };
 #[cfg(feature = "migration-v1-0-to-v1-1")]
-use genius_locus_kit_migrations::{compiled_floor, DistilledSourceDigestColumnMigrationExt};
+use genius_locus_kit_migrations::{
+    compiled_floor, DistilledSourceDigestColumnMigrationExt, IndexCompositionSettingMigrationExt,
+};
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
@@ -242,15 +244,24 @@ fn v1_0_estate_runs_full_chain_to_v1_3() {
         .expect("version set");
     assert_eq!(after_icm, EstateFormatVersion::V1_2, "the 1.1→1.2 capsule stamps V1_2, not current");
 
-    // Run the v1_2 → v1_3 capsule: the chain ends at the current format.
+    // Run the v1_2 → v1_3 capsule, then the v1_3 → v1_4 capsule: the chain
+    // ends at the current format.
     coord
         .run_distilled_source_digest_column_migration(&handle, NOW)
         .expect("distilled source digest column migration must succeed");
+    let after_dsd = EstateFormatStore::new(Arc::clone(&storage))
+        .read_if_present()
+        .expect("read format")
+        .expect("version set");
+    assert_eq!(after_dsd, EstateFormatVersion::V1_3, "the 1.2→1.3 capsule stamps V1_3, not current");
+    coord
+        .run_index_composition_setting_migration(&handle, NOW)
+        .expect("index composition setting migration must succeed");
     let final_stamp = EstateFormatStore::new(Arc::clone(&storage))
         .read_if_present()
         .expect("read format")
         .expect("version set");
-    assert_eq!(final_stamp, EstateFormatVersion::V1_3, "estate must be stamped V1_3 after full chain");
+    assert_eq!(final_stamp, EstateFormatVersion::V1_4, "estate must be stamped V1_4 after full chain");
     assert_eq!(final_stamp, EstateFormatVersion::CURRENT);
 
     // Verify corpus_index_state is writable (composition_policy column present).

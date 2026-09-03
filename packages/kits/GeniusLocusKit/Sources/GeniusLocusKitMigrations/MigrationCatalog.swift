@@ -12,6 +12,10 @@
 @_exported import GLKMigrationV1_2ToV1_3
 #endif
 
+#if GLK_MIGRATION_V1_3_TO_V1_4
+@_exported import GLKMigrationV1_3ToV1_4
+#endif
+
 import Foundation
 
 /// Errors owned by the optional migration catalog. The current GLK runtime
@@ -52,14 +56,17 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.1→1.2, and 1.2→1.3 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_1_TO_V1_2
-        // Floor covers the 1.1→1.2 and 1.2→1.3 capsules.
+        // Floor covers the 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
         .v1_1
         #elseif GLK_MIGRATION_V1_2_TO_V1_3
-        // Floor covers the 1.2→1.3 capsule only.
+        // Floor covers the 1.2→1.3 and 1.3→1.4 capsules.
         .v1_2
+        #elseif GLK_MIGRATION_V1_3_TO_V1_4
+        // Floor covers the 1.3→1.4 capsule only.
+        .v1_3
         #else
         nil
         #endif
@@ -104,8 +111,12 @@ public enum GLKMigrationCatalog {
             // found is between the compiled floor and current — run historical chain.
             found = stamped
         } else {
-            // Fresh estate (nil stamp): provisioned without migration. Stamp current
-            // and return — no historical capsules need to run.
+            // Fresh estate (nil stamp): created by a bare open without
+            // `provision`. Store the index composition setting the estate is
+            // born with (the creation-time seed), then stamp current — the
+            // same order as the 1.3 → 1.4 capsule, so a stamp never precedes
+            // the setting it vouches for. No historical capsules need to run.
+            try await kit.seedIndexCompositionPolicyIfAbsent(for: handle)
             try await formatStore.stamp(.current, now: now)
             return GLKMigrationPreparation(
                 format: .current, migrated: false, migrationState: nil)
@@ -115,17 +126,18 @@ public enum GLKMigrationCatalog {
     }
 
     /// Run the compiled capsules from `found` to the current format as one
-    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, then
-    /// 1.2 -> 1.3; found == v1_1 runs 1.1 -> 1.2 then 1.2 -> 1.3; found ==
-    /// v1_2 runs 1.2 -> 1.3 only. A build that compiles no chain reaching the
-    /// current format cannot serve a historical estate at all.
+    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, 1.2 -> 1.3,
+    /// then 1.3 -> 1.4; found == v1_1 starts at 1.1 -> 1.2; found == v1_2
+    /// starts at 1.2 -> 1.3; found == v1_3 runs 1.3 -> 1.4 only. A build that
+    /// compiles no chain reaching the current format cannot serve a
+    /// historical estate at all.
     private static func runCompiledChain(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_2_TO_V1_3
+        #if GLK_MIGRATION_V1_3_TO_V1_4
         var migrated = false
         var migrationState: String? = nil
         #if GLK_MIGRATION_V1_0_TO_V1_1
@@ -150,9 +162,17 @@ public enum GLKMigrationCatalog {
             try await kit.runIndexCompositionColumnMigration(handle: handle, now: now)
         }
         #endif
-        // Adds distilled_source_digest to drawers through LocusKit's own ladder
-        // (idempotent addColumn) and stamps v1_3.
-        try await kit.runDistilledSourceDigestColumnMigration(handle: handle, now: now)
+        #if GLK_MIGRATION_V1_2_TO_V1_3
+        if found < .v1_3 {
+            // Adds distilled_source_digest to drawers through LocusKit's own
+            // ladder (idempotent addColumn) and stamps v1_3; the chain
+            // continues to 1.4.
+            try await kit.runDistilledSourceDigestColumnMigration(handle: handle, now: now)
+        }
+        #endif
+        // Stores the index composition setting when the estate carries none
+        // (the creation-time seed) and stamps v1_4.
+        try await kit.runIndexCompositionSettingMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,

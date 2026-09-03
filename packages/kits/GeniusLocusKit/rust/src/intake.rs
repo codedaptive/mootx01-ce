@@ -50,25 +50,26 @@ use locus_kit::estate::Estate;
 /// every live drawer reports revision 1 with digest = sha256(content).
 /// The estate verbs ARE the change stream — the polling feed is empty.
 ///
-/// INDEX COMPOSITION POLICY (CDL-03): `composition_policy` controls which text
-/// each index lane consumes. The default (`.current()`) matches pre-CDL-03
-/// behaviour: original text for BM25, distillate for dense. Gauntlet cells B-E
-/// substitute adornment-appended text or the original text in one or both lanes.
-/// The policy is selected at estate open via `MOOT_INDEX_COMPOSITION` and
-/// threaded from the coordinator to this source.
+/// INDEX COMPOSITION POLICY: `composition_policy` controls which text each
+/// index lane consumes. The default (`.current()`) is original text for BM25,
+/// distillate for dense. Gauntlet cells B-E substitute adornment-appended
+/// text or the original text in one or both lanes. The policy an estate runs
+/// under is its stored setting (manifest key `index_composition_policy`),
+/// read by the coordinator at every open and threaded to this source.
 ///
 /// The digest always keys on `drawer.content` so the idempotence anchor is
 /// unaffected by policy, adornment, or distillation changes.
 pub struct LocusDrawerContentSource {
     estate: Estate,
-    /// Index composition policy in effect for this estate open (CDL-03).
-    /// Selects what text feeds each index lane. Default: `.current()`.
+    /// Index composition policy in effect for this estate open: the
+    /// estate's stored setting. Selects what text feeds each index lane.
     composition_policy: IndexCompositionPolicy,
 }
 
 impl LocusDrawerContentSource {
     /// Construct with the `.current()` policy — original text for BM25,
-    /// distillate for dense. This matches pre-CDL-03 behaviour.
+    /// distillate for dense. For tooling over a scratch estate; every estate
+    /// open goes through `new_with_policy` with the stored setting.
     pub fn new(estate: Estate) -> Self {
         LocusDrawerContentSource {
             estate,
@@ -76,7 +77,8 @@ impl LocusDrawerContentSource {
         }
     }
 
-    /// Construct with an explicit composition policy (CDL-03).
+    /// Construct with an explicit composition policy: the estate's stored
+    /// setting at every open.
     pub fn new_with_policy(estate: Estate, composition_policy: IndexCompositionPolicy) -> Self {
         LocusDrawerContentSource { estate, composition_policy }
     }

@@ -423,23 +423,23 @@ fn syncing_direction_tokens_are_camelcase_matching_swift_rawvalue() {
 }
 
 // ---------------------------------------------------------------------------
-// CDL-03: index_composition_policy field in estate_status
+// index_composition_policy field in estate_status
 //
 // Parity with Swift EstateStatusSyncTests.indexCompositionPolicy_fieldPresent
-// and indexCompositionPolicy_defaultIsCellA.
+// and indexCompositionPolicy_locusOnlyIsNone.
 //
-// estate_status must expose "index_composition_policy: <id>" for every estate.
-// When MOOT_INDEX_COMPOSITION is absent or blank, the field must report the
-// production-default cell A id: "lex=original;dense=distilled".
+// estate_status must expose "index_composition_policy: <id>" for every estate:
+// the estate's stored setting, read through the wired Corpus. The in-memory
+// registry seeds the setting when it creates its estate, so the field reports
+// the seeded id; with no MOOT_INDEX_COMPOSITION in the creating process that
+// is the production-default cell A id, "lex=original;dense=distilled".
 // ---------------------------------------------------------------------------
 
-/// estate_status must always include the "index_composition_policy:" field (CDL-03).
+/// estate_status must always include the "index_composition_policy:" field.
 /// Parity: Swift EstateStatusSyncTests.indexCompositionPolicy_fieldPresent.
 #[test]
 fn index_composition_policy_field_present() {
     let registry = EstateRegistry::new_inmemory();
-    // Clear the env var for a deterministic result regardless of test-runner env.
-    std::env::remove_var("MOOT_INDEX_COMPOSITION");
     let result =
         dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
             .expect("estate_status must not throw");
@@ -447,25 +447,47 @@ fn index_composition_policy_field_present() {
     let text = content_text(&result);
     assert!(
         text.contains("index_composition_policy: "),
-        "estate_status must include 'index_composition_policy:' field (CDL-03); got:\n{text}"
+        "estate_status must include the 'index_composition_policy:' field; got:\n{text}"
     );
 }
 
-/// When MOOT_INDEX_COMPOSITION is absent, estate_status must report the
-/// production-default policy id "lex=original;dense=distilled" (cell A).
-/// Parity: Swift EstateStatusSyncTests.indexCompositionPolicy_defaultIsCellA.
+/// estate_status reports the estate's STORED setting: the id the in-memory
+/// registry seeded at creation, which the wired Corpus runs under. The test
+/// reads the stored value back through the coordinator and expects the
+/// status line to name exactly that id, whatever the environment says now.
 #[test]
-fn index_composition_policy_default_is_cell_a() {
+fn index_composition_policy_reports_the_stored_setting() {
     let registry = EstateRegistry::new_inmemory();
-    // Ensure the env var is absent so the default policy applies.
-    std::env::remove_var("MOOT_INDEX_COMPOSITION");
+    let stored = {
+        let coord = registry.coord.lock().unwrap();
+        coord
+            .stored_index_composition_policy_id(&registry.default.handle)
+            .expect("stored setting read")
+            .expect("the in-memory registry seeds the setting at creation")
+    };
     let result =
         dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
             .expect("estate_status must not throw");
     assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
     let text = content_text(&result);
     assert!(
-        text.contains("index_composition_policy: lex=original;dense=distilled"),
-        "Default policy must be cell A (lex=original;dense=distilled); got:\n{text}"
+        text.contains(&format!("index_composition_policy: {stored}")),
+        "status must report the stored setting {stored}; got:\n{text}"
+    );
+}
+
+/// A locus-only registry (no Corpus wired) reports "none", as the Swift
+/// port does for a locusOnly estate.
+#[test]
+fn index_composition_policy_is_none_without_a_corpus() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result =
+        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
+            .expect("estate_status must not throw");
+    assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("index_composition_policy: none"),
+        "a registry without a Corpus must report none; got:\n{text}"
     );
 }

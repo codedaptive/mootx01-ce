@@ -53,7 +53,7 @@ use genius_locus_kit_migrations::SharedContentMigrationExt;
 
 use substrate_types::{RowState, RowStateCluster};
 
-use corpus_kit::index_composition_policy::IndexCompositionPolicy;
+
 use vault_kit::json_import_bridge::JsonImportBridge;
 use vault_kit::palace_bridge::PalaceBridge;
 
@@ -3018,24 +3018,17 @@ fn run_estate_status(
         .filter(|d| !d.content.is_empty() && d.subject.is_some())
         .count();
 
-    // CDL-03: read the active index composition policy from the environment
-    // (same source used at estate open time — see coordinator.rs
-    // `index_composition_policy_from_env`). Absent or unrecognised env var →
-    // `current()` (cell A, production default). Mirrors Swift runEstateStatus:
+    // The index composition policy the wired Corpus runs under: the estate's
+    // stored setting, read through the coordinator. "none" when no Corpus is
+    // wired (a locus-only estate). Mirrors Swift runEstateStatus:
     //   kit.indexCompositionPolicy(for: handle)?.id ?? "none"
-    // Note: Swift returns "none" for locusOnly estates where the CorpusKit
-    // engine is not wired. On the Rust side the env-var path always resolves
-    // to a policy id (the coordinator always wires CorpusKit when GLK opens),
-    // so we report the resolved id rather than "none".
-    let composition_policy_id = std::env::var("MOOT_INDEX_COMPOSITION")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .and_then(|v| IndexCompositionPolicy::from_environment_value(&v))
-        .unwrap_or_else(IndexCompositionPolicy::current)
-        .id();
+    let composition_policy_id = coord
+        .index_composition_policy(&estate.handle)
+        .map(|policy| policy.id())
+        .unwrap_or_else(|| "none".to_string());
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / subjects / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    //   / index_composition_policy (CDL-03) / frozen / fdc_recalculation
+    //   / index_composition_policy / frozen / fdc_recalculation
     //   / fdc_recalculation_floor / fdc_recalculation_current
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     // `frozen:` is the posture of this serve (`mootx01 serve --frozen` /

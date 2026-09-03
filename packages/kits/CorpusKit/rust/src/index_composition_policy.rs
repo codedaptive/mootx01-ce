@@ -15,11 +15,15 @@
 //!   D — lex=originalPlusAdornments; dense=distilledPlusAdornments
 //!   E — lex=original; dense=original             (lexical-only ablation baseline)
 //!
-//! The id is stored in `corpus_index_state.composition_policy` so the engine
-//! can detect a configuration mismatch at open time (stored vs. configured).
+//! The id is stored in `corpus_index_state.composition_policy` on every row
+//! the engine indexes (the Swift engine compares it to the configured policy
+//! at open; `mootx01 db composition --set` rebuilds every row under a new
+//! policy in both ports). The policy an estate runs under is a stored estate
+//! setting (LocusKit manifest key `index_composition_policy`), read by
+//! GeniusLocusKit at every open.
 
 /// What text feeds the BM25 inverted index for one content row.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LexicalIndexSource {
     /// Verbatim drawer content — production default.
@@ -57,7 +61,7 @@ impl LexicalIndexSource {
 }
 
 /// What text feeds the float embedding / dense vector lane.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DenseIndexSource {
     /// Distillate text — production default; falls back to verbatim when nil.
@@ -92,10 +96,14 @@ impl DenseIndexSource {
 /// Named policy controlling which texts each index lane consumes.
 ///
 /// The `id()` string is the persistence anchor, stored verbatim in
-/// `corpus_index_state.composition_policy`. A policy change on an existing
-/// estate must be detected at open time by comparing the recorded id to the
-/// configured id, to prevent mixing rows indexed under different policies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `corpus_index_state.composition_policy` and in the estate's stored
+/// setting. A policy change on an existing estate goes through
+/// `mootx01 db composition --set`, which rewrites the setting and rebuilds
+/// every index row, so rows indexed under different policies never mix.
+///
+/// `Copy`: two unit enums, so the policy travels inside the `Copy`
+/// `CorpusContentConfiguration` without allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexCompositionPolicy {
     /// What text the BM25 inverted index lane consumes.
     pub lexical_source: LexicalIndexSource,
@@ -124,9 +132,9 @@ impl IndexCompositionPolicy {
 
     // MARK: - Named policies
 
-    /// Production default — original text for BM25, distillate for dense.
-    /// Matches behaviour before CDL-03 (cell A). Estates without
-    /// `MOOT_INDEX_COMPOSITION` use this policy.
+    /// Production default — original text for BM25, distillate for dense
+    /// (cell A). An estate whose setting was seeded without
+    /// `MOOT_INDEX_COMPOSITION` in the creating process runs this policy.
     pub fn current() -> IndexCompositionPolicy {
         IndexCompositionPolicy::new(LexicalIndexSource::Original, DenseIndexSource::Distilled)
     }
@@ -160,14 +168,15 @@ impl IndexCompositionPolicy {
         IndexCompositionPolicy::new(LexicalIndexSource::Original, DenseIndexSource::Original)
     }
 
-    // MARK: - Environment-variable selector
+    // MARK: - Policy id parser
 
-    /// Parse an `IndexCompositionPolicy` from the value of `MOOT_INDEX_COMPOSITION`.
+    /// Parse an `IndexCompositionPolicy` from its id string.
     ///
     /// Accepted format: `"lex=<lex>;dense=<dense>"` where both parts use the
     /// raw values of `LexicalIndexSource` and `DenseIndexSource`. Returns
-    /// `None` for unrecognised or malformed strings; the caller falls back to
-    /// `IndexCompositionPolicy::current()`.
+    /// `None` for unrecognised or malformed strings. The stored estate
+    /// setting, the `mootx01 db composition --set` argument, and the
+    /// creation-time `MOOT_INDEX_COMPOSITION` seed all use this form.
     pub fn from_environment_value(value: &str) -> Option<IndexCompositionPolicy> {
         let mut parts = value.splitn(2, ';');
         let lex_part = parts.next()?;
