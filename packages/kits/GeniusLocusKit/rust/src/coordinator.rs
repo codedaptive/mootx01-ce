@@ -3955,6 +3955,76 @@ impl EstateCoordinator {
         })
     }
 
+    // MARK: - mid-run crash recovery probe
+
+    /// Count of active, represented drawers whose corpus index row is missing
+    /// or was last updated strictly before the drawer's `distilled_at` timestamp.
+    ///
+    /// The distillation convergence step runs a sweep then a reindex. If the
+    /// process dies after the sweep commits but before the reindex runs, every
+    /// drawer reads as "current converter" — so a second run would skip the
+    /// reindex entirely, leaving the derived lanes built from the old text. This
+    /// count detects that gap by cross-referencing two independently-updated
+    /// timestamps.
+    ///
+    /// Eligibility predicate — a drawer counts when ALL of:
+    ///   1. Active (not tombstoned), non-empty content.
+    ///   2. Carries a distilled representation (bit 19 set).
+    ///   3. The corpus has no index row for that drawer, OR the index row's
+    ///      `updated_at_millis` is strictly earlier than the drawer's
+    ///      `distilled_at` millis. Equal millis mean indexed (sweep and reindex
+    ///      ran under the same `now`).
+    ///
+    /// Returns 0 immediately when no corpus is registered for the estate
+    /// (LocusOnly estate — no index to check). Mirrors Swift
+    /// `GeniusLocusKit.distilledRepresentationsAwaitingReindex`.
+    pub fn distilled_representations_awaiting_reindex(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<usize, VerbDispatchError> {
+        // An unopened handle is an error before anything else, as in the
+        // Swift port; a LocusOnly estate (open, no corpus) reports zero.
+        let Some(estate) = self.registry.get(handle) else {
+            return Err(VerbDispatchError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            });
+        };
+        let Some(corpus) = self.corpus_kits.get(handle) else {
+            return Ok(0);
+        };
+        // Fetch the two independent timestamp sets without hydrating content.
+        let drawers = estate
+            .drawers_with_representations()
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "distilled_representations_awaiting_reindex".to_string(),
+                reason: format!("{e:?}"),
+            }))?;
+        let index_states = corpus
+            .all_index_states()
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "distilled_representations_awaiting_reindex".to_string(),
+                reason: format!("{e:?}"),
+            }))?;
+        // Build a lookup from contentID (== drawerID) to the index row's updated_at.
+        let indexed_at: std::collections::HashMap<&str, i64> = index_states
+            .iter()
+            .map(|s| (s.content_id.as_str(), s.updated_at_millis))
+            .collect();
+        // Count drawers with no index row OR whose index row is older than the
+        // representation. Strict `<`: equal millis mean sweep and reindex ran
+        // together under the same `now` — the drawer is fully indexed.
+        let count = drawers
+            .iter()
+            .filter(|(id, distilled_at)| {
+                match indexed_at.get(id.as_str()) {
+                    None => true,                    // no index row — awaiting
+                    Some(&idx_at) => idx_at < *distilled_at,
+                }
+            })
+            .count();
+        Ok(count)
+    }
+
     // MARK: - anomaly_flag_sweep
 
     /// Compute room-cohesion z-scores and set/clear bit 26 (`is_anomalous()`)
