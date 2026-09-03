@@ -26,16 +26,17 @@ import GeniusLocusKit
 @Suite("SprintDXAssertionTests — Sprint DX milestone gate")
 struct SprintDXAssertionTests {
 
-    /// CK-DX-1: RecipeCatalog carries all 30 recipes.
+    /// CK-DX-1: RecipeCatalog carries all 31 recipes.
     ///
     /// Baseline 26 + 2 distillation-family recipes (distill,
     /// distilled_recall — recollect retired with the factoid tier,
     /// SPEC_DISTILLATION_STORAGE §11); + 1 diffusion node-layer lens
-    /// (node_motion); + 1 escalation-ladder recall recipe (walk_recall, D10).
-    @Test("CK-DX-1: RecipeCatalog.all.count == 29 (26 baseline + 2 distillation + node_motion)")
+    /// (node_motion); + 1 escalation-ladder recall recipe (walk_recall, D10);
+    /// + redistill (CDL-02, force-redistill all items + laneScope .all reindex).
+    @Test("CK-DX-1: RecipeCatalog.all.count == 31 (26 baseline + 2 distillation + node_motion + walk_recall + redistill)")
     func recipeCatalogCountIncludesDistillationTriple() {
-        #expect(RecipeCatalog.all.count == 30,
-            "RecipeCatalog must contain exactly 30 recipes: 26 baseline + 2 distillation + node_motion + walk_recall")
+        #expect(RecipeCatalog.all.count == 31,
+            "RecipeCatalog must contain exactly 31 recipes: 26 baseline + 2 distillation + node_motion + walk_recall + redistill (CDL-02)")
     }
 
     /// CK-DX-2: defaultStandingSignalNames contains all 13 standing signals.
