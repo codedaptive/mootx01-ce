@@ -27,14 +27,78 @@ mod distillation_storage_migration;
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 pub use distillation_storage_migration::*;
 
+// GLK 1.1 → 1.2 capsule: applies composition_policy column to corpus_index_state
+// on estates created before corpus_index_state reached schema version 3 (parity with the Swift GLKMigrationV1_1ToV1_2 target).
+#[cfg(feature = "migration-v1-1-to-v1-2")]
+mod index_composition_column_migration;
+
+#[cfg(feature = "migration-v1-1-to-v1-2")]
+pub use index_composition_column_migration::*;
+
 use genius_locus_kit::estate_format::EstateFormatVersion;
 
+/// The compiled historical chain, run in format order. Every capsule reads
+/// its own persisted state and is idempotent, so the chain is safe to run on
+/// an estate at any compiled stamp; capsules whose work is already done
+/// return without touching the estate. Mirrors the Swift
+/// `GLKMigrationCatalog.prepare` dispatch: 1.0 -> 1.1 (distillation storage
+/// then shared content, which stamps 1.1), then 1.1 -> 1.2 (index composition
+/// column, which stamps 1.2).
+pub trait MigrationChainExt {
+    /// Run every compiled capsule for `handle`, oldest first. `models` is the
+    /// embedding ensemble the shared-content capsule rebuilds the derived
+    /// lanes with; it is unused when that capsule is not compiled.
+    fn run_migration_chain(
+        &mut self,
+        handle: &genius_locus_kit::handle::EstateHandle,
+        now_millis: i64,
+        models: Vec<corpus_kit::EmbeddingModelConfig>,
+    ) -> Result<(), String>;
+}
+
+impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
+    fn run_migration_chain(
+        &mut self,
+        handle: &genius_locus_kit::handle::EstateHandle,
+        now_millis: i64,
+        models: Vec<corpus_kit::EmbeddingModelConfig>,
+    ) -> Result<(), String> {
+        #[cfg(feature = "migration-v1-0-to-v1-1")]
+        {
+            self.run_shared_content_migration(handle, now_millis, models)
+                .map_err(|error| format!("shared-content migration: {error:?}"))?;
+        }
+        #[cfg(not(feature = "migration-v1-0-to-v1-1"))]
+        let _ = models;
+        #[cfg(feature = "migration-v1-1-to-v1-2")]
+        {
+            self.run_index_composition_column_migration(handle, now_millis)
+                .map_err(|error| format!("index-composition-column migration: {error:?}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Returns the lowest estate format version this build can migrate from,
+/// or `None` when no historical capsules are compiled.
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
+        // Floor covers both 1.0→1.1 and 1.1→1.2 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
-    #[cfg(not(feature = "migration-v1-0-to-v1-1"))]
+    #[cfg(all(
+        feature = "migration-v1-1-to-v1-2",
+        not(feature = "migration-v1-0-to-v1-1")
+    ))]
+    {
+        // Only the 1.1→1.2 capsule is compiled.
+        return Some(EstateFormatVersion::V1_1);
+    }
+    #[cfg(all(
+        not(feature = "migration-v1-0-to-v1-1"),
+        not(feature = "migration-v1-1-to-v1-2")
+    ))]
     {
         None
     }
