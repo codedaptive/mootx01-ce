@@ -57,52 +57,65 @@ struct UpgradeCommandSourceTests {
         #expect(!branch.contains("download"))
     }
 
-    @Test("Each backfill function captures daemon state and restarts the daemon inline")
-    func backfillFunctionsRestartDaemonInline() throws {
+    @Test("Each backfill function routes its daemon quiesce through ResidentDaemonQuiesce")
+    func backfillFunctionsQuiesceThroughTheSharedHelper() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
 
-        // Each function must capture wasRunning before its stop call so it
-        // can restart unconditionally of the caller (Finding 1 fix).
-        // We verify the pattern by asserting startDaemon appears inside each
-        // function body. Source-inspection is the right tool here: launchd is
-        // not testable headless, but the presence of the restart call in each
-        // function body is a structural invariant that can be checked statically.
+        // Source inspection is the right tool here: launchd is not testable
+        // headless, but "every step goes through the one helper, and none
+        // reaches launchd on its own" is a structural invariant that can be
+        // checked statically. The helper itself is covered by
+        // ResidentDaemonQuiesceTests with a recording daemon control.
+        //
+        // Each step is bounded by its own declaration and the doc comment
+        // of the function that follows it in the file.
+        let steps: [(name: String, start: String, end: String)] = [
+            ("runKGFactIdentityBackfill",
+             "private func runKGFactIdentityBackfill",
+             "/// CDL-02: bring every drawer's stored distilled representation"),
+            ("runDistilledRepresentationConvergence",
+             "private func runDistilledRepresentationConvergence",
+             "/// ADORN-STORE-02 Part C:"),
+            ("runAdornmentStoreMigration",
+             "private func runAdornmentStoreMigration",
+             "/// P5 of the shared-content"),
+            ("runSharedContentReclaimIfPending",
+             "private func runSharedContentReclaimIfPending",
+             "/// CE-1.0.35-08: offer to encrypt"),
+        ]
+        for step in steps {
+            let start = try #require(source.range(of: step.start)?.lowerBound)
+            let end = try #require(
+                source.range(of: step.end, range: start..<source.endIndex)?.lowerBound)
+            let body = source[start..<end]
+            #expect(body.contains("ResidentDaemonQuiesce.run("),
+                    "\(step.name) must route its quiesce through the shared helper")
+            #expect(body.contains("residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home)"),
+                    "\(step.name) must compare against the resident data directory")
+            #expect(body.contains("daemon: .launchd(homeDirectory: home)"),
+                    "\(step.name) must hand the helper the launchd seam")
+            #expect(!body.contains("LaunchAgent.isDaemonRunning"),
+                    "\(step.name) must not query launchd on its own")
+            #expect(!body.contains("LaunchAgent.stopDaemon"),
+                    "\(step.name) must not stop the daemon on its own")
+            #expect(!body.contains("LaunchAgent.startDaemon"),
+                    "\(step.name) must not start the daemon on its own")
+        }
+        // The command reaches launchd only through the helper's seam.
+        #expect(!source.contains("LaunchAgent.stopDaemon"))
+        #expect(!source.contains("LaunchAgent.startDaemon"))
+    }
 
-        // runKGFactIdentityBackfill must contain the inline restart.
-        // kgEnd anchor: the doc comment for the next function — renamed from
-        // ADORN-BACKFILL to ADORN-STORE-02 in Part C.
-        let kgStart = try #require(
-            source.range(of: "private func runKGFactIdentityBackfill")?.lowerBound)
-        let kgEnd = try #require(
-            source.range(of: "/// ADORN-STORE-02 Part C:", range: kgStart..<source.endIndex)?.lowerBound)
-        let kgBody = source[kgStart..<kgEnd]
-        #expect(kgBody.contains("let wasRunning = LaunchAgent.isDaemonRunning()"),
-                "runKGFactIdentityBackfill must capture wasRunning before the stop call")
-        #expect(kgBody.contains("LaunchAgent.startDaemon(homeDirectory: home)"),
-                "runKGFactIdentityBackfill must restart the daemon inline")
-
-        // runAdornmentStoreMigration must contain the inline restart.
-        // (renamed from runAdornmentRequiredBackfill in ADORN-STORE-02 Part C)
-        let adStart = try #require(
-            source.range(of: "private func runAdornmentStoreMigration")?.lowerBound)
-        let adEnd = try #require(
-            source.range(of: "/// P5 of the shared-content", range: adStart..<source.endIndex)?.lowerBound)
-        let adBody = source[adStart..<adEnd]
-        #expect(adBody.contains("let wasRunning = LaunchAgent.isDaemonRunning()"),
-                "runAdornmentStoreMigration must capture wasRunning before the stop call")
-        #expect(adBody.contains("LaunchAgent.startDaemon(homeDirectory: home)"),
-                "runAdornmentStoreMigration must restart the daemon inline")
-
-        // runSharedContentReclaimIfPending must contain the inline restart.
-        let rcStart = try #require(
-            source.range(of: "private func runSharedContentReclaimIfPending")?.lowerBound)
-        let rcEnd = try #require(
-            source.range(of: "/// CE-1.0.35-08: offer to encrypt", range: rcStart..<source.endIndex)?.lowerBound)
-        let rcBody = source[rcStart..<rcEnd]
-        #expect(rcBody.contains("let wasRunning = LaunchAgent.isDaemonRunning()"),
-                "runSharedContentReclaimIfPending must capture wasRunning before the stop call")
-        #expect(rcBody.contains("LaunchAgent.startDaemon(homeDirectory: home)"),
-                "runSharedContentReclaimIfPending must restart the daemon inline")
+    @Test("The encryption migration selects the launchd seam only for the resident estate")
+    func encryptionMigrationSelectsDaemonControlByPredicate() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        let start = try #require(
+            source.range(of: "private func runEstateEncryptionMigration")?.lowerBound)
+        let end = try #require(
+            source.range(of: "/// See the call site's doc comment. The gating", range: start..<source.endIndex)?.lowerBound)
+        let body = source[start..<end]
+        #expect(body.contains("MootPaths.isResidentEstate("))
+        #expect(body.contains("daemon: resident ? .launchd(homeDirectory: home) : .none"))
     }
 
     @Test("runDistilledRepresentationConvergence uses two-key eligibility gate")
