@@ -852,6 +852,27 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Active, non-empty drawers that carry a distilled representation,
+    /// returned as `(id, distilled_at_millis)` pairs with no content hydration.
+    ///
+    /// Used by GeniusLocusKit's `distilled_representations_awaiting_reindex` to
+    /// compare each drawer's `distilled_at` instant against the corresponding
+    /// corpus index row's `updated_at_millis`, detecting the mid-run crash
+    /// scenario where the sweep committed but the reindex did not.
+    ///
+    /// Query shape mirrors `count_undistilled`: tombstoned_at IS NULL, content ≠ "",
+    /// bit 19 (HAS_CURRENT_REPRESENTATION) set. Projects only `id` and
+    /// `distilled_at` — no text column is materialized. The §4 invariant (bit and
+    /// columns always in agreement) guarantees `distilled_at` is non-null when
+    /// bit 19 is set. Mirrors Swift `DrawerStore.drawersWithRepresentations`.
+    fn drawers_with_representations(
+        &self,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "drawers_with_representations not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
 
     /// Write the subject line of one drawer — all three subject columns
@@ -2466,6 +2487,9 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_undistilled(pipeline_version)
+    }
+    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.as_ref().drawers_with_representations()
     }
     fn set_subject_representation(
         &self,
