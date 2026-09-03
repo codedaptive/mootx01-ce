@@ -15,7 +15,7 @@
 /// kit then treats the row as a forward-schema entry it does not know how
 /// to interpret).
 ///
-/// All 25 cases — 18 required + 7 optional — are present and ordered
+/// All 26 cases — 18 required + 8 optional — are present and ordered
 /// to match the Swift declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestKey {
@@ -39,7 +39,7 @@ pub enum ManifestKey {
     BitmapLayoutVersion,
     ProvenanceBitmapVersion,
 
-    // Optional keys (7)
+    // Optional keys (8)
     FederationGroupID,
     MiningPatternsHash,
     TinyModelID,
@@ -58,6 +58,16 @@ pub enum ManifestKey {
     /// key bytes here: `manifest.value` is ordinary metadata and is not
     /// protected by row encryption.
     Ed25519PrivateKeyWrapped,
+
+    /// The estate's index composition policy id: which text each search
+    /// index lane is built from, in CorpusKit's `IndexCompositionPolicy::id()`
+    /// form (`lex=<source>;dense=<source>`). Written once, when the estate is
+    /// created or when the estate-format 1.3 to 1.4 capsule seeds it; read
+    /// by GeniusLocusKit at every open; changed only by
+    /// `mootx01 db composition --set`, which rebuilds every index lane in
+    /// the same command so the stored id and the index rows never disagree.
+    /// LocusKit stores the string and never interprets it.
+    IndexCompositionPolicy,
 }
 
 impl ManifestKey {
@@ -90,6 +100,7 @@ impl ManifestKey {
             ManifestKey::OperationalBitmapLayouts => "operational_bitmap_layouts",
             ManifestKey::Ed25519PublicKey => "ed25519_public_key",
             ManifestKey::Ed25519PrivateKeyWrapped => "ed25519_private_key_wrapped",
+            ManifestKey::IndexCompositionPolicy => "index_composition_policy",
         }
     }
 
@@ -130,6 +141,7 @@ impl ManifestKey {
             "operational_bitmap_layouts" => ManifestKey::OperationalBitmapLayouts,
             "ed25519_public_key" => ManifestKey::Ed25519PublicKey,
             "ed25519_private_key_wrapped" => ManifestKey::Ed25519PrivateKeyWrapped,
+            "index_composition_policy" => ManifestKey::IndexCompositionPolicy,
             _ => return None,
         })
     }
@@ -157,8 +169,8 @@ impl ManifestKey {
         ManifestKey::ProvenanceBitmapVersion,
     ];
 
-    /// The 7 optional keys. Absent means "not configured".
-    pub const OPTIONAL: [ManifestKey; 7] = [
+    /// The 8 optional keys. Absent means "not configured".
+    pub const OPTIONAL: [ManifestKey; 8] = [
         ManifestKey::FederationGroupID,
         ManifestKey::MiningPatternsHash,
         ManifestKey::TinyModelID,
@@ -166,6 +178,7 @@ impl ManifestKey {
         ManifestKey::OperationalBitmapLayouts,
         ManifestKey::Ed25519PublicKey,
         ManifestKey::Ed25519PrivateKeyWrapped,
+        ManifestKey::IndexCompositionPolicy,
     ];
 }
 
@@ -319,11 +332,13 @@ mod tests {
         assert_eq!(ManifestKey::from_str("Manifest_Version"), None); // case sensitive
     }
 
-    /// 18 required keys, 7 optional, 25 total.
+    /// 18 required keys, 8 optional, 26 total.
     #[test]
     fn key_counts() {
         assert_eq!(ManifestKey::REQUIRED.len(), 18);
-        assert_eq!(ManifestKey::OPTIONAL.len(), 7);
+        assert_eq!(ManifestKey::OPTIONAL.len(), 8);
+        assert_eq!(ManifestKey::IndexCompositionPolicy.as_str(), "index_composition_policy");
+        assert!(ManifestKey::OPTIONAL.contains(&ManifestKey::IndexCompositionPolicy));
     }
 
     /// Required and optional sets are disjoint.
