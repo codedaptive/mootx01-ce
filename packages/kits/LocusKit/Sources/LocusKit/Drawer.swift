@@ -182,20 +182,29 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// of this one item: no independent identity, lifecycle, or
     /// provenance. NULL means "no representation exists yet" and is the
     /// sweep-eligibility predicate — there is no separate staleness flag
-    /// and no Bool accessor; callers test `distilled != nil`. The four
+    /// and no Bool accessor; callers test `distilled != nil`. The five
     /// `distilled*` fields are NULL together or populated together (one
     /// atomic column write, `DrawerStore.setDistilledRepresentation`),
-    /// and every write that touches `content` NULLs all four in the
+    /// and every write that touches `content` NULLs all five in the
     /// same statement (the §7.3 regeneration trigger and the erasure
     /// scrub — derived text must not outlive erased content).
     public let distilled: String?
 
     /// The converter ID that produced `distilled` — the ContextDistillLib
     /// converter identity of the form `<candidate>@<ruleset-version>`
-    /// (see `GeniusLocusKit.distillationConverterID`). A row whose value
-    /// differs from the current build's converter ID is a regeneration
-    /// candidate for the sweep. Nil iff `distilled` is nil.
+    /// (see `GeniusLocusKit.distillationConverterID`). Together with
+    /// `distilledSourceDigest` it decides currency: a row is current iff
+    /// this equals the active converter ID AND the digest equals the
+    /// digest of `content`. Nil iff `distilled` is nil.
     public let distilledPipelineVersion: String?
+
+    /// The SHA-256 hex digest (ContextDistillLib `sourceDigest`) of the
+    /// complete original `content` that `distilled` was rendered from.
+    /// The second half of the currency rule: a representation whose
+    /// digest differs from the digest of the row's current content, or
+    /// whose digest is nil (written before the column existed), is stale
+    /// and regenerates on the next sweep. Nil iff `distilled` is nil.
+    public let distilledSourceDigest: String?
 
     /// Approximate token count of `distilled` (SPEC §6): deterministic,
     /// vendor-neutral estimate so AI clients can budget context before
@@ -264,6 +273,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
         distilledPipelineVersion: String? = nil,
         distilledTokenCount: Int64? = nil,
         distilledAt: Date? = nil,
+        distilledSourceDigest: String? = nil,
         subject: String? = nil,
         subjectPipelineVersion: String? = nil,
         subjectAt: Date? = nil
@@ -291,6 +301,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
         self.distilledPipelineVersion = distilledPipelineVersion
         self.distilledTokenCount = distilledTokenCount
         self.distilledAt = distilledAt
+        self.distilledSourceDigest = distilledSourceDigest
         self.subject = subject
         self.subjectPipelineVersion = subjectPipelineVersion
         self.subjectAt = subjectAt
@@ -309,6 +320,7 @@ extension Drawer: Codable {
         case provenance, adjectiveBitmap, operationalBitmap
         case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
         case distilled, distilledPipelineVersion, distilledTokenCount, distilledAt
+        case distilledSourceDigest
         case subject, subjectPipelineVersion, subjectAt
         // Note: the `adornment` CodingKey is intentionally absent. The drawers
         // table column is retained physically (dead column, see LocusKitSchema
@@ -343,6 +355,9 @@ extension Drawer: Codable {
         distilledPipelineVersion = try c.decodeIfPresent(String.self, forKey: .distilledPipelineVersion)
         distilledTokenCount = try c.decodeIfPresent(Int64.self, forKey: .distilledTokenCount)
         distilledAt = try c.decodeIfPresent(Date.self, forKey: .distilledAt)
+        // decodeIfPresent: payloads encoded before the digest column existed
+        // decode with a nil digest, which the currency rule reads as stale.
+        distilledSourceDigest = try c.decodeIfPresent(String.self, forKey: .distilledSourceDigest)
         // Subject trio (PR-01): decodeIfPresent so payloads encoded before
         // the trio existed decode with nil subjects (missing = truthful).
         subject = try c.decodeIfPresent(String.self, forKey: .subject)
@@ -378,6 +393,7 @@ extension Drawer: Codable {
         try c.encodeIfPresent(distilledPipelineVersion, forKey: .distilledPipelineVersion)
         try c.encodeIfPresent(distilledTokenCount, forKey: .distilledTokenCount)
         try c.encodeIfPresent(distilledAt, forKey: .distilledAt)
+        try c.encodeIfPresent(distilledSourceDigest, forKey: .distilledSourceDigest)
         try c.encodeIfPresent(subject, forKey: .subject)
         try c.encodeIfPresent(subjectPipelineVersion, forKey: .subjectPipelineVersion)
         try c.encodeIfPresent(subjectAt, forKey: .subjectAt)
