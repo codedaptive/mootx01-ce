@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MOOTx01 hooks for Claude Code.
 
-One script, four modes (argv[1]):
+One script, seven modes (argv[1]):
 
   context     UserPromptSubmit  Checkpoint-note reminders as the context window
                                 fills (30 / 50 / 70 / 85 %), each rung once per
@@ -19,13 +19,27 @@ One script, four modes (argv[1]):
   stop        Stop              If MOOTx01 tools were used this session but no
                                 durable writeback happened, asks Claude (once)
                                 to file memories before finishing.
+  plan-approved   PostToolUse   (matcher ExitPlanMode) An approved plan lives
+                                only in the session, so at approval the hook
+                                marks it pending (`plan_pending` = short hash
+                                of the plan text) and asks Claude to file it to
+                                `plans/<project>/<plan-slug>` verbatim.
+  plan-filed      PostToolUse   (matcher mcp__.*__moot_file_memory) A
+                                moot_file_memory call whose location begins
+                                `plans/` clears `plan_pending`. Nothing else
+                                clears it. Prints nothing.
+  precommit-check PreToolUse    (matcher Bash) A `git commit` while
+                                `plan_pending` is still set gets a reminder to
+                                file the plan first, once per session. Never
+                                blocks the command.
 
 Design constraints, on purpose:
   - Python standard library only. No third-party imports.
   - No network access. Ever.
   - Reads only the hook JSON on stdin, the session transcript path that
-    Claude Code provides, and (session mode only) the user's own
-    ~/.claude.json to check for a competing direct MCP entry. Writes only a
+    Claude Code provides, (session mode only) the user's own ~/.claude.json
+    to check for a competing direct MCP entry, and (plan-approved mode only)
+    `git rev-parse --show-toplevel` for the repository name. Writes only a
     small state file in the system temp directory. NEVER writes to
     ~/.claude.json or any client config — detection is read-only, warn-mode
     only. The hook never edits client configuration.
@@ -39,8 +53,11 @@ Environment:
                            this hook does not know yields no percentage.
 """
 
+import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 
@@ -150,6 +167,48 @@ RECOVERY_MESSAGE = (
     "derivesFrom tunnels if you need more than the handoff carries — walk "
     "back only if the handoff leaves you short."
 )
+
+# Plan capture. The hook cannot call moot itself (MCP tools belong to the
+# agent), so each message is an instruction the agent carries out on its next
+# turn. PostToolUse / PreToolUse deliver context only through the JSON form on
+# stdout ({"hookSpecificOutput": {"hookEventName": ..., "additionalContext":
+# ...}}); plain stdout is not shown to the model on those events.
+PLAN_APPROVED_MESSAGE = (
+    "[MOOTx01 plan capture] A plan was just approved. File it now with "
+    "moot_file_memory to `{location}`, with the plan text verbatim in the "
+    "body. Project is the repository name; slug comes from the plan's own "
+    "title. This is the one artifact a later session cannot reconstruct."
+)
+
+PLAN_REAPPROVED_LINE = (
+    " This same plan text (hash {plan_hash}) was already approved in this "
+    "session: update the existing note at `{location}` rather than filing a "
+    "second one."
+)
+
+PLAN_ESTATE_UNREACHABLE_LINE = (
+    " The MOOTx01 estate is unreachable right now (nothing is listening on "
+    "127.0.0.1:4242), so the filing may not land: paste the plan somewhere "
+    "durable as well, such as a file in the repository or the handoff you "
+    "leave for the next session."
+)
+
+PLAN_PRECOMMIT_MESSAGE = (
+    "[MOOTx01 plan capture] The approved plan for this session is not in moot "
+    "yet. File it now to `{location}` while you still have it — this is "
+    "the last moment it is cheap. Then continue with the commit."
+)
+
+# A `git commit` anywhere in a Bash command: `git`, then `commit` before the
+# next shell separator, so `git -C path commit`, `cd x && git commit -m` and
+# `git -c user.name=X commit` all match while `git log` does not. The
+# lookarounds keep `commit` a whole word even against `-`, so
+# `git revert --no-commit` and `git commit-graph write` do not match.
+GIT_COMMIT_PATTERN = re.compile(r"\bgit\b[^;&|\n]*?(?<![-\w])commit(?![-\w])")
+
+# The plan-capture location. Each project is a room whose drawers are its
+# plans, so the plan history stays queryable on its own.
+PLAN_LOCATION = "plans/{project}/{slug}"
 
 STOP_REASON = (
     "[MOOTx01 writeback check] MOOTx01 memory tools were used this session, "
@@ -437,6 +496,134 @@ def mode_stop(data):
     print(json.dumps({"decision": "block", "reason": STOP_REASON}))
 
 
+def inject_context(hook_event_name, text):
+    """Print the JSON form that delivers `text` to the model on PreToolUse and
+    PostToolUse. Only `hookSpecificOutput.additionalContext` reaches the model
+    on those events; no decision field is set, so the tool call proceeds."""
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": hook_event_name,
+        "additionalContext": text,
+    }}))
+
+
+def plan_hash(plan_text):
+    """First 12 hex digits of SHA-256 over the plan text: enough to tell two
+    plans apart within a session, short enough to quote in a message."""
+    return hashlib.sha256(plan_text.encode("utf-8")).hexdigest()[:12]
+
+
+def slugify(text):
+    """Lowercase, every run of non-alphanumerics to one `-`, trimmed."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+    return slug
+
+
+def plan_slug(plan_text):
+    """Slug of the plan's first Markdown heading; `untitled-plan` when the plan
+    has no heading or the heading slugs to nothing."""
+    for line in plan_text.splitlines():
+        match = re.match(r"\s*#+\s*(.+?)\s*#*\s*$", line)
+        if match:
+            return slugify(match.group(1)) or "untitled-plan"
+    return "untitled-plan"
+
+
+def project_name(cwd):
+    """Basename of the git top level for `cwd`, falling back to the basename
+    of `cwd` itself, or `unknown-project` when no cwd was given. Never raises;
+    a missing git or a non-repo cwd is the fallback, not an error."""
+    cwd = str(cwd or "")
+    if not cwd:
+        return "unknown-project"
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2, check=False)
+        top = result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        top = ""
+    name = os.path.basename(top.rstrip("/\\")) if top else ""
+    if not name:
+        name = os.path.basename(os.path.abspath(cwd).rstrip("/\\"))
+    return name or "unknown-project"
+
+
+def plan_location(data, plan_text):
+    return PLAN_LOCATION.format(project=project_name(data.get("cwd")),
+                                slug=plan_slug(plan_text))
+
+
+def approved_plan_text(data):
+    """The approved plan. Claude Code injects it into `tool_response.plan` on
+    PostToolUse (the hooks reference prefers that field) and also into
+    `tool_input.plan`; the first non-empty string wins."""
+    for container in (data.get("tool_response"), data.get("tool_input")):
+        if isinstance(container, dict):
+            plan = container.get("plan")
+            if isinstance(plan, str) and plan.strip():
+                return plan
+    return None
+
+
+def mode_plan_approved(data):
+    plan_text = approved_plan_text(data)
+    if plan_text is None:
+        return
+    session_id = data.get("session_id", "default")
+    digest = plan_hash(plan_text)
+    location = plan_location(data, plan_text)
+    state = load_state(session_id)
+    # Same text approved again (still pending, or filed earlier this session):
+    # the note is updated, not duplicated. `plan_filed` remembers the hash of
+    # the last plan that was filed so a re-approval after filing is recognised.
+    reapproved = digest in (state.get("plan_pending"), state.get("plan_filed"))
+    state["plan_pending"] = digest
+    # The reminder in precommit-check names the same location, so it is kept
+    # with the hash rather than recomputed from a plan the hook no longer has.
+    state["plan_location"] = location
+    save_state(session_id, state)
+    text = PLAN_APPROVED_MESSAGE.format(location=location)
+    if reapproved:
+        text += PLAN_REAPPROVED_LINE.format(plan_hash=digest, location=location)
+    if not is_daemon_reachable():
+        text += PLAN_ESTATE_UNREACHABLE_LINE
+    inject_context("PostToolUse", text)
+
+
+def mode_plan_filed(data):
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return
+    location = tool_input.get("location")
+    if not isinstance(location, str) or not location.startswith("plans/"):
+        return
+    session_id = data.get("session_id", "default")
+    state = load_state(session_id)
+    if "plan_pending" not in state:
+        return
+    state["plan_filed"] = state.pop("plan_pending")
+    save_state(session_id, state)
+
+
+def mode_precommit_check(data):
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not GIT_COMMIT_PATTERN.search(command):
+        return
+    session_id = data.get("session_id", "default")
+    state = load_state(session_id)
+    # Once per session: a reminder on every commit stops being read.
+    if not state.get("plan_pending") or state.get("plan_reminded"):
+        return
+    state["plan_reminded"] = True
+    save_state(session_id, state)
+    location = state.get("plan_location") or PLAN_LOCATION.format(
+        project=project_name(data.get("cwd")), slug="untitled-plan")
+    inject_context("PreToolUse", PLAN_PRECOMMIT_MESSAGE.format(location=location))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     data = read_stdin()
@@ -449,6 +636,12 @@ def main():
             mode_session(data)
         elif mode == "stop":
             mode_stop(data)
+        elif mode == "plan-approved":
+            mode_plan_approved(data)
+        elif mode == "plan-filed":
+            mode_plan_filed(data)
+        elif mode == "precommit-check":
+            mode_precommit_check(data)
     except Exception:
         pass
     sys.exit(0)
