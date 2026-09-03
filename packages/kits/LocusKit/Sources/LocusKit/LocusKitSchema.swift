@@ -144,7 +144,17 @@ public enum LocusKitSchema {
     /// rows, and clears bits 27-30 on all live drawers. Idempotent on
     /// fresh AND already-migrated estates in both ports (the CREATE TABLE
     /// IF NOT EXISTS DDL is used via custom migration).
-    public static let version = 17
+    /// v18 (2026-09-03): adds `distilled_source_digest` TEXT nullable to
+    /// `drawers` — the SHA-256 hex digest of the complete original content
+    /// the stored distilled representation was rendered from. The fifth
+    /// member of the representation column set (NULL together, populated
+    /// together with the distilled quad). A representation is current only
+    /// when its pipeline version matches the active converter AND its digest
+    /// equals the digest of the row's content; a NULL digest (any row
+    /// written before v18) is stale by definition and regenerates on the
+    /// next sweep. Ships as a ladder entry (idempotent addColumn) and reaches
+    /// populated estates through GeniusLocusKit's estate-format 1.3 capsule.
+    public static let version = 18
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -367,6 +377,21 @@ public enum LocusKitSchema {
                         """
                     ),
                 ]),
+                // v17 → v18 (2026-09-03): add distilled_source_digest TEXT
+                // nullable to drawers — the SHA-256 of the complete original
+                // content the stored representation was rendered from. NULL on
+                // every pre-v18 row, which is exactly the "stale by definition"
+                // signal the representation-currency rule keys on; the next
+                // sweep regenerates those rows and populates the digest. No
+                // backfill here: the digest is only meaningful alongside a
+                // representation rendered from the same content.
+                // PersistenceKit replay discipline: addColumn is idempotent in
+                // both ports — re-opening a v17 estate replays this safely, and
+                // GeniusLocusKit's estate-format 1.3 capsule replays this same
+                // ladder before stamping populated estates.
+                Migration(fromVersion: 17, toVersion: 18, operations: [
+                    .addColumn(table: "drawers", column: .text("distilled_source_digest", nullable: true)),
+                ]),
             ]
         )
     }
@@ -451,12 +476,13 @@ public enum LocusKitSchema {
             .blob("content_fingerprint", nullable: true),
             // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
             // A dense parallel rendering of `content` — a VIEW of this
-            // row, not an item — plus its pipeline contract identifier,
-            // approximate token count, and generation instant. The four
-            // columns are NULL together or populated together (one atomic
-            // UPDATE via DrawerStore.setDistilledRepresentation); every
-            // write that touches `content` NULLs all four in the same
-            // statement (§7.3 regeneration trigger + erasure scrub).
+            // row, not an item — plus its converter ID, approximate token
+            // count, generation instant, and (declared last, below) the
+            // source digest. The five columns are NULL together or populated
+            // together (one atomic UPDATE via
+            // DrawerStore.setDistilledRepresentation); every write that
+            // touches `content` NULLs all five in the same statement (§7.3
+            // regeneration trigger + erasure scrub).
             // NULL `distilled` is the sweep-eligibility predicate.
             // Landed in the v1 declaration with no migration ladder per
             // this file's design note — the 1.1.x schema is fluid (no
@@ -498,7 +524,19 @@ public enum LocusKitSchema {
             // External callers that previously read Drawer.adornment are
             // updated in Parts B/C of ADORN-STORE-02. Bits 27-30 of
             // operationalBitmap are likewise returned to the free pool.
-            .text("adornment", nullable: true)
+            .text("adornment", nullable: true),
+            // Distilled-source digest (v18): the SHA-256 hex of the complete
+            // original content the stored representation was rendered from
+            // — the fifth representation column, NULL together with the
+            // distilled quad. Written only by `setDistilledRepresentation`
+            // (the library digest of the content it distilled) and cleared
+            // by every content-touching write. Currency rule: a row is
+            // current iff `distilled_pipeline_version` equals the active
+            // converter id AND this digest equals the digest of `content`;
+            // NULL means stale by definition. Declared last so a populated
+            // estate's ALTER TABLE order matches a fresh CREATE TABLE.
+            // Mirrors the Rust drawers_table declaration.
+            .text("distilled_source_digest", nullable: true),
         ],
         primaryKey: ["id"],
         generatedColumns: [
