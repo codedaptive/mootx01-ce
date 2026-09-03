@@ -222,18 +222,18 @@ fn full_row_conformance_blind200() {
 // §3 — Cross-port fixture (CDL_CROSSPORT_OUT env var)
 // ---------------------------------------------------------------------------
 
-/// Write all 509 Rust port output rows as canonical JSON to the path in
-/// `CDL_CROSSPORT_OUT` when that variable is set.
+/// Write all 509 v22 Rust port output rows plus 309 v23.2 rows as canonical JSON
+/// to the path in `CDL_CROSSPORT_OUT` when that variable is set.
 ///
 /// When the variable is not set the test passes silently — it is a helper
 /// for the cross-port diff, not a conformance gate.
 ///
-/// Output format: one JSON object per line (JSONL), 509 lines, one per oracle
-/// row in canonical order debug7 → sample30 → locomo → blind200.
+/// Output format: one JSON object per line (JSONL).
+/// - 509 v22 rows: debug7 → sample30 → locomo → blind200.
+/// - 309 v23.2 rows: debug7 → sample30 → locomo (no blind200 oracle for v23.2).
 ///
-/// The test helper writes `drawer_id`, `original`, `enrichment_trailer`, and
-/// `candidate` into each row alongside the converter output so the cross-port diff
-/// can correlate rows across ports.
+/// Each row carries `drawer_id`, `original`, `enrichment_trailer`, and `candidate`
+/// alongside the converter output for cross-port correlation.
 #[test]
 fn crossport_fixture() {
     let out_path = match std::env::var("CDL_CROSSPORT_OUT") {
@@ -242,10 +242,11 @@ fn crossport_fixture() {
     };
 
     let distiller = ContextDistiller::new();
-    let beds = ["debug7", "sample30", "locomo", "blind200"];
-    let mut lines: Vec<String> = Vec::with_capacity(509);
+    let mut lines: Vec<String> = Vec::with_capacity(818); // 509 v22 + 309 v23.2
 
-    for bed in &beds {
+    // v22 rows: all four beds.
+    let v22_beds = ["debug7", "sample30", "locomo", "blind200"];
+    for bed in &v22_beds {
         let rows = oracle_vectors::load_bed(bed);
         for (i, row) in rows.iter().enumerate() {
             let original  = row["original"].as_str()
@@ -269,6 +270,36 @@ fn crossport_fixture() {
             obj.insert("candidate".into(),          Value::String("intent-span".to_string()));
 
             // Serialise with sorted keys (mirrors Python json.dumps(sort_keys=True)).
+            let sorted = sort_keys_recursive(Value::Object(obj));
+            lines.push(serde_json::to_string(&sorted).expect("line serialise"));
+        }
+    }
+
+    // v23.2 rows: three beds (no blind200 oracle exists for v23.2).
+    let v23_beds = ["debug7", "sample30", "locomo"];
+    for bed in &v23_beds {
+        let rows = oracle_vectors::load_bed_suffix(bed, "intent-span-v23-attributed");
+        for (i, row) in rows.iter().enumerate() {
+            let original  = row["original"].as_str()
+                .unwrap_or_else(|| panic!("crossport v23.2 row {i} in {bed}: 'original' not string"));
+            let trailer   = row["enrichment_trailer"].as_str().unwrap_or("");
+            let drawer_id = row["drawer_id"].as_str().unwrap_or("?");
+
+            let input = DistillationInput::new(original, trailer);
+            let result = distiller.distill(&input, ContextDistillConverter::IntentSpanV23Attributed);
+
+            let mut obj: Map<String, Value> = serde_json::to_value(&result)
+                .expect("serialise v23.2 result")
+                .as_object()
+                .cloned()
+                .expect("result is object");
+
+            obj.insert("drawer_id".into(),          Value::String(drawer_id.to_string()));
+            obj.insert("original".into(),           Value::String(original.to_string()));
+            obj.insert("enrichment_trailer".into(), Value::String(trailer.to_string()));
+            obj.insert("candidate".into(),
+                Value::String("intent-span-v23-attributed".to_string()));
+
             let sorted = sort_keys_recursive(Value::Object(obj));
             lines.push(serde_json::to_string(&sorted).expect("line serialise"));
         }

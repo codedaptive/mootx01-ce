@@ -46,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Map, Value};
 
-use crate::atoms::{dependency_closure, intent_atoms, IntentAtom};
+use crate::atoms::{dependency_closure, intent_atoms_with_peer_dialogue, IntentAtom};
 use crate::terms::normalized_terms;
 use crate::scanners::{scan_date_re, scan_number_re, scan_list_marker_re};
 use crate::atoms::known_speaker;
@@ -309,6 +309,19 @@ pub fn render_exact(
     let mut pieces: Vec<String> = Vec::new();
     let mut spans: Vec<SpanInfo> = Vec::new();
     let mut previous_end: Option<usize> = None;
+    let mut previous_atom: Option<&IntentAtom> = None;
+    let atom_by_id: HashMap<usize, &IntentAtom> = atoms.iter()
+        .map(|atom| (atom.atom_id, atom)).collect();
+    let peer_group = |atom: Option<&IntentAtom>| -> Option<usize> {
+        let atom = atom?;
+        if !atom.kind.starts_with("peer-") { return None; }
+        if atom.kind == "peer-speaker-prefix" { return Some(atom.atom_id); }
+        atom.dependencies.iter().find_map(|dependency| {
+            atom_by_id.get(dependency)
+                .filter(|candidate| candidate.kind == "peer-speaker-prefix")
+                .map(|candidate| candidate.atom_id)
+        })
+    };
 
     for atom in &chosen {
         if let Some(prev_end) = previous_end {
@@ -317,6 +330,10 @@ pub fn render_exact(
                 if gap.trim().is_empty() {
                     // Pure whitespace gap — include verbatim.
                     pieces.push(gap);
+                } else if peer_group(previous_atom) == peer_group(Some(atom))
+                    && peer_group(Some(atom)).is_some()
+                {
+                    pieces.push(" ".to_string());
                 } else {
                     // Non-whitespace gap → separator.
                     pieces.push("\n\n".to_string());
@@ -344,6 +361,7 @@ pub fn render_exact(
             hard_required: atom.hard_required || hard.contains(&atom.atom_id),
         });
         previous_end = Some(atom.end);
+        previous_atom = Some(atom);
     }
 
     (pieces.concat(), spans)
@@ -444,11 +462,20 @@ pub struct IntentSpanResult {
 /// An `IntentSpanResult` with `compact_core`, `selected_source_spans`, and
 /// `selection_details` (without `trailer_projection`).
 pub fn intent_span_selection(source: &str, applied_trailer_bytes: usize) -> IntentSpanResult {
+    intent_span_selection_with_peer_dialogue(source, applied_trailer_bytes, false)
+}
+
+/// Select intent-span atoms, optionally enabling the additive v23 peer lane.
+pub fn intent_span_selection_with_peer_dialogue(
+    source: &str,
+    applied_trailer_bytes: usize,
+    peer_dialogue: bool,
+) -> IntentSpanResult {
     let source_chars: Vec<char> = source.chars().collect();
     let source_bytes = source.len(); // UTF-8 byte count
 
     // §8.1 — Build atoms.
-    let result = intent_atoms(source);
+    let result = intent_atoms_with_peer_dialogue(source, peer_dialogue);
     let atoms = result.atoms;
     let hard = result.hard;
     let coverage = result.coverage;
@@ -535,7 +562,8 @@ pub fn intent_span_selection(source: &str, applied_trailer_bytes: usize) -> Inte
     let mut remaining: Vec<&IntentAtom> = atoms.iter()
         .filter(|a| !selected.contains(&a.atom_id)
             && a.kind != "heading"
-            && a.kind != "answer-heading")
+            && a.kind != "answer-heading"
+            && a.kind != "peer-speaker-prefix")
         .collect();
     let mut budget_rejected: Vec<Value> = Vec::new();
 
