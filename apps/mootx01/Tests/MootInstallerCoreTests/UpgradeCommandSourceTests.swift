@@ -105,6 +105,27 @@ struct UpgradeCommandSourceTests {
                 "runSharedContentReclaimIfPending must restart the daemon inline")
     }
 
+    @Test("runDistilledRepresentationConvergence uses two-key eligibility gate")
+    func distilledRepresentationUseTwoKeyGate() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        // Locate the runDistilledRepresentationConvergence function body.
+        let funcStart = try #require(
+            source.range(of: "private func runDistilledRepresentationConvergence")?.lowerBound)
+        // The next private func starts the ADORN-STORE migration section; use it as the end anchor.
+        let funcEnd = try #require(
+            source.range(of: "/// ADORN-STORE-02 Part C:", range: funcStart..<source.endIndex)?.lowerBound)
+        let body = source[funcStart..<funcEnd]
+        // Both eligibility keys must appear in the function body.
+        #expect(body.contains("distilledRepresentationsAwaitingReindex(handle: handle)"),
+                "second eligibility key: awaiting-reindex count must be fetched")
+        // The gate must check both keys with a logical-or.
+        #expect(body.contains("regenerated > 0 || awaiting > 0"),
+                "gate must fire on regenerated OR awaiting")
+        // The crash-recovery branch message must be present.
+        #expect(body.contains("index gap detected"),
+                "crash-recovery message must name the detected gap")
+    }
+
     @Test("An already-current upgrade still runs the KG fact backfill")
     func currentVersionRunsKGFactBackfill() throws {
         let commandURL = URL(fileURLWithPath: #filePath)

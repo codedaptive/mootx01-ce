@@ -5785,6 +5785,41 @@ public actor DrawerStore {
         }
     }
 
+    /// Active, non-empty drawers that already carry a distilled representation,
+    /// returned as `(id, distilledAt)` pairs with no content hydration.
+    ///
+    /// Used by GeniusLocusKit's `distilledRepresentationsAwaitingReindex` to
+    /// compare each drawer's `distilledAt` instant against the corresponding
+    /// corpus index row's `updatedAt`, so the convergence step can detect the
+    /// mid-run crash scenario where the sweep committed but the reindex did not.
+    ///
+    /// Query shape mirrors `countUndistilled`: tombstonedAt IS NULL, content ≠ "",
+    /// bit 19 (hasCurrentRepresentation) set. Projects only `id` and `distilled_at`
+    /// — no text column is materialized. The §4 invariant (bit and columns always
+    /// in agreement) guarantees `distilled_at` is non-null when bit 19 is set.
+    ///
+    /// Mirrors Rust `DrawerStore::drawers_with_representations`.
+    public func drawersWithRepresentations() async throws -> [(id: String, distilledAt: Date)] {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .neq(Column(table: "drawers", name: "content"), .text("")),
+                // Bit 19 set → representation columns all populated (§4 invariant).
+                .bitmaskAll(
+                    Column(table: "drawers", name: "operationalBitmap"),
+                    mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                ),
+            ]),
+            orderBy: [], limit: nil, offset: nil, columns: ["id", "distilled_at"]
+        )
+        return rows.compactMap { row -> (id: String, distilledAt: Date)? in
+            let id = Self.string(row["id"])
+            guard !id.isEmpty, let ts = Self.optDate(row["distilled_at"]) else { return nil }
+            return (id: id, distilledAt: ts)
+        }
+    }
+
     // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
 
     // MARK: - Minter registry

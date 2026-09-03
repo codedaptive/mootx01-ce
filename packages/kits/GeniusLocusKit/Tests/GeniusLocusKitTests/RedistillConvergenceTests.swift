@@ -176,6 +176,139 @@ struct RedistillConvergenceTests {
         }
     }
 
+    // MARK: - §awaiting-reindex
+
+    /// Shared helper: provision a LocusOnly estate (no corpus, no vector store).
+    private func provisionLocusOnlyEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-redistill-locus-only")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        let params = EstateProvisionParams(
+            estateName: "Redistill LocusOnly Estate",
+            kind: .locusOnly,
+            zoomWindowLow: 1,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none
+        )
+        let handle = try await kit.provision(
+            storage: storage, owner: owner, params: params,
+            embeddingModels: [])
+        return (kit, handle)
+    }
+
+    // Shared long-form content strings (100+ words each) used by the
+    // awaiting-reindex tests. Short strings cause degenerate range faults in
+    // the BM25/HNSW indexer when hint-room drawers contribute very few tokens;
+    // paragraphs of this length exercise the indexer without triggering that edge case.
+    private static let alphaContent = """
+        The distributed memory model partitions knowledge across spatial regions \
+        called wings, each subdivided into rooms and drawers. A room groups thematically \
+        related drawers under a shared lattice anchor, enabling efficient neighbourhood \
+        recall without full-corpus scans. Each drawer carries typed content, an optional \
+        enrichment trailer, and a distilled representation indexed by the current \
+        converter pipeline version. When the converter ID changes, the eligibility sweep \
+        identifies stale rows and regenerates their representations in a single pass before \
+        the derived corpus lanes are rebuilt from the new text.
+        """
+
+    private static let betaContent = """
+        Convergence idempotence requires that a second pass over a fully-updated estate \
+        produces zero regenerated rows and skips the reindex entirely. The two-key \
+        eligibility gate adds a second condition: even when the sweep reports zero \
+        regenerated rows, the reindex still runs if any drawer's distilled-at timestamp \
+        is strictly newer than its corresponding corpus index row's updated-at timestamp. \
+        This detects the mid-run crash scenario where the sweep transaction committed but \
+        the process terminated before the reindex could execute, leaving the derived BM25 \
+        and dense lanes indexed against the previous representation text.
+        """
+
+    private static let gammaContent = """
+        Bitmap-indexed content flags allow the estate to distinguish active, tombstoned, \
+        and archived drawers without materialising boolean columns in the schema. Bit \
+        nineteen records whether all four distillation columns are populated and agree with \
+        the current converter identifier. The §4 invariant guarantees the bit and the \
+        columns are always in agreement: setting the bit without writing the columns, or \
+        writing the columns without setting the bit, constitutes a schema violation that \
+        the pre-commit gate rejects. The awaiting-reindex probe relies on this invariant \
+        to project only the id and distilled-at columns without hydrating the full content.
+        """
+
+    @Test("Full sweep then reindex leaves awaiting count at zero")
+    func sweepAndReindexLeavesZeroAwaiting() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        // File two drawers so there is content to distill.
+        _ = try await kit.capture(handle, captureFrame(Self.alphaContent), mode: .impatient)
+        _ = try await kit.capture(handle, captureFrame(Self.betaContent), mode: .impatient)
+
+        // Use the current system time for sweep and reindex so that any
+        // provision-time hint drawers (distilledAt = some earlier Date()) also
+        // get their index rows stamped with a updatedAt >= distilledAt. A fixed
+        // past timestamp like t0 (2023) would be older than the provision-time
+        // hint-drawer distilledAt (2026), causing them to count as awaiting.
+        let now = Date()
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        #expect(regenerated >= 2)
+
+        // Reindex — index rows get updatedAt == now >= distilledAt for every
+        // drawer in the estate, so the strict `<` predicate is false for all.
+        try await kit.reindexCorpus(handle: handle, now: now)
+        let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        #expect(awaiting == 0)
+    }
+
+    @Test("Sweep without reindex leaves all represented drawers awaiting (crash-scenario simulation)")
+    func sweepWithoutReindexLeavesDrawersAwaiting() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        let count = 3
+        let contents = [Self.alphaContent, Self.betaContent, Self.gammaContent]
+        for i in 0..<count {
+            _ = try await kit.capture(handle, captureFrame(contents[i]), mode: .impatient)
+        }
+
+        // Sweep sets distilledAt on all drawers — but we do NOT call reindexCorpus.
+        // This is the crash scenario: sweep committed, reindex did not. Use the
+        // current system time for sweep so no hint drawer is excluded (see
+        // sweepAndReindexLeavesZeroAwaiting for the t0 vs Date() reasoning).
+        let now = Date()
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        #expect(regenerated >= count)
+
+        // No index rows exist (or they are older than distilledAt), so every
+        // represented drawer is awaiting reindex.
+        let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        // The estate may also have provision-time hint drawers; awaiting >= filed count.
+        #expect(awaiting >= count)
+
+        // After reindex the gap closes.
+        try await kit.reindexCorpus(handle: handle, now: now)
+        let afterReindex = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        #expect(afterReindex == 0)
+    }
+
+    @Test("Drawer with no index row counts as awaiting")
+    func drawerWithNoIndexRowCountsAsAwaiting() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        _ = try await kit.capture(handle, captureFrame(Self.alphaContent), mode: .impatient)
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: Date(), limit: nil)
+        // No reindex — no index rows (or only stale pre-sweep rows). At least the
+        // one explicitly filed drawer has distilledAt set and no current index row.
+        let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        #expect(awaiting >= 1)
+    }
+
+    @Test("LocusOnly estate returns zero awaiting (no corpus to check)")
+    func locusOnlyEstateReturnsZero() async throws {
+        let (kit, handle) = try await provisionLocusOnlyEstate()
+        // No corpus is registered for this estate kind.
+        let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        #expect(awaiting == 0)
+    }
+
     // MARK: - §trailer-parity (reported)
 
     /// REPORTED, not gated: the regenerated enrichment trailer versus the

@@ -546,6 +546,16 @@ public actor Estate {
             pipelineVersion: pipelineVersion)
     }
 
+    /// Active, non-empty drawers that carry a distilled representation,
+    /// returned as `(id, distilledAt)` pairs with no content hydration.
+    /// Estate-level pass-through over `DrawerStore.drawersWithRepresentations`
+    /// — the metadata projection GeniusLocusKit uses to detect the mid-run
+    /// crash scenario (sweep committed, reindex did not). Mirrors Rust
+    /// `Estate::drawers_with_representations`.
+    public func drawersWithRepresentations() async throws -> [(id: String, distilledAt: Date)] {
+        try await store.drawersWithRepresentations()
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore.setSubjectRepresentation` — the seam the filing
     /// surface, backfill, and the (future) subject rider write through.
