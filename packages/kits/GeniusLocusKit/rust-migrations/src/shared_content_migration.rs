@@ -804,7 +804,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
                     // Fresh estate: stamp current without creating historical
                     // migration bookkeeping.
                     EstateFormatStore::new(Arc::clone(&storage))
-                        .stamp(EstateFormatVersion::CURRENT, now_millis)
+                        .stamp(EstateFormatVersion::V1_1, now_millis)
                         .map_err(|error| SharedContentMigrationError::StorageFailure {
                             state: SharedContentMigrationState::Discovered,
                             reason: format!("estate-format stamp: {error:?}"),
@@ -848,7 +848,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
         if record.state == SharedContentMigrationState::Complete {
             if record.ensemble_fingerprint.as_deref() == Some(wired_fingerprint.as_str()) {
                 EstateFormatStore::new(Arc::clone(&storage))
-                    .stamp(EstateFormatVersion::CURRENT, now_millis)
+                    .stamp(EstateFormatVersion::V1_1, now_millis)
                     .map_err(|error| SharedContentMigrationError::StorageFailure {
                         state: SharedContentMigrationState::Complete,
                         reason: format!("estate-format stamp: {error:?}"),
@@ -1227,7 +1227,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
         }
 
         EstateFormatStore::new(Arc::clone(&storage))
-            .stamp(EstateFormatVersion::CURRENT, now_millis)
+            .stamp(EstateFormatVersion::V1_1, now_millis)
             .map_err(|error| SharedContentMigrationError::StorageFailure {
                 state: record.state,
                 reason: format!("estate-format stamp: {error:?}"),
