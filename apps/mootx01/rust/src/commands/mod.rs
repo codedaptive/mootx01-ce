@@ -31,7 +31,7 @@ pub mod unlock;
 
 pub fn dispatch(command: Command) -> ExitCode {
     match command {
-        Command::Serve { db, http } => serve::run(db, http),
+        Command::Serve { db, http, frozen } => serve::run(db, http, frozen),
         Command::Install {
             target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt,
         } => install::run(target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt),
