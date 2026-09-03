@@ -111,7 +111,18 @@ pub const KIT_ID: &str = "LocusKit";
 /// retained physically but dead — no code reads or writes it. Bits 27-30
 /// of `operationalBitmap` are returned to FREE. Matches Swift
 /// `LocusKitSchema.version` v17.
-pub const SCHEMA_VERSION: i32 = 17;
+/// v18 (2026-09-03) adds `distilled_source_digest` TEXT nullable to
+/// `drawers` — the SHA-256 hex digest of the complete original content
+/// the stored distilled representation was rendered from. The fifth
+/// member of the representation column set (NULL together, populated
+/// together with the distilled quad). A representation is current only
+/// when its pipeline version matches the active converter AND its digest
+/// equals the digest of the row's content; a NULL digest (any row written
+/// before v18) is stale by definition and regenerates on the next sweep.
+/// Ships as a ladder entry (idempotent AddColumn) and reaches populated
+/// estates through GeniusLocusKit's estate-format 1.3 capsule. Matches
+/// Swift `LocusKitSchema.version` v18.
+pub const SCHEMA_VERSION: i32 = 18;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -146,6 +157,26 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
+            // v17 → v18 (2026-09-03): add distilled_source_digest TEXT
+            // nullable to drawers — the SHA-256 of the complete original
+            // content the stored representation was rendered from. NULL on
+            // every pre-v18 row, which is exactly the "stale by definition"
+            // signal the representation-currency rule keys on; the next
+            // sweep regenerates those rows and populates the digest. No
+            // backfill here: the digest is only meaningful alongside a
+            // representation rendered from the same content. AddColumn is
+            // idempotent in both ports — re-opening a v17 estate replays this
+            // safely, and GeniusLocusKit's estate-format 1.3 capsule replays
+            // this same ladder before stamping populated estates. Matches
+            // Swift LocusKitSchema v18.
+            Migration {
+                from_version: 17,
+                to_version: 18,
+                operations: vec![SchemaOperation::AddColumn {
+                    table: "drawers".to_string(),
+                    column: ColumnDeclaration::text("distilled_source_digest").nullable(),
+                }],
+            },
             // v16 → v17: normalized adornment tables (ADORN-STORE-02).
             // Creates `adornment_minters` and `adornments`; the legacy
             // `drawers.adornment` column is retained physically but dead.
@@ -409,11 +440,11 @@ fn drawers_table() -> TableDeclaration {
             ColumnDeclaration::blob("content_fingerprint").nullable(),
             // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
             // A dense parallel rendering of `content` — a VIEW of this
-            // row, not an item — plus its pipeline contract identifier,
-            // approximate token count, and generation instant. The four
-            // columns are NULL together or populated together (one
-            // atomic UPDATE via `set_distilled_representation`); every
-            // write that touches `content` NULLs all four in the same
+            // row, not an item — plus its converter id, approximate token
+            // count, generation instant, and (declared last, below) the
+            // source digest. The five columns are NULL together or populated
+            // together (one atomic UPDATE via `set_distilled_representation`);
+            // every write that touches `content` NULLs all five in the same
             // statement (§7.3 regeneration trigger + erasure scrub).
             // NULL `distilled` is the sweep-eligibility predicate.
             // Landed in the v1 declaration with no migration ladder —
@@ -445,10 +476,22 @@ fn drawers_table() -> TableDeclaration {
             // Adornment (SPEC_ADORNMENT §2, 2026-08-23): dream-time minted
             // short form — stated claims certified by AV-1..AV-8. None =
             // never adorned or cleared by a body-mutating write.
-            // The Rust port never replays addColumn migrations — the column
-            // is included here so fresh databases include it from the start.
+            // Declared here so fresh databases carry it from the start;
+            // the v15 → v16 ladder entry adds it to populated estates.
             // Mirrors Swift drawersTable.adornment declaration.
             ColumnDeclaration::text("adornment").nullable(),
+            // Distilled-source digest (v18): the SHA-256 hex of the complete
+            // original content the stored representation was rendered from
+            // — the fifth representation column, NULL together with the
+            // distilled quad. Written only by `set_distilled_representation`
+            // (the library digest of the content it distilled) and cleared
+            // by every content-touching write. Currency rule: a row is
+            // current iff `distilled_pipeline_version` equals the active
+            // converter id AND this digest equals the digest of `content`;
+            // NULL means stale by definition. Declared last so a populated
+            // estate's ALTER TABLE order matches a fresh CREATE TABLE.
+            // Mirrors Swift drawersTable.distilled_source_digest.
+            ColumnDeclaration::text("distilled_source_digest").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -1450,9 +1493,9 @@ mod tests {
     /// order_key to tunnels (node-tree integrity, NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_seventeen() {
-        assert_eq!(SCHEMA_VERSION, 17);
-        // Eight migrations: v9 → v10 (FINDING-3 dedup + unique index),
+    fn schema_version_is_eighteen() {
+        assert_eq!(SCHEMA_VERSION, 18);
+        // Nine migrations: v9 → v10 (FINDING-3 dedup + unique index),
         //                   v10 → v11 (operationalAND on container_fingerprints),
         //                   v11 → v12 (subject trio on drawers),
         //                   v12 → v13 (kg_facts identity trio),
@@ -1460,41 +1503,51 @@ mod tests {
         //                   v14 → v15 (recall_trace lane-attribution trio),
         //                   v15 → v16 (adornment TEXT nullable on drawers),
         //                   v16 → v17 (normalized adornment tables,
-        //                              ADORN-STORE-02).
+        //                              ADORN-STORE-02),
+        //                   v17 → v18 (distilled_source_digest on drawers).
         let m = schema();
-        assert_eq!(m.migrations.len(), 8);
-        // v16 → v17 is listed first (newest-first order).
-        assert_eq!(m.migrations[0].from_version, 16);
-        assert_eq!(m.migrations[0].to_version, 17);
-        assert_eq!(m.migrations[0].operations.len(), 2);
-        // v15 → v16 is listed second.
-        assert_eq!(m.migrations[1].from_version, 15);
-        assert_eq!(m.migrations[1].to_version, 16);
-        assert_eq!(m.migrations[1].operations.len(), 1);
-        // v14 → v15 is listed third.
-        assert_eq!(m.migrations[2].from_version, 14);
-        assert_eq!(m.migrations[2].to_version, 15);
-        assert_eq!(m.migrations[2].operations.len(), 3);
-        // v13 → v14 is listed fourth.
-        assert_eq!(m.migrations[3].from_version, 13);
-        assert_eq!(m.migrations[3].to_version, 14);
-        assert_eq!(m.migrations[3].operations.len(), 1);
-        // v12 → v13 is listed fifth.
-        assert_eq!(m.migrations[4].from_version, 12);
-        assert_eq!(m.migrations[4].to_version, 13);
-        assert_eq!(m.migrations[4].operations.len(), 3);
-        // v11 → v12 is listed sixth.
-        assert_eq!(m.migrations[5].from_version, 11);
-        assert_eq!(m.migrations[5].to_version, 12);
+        assert_eq!(m.migrations.len(), 9);
+        // v17 → v18 is listed first (newest-first order): one AddColumn.
+        assert_eq!(m.migrations[0].from_version, 17);
+        assert_eq!(m.migrations[0].to_version, 18);
+        assert_eq!(m.migrations[0].operations.len(), 1);
+        assert!(matches!(
+            &m.migrations[0].operations[0],
+            SchemaOperation::AddColumn { table, column }
+                if table == "drawers" && column.name == "distilled_source_digest"
+        ));
+        // v16 → v17 is listed second.
+        assert_eq!(m.migrations[1].from_version, 16);
+        assert_eq!(m.migrations[1].to_version, 17);
+        assert_eq!(m.migrations[1].operations.len(), 2);
+        // v15 → v16 is listed third.
+        assert_eq!(m.migrations[2].from_version, 15);
+        assert_eq!(m.migrations[2].to_version, 16);
+        assert_eq!(m.migrations[2].operations.len(), 1);
+        // v14 → v15 is listed fourth.
+        assert_eq!(m.migrations[3].from_version, 14);
+        assert_eq!(m.migrations[3].to_version, 15);
+        assert_eq!(m.migrations[3].operations.len(), 3);
+        // v13 → v14 is listed fifth.
+        assert_eq!(m.migrations[4].from_version, 13);
+        assert_eq!(m.migrations[4].to_version, 14);
+        assert_eq!(m.migrations[4].operations.len(), 1);
+        // v12 → v13 is listed sixth.
+        assert_eq!(m.migrations[5].from_version, 12);
+        assert_eq!(m.migrations[5].to_version, 13);
         assert_eq!(m.migrations[5].operations.len(), 3);
-        // v10 → v11 is listed seventh.
-        assert_eq!(m.migrations[6].from_version, 10);
-        assert_eq!(m.migrations[6].to_version, 11);
-        assert_eq!(m.migrations[6].operations.len(), 1);
-        // v9 → v10 is listed eighth.
-        assert_eq!(m.migrations[7].from_version, 9);
-        assert_eq!(m.migrations[7].to_version, 10);
-        assert_eq!(m.migrations[7].operations.len(), 2);
+        // v11 → v12 is listed seventh.
+        assert_eq!(m.migrations[6].from_version, 11);
+        assert_eq!(m.migrations[6].to_version, 12);
+        assert_eq!(m.migrations[6].operations.len(), 3);
+        // v10 → v11 is listed eighth.
+        assert_eq!(m.migrations[7].from_version, 10);
+        assert_eq!(m.migrations[7].to_version, 11);
+        assert_eq!(m.migrations[7].operations.len(), 1);
+        // v9 → v10 is listed ninth.
+        assert_eq!(m.migrations[8].from_version, 9);
+        assert_eq!(m.migrations[8].to_version, 10);
+        assert_eq!(m.migrations[8].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1672,6 +1725,8 @@ mod tests {
                 // Adornment column (SPEC_ADORNMENT §2): dream-time minted short
                 // form; NULL until AdornmentPass mints a valid adornment.
                 "adornment",
+                // Distilled-source digest (v18): the fifth representation column.
+                "distilled_source_digest",
             ]
         );
     }

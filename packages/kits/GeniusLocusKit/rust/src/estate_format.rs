@@ -23,7 +23,10 @@ impl EstateFormatVersion {
     /// Format 1.2: the corpus_index_state composition_policy column reaches
     /// populated estates through the migration catalog.
     pub const V1_2: Self = Self { major: 1, minor: 2 };
-    pub const CURRENT: Self = Self::V1_2;
+    /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
+    /// v18) reaches populated estates through the migration catalog.
+    pub const V1_3: Self = Self { major: 1, minor: 3 };
+    pub const CURRENT: Self = Self::V1_3;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

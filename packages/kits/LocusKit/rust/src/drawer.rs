@@ -167,18 +167,29 @@ pub struct Drawer {
     /// of this one item: no independent identity, lifecycle, or
     /// provenance. None means "no representation exists yet" and is the
     /// sweep-eligibility predicate — no staleness flag, no bool; callers
-    /// test `distilled.is_some()`. The four `distilled*` fields are None
+    /// test `distilled.is_some()`. The five `distilled*` fields are None
     /// together or populated together (one atomic column write,
     /// `set_distilled_representation`); every write that touches
-    /// `content` NULLs all four in the same statement (§7.3 regeneration
+    /// `content` NULLs all five in the same statement (§7.3 regeneration
     /// trigger + erasure scrub). Mirrors Swift `Drawer.distilled`.
     pub distilled: Option<String>,
 
-    /// Identifier of the format + pipeline contract that produced
-    /// `distilled` (Phase 1 value: "p1"). A row whose value differs from
-    /// the current build's contract identifier is a regeneration
-    /// candidate for the sweep. None iff `distilled` is None.
+    /// The converter ID that produced `distilled` — the ContextDistillLib
+    /// converter identity `<candidate>@<ruleset-version>` (see
+    /// `genius_locus_kit::distillation_converter_id`). Together with
+    /// `distilled_source_digest` it decides currency: a row is current iff
+    /// this equals the active converter ID AND the digest equals the
+    /// digest of `content`. None iff `distilled` is None.
     pub distilled_pipeline_version: Option<String>,
+
+    /// The SHA-256 hex digest (ContextDistillLib `source_digest`) of the
+    /// complete original `content` that `distilled` was rendered from.
+    /// The second half of the currency rule: a representation whose digest
+    /// differs from the digest of the row's current content, or whose
+    /// digest is None (written before the column existed), is stale and
+    /// regenerates on the next sweep. None iff `distilled` is None.
+    /// Mirrors Swift `Drawer.distilledSourceDigest`.
+    pub distilled_source_digest: Option<String>,
 
     /// Approximate token count of `distilled` (SPEC §6): deterministic,
     /// vendor-neutral estimate so AI clients can budget context before
@@ -267,6 +278,7 @@ impl Drawer {
             distilled_pipeline_version: None,
             distilled_token_count: None,
             distilled_at: None,
+            distilled_source_digest: None,
             subject: None,
             subject_pipeline_version: None,
             subject_at: None,

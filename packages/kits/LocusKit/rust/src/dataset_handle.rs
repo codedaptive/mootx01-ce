@@ -184,7 +184,7 @@ impl Estate {
         );
         // Pre-read the current operationalBitmap so the
         // has_current_representation bit (cookbook §2.4.1) can be cleared
-        // in the same UPDATE as the four distillation columns (§4 invariant).
+        // in the same UPDATE as the five distillation columns (§4 invariant).
         let current_op: i64 = row_store
             .query(T_DRAWERS, Some(&pred), &[], Some(1), None)
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?

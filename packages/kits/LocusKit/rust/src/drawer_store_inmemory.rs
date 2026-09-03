@@ -161,6 +161,7 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "distilled_pipeline_version",
     "distilled_token_count",
     "distilled_at",
+    "distilled_source_digest",
     // Subject trio (PR-01): the subject IS structured-tier data — it
     // exists precisely so candidate rows can be judged without hydrating
     // content, so the structured projection carries all three.
@@ -2425,11 +2426,11 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
-    /// Write the distilled representation of one drawer — all four columns
+    /// Write the distilled representation of one drawer — all five columns
     /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
     /// together or populated together). Also sets bit 19
     /// (`HAS_CURRENT_REPRESENTATION`) in `operational_bitmap` in the same
-    /// UPDATE so the bit and the four columns are always in agreement
+    /// UPDATE so the bit and the five columns are always in agreement
     /// (cookbook §2.4.1). Read-then-update in the same synchronous call:
     /// the in-memory and SQLite backends serialize via their own locking,
     /// so TOCTOU is not a concern here. Direct column write: no audit
@@ -2442,6 +2443,7 @@ impl DrawerStore for DrawerStoreCore {
         drawer_id: &str,
         distilled: &str,
         pipeline_version: &str,
+        source_digest: &str,
         token_count: i64,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -2460,6 +2462,11 @@ impl DrawerStore for DrawerStoreCore {
                 "pipelineVersion must not be empty".to_string(),
             ));
         }
+        if source_digest.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "sourceDigest must not be empty".to_string(),
+            ));
+        }
         let row_store = self.storage.row_store();
         let id_pred = StoragePredicate::Eq(
             Column::new(T_DRAWERS, "id"),
@@ -2467,7 +2474,7 @@ impl DrawerStore for DrawerStoreCore {
         );
         // Read the current bitmap fields:
         //   operationalBitmap — to set bit 19 (HAS_CURRENT_REPRESENTATION) in
-        //     the same UPDATE as the four distillation columns (§4 invariant).
+        //     the same UPDATE as the five distillation columns (§4 invariant).
         //   adjectiveBitmap, provenance, parent_node_id — to OR into the
         //     container-fingerprint aggregate after a successful write, so
         //     recall filters on .hasFeatureFlag(.hasCurrentRepresentation) do
@@ -2501,6 +2508,10 @@ impl DrawerStore for DrawerStoreCore {
         values.insert(
             "distilled_at".to_string(),
             TypedValue::Timestamp(generated_at),
+        );
+        values.insert(
+            "distilled_source_digest".to_string(),
+            TypedValue::Text(source_digest.to_string()),
         );
         values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(set_op));
         let updated = row_store
@@ -3125,6 +3136,9 @@ impl DrawerStore for DrawerStoreCore {
                     Column::new(T_DRAWERS, "distilled_pipeline_version"),
                     TypedValue::Text(pipeline_version.to_string()),
                 ),
+                // A representation without a source digest was written before
+                // the digest column existed: stale by definition.
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled_source_digest")),
             ]),
         ]);
         let rows = row_store
@@ -3133,7 +3147,51 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
-    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
+    fn rooms_with_stale_distilled_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        let row_store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            // Bit 19 set → a representation is present; the row is stale only
+            // through the converter id or the missing digest.
+            StoragePredicate::BitmaskAll {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
+            },
+            StoragePredicate::Or(vec![
+                StoragePredicate::Neq(
+                    Column::new(T_DRAWERS, "distilled_pipeline_version"),
+                    TypedValue::Text(pipeline_version.to_string()),
+                ),
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled_source_digest")),
+            ]),
+        ]);
+        let rows = row_store
+            .query_projected(T_DRAWERS, &["parent_node_id"], Some(&predicate), &[], None, None)
+            .map_err(map_storage_err)?;
+        let mut parent_node_ids: Vec<String> = rows
+            .iter()
+            .map(|r| string_value_of(r.get("parent_node_id")))
+            .filter(|id| !id.is_empty())
+            .collect();
+        parent_node_ids.sort();
+        parent_node_ids.dedup();
+        let names = self.resolve_node_names(&parent_node_ids)?;
+        let mut rooms: Vec<(String, String)> = parent_node_ids
+            .iter()
+            .filter_map(|id| names.get(id).cloned())
+            .collect();
+        rooms.sort();
+        rooms.dedup();
+        Ok(rooms)
+    }
+
+    fn drawers_with_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::And(vec![
             StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
@@ -3141,13 +3199,19 @@ impl DrawerStore for DrawerStoreCore {
                 Column::new(T_DRAWERS, "content"),
                 TypedValue::Text(String::new()),
             ),
-            // Bit 19 (HAS_CURRENT_REPRESENTATION) set → all four distillation
+            // Bit 19 (HAS_CURRENT_REPRESENTATION) set → all five distillation
             // columns are populated (§4 invariant). Projects only id and
             // distilled_at — no text column is materialized.
             StoragePredicate::BitmaskAll {
                 column: Column::new(T_DRAWERS, "operationalBitmap"),
                 mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
             },
+            // Current under the caller's converter: id equal and digest present.
+            StoragePredicate::Eq(
+                Column::new(T_DRAWERS, "distilled_pipeline_version"),
+                TypedValue::Text(pipeline_version.to_string()),
+            ),
+            StoragePredicate::IsNotNull(Column::new(T_DRAWERS, "distilled_source_digest")),
         ]);
         let rows = row_store
             .query_projected(T_DRAWERS, &["id", "distilled_at"], Some(&predicate), &[], None, None)
@@ -6378,6 +6442,7 @@ impl DrawerStore for InMemoryDrawerStore {
         drawer_id: &str,
         distilled: &str,
         pipeline_version: &str,
+        source_digest: &str,
         token_count: i64,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -6385,6 +6450,7 @@ impl DrawerStore for InMemoryDrawerStore {
             drawer_id,
             distilled,
             pipeline_version,
+            source_digest,
             token_count,
             generated_at,
         )
@@ -6392,8 +6458,17 @@ impl DrawerStore for InMemoryDrawerStore {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_undistilled(pipeline_version)
     }
-    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.inner.drawers_with_representations()
+    fn rooms_with_stale_distilled_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        self.inner.rooms_with_stale_distilled_representations(pipeline_version)
+    }
+    fn drawers_with_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.inner.drawers_with_representations(pipeline_version)
     }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.inner.set_anomalous_flag(drawer_id, anomalous)
@@ -6932,7 +7007,7 @@ impl DrawerStore for InMemoryDrawerStore {
 /// populate the column (CRITICAL fix — this column replaces the old
 /// recompute-on-every-read path in `fingerprints_captured_in`/
 /// `fingerprint_bit_series`).
-/// Merge the four representation-clearing NULLs into a content-writing
+/// Merge the representation-clearing NULLs into a content-writing
 /// UPDATE's value map (SPEC_DISTILLATION_STORAGE §4/§7.3): every write
 /// that touches `content` NULLs the distilled representation in the same
 /// statement, so a representation can never outlive the content it
@@ -6950,6 +7025,7 @@ pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedV
         "distilled_pipeline_version",
         "distilled_token_count",
         "distilled_at",
+        "distilled_source_digest",
         "subject",
         "subject_pipeline_version",
         "subject_at",
@@ -7051,7 +7127,7 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         TypedValue::Blob(fingerprint.wire_bytes().to_vec()),
     );
     // Distilled representation (SPEC §4): fresh captures carry None in all
-    // four fields — population happens post-insert via
+    // five fields — population happens post-insert via
     // set_distilled_representation (drain-stage or sweep), never on the
     // capture path. Mirrors Swift drawerValues.
     m.insert(
@@ -7078,6 +7154,13 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         "distilled_at".to_string(),
         d.distilled_at
             .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "distilled_source_digest".to_string(),
+        d.distilled_source_digest
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
             .unwrap_or(TypedValue::Null),
     );
     // Subject trio (PR-01): same capture-path contract as the distilled
@@ -7580,6 +7663,7 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
         distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
         distilled_at: opt_int_value_of(row.get("distilled_at")),
+        distilled_source_digest: opt_string_value_of(row.get("distilled_source_digest")),
         // Subject trio (PR-01). NULL on any row not yet subjected;
         // decodes to None — the backfill-eligibility signal.
         subject: opt_string_value_of(row.get("subject")),
@@ -9880,6 +9964,7 @@ mod tests {
         assert!(loaded.distilled_pipeline_version.is_none());
         assert!(loaded.distilled_token_count.is_none());
         assert!(loaded.distilled_at.is_none());
+        assert!(loaded.distilled_source_digest.is_none());
     }
 
     #[test]
@@ -9888,7 +9973,7 @@ mod tests {
         let d = sample_drawer("dr2", "w", "k", "meeting moved thursday");
         store.add_drawer(&d, NOW).unwrap();
         let updated = store
-            .set_distilled_representation(&d.id, "Meeting moved Thursday.", "p1", 4, NOW + 200)
+            .set_distilled_representation(&d.id, "Meeting moved Thursday.", "p1", "digest-dr2", 4, NOW + 200)
             .unwrap();
         assert_eq!(updated, 1);
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
@@ -9896,6 +9981,7 @@ mod tests {
         assert_eq!(loaded.distilled_pipeline_version.as_deref(), Some("p1"));
         assert_eq!(loaded.distilled_token_count, Some(4));
         assert_eq!(loaded.distilled_at, Some(NOW + 200));
+        assert_eq!(loaded.distilled_source_digest.as_deref(), Some("digest-dr2"));
         // Content and lifecycle untouched by a representation write.
         assert_eq!(loaded.content, "meeting moved thursday");
         assert!(loaded.tombstoned_at.is_none());
@@ -9907,10 +9993,10 @@ mod tests {
         let d = sample_drawer("dr3", "w", "k", "content");
         store.add_drawer(&d, NOW).unwrap();
         store
-            .set_distilled_representation(&d.id, "first", "p1", 1, NOW + 200)
+            .set_distilled_representation(&d.id, "first", "p1", "digest-dr3", 1, NOW + 200)
             .unwrap();
         store
-            .set_distilled_representation(&d.id, "second rendering", "p1", 2, NOW + 300)
+            .set_distilled_representation(&d.id, "second rendering", "p1", "digest-dr3", 2, NOW + 300)
             .unwrap();
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(loaded.distilled.as_deref(), Some("second rendering"));
@@ -9926,6 +10012,7 @@ mod tests {
                 "99999999-9999-4999-8999-999999999999",
                 "x",
                 "p1",
+                "digest-x",
                 1,
                 NOW + 200,
             )
@@ -9939,7 +10026,7 @@ mod tests {
         let d = sample_drawer("dr4", "w", "k", "derivable content");
         store.add_drawer(&d, NOW).unwrap();
         store
-            .set_distilled_representation(&d.id, "derived text", "p1", 2, NOW + 200)
+            .set_distilled_representation(&d.id, "derived text", "p1", "digest-dr4", 2, NOW + 200)
             .unwrap();
         store
             .expunge_gated(&d.id, "alice", Some("erasure covers representation"), NOW + 500, true)
@@ -9960,7 +10047,7 @@ mod tests {
         let d = sample_drawer("dr5", "w", "k", "{\"orig\":true}");
         store.add_drawer(&d, NOW).unwrap();
         store
-            .set_distilled_representation(&d.id, "stale rendering", "p1", 2, NOW + 200)
+            .set_distilled_representation(&d.id, "stale rendering", "p1", "digest-dr5", 2, NOW + 200)
             .unwrap();
         // patch_dataset_handle_content routes through Estate; exercise the
         // same NULL-on-edit write shape directly at the row-store layer via

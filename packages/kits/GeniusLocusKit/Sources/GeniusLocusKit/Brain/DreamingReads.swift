@@ -272,7 +272,10 @@ public extension GeniusLocusKit {
     ///
     /// Eligibility predicate — a drawer counts when ALL of:
     ///   1. Active (not tombstoned), non-empty content.
-    ///   2. Carries a distilled representation (bit 19 set).
+    ///   2. Carries a representation that is current under the active
+    ///      converter (bit 19 set, converter ID equal, source digest stored)
+    ///      — a stale row is the sweep's to regenerate first, so it cannot
+    ///      be waiting on its reindex.
     ///   3. The corpus has no index row for that drawer, OR the index row's
     ///      `updatedAt` is strictly earlier than the drawer's `distilledAt`.
     ///      Equal instants mean indexed (sweep and reindex ran under the same `now`).
@@ -294,7 +297,8 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
 
         // Fetch the two independent timestamp sets without hydrating content.
-        let drawers = try await estate.drawersWithRepresentations()
+        let drawers = try await estate.drawersWithRepresentations(
+            pipelineVersion: GeniusLocusKit.distillationConverterID)
         let indexStates = try await corpus.allIndexStates()
 
         // Build a lookup from contentID (== drawerID for non-passage mode) to

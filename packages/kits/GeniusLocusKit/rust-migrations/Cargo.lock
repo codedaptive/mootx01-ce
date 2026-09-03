@@ -1324,6 +1324,7 @@ dependencies = [
 name = "genius-locus-kit-migrations"
 version = "0.1.0"
 dependencies = [
+ "context-distill-lib",
  "corpus-kit",
  "corpus-kit-providers",
  "genius-locus-kit",

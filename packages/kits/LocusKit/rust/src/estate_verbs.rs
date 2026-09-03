@@ -1474,19 +1474,21 @@ impl Estate {
         self.store.all_drawers()
     }
 
-    /// Write the distilled representation of one drawer — all four
+    /// Write the distilled representation of one drawer — all five
     /// representation columns in one atomic UPDATE. Estate-level
     /// pass-through over `DrawerStore::set_distilled_representation`; see
     /// the trait method for the full contract (direct column write, no
     /// audit event, no index-feed involvement —
-    /// SPEC_DISTILLATION_STORAGE §4/§7.2). This is the seam GLK's
-    /// distillation paths write through. Mirrors Swift
-    /// `Estate.setDistilledRepresentation`.
+    /// SPEC_DISTILLATION_STORAGE §4/§7.2). `source_digest` is the SHA-256
+    /// hex of the complete content the representation was rendered from.
+    /// This is the seam GLK's distillation paths write through. Mirrors
+    /// Swift `Estate.setDistilledRepresentation`.
     pub fn set_distilled_representation(
         &self,
         drawer_id: &str,
         distilled: &str,
         pipeline_version: &str,
+        source_digest: &str,
         token_count: i64,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -1494,6 +1496,7 @@ impl Estate {
             drawer_id,
             distilled,
             pipeline_version,
+            source_digest,
             token_count,
             generated_at,
         )
@@ -1507,14 +1510,32 @@ impl Estate {
         self.store.count_undistilled(pipeline_version)
     }
 
-    /// Active, non-empty drawers that carry a distilled representation,
-    /// as `(id, distilled_at_millis)` pairs without hydrating content.
-    /// Estate-level pass-through over `DrawerStore::drawers_with_representations`
-    /// — the metadata projection GeniusLocusKit uses to detect the mid-run
-    /// crash scenario (sweep committed, reindex did not). Mirrors Swift
+    /// Rooms whose populated distilled representation is stale under
+    /// `pipeline_version` (converter id differs or digest NULL). Used by
+    /// the distillation sweep to keep its room-level bitmap skip
+    /// currency-aware without loading drawer content. Estate-level
+    /// pass-through over
+    /// `DrawerStore::rooms_with_stale_distilled_representations`. Mirrors
+    /// Swift `Estate.roomsWithStaleDistilledRepresentations`.
+    pub fn rooms_with_stale_distilled_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        self.store.rooms_with_stale_distilled_representations(pipeline_version)
+    }
+
+    /// Active, non-empty drawers whose distilled representation is current
+    /// under `pipeline_version`, as `(id, distilled_at_millis)` pairs
+    /// without hydrating content. Estate-level pass-through over
+    /// `DrawerStore::drawers_with_representations` — the metadata
+    /// projection GeniusLocusKit uses to detect the mid-run crash scenario
+    /// (sweep committed, reindex did not). Mirrors Swift
     /// `Estate.drawersWithRepresentations`.
-    pub fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.store.drawers_with_representations()
+    pub fn drawers_with_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.store.drawers_with_representations(pipeline_version)
     }
 
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's

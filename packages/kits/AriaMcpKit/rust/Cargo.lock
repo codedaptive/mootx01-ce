@@ -1384,6 +1384,7 @@ version = "0.1.0"
 dependencies = [
  "corpus-kit",
  "genius-locus-kit",
+ "locus-kit",
  "persistence-kit",
  "rusqlite",
  "serde",
