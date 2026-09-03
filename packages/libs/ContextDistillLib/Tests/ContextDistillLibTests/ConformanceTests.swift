@@ -56,11 +56,12 @@ private enum JSONError: Error { case encoding }
 /// expected output fields under canonical-JSON comparison.
 private func assertFullRowMatch(
     _ row: OracleRow,
-    distiller: ContextDistiller
+    distiller: ContextDistiller,
+    converter: ContextDistillConverter = .intentSpanV22
 ) throws {
     let input = DistillationInput(original: row.original,
                                   enrichmentTrailer: row.enrichmentTrailer)
-    let result = distiller.distill(input, converter: .intentSpanV22)
+    let result = distiller.distill(input, converter: converter)
 
     let portDict = result.asDict()
     let oracleDict = row.rawJSON
@@ -155,16 +156,70 @@ func fullRowConformance_blind200() throws {
     }
 }
 
+/// Full-row conformance for the v23.2 attributed converter over all 7 debug7 rows.
+/// The v22 beds above remain independent regression gates for the default converter.
+@Test("Full-row conformance — v23.2 attributed debug7 (7 rows)")
+func fullRowConformance_v23Attributed_debug7() throws {
+    let distiller = ContextDistiller()
+    let rows = loadOracleRows(
+        bed: "debug7",
+        converterSuffix: "intent-span-v23-attributed"
+    )
+    for row in rows {
+        try assertFullRowMatch(
+            row,
+            distiller: distiller,
+            converter: .intentSpanV23Attributed
+        )
+    }
+}
+
+/// Full-row conformance for the v23.2 attributed converter over all 30 sample30 rows.
+@Test("Full-row conformance — v23.2 attributed sample30 (30 rows)")
+func fullRowConformance_v23Attributed_sample30() throws {
+    let distiller = ContextDistiller()
+    let rows = loadOracleRows(
+        bed: "sample30",
+        converterSuffix: "intent-span-v23-attributed"
+    )
+    for row in rows {
+        try assertFullRowMatch(
+            row,
+            distiller: distiller,
+            converter: .intentSpanV23Attributed
+        )
+    }
+}
+
+/// Full-row conformance for the v23.2 attributed converter over all 272 locomo rows.
+@Test("Full-row conformance — v23.2 attributed LoCoMo (272 rows)")
+func fullRowConformance_v23Attributed_locomo() throws {
+    let distiller = ContextDistiller()
+    let rows = loadOracleRows(
+        bed: "locomo",
+        converterSuffix: "intent-span-v23-attributed"
+    )
+    for row in rows {
+        try assertFullRowMatch(
+            row,
+            distiller: distiller,
+            converter: .intentSpanV23Attributed
+        )
+    }
+}
+
 // MARK: - Cross-port fixture (Part 5)
 
-/// Writes all 509 Swift port output rows to the cross-port fixture file.
+/// Writes all 509 v22 Swift port output rows plus 309 v23.2 rows to the cross-port
+/// fixture file.
 ///
 /// The fixture path comes from the environment variable CDL_CROSSPORT_OUT.
 /// When the variable is not set this test is skipped — it is a helper for the
 /// cross-port diff, not a conformance gate.
 ///
-/// Output format: one JSON object per line (JSONL), 509 lines, one per oracle
-/// row in order debug7 → sample30 → locomo → blind200.
+/// Output format: one JSON object per line (JSONL).
+/// - 509 v22 rows: debug7 → sample30 → locomo → blind200.
+/// - 309 v23.2 rows: debug7 → sample30 → locomo (no blind200 bed for v23.2).
 ///
 /// The Rust port writes its equivalent output to a sibling file (rust-rows.jsonl)
 /// so the cross-port diff can compare the two ports against each other and against
@@ -179,24 +234,47 @@ func crossPortFixture() throws {
     }
 
     let distiller = ContextDistiller()
-    let beds = ["debug7", "sample30", "locomo", "blind200"]
     var lines: [String] = []
-    lines.reserveCapacity(509)
+    lines.reserveCapacity(818)  // 509 v22 + 309 v23.2
 
-    for bed in beds {
+    // v22 rows: all four beds in order.
+    let v22Beds = ["debug7", "sample30", "locomo", "blind200"]
+    for bed in v22Beds {
         let rows = loadOracleRows(bed: bed)
         for row in rows {
             let input = DistillationInput(original: row.original,
                                           enrichmentTrailer: row.enrichmentTrailer)
             let result = distiller.distill(input, converter: .intentSpanV22)
 
-            // Include record-identity fields (drawer_id) in the fixture so the
-            // cross-port diff can correlate rows across ports.
+            // Include record-identity fields so the cross-port diff can correlate rows.
             var dict = result.asDict()
             dict["drawer_id"] = row.drawerID
             dict["original"]  = row.original
             dict["enrichment_trailer"] = row.enrichmentTrailer
             dict["candidate"] = "intent-span"
+
+            let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+            guard let line = String(data: data, encoding: .utf8) else {
+                throw JSONError.encoding
+            }
+            lines.append(line)
+        }
+    }
+
+    // v23.2 rows: three beds (no blind200 oracle exists for v23.2).
+    let v23Beds = ["debug7", "sample30", "locomo"]
+    for bed in v23Beds {
+        let rows = loadOracleRows(bed: bed, converterSuffix: "intent-span-v23-attributed")
+        for row in rows {
+            let input = DistillationInput(original: row.original,
+                                          enrichmentTrailer: row.enrichmentTrailer)
+            let result = distiller.distill(input, converter: .intentSpanV23Attributed)
+
+            var dict = result.asDict()
+            dict["drawer_id"] = row.drawerID
+            dict["original"]  = row.original
+            dict["enrichment_trailer"] = row.enrichmentTrailer
+            dict["candidate"] = "intent-span-v23-attributed"
 
             let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
             guard let line = String(data: data, encoding: .utf8) else {
@@ -218,6 +296,69 @@ func contextDistillConverterIdentifiers() {
     #expect(c.id             == "intent-span@intent-span-v22-authority-closure")
     #expect(c.converterVersion == "distill-plus-v1")
     #expect(c.schemaVersion  == 1)
+
+    let attributed = ContextDistillConverter.intentSpanV23Attributed
+    #expect(attributed.id
+        == "intent-span-v23-attributed@intent-span-v23.2-attributed-prose")
+    #expect(attributed.converterVersion == "distill-plus-v1")
+    #expect(attributed.schemaVersion == 1)
+}
+
+@Test("v23.2 peer dialogue is explicit and keeps the frozen v22 detail identity")
+func v23AttributedPeerDialogueIsExplicit() {
+    let source = [
+        "Alice: Good morning!",
+        "Bob: Hello there!",
+        "Alice: I prefer the blue design.",
+        "Bob: We agreed to ship it Friday.",
+        "Alice: Do not change the quantity of 12.",
+        "Bob: The Boston launch remains approved.",
+    ].joined(separator: "\n")
+    let input = DistillationInput(original: source)
+    let distiller = ContextDistiller()
+
+    let v22 = distiller.distill(input, converter: .intentSpanV22)
+    #expect(v22.selectionDetails["mode"] as? String == "document")
+    #expect(v22.selectionDetails["rendering"] == nil)
+
+    let attributed = distiller.distill(input, converter: .intentSpanV23Attributed)
+    #expect(attributed.selectionDetails["mode"] as? String == "peer-dialogue")
+    #expect(attributed.selectionDetails["intent_span_version"] as? String
+        == "intent-span-v22-authority-closure")
+    #expect(attributed.selectionDetails["rendering"] as? String
+        == "inline-attributed-prose")
+    #expect(attributed.compactCore == [
+        "Alice said: “I prefer the blue design.”",
+        "Bob said: “We agreed to ship it Friday.”",
+        "Alice said: “Do not change the quantity of 12.”",
+        "Bob said: “The Boston launch remains approved.”",
+    ].joined(separator: " "))
+}
+
+@Test(
+    "v23.2 peer topology rejects metadata, weak coverage, and weak switching",
+    arguments: [
+        [
+            "Name: Alice", "Date: 2026-09-01", "Name: Bob",
+            "Date: 2026-09-02", "Name: Carol", "Date: 2026-09-03",
+        ].joined(separator: "\n"),
+        [
+            "Alice: one", "Bob: two", "Alice: three", "Bob: four",
+            "Alice: five", "Bob: six", "an unlabeled seventh line",
+        ].joined(separator: "\n"),
+        [
+            "Alice: one", "Alice: two", "Alice: three",
+            "Bob: four", "Bob: five", "Bob: six",
+        ].joined(separator: "\n"),
+    ]
+)
+func v23AttributedPeerTopologyRejectsFalsePositives(_ source: String) {
+    let result = ContextDistiller().distill(
+        DistillationInput(original: source),
+        converter: .intentSpanV23Attributed
+    )
+    #expect(result.selectionDetails["mode"] as? String != "peer-dialogue")
+    #expect(result.selectionDetails["rendering"] as? String == "source-exact")
 }
 
 @Test("DistillationInput initialisation")

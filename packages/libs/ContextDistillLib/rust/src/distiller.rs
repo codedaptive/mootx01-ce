@@ -33,13 +33,13 @@
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::atoms::intent_atoms;
+use crate::atoms::intent_atoms_with_peer_dialogue;
 use crate::converter::ContextDistillConverter;
 use crate::digest::{estimate_tokens, source_digest};
 use crate::input::DistillationInput;
-use crate::python_text::{is_python_whitespace, py_word_char};
+use crate::python_text::{is_python_whitespace, py_strip, py_word_char};
 use crate::scanners::{scan_date_re, scan_quantity_value_re, ScannerMatch};
-use crate::selection::{intent_span_selection, sentence_initial};
+use crate::selection::{intent_span_selection_with_peer_dialogue, sentence_initial};
 use crate::shape::classify_record;
 use crate::terms::normalized_terms;
 
@@ -786,6 +786,86 @@ pub struct DistilledRepresentation {
 // §10 — ContextDistiller
 // ---------------------------------------------------------------------------
 
+/// Renders selected named-peer turns as one attributed prose stream.
+///
+/// Splits on Python str.splitlines() boundaries (LF, VT, FF, CR, CR+LF,
+/// FS/GS/RS, NEL, LS/PS), strips each line with Python str.strip() semantics
+/// via py_strip, and formats lines matching the speaker-colon pattern as
+/// `Speaker said: \u{201C}body\u{201D}` clauses joined by a single space.
+/// Mirrors Python render_peer_attributed_prose exactly.
+pub fn render_peer_attributed_prose(text: &str) -> String {
+    // Python str.splitlines() splits on these code points:
+    //   LF (0x0A), VT (0x0B), FF (0x0C), CR (0x0D),
+    //   FS/GS/RS (0x1C-0x1E), NEL (0x85), LS/PS (0x2028-0x2029).
+    // CR followed immediately by LF counts as one separator.
+    let is_py_line_boundary = |c: char| -> bool {
+        matches!(c as u32,
+            0x0A | 0x0B | 0x0C | 0x0D | 0x1C | 0x1D | 0x1E | 0x85
+            | 0x2028 | 0x2029)
+    };
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    let mut i = 0;
+    let n = chars.len();
+    let mut line_start = 0;
+    while i < n {
+        if is_py_line_boundary(chars[i]) {
+            lines.push(chars[line_start..i].to_vec());
+            // Absorb CR+LF as one separator.
+            if chars[i] == '\r' && i + 1 < n && chars[i + 1] == '\n' {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            line_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if line_start < n {
+        lines.push(chars[line_start..].to_vec());
+    }
+
+    lines.iter().filter_map(|raw_line| {
+        // Python str.strip() semantics via py_strip.
+        let stripped = py_strip(raw_line);
+        if stripped.is_empty() { return None; }
+
+        // Pattern: ^([A-Za-z][A-Za-z ._-]{0,31}):\s*(.*)$
+        // Mirrors the Swift renderPeerAttributedProse scanner exactly.
+        let mut cursor = 0;
+        if !stripped[cursor].is_ascii_alphabetic() {
+            return Some(stripped.iter().collect::<String>());
+        }
+        cursor += 1;
+        let mut tail_count = 0usize;
+        while cursor < stripped.len() && tail_count < 31 {
+            let v = stripped[cursor] as u32;
+            let allowed = (v >= 0x41 && v <= 0x5A)
+                || (v >= 0x61 && v <= 0x7A)
+                || v == 0x20  // space
+                || v == 0x2E  // '.'
+                || v == 0x5F  // '_'
+                || v == 0x2D; // '-'
+            if !allowed { break; }
+            cursor += 1;
+            tail_count += 1;
+        }
+        if cursor >= stripped.len() || stripped[cursor] != ':' {
+            return Some(stripped.iter().collect::<String>());
+        }
+        let speaker: String = stripped[..cursor].iter().collect();
+        cursor += 1; // skip ':'
+        // Skip \s* after colon using Python whitespace semantics.
+        while cursor < stripped.len() && is_python_whitespace(stripped[cursor]) {
+            cursor += 1;
+        }
+        let body: String = stripped[cursor..].iter().collect();
+        Some(format!("{speaker} said: “{body}”"))
+    }).collect::<Vec<_>>().join(" ")
+}
+
 /// Stateless assembler for the intent-span distillation candidate.
 ///
 /// Mirrors the intent-span branch of `candidate_rows()` in
@@ -803,8 +883,7 @@ impl ContextDistiller {
     /// # Parameters
     ///
     /// - `input`: Source text (`original`) and raw enrichment trailer.
-    /// - `converter`: Converter variant to apply.  Currently only
-    ///   `ContextDistillConverter::IntentSpanV22` is defined.
+    /// - `converter`: Explicit v22 or v23.2 attributed converter variant.
     ///
     /// # Returns
     ///
@@ -824,6 +903,8 @@ impl ContextDistiller {
     ) -> DistilledRepresentation {
         let source = &input.original;
         let trailer = &input.enrichment_trailer;
+        let peer_dialogue = matches!(
+            converter, ContextDistillConverter::IntentSpanV23Attributed);
 
         // §10.1 — Shape classification.
         // Mirrors Python: decision = classify_record(record.content)
@@ -839,7 +920,7 @@ impl ContextDistiller {
         //       projection_source = source[:start] + " " * (end - start) + source[end:]
         //       excluded_projection_spans.append({...})
         let source_chars: Vec<char> = source.chars().collect();
-        let atoms_result = intent_atoms(source);
+        let atoms_result = intent_atoms_with_peer_dialogue(source, peer_dialogue);
         let mode_details = &atoms_result.mode_details;
 
         let mut excluded_projection_spans: Vec<Value> = Vec::new();
@@ -893,13 +974,23 @@ impl ContextDistiller {
         //   budget = max(512, len(source.encode("utf-8")) * budget_percent // 100
         //                     - len(projected_trailer.encode("utf-8")))
         let applied_trailer_bytes = projected_trailer.len(); // UTF-8 bytes (str::len())
-        let selection_result = intent_span_selection(source, applied_trailer_bytes);
+        let selection_result = intent_span_selection_with_peer_dialogue(
+            source, applied_trailer_bytes, peer_dialogue);
 
         // §10.5 — Add trailer_projection to selection_details.
         //
         // Part 4 excluded this key from `selection_details`. Part 5 inserts it.
         // Mirrors Python: details["trailer_projection"] = projection
         let mut selection_details_map = selection_result.selection_details;
+        let peer_mode = selection_details_map.get("mode")
+            .and_then(Value::as_str) == Some("peer-dialogue");
+        if peer_dialogue {
+            selection_details_map.insert(
+                "rendering".into(),
+                json!(if peer_mode { "inline-attributed-prose" }
+                      else { "source-exact" }),
+            );
+        }
         selection_details_map.insert(
             "trailer_projection".into(),
             Value::Object(projection),
@@ -908,12 +999,17 @@ impl ContextDistiller {
 
         // §10.6 — _combine.
         // Mirrors Python: combined = _combine(intent_text, intent_trailer)
-        let combined = combine(&selection_result.compact_core, &projected_trailer);
+        let rendered_core = if peer_dialogue && peer_mode {
+            render_peer_attributed_prose(&selection_result.compact_core)
+        } else {
+            selection_result.compact_core
+        };
+        let combined = combine(&rendered_core, &projected_trailer);
 
         // §10.7 — Metrics.
         // Mirrors Python: metrics dict inside candidate_rows().
         let original_bytes = source.len() as u64; // str::len() = UTF-8 bytes
-        let core_bytes = selection_result.compact_core.len() as u64;
+        let core_bytes = rendered_core.len() as u64;
         let trailer_bytes = trailer.len() as u64;
         let applied_trailer_bytes_u64 = projected_trailer.len() as u64;
         let distilled_bytes = combined.len() as u64;
@@ -957,7 +1053,7 @@ impl ContextDistiller {
             span_offset_unit:           "unicode-code-point".to_string(),
             span_utf8_offset_unit:      "byte".to_string(),
             selected_source_spans:      Value::Array(selection_result.selected_source_spans),
-            compact_core:               selection_result.compact_core,
+            compact_core:               rendered_core,
             applied_enrichment_trailer: projected_trailer,
             ai_text:                    combined.clone(),
             mining_body:                combined,
