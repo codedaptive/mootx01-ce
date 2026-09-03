@@ -23,6 +23,8 @@
 // digests proving which recipe they were).
 //
 //   apple-fm             p1  s1   (Apple FoundationModels; OS-resident weights)
+//   nuextract-tiny-v1.5-b1-q8
+//                        p1  s1   (Core AI B1 blockwise-int8; macOS opt-in)
 //   qwen2-0.5b-q4km      p2  s1   (Rust quantized engine default GGUF;
 //                                  p2 = user-only frame, D1 ruling 2026-08-31)
 //   qwen2.5-0.5b-q4km    p2  s1   (Rust registry)
@@ -175,6 +177,37 @@ extension MinterRecipe {
         ],
         output: .text,
         family: "apple"
+    )
+
+    /// NuExtract 1.5 Tiny, B1 Core AI Q8 product candidate. The model-native
+    /// extraction frame is recorded here even though `CoreAIEngine` performs
+    /// the actual framing: its bytes are part of the persistent recipe digest,
+    /// not an invisible executor detail. B1 is the one-record graph geometry;
+    /// generation is greedy and capped at the protocol's 256-token working
+    /// boundary. The recipe remains opt-in until the containment/quality gate.
+    public static let nuextractTinyV15B1Q8 = MinterRecipe(
+        model: "nuextract-tiny-v1.5-b1-q8",
+        promptVersion: 1,
+        settingsVersion: 1,
+        systemPrompt: "",
+        chatTemplate: """
+        <|input|>
+        ### Template:
+        {"claim": "", "entities": [], "dates": [], "quantities": []}
+        ### Text:
+        {input}
+        <|output|>
+        """,
+        parameters: [
+            "batch_width": "1",
+            "context_tokens": "8192",
+            "max_new_tokens": "256",
+            "quantization": "blockwise-int8",
+            "sampling": "greedy",
+            "style": "nuextract",
+        ],
+        output: .json,
+        family: "quantized"
     )
 }
 
