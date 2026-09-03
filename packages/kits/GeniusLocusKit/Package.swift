@@ -68,9 +68,18 @@ let package = Package(
             description: "Compile the historical GLK 1.0 to 1.1 shared-content migration capsule."
         ),
         .trait(
+            name: "MigrationV1_1ToV1_2",
+            description: "Compile the GLK 1.1 to 1.2 index-composition-column migration capsule."
+        ),
+        .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2"]
+        ),
+        .trait(
+            name: "MigrationFloor1_1",
+            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule).",
+            enabledTraits: ["MigrationV1_1ToV1_2"]
         ),
     ],
     dependencies: [
@@ -178,6 +187,24 @@ let package = Package(
             ],
             path: "Sources/GLKMigrationV1_0ToV1_1"
         ),
+        // GLK 1.1 -> 1.2 capsule: applies corpus_index_state composition_policy
+        // column to populated estates that were written before corpus_index_state reached schema version 3.
+        // Mirrors the GLKMigrationV1_0ToV1_1 target structure.
+        .target(
+            name: "GLKMigrationV1_1ToV1_2",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKMigrationV1_1ToV1_2",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_1_TO_V1_2",
+                    .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKitMigrations",
             dependencies: [
@@ -192,12 +219,20 @@ let package = Package(
                     name: "GLKMigrationV1_0ToV1_1",
                     condition: .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
+                .target(
+                    name: "GLKMigrationV1_1ToV1_2",
+                    condition: .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
             ],
             path: "Sources/GeniusLocusKitMigrations",
             swiftSettings: [
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_1_TO_V1_2",
+                    .when(traits: ["MigrationV1_1ToV1_2"])
                 ),
             ]
         ),
@@ -329,6 +364,39 @@ let package = Package(
             ],
             path: "Tests/GLKMigrationV1_0ToV1_1Tests",
             swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        // Tests for the GLK 1.1 -> 1.2 index-composition-column migration capsule.
+        // Verifies that corpus_index_state gains composition_policy on v1_1-stamped
+        // estates, and that the catalog chain (v1_0 -> v1_1 -> v1_2) ends at v1_2.
+        .testTarget(
+            name: "GLKMigrationV1_1ToV1_2Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_1ToV1_2",
+                    condition: .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
+                .target(
+                    name: "GLKMigrationV1_0ToV1_1",
+                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
+            path: "Tests/GLKMigrationV1_1ToV1_2Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_1_TO_V1_2",
+                    .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
