@@ -3,14 +3,19 @@
 
 One script, four modes (argv[1]):
 
-  context     UserPromptSubmit  Escalating memory-writeback reminders as the
-                                context window fills (65 / 75 / 85 / 95 %).
+  context     UserPromptSubmit  Checkpoint-note reminders as the context window
+                                fills (30 / 50 / 70 / 85 %), each rung once per
+                                session, chained to a session-scoped location
+                                so the next rung can find its predecessor.
+                                Reports UNKNOWN, never a percentage, when the
+                                model's window is not known.
   precompact  PreCompact        Records that compaction is about to happen so
-                                the next SessionStart can trigger recovery.
+                                the next SessionStart can trigger recovery, and
+                                says so when no handoff note was filed.
   session     SessionStart      Orientation reminder on startup/resume/clear;
-                                continuity-recovery injection after compaction;
-                                warns (never edits) if a stale direct
-                                `memory` MCP entry is still wired.
+                                after compaction, points at this session's
+                                handoff note; warns (never edits) if a stale
+                                direct `memory` MCP entry is still wired.
   stop        Stop              If MOOTx01 tools were used this session but no
                                 durable writeback happened, asks Claude (once)
                                 to file memories before finishing.
@@ -28,10 +33,10 @@ Design constraints, on purpose:
     session.
 
 Environment:
-  MOOTX01_CONTEXT_WINDOW   Override the assumed context window size in tokens
-                           (default: inferred — 200000, or 1000000 when the
-                         transcript names a "[1m]" model or the measured
-                         footprint exceeds 200000).
+  MOOTX01_CONTEXT_WINDOW   Override the assumed context window size in tokens.
+                           Without it the window comes from the model id the
+                           transcript names (see window_for_model); a model
+                           this hook does not know yields no percentage.
 """
 
 import json
@@ -39,11 +44,20 @@ import os
 import sys
 import tempfile
 
-THRESHOLDS = (65, 75, 85, 95)
+THRESHOLDS = (30, 50, 70, 85)
 DEFAULT_WINDOW = 200_000
-# 1M-token window ("[1m]"-suffixed model ids); inferred, or set
-# MOOTX01_CONTEXT_WINDOW explicitly.
 LARGE_WINDOW = 1_000_000
+
+# Context windows by model id, matched as case-insensitive substrings of the
+# transcript's assistant `message.model`. Two lists on purpose: a model that
+# matches neither gets NO percentage (see UNKNOWN_WINDOW_MESSAGE) — an assumed
+# window can only be wrong in the alarming direction, and a confident wrong
+# percentage was used as an input to real decisions before this hook learned
+# to say it did not know. Add a fragment only with its window established
+# from a primary source; "[1m]" is checked first because it marks the
+# 1M-window variant of an otherwise 200k model.
+MILLION_WINDOW_MODEL_FRAGMENTS = ("[1m]", "fable", "mythos", "sonnet-5", "opus-5")
+STANDARD_WINDOW_MODEL_FRAGMENTS = ("sonnet-4-", "opus-4-6", "haiku-4-5")
 
 # Markers are the MCP-QUALIFIED tool-name fragment ("mcp__<server>__moot_*"
 # contains "__moot_*"), which only appears in genuine tool-use records of the
@@ -60,33 +74,59 @@ WRITEBACK_MARKERS = (
     "__moot_confirm_memory",
 )
 
+# Every note is filed to a session-scoped location so the next rung can find
+# its predecessor without this hook tracking any state, and every note body
+# repeats the session id so the chain is findable by search even when a
+# tunnel fails.
 MESSAGES = {
-    65: (
-        "[MOOTx01 context meter] Context is about {pct}% full. Natural "
-        "checkpoint: if durable decisions, preferences, corrections, or "
-        "useful project facts have accumulated, file them now with "
-        "moot_file_memory / moot_file_fact and link related memories."
+    30: (
+        "[MOOTx01 context meter] Context is about {pct}% full. File a "
+        "checkpoint note now with moot_file_memory to "
+        "`session/{session_id}/checkpoint-30`: what this session is doing, "
+        "what has been decided, what is open. Include the session id "
+        "{session_id} in the body."
     ),
-    75: (
-        "[MOOTx01 context meter] Context is about {pct}% full. Write back "
-        "durable knowledge now rather than later: moot_file_memory for "
-        "decisions and observations, moot_file_fact for stable triples, "
-        "moot_write_journal for continuity."
+    50: (
+        "[MOOTx01 context meter] Context is about {pct}% full. File "
+        "`session/{session_id}/checkpoint-50` with moot_file_memory (include "
+        "the session id {session_id} in the body). Then find your "
+        "checkpoint-30 note for this session and link the new note to it "
+        "with moot_link_memories kind derivesFrom. If the link fails, say so "
+        "and continue."
+    ),
+    70: (
+        "[MOOTx01 context meter] Context is about {pct}% full. File "
+        "`session/{session_id}/checkpoint-70` with moot_file_memory (include "
+        "the session id {session_id} in the body) and link it derivesFrom "
+        "your checkpoint-50 note. If the link fails, say so and continue."
     ),
     85: (
-        "[MOOTx01 context meter] Context is about {pct}% full and compaction "
-        "is approaching. Before continuing the task, file every durable "
-        "memory, fact, and link from this session and write a journal entry "
-        "with moot_write_journal so continuity survives compaction."
-    ),
-    95: (
-        "[MOOTx01 context meter] URGENT: context is about {pct}% full. "
-        "Compaction may occur at any moment and unsaved context will be "
-        "lost. Immediately file durable memories (moot_file_memory), facts "
-        "(moot_file_fact), links (moot_link_memories), and a journal entry "
-        "(moot_write_journal). Do this before any other work."
+        "[MOOTx01 context meter] Context is about {pct}% full. Write a "
+        "POST-COMPACT HANDOFF for a colleague picking this up cold: what we "
+        "are building and why, where things stand, decisions and the "
+        "thinking behind them, what failed and how, exact strings quoted "
+        "verbatim, what is still open, where you would pick up. Give "
+        "context, not commands. File it with moot_file_memory to "
+        "`session/{session_id}/handoff` (include the session id "
+        "{session_id} in the body) and link it derivesFrom your "
+        "checkpoint-70 note. If the link fails, say so and continue. Then "
+        "compact."
     ),
 }
+
+UNKNOWN_WINDOW_MESSAGE = (
+    "[MOOTx01 context meter] Context usage is UNKNOWN for this session: the "
+    "transcript names the model {model} and this hook does not know its "
+    "context window, so it will not report a percentage. Run /context for "
+    "the real figure, and set MOOTX01_CONTEXT_WINDOW to the window size in "
+    "tokens if you want the checkpoint reminders."
+)
+
+NO_HANDOFF_MESSAGE = (
+    "[MOOTx01] Compaction is starting and no post-compact handoff was filed "
+    "this session (`session/{session_id}/handoff`). Whatever this session "
+    "knew and did not write down is about to be summarized away."
+)
 
 ORIENT_MESSAGE = (
     "[MOOTx01] This project uses MOOTx01 as its memory substrate. If this "
@@ -103,11 +143,12 @@ COMPETING_ENTRY_MESSAGE = (
 )
 
 RECOVERY_MESSAGE = (
-    "[MOOTx01] Context was just compacted. Details from earlier in this "
-    "session may have been summarized away. Recover continuity now: call "
-    "moot_read_journal and moot_memory_search for the current task before "
-    "proceeding, and re-verify any paths, names, or decisions you are "
-    "about to rely on."
+    "[MOOTx01] Context was just compacted. Your post-compact handoff for "
+    "this session is at `session/{session_id}/handoff`. Read it first "
+    "(moot_memory_search for the session id {session_id}, then "
+    "moot_memory_get). Earlier checkpoints are reachable from it by "
+    "derivesFrom tunnels if you need more than the handoff carries — walk "
+    "back only if the handoff leaves you short."
 )
 
 STOP_REASON = (
@@ -142,7 +183,8 @@ def load_state(session_id):
                 return state
     except Exception:
         pass
-    return {"fired": [], "compacted": False, "stop_nagged": False}
+    return {"fired": [], "compacted": False, "stop_nagged": False,
+            "unknown_reported": False}
 
 
 def save_state(session_id, state):
@@ -154,16 +196,18 @@ def save_state(session_id, state):
 
 
 def estimate_context_tokens(transcript_path):
-    """Return (tokens, large_window_hint) for the main-chain context, or None.
+    """Return (tokens, model) for the main-chain context, or (None, None).
 
     Claude Code transcripts are JSONL. Assistant entries carry a usage block;
-    the most recent one reflects what the current context actually costs.
-    large_window_hint is True when any main-chain entry names a 1M-window
-    model (the "[1m]" model-id suffix)."""
+    the most recent one reflects what the current context actually costs, and
+    the same entry's `message.model` names the model that produced it — the
+    input that sizes the window. A usage-bearing entry whose model is
+    "<synthetic>" or empty still wins as the latest entry: the caller treats
+    that model as unknown rather than guessing which real model preceded it."""
     if not transcript_path:
-        return None
+        return None, None
     latest = 0
-    large_hint = False
+    model = None
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -179,9 +223,6 @@ def estimate_context_tokens(transcript_path):
                 message = entry.get("message")
                 if not isinstance(message, dict):
                     continue
-                model = message.get("model")
-                if isinstance(model, str) and "[1m]" in model:
-                    large_hint = True
                 usage = message.get("usage")
                 if not isinstance(usage, dict):
                     continue
@@ -197,38 +238,56 @@ def estimate_context_tokens(transcript_path):
                         total += int(value)
                 if total:
                     latest = total
+                    entry_model = message.get("model")
+                    model = entry_model if isinstance(entry_model, str) else None
     except Exception:
-        return None
+        return None, None
     if not latest:
+        return None, None
+    return latest, model
+
+
+def window_for_model(model):
+    """Context window in tokens for `model`, or None when this hook does not
+    know it (absent, empty, "<synthetic>", or a model id outside both
+    fragment lists). None means: report unknown, never a percentage."""
+    if not isinstance(model, str) or not model.strip():
         return None
-    return latest, large_hint
+    lowered = model.lower()
+    for fragment in MILLION_WINDOW_MODEL_FRAGMENTS:
+        if fragment in lowered:
+            return LARGE_WINDOW
+    for fragment in STANDARD_WINDOW_MODEL_FRAGMENTS:
+        if fragment in lowered:
+            return DEFAULT_WINDOW
+    return None
 
 
 def mode_context(data):
     session_id = data.get("session_id", "default")
-    estimate = estimate_context_tokens(data.get("transcript_path"))
-    if estimate is None:
+    tokens, model = estimate_context_tokens(data.get("transcript_path"))
+    if tokens is None:
         return
-    tokens, large_hint = estimate
     try:
         window = int(os.environ.get("MOOTX01_CONTEXT_WINDOW", 0))
     except ValueError:
         window = 0
     if window <= 0:
-        # No explicit override: infer the window. A context footprint can
-        # only exceed a window that is bigger than the default, and a
-        # "[1m]" model id in the transcript names a 1M-window model — in
-        # either case percentages against the 200k default would read
-        # "100% full" on every prompt of a healthy large-window session
-        # (the calibration bug this replaces). Default stays 200k for
-        # everything else, so small-window behavior is unchanged.
-        if large_hint or tokens > DEFAULT_WINDOW:
-            window = LARGE_WINDOW
-        else:
-            window = DEFAULT_WINDOW
+        window = window_for_model(model)
+    state = load_state(session_id)
+    if window is None:
+        # Unknown model: say so once per session and compute nothing. A
+        # percentage against a guessed window is wrong in the alarming
+        # direction only, which is worse than no number.
+        if not state.get("unknown_reported"):
+            state["unknown_reported"] = True
+            save_state(session_id, state)
+            print(UNKNOWN_WINDOW_MESSAGE.format(model=repr(model or "")))
+        return
     pct = min(100, int(round(tokens * 100.0 / window)))
 
-    state = load_state(session_id)
+    # Each rung fires once per session: `fired` is the set of rungs already
+    # announced, and crossing several at once announces only the highest.
     fired = set(state.get("fired") or [])
     crossed = [t for t in THRESHOLDS if pct >= t and t not in fired]
     if not crossed:
@@ -237,7 +296,24 @@ def mode_context(data):
     fired.update(t for t in THRESHOLDS if t <= top)
     state["fired"] = sorted(fired)
     save_state(session_id, state)
-    print(MESSAGES[top].format(pct=pct))
+    print(MESSAGES[top].format(pct=pct, session_id=session_id))
+
+
+def handoff_filed(transcript_path, session_id):
+    """True when this session's transcript shows a moot_file_memory call
+    addressed to `session/<session_id>/handoff`. Tool-use records carry
+    their arguments on the same JSONL line as the MCP-qualified tool name."""
+    if not transcript_path:
+        return False
+    location = "session/%s/handoff" % session_id
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "__moot_file_memory" in line and location in line:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def mode_precompact(data):
@@ -245,6 +321,10 @@ def mode_precompact(data):
     state = load_state(session_id)
     state["compacted"] = True
     save_state(session_id, state)
+    # A hook cannot compose the handoff — the agent gets no further turn
+    # once this fires — but it can make a silent loss visible.
+    if not handoff_filed(data.get("transcript_path"), session_id):
+        print(NO_HANDOFF_MESSAGE.format(session_id=session_id))
 
 
 def warn_competing_direct_entry():
@@ -276,11 +356,12 @@ def mode_session(data):
     source = data.get("source", "")
     state = load_state(session_id)
     if source == "compact" or state.get("compacted"):
-        # Context shrank: re-arm the meter and recover continuity.
+        # Context shrank: re-arm the meter and point at the handoff.
         state["compacted"] = False
         state["fired"] = []
+        state["unknown_reported"] = False
         save_state(session_id, state)
-        print(RECOVERY_MESSAGE)
+        print(RECOVERY_MESSAGE.format(session_id=session_id))
         warn_competing_direct_entry()
         return
     if source == "clear":
