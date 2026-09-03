@@ -25,6 +25,10 @@
 
 import Foundation
 
+@inline(__always) private func atlSelectionIsAlpha(_ value: UInt32) -> Bool {
+    (value >= 0x41 && value <= 0x5A) || (value >= 0x61 && value <= 0x7A)
+}
+
 // MARK: - Constants (mirrors Python constants)
 
 private let intentSpanVersion = "intent-span-v22-authority-closure"
@@ -189,14 +193,32 @@ public func renderExact(
     var pieces: [String] = []
     var spans: [[String: Any]] = []
     var previousEnd: Int? = nil
+    var previousAtom: IntentAtom? = nil
+    let atomByID = Dictionary(uniqueKeysWithValues: atoms.map { ($0.atomID, $0) })
+
+    func peerGroup(_ atom: IntentAtom?) -> Int? {
+        guard let atom, atom.kind.hasPrefix("peer-") else { return nil }
+        if atom.kind == "peer-speaker-prefix" { return atom.atomID }
+        for dependency in atom.dependencies {
+            if atomByID[dependency]?.kind == "peer-speaker-prefix" {
+                return dependency
+            }
+        }
+        return nil
+    }
 
     for atom in chosen {
         if let prev = previousEnd, atom.start > prev {
             let gapScalars = Array(scalars[prev ..< atom.start])
             let gapIsWhitespace = gapScalars.allSatisfy { isPythonWhitespace($0) }
-            // Mirror Python: if not gap.strip() use gap else "\n\n".
+            let previousPeerGroup = peerGroup(previousAtom)
+            let samePeerTurn = previousPeerGroup != nil && previousPeerGroup == peerGroup(atom)
+            // v23 uses one space for an omitted non-whitespace gap inside the
+            // same named-peer turn. Every v22 gap remains byte-identical.
             if gapIsWhitespace {
                 pieces.append(scalarsToString(gapScalars))
+            } else if samePeerTurn {
+                pieces.append(" ")
             } else {
                 pieces.append("\n\n")
             }
@@ -217,8 +239,78 @@ public func renderExact(
             "hard_required": atom.hardRequired || hardIDs.contains(atom.atomID),
         ])
         previousEnd = atom.end
+        previousAtom = atom
     }
     return (pieces.joined(), spans)
+}
+
+// MARK: - renderPeerAttributedProse
+
+/// Renders selected named-peer turns as one attributed prose stream.
+///
+/// Mirrors v23.2 `render_peer_attributed_prose` without a regex engine. The
+/// selected evidence and its source spans do not change; only presentation
+/// topology changes from `Name: body` lines to `Name said: “body”` clauses.
+func renderPeerAttributedProse(_ text: String) -> String {
+    let scalars = Array(text.unicodeScalars)
+    var lines: [[Unicode.Scalar]] = []
+    var lineStart = 0
+    var index = 0
+
+    func isPythonLineBoundary(_ value: UInt32) -> Bool {
+        value == 0x0A || value == 0x0B || value == 0x0C || value == 0x0D
+            || (value >= 0x1C && value <= 0x1E) || value == 0x85
+            || value == 0x2028 || value == 0x2029
+    }
+
+    while index < scalars.count {
+        guard isPythonLineBoundary(scalars[index].value) else {
+            index += 1
+            continue
+        }
+        lines.append(Array(scalars[lineStart ..< index]))
+        if scalars[index].value == 0x0D,
+           index + 1 < scalars.count,
+           scalars[index + 1].value == 0x0A {
+            index += 2
+        } else {
+            index += 1
+        }
+        lineStart = index
+    }
+    if lineStart < scalars.count {
+        lines.append(Array(scalars[lineStart...]))
+    }
+
+    return lines.compactMap { rawLine -> String? in
+        let line = pyStrip(rawLine)
+        guard !line.isEmpty else { return nil }
+
+        // Python pattern: ^([A-Za-z][A-Za-z ._-]{0,31}):\s*(.*)$
+        var cursor = 0
+        guard atlSelectionIsAlpha(line[cursor].value) else {
+            return scalarsToString(line)
+        }
+        cursor += 1
+        var tailCount = 0
+        while cursor < line.count && tailCount < 31 {
+            let value = line[cursor].value
+            let allowed = atlSelectionIsAlpha(value) || value == 0x20
+                || value == 0x2E || value == 0x5F || value == 0x2D
+            if !allowed { break }
+            cursor += 1
+            tailCount += 1
+        }
+        guard cursor < line.count, line[cursor].value == 0x3A else {
+            return scalarsToString(line)
+        }
+
+        let speaker = scalarsToString(Array(line[0 ..< cursor]))
+        cursor += 1
+        while cursor < line.count && isPythonWhitespace(line[cursor]) { cursor += 1 }
+        let body = scalarsToString(Array(line[cursor...]))
+        return "\(speaker) said: “\(body)”"
+    }.joined(separator: " ")
 }
 
 // MARK: - portableSpanOffsets
@@ -893,11 +985,15 @@ private func scalarsToString(_ scalars: [Unicode.Scalar]) -> String {
 ///   - `core`: concatenated selected atom text
 ///   - `selectedSpans`: per-atom metadata with UTF-8 byte offsets
 ///   - `selectionDetails`: full metadata except `trailer_projection`
-public func intentSpan(_ source: String, trailer: String) -> IntentSpanResult {
+public func intentSpan(
+    _ source: String,
+    trailer: String,
+    peerDialogue: Bool = false
+) -> IntentSpanResult {
     let scalars = Array(source.unicodeScalars)
 
     // --- atoms, hard, coverage, unsupported, mode_details ---
-    let atomsResult = intentAtoms(scalars)
+    let atomsResult = intentAtoms(scalars, peerDialogue: peerDialogue)
     let atoms = atomsResult.atoms
     let hard = atomsResult.hardIDs
     let coverage = atomsResult.coverageIDs
@@ -981,6 +1077,7 @@ public func intentSpan(_ source: String, trailer: String) -> IntentSpanResult {
     var remaining: [IntentAtom] = atoms.filter {
         !selected.contains($0.atomID)
         && $0.kind != "heading" && $0.kind != "answer-heading"
+        && $0.kind != "peer-speaker-prefix"
     }
     var budgetRejected: [[String: Any]] = []
 

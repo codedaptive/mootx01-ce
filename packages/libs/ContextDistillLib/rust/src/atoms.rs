@@ -42,8 +42,9 @@ use serde_json::{json, Map, Value};
 
 use crate::scanners::{
     scan_bold_heading_re, scan_diagram_re, scan_embedded_user_fact_re,
+    scan_dialogue_filler_only_re,
     scan_fence_open_re, scan_field_line_re, scan_list_marker_re,
-    scan_markdown_heading_re, scan_date_re, scan_number_re,
+    scan_greeting_only_re, scan_markdown_heading_re, scan_date_re, scan_number_re,
     scan_operative_re, scan_pipe_split_re, scan_polarity_only_re,
     scan_table_separator_re, scan_transform_followup_re, scan_turn_filler_re,
 };
@@ -51,6 +52,7 @@ use crate::shape::{
     scan_bullet_lead, scan_date_lead, scan_heading_lead, scan_tag_line_with_body,
     KNOWN_SPEAKERS,
 };
+use crate::python_text::py_strip;
 use crate::terms::{normalized_terms, query_terms};
 
 // ---------------------------------------------------------------------------
@@ -68,6 +70,13 @@ const KNOWN_USER_SPEAKERS: &[&str] = &["user", "human", "customer", "interviewer
 /// Mirrors Python `KNOWN_ANSWER_SPEAKERS = frozenset({"assistant", "agent",
 /// "system", "interviewee"})`.
 const KNOWN_ANSWER_SPEAKERS: &[&str] = &["assistant", "agent", "system", "interviewee"];
+
+/// Metadata labels excluded from the v23 named-peer detector.
+const PEER_FIELD_LABELS: &[&str] = &[
+    "address", "country", "date", "email", "entity", "id", "location",
+    "name", "notes", "phone", "place", "quantity", "status", "subject",
+    "title", "type",
+];
 
 /// Abbreviation set used by `_period_is_abbreviation`.
 ///
@@ -278,6 +287,70 @@ pub fn speaker_turns(source_chars: &[char]) -> Vec<SpeakerTurn> {
         });
     }
     turns
+}
+
+/// Parse the strict arbitrary-name peer topology introduced by v23.
+fn peer_speaker_turns(source_chars: &[char]) -> Vec<SpeakerTurn> {
+    let lines = physical_lines(source_chars, 0, source_chars.len());
+    let mut nonblank_line_count = 0usize;
+    let mut markers: Vec<(usize, usize, usize, String)> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    let mut fence_char: Option<char> = None;
+
+    for (line_start, line_end, visible) in &lines {
+        // Fence detection mirrors Python FENCE_OPEN_RE.match — anchored at
+        // code point 0. scan_fence_open_re returns start_cp = 0 on a match.
+        if let Some(fence_match) = scan_fence_open_re(visible).first() {
+            if fence_match.start_cp == 0 {
+                let marker = fence_match.groups.get(1)
+                    .and_then(|group| group.as_ref())
+                    .and_then(|token| token.chars().next())
+                    .unwrap_or('`');
+                if fence_char.is_none() {
+                    fence_char = Some(marker);
+                } else if fence_char == Some(marker) {
+                    fence_char = None;
+                }
+                continue;
+            }
+        }
+        // Blank-line test uses Python str.strip() semantics via py_strip.
+        let visible_chars: Vec<char> = visible.chars().collect();
+        if fence_char.is_some() || py_strip(&visible_chars).is_empty() {
+            continue;
+        }
+
+        nonblank_line_count += 1;
+        if let Some((speaker, body_offset)) = scan_tag_line_with_body(visible) {
+            labels.push(speaker.clone());
+            markers.push((*line_start, *line_end,
+                          line_start + body_offset, speaker));
+        }
+    }
+
+    let distinct: HashSet<&str> = labels.iter().map(String::as_str).collect();
+    let switches = labels.windows(2)
+        .filter(|pair| pair[0] != pair[1])
+        .count();
+    let includes_excluded_label = distinct.iter().any(|label| {
+        KNOWN_SPEAKERS.contains(label) || PEER_FIELD_LABELS.contains(label)
+    });
+    if labels.len() < 6 || distinct.len() != 2 || includes_excluded_label
+        || labels.len() * 100 / nonblank_line_count.max(1) < 90
+        || switches * 100 / labels.len().saturating_sub(1).max(1) < 75
+    {
+        return Vec::new();
+    }
+
+    markers.iter().enumerate().map(|(index, marker)| SpeakerTurn {
+        start: marker.0,
+        end: markers.get(index + 1)
+            .map(|next| next.0)
+            .unwrap_or(source_chars.len()),
+        first_line_end: marker.1,
+        body_start: marker.2,
+        speaker: marker.3.clone(),
+    }).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,14 +1550,26 @@ pub struct IntentAtomsResult {
     pub mode_details: Map<String, Value>,
 }
 
-/// Produce intent-span atoms for `source`, handling all four topology modes:
+/// Produce v22 intent-span atoms for `source`.
+pub fn intent_atoms(source: &str) -> IntentAtomsResult {
+    intent_atoms_with_peer_dialogue(source, false)
+}
+
+/// Produce intent-span atoms for `source`, optionally enabling the additive
+/// v23 peer-dialogue lane after document exchange and before genuine dialogue.
+///
+/// Handles these topology modes:
 /// - embedded-transcript
 /// - document-exchange
+/// - peer-dialogue (v23 only)
 /// - genuine-dialogue
 /// - document
 ///
-/// Mirrors Python `_intent_atoms(source)`.
-pub fn intent_atoms(source: &str) -> IntentAtomsResult {
+/// Mirrors Python `_intent_atoms(source, peer_dialogue=...)`.
+pub fn intent_atoms_with_peer_dialogue(
+    source: &str,
+    peer_dialogue: bool,
+) -> IntentAtomsResult {
     let source_chars: Vec<char> = source.chars().collect();
     let total_cp = source_chars.len();
 
@@ -1600,7 +1685,93 @@ pub fn intent_atoms(source: &str) -> IntentAtomsResult {
         };
     }
 
-    // --- Mode 3: genuine-dialogue ---
+    // --- Mode 3: named peer-dialogue (v23 only) ---
+    if peer_dialogue {
+        let peer_turns = peer_speaker_turns(&source_chars);
+        if !peer_turns.is_empty() {
+            let mut atoms: Vec<IntentAtom> = Vec::new();
+            let mut unsupported: Vec<String> = Vec::new();
+            let mut discarded_turns: Vec<Value> = Vec::new();
+
+            for turn in &peer_turns {
+                let body = turn_body(&source_chars, turn);
+                let body_len = body.chars().count();
+                let is_fullmatch = |matches: Vec<crate::scanners::ScannerMatch>| {
+                    matches.first().is_some_and(|m| {
+                        m.start_cp == 0 && m.end_cp == body_len
+                    })
+                };
+                if body.is_empty()
+                    || is_fullmatch(scan_turn_filler_re(&body))
+                    || is_fullmatch(scan_greeting_only_re(&body))
+                    || is_fullmatch(scan_dialogue_filler_only_re(&body))
+                {
+                    discarded_turns.push(json!({
+                        "speaker": turn.speaker,
+                        "start": turn.start,
+                        "reason": "filler",
+                    }));
+                    continue;
+                }
+
+                let prefix = append_exact_atom(
+                    &mut atoms, &source_chars, turn.start, turn.body_start,
+                    "peer-speaker-prefix", Some(turn.speaker.as_str()),
+                    vec![], false,
+                );
+                let (parts, problems) = structured_atoms(
+                    &source_chars, turn.body_start, turn.end);
+                unsupported.extend(problems);
+                if parts.is_empty() {
+                    append_exact_atom(
+                        &mut atoms, &source_chars, turn.body_start, turn.end,
+                        "peer-dialogue-turn", Some(turn.speaker.as_str()),
+                        vec![prefix.atom_id], false,
+                    );
+                    continue;
+                }
+
+                let base_id = atoms.len();
+                for part in parts {
+                    let mut dependencies = vec![prefix.atom_id];
+                    dependencies.extend(part.dependencies.iter()
+                        .map(|dependency| base_id + dependency));
+                    // Order-preserving set dedup mirrors Python dict.fromkeys.
+                    let mut seen_deps = HashSet::new();
+                    dependencies.retain(|dep| seen_deps.insert(*dep));
+                    append_exact_atom(
+                        &mut atoms, &source_chars, part.start, part.end,
+                        &format!("peer-{}", part.kind),
+                        Some(turn.speaker.as_str()), dependencies, false,
+                    );
+                }
+            }
+
+            if atoms.iter().any(|atom| atom.kind != "peer-speaker-prefix") {
+                unsupported.sort();
+                unsupported.dedup();
+                let mut peer_speakers: Vec<String> = peer_turns.iter()
+                    .map(|turn| turn.speaker.clone()).collect();
+                peer_speakers.sort();
+                peer_speakers.dedup();
+                let mut mode_details = Map::new();
+                mode_details.insert("mode".into(), json!("peer-dialogue"));
+                mode_details.insert("peer_speakers".into(), json!(peer_speakers));
+                mode_details.insert("peer_turn_count".into(), json!(peer_turns.len()));
+                mode_details.insert("discarded_turns".into(), Value::Array(discarded_turns));
+                return IntentAtomsResult {
+                    atoms,
+                    hard: HashSet::new(),
+                    coverage: HashSet::new(),
+                    unsupported,
+                    mode: "peer-dialogue".to_string(),
+                    mode_details,
+                };
+            }
+        }
+    }
+
+    // --- Mode 4: genuine-dialogue ---
     if turns.len() >= 2 {
         let mut atoms: Vec<IntentAtom> = Vec::new();
         let mut hard: HashSet<usize> = HashSet::new();
@@ -1783,7 +1954,7 @@ pub fn intent_atoms(source: &str) -> IntentAtomsResult {
         }
     }
 
-    // --- Mode 4: document ---
+    // --- Mode 5: document ---
     let (atoms, unsupported) = structured_atoms(&source_chars, 0, total_cp);
     // Mirrors Python mode_details for document: {"mode": "document"}
     let mut mode_details_doc = Map::new();

@@ -53,6 +53,14 @@ private let knownSpeakersAtom: Set<String> = [
 private let knownUserSpeakers: Set<String> = ["user", "human", "customer", "interviewer"]
 private let knownAnswerSpeakers: Set<String> = ["assistant", "agent", "system", "interviewee"]
 
+// Metadata labels that must never be treated as named conversation peers.
+// Mirrors PEER_FIELD_LABELS in the v23 Python authority.
+private let peerFieldLabels: Set<String> = [
+    "address", "country", "date", "email", "entity", "id", "location",
+    "name", "notes", "phone", "place", "quantity", "status", "subject",
+    "title", "type",
+]
+
 // MARK: - ABBREVIATIONS
 // Mirrors ABBREVIATIONS in distill_plus_converter.py.
 private let abbreviations: Set<String> = [
@@ -235,14 +243,14 @@ func physicalLines(
 
 // MARK: - matchTagLineAtom
 
-/// Matches a TAG_LINE pattern at the start of `line` for known speakers.
+/// Matches the content-only TAG_LINE grammar at the start of `line`.
 ///
 /// Pattern (record_shape_classifier.py):
 /// ``^\s*([A-Za-z][A-Za-z0-9_ -]{0,23}):\s*(.*)$``
 ///
 /// Returns `(casefolded_speaker, bodyOffset)` where `bodyOffset` is the
 /// code-point index within `line` where group(2) starts.
-private func matchTagLineAtom(_ line: String) -> (speaker: String, bodyOffset: Int)? {
+private func matchAnyTagLineAtom(_ line: String) -> (speaker: String, bodyOffset: Int)? {
     let sc = Array(line.unicodeScalars)
     let n = sc.count
     var i = 0
@@ -271,9 +279,16 @@ private func matchTagLineAtom(_ line: String) -> (speaker: String, bodyOffset: I
     // group(1) = sc[tagStart..<tagEnd], stripped and casefolded
     let rawTag = scalarsToString(sc, tagStart ..< tagEnd)
     let tag = rawTag.trimmingCharacters(in: .whitespaces).lowercased()
-    // Validate: must be a known speaker
-    guard knownSpeakersAtom.contains(tag) || tag.hasPrefix("speaker ") else { return nil }
     return (tag, i)
+}
+
+/// Matches a TAG_LINE only when its label is a pinned dialogue role.
+private func matchTagLineAtom(_ line: String) -> (speaker: String, bodyOffset: Int)? {
+    guard let match = matchAnyTagLineAtom(line),
+          knownSpeakersAtom.contains(match.speaker) || match.speaker.hasPrefix("speaker ") else {
+        return nil
+    }
+    return match
 }
 
 // MARK: - knownSpeakerAtom
@@ -328,6 +343,63 @@ public func speakerTurns(_ scalars: [Unicode.Scalar]) -> [SpeakerTurn] {
         ))
     }
     return turns
+}
+
+/// Parses a strict alternating two-person transcript whose speakers use
+/// ordinary names rather than pinned chat roles.
+///
+/// The topology thresholds mirror `_peer_speaker_turns` in the v23 Python
+/// authority: exactly two labels, at least six tagged turns, at least 90%
+/// tagged-line coverage, and at least 75% switching. Labels used as ordinary
+/// metadata fields are excluded. Lines inside fenced blocks are ignored.
+private func peerSpeakerTurns(_ scalars: [Unicode.Scalar]) -> [SpeakerTurn] {
+    var visibleLineCount = 0
+    var markers: [(lineStart: Int, lineEnd: Int, bodyStart: Int, speaker: String)] = []
+    var labels: [String] = []
+    var fenceChar: UInt32? = nil
+
+    for (lineStart, lineEnd, visible) in physicalLines(scalars) {
+        let visibleScalars = Array(visible.unicodeScalars)
+        let fenceMatches = fenceOpenREFinditer(visibleScalars)
+        if !fenceMatches.isEmpty, let token = fenceMatches[0].groups[0],
+           let marker = token.unicodeScalars.first?.value {
+            if fenceChar == nil {
+                fenceChar = marker
+            } else if marker == fenceChar {
+                fenceChar = nil
+            }
+            continue
+        }
+        if fenceChar != nil || pyStrip(visibleScalars).isEmpty { continue }
+
+        visibleLineCount += 1
+        guard let match = matchAnyTagLineAtom(visible) else { continue }
+        labels.append(match.speaker)
+        markers.append((lineStart, lineEnd, lineStart + match.bodyOffset, match.speaker))
+    }
+
+    let distinct = Set(labels)
+    let switches = zip(labels, labels.dropFirst()).filter { pair in
+        pair.0 != pair.1
+    }.count
+    guard labels.count >= 6,
+          distinct.count == 2,
+          distinct.isDisjoint(with: knownSpeakersAtom),
+          distinct.isDisjoint(with: peerFieldLabels),
+          labels.count * 100 / max(1, visibleLineCount) >= 90,
+          switches * 100 / max(1, labels.count - 1) >= 75 else {
+        return []
+    }
+
+    return markers.enumerated().map { index, marker in
+        SpeakerTurn(
+            start: marker.lineStart,
+            end: index + 1 < markers.count ? markers[index + 1].lineStart : scalars.count,
+            firstLineEnd: marker.lineEnd,
+            bodyStart: marker.bodyStart,
+            speaker: marker.speaker
+        )
+    }
 }
 
 // MARK: - headingLevel
@@ -1382,7 +1454,10 @@ public struct IntentAtomsResult: @unchecked Sendable {
 ///
 /// - Parameter scalars: The full source string as a Unicode scalar array.
 /// - Returns: An ``IntentAtomsResult`` with all atoms and classification metadata.
-public func intentAtoms(_ scalars: [Unicode.Scalar]) -> IntentAtomsResult {
+public func intentAtoms(
+    _ scalars: [Unicode.Scalar],
+    peerDialogue: Bool = false
+) -> IntentAtomsResult {
 
     // --- embedded-transcript path ---
     let embeddedFacts = embeddedUserFactAtoms(scalars)
@@ -1461,6 +1536,87 @@ public func intentAtoms(_ scalars: [Unicode.Scalar]) -> IntentAtomsResult {
             mode: "document-exchange",
             modeExtras: extras
         )
+    }
+
+    // --- named-peer dialogue path (v23.2 attributed prose) ---
+    if peerDialogue {
+        let peerTurns = peerSpeakerTurns(scalars)
+        if !peerTurns.isEmpty {
+            var atoms: [IntentAtom] = []
+            var unsupported: [String] = []
+            var discardedTurns: [[String: Any]] = []
+
+            for turn in peerTurns {
+                let body = turnBody(scalars: scalars, turn: turn)
+                let bodyScalars = Array(body.unicodeScalars)
+                let turnFiller = turnFillerREFinditer(bodyScalars)
+                let greetingOnly = greetingOnlyREFinditer(bodyScalars)
+                let dialogueFiller = dialogueFillerOnlyREFinditer(bodyScalars)
+                let isFiller = body.isEmpty
+                    || (turnFiller.first?.start == 0 && turnFiller.first?.end == bodyScalars.count)
+                    || (greetingOnly.first?.start == 0 && greetingOnly.first?.end == bodyScalars.count)
+                    || (dialogueFiller.first?.start == 0 && dialogueFiller.first?.end == bodyScalars.count)
+
+                if isFiller {
+                    discardedTurns.append([
+                        "speaker": turn.speaker,
+                        "start": turn.start,
+                        "reason": "filler",
+                    ])
+                    continue
+                }
+
+                let prefix = appendExactAtom(
+                    &atoms, scalars: scalars,
+                    start: turn.start, end: turn.bodyStart,
+                    kind: "peer-speaker-prefix", speaker: turn.speaker
+                )
+                let (parts, problems) = structuredAtoms(
+                    scalars, start: turn.bodyStart, stop: turn.end)
+                unsupported.append(contentsOf: problems)
+
+                if parts.isEmpty {
+                    appendExactAtom(
+                        &atoms, scalars: scalars,
+                        start: turn.bodyStart, end: turn.end,
+                        kind: "peer-dialogue-turn", speaker: turn.speaker,
+                        dependencies: [prefix.atomID]
+                    )
+                    continue
+                }
+
+                let baseID = atoms.count
+                for part in parts {
+                    var dependencies = [prefix.atomID]
+                    for dependency in part.dependencies.map({ baseID + $0 })
+                        where !dependencies.contains(dependency) {
+                        dependencies.append(dependency)
+                    }
+                    appendExactAtom(
+                        &atoms, scalars: scalars,
+                        start: part.start, end: part.end,
+                        kind: "peer-\(part.kind)", speaker: turn.speaker,
+                        dependencies: dependencies
+                    )
+                }
+            }
+
+            if atoms.contains(where: { $0.kind != "peer-speaker-prefix" }) {
+                let extras: [String: Any] = [
+                    "peer_speakers": Set(peerTurns.map(\.speaker)).sorted(),
+                    "peer_turn_count": peerTurns.count,
+                    "discarded_turns": discardedTurns,
+                ]
+                return IntentAtomsResult(
+                    atoms: atoms,
+                    hardIDs: [],
+                    coverageIDs: [],
+                    unsupported: Array(Set(unsupported)).sorted(),
+                    mode: "peer-dialogue",
+                    modeExtras: extras
+                )
+            }
+        }
     }
 
     // --- genuine-dialogue path ---

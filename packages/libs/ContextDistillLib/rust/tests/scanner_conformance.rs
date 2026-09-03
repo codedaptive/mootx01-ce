@@ -11,7 +11,7 @@
 
 use context_distill_lib::{
     digest::{estimate_tokens, source_digest, split_enrichment},
-    scanners::{scan_by_name, ScannerMatch},
+    scanners::scan_by_name,
 };
 use serde_json::Value;
 use std::path::PathBuf;

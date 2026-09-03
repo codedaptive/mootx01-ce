@@ -34,6 +34,14 @@ pub enum ContextDistillConverter {
     ///   schema_version      = 1  (integer)
     ///   converter_id        = "intent-span@intent-span-v22-authority-closure"
     IntentSpanV22,
+
+    /// The intent-span@v23.2 attributed peer-dialogue converter.
+    ///
+    /// Preserves v22 selection for all existing modes, adds strict named-peer
+    /// transcript detection, and renders selected peer turns as attributed
+    /// prose. Selection details carry a `rendering` key with value
+    /// `"inline-attributed-prose"` when peer mode fires, `"source-exact"` otherwise.
+    IntentSpanV23Attributed,
 }
 
 impl ContextDistillConverter {
@@ -45,6 +53,8 @@ impl ContextDistillConverter {
         match self {
             Self::DistillPlusV1  => "distill-plus-v1",
             Self::IntentSpanV22  => "intent-span@intent-span-v22-authority-closure",
+            Self::IntentSpanV23Attributed =>
+                "intent-span-v23-attributed@intent-span-v23.2-attributed-prose",
         }
     }
 
@@ -54,7 +64,8 @@ impl ContextDistillConverter {
     /// Mirrors Python constant `CONVERTER_VERSION = "distill-plus-v1"`.
     pub fn converter_version(&self) -> &'static str {
         match self {
-            Self::DistillPlusV1 | Self::IntentSpanV22 => "distill-plus-v1",
+            Self::DistillPlusV1 | Self::IntentSpanV22
+                | Self::IntentSpanV23Attributed => "distill-plus-v1",
         }
     }
 
@@ -67,6 +78,7 @@ impl ContextDistillConverter {
         match self {
             Self::DistillPlusV1 => "mechanical-v8-scoring-corrections",
             Self::IntentSpanV22 => "intent-span-v22-authority-closure",
+            Self::IntentSpanV23Attributed => "intent-span-v23.2-attributed-prose",
         }
     }
 
@@ -76,7 +88,8 @@ impl ContextDistillConverter {
     /// Mirrors Python `"schema_version": 1`.
     pub fn schema_version(&self) -> u32 {
         match self {
-            Self::DistillPlusV1 | Self::IntentSpanV22 => 1,
+            Self::DistillPlusV1 | Self::IntentSpanV22
+                | Self::IntentSpanV23Attributed => 1,
         }
     }
 }
