@@ -29,6 +29,7 @@ use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
 use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationState};
+use vectorkit::engine::metric::FloatMetric;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
@@ -324,7 +325,7 @@ fn qualify_large_estate_migration() {
     {
         // Per-signal dense float lane: every configured signal must serve.
         let t_f = Instant::now();
-        let per_signal = engine.float_nearest_per_signal(query, 5);
+        let per_signal = engine.float_nearest_per_signal(query, 5, FloatMetric::Cosine);
         q(
             &format!("recall.q{i}.float_all_signals_ms"),
             format!("{:.1}", t_f.elapsed().as_secs_f64() * 1000.0),
