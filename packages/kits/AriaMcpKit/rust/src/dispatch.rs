@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+use crate::estate_posture::EstatePosture;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::vault_tools::VaultJobLedger;
@@ -85,6 +86,9 @@ pub fn dispatch_tool_with_ledgers(
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
     sensitivity_ledger: &SensitivityGrantLedger,
+    // Frozen or live: the runners that write on the read path (memory
+    // search origin, reward marks) and `moot_estate_status` read it.
+    posture: EstatePosture,
     build_serial: &str,
     version_skew: &str,
     // Upstream-release advisory provider — evaluated by ping/status only.
@@ -95,7 +99,7 @@ pub fn dispatch_tool_with_ledgers(
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     dispatch_tool_with_vault_ledger_and_flag(
-        name, args, registry, ledger, vault_ledger, sensitivity_ledger,
+        name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
         crate::tool_list::vault_enabled(), build_serial, version_skew,
         update_advisory, monitoring_control,
     )
@@ -118,7 +122,7 @@ pub fn dispatch_tool_with_vault_flag(
     // Monitoring control: None — test/non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
-        vault_on, "", "", None, None,
+        EstatePosture::Live, vault_on, "", "", None, None,
     )
 }
 
@@ -142,7 +146,7 @@ pub fn dispatch_tool_with_vault_ledger(
     // Monitoring control: None — non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
-        crate::tool_list::vault_enabled(), build_serial, version_skew, None, None,
+        EstatePosture::Live, crate::tool_list::vault_enabled(), build_serial, version_skew, None, None,
     )
 }
 
@@ -165,6 +169,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
     sensitivity_ledger: &SensitivityGrantLedger,
+    posture: EstatePosture,
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
@@ -172,7 +177,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let routed = route_tool(
-        name, args, registry, ledger, vault_ledger, sensitivity_ledger,
+        name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
         vault_on, build_serial, version_skew, update_advisory, monitoring_control,
     );
     // Apply unrecognized-arg hint after surface_dispatch_failure so error
@@ -225,6 +230,7 @@ fn route_tool(
     ledger: &SurfacedRecallLedger,
     vault_ledger: &VaultJobLedger,
     sensitivity_ledger: &SensitivityGrantLedger,
+    posture: EstatePosture,
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
@@ -264,7 +270,7 @@ fn route_tool(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew, update_advisory, monitoring_control)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, posture, build_serial, version_skew, update_advisory, monitoring_control)?;
         return Ok(inject_hint(name, args, result));
     }
 
