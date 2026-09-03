@@ -690,13 +690,9 @@ mod tests {
         let untriaged: Vec<&String> = real_tools.iter().filter(|t| !classified.contains(t.as_str())).collect();
         assert!(untriaged.is_empty(), "real tool(s) with no explicit tier classification: {untriaged:?}");
 
-        // `moot_redistill` is dispatchable (aria_mcp recipe_tools) and
-        // triaged Ask in the shared inventory, but the tool list does not
-        // advertise it today; see aria_mcp::tool_mutation_inventory's test.
-        let known_unadvertised = ["moot_redistill"];
         let stale: Vec<&&str> = classified
             .iter()
-            .filter(|c| !real_tools.contains(**c) && !known_unadvertised.contains(c))
+            .filter(|c| !real_tools.contains(**c))
             .collect();
         assert!(stale.is_empty(), "classification table names tool(s) no longer in the real surface: {stale:?}");
     }
