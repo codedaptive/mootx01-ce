@@ -49,7 +49,8 @@ struct UpgradeCommand: AsyncParsableCommand {
             (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence)
             against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
-            cycle — each step quiesces and restores the daemon itself:
+            cycle — each step quiesces and restores the daemon itself when the
+            estate is the resident one, and leaves it running otherwise:
               mootx01 upgrade --backfill-only
             """
     )
@@ -90,7 +91,10 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// scripted and benchmark estates where the caller owns the estate via
     /// MOOTX01_DATA_DIR. No network, no download, no plugin convergence, no
     /// encryption offer, no restartAgents cycle. Each step handles its own
-    /// daemon quiesce and restore so the caller need not manage service state.
+    /// daemon quiesce and restore so the caller need not manage service state,
+    /// and quiesces only when the estate is the resident one
+    /// (`MootPaths.isResidentEstate`); a cloned estate is upgraded with the
+    /// daemon left running.
     ///
     /// Ordering matches `runConvergence`: kg_facts identity first (correctness
     /// migration), adornment store migration second (schema v17 + data move),
@@ -98,7 +102,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// representation convergence last.
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself. Exits non-zero if any step fails.")
+        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -159,7 +163,8 @@ struct UpgradeCommand: AsyncParsableCommand {
         // distilled representation convergence)
         // against the estate resolved via MOOTX01_DATA_DIR. No network,
         // no download, no plugin convergence, no encryption offer, no
-        // restartAgents cycle. Each step owns its daemon quiesce+restore inline.
+        // restartAgents cycle. Each step owns its daemon quiesce+restore through
+        // ResidentDaemonQuiesce, which touches the daemon only for the resident estate.
         // Aggregates failures across all steps and exits non-zero if any fail,
         // matching the Rust `--backfill-only` contract.
         if backfillOnly {
@@ -439,59 +444,49 @@ struct UpgradeCommand: AsyncParsableCommand {
             return false
         }
 
-        // Quiesce first (single-writer discipline, same direction as the
-        // encryption migration): if the daemon will not stop, skip —
-        // nothing is half-done, and the next `mootx01 upgrade` retries.
-        // The daemon is restarted inline after the work (per-function
-        // shape, mirrors Rust) so --backfill-only restores the daemon
-        // after each step without relying on any caller-side restart.
-        let wasRunning = LaunchAgent.isDaemonRunning()
-        if wasRunning && !LaunchAgent.stopDaemon() {
-            print("  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return false
-        }
-
-        var ok = true
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            // The class-B resolver is VaultKit's stable-source-key hash,
-            // injected here because LocusKit sits below VaultKit and must
-            // not import it.
-            let report = try await KGFactIdentityBackfill.run(
-                storage: storage,
-                resolveForeignKey: DrawerMapping.lineageID(forStableSourceKey:))
-            await storage.close()
-            if report.scanned == 0 {
-                print("  ✓ kg_facts identity columns: nothing to backfill")
-            } else {
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "kg_facts identity backfill",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // The class-B resolver is VaultKit's stable-source-key hash,
+                // injected here because LocusKit sits below VaultKit and must
+                // not import it.
+                let report = try await KGFactIdentityBackfill.run(
+                    storage: storage,
+                    resolveForeignKey: DrawerMapping.lineageID(forStableSourceKey:))
+                await storage.close()
+                if report.scanned == 0 {
+                    print("  ✓ kg_facts identity columns: nothing to backfill")
+                } else {
+                    print("""
+                          ✓ kg_facts identity backfill: \(report.scanned) scanned — \
+                        addedBy \(report.hostIdentities), foreignSourceKey \(report.foreignPalaceKeys), \
+                        foreignRecordID \(report.tripleIDs), local anchors kept \(report.localDrawerIDs) \
+                        (sensitivity inherited \(report.inheritanceApplied)), unclassified \(report.unclassified)
+                        """)
+                }
+                return true
+            } catch {
                 print("""
-                      ✓ kg_facts identity backfill: \(report.scanned) scanned — \
-                    addedBy \(report.hostIdentities), foreignSourceKey \(report.foreignPalaceKeys), \
-                    foreignRecordID \(report.tripleIDs), local anchors kept \(report.localDrawerIDs) \
-                    (sensitivity inherited \(report.inheritanceApplied)), unclassified \(report.unclassified)
+                      ✗ kg_facts identity backfill failed: \(error)
+                        Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
                     """)
+                return false
             }
-        } catch {
-            print("""
-                  ✗ kg_facts identity backfill failed: \(error)
-                    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
-                """)
-            ok = false
-        }
-
-        // Put the daemon back over the (possibly migrated) estate, mirroring
-        // the Rust per-function shape: was_running capture → inline daemon_start.
-        // This fires for both success and failure so the caller (including
-        // --backfill-only) never needs to know which functions quiesce the daemon.
-        if wasRunning {
-            _ = LaunchAgent.startDaemon(homeDirectory: home)
-        }
-        return ok
+        } ?? false
         #else
         return true
         #endif
@@ -529,58 +524,58 @@ struct UpgradeCommand: AsyncParsableCommand {
             print("  ✗ distilled representation convergence skipped — estate key unavailable: \(error)")
             return false
         }
-        // Single-writer discipline, same shape as the other backfill steps:
-        // quiesce the daemon, do the work, restore the daemon inline.
-        let wasRunning = LaunchAgent.isDaemonRunning()
-        if wasRunning && !LaunchAgent.stopDaemon() {
-            print("  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return false
-        }
-        var ok = true
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
-            let kit = GeniusLocusKit()
-            let handle = try await kit.open(storage: storage, owner: owner)
-            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
-            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
-            let now = Date()
-            let regenerated = try await kit.distillItemsSweep(
-                handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now)
-            // Second eligibility key: drawers whose representation postdates
-            // their corpus index row. A non-zero count signals the mid-run
-            // crash scenario (sweep committed, reindex did not). Equal
-            // timestamps (sweep and reindex ran under the same `now`) evaluate
-            // to zero — fully indexed, no reindex needed.
-            let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
-            if regenerated > 0 || awaiting > 0 {
-                try await kit.reindexCorpus(handle: handle, now: now)
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "distilled representation convergence",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(storage: storage, owner: owner)
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                let now = Date()
+                let regenerated = try await kit.distillItemsSweep(
+                    handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now)
+                // Second eligibility key: drawers whose representation postdates
+                // their corpus index row. A non-zero count signals the mid-run
+                // crash scenario (sweep committed, reindex did not). Equal
+                // timestamps (sweep and reindex ran under the same `now`) evaluate
+                // to zero — fully indexed, no reindex needed.
+                let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+                if regenerated > 0 || awaiting > 0 {
+                    try await kit.reindexCorpus(handle: handle, now: now)
+                }
+                try await kit.close(handle)
+                await storage.close()
+                if regenerated == 0 && awaiting == 0 {
+                    print("  ✓ distilled representations: already at converter \(GeniusLocusKit.distillationConverterID)")
+                } else if regenerated == 0 {
+                    print("  ✓ distilled representation convergence: index gap detected (\(awaiting) row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)")
+                } else {
+                    print("  ✓ distilled representation convergence: \(regenerated) row(s) regenerated at converter \(GeniusLocusKit.distillationConverterID); derived lanes reindexed (BM25 + dense)")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ distilled representation convergence failed: \(error)
+                        Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
             }
-            try await kit.close(handle)
-            await storage.close()
-            if regenerated == 0 && awaiting == 0 {
-                print("  ✓ distilled representations: already at converter \(GeniusLocusKit.distillationConverterID)")
-            } else if regenerated == 0 {
-                print("  ✓ distilled representation convergence: index gap detected (\(awaiting) row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)")
-            } else {
-                print("  ✓ distilled representation convergence: \(regenerated) row(s) regenerated at converter \(GeniusLocusKit.distillationConverterID); derived lanes reindexed (BM25 + dense)")
-            }
-        } catch {
-            print("""
-                  ✗ distilled representation convergence failed: \(error)
-                    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry.
-                """)
-            ok = false
-        }
-        if wasRunning {
-            _ = LaunchAgent.startDaemon(homeDirectory: home)
-        }
-        return ok
+        } ?? false
         #else
         return true
         #endif
@@ -636,96 +631,89 @@ struct UpgradeCommand: AsyncParsableCommand {
             return false
         }
 
-        // Quiesce first (single-writer discipline): if the daemon will not
-        // stop, skip — nothing is half-done, and the next upgrade retries.
-        // The daemon is restarted inline after the work (per-function
-        // shape, mirrors Rust) so --backfill-only restores the daemon
-        // after each step without relying on any caller-side restart.
-        let wasRunning = LaunchAgent.isDaemonRunning()
-        if wasRunning && !LaunchAgent.stopDaemon() {
-            print("  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return false
-        }
-        var ok = true
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "adornment store migration",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // Estate.open calls DrawerStore(storage:) → storage.open(schema:),
+                // which runs the v17 schema ladder before any row is touched.
+                let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+                let estate = try await LocusKit.Estate.open(storage: storage, owner: owner)
 
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            // Estate.open calls DrawerStore(storage:) → storage.open(schema:),
-            // which runs the v17 schema ladder before any row is touched.
-            let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
-            let estate = try await LocusKit.Estate.open(storage: storage, owner: owner)
+                // Scan for legacy adornment text in the (now-dead) drawers.adornment
+                // column. The column is physically retained post-v17 but the dream
+                // cycle never writes to it; values present here pre-date schema v17.
+                let drawerRows = try await storage.rowStore.query(
+                    table: "drawers",
+                    where: nil,
+                    orderBy: [],
+                    limit: nil,
+                    offset: nil
+                )
+                let legacyRows = drawerRows.filter { row in
+                    if case .text(let t) = row["adornment"] { return !t.isEmpty }
+                    return false
+                }
 
-            // Scan for legacy adornment text in the (now-dead) drawers.adornment
-            // column. The column is physically retained post-v17 but the dream
-            // cycle never writes to it; values present here pre-date schema v17.
-            let drawerRows = try await storage.rowStore.query(
-                table: "drawers",
-                where: nil,
-                orderBy: [],
-                limit: nil,
-                offset: nil
-            )
-            let legacyRows = drawerRows.filter { row in
-                if case .text(let t) = row["adornment"] { return !t.isEmpty }
+                if legacyRows.isEmpty {
+                    print("  ✓ adornment store migration: no legacy adornments to migrate")
+                } else {
+                    // Register the single synthetic minter that owns all legacy text.
+                    // `registerAdornmentMinter` is an upsert — running twice changes nothing.
+                    // isActive = true ensures activeAdornments() returns the migrated rows.
+                    let legacyMinter = AdornmentMinterDescriptor(
+                        id: "legacy-v16-adornment",
+                        name: "Legacy v16 Adornment",
+                        family: "legacy",
+                        modelID: "unknown-v16",
+                        modelVersion: "2026",
+                        promptDigest: "legacy-pre-adornment-store",
+                        parameters: [:],
+                        isActive: true
+                    )
+                    try await estate.registerAdornmentMinter(legacyMinter)
+
+                    // Move each legacy row. putAdornment is INSERT OR REPLACE on
+                    // (drawer_id, minter_id), so a second run produces zero net writes.
+                    var moved = 0
+                    for row in legacyRows {
+                        guard case .text(let drawerID) = row["id"],
+                              case .text(let text) = row["adornment"]
+                        else { continue }
+                        let adornment = StoredAdornment(
+                            drawerID: drawerID,
+                            minterID: legacyMinter.id,
+                            text: text
+                        )
+                        _ = try await estate.putAdornment(adornment)
+                        moved += 1
+                    }
+                    print("  ✓ adornment store migration: \(moved) legacy adornment(s) moved to normalized store")
+                }
+                await storage.close()
+                return true
+            } catch {
+                print(
+                    "  ✗ adornment store migration failed: \(error)\n" +
+                    "    Legacy adornments remain readable via drawers.adornment until resolved." +
+                    " Run `mootx01 upgrade` to retry."
+                )
                 return false
             }
-
-            if legacyRows.isEmpty {
-                print("  ✓ adornment store migration: no legacy adornments to migrate")
-            } else {
-                // Register the single synthetic minter that owns all legacy text.
-                // `registerAdornmentMinter` is an upsert — running twice changes nothing.
-                // isActive = true ensures activeAdornments() returns the migrated rows.
-                let legacyMinter = AdornmentMinterDescriptor(
-                    id: "legacy-v16-adornment",
-                    name: "Legacy v16 Adornment",
-                    family: "legacy",
-                    modelID: "unknown-v16",
-                    modelVersion: "2026",
-                    promptDigest: "legacy-pre-adornment-store",
-                    parameters: [:],
-                    isActive: true
-                )
-                try await estate.registerAdornmentMinter(legacyMinter)
-
-                // Move each legacy row. putAdornment is INSERT OR REPLACE on
-                // (drawer_id, minter_id), so a second run produces zero net writes.
-                var moved = 0
-                for row in legacyRows {
-                    guard case .text(let drawerID) = row["id"],
-                          case .text(let text) = row["adornment"]
-                    else { continue }
-                    let adornment = StoredAdornment(
-                        drawerID: drawerID,
-                        minterID: legacyMinter.id,
-                        text: text
-                    )
-                    _ = try await estate.putAdornment(adornment)
-                    moved += 1
-                }
-                print("  ✓ adornment store migration: \(moved) legacy adornment(s) moved to normalized store")
-            }
-            await storage.close()
-        } catch {
-            print(
-                "  ✗ adornment store migration failed: \(error)\n" +
-                "    Legacy adornments remain readable via drawers.adornment until resolved." +
-                " Run `mootx01 upgrade` to retry."
-            )
-            ok = false
-        }
-
-        // Put the daemon back over the (possibly migrated) estate, mirroring
-        // the kg_facts identity backfill ordering and the Rust per-function shape.
-        if wasRunning {
-            _ = LaunchAgent.startDaemon(homeDirectory: home)
-        }
-        return ok
+        } ?? false
         #else
         return true
         #endif
@@ -761,99 +749,93 @@ struct UpgradeCommand: AsyncParsableCommand {
             return false
         }
 
-        // Quiesce before VACUUM (single-writer discipline): if the daemon will
-        // not stop, skip — nothing is half-done, and the next upgrade retries.
-        // The daemon is restarted inline after the work (per-function shape,
-        // mirrors Rust) so --backfill-only restores the daemon after each step.
-        let wasRunning = LaunchAgent.isDaemonRunning()
-        if wasRunning && !LaunchAgent.stopDaemon() {
-            print("  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return false
-        }
-        var ok = true
-
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            // Apply the shared-content migration ledger schema (CREATE TABLE IF NOT EXISTS)
-            // before reading the reclaim record. An estate that never ran the
-            // shared-content migration has no ledger table, and reading it would
-            // throw "no such table: glk_shared_content_migration". Applying the
-            // declaration is a no-op once the table exists.
-            try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
-            let kit = GeniusLocusKit()
-            // The upgrade tool is not the estate's real owner; the substrate
-            // validates only that ownerIdentifier is non-empty, so this
-            // sentinel is sufficient.
-            let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
-            // Durable estate: pass nil so LocusKit resolves the backend default
-            // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
-            // store here lets Estate.open mint an Ed25519 keypair, persist only
-            // the public half to the manifest, and drop the private half at
-            // process exit -- permanently disabling grant/federation signing for
-            // any estate whose identity had not yet been established.
-            //
-            // EXCEPT under the declared throwaway posture: with
-            // MOOTX01_ESTATE_LIFETIME=ephemeral the identity key lives in an
-            // in-memory store, same contract as ServeCommand. Without this,
-            // every bulk-upgrade sweep over benchmark estates minted one
-            // Keychain identity item per estate and never deleted it —
-            // 247 accumulated items by 2026-08-26 (keychain pollution,
-            // ACTION D5 recurrence). Benchmark estates have no federation
-            // signing to lose; the marker is a declaration, never inferred.
-            let upgradeLifetimeIsEphemeral =
-                (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                    .lowercased() == "ephemeral"
-            let handle = try await kit.open(
-                storage: storage,
-                owner: owner,
-                identityKeyStore: upgradeLifetimeIsEphemeral
-                    ? InMemoryEstateIdentityKeyStore() : nil
-            )
-            let report = try await kit.completeSharedContentReclaim(
-                handle: handle, now: Date())
-            try await kit.close(handle)
-            if let report {
-                if report.reclaimedBytes > 0 {
-                    print("  ✓ shared-content reclaim: \(report.reclaimedBytes) bytes returned to filesystem")
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "shared-content reclaim",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // Apply the shared-content migration ledger schema (CREATE TABLE IF NOT EXISTS)
+                // before reading the reclaim record. An estate that never ran the
+                // shared-content migration has no ledger table, and reading it would
+                // throw "no such table: glk_shared_content_migration". Applying the
+                // declaration is a no-op once the table exists.
+                try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
+                let kit = GeniusLocusKit()
+                // The upgrade tool is not the estate's real owner; the substrate
+                // validates only that ownerIdentifier is non-empty, so this
+                // sentinel is sufficient.
+                let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+                // Durable estate: pass nil so LocusKit resolves the backend default
+                // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
+                // store here lets Estate.open mint an Ed25519 keypair, persist only
+                // the public half to the manifest, and drop the private half at
+                // process exit -- permanently disabling grant/federation signing for
+                // any estate whose identity had not yet been established.
+                //
+                // EXCEPT under the declared throwaway posture: with
+                // MOOTX01_ESTATE_LIFETIME=ephemeral the identity key lives in an
+                // in-memory store, same contract as ServeCommand. Without this,
+                // every bulk-upgrade sweep over benchmark estates minted one
+                // Keychain identity item per estate and never deleted it —
+                // 247 accumulated items by 2026-08-26 (keychain pollution,
+                // ACTION D5 recurrence). Benchmark estates have no federation
+                // signing to lose; the marker is a declaration, never inferred.
+                let upgradeLifetimeIsEphemeral =
+                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                        .lowercased() == "ephemeral"
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: upgradeLifetimeIsEphemeral
+                        ? InMemoryEstateIdentityKeyStore() : nil
+                )
+                let report = try await kit.completeSharedContentReclaim(
+                    handle: handle, now: Date())
+                try await kit.close(handle)
+                if let report {
+                    if report.reclaimedBytes > 0 {
+                        print("  ✓ shared-content reclaim: \(report.reclaimedBytes) bytes returned to filesystem")
+                    } else {
+                        print("  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)")
+                    }
                 } else {
-                    print("  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)")
+                    print("  ✓ shared-content reclaim: not pending")
                 }
-            } else {
-                print("  ✓ shared-content reclaim: not pending")
+                return true
+            } catch let err as StorageMaintenanceError {
+                // The inventory trim committed before performMaintenance ran — the
+                // estate IS affected: legacyVectorKeys are cleared, the freelist has
+                // grown, but the freed pages are not yet returned to the filesystem.
+                // State remains reclaimPending, so the next `mootx01 upgrade` retries.
+                print("""
+                      ✗ shared-content reclaim: VACUUM failed — \(err)
+                        The inventory trim completed (legacy vector keys cleared).
+                        Freed pages are on the freelist and not yet returned to the filesystem.
+                        Run `mootx01 upgrade` again to retry the VACUUM.
+                    """)
+                return false
+            } catch {
+                // Failure before completeSharedContentReclaim commits the trim —
+                // estate state is unchanged.
+                print("""
+                      ✗ shared-content reclaim failed: \(error)
+                        The estate is unaffected. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
             }
-        } catch let err as StorageMaintenanceError {
-            // The inventory trim committed before performMaintenance ran — the
-            // estate IS affected: legacyVectorKeys are cleared, the freelist has
-            // grown, but the freed pages are not yet returned to the filesystem.
-            // State remains reclaimPending, so the next `mootx01 upgrade` retries.
-            print("""
-                  ✗ shared-content reclaim: VACUUM failed — \(err)
-                    The inventory trim completed (legacy vector keys cleared).
-                    Freed pages are on the freelist and not yet returned to the filesystem.
-                    Run `mootx01 upgrade` again to retry the VACUUM.
-                """)
-            ok = false
-        } catch {
-            // Failure before completeSharedContentReclaim commits the trim —
-            // estate state is unchanged.
-            print("""
-                  ✗ shared-content reclaim failed: \(error)
-                    The estate is unaffected. Run `mootx01 upgrade` to retry.
-                """)
-            ok = false
-        }
-
-        // Put the daemon back before returning, mirroring the kg_facts
-        // identity backfill ordering and the Rust per-function shape.
-        if wasRunning {
-            _ = LaunchAgent.startDaemon(homeDirectory: home)
-        }
-        return ok
+        } ?? false
         #else
         return true
         #endif
@@ -894,7 +876,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        runEstateEncryptionMigration(estateURL: estateURL, home: home)
+        runEstateEncryptionMigration(estateURL: estateURL, dataDirectory: dataDir, home: home)
         #endif
     }
 
@@ -903,7 +885,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// → swap → trash through EstateEncryptionMigrator. Every failure path
     /// leaves the plaintext original working at the canonical path; the
     /// messages below say which side of the swap the user is on.
-    private func runEstateEncryptionMigration(estateURL: URL, home: URL) {
+    private func runEstateEncryptionMigration(estateURL: URL, dataDirectory: URL, home: URL) {
         let key: Data
         do {
             // EstateKeyProvider owns key custody: returns the existing key
@@ -918,12 +900,21 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
+        // The migrator's daemon seam: launchd when this is the resident
+        // estate, a no-op otherwise — a cloned estate is encrypted with the
+        // resident daemon left running over its own estate.
+        let resident = MootPaths.isResidentEstate(
+            dataDirectory: dataDirectory,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home))
+        if !resident {
+            print("  data directory \(dataDirectory.path) is not the resident estate; daemon left running")
+        }
         print("Encrypting the estate\u{2026}")
         do {
             let result = try EstateEncryptionMigrator.migrate(
                 estateURL: estateURL,
                 key: key,
-                daemon: .launchd(homeDirectory: home))
+                daemon: resident ? .launchd(homeDirectory: home) : .none)
             print("  \u{2713} Estate encrypted in place at \(estateURL.path)")
             print("  \u{2713} Verified: \(result.counts)")
             if result.swap.daemonWasRunning {
