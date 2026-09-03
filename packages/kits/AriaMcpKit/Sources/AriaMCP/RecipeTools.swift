@@ -87,6 +87,11 @@ enum RecipeTools {
     /// the on-row distilled representation of every eligible item. Delegates
     /// to the Distill recipe → GeniusLocusKit.distillItemsSweep.
     static let distillToolName = "moot_distill"
+    /// Force-redistill all active items + full laneScope .all reindex (CDL-02):
+    /// overwrites every active non-empty drawer's representation unconditionally,
+    /// then rebuilds BM25 and dense lanes so trailer tokens from the distillates
+    /// are admitted to the posting lists.
+    static let redistillToolName = "moot_redistill"
     /// Distilled-payload recall (SPEC §10.3): exact-search geometry over
     /// originals with the hydration selector pinned to `distilled` —
     /// identical ranking to exact search, smaller payloads, per-hit token
@@ -196,6 +201,7 @@ enum RecipeTools {
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
             || name == distillToolName
+            || name == redistillToolName
             || name == recallDistilledToolName
             || name == recollectToolName
             || name == huntContradictionsToolName
@@ -220,6 +226,7 @@ enum RecipeTools {
             confirmMigrationPromotionTool(),
             dreamTool(),
             distillTool(),
+            redistillTool(),
             recallDistilledTool(),
             vagueRecallTool(),
             huntContradictionsTool(),
@@ -597,6 +604,31 @@ enum RecipeTools {
             provenance: .recipe)
     }
 
+    // MARK: - redistill descriptor
+
+    /// Force-redistill all active items and trigger a full laneScope .all reindex (CDL-02).
+    /// Delegates to the Redistill recipe → GLK.redistillItemsSweep +
+    /// GLK.reindexCorpus(handle:now:). Takes no required arguments — the sweep
+    /// is always estate-wide.
+    private static func redistillTool() -> ProjectedTool {
+        ProjectedTool(
+            name: redistillToolName,
+            description: "Force-redistill all active items in the estate: overwrite "
+                + "every active non-empty item's distilled representation unconditionally "
+                + "(ignores the hasCurrentRepresentation flag), then rebuild both recall "
+                + "indexes (BM25 + dense) so trailer tokens from the distillates are "
+                + "admitted to the BM25 posting lists. Use after a pipeline upgrade or "
+                + "when BM25 scores are suspected stale. Idempotent but slow on large "
+                + "estates — prefer moot_distill for incremental maintenance.",
+            inputSchema: objectSchema(
+                properties: [
+                    "estateID": stringSchema(
+                        "Optional UUID of the open estate to target. Omit for the default estate."),
+                ],
+                required: []),
+            provenance: .recipe)
+    }
+
     // MARK: - recall_distilled descriptor
 
     /// Distilled-payload recall (SPEC §10.3): the exact-search recall path
@@ -720,6 +752,8 @@ enum RecipeTools {
             return try await runDream(args, kit: kit, handle: handle)
         case distillToolName:
             return try await runDistill(args, kit: kit, handle: handle)
+        case redistillToolName:
+            return try await runRedistill(args, kit: kit, handle: handle)
         case recallDistilledToolName:
             // Reaches here only when ack: "recall_distilled/v2" was present.
             return try await runRecallDistilled(args, kit: kit, handle: handle)
@@ -2353,6 +2387,37 @@ enum RecipeTools {
         let body = """
         moot_distill: sweep complete
         itemsDistilled: \(out.itemsDistilled)
+        """
+        return ToolDispatcher.textResult(body)
+    }
+
+    // MARK: - redistill
+
+    /// Run `moot_redistill`: force-redistill all active items then trigger a
+    /// full laneScope .all corpus reindex (CDL-02).
+    ///
+    /// Unlike `moot_distill`, this verb ignores the hasCurrentRepresentation
+    /// flag — every active non-empty drawer is re-distilled unconditionally.
+    /// After the sweep, GLK.reindexCorpus(handle:now:) rebuilds BM25 posting
+    /// lists (admitting trailer tokens from the fresh distillates) and
+    /// re-embeds all dense float vectors.
+    ///
+    /// Returns a plain-text summary: item count + confirmation that both lanes
+    /// were reindexed.
+    private static func runRedistill(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        // No required arguments: redistill is an estate-wide operation.
+        let out = try await Redistill().run(
+            input: .init(limit: nil),
+            estate: handle, kit: kit)
+
+        let body = """
+        moot_redistill: sweep complete
+        itemsRedistilled: \(out.itemsRedistilled)
+        reindexed: both lanes (BM25 + dense)
         """
         return ToolDispatcher.textResult(body)
     }
