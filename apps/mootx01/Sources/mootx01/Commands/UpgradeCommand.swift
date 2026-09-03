@@ -85,7 +85,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     var noRestart: Bool = false
 
     /// Run ONLY the data-directory migration steps: kg_facts identity,
-    /// adornment store migration, and shared-content reclaim. Intended for
+    /// adornment store migration, shared-content reclaim, and distilled
+    /// representation convergence. Intended for
     /// scripted and benchmark estates where the caller owns the estate via
     /// MOOTX01_DATA_DIR. No network, no download, no plugin convergence, no
     /// encryption offer, no restartAgents cycle. Each step handles its own
@@ -93,10 +94,11 @@ struct UpgradeCommand: AsyncParsableCommand {
     ///
     /// Ordering matches `runConvergence`: kg_facts identity first (correctness
     /// migration), adornment store migration second (schema v17 + data move),
-    /// shared-content reclaim last (VACUUM-backed, most I/O).
+    /// shared-content reclaim third (VACUUM-backed, most I/O), distilled
+    /// representation convergence last.
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself.")
+        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself. Exits non-zero if any step fails.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -158,11 +160,14 @@ struct UpgradeCommand: AsyncParsableCommand {
         // against the estate resolved via MOOTX01_DATA_DIR. No network,
         // no download, no plugin convergence, no encryption offer, no
         // restartAgents cycle. Each step owns its daemon quiesce+restore inline.
+        // Aggregates failures across all steps and exits non-zero if any fail,
+        // matching the Rust `--backfill-only` contract.
         if backfillOnly {
-            await runKGFactIdentityBackfill(home: home)
-            await runAdornmentStoreMigration(home: home)
-            await runSharedContentReclaimIfPending(home: home)
-            await runDistilledRepresentationConvergence(home: home)
+            let okKG     = await runKGFactIdentityBackfill(home: home)
+            let okAdo    = await runAdornmentStoreMigration(home: home)
+            let okRecl   = await runSharedContentReclaimIfPending(home: home)
+            let okDist   = await runDistilledRepresentationConvergence(home: home)
+            guard okKG && okAdo && okRecl && okDist else { throw ExitCode.failure }
             return
         }
 
@@ -411,14 +416,16 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// opens through the SUBSTRATE path on purpose: the schema ladder's
     /// v12 → v13 migration is what adds the identity columns to estates
     /// that predate them.
-    private func runKGFactIdentityBackfill(home: URL) async {
+    /// Returns `true` on success or when there is nothing to backfill, `false` on failure.
+    @discardableResult
+    private func runKGFactIdentityBackfill(home: URL) async -> Bool {
         #if os(macOS)
         let dataDir = MootPaths.resolveDataDirectory(
             environment: ProcessInfo.processInfo.environment, homeDirectory: home)
         let estateURL = MootPaths.estateURL(in: dataDir)
         // Absent estate means first run — serve creates new estates
         // post-KH; there is nothing to backfill.
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
 
         // Same key custody as serve's open path: existing key for an
         // encrypted estate, plaintext posture preserved for a plaintext
@@ -429,7 +436,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
         } catch {
             print("  ✗ kg_facts identity backfill skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
 
         // Quiesce first (single-writer discipline, same direction as the
@@ -441,9 +448,10 @@ struct UpgradeCommand: AsyncParsableCommand {
         let wasRunning = LaunchAgent.isDaemonRunning()
         if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
+            return false
         }
 
+        var ok = true
         do {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
@@ -473,6 +481,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                   ✗ kg_facts identity backfill failed: \(error)
                     Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
                 """)
+            ok = false
         }
 
         // Put the daemon back over the (possibly migrated) estate, mirroring
@@ -482,6 +491,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         if wasRunning {
             _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
+        return ok
+        #else
+        return true
         #endif
     }
 
@@ -494,26 +506,29 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// scanned from the distilled text and the dense lane embeds it. Nothing
     /// is re-ingested, re-mined, or re-dreamed. Idempotent: a converged estate
     /// regenerates zero rows and skips the reindex.
-    private func runDistilledRepresentationConvergence(home: URL) async {
+    /// Returns `true` on success or when there is nothing to converge, `false` on failure.
+    @discardableResult
+    private func runDistilledRepresentationConvergence(home: URL) async -> Bool {
         #if os(macOS)
         let dataDir = MootPaths.resolveDataDirectory(
             environment: ProcessInfo.processInfo.environment, homeDirectory: home)
         let estateURL = MootPaths.estateURL(in: dataDir)
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
             encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
         } catch {
             print("  ✗ distilled representation convergence skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
         // Single-writer discipline, same shape as the other backfill steps:
         // quiesce the daemon, do the work, restore the daemon inline.
         let wasRunning = LaunchAgent.isDaemonRunning()
         if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
+            return false
         }
+        var ok = true
         do {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
@@ -544,10 +559,14 @@ struct UpgradeCommand: AsyncParsableCommand {
                   ✗ distilled representation convergence failed: \(error)
                     Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry.
                 """)
+            ok = false
         }
         if wasRunning {
             _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
+        return ok
+        #else
+        return true
         #endif
     }
 
@@ -579,14 +598,16 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// partial state; the next `mootx01 upgrade` completes the rest.
     ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
-    private func runAdornmentStoreMigration(home: URL) async {
+    /// Returns `true` on success or when there is nothing to migrate, `false` on failure.
+    @discardableResult
+    private func runAdornmentStoreMigration(home: URL) async -> Bool {
         #if os(macOS)
         let dataDir = MootPaths.resolveDataDirectory(
             environment: ProcessInfo.processInfo.environment, homeDirectory: home)
         let estateURL = MootPaths.estateURL(in: dataDir)
         // Absent estate means first run — new estates start on v17 and have
         // no legacy adornment text; nothing to migrate.
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
 
         // Same key custody as the kg_facts identity backfill: existing key
         // for an encrypted estate, plaintext posture preserved for a
@@ -596,7 +617,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
         } catch {
             print("  ✗ adornment store migration skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
 
         // Quiesce first (single-writer discipline): if the daemon will not
@@ -607,8 +628,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         let wasRunning = LaunchAgent.isDaemonRunning()
         if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
+            return false
         }
+        var ok = true
 
         do {
             let configuration = EstateConfiguration(
@@ -679,6 +701,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 "    Legacy adornments remain readable via drawers.adornment until resolved." +
                 " Run `mootx01 upgrade` to retry."
             )
+            ok = false
         }
 
         // Put the daemon back over the (possibly migrated) estate, mirroring
@@ -686,6 +709,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         if wasRunning {
             _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
+        return ok
+        #else
+        return true
         #endif
     }
 
@@ -698,14 +724,16 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Opens the estate through GeniusLocusKit rather than raw storage because
     /// `completeSharedContentReclaim` accesses the estate via the GLK
     /// migration-host seam, which requires an open GLK handle.
-    private func runSharedContentReclaimIfPending(home: URL) async {
+    /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
+    @discardableResult
+    private func runSharedContentReclaimIfPending(home: URL) async -> Bool {
         #if os(macOS)
         let dataDir = MootPaths.resolveDataDirectory(
             environment: ProcessInfo.processInfo.environment, homeDirectory: home)
         let estateURL = MootPaths.estateURL(in: dataDir)
         // Absent estate means first run — serve creates new estates
         // post-cutover; there is nothing to reclaim.
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
 
         // Same key custody as serve's open path: existing key for an
         // encrypted estate, plaintext posture preserved for a plaintext one.
@@ -714,7 +742,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
         } catch {
             print("  ✗ shared-content reclaim skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
 
         // Quiesce before VACUUM (single-writer discipline): if the daemon will
@@ -724,8 +752,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         let wasRunning = LaunchAgent.isDaemonRunning()
         if wasRunning && !LaunchAgent.stopDaemon() {
             print("  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
+            return false
         }
+        var ok = true
 
         do {
             let configuration = EstateConfiguration(
@@ -734,6 +763,12 @@ struct UpgradeCommand: AsyncParsableCommand {
                 encryptionConfig: encryption
             )
             let storage = try SQLiteStorage(configuration: configuration)
+            // Apply the shared-content migration ledger schema (CREATE TABLE IF NOT EXISTS)
+            // before reading the reclaim record. An estate that never ran the
+            // shared-content migration has no ledger table, and reading it would
+            // throw "no such table: glk_shared_content_migration". Applying the
+            // declaration is a no-op once the table exists.
+            try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
             let kit = GeniusLocusKit()
             // The upgrade tool is not the estate's real owner; the substrate
             // validates only that ownerIdentifier is non-empty, so this
@@ -786,6 +821,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                     Freed pages are on the freelist and not yet returned to the filesystem.
                     Run `mootx01 upgrade` again to retry the VACUUM.
                 """)
+            ok = false
         } catch {
             // Failure before completeSharedContentReclaim commits the trim —
             // estate state is unchanged.
@@ -793,6 +829,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                   ✗ shared-content reclaim failed: \(error)
                     The estate is unaffected. Run `mootx01 upgrade` to retry.
                 """)
+            ok = false
         }
 
         // Put the daemon back before returning, mirroring the kg_facts
@@ -800,6 +837,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         if wasRunning {
             _ = LaunchAgent.startDaemon(homeDirectory: home)
         }
+        return ok
+        #else
+        return true
         #endif
     }
 
