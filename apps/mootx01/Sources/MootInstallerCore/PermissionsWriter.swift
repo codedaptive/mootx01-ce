@@ -53,6 +53,7 @@
 // entry the user explicitly placed in `deny` (see its doc comment).
 
 import Foundation
+import AriaMCP
 
 /// Manages the Claude Code permissions lists for ARIA tools.
 public enum PermissionsWriter {
@@ -134,48 +135,11 @@ public enum PermissionsWriter {
         "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
     ]
 
-    /// Additive-unconfirmed writes: create NEW content; nothing already
-    /// committed is changed, moved, or removed. Same risk class as a read
-    /// from the user's perspective — undoable by withdrawing/retiring the
-    /// new row, never a mutation of prior state.
-    private static let additiveWriteTools: Set<String> = [
-        "moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories",
-    ]
-
-    /// Mutations of existing state: something already committed changes
-    /// shape, is superseded, moves, or a background process alters
-    /// estate-wide indexes/consolidation state. Prompts — this is the
-    /// bucket the pre-re-tier default put EVERYTHING (except diagnostics)
-    /// into, producing 55 ask rules on a real machine including every pure
-    /// read; this table exists so only genuine mutations land here.
-    private static let mutationTools: Set<String> = [
-        "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-        "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
-        // Force-redistill all active items + full laneScope .all reindex (CDL-02):
-        // overwrites every active non-empty drawer's representation unconditionally
-        // and rebuilds BM25 + dense indexes. Ask posture: same as moot_distill.
-        "moot_redistill",
-        "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
-        // Seed-file JSON import (MXE-JI-1): reads a seed file from the
-        // filesystem and bulk-writes the estate — same Ask posture as
-        // palace/vault import.
-        "moot_json_import",
-        // Dataset import (MX-TAB-7): creates a backend table and can read a
-        // csv_path from the filesystem — same Ask posture as palace/vault import.
-        "moot_file_dataset",
-        // Monitoring flag mutation: sets daemon telemetry state
-        // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
-        "moot_monitoring_status",
-        // Contradiction hunter: estate-wide sweep that persists PROPOSED
-        // contradicts tunnels (same sweep runs inside moot_dream, already ask
-        // tier). Review settles a proposed tunnel's lifecycle — a mutation
-        // of committed state, and rejection is durable (never re-proposed).
-        "moot_hunt_contradictions", "moot_review_tunnel",
-    ]
-
-    /// Destructive, irreversible: hard-deletes content from the estate.
-    private static let destructiveTools: Set<String> = ["moot_erase_memory"]
+    /// The additive-write, mutation and destructive sets live in AriaMcpKit
+    /// (`ToolMutationInventory`), the kit that owns the tool surface: the
+    /// tiered installer default here and the frozen serve posture in the
+    /// dispatcher read the same tables, so a new mutating tool is triaged
+    /// once. Only the read table is installer-local.
 
     /// Every tool name this module has explicitly triaged into a tier.
     /// Exposed so a test can assert this set equals the REAL tool inventory
@@ -185,7 +149,10 @@ public enum PermissionsWriter {
     /// already fixed once for a hardcoded allow-all list; this is the same
     /// discipline applied to the tiered default).
     public static var explicitlyClassifiedTools: Set<String> {
-        readTools.union(additiveWriteTools).union(mutationTools).union(destructiveTools)
+        readTools
+            .union(ToolMutationInventory.additiveWriteTools)
+            .union(ToolMutationInventory.mutationTools)
+            .union(ToolMutationInventory.destructiveTools)
     }
 
     /// Classify a bare tool name (no MCP prefix) into its default tier.
@@ -199,17 +166,17 @@ public enum PermissionsWriter {
     /// name pattern the way "ends in _status" can (nothing about the string
     /// "moot_dream" says "mutation", and nothing about "moot_recall_shaped"
     /// says "read" via suffix alone), so the source of truth here is the
-    /// explicit `readTools` / `additiveWriteTools` / `mutationTools` /
-    /// `destructiveTools` tables, not a pattern match.
+    /// explicit `readTools` / `ToolMutationInventory.additiveWriteTools` / `.mutationTools` /
+    /// `.destructiveTools` tables, not a pattern match.
     ///
     /// A tool absent from all four tables (a brand-new addition to the
     /// surface not yet triaged) still lands in `ask`, the safe middle — but
     /// `explicitlyClassifiedTools` lets a test catch that omission instead
     /// of shipping it silently.
     public static func classify(_ tool: String) -> Tier {
-        if destructiveTools.contains(tool) { return .deny }
-        if mutationTools.contains(tool) { return .ask }
-        if readTools.contains(tool) || additiveWriteTools.contains(tool) { return .allow }
+        if ToolMutationInventory.destructiveTools.contains(tool) { return .deny }
+        if ToolMutationInventory.mutationTools.contains(tool) { return .ask }
+        if readTools.contains(tool) || ToolMutationInventory.additiveWriteTools.contains(tool) { return .allow }
         // Untriaged tool — safe middle; see explicitlyClassifiedTools.
         return .ask
     }

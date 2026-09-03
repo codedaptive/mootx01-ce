@@ -52,6 +52,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
     var http: Int?
 
+    @Flag(name: .long, help: "Serve the estate as a read-only snapshot (also MOOTX01_FROZEN=1): no background workers, no recall traces or reward marks, mutating tools refused. stdio only — refused with --http.")
+    var frozen = false
+
     /// Interval between periodic dream spawns in long-running stdio sessions (6 hours).
     /// At 256 items/cycle a 36k-estate converges within a few cycles; the periodic
     /// trigger ensures those cycles fire without requiring session restarts.
@@ -105,6 +108,22 @@ struct ServeCommand: AsyncParsableCommand {
         let residentPort = Self.resolveResidentPort(flag: http, environment: environment)
         Logging.stderr.log("mootx01 serve starting (estate: \(estateName), data dir: \(dataDir.path), transport: \(residentPort.map { "HTTP :\($0)" } ?? "stdio"))")
 
+        // Frozen posture: `--frozen` wins, else MOOTX01_FROZEN=1. A frozen serve
+        // is a read-only, side-effect-free snapshot: no detached dreamer or
+        // drainer, no periodic dreamer, `moot_memory_search` with internal
+        // origin (no trace rows, no dreaming enqueue), no reward mark on
+        // dereference, every mutating tool refused. The resident daemon's
+        // autonomic governor is a background worker by definition, so the
+        // combination with HTTP is refused rather than served half-frozen.
+        let posture = EstatePosture.resolve(frozenFlag: frozen, environment: environment)
+        if posture == .frozen {
+            if residentPort != nil {
+                Logging.stderr.log("mootx01 serve fatal: --frozen / MOOTX01_FROZEN=1 cannot be combined with --http / MOOTX01_HTTP_PORT — the resident daemon runs background workers. Serve a frozen estate over stdio.")
+                throw ExitCode.failure
+            }
+            Logging.stderr.log("mootx01 serve: \(EstatePosture.frozenLogLine)")
+        }
+
         // PID + served-estate markers (resident-only, written below).
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
         let estateMarkerURL = dataDir.appendingPathComponent("mootx01.estate", isDirectory: false)
@@ -124,6 +143,13 @@ struct ServeCommand: AsyncParsableCommand {
            Self.residentServesEstate(estateURL, markerURL: estateMarkerURL) {
             let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
             if await Self.residentReachable(port: port) {
+                // A frozen serve never forwards: the resident is a live, mutating
+                // server and forwarding would hand the client exactly what the
+                // flag promised it would not get.
+                if posture == .frozen {
+                    Logging.stderr.log("mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:\(port); a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone.")
+                    throw ExitCode.failure
+                }
                 Logging.stderr.log("mootx01 serve: a live resident already serves this estate — forwarding stdio to the daemon on 127.0.0.1:\(port) instead of opening a second writer (T4)")
                 var proxy = ProxyCommand()
                 proxy.http = "http://127.0.0.1:\(port)"
@@ -584,7 +610,8 @@ struct ServeCommand: AsyncParsableCommand {
             kit: kit, handle: handle, serverIdentity: "mootx01",
             versionSkewAdvisory: versionSkewAdvisory,
             updateAdvisoryProvider: updateAdvisoryProvider,
-            adornmentStatusProvider: adornmentStatusProvider
+            adornmentStatusProvider: adornmentStatusProvider,
+            posture: posture
         )
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
@@ -655,7 +682,8 @@ struct ServeCommand: AsyncParsableCommand {
             // than the in-session state (which is zero at startup). Idempotent.
             await kit.mountDreamingQueue(for: handle)
             if let startupPending = await kit.dreamingQueuePendingCount(for: handle),
-               startupPending > 0 {
+               startupPending > 0,
+               Self.backgroundWorkerPermitted(posture, worker: "startup dreamer") {
                 Logging.stderr.log(
                     "mootx01 serve: \(startupPending) dreaming job(s) pending from prior session — " +
                     "spawning a detached dreamer (T10 on-startup trigger)"
@@ -680,7 +708,9 @@ struct ServeCommand: AsyncParsableCommand {
             // spawn has already completed; the on-exit spawn fires after
             // `server.run()` returns, then the defer at scope exit cancels this
             // Task — it is in a 6-hour sleep and cannot fire again before then.
-            let periodicDreamer = Task {
+            // Frozen: no periodic dreamer at all — the Task is never created, so
+            // there is nothing to cancel and nothing that could fire.
+            let periodicDreamer: Task<Void, Never>? = posture == .live ? Task {
                 while true {
                     do {
                         try await Task.sleep(for: Self.periodicDreamInterval)
@@ -692,8 +722,8 @@ struct ServeCommand: AsyncParsableCommand {
                         "mootx01 serve: periodic dream spawn (6-hour trigger — draining subject debt)")
                     Self.spawnDetachedDream(estateName: estateName, environment: environment)
                 }
-            }
-            defer { periodicDreamer.cancel() }
+            } : nil
+            defer { periodicDreamer?.cancel() }
 
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, stdio)")
@@ -712,7 +742,8 @@ struct ServeCommand: AsyncParsableCommand {
             // the finisher a wait it can never win while it holds the encode
             // lease. Rationale on the helper.
             let remaining = (try? await kit.drainStatuses(handle)) ?? []
-            if !DrainStatus.encodeSettled(remaining) {
+            if !DrainStatus.encodeSettled(remaining),
+               Self.backgroundWorkerPermitted(posture, worker: "encode drainer") {
                 Logging.stderr.log("mootx01 serve: encode work still pending at stdio exit — spawning a detached drainer to finish (T5)")
                 Self.spawnDetachedDrain(estateName: estateName, environment: environment)
             }
@@ -733,7 +764,8 @@ struct ServeCommand: AsyncParsableCommand {
             // was never mounted (no qualifying recall in this session AND no prior
             // session backlog). In that case, no dreamer is spawned.
             if let exitPending = await kit.dreamingQueuePendingCount(for: handle),
-               exitPending > 0 {
+               exitPending > 0,
+               Self.backgroundWorkerPermitted(posture, worker: "exit dreamer") {
                 Logging.stderr.log(
                     "mootx01 serve: \(exitPending) dreaming job(s) pending at stdio exit — " +
                     "spawning a detached dreamer to finish (T10 on-exit trigger)"
@@ -744,6 +776,16 @@ struct ServeCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 serve exiting (stdin closed)")
             if let coreAIEngine { await coreAIEngine.shutdown() }
         }
+    }
+
+    /// Whether this serve may launch a detached background worker (dreamer or
+    /// drainer). Every spawn site consults this before spawning; a frozen serve
+    /// answers false and says so once per site, so pending work is visible in
+    /// the log but never picked up by a process that outlives the snapshot.
+    static func backgroundWorkerPermitted(_ posture: EstatePosture, worker: String) -> Bool {
+        guard posture == .frozen else { return true }
+        Logging.stderr.log("mootx01 serve: frozen — \(worker) not spawned; pending work is left untouched")
+        return false
     }
 
     /// Launch a detached `mootx01 drain` to finish the encode queue after a
@@ -821,7 +863,10 @@ struct ServeCommand: AsyncParsableCommand {
         }
         guard result == 0 else { return nil }
 
-        let path = String(cString: buffer)
+        // Decode up to the NUL terminator; the buffer is sized by the first
+        // _NSGetExecutablePath call and is always terminated.
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let path = String(decoding: bytes, as: UTF8.self)
         guard path.first == "/" else { return nil }
         return URL(fileURLWithPath: path)
     }

@@ -10,7 +10,11 @@ installs. One tool, three roles:
   every other key in a client's config.
 - **`mootx01 serve`** — a stdio MCP server by default. `--http <port>` or
   `MOOTX01_HTTP_PORT` selects the resident HTTP daemon that owns the
-  single-writer estate and runs background maintenance.
+  single-writer estate and runs background maintenance. `--frozen` or
+  `MOOTX01_FROZEN=1` serves the estate as a read-only snapshot over stdio:
+  no background workers, no recall traces or reward marks, every mutating
+  tool refused, `moot_estate_status` reports `frozen: true`. Benchmarks and
+  debugging sessions use it so a served estate never changes under them.
 - **`mootx01 proxy --http <url>`** — a stdio↔HTTP bridge for clients whose config
   can't take a raw HTTP URL (Claude Desktop), so they route through the one
   resident daemon and share its single-writer guarantee and telemetry.

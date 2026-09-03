@@ -63,6 +63,7 @@ use crate::dispatch::{
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+use crate::estate_posture::EstatePosture;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::session_protocol::{ARIA_SESSION_PROTOCOL, modes_status_section};
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
@@ -364,6 +365,10 @@ pub fn dispatch(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     sensitivity_ledger: &SensitivityGrantLedger,
+    // Frozen or live: memory search origin, reward marks on dereference,
+    // and the `frozen:` status line read it. Mutating tools never reach this
+    // function when frozen — the dispatcher refuses them first.
+    posture: EstatePosture,
     build_serial: &str,
     version_skew: &str,
     // Upstream-release advisory provider — consumed by ping/status only.
@@ -377,14 +382,14 @@ pub fn dispatch(
         // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
         "memory" => crate::memory_adapter::dispatch_memory(args, registry),
         "moot_file_memory" => run_file_memory(args, registry),
-        "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
+        "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger, posture),
         "moot_memory_list" => run_memory_list(args, registry),
-        "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger, ledger),
-        "moot_update_memory" => run_update_memory(args, registry, ledger),
-        "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger),
+        "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger, ledger, posture),
+        "moot_update_memory" => run_update_memory(args, registry, ledger, posture),
+        "moot_withdraw_memory" => run_withdraw_memory(args, registry, ledger, posture),
         "moot_erase_memory" => run_erase_memory(args, registry),
-        "moot_confirm_memory" => run_confirm_memory(args, registry, ledger),
-        "moot_move_memory" => run_move_memory(args, registry, ledger),
+        "moot_confirm_memory" => run_confirm_memory(args, registry, ledger, posture),
+        "moot_move_memory" => run_move_memory(args, registry, ledger, posture),
         "moot_link_memories" => run_link_memories(args, registry),
         "moot_review_tunnel" => run_review_tunnel(args, registry),
         "moot_connection_search" => run_connection_search(args, registry),
@@ -397,7 +402,7 @@ pub fn dispatch(
         "moot_read_journal" => run_read_journal(args, registry),
         // Pass version_skew so the report includes the plugin-owned MCP connections advisory
         // when present (empty string ⇒ no line appended).
-        "moot_estate_status" => run_estate_status(args, registry, version_skew, update_advisory),
+        "moot_estate_status" => run_estate_status(args, registry, posture, version_skew, update_advisory),
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
         "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew, update_advisory),
@@ -740,6 +745,7 @@ fn run_memory_search(
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
     sensitivity_ledger: &SensitivityGrantLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use genius_locus_kit::recall::{
         GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
@@ -1011,16 +1017,20 @@ fn run_memory_search(
         };
 
     // B-10a: RecallOrigin::External causes the coordinator to write recall-trace
-    // rows for the reward pipeline. The ARIA_MCP boundary is the ONLY call site
-    // that passes External — internal callers (dreaming, lenses, recipes) pass
-    // Internal at the constructor, enforced at compile time.
+    // rows for the reward pipeline and enqueue a dreaming item. The ARIA_MCP
+    // boundary is the ONLY call site that passes External — internal callers
+    // (dreaming, lenses, recipes) pass Internal at the constructor, enforced
+    // at compile time. A frozen dispatcher passes Internal here too, so a
+    // frozen search leaves no trace and no dreaming job — the same path
+    // every internal reader takes. Mirrors Swift runMemorySearch.
+    let origin = if posture.is_frozen() { RecallOrigin::Internal } else { RecallOrigin::External };
     let mut request = GLKRecallRequest::new(
         frame,
         GLKRecallMode::UnionBest,
         scoring,
         limit,
         RecallFallbackPolicy::AllowDegraded,
-        RecallOrigin::External, // B-10a: ARIA boundary is external origin
+        origin,
     )
     .with_query_text(query.to_string())
     // W2.5 Track R(a): door identity recorded on every reward-cycle trace
@@ -1335,6 +1345,7 @@ fn run_memory_get(
     registry: &EstateRegistry,
     sensitivity_ledger: &SensitivityGrantLedger,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     // Hydration depth (PR-03): one verb, three tiers — subject (dense row
@@ -1574,7 +1585,7 @@ fn run_memory_get(
         // Build the result value first, then release, then mark usage.
         drop(coord);
         for id in &found_ids {
-            note_usage(id, &estate, ledger);
+            note_usage(id, &estate, ledger, posture);
         }
         return Ok(batch_result);
     }
@@ -1622,7 +1633,7 @@ fn run_memory_get(
     // note_usage can acquire estate.coord without deadlock — same pattern as the
     // batch path above and the mutation verbs (run_update_memory, etc.).
     drop(coord);
-    note_usage(row_id, &estate, ledger);
+    note_usage(row_id, &estate, ledger, posture);
     Ok(single_result)
 }
 
@@ -1709,7 +1720,14 @@ fn note_usage(
     id: &str,
     estate: &crate::estate_registry::OpenEstate,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) {
+    // Frozen: the ledger still records what a search surfaced (it is
+    // session memory, not estate state), but the reward mark is a
+    // persistent write and is skipped. Mirrors Swift noteUsage.
+    if posture.is_frozen() {
+        return;
+    }
     if let Some(entry) = ledger.get(id) {
         // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
     let now = bench_clock_now();
@@ -1780,6 +1798,7 @@ fn run_update_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
@@ -1824,7 +1843,7 @@ fn run_update_memory(
     // `optionalString(args["note"], ...)` → MutateFrame.payload.
     let note = optional_string(args, "note")?;
     // Note usage before acquiring the coord lock so note_usage can also lock.
-    note_usage(id, &estate, ledger);
+    note_usage(id, &estate, ledger, posture);
     let coord = estate.coord.lock().unwrap();
     match coord.mutate(&estate.handle, id, kind, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("updated memory {id} ({mutation_str})"))),
@@ -1839,6 +1858,7 @@ fn run_withdraw_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
@@ -1846,7 +1866,7 @@ fn run_withdraw_memory(
 
     // Note usage: if this drawer was surfaced by moot_memory_search, mark its
     // recall-trace rows used so the reward sweep assigns reward 1.0.
-    note_usage(id, &estate, ledger);
+    note_usage(id, &estate, ledger, posture);
     // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
     let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
@@ -1914,6 +1934,7 @@ fn run_confirm_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
@@ -1922,7 +1943,7 @@ fn run_confirm_memory(
     let note = optional_string(args, "note")?;
 
     // Note usage: confirming a surfaced drawer means the user acted on it.
-    note_usage(id, &estate, ledger);
+    note_usage(id, &estate, ledger, posture);
     let coord = estate.coord.lock().unwrap();
     match coord.mutate(&estate.handle, id, MutationKind::Confirm, note.as_deref()) {
         Ok(()) => Ok(text_result(&format!("confirmed memory {id}"))),
@@ -1937,6 +1958,7 @@ fn run_move_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     ledger: &SurfacedRecallLedger,
+    posture: EstatePosture,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
@@ -1946,7 +1968,7 @@ fn run_move_memory(
     let wing = optional_string(args, "wing")?;
 
     // Note usage: moving a surfaced drawer means the user acted on it.
-    note_usage(id, &estate, ledger);
+    note_usage(id, &estate, ledger, posture);
     let coord = estate.coord.lock().unwrap();
     match coord.reanchor(&estate.handle, id, Some(location), wing, None) {
         Ok(()) => {
@@ -2877,6 +2899,7 @@ fn run_read_journal(
 fn run_estate_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    posture: EstatePosture,
     version_skew: &str,
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
 ) -> Result<serde_json::Value, JSONRPCError> {
@@ -3012,11 +3035,15 @@ fn run_estate_status(
         .id();
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / subjects / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    //   / index_composition_policy (CDL-03) / fdc_recalculation / fdc_recalculation_floor
-    //   / fdc_recalculation_current
+    //   / index_composition_policy (CDL-03) / frozen / fdc_recalculation
+    //   / fdc_recalculation_floor / fdc_recalculation_current
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
+    // `frozen:` is the posture of this serve (`mootx01 serve --frozen` /
+    // MOOTX01_FROZEN=1): true means mutating tools are refused and the read
+    // path writes nothing. A process property, not estate state.
+    let frozen_value = posture.status_value();
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nindex_composition_policy: {composition_policy_id}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nindex_composition_policy: {composition_policy_id}\nfrozen: {frozen_value}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         visible.len(),
         visible_total.len(),
         subject_bearing,

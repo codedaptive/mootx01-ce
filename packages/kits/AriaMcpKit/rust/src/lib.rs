@@ -55,6 +55,7 @@ pub mod dataset_tools;
 // dense_row module deleted in COMPOSER-02B: all render sites migrated to result_composer.
 pub mod dispatch;
 pub mod dispatcher;
+pub mod estate_posture;
 // monitoring_control: injection seam for daemon telemetry monitoring state.
 // AriaMcpKit defines the trait; serve host injects the StatsStore-backed impl.
 pub mod monitoring_control;
@@ -87,6 +88,7 @@ pub mod session_protocol;
 pub mod surfaced_recall_ledger;
 pub mod teachme_guides;
 pub mod tool_list;
+pub mod tool_mutation_inventory;
 pub mod vault_tools;
 
 /// Re-export the shared whole-file key entry point so the `mootx01` binary can

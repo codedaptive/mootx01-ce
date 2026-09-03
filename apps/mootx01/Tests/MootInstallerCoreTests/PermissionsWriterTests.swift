@@ -98,23 +98,21 @@ struct PermissionsWriterTests {
     /// from a hardcoded name list going stale.
     ///
     /// This uses a PINNED copy of the real tool inventory rather than
-    /// fetching it live from `AriaMCP.ToolProjection.tools()`: MootInstallerCore
-    /// (and its test target) deliberately does NOT depend on AriaMcpKit —
-    /// AriaMcpKit requires macOS(.v26) (see Package.swift's platform
-    /// comment), and MootInstallerCoreTests is built cross-platform
-    /// (Linux too, per the same comment). Making the live tool-list seam
-    /// reachable here would force every Linux test run to build the
-    /// macOS-only AriaMCP/GeniusLocusKit/PersistenceKitSQLite dependency
-    /// chain — out of scope for this mission. The count guard below is the
-    /// safety net for THIS pinned copy going stale: if the real surface
-    /// grows or shrinks, the count assertion fails loudly even before the
-    /// per-name comparison would, naming exactly how far off it is.
+    /// fetching it live from `AriaMCP.ToolProjection.tools()`. The pinned
+    /// copy is deliberate: the tier tables are a product contract and this
+    /// test is the place a new tool is triaged by hand. The count guard
+    /// below is the safety net for THIS pinned copy going stale: if the
+    /// real surface grows or shrinks, the count assertion fails loudly even
+    /// before the per-name comparison would, naming exactly how far off it
+    /// is. (`AriaMCP.ToolMutationInventoryTests` separately checks that the
+    /// mutation tables name only real tools, against the live projection.)
     ///
     /// When AriaMcpKit's `tool_list::build_tool_list()` / `ToolProjection.tools()`
     /// gains or removes a tool, update BOTH this pinned list and whichever
-    /// of `readTools` / `additiveWriteTools` / `mutationTools` /
-    /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 73-tool inventory")
+    /// of `readTools` (here) or `ToolMutationInventory.additiveWriteTools` /
+    /// `.mutationTools` / `.destructiveTools` (AriaMcpKit) the new tool
+    /// belongs in.
+    @Test("classify's tier tables are exhaustive over the real 77-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
