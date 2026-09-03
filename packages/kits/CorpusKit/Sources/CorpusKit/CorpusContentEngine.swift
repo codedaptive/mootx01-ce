@@ -3458,6 +3458,20 @@ public actor CorpusContentEngine {
             .map { ($0.contentID, $0.revision, $0.digest) }
     }
 
+    /// All non-cursor index-state rows for this corpus engine, without
+    /// filtering by content ID.
+    ///
+    /// GeniusLocusKit calls this to compare each drawer's `distilledAt` instant
+    /// against the corresponding index row's `updatedAt`, detecting the mid-run
+    /// crash scenario where the distillation sweep committed but the reindex did
+    /// not. The feed-cursor sentinel row is excluded (same filter as
+    /// `indexCoverageAttestations`). Mirrors Rust
+    /// `CorpusContentEngine::all_index_states`.
+    public func allIndexStates() async throws -> [CorpusIndexState] {
+        try await indexState.allStates()
+            .filter { $0.contentID != Self.feedCursorRowID }
+    }
+
     /// Indexed content-row count (content-unit semantics — canonical rows,
     /// not chunks). The estate drain status reports this.
     public func count() async throws -> Int {
