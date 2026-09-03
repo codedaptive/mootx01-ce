@@ -167,3 +167,76 @@ struct PathsTests {
         #expect(port == 5050)
     }
 }
+
+/// The resident-estate predicate: the rule `mootx01 upgrade` uses to
+/// decide whether a step may stop the resident daemon. Filesystem-touching
+/// tests use their own uniquely-named temp directory.
+@Suite("MootPaths resident estate")
+struct ResidentEstateTests {
+
+    private func makeTempRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-resident-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    @Test func residentDataDirectoryIsTheDefaultWithNoOverride() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        #expect(
+            MootPaths.residentDataDirectory(homeDirectory: home).path ==
+            "/Users/test/Library/Application Support/com.mootx01.ce"
+        )
+    }
+
+    @Test func residentDirectoryIsTheResidentEstate() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let resolved = MootPaths.resolveDataDirectory(environment: [:], homeDirectory: home)
+        #expect(MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
+    }
+
+    @Test func dotSegmentsAndTrailingSeparatorDoNotDefeatThePredicate() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let spelled = MootPaths.resolveDataDirectory(
+            environment: ["MOOTX01_DATA_DIR": "/Users/test/Library/./Application Support/com.mootx01.ce/"],
+            homeDirectory: home)
+        #expect(MootPaths.isResidentEstate(dataDirectory: spelled, residentDataDirectory: resident))
+    }
+
+    @Test func symlinkToTheResidentDirectoryIsTheResidentEstate() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resident = MootPaths.residentDataDirectory(homeDirectory: root)
+        try FileManager.default.createDirectory(at: resident, withIntermediateDirectories: true)
+        let link = root.appendingPathComponent("estate-link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: resident)
+        let viaLink = MootPaths.resolveDataDirectory(
+            environment: ["MOOTX01_DATA_DIR": link.path], homeDirectory: root)
+        #expect(MootPaths.isResidentEstate(dataDirectory: viaLink, residentDataDirectory: resident))
+    }
+
+    @Test func siblingScratchDirectoryIsNotTheResidentEstate() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resident = MootPaths.residentDataDirectory(homeDirectory: root)
+        try FileManager.default.createDirectory(at: resident, withIntermediateDirectories: true)
+        // A benchmark clone beside the resident directory: same parent,
+        // same prefix, a different estate.
+        let scratch = resident.deletingLastPathComponent()
+            .appendingPathComponent("com.mootx01.ce-bench", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let resolved = MootPaths.resolveDataDirectory(
+            environment: ["MOOTX01_DATA_DIR": scratch.path], homeDirectory: root)
+        #expect(!MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
+    }
+
+    @Test func nonExistentScratchDirectoryIsNotTheResidentEstate() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let resolved = MootPaths.resolveDataDirectory(
+            environment: ["MOOTX01_DATA_DIR": "/Volumes/scratch/bench-clone"], homeDirectory: home)
+        #expect(!MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
+    }
+}

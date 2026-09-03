@@ -31,6 +31,50 @@ pub fn data_dir() -> PathBuf {
     platform_data_dir()
 }
 
+/// The data directory the resident daemon serves: the platform default,
+/// with no `MOOTX01_DATA_DIR` override applied. `mootx01 install`
+/// registers the daemon over the directory it resolved at install time,
+/// which is this one unless `MOOTX01_DATA_DIR` was set for that install.
+pub fn resident_data_dir() -> PathBuf {
+    platform_data_dir()
+}
+
+/// Whether `data` refers to the resident estate — the one the resident
+/// daemon has open. `mootx01 upgrade` quiesces the daemon around a step
+/// only when this is true; a cloned estate reached through
+/// `MOOTX01_DATA_DIR` is upgraded with the daemon left running, because
+/// the daemon has no stake in it.
+///
+/// Both paths are canonicalised before comparison: symlinks resolved
+/// (`fs::canonicalize`), `.` components and trailing separators dropped,
+/// `..` collapsed. A path that does not exist cannot be symlink-resolved
+/// and compares by its lexically normalised form.
+pub fn is_resident_estate(data: &Path, resident: &Path) -> bool {
+    canonical_path(data) == canonical_path(resident)
+}
+
+/// `fs::canonicalize` when the path exists, else a lexical normalisation
+/// (`.` dropped, `..` collapsed into its parent where one exists).
+/// `Path::components` already drops trailing separators.
+fn canonical_path(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(target_os = "windows")]
 fn platform_data_dir() -> PathBuf {
     let base = std::env::var("LOCALAPPDATA")
@@ -175,5 +219,43 @@ mod tests {
         write_port_file(&f, 4242).unwrap();
         assert_eq!(read_port_file(&f), Some(4242));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resident_dir_is_resident_estate() {
+        let resident = Path::new("/srv/moot/resident");
+        assert!(is_resident_estate(resident, resident));
+        // `.` segments and a trailing separator are spellings, not a
+        // different directory.
+        assert!(is_resident_estate(Path::new("/srv/moot/./resident/"), resident));
+        assert!(is_resident_estate(Path::new("/srv/moot/other/../resident"), resident));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_resident_dir_is_resident_estate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resident = tmp.path().join("resident");
+        fs::create_dir_all(&resident).expect("resident dir");
+        let link = tmp.path().join("estate-link");
+        std::os::unix::fs::symlink(&resident, &link).expect("symlink");
+        assert!(is_resident_estate(&link, &resident));
+    }
+
+    #[test]
+    fn sibling_scratch_dir_is_not_resident_estate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resident = tmp.path().join("resident");
+        // A benchmark clone beside the resident directory: same parent,
+        // same prefix, a different estate.
+        let scratch = tmp.path().join("resident-bench");
+        fs::create_dir_all(&resident).expect("resident dir");
+        fs::create_dir_all(&scratch).expect("scratch dir");
+        assert!(!is_resident_estate(&scratch, &resident));
+        // Neither side existing still compares the two spellings.
+        assert!(!is_resident_estate(
+            Path::new("/srv/moot/bench-clone"),
+            Path::new("/srv/moot/resident")
+        ));
     }
 }

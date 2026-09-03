@@ -2,7 +2,9 @@
 //
 // Resolves the user data directory that mootx01 opens. Pure
 // path math — no filesystem touching — so the logic is unit-testable
-// without spawning a process or writing under the user's home.
+// without spawning a process or writing under the user's home. The one
+// exception is `isResidentEstate`, which resolves symlinks so a link to
+// the resident directory compares equal to it.
 //
 // macOS-only per LAUNCH_PLAN.md §"The Monday cut". The single
 // supported location is the standard Application Support directory:
@@ -67,6 +69,47 @@ public enum MootPaths {
     /// open (PersistenceKitSQLite.SQLiteConnection makes parent dirs).
     public static func estateURL(in dataDirectory: URL) -> URL {
         dataDirectory.appendingPathComponent(estateFileName, isDirectory: false)
+    }
+
+    /// The data directory the resident daemon serves: the platform
+    /// default location under `homeDirectory`, with no environment
+    /// override applied. `mootx01 install` registers the daemon over the
+    /// directory it resolved at install time, which is this one unless
+    /// `MOOTX01_DATA_DIR` was set for that install.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`
+    ///   in the executable.
+    /// - Returns: the resident data directory URL. Does not touch the
+    ///   filesystem.
+    public static func residentDataDirectory(homeDirectory: URL) -> URL {
+        resolveDataDirectory(environment: [:], homeDirectory: homeDirectory)
+    }
+
+    /// Whether `dataDirectory` refers to the resident estate — the one
+    /// the resident daemon has open. `mootx01 upgrade` quiesces the
+    /// daemon around a step only when this is true; a cloned estate
+    /// reached through `MOOTX01_DATA_DIR` is upgraded with the daemon
+    /// left running, because the daemon has no stake in it.
+    ///
+    /// Both paths are canonicalised before comparison: symlinks resolved
+    /// (`/var` becomes `/private/var`, a link into Application Support
+    /// becomes its target), `.` and `..` collapsed, trailing separators
+    /// dropped. A path that does not exist cannot be symlink-resolved
+    /// and compares by its standardized form.
+    ///
+    /// - Parameters:
+    ///   - dataDirectory: the directory an upgrade step is about to open.
+    ///   - residentDataDirectory: the daemon's directory, from
+    ///     `residentDataDirectory(homeDirectory:)`.
+    public static func isResidentEstate(dataDirectory: URL, residentDataDirectory: URL) -> Bool {
+        canonicalPath(dataDirectory) == canonicalPath(residentDataDirectory)
+    }
+
+    /// Symlink-resolved, standardized path with no trailing separator.
+    private static func canonicalPath(_ url: URL) -> String {
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
     }
 
     /// URL of the Claude Code project-local MCP config file.
