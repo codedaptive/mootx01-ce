@@ -28,6 +28,7 @@ use crate::corpus_provider_counts_store::{
 use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
+use crate::index_composition_policy::IndexCompositionPolicy;
 use crate::index_state_operational::{
     coverage_mask_bit_offset, fresh_checkpoint_bitmap, setting_coverage_slot,
     INDEX_BIT_HAS_DENSE_TEXT,
@@ -421,6 +422,15 @@ pub struct CorpusContentEngine {
 }
 
 impl CorpusContentEngine {
+    /// The composition policy the engine was configured with: the id it
+    /// records on every index row it writes. Exposed read-only so
+    /// GeniusLocusKit can surface it in `moot_estate_status` without
+    /// reaching into private internals. Twin of Swift
+    /// `CorpusContentEngine.compositionPolicy`.
+    pub fn composition_policy(&self) -> IndexCompositionPolicy {
+        self.configuration.composition_policy()
+    }
+
     /// Construct the engine over a validated configuration and content
     /// source. In attached mode NO canonical content table is created.
     pub fn open(
@@ -1578,7 +1588,7 @@ impl CorpusContentEngine {
                 index_version: CONTENT_ENGINE_INDEX_VERSION,
                 applied_cursor: None,
                 updated_at_millis: now_millis,
-                composition_policy_id: String::new(), // pre-CDL-03 Rust path; policy threaded via GLK intake
+                composition_policy_id: self.configuration.composition_policy().id(),
                 operational_bitmap: bitmap,
             })?;
         }
@@ -2170,7 +2180,7 @@ impl CorpusContentEngine {
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: applied_cursor.map(str::to_string),
             updated_at_millis: now_millis,
-            composition_policy_id: String::new(), // pre-CDL-03 Rust path; policy threaded via GLK intake
+            composition_policy_id: self.configuration.composition_policy().id(),
             operational_bitmap: bitmap,
         }))
     }
