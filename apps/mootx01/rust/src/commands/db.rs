@@ -1,4 +1,5 @@
-//! commands/db.rs — §4.4: named estate lifecycle.
+//! commands/db.rs — §4.4: named estate lifecycle and the estate-level
+//! settings that live in the estate itself (`composition`).
 //!
 //! Estate lifecycle commands follow the same structure as Swift DbCommand.
 //! Note: flag names differ in places (e.g. `--force` here vs Swift's `--yes`
@@ -7,11 +8,19 @@
 //! is created on first `serve`, so `create` makes the directory only.
 
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
+
+use aria_mcp::estate_registry::EstateRegistry;
+use genius_locus_kit::EstateCoordinator;
 
 use crate::cli::DbCommand;
 use crate::core::{encrypt_optout, paths};
 use crate::exit;
+
+/// Host identity for a `composition` open (the registry's production default).
+const OWNER: &str = "aria-mcp-default";
 
 pub fn run(cmd: DbCommand) -> ExitCode {
     let data = paths::data_dir();
@@ -20,6 +29,7 @@ pub fn run(cmd: DbCommand) -> ExitCode {
         DbCommand::List => list(&data),
         DbCommand::Open { name } => open(&data, &name),
         DbCommand::Delete { name, force } => delete(&data, &name, force),
+        DbCommand::Composition { db, set } => composition(&data, db, set),
     }
 }
 
@@ -193,6 +203,117 @@ fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
     ExitCode::from(exit::OK)
 }
 
+/// `mootx01 db composition [--db <name>] [--set <policy-id>]`: show or change
+/// the estate's stored index composition policy, which names the text each
+/// search index lane is built from (id `lex=<source>;dense=<source>`). The
+/// policy is an estate setting (LocusKit manifest key
+/// `index_composition_policy`), read by GeniusLocusKit at every open.
+///
+/// Without `--set` the command prints the stored id. With `--set` it
+/// validates the id before opening anything, writes the setting, reopens the
+/// estate (the registry wires the Corpus under the stored setting), and runs
+/// the same `reindex_corpus` the upgrade convergence step runs, so the stored
+/// policy and the index rows never disagree; it prints the rows reindexed and
+/// exits non-zero on any failure. Rust twin of Swift `DbCompositionCommand`.
+fn composition(data: &Path, db: Option<String>, set: Option<String>) -> ExitCode {
+    let name = db.unwrap_or_else(|| paths::active_estate(data));
+    // Estate path: an explicit ARIA_MCP_SQLITE_PATH override wins; else the
+    // named/active estate (mirrors redistill.rs).
+    let estate = match std::env::var("ARIA_MCP_SQLITE_PATH") {
+        Ok(p) if !p.is_empty() => p,
+        _ => paths::estate_sqlite_path(data, &name).to_string_lossy().into_owned(),
+    };
+    let dir_exists = Path::new(&estate).parent().map(Path::exists).unwrap_or(false);
+    if !dir_exists {
+        eprintln!("mootx01 db composition fatal: estate '{name}' not found at {estate}");
+        return ExitCode::from(exit::FAILURE);
+    }
+    match run_composition_on_estate(&estate, &name, set.as_deref()) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            ExitCode::from(exit::OK)
+        }
+        Err(e) => {
+            eprintln!("mootx01 db composition fatal: {e}");
+            ExitCode::from(exit::FAILURE)
+        }
+    }
+}
+
+/// Show the stored setting, or store `set` and rebuild every index lane
+/// under it. Returns the lines to print. A malformed `set` is refused before
+/// the estate is opened, so nothing is written.
+pub(crate) fn run_composition_on_estate(
+    estate: &str,
+    name: &str,
+    set: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let requested = match set {
+        Some(id) => Some(EstateCoordinator::index_composition_policy_id_parsing(id).ok_or_else(|| {
+            format!(
+                "'{id}' is not an index composition policy id (expected lex=<source>;dense=<source>, e.g. lex=original;dense=distilled)"
+            )
+        })?),
+        None => None,
+    };
+    let mut lines = vec![format!("estate: {name}")];
+    let Some(requested) = requested else {
+        // Opening through the registry runs the migration chain, which seeds
+        // the setting on an estate that predates it.
+        let reg = EstateRegistry::new_sqlite(estate, OWNER)?;
+        let stored = {
+            let coord = reg.coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+            coord
+                .stored_index_composition_policy_id(&reg.default.handle)
+                .map_err(|e| format!("{e:?}"))?
+        };
+        lines.push(format!("index_composition_policy: {}", stored.unwrap_or_else(|| "none".to_string())));
+        return Ok(lines);
+    };
+    let start = Instant::now();
+    // 1. Store the setting on the open estate.
+    let stored = {
+        let reg = EstateRegistry::new_sqlite(estate, OWNER)?;
+        let coord = reg.coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        coord
+            .set_index_composition_policy_id(&reg.default.handle, &requested)
+            .map_err(|e| format!("{e:?}"))?
+    };
+    // 2. Reopen: the registry wires the Corpus under the stored setting.
+    // 3. Rebuild every lane. 4. Prove every active row carries the new id.
+    let reg = EstateRegistry::new_sqlite(estate, OWNER)?;
+    let handle = reg.default.handle.clone();
+    let counts = {
+        let coord = reg.coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
+        coord
+            .index_composition_policy_row_counts(&handle)
+            .map_err(|e| format!("{e:?}"))?
+    };
+    let reindexed = counts.get(&stored).copied().unwrap_or(0);
+    let stale: Vec<String> = counts
+        .iter()
+        .filter(|(id, _)| *id != &stored)
+        .map(|(id, n)| format!("{id}: {n}"))
+        .collect();
+    lines.push(format!("index_composition_policy: {stored}"));
+    lines.push(format!("rows reindexed: {reindexed}"));
+    lines.push(format!("elapsed: {:.1}s", start.elapsed().as_secs_f64()));
+    if !stale.is_empty() {
+        return Err(format!(
+            "rows still carry another policy after the rebuild ({})",
+            stale.join(", ")
+        ));
+    }
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +393,82 @@ mod tests {
         );
         assert!(dir.join(aria_mcp::INSTALL_KEY_FILE).exists(), "default create mints db.key eagerly");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    fn temp_estate() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("estate.sqlite").to_string_lossy().into_owned();
+        (dir, path)
+    }
+
+    fn file_memory(estate: &str, content: &str) {
+        use aria_mcp::jsonrpc::JsonValue;
+        use aria_mcp::surfaced_recall_ledger::SurfacedRecallLedger;
+        let reg = EstateRegistry::new_sqlite(estate, OWNER).expect("open");
+        let mut args: std::collections::BTreeMap<String, JsonValue> = std::collections::BTreeMap::new();
+        args.insert("content".into(), JsonValue::from(serde_json::json!(content)));
+        args.insert("subject".into(), JsonValue::from(serde_json::json!(content)));
+        args.insert("location".into(), JsonValue::from(serde_json::json!("composition-cli")));
+        let result = aria_mcp::dispatch::dispatch_tool("moot_file_memory", &args, &reg, &SurfacedRecallLedger::new())
+            .expect("file memory");
+        assert!(!result["isError"].as_bool().unwrap_or(false), "{result}");
+    }
+
+    /// A fresh estate shows the production default; `--set` stores a new id,
+    /// rebuilds every row under it, and the next show reports it.
+    #[test]
+    fn composition_shows_then_sets_and_reindexes() {
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli test content one");
+        file_memory(&estate, "composition cli test content two");
+
+        let shown = run_composition_on_estate(&estate, "t", None).expect("show");
+        assert_eq!(shown, vec![
+            "estate: t".to_string(),
+            "index_composition_policy: lex=original;dense=distilled".to_string(),
+        ]);
+
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        let set = run_composition_on_estate(&estate, "t", Some(new_id)).expect("set");
+        assert_eq!(set[0], "estate: t");
+        assert_eq!(set[1], format!("index_composition_policy: {new_id}"));
+        let reindexed: usize = set[2]
+            .strip_prefix("rows reindexed: ")
+            .and_then(|n| n.parse().ok())
+            .expect("rows reindexed line");
+        assert!(reindexed >= 2, "both filed items are active and must be reindexed; got {reindexed}");
+        assert!(set[3].starts_with("elapsed: "), "{set:?}");
+
+        // Every active index row now carries the new id, and the stored
+        // setting reads it back.
+        let reg = EstateRegistry::new_sqlite(&estate, OWNER).expect("reopen");
+        let coord = reg.coord.lock().unwrap();
+        let counts = coord
+            .index_composition_policy_row_counts(&reg.default.handle)
+            .expect("row counts");
+        assert_eq!(counts.keys().collect::<Vec<_>>(), vec![new_id]);
+        assert_eq!(
+            coord.stored_index_composition_policy_id(&reg.default.handle).expect("read"),
+            Some(new_id.to_string())
+        );
+        assert_eq!(
+            coord.index_composition_policy(&reg.default.handle).map(|p| p.id()),
+            Some(new_id.to_string())
+        );
+    }
+
+    /// An invalid id is refused before the estate is opened or written.
+    #[test]
+    fn composition_refuses_an_invalid_id_before_any_write() {
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli invalid id content");
+        let before = std::fs::metadata(&estate).expect("estate file").modified().expect("mtime");
+        let err = run_composition_on_estate(&estate, "t", Some("cell B")).expect_err("refused");
+        assert!(err.contains("not an index composition policy id"), "{err}");
+        let after = std::fs::metadata(&estate).expect("estate file").modified().expect("mtime");
+        assert_eq!(before, after, "a refused --set must not touch the estate");
+        let shown = run_composition_on_estate(&estate, "t", None).expect("show");
+        assert_eq!(shown[1], "index_composition_policy: lex=original;dense=distilled");
     }
 
     /// Deleting an estate removes the whole directory — including the encryption
