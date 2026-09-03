@@ -178,6 +178,7 @@ table=drawers
   col=subject_pipeline_version type=text null=1 default=- role=-
   col=subject_at type=timestamp null=1 default=- role=-
   col=adornment type=text null=1 default=- role=-
+  col=distilled_source_digest type=text null=1 default=- role=-
   gen=g_state_cluster type=int
   gen=g_provenance_source type=int
   gen=g_provenance_confirmation type=int

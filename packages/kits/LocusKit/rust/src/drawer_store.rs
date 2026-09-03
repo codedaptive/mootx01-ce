@@ -705,17 +705,21 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Write the distilled representation of one drawer — all four columns
+    /// Write the distilled representation of one drawer — all five columns
     /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
     /// together or populated together).
     ///
     /// A representation is a deterministic, regenerable function of
-    /// (content, pipeline version) — a view, not a belief-state change —
+    /// (content, converter id) — a view, not a belief-state change —
     /// so this is a direct column write: no audit event, no supersession
     /// cascade, no lifecycle or lineage field touched, and no content
     /// digest/revision bump (search isolation §9: a representation-only
-    /// write emits no index job). `generated_at` is epoch millis
-    /// (deterministic clock — passed in, never read here).
+    /// write emits no index job). `source_digest` is the SHA-256 hex of
+    /// the complete content the representation was rendered from (the
+    /// caller computes it with ContextDistillLib's `source_digest`); it is
+    /// stored beside the converter id so a later reader can prove the
+    /// representation still describes the row's content. `generated_at`
+    /// is epoch millis (deterministic clock — passed in, never read here).
     ///
     /// Returns the count of rows updated (0 = drawer not found;
     /// 1 = success). Mirrors Swift `DrawerStore.setDistilledRepresentation`.
@@ -724,6 +728,7 @@ pub trait DrawerStore: Send + Sync {
         _drawer_id: &str,
         _distilled: &str,
         _pipeline_version: &str,
+        _source_digest: &str,
         _token_count: i64,
         _generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -843,30 +848,59 @@ pub trait DrawerStore: Send + Sync {
 
     /// Count of active drawers still awaiting distillation — the §7.1
     /// eligibility predicate as an aggregate (not tombstoned, non-empty
-    /// content, `distilled` NULL or stale pipeline version). The
-    /// distillation drain-accounting observable reported by the GLK
-    /// coordinator's `drain_statuses`. Mirrors Swift `countUndistilled`.
+    /// content, and no representation that is current under
+    /// `pipeline_version`). The storage-visible half of the currency rule:
+    /// bit 19 clear, OR `distilled_pipeline_version` differs, OR
+    /// `distilled_source_digest` IS NULL (written before the digest column
+    /// existed). The digest-equality half needs the row's content and is
+    /// applied by the sweep per drawer; under the NULL-on-content-write
+    /// invariant a populated digest always equals the digest of the
+    /// content beside it, so the two halves agree. The distillation
+    /// drain-accounting observable reported by the GLK coordinator's
+    /// `drain_statuses`. Mirrors Swift `countUndistilled`.
     fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "count_undistilled not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Active, non-empty drawers that carry a distilled representation,
+    /// Rooms containing at least one active, represented drawer whose stored
+    /// representation is not current under `pipeline_version`: the converter
+    /// id differs, or the source digest is NULL. The version companion to
+    /// the room-level bit-19 aggregate the sweep skips on: bit 19 proves
+    /// presence only, so a fully represented room is skipped only when this
+    /// projection finds nothing stale in it. Projects `parent_node_id` only
+    /// and resolves the distinct rooms, so a current estate pays no content
+    /// hydration. Returns `(wing, room)` pairs sorted by wing then room.
+    /// Mirrors Swift `DrawerStore.roomsWithStaleDistilledRepresentations`.
+    fn rooms_with_stale_distilled_representations(
+        &self,
+        _pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "rooms_with_stale_distilled_representations not implemented for this DrawerStore impl"
+                .to_string(),
+        ))
+    }
+
+    /// Active, non-empty drawers whose representation is current under
+    /// `pipeline_version` (bit 19 set, converter id equal, digest present),
     /// returned as `(id, distilled_at_millis)` pairs with no content hydration.
     ///
     /// Used by GeniusLocusKit's `distilled_representations_awaiting_reindex` to
     /// compare each drawer's `distilled_at` instant against the corresponding
     /// corpus index row's `updated_at_millis`, detecting the mid-run crash
-    /// scenario where the sweep committed but the reindex did not.
+    /// scenario where the sweep committed but the reindex did not. Stale rows
+    /// are excluded on purpose: the sweep regenerates them first, and only a
+    /// current representation can be waiting on its reindex.
     ///
-    /// Query shape mirrors `count_undistilled`: tombstoned_at IS NULL, content ≠ "",
-    /// bit 19 (HAS_CURRENT_REPRESENTATION) set. Projects only `id` and
+    /// Query shape mirrors `count_undistilled` inverted. Projects only `id` and
     /// `distilled_at` — no text column is materialized. The §4 invariant (bit and
     /// columns always in agreement) guarantees `distilled_at` is non-null when
     /// bit 19 is set. Mirrors Swift `DrawerStore.drawersWithRepresentations`.
     fn drawers_with_representations(
         &self,
+        _pipeline_version: &str,
     ) -> Result<Vec<(String, i64)>, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "drawers_with_representations not implemented for this DrawerStore impl".to_string(),
@@ -2440,6 +2474,7 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         drawer_id: &str,
         distilled: &str,
         pipeline_version: &str,
+        source_digest: &str,
         token_count: i64,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -2447,6 +2482,7 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             drawer_id,
             distilled,
             pipeline_version,
+            source_digest,
             token_count,
             generated_at,
         )
@@ -2488,8 +2524,17 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_undistilled(pipeline_version)
     }
-    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.as_ref().drawers_with_representations()
+    fn rooms_with_stale_distilled_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        self.as_ref().rooms_with_stale_distilled_representations(pipeline_version)
+    }
+    fn drawers_with_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.as_ref().drawers_with_representations(pipeline_version)
     }
     fn set_subject_representation(
         &self,

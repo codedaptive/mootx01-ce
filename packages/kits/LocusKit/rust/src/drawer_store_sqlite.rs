@@ -370,6 +370,7 @@ impl DrawerStore for SqliteDrawerStore {
         drawer_id: &str,
         distilled: &str,
         pipeline_version: &str,
+        source_digest: &str,
         token_count: i64,
         generated_at: i64,
     ) -> Result<usize, LocusKitError> {
@@ -377,6 +378,7 @@ impl DrawerStore for SqliteDrawerStore {
             drawer_id,
             distilled,
             pipeline_version,
+            source_digest,
             token_count,
             generated_at,
         )
@@ -384,8 +386,17 @@ impl DrawerStore for SqliteDrawerStore {
     fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_undistilled(pipeline_version)
     }
-    fn drawers_with_representations(&self) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.0.drawers_with_representations()
+    fn rooms_with_stale_distilled_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, String)>, LocusKitError> {
+        self.0.rooms_with_stale_distilled_representations(pipeline_version)
+    }
+    fn drawers_with_representations(
+        &self,
+        pipeline_version: &str,
+    ) -> Result<Vec<(String, i64)>, LocusKitError> {
+        self.0.drawers_with_representations(pipeline_version)
     }
     fn list_adornment_minters(
         &self,
