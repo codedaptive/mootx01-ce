@@ -59,6 +59,7 @@ struct IndexCompositionPolicyAdapterTests {
             drawerId: drawer.id,
             distilled: distillate,
             pipelineVersion: "cdl-03-test",
+            sourceDigest: "cdl-03-digest",
             tokenCount: 12,
             at: now)
         #expect(written == 1)

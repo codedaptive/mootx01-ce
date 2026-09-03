@@ -5,7 +5,8 @@
 //!   1. v1_1-stamped estate with pre-v3 (version 2) schema: after migration the
 //!      composition_policy column is present and writable via store API.
 //!   2. Idempotence: calling the capsule twice on the same estate is a no-op.
-//!   3. Full chain from v1_0 through compile-catalog ends at v1_2.
+//!   3. Full chain from v1_0 through the compiled catalog ends at the current
+//!      format, v1_3 — the 1.2 → 1.3 capsule runs after this one.
 //!      (Gated on feature = "migration-v1-0-to-v1-1" being enabled — only when
 //!       the v1_1_to_v1_2 test crate is built with the floor-1-0 feature.)
 
@@ -18,7 +19,7 @@ use genius_locus_kit_migrations::{
     IndexCompositionColumnMigrationExt, IndexCompositionColumnMigrationError,
 };
 #[cfg(feature = "migration-v1-0-to-v1-1")]
-use genius_locus_kit_migrations::compiled_floor;
+use genius_locus_kit_migrations::{compiled_floor, DistilledSourceDigestColumnMigrationExt};
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
@@ -207,7 +208,7 @@ fn unregistered_handle_returns_storage_unavailable() {
 
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 #[test]
-fn v1_0_estate_runs_full_chain_to_v1_2() {
+fn v1_0_estate_runs_full_chain_to_v1_3() {
     use corpus_kit_providers::default_ensemble;
     use genius_locus_kit_migrations::SharedContentMigrationExt;
 
@@ -235,11 +236,22 @@ fn v1_0_estate_runs_full_chain_to_v1_2() {
         .run_index_composition_column_migration(&handle, NOW)
         .expect("index composition column migration must succeed");
 
+    let after_icm = EstateFormatStore::new(Arc::clone(&storage))
+        .read_if_present()
+        .expect("read format")
+        .expect("version set");
+    assert_eq!(after_icm, EstateFormatVersion::V1_2, "the 1.1→1.2 capsule stamps V1_2, not current");
+
+    // Run the v1_2 → v1_3 capsule: the chain ends at the current format.
+    coord
+        .run_distilled_source_digest_column_migration(&handle, NOW)
+        .expect("distilled source digest column migration must succeed");
     let final_stamp = EstateFormatStore::new(Arc::clone(&storage))
         .read_if_present()
         .expect("read format")
         .expect("version set");
-    assert_eq!(final_stamp, EstateFormatVersion::V1_2, "estate must be stamped V1_2 after full chain");
+    assert_eq!(final_stamp, EstateFormatVersion::V1_3, "estate must be stamped V1_3 after full chain");
+    assert_eq!(final_stamp, EstateFormatVersion::CURRENT);
 
     // Verify corpus_index_state is writable (composition_policy column present).
     let store = CorpusIndexStateStore::new(Arc::clone(&storage));
