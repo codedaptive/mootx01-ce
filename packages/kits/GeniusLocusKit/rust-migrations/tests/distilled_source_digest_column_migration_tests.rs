@@ -8,8 +8,8 @@
 //!   2. Idempotence: calling the capsule twice on the same estate is a no-op
 //!      that leaves the stamp at V1_3.
 //!   3. StorageUnavailable: an unregistered handle returns the error variant.
-//!   4. Full chain from v1_0 through the compiled catalog ends at V1_3.
-//!      (Gated on feature = "migration-v1-0-to-v1-1" being enabled.)
+//!   4. Full chain from v1_0 through the compiled catalog ends at CURRENT
+//!      (V1_4). (Gated on feature = "migration-v1-0-to-v1-1" being enabled.)
 
 use std::sync::Arc;
 
@@ -112,8 +112,10 @@ fn v1_2_estate_gains_digest_column_and_stamps_v1_3() {
         .run_distilled_source_digest_column_migration(&handle, NOW)
         .expect("migration must succeed on v1_2 estate");
 
+    // This capsule stamps V1_3 and no further; the 1.3 → 1.4 capsule owns the
+    // step to the current format.
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_3, "estate must be stamped V1_3");
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
+    assert!(EstateFormatVersion::V1_3 < EstateFormatVersion::CURRENT);
     assert_eq!(
         storage.current_schema_version_for(KIT_ID).expect("kit version"),
         SCHEMA_VERSION,
@@ -190,12 +192,14 @@ fn v1_0_estate_runs_full_chain_to_v1_3() {
 
     // The whole compiled chain, as every Rust host runs it: 1.0 → 1.1 (shared
     // content, which stamps V1_1), 1.1 → 1.2 (index composition column, which
-    // stamps V1_2), 1.2 → 1.3 (this capsule, which stamps V1_3).
+    // stamps V1_2), 1.2 → 1.3 (this capsule, which stamps V1_3), 1.3 → 1.4
+    // (index composition setting, which stamps V1_4).
     coord
         .run_migration_chain(&handle, NOW, default_ensemble())
         .expect("full chain must succeed on an empty v1_0 estate");
 
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_3, "full chain must end at V1_3");
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_4, "full chain must end at V1_4");
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(
         write_and_read_digest(&store, "00000000-0000-4000-8000-00000000c004").as_deref(),
         Some(source_digest(CONTENT).as_str())

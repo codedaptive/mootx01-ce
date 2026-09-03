@@ -25,6 +25,7 @@ use crate::basis_store::BasisStore;
 use crate::corpus_provider_counts_store::CorpusProviderCountsStore;
 use crate::document_store::CorpusDocumentStore;
 use crate::error::CorpusKitError;
+use crate::index_composition_policy::IndexCompositionPolicy;
 use crate::index_state_store::CorpusIndexStateStore;
 use persistence_kit::{ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration};
 use std::collections::BTreeSet;
@@ -52,12 +53,20 @@ pub enum CorpusOperatingMode {
     Attached,
 }
 
-/// Validated (mode, index-unit) configuration — the constructor-time gate
-/// that rejects invalid combinations BEFORE anything is written.
+/// Validated (mode, index-unit, composition-policy) configuration — the
+/// constructor-time gate that rejects invalid combinations BEFORE anything
+/// is written. Twin of Swift `CorpusContentConfiguration`.
+///
+/// `composition_policy` names which text each index lane consumes and is
+/// the id the engine records on every `corpus_index_state` row it writes.
+/// `new` starts at `IndexCompositionPolicy::current()`; GeniusLocusKit
+/// replaces it with the estate's stored setting through
+/// `with_composition_policy` before opening the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorpusContentConfiguration {
     mode: CorpusOperatingMode,
     index_unit: CorpusIndexUnitPolicy,
+    composition_policy: IndexCompositionPolicy,
 }
 
 impl CorpusContentConfiguration {
@@ -98,7 +107,17 @@ impl CorpusContentConfiguration {
             }
             _ => {}
         }
-        Ok(CorpusContentConfiguration { mode, index_unit })
+        Ok(CorpusContentConfiguration {
+            mode,
+            index_unit,
+            composition_policy: IndexCompositionPolicy::current(),
+        })
+    }
+
+    /// The same configuration under `composition_policy`. Every policy is
+    /// valid in both operating modes, so this cannot fail.
+    pub fn with_composition_policy(self, composition_policy: IndexCompositionPolicy) -> Self {
+        CorpusContentConfiguration { composition_policy, ..self }
     }
 
     pub fn mode(&self) -> CorpusOperatingMode {
@@ -107,6 +126,12 @@ impl CorpusContentConfiguration {
 
     pub fn index_unit(&self) -> CorpusIndexUnitPolicy {
         self.index_unit
+    }
+
+    /// The named composition policy the engine indexes under and records
+    /// on every index row.
+    pub fn composition_policy(&self) -> IndexCompositionPolicy {
+        self.composition_policy
     }
 
     /// Whether canonical-content mutation (put/remove) is permitted through
