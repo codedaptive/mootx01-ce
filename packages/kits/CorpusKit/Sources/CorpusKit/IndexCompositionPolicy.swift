@@ -11,12 +11,14 @@
 //   "lex=<value>;dense=<value>"
 //
 // The id is stored in corpus_index_state.composition_policy so the
-// engine can detect a configuration mismatch (e.g. a policy change
-// after an estate is opened) at open time and reject the mismatch.
+// engine can detect a configuration mismatch at open time and reject it.
 //
-// Policy selector: the MOOT_INDEX_COMPOSITION environment variable at
-// estate open. Absent or unrecognised → .current (the build default).
-// Same posture as MOOT_BENCH_GOLD_MINTER (dark scratch-path selector).
+// Which policy an estate runs under is a stored estate setting (LocusKit
+// manifest key `index_composition_policy`), read by GeniusLocusKit at
+// every open. The MOOT_INDEX_COMPOSITION environment variable is consulted
+// only when that setting is first seeded (estate creation and the
+// estate-format 1.3 to 1.4 capsule); a running estate changes policy only
+// through `mootx01 db composition --set`, which rebuilds every index lane.
 //
 // Gauntlet cells:
 //   A — lex=original;  dense=distilled           (.current, today's production behaviour)
@@ -95,9 +97,9 @@ public struct IndexCompositionPolicy: Sendable, Equatable, Codable {
 
     // MARK: - Named policies
 
-    /// Production default — original text for BM25, distillate for dense.
-    /// Matches today's hard-coded behaviour before CDL-03 (Stream F / cell A).
-    /// Estates opened without MOOT_INDEX_COMPOSITION use this policy.
+    /// Production default — original text for BM25, distillate for dense
+    /// (cell A). An estate whose setting was seeded without
+    /// MOOT_INDEX_COMPOSITION in the creating process runs this policy.
     public static let current = IndexCompositionPolicy(
         lexicalSource: .original,
         denseSource: .distilled)
@@ -122,10 +124,11 @@ public struct IndexCompositionPolicy: Sendable, Equatable, Codable {
         lexicalSource: .original,
         denseSource: .original)
 
-    // MARK: - Environment-variable selector
+    // MARK: - Policy id parser
 
-    /// Parse an `IndexCompositionPolicy` from the value of the
-    /// `MOOT_INDEX_COMPOSITION` environment variable.
+    /// Parse an `IndexCompositionPolicy` from its id string. The stored
+    /// estate setting, the `mootx01 db composition --set` argument, and the
+    /// creation-time `MOOT_INDEX_COMPOSITION` seed all use this form.
     ///
     /// Accepted values (case-sensitive, matching the `id` format):
     ///   - `"lex=original;dense=distilled"` (default / cell A)
@@ -135,8 +138,9 @@ public struct IndexCompositionPolicy: Sendable, Equatable, Codable {
     ///   - `"lex=original;dense=original"` (cell E)
     ///   - Any `"lex=<lex>;dense=<dense>"` string whose parts are valid rawValues.
     ///
-    /// Returns nil for unrecognised or malformed strings. The caller falls
-    /// back to `.current`.
+    /// Returns nil for unrecognised or malformed strings; the caller decides
+    /// whether that means "refuse" (a stored setting, a `--set` argument) or
+    /// "seed `.current`" (an unset or malformed creation-time seed).
     public static func fromEnvironmentValue(_ value: String) -> IndexCompositionPolicy? {
         // Expected format: "lex=<lexValue>;dense=<denseValue>"
         let parts = value.split(separator: ";", maxSplits: 2)

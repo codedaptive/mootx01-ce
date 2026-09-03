@@ -44,6 +44,15 @@ mod distilled_source_digest_column_migration;
 #[cfg(feature = "migration-v1-2-to-v1-3")]
 pub use distilled_source_digest_column_migration::*;
 
+// GLK 1.3 → 1.4 capsule: stores the index composition setting (manifest key
+// index_composition_policy) on estates written before the setting existed
+// (parity with the Swift GLKMigrationV1_3ToV1_4 target).
+#[cfg(feature = "migration-v1-3-to-v1-4")]
+mod index_composition_setting_migration;
+
+#[cfg(feature = "migration-v1-3-to-v1-4")]
+pub use index_composition_setting_migration::*;
+
 use genius_locus_kit::estate_format::EstateFormatVersion;
 
 /// The compiled historical chain, run in format order. Every capsule reads
@@ -53,7 +62,8 @@ use genius_locus_kit::estate_format::EstateFormatVersion;
 /// `GLKMigrationCatalog.prepare` dispatch: 1.0 -> 1.1 (distillation storage
 /// then shared content, which stamps 1.1), then 1.1 -> 1.2 (index composition
 /// column, which stamps 1.2), then 1.2 -> 1.3 (distilled source digest column,
-/// which stamps 1.3).
+/// which stamps 1.3), then 1.3 -> 1.4 (index composition setting, which
+/// stamps 1.4).
 pub trait MigrationChainExt {
     /// Run every compiled capsule for `handle`, oldest first. `models` is the
     /// embedding ensemble the shared-content capsule rebuilds the derived
@@ -90,6 +100,11 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
             self.run_distilled_source_digest_column_migration(handle, now_millis)
                 .map_err(|error| format!("distilled-source-digest-column migration: {error:?}"))?;
         }
+        #[cfg(feature = "migration-v1-3-to-v1-4")]
+        {
+            self.run_index_composition_setting_migration(handle, now_millis)
+                .map_err(|error| format!("index-composition-setting migration: {error:?}"))?;
+        }
         Ok(())
     }
 }
@@ -99,7 +114,7 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
-        // Floor covers the 1.0→1.1, 1.1→1.2, and 1.2→1.3 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
     #[cfg(all(
@@ -107,7 +122,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Floor covers the 1.1→1.2 and 1.2→1.3 capsules.
+        // Floor covers the 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
         return Some(EstateFormatVersion::V1_1);
     }
     #[cfg(all(
@@ -116,13 +131,24 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Only the 1.2→1.3 capsule is compiled.
+        // Floor covers the 1.2→1.3 and 1.3→1.4 capsules.
         return Some(EstateFormatVersion::V1_2);
+    }
+    #[cfg(all(
+        feature = "migration-v1-3-to-v1-4",
+        not(feature = "migration-v1-2-to-v1-3"),
+        not(feature = "migration-v1-1-to-v1-2"),
+        not(feature = "migration-v1-0-to-v1-1")
+    ))]
+    {
+        // Only the 1.3→1.4 capsule is compiled.
+        return Some(EstateFormatVersion::V1_3);
     }
     #[cfg(all(
         not(feature = "migration-v1-0-to-v1-1"),
         not(feature = "migration-v1-1-to-v1-2"),
-        not(feature = "migration-v1-2-to-v1-3")
+        not(feature = "migration-v1-2-to-v1-3"),
+        not(feature = "migration-v1-3-to-v1-4")
     ))]
     {
         None

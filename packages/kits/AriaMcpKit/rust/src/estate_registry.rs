@@ -752,6 +752,16 @@ fn wire_inmemory_semantic_recall(
     // fresh UUID — this storage holds no LocusKit rows and is never read via
     // the DrawerStore path, so the estate_id is a logging hint only.
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // An in-memory estate is created here, so this is where its index
+    // composition setting is seeded (the creation-time seed) before the
+    // format stamp that vouches for it; the wiring below reads it back like
+    // every other open.
+    {
+        let guard = coord.lock().unwrap();
+        guard
+            .seed_index_composition_policy_if_absent(handle)
+            .map_err(|error| format!("index composition setting seed: {error:?}"))?;
+    }
     EstateFormatStore::new(Arc::clone(&storage))
         .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
         .map_err(|error| format!("estate-format stamp: {error:?}"))?;
@@ -768,15 +778,25 @@ fn wire_inmemory_semantic_recall(
             .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
             .clone()
     };
+    // The index composition policy is the estate's stored setting, read at
+    // every open and threaded to both the configuration (the id recorded on
+    // every index row) and the content source (which text each lane gets).
+    let composition_policy = {
+        let guard = coord.lock().unwrap();
+        guard
+            .active_index_composition_policy(handle)
+            .map_err(|e| format!("index composition setting: {e:?}"))?
+    };
     let config = CorpusContentConfiguration::new(
         CorpusOperatingMode::Attached,
         CorpusIndexUnitPolicy::WholeContent,
     )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    .map_err(|e| format!("engine configuration: {e:?}"))?
+    .with_composition_policy(composition_policy);
     let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
+            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
@@ -868,15 +888,25 @@ fn wire_postgres_semantic_recall(
             .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
             .clone()
     };
+    // The index composition policy is the estate's stored setting, read at
+    // every open and threaded to both the configuration (the id recorded on
+    // every index row) and the content source (which text each lane gets).
+    let composition_policy = {
+        let guard = coord.lock().unwrap();
+        guard
+            .active_index_composition_policy(handle)
+            .map_err(|e| format!("index composition setting: {e:?}"))?
+    };
     let config = CorpusContentConfiguration::new(
         CorpusOperatingMode::Attached,
         CorpusIndexUnitPolicy::WholeContent,
     )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    .map_err(|e| format!("engine configuration: {e:?}"))?
+    .with_composition_policy(composition_policy);
     let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
+            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
@@ -952,15 +982,25 @@ fn wire_sqlite_semantic_recall(
             .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
             .clone()
     };
+    // The index composition policy is the estate's stored setting, read at
+    // every open and threaded to both the configuration (the id recorded on
+    // every index row) and the content source (which text each lane gets).
+    let composition_policy = {
+        let guard = coord.lock().unwrap();
+        guard
+            .active_index_composition_policy(handle)
+            .map_err(|e| format!("index composition setting: {e:?}"))?
+    };
     let config = CorpusContentConfiguration::new(
         CorpusOperatingMode::Attached,
         CorpusIndexUnitPolicy::WholeContent,
     )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    .map_err(|e| format!("engine configuration: {e:?}"))?
+    .with_composition_policy(composition_policy);
     let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
+            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;

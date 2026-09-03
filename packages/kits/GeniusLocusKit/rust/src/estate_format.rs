@@ -26,7 +26,11 @@ impl EstateFormatVersion {
     /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
     /// v18) reaches populated estates through the migration catalog.
     pub const V1_3: Self = Self { major: 1, minor: 3 };
-    pub const CURRENT: Self = Self::V1_3;
+    /// Format 1.4: the index composition policy is a stored estate setting
+    /// (LocusKit manifest key `index_composition_policy`), seeded on every
+    /// populated estate through the migration catalog.
+    pub const V1_4: Self = Self { major: 1, minor: 4 };
+    pub const CURRENT: Self = Self::V1_4;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

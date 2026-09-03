@@ -271,11 +271,11 @@ struct EstateStatusSyncTests {
                 "Total non-erased count must be 1; got:\n\(body)")
     }
 
-    // MARK: - CDL-03: index_composition_policy field
+    // MARK: - index_composition_policy field
 
-    /// estate_status must always include the "index_composition_policy:" field (CDL-03).
-    /// For a GLK estate opened without MOOT_INDEX_COMPOSITION, the policy is the
-    /// production default: cell A (lex=original;dense=distilled).
+    /// estate_status must always include the "index_composition_policy:" field:
+    /// the estate's stored setting, read through the wired Corpus, or "none"
+    /// when no Corpus is wired.
     @Test func indexCompositionPolicy_fieldPresent() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "icp-field-present")
         let result = try await dispatcher.dispatch(
@@ -284,7 +284,7 @@ struct EstateStatusSyncTests {
         )
         let body = text(of: result)
         #expect(body.contains("index_composition_policy: "),
-                "estate_status must include 'index_composition_policy:' field (CDL-03); got:\n\(body)")
+                "estate_status must include the 'index_composition_policy:' field; got:\n\(body)")
     }
 
     /// A locusOnly estate (no CorpusKit engine wired) must report
