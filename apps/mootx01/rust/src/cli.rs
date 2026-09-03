@@ -58,8 +58,8 @@ pub enum BotLinkSub {
 /// A fully parsed invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// §4.1 serve [--db <name>] [--http <port|auto>]
-    Serve { db: Option<String>, http: Option<HttpMode> },
+    /// §4.1 serve [--db <name>] [--http <port|auto>] [--frozen]
+    Serve { db: Option<String>, http: Option<HttpMode>, frozen: bool },
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
     ///              [--mode server|skills|plugin]
     ///              [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon]
@@ -380,10 +380,11 @@ fn take_value(it: &mut Args, flag: &str) -> Result<String, UsageError> {
 }
 
 fn parse_serve(it: &mut Args) -> Result<Command, UsageError> {
-    let (mut db, mut http) = (None, None);
+    let (mut db, mut http, mut frozen) = (None, None, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = Some(take_value(it, "--db")?),
+            "--frozen" => frozen = true,
             "--http" => {
                 let v = take_value(it, "--http")?;
                 http = Some(if v == "auto" {
@@ -400,7 +401,7 @@ fn parse_serve(it: &mut Args) -> Result<Command, UsageError> {
             other => return Err(unexpected(other, "serve")),
         }
     }
-    Ok(Command::Serve { db, http })
+    Ok(Command::Serve { db, http, frozen })
 }
 
 fn parse_drain(it: &mut Args) -> Result<Command, UsageError> {
@@ -974,11 +975,12 @@ pub fn subcommand_usage(cmd: &str) -> String {
     match cmd {
         "serve" => "Start the ARIA MCP server (stdio, or resident HTTP when --http / MOOTX01_HTTP_PORT is set).\n\
             \n\
-            USAGE: mootx01 serve [--db <name>] [--http <port|auto>]\n\
+            USAGE: mootx01 serve [--db <name>] [--http <port|auto>] [--frozen]\n\
             \n\
             OPTIONS:\n\
             \x20 --db <name>             Named estate to serve. Default: active estate.\n\
-            \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.".into(),
+            \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.\n\
+            \x20 --frozen                Serve the estate as a read-only snapshot (also MOOTX01_FROZEN=1): no background workers, no recall traces or reward marks, mutating tools refused. stdio only — refused with --http.".into(),
         "install" => "Wire mootx01 into MCP clients.\n\
             \n\
             USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off] [--reuse-db | --replace-db] [--no-encrypt]\n\
@@ -1252,18 +1254,22 @@ mod tests {
 
     #[test]
     fn serve_defaults() {
-        assert_eq!(p(&["serve"]).unwrap(), Command::Serve { db: None, http: None });
+        assert_eq!(p(&["serve"]).unwrap(), Command::Serve { db: None, http: None, frozen: false });
     }
 
     #[test]
     fn serve_flags() {
         assert_eq!(
             p(&["serve", "--db", "work", "--http", "4242"]).unwrap(),
-            Command::Serve { db: Some("work".into()), http: Some(HttpMode::Port(4242)) }
+            Command::Serve { db: Some("work".into()), http: Some(HttpMode::Port(4242)), frozen: false }
         );
         assert_eq!(
             p(&["serve", "--http", "auto"]).unwrap(),
-            Command::Serve { db: None, http: Some(HttpMode::Auto) }
+            Command::Serve { db: None, http: Some(HttpMode::Auto), frozen: false }
+        );
+        assert_eq!(
+            p(&["serve", "--frozen", "--db", "clone"]).unwrap(),
+            Command::Serve { db: Some("clone".into()), http: None, frozen: true }
         );
     }
 

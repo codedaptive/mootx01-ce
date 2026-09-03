@@ -13,6 +13,12 @@
 //!   --http auto   → hunt 4242 upward to the first free port (§3)
 //!   --http <port> → exact; busy means exit 1, never hunt (§3)
 //!   (neither)     → MOOTX01_HTTP_PORT env if the caller set it, else stdio
+//!   --frozen      → MOOTX01_FROZEN=1 (the runtime's Dispatcher reads it and
+//!                   refuses mutating tools, drops recall traces and reward
+//!                   marks); this command spawns no detached dreamer or
+//!                   drainer, never forwards to a live resident, and refuses
+//!                   the combination with HTTP (the resident's autonomic
+//!                   governor is a background worker)
 //!   MOOTX01_BACKEND=inmemory → skip SQLite path resolution; the runtime's
 //!                   from_env selects InMemory (C1 RAM accuracy shape)
 //!
@@ -22,6 +28,8 @@
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::ExitCode;
+
+use aria_mcp::estate_posture::EstatePosture;
 
 use crate::cli::HttpMode;
 use crate::core::daemon_client;
@@ -72,11 +80,24 @@ fn lock_memory_from_swap() {
     // Windows: per-region VirtualLock only; not applied process-wide here.
 }
 
-pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
+pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> ExitCode {
     // Keep the daemon's memory (incl. decrypted estate content held in RAM) out
     // of the swap file. Best-effort; the estate is encrypted at rest regardless.
     lock_memory_from_swap();
     let data = paths::data_dir();
+
+    // Frozen posture: `--frozen` wins, else MOOTX01_FROZEN=1. The flag is
+    // translated into the environment variable so the runtime's Dispatcher,
+    // constructed inside `aria_mcp::runtime::run`, derives the same posture
+    // — the flag → env contract this module already follows for --db/--http.
+    let posture = EstatePosture::resolve(
+        frozen_flag,
+        std::env::var(EstatePosture::ENVIRONMENT_KEY).ok().as_deref(),
+    );
+    let frozen = posture.is_frozen();
+    if frozen {
+        std::env::set_var(EstatePosture::ENVIRONMENT_KEY, "1");
+    }
 
     // Gold miner (ADORNMENTLIB_SPEC 0.5.0): install the resident in-process
     // engine at startup — resident always, never load-on-demand. The engine
@@ -265,6 +286,15 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
             if same_estate {
                 let port = daemon_client::resolved_port();
                 if daemon_client::alive(port) {
+                    // A frozen serve never forwards: the resident is a live,
+                    // mutating server and forwarding would hand the client
+                    // exactly what the flag promised it would not get.
+                    if frozen {
+                        eprintln!(
+                            "mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:{port}; a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone."
+                        );
+                        return ExitCode::FAILURE;
+                    }
                     eprintln!(
                         "mootx01: a live resident already serves this estate \u{2014} forwarding stdio to the daemon on 127.0.0.1:{port} instead of opening a second writer (T4)"
                     );
@@ -275,6 +305,18 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
                 );
             }
         }
+    }
+
+    // Frozen + HTTP is refused rather than served half-frozen: the resident
+    // daemon's autonomic governor is a background worker by definition.
+    if frozen {
+        if bound_port.is_some() {
+            eprintln!(
+                "mootx01 serve fatal: --frozen / MOOTX01_FROZEN=1 cannot be combined with --http / MOOTX01_HTTP_PORT \u{2014} the resident daemon runs background workers. Serve a frozen estate over stdio."
+            );
+            return ExitCode::FAILURE;
+        }
+        eprintln!("mootx01 serve: {}", EstatePosture::FROZEN_LOG_LINE);
     }
 
     // §3: whatever port the daemon binds is written to daemon.port and
@@ -322,7 +364,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     // has pending items from a prior session, spawn a detached dreamer so
     // dreaming catches up without waiting for the next recall event.
     if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-        if dreaming_queue_has_pending(&estate) {
+        if dreaming_queue_has_pending(&estate) && background_worker_permitted(posture, "startup dreamer") {
             eprintln!("mootx01: dreaming queue has pending items from prior session — spawning detached dreamer (T10 startup)");
             spawn_detached_dream();
         }
@@ -385,7 +427,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
         // drains to empty, or stands by if a resident has since taken over). Only
         // spawn when the maildir actually has pending/in-flight jobs.
         if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-            if encode_queue_has_pending(&estate) {
+            if encode_queue_has_pending(&estate) && background_worker_permitted(posture, "encode drainer") {
                 spawn_detached_drain();
             }
             //  on-exit dreaming trigger: if the dreaming
@@ -393,7 +435,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
             // spawn a detached `dream` finisher so dreaming work is not lost when
             // the stdio serve exits. Independent of the encode drain — both can be
             // held simultaneously.
-            if dreaming_queue_has_pending(&estate) {
+            if dreaming_queue_has_pending(&estate) && background_worker_permitted(posture, "exit dreamer") {
                 eprintln!("mootx01: dreaming queue has pending items on exit — spawning detached dreamer (T10 exit)");
                 spawn_detached_dream();
             }
@@ -444,6 +486,19 @@ fn dreaming_queue_has_pending(estate_path: &str) -> bool {
         return false;
     }
     dir.join(format!("{}.queue.sqlite", stem)).exists()
+}
+
+/// Whether this serve may launch a detached background worker (dreamer or
+/// drainer). Every spawn site consults this before spawning; a frozen serve
+/// answers false and says so once per site, so pending work is visible in
+/// the log but never picked up by a process that outlives the snapshot.
+/// Mirrors Swift `ServeCommand.backgroundWorkerPermitted`.
+fn background_worker_permitted(posture: EstatePosture, worker: &str) -> bool {
+    if !posture.is_frozen() {
+        return true;
+    }
+    eprintln!("mootx01 serve: frozen — {worker} not spawned; pending work is left untouched");
+    false
 }
 
 /// Spawn `mootx01 dream` detached to run one REM-ALPHA cycle after a
@@ -528,6 +583,37 @@ fn remove_port_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_never_permits_a_background_worker() {
+        assert!(background_worker_permitted(EstatePosture::Live, "startup dreamer"));
+        assert!(!background_worker_permitted(EstatePosture::Frozen, "startup dreamer"));
+        assert!(!background_worker_permitted(EstatePosture::Frozen, "encode drainer"));
+    }
+
+    /// Source-shape guard: every detached-worker spawn in this file sits
+    /// under `background_worker_permitted`. A new spawn site added without
+    /// the guard fails here, not in a benchmark.
+    #[test]
+    fn every_detached_worker_spawn_is_guarded() {
+        let source = include_str!("serve.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let mut sites = 0;
+        for (i, line) in lines.iter().enumerate() {
+            // Skip comments and this test's own string literals.
+            let is_call = (line.contains("spawn_detached_dream();") || line.contains("spawn_detached_drain();"))
+                && !line.trim_start().starts_with("//")
+                && !line.contains("contains(");
+            if !is_call {
+                continue;
+            }
+            sites += 1;
+            let window = lines[i.saturating_sub(6)..i].join("\n");
+            assert!(window.contains("background_worker_permitted(posture"), "spawn at serve.rs:{} is not under the frozen gate", i + 1);
+        }
+        // Startup dreamer, exit drainer, exit dreamer.
+        assert_eq!(sites, 3, "expected 3 spawn sites");
+    }
 
     #[test]
     fn hunt_skips_a_busy_port() {
