@@ -46,6 +46,19 @@ struct MinterRecipeTests {
         #expect(AppleFoundationEngine.ifAvailable()?.identity ?? MinterRecipe.apple.id == MinterRecipe.apple.id)
     }
 
+    @Test("Core AI NuExtract B1 Q8 recipe pins model geometry and budget")
+    func nuextractB1Q8Recipe() {
+        let recipe = MinterRecipe.nuextractTinyV15B1Q8
+        #expect(recipe.id == "nuextract-tiny-v1.5-b1-q8-p1-s1")
+        #expect(recipe.output == .json)
+        #expect(recipe.parameters["batch_width"] == "1")
+        #expect(recipe.parameters["max_new_tokens"] == "256")
+        #expect(recipe.parameters["style"] == "nuextract")
+        #expect(recipe.chatTemplate.contains("<|input|>"))
+        #expect(recipe.chatTemplate.contains("{input}"))
+        #expect(recipe.chatTemplate.contains("<|output|>"))
+    }
+
     @Test("normalizer text fixtures (twinned with Rust)")
     func normalizerTextFixtures() {
         #expect(normalizeMintOutput("```\n- the claim<|im_end|>\n```", kind: .text) == "the claim")
