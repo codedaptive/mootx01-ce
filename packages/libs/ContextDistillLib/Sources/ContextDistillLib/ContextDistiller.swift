@@ -303,10 +303,12 @@ public struct ContextDistiller: Sendable {
     ///
     /// - Parameters:
     ///   - input: Source text and raw enrichment trailer (split before this call).
-    ///   - converter: The converter variant to apply. Currently only
-    ///     ``ContextDistillConverter/intentSpanV22`` is supported.
+    ///   - converter: The converter variant to apply. Pass
+    ///     ``ContextDistillConverter/intentSpanV22`` for the v22 authority-closure
+    ///     converter, or ``ContextDistillConverter/intentSpanV23Attributed`` for
+    ///     the v23.2 attributed peer-dialogue converter.
     /// - Returns: A ``DistilledRepresentation`` whose fields match the oracle
-    ///   JSONL schema for the intent-span candidate.
+    ///   JSONL schema for the chosen converter.
     ///
     /// Mirrors Python:
     /// ```python
@@ -328,11 +330,25 @@ public struct ContextDistiller: Sendable {
         // --- Intent-span selection ---
         // Mirrors Python: intent_text, intent_spans, intent_details, intent_trailer
         //                 = intent_span(record.content, trailer)
-        let spanResult = intentSpan(source, trailer: trailer)
-        let intentText    = spanResult.core
+        let useAttributedPeerDialogue = converter == .intentSpanV23Attributed
+        let spanResult = intentSpan(
+            source,
+            trailer: trailer,
+            peerDialogue: useAttributedPeerDialogue
+        )
+        var intentText    = spanResult.core
         let intentSpans   = spanResult.selectedSpans
-        let intentDetails = spanResult.selectionDetails
+        var intentDetails = spanResult.selectionDetails
         let intentTrailer = spanResult.projectedTrailer
+
+        if useAttributedPeerDialogue {
+            if intentDetails["mode"] as? String == "peer-dialogue" {
+                intentText = renderPeerAttributedProse(intentText)
+                intentDetails["rendering"] = "inline-attributed-prose"
+            } else {
+                intentDetails["rendering"] = "source-exact"
+            }
+        }
 
         // --- _combine ---
         // Mirrors Python: combined = _combine(intent_text, intent_trailer)
