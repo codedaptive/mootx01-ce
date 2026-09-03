@@ -332,6 +332,7 @@ struct DistillationCycleTests {
             drawerId: itemID,
             distilled: "stale rendering",
             pipelineVersion: "stale-pipeline-version",
+            sourceDigest: "stale-digest",
             tokenCount: 2,
             at: t0)
 
@@ -428,12 +429,15 @@ struct DistillationCycleTests {
         }
 
         // Distill the first 199 via distillItem directly (bypasses the sweep
-        // skip-gate so we control which drawer remains undistilled).
+        // skip-gate so we control which drawer remains undistilled). Each
+        // call receives the drawer's own content: the stored digest is the
+        // digest of that content, so the 199 rows read as current and only
+        // the 200th is eligible.
         let distillFn = stubFn(rendering: "rendered", fingerprint: nonZeroFingerprint256)
-        for id in ids.prefix(199) {
+        for (i, id) in ids.prefix(199).enumerated() {
             _ = try await kit.distillItem(
                 handle: handle, drawerID: id,
-                content: "Item. Sentence two. Sentence three.",
+                content: "Item \(i). Sentence two. Sentence three.",
                 distillFn: distillFn, now: t0)
         }
 

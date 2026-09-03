@@ -3179,6 +3179,7 @@ public extension GeniusLocusKit {
             distilledPipelineVersion: d.distilledPipelineVersion,
             distilledTokenCount: d.distilledTokenCount,
             distilledAt: d.distilledAt,
+            distilledSourceDigest: d.distilledSourceDigest,
             // Subject trio must survive the shared-content rebuild — the
             // PR-03 dense row reads it off recall hits; dropping it here
             // rendered every hit as "(no subject)" regardless of storage.
