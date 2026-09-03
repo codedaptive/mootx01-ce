@@ -15,6 +15,11 @@ installs. One tool, three roles:
   no background workers, no recall traces or reward marks, every mutating
   tool refused, `moot_estate_status` reports `frozen: true`. Benchmarks and
   debugging sessions use it so a served estate never changes under them.
+- **`mootx01 redistill [--db <name>] [--dry-run]`** — force-redistill every
+  active item of an estate with the active converter and rebuild both recall
+  lanes, from the terminal without a server; the same operation as the
+  `moot_redistill` MCP tool. `--dry-run` reports how many rows are stale under
+  the active converter and writes nothing.
 - **`mootx01 proxy --http <url>`** — a stdio↔HTTP bridge for clients whose config
   can't take a raw HTTP URL (Claude Desktop), so they route through the one
   resident daemon and share its single-writer guarantee and telemetry.
