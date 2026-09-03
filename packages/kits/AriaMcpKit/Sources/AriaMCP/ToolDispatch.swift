@@ -92,6 +92,16 @@ public struct ToolDispatcher: Sendable {
     /// reset logic. See `SensitivityGrantLedger`'s own doc comment.
     let sensitivityUnlockLedger: SensitivityGrantLedger
 
+    /// Live or frozen. A frozen dispatcher refuses every tool in
+    /// `ToolMutationInventory.frozenRefusedTools`, runs `moot_memory_search`
+    /// with internal origin (no recall-trace rows, no dreaming enqueue), and
+    /// skips the reward mark in `noteUsage`. Resolved once at construction:
+    /// from the explicit `posture:` argument when the host passes one
+    /// (`mootx01 serve --frozen`), else from `MOOTX01_FROZEN` in the injected
+    /// environment. Forwarded unchanged by `registering(_:)` and
+    /// `withMonitoringControl(_:)`, so one serve process has one posture.
+    public let posture: EstatePosture
+
     /// Injection seam for daemon telemetry monitoring state.
     ///
     /// Nil when the host has no stats store wired (stdio mode, test harnesses,
@@ -210,7 +220,8 @@ public struct ToolDispatcher: Sendable {
                 monitoringControl: (any MonitoringControl)? = nil,
                 adornmentStatusProvider: AdornmentOperationalStatusProvider? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
-                modeSessionState: ModeSessionState = ModeSessionState()) {
+                modeSessionState: ModeSessionState = ModeSessionState(),
+                posture: EstatePosture? = nil) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
@@ -229,6 +240,9 @@ public struct ToolDispatcher: Sendable {
         // a custom dict with or without the pin key as needed.
         self.benchClock = BenchClock(environment: environment)
         self.modeSessionState = modeSessionState
+        // Hosts that parse `--frozen` pass the posture explicitly; everyone
+        // else (the aria-mcp dev server, tests) gets the environment twin.
+        self.posture = posture ?? EstatePosture.resolve(frozenFlag: false, environment: environment)
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -252,7 +266,8 @@ public struct ToolDispatcher: Sendable {
                               updateAdvisoryProvider: updateAdvisoryProvider,
                               environment: environment,
                               benchClock: benchClock,
-                              modeSessionState: modeSessionState)
+                              modeSessionState: modeSessionState,
+                              posture: posture)
     }
 
     /// Return a copy of this dispatcher with `control` wired as the monitoring
@@ -271,7 +286,8 @@ public struct ToolDispatcher: Sendable {
                        updateAdvisoryProvider: updateAdvisoryProvider,
                        environment: environment,
                        benchClock: benchClock,
-                       modeSessionState: modeSessionState)
+                       modeSessionState: modeSessionState,
+                       posture: posture)
     }
 
     /// Private designated initializer carrying an explicit estate map,
@@ -291,7 +307,8 @@ public struct ToolDispatcher: Sendable {
         updateAdvisoryProvider: (@Sendable () async -> String?)?,
         environment: [String: String],
         benchClock: BenchClock,
-        modeSessionState: ModeSessionState
+        modeSessionState: ModeSessionState,
+        posture: EstatePosture
     ) {
         self.kit = kit
         self.handle = handle
@@ -308,6 +325,7 @@ public struct ToolDispatcher: Sendable {
         self.environment = environment
         self.benchClock = benchClock
         self.modeSessionState = modeSessionState
+        self.posture = posture
     }
 
     // MARK: - Build serial derivation
@@ -470,6 +488,16 @@ public struct ToolDispatcher: Sendable {
             // Intercepted before any runner fires so no side effects occur.
             if try optionalBool(args["teachme"], argument: "teachme") == true {
                 return Self.textResult(TeachmeGuides.guide(for: name))
+            }
+
+            // Frozen posture: refuse every writing, mutating, or deleting tool
+            // before any runner fires and before the session state records
+            // the call, so the refusal leaves no side effect at all. Returned
+            // as an isError tool result (not a JSON-RPC error) for the same
+            // reason substrate refusals are: the client keeps the call id and
+            // the model sees the reason.
+            if posture == .frozen, ToolMutationInventory.frozenRefusedTools.contains(name) {
+                return Self.errorResult(EstatePosture.refusalMessage(tool: name))
             }
 
             // Decode the optional `mode` argument (modes are fail-open by spec).
@@ -1953,7 +1981,12 @@ extension ToolDispatcher {
             limit: limit,
             fallback: .allowDegraded,
             queryText: query,
-            origin: .external,  // B-10a: ARIA boundary is external origin
+            // B-10a: the ARIA boundary is the one external-origin caller, and
+            // external origin is what makes the director write recall-trace
+            // rows and enqueue a dreaming item. A frozen dispatcher passes
+            // internal origin instead, so a frozen search leaves no trace and
+            // no dreaming job — the same path every internal reader takes.
+            origin: posture == .frozen ? .internal : .external,
             // W2.5 Track R(a): door identity recorded on every reward-cycle
             // trace row this recall writes. The director derives the
             // composition ("unionBest/<scoring>") since no recipe-level
@@ -2193,7 +2226,7 @@ extension ToolDispatcher {
             // The composed text is: header\nrow1\nrow2\n...\ncontrol-lines
             // We need to insert explain lines after each row. Parse the text,
             // find the row lines (skip header and control lines), and insert.
-            var textLines = finalText.components(separatedBy: "\n")
+            let textLines = finalText.components(separatedBy: "\n")
             // Identify the header line (always first) and control lines (suffix).
             // Rows are the middle section. We walk backward from candidateRows.
             // Simple approach: rebuild from scratch to avoid parse fragility.
@@ -2590,6 +2623,10 @@ extension ToolDispatcher {
     /// Failures are silenced — a reward-marking failure must never break the
     /// dereference verb's primary result.
     private func noteUsage(_ rowID: String, handle: EstateHandle) async {
+        // Frozen: the ledger still records what a search surfaced (it is
+        // session memory, not estate state), but the reward mark is a
+        // persistent write and is skipped.
+        guard posture == .live else { return }
         guard await recallLedger.entry(for: rowID) != nil else { return }
         // Use current wall time as `now` so the retention window is
         // [Date() - 30 days, Date()]. The RecallDirector stamps trace rows with
@@ -3510,6 +3547,10 @@ extension ToolDispatcher {
             // can verify which gauntlet cell the estate is running under.
             // "none" for locusOnly estates (no Corpus engine wired).
             "index_composition_policy: \(await kit.indexCompositionPolicy(for: handle)?.id ?? "none")",
+            // Frozen posture of this serve (`mootx01 serve --frozen` /
+            // MOOTX01_FROZEN=1): true means mutating tools are refused and the
+            // read path writes nothing. A process property, not estate state.
+            "frozen: \(posture.statusValue)",
             "fdc_recalculation: \(fdcRecalculationState)",
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
@@ -3616,7 +3657,7 @@ extension ToolDispatcher {
     /// a false enabled/disabled state. Mirrors the B-6 honesty discipline.
     ///
     /// Permission tier: `ask` (it can mutate monitoring state when `enabled` is
-    /// supplied — classified in PermissionsWriter.mutationTools, out-of-band sensitivity grants).
+    /// supplied — classified in ToolMutationInventory.mutationTools, out-of-band sensitivity grants).
     func runMonitoringStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
         guard let control = monitoringControl else {
             // No stats store wired — honest "unavailable" response. Never say
