@@ -1512,9 +1512,9 @@ mod tests {
     }
 
     /// `--backfill-only` runs only the four data-dir migration steps
-    /// (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence);
-    /// no network, no service manager, no prompts. Used by scripted and
-    /// benchmark estates.
+    /// (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation
+    /// convergence); no network, no service manager, no prompts.
+    /// Exits non-zero when any step fails. Used by scripted and benchmark estates.
     #[test]
     fn upgrade_backfill_only_parses() {
         assert_eq!(
