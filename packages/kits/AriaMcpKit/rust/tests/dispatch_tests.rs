@@ -262,7 +262,7 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_77() {
+fn tools_list_count_is_78() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -296,10 +296,10 @@ fn tools_list_count_is_77() {
     //       moot_rebuild_status, the derived-state rebuild condition surface)
     // Use build_tool_list_with_flags with memory_on=false for deterministic count:
     // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 78.
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 79.
     let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 77, "expected 77 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 78, "expected 78 tools; got {}", arr.len());
 }
 
 #[test]
@@ -350,10 +350,11 @@ fn tools_list_name_set_matches_expected_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (14) — list_lenses + list_recipes + synthesize + run_migration
+        // Recipe (15) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_connected
         //               + recall_shaped + recall_vague + dream
-        //               + distill + recall_distilled + hunt_contradictions
+        //               + distill + redistill + recall_distilled
+        //               + hunt_contradictions
         //               + recall_walk (D10: escalation-ladder recall)
         //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
         //                moot_recollect is a notice-only stub, not listed)
@@ -369,6 +370,7 @@ fn tools_list_name_set_matches_expected_names() {
         "moot_recall_vague",
         "moot_dream",
         "moot_distill",
+        "moot_redistill",
         "moot_recall_distilled",
         "moot_hunt_contradictions",
         "moot_recall_walk",
@@ -6195,7 +6197,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 77, "vault-on must produce 77 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, and moot_rebuild_status)");
+    assert_eq!(arr.len(), 78, "vault-on must produce 78 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, moot_rebuild_status, and moot_redistill)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6210,7 +6212,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 70, "vault-off must produce 70 tools (77 - 5 vault - 2 gated import lanes)");
+    assert_eq!(arr.len(), 71, "vault-off must produce 71 tools (78 - 5 vault - 2 gated import lanes)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
