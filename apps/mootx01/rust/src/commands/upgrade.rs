@@ -39,18 +39,24 @@ pub fn run(
     }
 
     // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs only the four data-directory migration steps (kg_facts identity,
+    // estates. Runs the four data-directory migration steps (kg_facts identity,
     // adornment store migration, shared-content reclaim, distilled representation
     // convergence) against the estate resolved via MOOTX01_DATA_DIR, then exits.
     // No network, no service manager, no prompts. Ordering matches run_convergence:
-    // correctness migration → schema v17 + data move → VACUUM-backed reclaim →
+    // correctness migration → schema + data move → VACUUM-backed reclaim →
     // distilled representation convergence.
+    // All steps run even when earlier steps fail (independent + retryable);
+    // exits non-zero when any step reported failure.
     if backfill_only {
-        run_kg_fact_identity_backfill();
-        run_adornment_store_migration();
-        run_shared_content_reclaim_if_pending();
-        run_distilled_representation_convergence();
-        return ExitCode::from(exit::OK);
+        let ok_kg    = run_kg_fact_identity_backfill();
+        let ok_ado   = run_adornment_store_migration();
+        let ok_recl  = run_shared_content_reclaim_if_pending();
+        let ok_dist  = run_distilled_representation_convergence();
+        if ok_kg && ok_ado && ok_recl && ok_dist {
+            return ExitCode::from(exit::OK);
+        } else {
+            return ExitCode::from(exit::FAILURE);
+        }
     }
 
     // Local-build path: --from skips the online check entirely.
@@ -203,10 +209,12 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
 /// both need a quiesced estate; the reclaim additionally repairs foreign SQLite
 /// geometry before its VACUUM.
 fn run_convergence() {
-    run_kg_fact_identity_backfill();
-    run_adornment_store_migration();
-    run_shared_content_reclaim_if_pending();
-    run_distilled_representation_convergence();
+    // Return values are intentionally ignored in the full convergence path —
+    // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
+    let _ = run_kg_fact_identity_backfill();
+    let _ = run_adornment_store_migration();
+    let _ = run_shared_content_reclaim_if_pending();
+    let _ = run_distilled_representation_convergence();
     run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
 }
@@ -228,7 +236,9 @@ fn run_convergence() {
 /// what adds the identity columns to estates that predate them, and
 /// `SqliteStorage::new` adopts the sibling `db.key` on its own, so keyed
 /// and plaintext estates both open correctly.
-fn run_kg_fact_identity_backfill() {
+/// Returns `true` when the step completes (or determines there is nothing to do),
+/// `false` when it fails. The caller decides whether to continue or aggregate the failure.
+fn run_kg_fact_identity_backfill() -> bool {
     use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
     use persistence_kit::sqlite::SqliteStorage;
     use uuid::Uuid;
@@ -239,7 +249,7 @@ fn run_kg_fact_identity_backfill() {
     // Absent estate means first run — serve creates new estates post-KH;
     // there is nothing to backfill.
     if !estate.exists() {
-        return;
+        return true;
     }
 
     // Quiesce first (single-writer discipline, same direction as the
@@ -250,7 +260,7 @@ fn run_kg_fact_identity_backfill() {
         println!(
             "  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
         );
-        return;
+        return false;
     }
 
     let result = (|| -> Result<locus_kit::kg_fact_identity_backfill::KGFactIdentityBackfillReport, String> {
@@ -304,8 +314,10 @@ fn run_kg_fact_identity_backfill() {
             println!(
                 "  ✗ kg_facts identity backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
             );
+            return false;
         }
     }
+    true
 }
 
 /// ADORN-STORE-02 Part C: move legacy `drawers.adornment` TEXT rows into
@@ -335,7 +347,8 @@ fn run_kg_fact_identity_backfill() {
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Mirrors Swift `runAdornmentStoreMigration(home:)`.
-fn run_adornment_store_migration() {
+/// Returns `true` on success or when there is nothing to do, `false` on failure.
+fn run_adornment_store_migration() -> bool {
     use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
@@ -349,7 +362,7 @@ fn run_adornment_store_migration() {
     // Absent estate means first run — new estates start on v17 and have
     // no legacy adornment text; nothing to migrate.
     if !estate.exists() {
-        return;
+        return true;
     }
 
     // Quiesce first (single-writer discipline): if the daemon will not
@@ -359,7 +372,7 @@ fn run_adornment_store_migration() {
         println!(
             "  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
         );
-        return;
+        return false;
     }
 
     let now_ms = SystemTime::now()
@@ -455,10 +468,14 @@ fn run_adornment_store_migration() {
         Ok(n) => println!(
             "  ✓ adornment store migration: {n} legacy adornment(s) moved to normalized store"
         ),
-        Err(e) => println!(
-            "  ✗ adornment store migration failed: {e}\n    Legacy adornments remain readable via drawers.adornment until resolved. Run `mootx01 upgrade` to retry."
-        ),
+        Err(e) => {
+            println!(
+                "  ✗ adornment store migration failed: {e}\n    Legacy adornments remain readable via drawers.adornment until resolved. Run `mootx01 upgrade` to retry."
+            );
+            return false;
+        }
     }
+    true
 }
 
 /// P5 of the shared-content 1.0→1.1 migration: WAL checkpoint + VACUUM for
@@ -487,12 +504,13 @@ fn run_adornment_store_migration() {
 /// Nothing is re-ingested, re-mined, or re-dreamed. Idempotent: a converged
 /// estate regenerates zero rows and skips the reindex. Twin of Swift
 /// `UpgradeCommand.runDistilledRepresentationConvergence`.
-fn run_distilled_representation_convergence() {
+/// Returns `true` on success or when there is nothing to converge, `false` on failure.
+fn run_distilled_representation_convergence() -> bool {
     let data = crate::core::paths::data_dir();
     let name = crate::core::paths::active_estate(&data);
     let estate = crate::core::paths::estate_sqlite_path(&data, &name);
     if !estate.exists() {
-        return;
+        return true;
     }
     // Single-writer discipline, same shape as the other backfill steps.
     let was_running = daemon_is_running();
@@ -500,7 +518,7 @@ fn run_distilled_representation_convergence() {
         println!(
             "  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
         );
-        return;
+        return false;
     }
     let result = (|| -> Result<usize, String> {
         let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
@@ -524,30 +542,42 @@ fn run_distilled_representation_convergence() {
         }
         Ok(regenerated)
     })();
-    match result {
-        Ok(0) => println!(
-            "  ✓ distilled representations: already at converter {}",
-            genius_locus_kit::distillation_converter_id()
-        ),
-        Ok(n) => println!(
-            "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
-            genius_locus_kit::distillation_converter_id()
-        ),
-        Err(e) => println!(
-            "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
-        ),
-    }
+    let ok = match result {
+        Ok(0) => {
+            println!(
+                "  ✓ distilled representations: already at converter {}",
+                genius_locus_kit::distillation_converter_id()
+            );
+            true
+        }
+        Ok(n) => {
+            println!(
+                "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
+                genius_locus_kit::distillation_converter_id()
+            );
+            true
+        }
+        Err(e) => {
+            println!(
+                "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
+            );
+            false
+        }
+    };
     if was_running {
         let _ = daemon_start();
     }
+    ok
 }
 
-fn run_shared_content_reclaim_if_pending() {
+/// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
+fn run_shared_content_reclaim_if_pending() -> bool {
     use genius_locus_kit::EstateCoordinator;
-    use genius_locus_kit_migrations::SharedContentMigrationExt;
+    use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationStore};
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
     use locus_kit::estate_types::OwnerCredentials;
+    use persistence_kit::Storage;
     use std::sync::Arc;
 
     let data = crate::core::paths::data_dir();
@@ -556,7 +586,7 @@ fn run_shared_content_reclaim_if_pending() {
     // Absent estate means first run — serve creates new estates post-cutover;
     // there is nothing to reclaim.
     if !estate.exists() {
-        return;
+        return true;
     }
 
     // Quiesce first (single-writer discipline, same direction as the
@@ -567,7 +597,7 @@ fn run_shared_content_reclaim_if_pending() {
         println!(
             "  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
         );
-        return;
+        return false;
     }
 
     // Geometry normalization must precede the estate connection, exactly as in
@@ -596,6 +626,15 @@ fn run_shared_content_reclaim_if_pending() {
         )
         .map_err(|e| e.to_string())?;
         let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
+        let storage: Arc<dyn Storage> = store.storage().ok_or("drawer store exposes no storage")?;
+        // Apply the ledger schema (CREATE TABLE IF NOT EXISTS) before reading
+        // the reclaim record. An estate that never ran the shared-content
+        // migration has no ledger table, and store.load() would throw
+        // "no such table". Applying the declaration is a no-op once the table
+        // exists.
+        storage
+            .migrate(&SharedContentMigrationStore::schema_declaration())
+            .map_err(|e| format!("ledger schema apply: {e:?}"))?;
         let mut coord = EstateCoordinator::new();
         // The upgrade tool is not the estate's real owner; the substrate
         // validates only that ownerIdentifier is non-empty, so this
@@ -627,9 +666,11 @@ fn run_shared_content_reclaim_if_pending() {
                     "  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)"
                 );
             }
+            true
         }
         Ok(None) => {
             println!("  ✓ shared-content reclaim: not pending");
+            true
         }
         Err(e) => {
             // The closure covers storage open, coordinator open, and the actual
@@ -641,6 +682,7 @@ fn run_shared_content_reclaim_if_pending() {
                  If the inventory trim committed before this failure, freed pages remain\n    \
                  on the freelist until a VACUUM completes. Run `mootx01 upgrade` to retry."
             );
+            false
         }
     }
 }

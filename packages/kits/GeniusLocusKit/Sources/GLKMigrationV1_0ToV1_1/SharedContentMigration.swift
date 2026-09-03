@@ -500,7 +500,7 @@ public extension GeniusLocusKit {
                 // Fresh estate: stamp the current format without creating any
                 // historical migration bookkeeping. A fresh SDK consumer that
                 // does not compile this target uses the same core format row.
-                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+                try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
                 var complete = fresh
                 complete.state = .complete
                 complete.ensembleFingerprint = wiredFingerprint
@@ -530,7 +530,7 @@ public extension GeniusLocusKit {
 
         if record.state == .complete {
             if record.ensembleFingerprint == wiredFingerprint {
-                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+                try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
                 return report(for: record)
             }
             // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
@@ -766,7 +766,7 @@ public extension GeniusLocusKit {
         // The current runtime may open semantic substores as soon as the
         // rebuilt lane is verified. Physical page reclamation remains a
         // retryable maintenance step and does not hold the format gate dark.
-        try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+        try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
 
         // 11. complete — after physical reclamation (P5's maintenance API).
         //    `completeSharedContentReclaim` flips the final state; until
