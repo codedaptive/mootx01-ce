@@ -86,6 +86,7 @@ struct Mootx01: AsyncParsableCommand {
                 ProxyCommand.self,
                 DrainCommand.self,
                 DreamCommand.self,
+                RedistillCommand.self,
                 InstallCommand.self,
                 UpgradeCommand.self,
                 UninstallCommand.self,
