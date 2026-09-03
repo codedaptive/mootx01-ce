@@ -3,7 +3,7 @@
 // Per-item distillation for GeniusLocusKit — SPEC_DISTILLATION_STORAGE
 // §7 (generation paths) and §8 (fingerprint lane).
 //
-// A distilled representation is a VIEW of one item: four nullable columns
+// A distilled representation is a VIEW of one item: five nullable columns
 // on the SOURCE drawer row (§4) plus one `distillation-features-v1` lane
 // entry keyed by the SOURCE drawer id (§8). One distillation performs
 // exactly those two writes (§7.2): it captures no drawer, writes no
@@ -28,7 +28,8 @@
 // columns and the lane are independently valid (§7.5).
 //
 // Determinism: the stored representation is a function of (content,
-// converter ID) only; the fingerprint is a function of (content,
+// converter ID) only — identical source and converter give identical bytes
+// and an identical stored source digest; the fingerprint is a function of (content,
 // `DistillationPipeline.defaultExtractor`) only. `distillFn` remains
 // injectable for tests; production callers pass
 // `GeniusLocusKit.defaultDistillFn`.
@@ -70,7 +71,7 @@ public extension GeniusLocusKit {
 
     /// Distill a SINGLE item into its on-row representation (§7.2).
     ///
-    /// Writes the four representation columns on the source drawer row in
+    /// Writes the five representation columns on the source drawer row in
     /// one atomic UPDATE, and replaces the item's
     /// `distillation-features-v1` lane entry when a non-zero structural
     /// fingerprint was computed. VectorStore absence is non-fatal: the
@@ -128,14 +129,18 @@ public extension GeniusLocusKit {
                 extractFeatures: DistillationPipeline.defaultExtractor)
         }
 
-        // Stored text (CDL-02): see `distilledRepresentation(forContent:)`.
+        // Stored text: see `distilledRepresentation(forContent:)`.
         let distilled = Self.distilledRepresentation(forContent: content)
 
-        // Write 1 of 2 (§7.2): the four representation columns, atomically.
+        // Write 1 of 2 (§7.2): the five representation columns, atomically.
+        // The digest is computed over the complete content the converter
+        // received, so `distilledRepresentationIsCurrent` can later prove
+        // the stored text still describes the row.
         let updated = try await estate.setDistilledRepresentation(
             drawerId: drawerID,
             distilled: distilled,
             pipelineVersion: Self.distillationConverterID,
+            sourceDigest: sourceDigest(content),
             tokenCount: Self.distilledTokenCount(distilled),
             at: now)
         guard updated == 1 else { return false }
@@ -158,13 +163,14 @@ public extension GeniusLocusKit {
 
     /// Per-item distillation sweep (§7.1 "sweep" path — the
     /// `moot_distill` tool): distill every active drawer with non-empty
-    /// content whose representation is NULL or was produced under a
-    /// different pipeline contract.
+    /// content whose representation is not current under
+    /// `distilledRepresentationIsCurrent` — absent, produced by another
+    /// converter, digest missing, or digest differing from the content.
     ///
-    /// Idempotent by the NULL predicate: a swept row carries
-    /// `distilled != nil` at the current pipeline version and is skipped
-    /// on re-run. There is no provenance scan — eligibility is read off
-    /// the row itself (§11.4).
+    /// Idempotent by the currency rule: a swept row carries the active
+    /// converter ID and the digest of its content and is skipped on
+    /// re-run. There is no provenance scan — eligibility is read off the
+    /// row itself (§11.4).
     ///
     /// - Parameters:
     ///   - handle: the estate. Must be open.
@@ -198,10 +204,11 @@ public extension GeniusLocusKit {
         //   lowers AND; only rebuildAll raises it).
         let rooms = try await estate.roomLevelFingerprints()
         // Bit 19 means the representation columns are populated; it does not
-        // encode which converter produced them. Read the stale-room
-        // set once through a metadata-only projection so a fully represented
-        // room is skipped only when every representation is also current.
-        // Current rooms retain the fast path: no drawer content is hydrated.
+        // encode which converter produced them or whether a digest is stored.
+        // Read the stale-room set once through a metadata-only projection so
+        // a fully represented room is skipped only when every representation
+        // carries the active converter ID and a digest. Current rooms retain
+        // the fast path: no drawer content is hydrated.
         let staleRooms = try await estate.roomsWithStaleDistilledRepresentations(
             pipelineVersion: Self.distillationConverterID)
         let staleRoomKeys = Set(staleRooms.map { "\($0.wing)\u{0}\($0.room)" })
@@ -210,9 +217,9 @@ public extension GeniusLocusKit {
         rooms: for entry in rooms {
             // Skip this room when the AND proves every active drawer already
             // has bit 19 set AND the metadata projection found no stale
-            // converter ID. The AND is an under-approximation so if it
-            // shows 1 for bit 19 the true AND is also 1; the ID check
-            // closes the separate stale-converter eligibility path.
+            // converter ID or missing digest. The AND is an under-approximation
+            // so if it shows 1 for bit 19 the true AND is also 1; the
+            // projection closes the separate stale-representation path.
             let roomKey = "\(entry.wing)\u{0}\(entry.room)"
             if (entry.fingerprint.operationalAnd & skipBit) == skipBit,
                !staleRoomKeys.contains(roomKey) {
@@ -231,16 +238,13 @@ public extension GeniusLocusKit {
             for drawer in drawers {
                 if let cap = limit, produced >= cap { break rooms }
                 guard !drawer.content.isEmpty else { continue }
-                // Eligibility (§7.1): bit 19 (has_current_representation)
-                // clear means the row has no representation yet; OR the
-                // representation was produced under a different converter
-                // (cookbook §2.4.1 / SPEC §7.1). The bitmap test avoids
-                // materializing the text column for the eligibility read;
-                // the ID comparison is what makes a converter bump
-                // regenerate every legacy row.
-                guard !drawer.hasCurrentRepresentation
-                    || drawer.distilledPipelineVersion != Self.distillationConverterID
-                else { continue }
+                // Eligibility (§7.1): the one currency rule. Bit 19 clear
+                // means no representation yet; a converter ID other than the
+                // active one, or a digest that is nil or differs from the
+                // digest of this content, means a stale one. The content is
+                // hydrated here (drawersIn returns full rows), so the digest
+                // half of the rule is evaluated exactly.
+                guard !Self.distilledRepresentationIsCurrent(drawer) else { continue }
                 if try await distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
                     distillFn: distillFn, now: now) {
@@ -264,9 +268,10 @@ public extension GeniusLocusKit {
     }
 
     /// Force-redistill ALL active non-empty items in the estate — used by the
-    /// `moot_redistill` verb (CDL-02). Unlike `distillItemsSweep`, this sweep:
+    /// `moot_redistill` verb and the `mootx01 redistill` CLI. Unlike
+    /// `distillItemsSweep`, this sweep:
     ///
-    ///  • Ignores `hasCurrentRepresentation` and the stored converter ID —
+    ///  • Ignores the currency rule (`distilledRepresentationIsCurrent`) —
     ///    every active non-empty drawer is re-distilled unconditionally.
     ///  • Skips the room-level AND optimisation — no room is short-circuited.
     ///  • Does NOT call `recomposeDenseVector` per item: the caller is responsible
@@ -315,7 +320,7 @@ public extension GeniusLocusKit {
                 // Skip only empty content — tombstoned rows are excluded by
                 // drawersIn(wing:room:) at the storage tier. No eligibility
                 // gate: force-distill every active non-empty drawer regardless
-                // of hasCurrentRepresentation or the stored converter ID.
+                // of the stored converter ID or digest.
                 if try await distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,
                     distillFn: distillFn, now: now) {
