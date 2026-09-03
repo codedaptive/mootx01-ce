@@ -1,8 +1,8 @@
 // OracleVectors.swift
-// JSONL loader for the intent-span-v22 oracle vectors.
+// JSONL loader for versioned intent-span oracle vectors.
 //
-// The four vector beds (debug7, sample30, locomo, blind200) live in Vectors/
-// inside the test target.  Package.swift declares them as .copy("Vectors") so
+// The four v22 beds plus the v23.2 attributed LoCoMo bed live in Vectors/
+// inside the test target. Package.swift declares them as .copy("Vectors") so
 // they are accessible via Bundle.module at runtime.
 //
 // Row layout (every field that matters for Part 1):
@@ -17,7 +17,7 @@
 
 import Foundation
 
-/// A single row from an intent-span-v22 oracle JSONL file.
+/// A single row from a versioned intent-span oracle JSONL file.
 ///
 /// `@unchecked Sendable` is safe here because the row is populated once from
 /// a frozen JSONL file and is never mutated.  The `[String: Any]` fields use
@@ -49,22 +49,27 @@ public struct OracleRow: @unchecked Sendable {
 
 /// Loads all rows from the named oracle bed.
 ///
-/// - Parameter bed: One of "debug7", "sample30", "locomo", "blind200".
+/// - Parameters:
+///   - bed: One of "debug7", "sample30", "locomo", "blind200".
+///   - converterSuffix: Resource suffix; defaults to the frozen v22 vectors.
 /// - Returns: All rows in file order.  Blank lines at the end of the JSONL file
 ///   are silently skipped.
 /// - Note: Crashes with a clear message if the resource file is missing or
 ///   contains malformed JSON.  Oracle files are frozen and must be valid.
-public func loadOracleRows(bed: String) -> [OracleRow] {
+public func loadOracleRows(
+    bed: String,
+    converterSuffix: String = "intent-span-v22"
+) -> [OracleRow] {
     // Bundle.module is populated by the .copy("Vectors") resource declaration
     // in Package.swift.  The subdirectory argument must match the directory name
     // inside the test bundle, which SwiftPM sets to "Vectors".
     guard let url = Bundle.module.url(
-        forResource: "\(bed)-intent-span-v22",
+        forResource: "\(bed)-\(converterSuffix)",
         withExtension: "jsonl",
         subdirectory: "Vectors"
     ) else {
         preconditionFailure(
-            "OracleVectors: missing resource \(bed)-intent-span-v22.jsonl — " +
+            "OracleVectors: missing resource \(bed)-\(converterSuffix).jsonl — " +
             "check that Package.swift declares .copy(\"Vectors\") for the test target"
         )
     }
