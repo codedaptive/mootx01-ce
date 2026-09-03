@@ -65,15 +65,7 @@ struct ToolMutationInventoryTests {
     /// being refused.
     @Test func inventoryNamesOnlyRealTools() {
         let real = Set(ToolProjection.tools().map(\.name))
-        // `moot_redistill` is dispatchable in the Rust port and listed in the
-        // installer tier tables of both ports, but neither port's tool list
-        // advertises it today (the Swift recipe and tool never reached
-        // develop; the Rust list was never extended). The inventory keeps
-        // the name so a frozen Rust dispatcher refuses the callable tool and
-        // the tier tables stay identical; this test tolerates exactly that
-        // one absence, and nothing else.
-        let knownUnadvertised: Set<String> = ["moot_redistill"]
-        let stale = ToolMutationInventory.frozenRefusedTools.subtracting(real).subtracting(knownUnadvertised)
+        let stale = ToolMutationInventory.frozenRefusedTools.subtracting(real)
         #expect(stale.isEmpty, "inventory names tool(s) not in the projection: \(stale.sorted())")
     }
 
