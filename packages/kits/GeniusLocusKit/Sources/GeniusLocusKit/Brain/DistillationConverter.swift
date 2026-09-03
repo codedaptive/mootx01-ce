@@ -1,27 +1,51 @@
 // DistillationConverter.swift
 //
-// The product's current dense-context converter (CDL-02). The converter ID is
-// the versioning contract for the stored `distilled` representation
-// (DECISION_CONTEXTDISTILLLIB_2026-09-02): it is written to
-// `distilled_pipeline_version` on every distillation, and every eligibility
-// check in the kit compares a row's stored value against it. Bumping the
-// converter re-distills every estate lazily through the existing sweep
-// (version-mismatch eligibility) and eagerly through the Redistill recipe.
+// The product's active dense-context converter: intent-span v23.2, the
+// attributed peer-dialogue ruleset (activated 2026-09-03 per the addendum to
+// DECISION_CONTEXTDISTILLLIB_2026-09-02). The converter ID is the versioning
+// contract for the stored `distilled` representation: it is written to
+// `distilled_pipeline_version` on every distillation, beside the SHA-256
+// digest of the complete content the representation was rendered from
+// (`distilled_source_digest`). The one currency rule below compares both
+// against the active converter and the row's content; bumping the converter
+// re-distills every estate lazily through the sweep and eagerly through the
+// Redistill recipe. The v22 ruleset stays in the library; nothing here
+// routes between converters.
 //
 // Readers below GeniusLocusKit that need the ID (CognitionKit recipes, the
 // mootx01 CLI) take it from here rather than from ContextDistillLib directly,
 // so the choice of converter is made in exactly one place.
 
 import ContextDistillLib
+import LocusKit
 
 public extension GeniusLocusKit {
 
     /// The converter that produces every stored distilled representation.
-    static var distillationConverter: ContextDistillConverter { .intentSpanV22 }
+    static var distillationConverter: ContextDistillConverter { .intentSpanV23Attributed }
 
     /// The converter ID written to `distilled_pipeline_version`. A row whose
     /// stored value differs is a regeneration candidate for the sweep.
     static var distillationConverterID: String { distillationConverter.id }
+
+    /// The one representation-currency rule (both ports, one function): a
+    /// drawer's stored representation is current iff bit 19 is set, its
+    /// converter ID equals `distillationConverterID`, AND its stored source
+    /// digest equals `sourceDigest(content)` — the digest of the complete
+    /// content beside it. A nil digest (written before the digest column
+    /// existed) is stale by definition. Every regeneration decision — the
+    /// sweep, the drain-stage rider, seeding, and the awaiting-reindex
+    /// probe — keys on this rule; the storage-level aggregates in LocusKit
+    /// apply the half SQL can see (converter ID and digest NULL-ness).
+    ///
+    /// Requires a fully hydrated drawer: at `.structured` hydration
+    /// `content` is empty and the digest comparison would read stale.
+    /// Pure: no I/O, no clock.
+    static func distilledRepresentationIsCurrent(_ drawer: Drawer) -> Bool {
+        drawer.hasCurrentRepresentation
+            && drawer.distilledPipelineVersion == distillationConverterID
+            && drawer.distilledSourceDigest == sourceDigest(drawer.content)
+    }
 
     /// The stored distilled representation for one item's content — the pure
     /// text half of `distillItem`, exposed so tests, the trailer-parity
