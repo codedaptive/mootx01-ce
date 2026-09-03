@@ -272,6 +272,7 @@ struct ContainerFingerprintStoreTests {
             drawerId: dr.id,
             distilled: "distilled text",
             pipelineVersion: "v1",
+            sourceDigest: "digest-v1",
             tokenCount: 42,
             at: Date(timeIntervalSince1970: 1_700_001_000))
         #expect(count == 1)

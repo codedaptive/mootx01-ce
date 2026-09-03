@@ -185,12 +185,15 @@ impl DrawerFeatureFlags {
     /// Bit 19 — drawer carries a current distilled representation per
     /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
     ///
-    /// Set iff all four distillation columns (`distilled`,
+    /// Set iff all five distillation columns (`distilled`,
     /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`) are populated. Clear when those columns are NULL.
+    /// `distilled_at`, `distilled_source_digest`) are populated. Clear when
+    /// those columns are NULL. Presence only: whether the representation is
+    /// CURRENT is `genius_locus_kit::distilled_representation_is_current`,
+    /// which also compares the converter id and the source digest.
     ///
     /// The §4 invariant makes this bit skew-impossible: it travels in the
-    /// SAME UPDATE as the four columns — set by `set_distilled_representation`,
+    /// SAME UPDATE as the five columns — set by `set_distilled_representation`,
     /// cleared by every `insert_cleared_representation` call site and by
     /// the dataset-content patch path. Wire value: 1 << 19 = 524288 (0x80000).
     ///

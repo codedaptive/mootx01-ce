@@ -492,14 +492,17 @@ struct UpgradeCommand: AsyncParsableCommand {
         #endif
     }
 
-    /// CDL-02: bring every drawer's stored distilled representation up to the
-    /// current converter (`GeniusLocusKit.distillationConverterID`). Rows whose
-    /// stored converter ID differs — every row written under the p2.3 pipeline
-    /// on an estate that predates ContextDistillLib — are regenerated through
-    /// the standard eligibility sweep, then every derived corpus lane (BM25 and
-    /// dense) is rebuilt once, because the lexical lane admits trailer tokens
-    /// scanned from the distilled text and the dense lane embeds it. Nothing
-    /// is re-ingested, re-mined, or re-dreamed.
+    /// Bring every drawer's stored distilled representation up to the active
+    /// converter (`GeniusLocusKit.distillationConverterID`). Rows the currency
+    /// rule (`GeniusLocusKit.distilledRepresentationIsCurrent`) calls stale —
+    /// a converter ID other than the active one, or a source digest that is
+    /// missing or differs from the digest of the row's content — are
+    /// regenerated through the standard eligibility sweep, then every derived
+    /// corpus lane (BM25 and dense) is rebuilt once, because the lexical lane
+    /// admits trailer tokens scanned from the distilled text and the dense
+    /// lane embeds it. Nothing is re-ingested, re-mined, or re-dreamed. The
+    /// digest column itself reaches the estate through the migration catalog
+    /// step above (estate format 1.3); this step adds nothing to it.
     ///
     /// Two-key eligibility: reindex runs when EITHER the sweep regenerated at
     /// least one row, OR at least one drawer's `distilledAt` timestamp is
