@@ -42,7 +42,8 @@ pub fn run(
     // estates. Runs the four data-directory migration steps (kg_facts identity,
     // adornment store migration, shared-content reclaim, distilled representation
     // convergence) against the estate resolved via MOOTX01_DATA_DIR, then exits.
-    // No network, no service manager, no prompts. Ordering matches run_convergence:
+    // No network, no prompts; each step quiesces the daemon only when the
+    // estate is the resident one. Ordering matches run_convergence:
     // correctness migration → schema + data move → VACUUM-backed reclaim →
     // distilled representation convergence.
     // All steps run even when earlier steps fail (independent + retryable);
@@ -252,46 +253,43 @@ fn run_kg_fact_identity_backfill() -> bool {
         return true;
     }
 
-    // Quiesce first (single-writer discipline, same direction as the
-    // encryption migration): if the daemon will not stop, skip — nothing is
-    // half-done, and the next `mootx01 upgrade` retries.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
-        println!(
-            "  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
-        );
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped
+    // and the next `mootx01 upgrade` retries.
+    let Some(result) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "kg_facts identity backfill",
+        &PlatformDaemon,
+        || {
+        (|| -> Result<locus_kit::kg_fact_identity_backfill::KGFactIdentityBackfillReport, String> {
+            // The estate_id here is transient — the manifest holds the canonical
+            // estate uuid; this value only satisfies the config constructor
+            // (same convention as SqliteDrawerStore::from_path).
+            let config = EstateConfiguration::new(
+                Uuid::new_v4(),
+                BackendConfiguration::Sqlite {
+                    path: estate.display().to_string(),
+                    busy_timeout_secs: 5.0,
+                },
+            );
+            let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+            // The class-B resolver is vault-kit's stable-source-key hash,
+            // injected here because locus-kit sits below vault-kit and must not
+            // depend on it.
+            let report = locus_kit::kg_fact_identity_backfill::run(
+                &storage,
+                &|key| vault_kit::drawer_mapping::DrawerMapping::lineage_id(key),
+            )
+            .map_err(|e| e.to_string())?;
+            let _ = storage.close();
+            Ok(report)
+        })()
+        },
+    ) else {
         return false;
-    }
-
-    let result = (|| -> Result<locus_kit::kg_fact_identity_backfill::KGFactIdentityBackfillReport, String> {
-        // The estate_id here is transient — the manifest holds the canonical
-        // estate uuid; this value only satisfies the config constructor
-        // (same convention as SqliteDrawerStore::from_path).
-        let config = EstateConfiguration::new(
-            Uuid::new_v4(),
-            BackendConfiguration::Sqlite {
-                path: estate.display().to_string(),
-                busy_timeout_secs: 5.0,
-            },
-        );
-        let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
-        // The class-B resolver is vault-kit's stable-source-key hash,
-        // injected here because locus-kit sits below vault-kit and must not
-        // depend on it.
-        let report = locus_kit::kg_fact_identity_backfill::run(
-            &storage,
-            &|key| vault_kit::drawer_mapping::DrawerMapping::lineage_id(key),
-        )
-        .map_err(|e| e.to_string())?;
-        let _ = storage.close();
-        Ok(report)
-    })();
-
-    // Put the daemon back over the (possibly migrated) estate before
-    // reporting, mirroring the encryption leg's ordering.
-    if was_running {
-        let _ = daemon_start();
-    }
+    };
 
     match result {
         Ok(report) => {
@@ -365,103 +363,101 @@ fn run_adornment_store_migration() -> bool {
         return true;
     }
 
-    // Quiesce first (single-writer discipline): if the daemon will not
-    // stop, skip — nothing is half-done, and the next upgrade retries.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
-        println!(
-            "  ✗ adornment store migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
-        );
-        return false;
-    }
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped
+    // and the next `mootx01 upgrade` retries.
+    let Some(result) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "adornment store migration",
+        &PlatformDaemon,
+        || {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
-    let result = (|| -> Result<usize, String> {
-        // SqliteDrawerStore::from_path calls DrawerStoreCore::new → schema.open(),
-        // which applies the v17 migration (creates adornment_minters + adornments
-        // tables) before any row is read or written. SqliteStorage::new adopts the
-        // sibling db.key on its own, so keyed and plaintext estates both open
-        // correctly.
-        let store = SqliteDrawerStore::from_path(
-            &estate.display().to_string(),
-            now_ms,
-            None,
-            5.0,
-        )
-        .map_err(|e| e.to_string())?;
-
-        // Access the underlying storage to read the legacy drawers.adornment
-        // column. The column is physically retained post-v17 but the dream cycle
-        // never writes to it; values present here pre-date schema v17.
-        let storage_arc = store
-            .storage()
-            .ok_or_else(|| "adornment store migration: storage handle unavailable".to_string())?;
-        let rows = storage_arc
-            .row_store()
-            .query("drawers", None, &[], None, None)
+        (|| -> Result<usize, String> {
+            // SqliteDrawerStore::from_path calls DrawerStoreCore::new → schema.open(),
+            // which applies the v17 migration (creates adornment_minters + adornments
+            // tables) before any row is read or written. SqliteStorage::new adopts the
+            // sibling db.key on its own, so keyed and plaintext estates both open
+            // correctly.
+            let store = SqliteDrawerStore::from_path(
+                &estate.display().to_string(),
+                now_ms,
+                None,
+                5.0,
+            )
             .map_err(|e| e.to_string())?;
 
-        let legacy_rows: Vec<(String, String)> = rows
-            .iter()
-            .filter_map(|row| {
-                // Only migrate rows with a non-empty adornment TEXT value.
-                let id = match row.get("id") {
-                    Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
-                    _ => return None,
-                };
-                let text = match row.get("adornment") {
-                    Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
-                    _ => return None,
-                };
-                Some((id, text))
-            })
-            .collect();
+            // Access the underlying storage to read the legacy drawers.adornment
+            // column. The column is physically retained post-v17 but the dream cycle
+            // never writes to it; values present here pre-date schema v17.
+            let storage_arc = store
+                .storage()
+                .ok_or_else(|| "adornment store migration: storage handle unavailable".to_string())?;
+            let rows = storage_arc
+                .row_store()
+                .query("drawers", None, &[], None, None)
+                .map_err(|e| e.to_string())?;
 
-        if legacy_rows.is_empty() {
-            return Ok(0);
-        }
+            let legacy_rows: Vec<(String, String)> = rows
+                .iter()
+                .filter_map(|row| {
+                    // Only migrate rows with a non-empty adornment TEXT value.
+                    let id = match row.get("id") {
+                        Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
+                        _ => return None,
+                    };
+                    let text = match row.get("adornment") {
+                        Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
+                        _ => return None,
+                    };
+                    Some((id, text))
+                })
+                .collect();
 
-        // Register the single synthetic minter that owns all legacy text.
-        // register_adornment_minter is an upsert — running twice is idempotent.
-        // is_active = true so active_adornments() returns the migrated rows.
-        let legacy_minter = AdornmentMinterDescriptor::new(
-            "legacy-v16-adornment",
-            "Legacy v16 Adornment",
-            "legacy",
-            "unknown-v16",
-            "2026",
-            "legacy-pre-adornment-store",
-            BTreeMap::new(),
-            true,
-        );
-        store
-            .register_adornment_minter(&legacy_minter)
-            .map_err(|e| e.to_string())?;
+            if legacy_rows.is_empty() {
+                return Ok(0);
+            }
 
-        // Move each legacy row. put_adornment is INSERT OR REPLACE on
-        // (drawer_id, minter_id), so a second run produces zero net writes.
-        let mut moved: usize = 0;
-        for (drawer_id, text) in &legacy_rows {
-            let adornment = StoredAdornment::new(
-                drawer_id.as_str(),
-                legacy_minter.id.as_str(),
-                text.as_str(),
+            // Register the single synthetic minter that owns all legacy text.
+            // register_adornment_minter is an upsert — running twice is idempotent.
+            // is_active = true so active_adornments() returns the migrated rows.
+            let legacy_minter = AdornmentMinterDescriptor::new(
+                "legacy-v16-adornment",
+                "Legacy v16 Adornment",
+                "legacy",
+                "unknown-v16",
+                "2026",
+                "legacy-pre-adornment-store",
+                BTreeMap::new(),
+                true,
             );
-            store.put_adornment(&adornment).map_err(|e| e.to_string())?;
-            moved += 1;
-        }
-        Ok(moved)
-    })();
+            store
+                .register_adornment_minter(&legacy_minter)
+                .map_err(|e| e.to_string())?;
 
-    // Put the daemon back over the (possibly migrated) estate before
-    // reporting, mirroring the kg_facts identity backfill ordering.
-    if was_running {
-        let _ = daemon_start();
-    }
+            // Move each legacy row. put_adornment is INSERT OR REPLACE on
+            // (drawer_id, minter_id), so a second run produces zero net writes.
+            let mut moved: usize = 0;
+            for (drawer_id, text) in &legacy_rows {
+                let adornment = StoredAdornment::new(
+                    drawer_id.as_str(),
+                    legacy_minter.id.as_str(),
+                    text.as_str(),
+                );
+                store.put_adornment(&adornment).map_err(|e| e.to_string())?;
+                moved += 1;
+            }
+            Ok(moved)
+        })()
+        },
+    ) else {
+        return false;
+    };
 
     match result {
         Ok(0) => println!("  ✓ adornment store migration: no legacy adornments to migrate"),
@@ -522,74 +518,78 @@ fn run_distilled_representation_convergence() -> bool {
     if !estate.exists() {
         return true;
     }
-    // Single-writer discipline, same shape as the other backfill steps.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
-        println!(
-            "  ✗ distilled representation convergence skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
-        );
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped
+    // and the next `mootx01 upgrade` retries.
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "distilled representation convergence",
+        &PlatformDaemon,
+        || {
+        let result = (|| -> Result<(usize, usize), String> {
+            let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
+                &estate.display().to_string(),
+                "aria-mcp-default",
+            )?;
+            let handle = reg.default.handle.clone();
+            let coord = reg
+                .coord
+                .lock()
+                .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let regenerated = coord
+                .distill_items_sweep(&handle, now_ms, None)
+                .map_err(|e| format!("{e:?}"))?;
+            // Second eligibility key: drawers whose representation postdates their
+            // corpus index row. A non-zero count signals the mid-run crash scenario
+            // (sweep committed, reindex did not). Equal timestamps (sweep and
+            // reindex ran under the same `now`) evaluate to zero — fully indexed.
+            let awaiting = coord
+                .distilled_representations_awaiting_reindex(&handle)
+                .map_err(|e| format!("{e:?}"))?;
+            if regenerated > 0 || awaiting > 0 {
+                coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
+            }
+            Ok((regenerated, awaiting))
+        })();
+        let ok = match result {
+            Ok((0, 0)) => {
+                println!(
+                    "  ✓ distilled representations: already at converter {}",
+                    genius_locus_kit::distillation_converter_id()
+                );
+                true
+            }
+            Ok((0, awaiting)) => {
+                println!(
+                    "  ✓ distilled representation convergence: index gap detected ({awaiting} row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)"
+                );
+                true
+            }
+            Ok((n, _)) => {
+                println!(
+                    "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
+                    genius_locus_kit::distillation_converter_id()
+                );
+                true
+            }
+            Err(e) => {
+                println!(
+                    "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
+                );
+                false
+            }
+        };
+        ok
+        },
+    ) else {
         return false;
-    }
-    let result = (|| -> Result<(usize, usize), String> {
-        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
-            &estate.display().to_string(),
-            "aria-mcp-default",
-        )?;
-        let handle = reg.default.handle.clone();
-        let coord = reg
-            .coord
-            .lock()
-            .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let regenerated = coord
-            .distill_items_sweep(&handle, now_ms, None)
-            .map_err(|e| format!("{e:?}"))?;
-        // Second eligibility key: drawers whose representation postdates their
-        // corpus index row. A non-zero count signals the mid-run crash scenario
-        // (sweep committed, reindex did not). Equal timestamps (sweep and
-        // reindex ran under the same `now`) evaluate to zero — fully indexed.
-        let awaiting = coord
-            .distilled_representations_awaiting_reindex(&handle)
-            .map_err(|e| format!("{e:?}"))?;
-        if regenerated > 0 || awaiting > 0 {
-            coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
-        }
-        Ok((regenerated, awaiting))
-    })();
-    let ok = match result {
-        Ok((0, 0)) => {
-            println!(
-                "  ✓ distilled representations: already at converter {}",
-                genius_locus_kit::distillation_converter_id()
-            );
-            true
-        }
-        Ok((0, awaiting)) => {
-            println!(
-                "  ✓ distilled representation convergence: index gap detected ({awaiting} row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)"
-            );
-            true
-        }
-        Ok((n, _)) => {
-            println!(
-                "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
-                genius_locus_kit::distillation_converter_id()
-            );
-            true
-        }
-        Err(e) => {
-            println!(
-                "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
-            );
-            false
-        }
     };
-    if was_running {
-        let _ = daemon_start();
-    }
     ok
 }
 
@@ -612,70 +612,67 @@ fn run_shared_content_reclaim_if_pending() -> bool {
         return true;
     }
 
-    // Quiesce first (single-writer discipline, same direction as the
-    // kg_facts identity backfill): if the daemon will not stop, skip —
-    // nothing is half-done, and the next `mootx01 upgrade` retries.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
-        println!(
-            "  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
-        );
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped
+    // and the next `mootx01 upgrade` retries.
+    let Some(result) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "shared-content reclaim",
+        &PlatformDaemon,
+        || {
+        // Geometry normalization must precede the estate connection, exactly as in
+        // `EstateRegistry::new_sqlite`. VACUUM fails on foreign geometry (file-header
+        // byte 20 != 0, as written by Apple's SEE-provisioned sqlite3) with
+        // SQLITE_CANTOPEN — "unable to open database: " with an empty filename — and
+        // this path never runs the migration catalog, whose Step 0 would otherwise
+        // normalize. Normalizing BEFORE the open (rather than mid-flight) is what keeps
+        // the connection on the canonical path: normalization swaps the file by rename,
+        // so a connection opened first would be left on the unlinked inode.
+        //
+        // No-op once the geometry is already correct. A failure here is logged and the
+        // reclaim proceeds: the VACUUM below surfaces the real error and leaves the
+        // record at ReclaimPending for the next `mootx01 upgrade`.
+        if let Err(e) = genius_locus_kit_migrations::run_geometry_normalization(&estate) {
+            println!("  ! geometry normalization did not run: {e:?}");
+        }
+
+        let now = wall_now_millis();
+        (|| -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, String> {
+            let sqlite_store = SqliteDrawerStore::from_path(
+                &estate.display().to_string(),
+                now,
+                None,
+                5.0,
+            )
+            .map_err(|e| e.to_string())?;
+            let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
+            let storage: Arc<dyn Storage> = store.storage().ok_or("drawer store exposes no storage")?;
+            // Apply the ledger schema (CREATE TABLE IF NOT EXISTS) before reading
+            // the reclaim record. An estate that never ran the shared-content
+            // migration has no ledger table, and store.load() would throw
+            // "no such table". Applying the declaration is a no-op once the table
+            // exists.
+            storage
+                .migrate(&SharedContentMigrationStore::schema_declaration())
+                .map_err(|e| format!("ledger schema apply: {e:?}"))?;
+            let mut coord = EstateCoordinator::new();
+            // The upgrade tool is not the estate's real owner; the substrate
+            // validates only that ownerIdentifier is non-empty, so this
+            // sentinel is sufficient.
+            let handle = coord
+                .open(store, OwnerCredentials::new("mootx01-upgrade"), 0, 100)
+                .map_err(|e| format!("{e:?}"))?;
+            let report = coord
+                .complete_shared_content_reclaim(&handle, now)
+                .map_err(|e| format!("{e:?}"))?;
+            Ok(report)
+        })()
+        },
+    ) else {
         return false;
-    }
-
-    // Geometry normalization must precede the estate connection, exactly as in
-    // `EstateRegistry::new_sqlite`. VACUUM fails on foreign geometry (file-header
-    // byte 20 != 0, as written by Apple's SEE-provisioned sqlite3) with
-    // SQLITE_CANTOPEN — "unable to open database: " with an empty filename — and
-    // this path never runs the migration catalog, whose Step 0 would otherwise
-    // normalize. Normalizing BEFORE the open (rather than mid-flight) is what keeps
-    // the connection on the canonical path: normalization swaps the file by rename,
-    // so a connection opened first would be left on the unlinked inode.
-    //
-    // No-op once the geometry is already correct. A failure here is logged and the
-    // reclaim proceeds: the VACUUM below surfaces the real error and leaves the
-    // record at ReclaimPending for the next `mootx01 upgrade`.
-    if let Err(e) = genius_locus_kit_migrations::run_geometry_normalization(&estate) {
-        println!("  ! geometry normalization did not run: {e:?}");
-    }
-
-    let now = wall_now_millis();
-    let result = (|| -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, String> {
-        let sqlite_store = SqliteDrawerStore::from_path(
-            &estate.display().to_string(),
-            now,
-            None,
-            5.0,
-        )
-        .map_err(|e| e.to_string())?;
-        let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
-        let storage: Arc<dyn Storage> = store.storage().ok_or("drawer store exposes no storage")?;
-        // Apply the ledger schema (CREATE TABLE IF NOT EXISTS) before reading
-        // the reclaim record. An estate that never ran the shared-content
-        // migration has no ledger table, and store.load() would throw
-        // "no such table". Applying the declaration is a no-op once the table
-        // exists.
-        storage
-            .migrate(&SharedContentMigrationStore::schema_declaration())
-            .map_err(|e| format!("ledger schema apply: {e:?}"))?;
-        let mut coord = EstateCoordinator::new();
-        // The upgrade tool is not the estate's real owner; the substrate
-        // validates only that ownerIdentifier is non-empty, so this
-        // sentinel is sufficient.
-        let handle = coord
-            .open(store, OwnerCredentials::new("mootx01-upgrade"), 0, 100)
-            .map_err(|e| format!("{e:?}"))?;
-        let report = coord
-            .complete_shared_content_reclaim(&handle, now)
-            .map_err(|e| format!("{e:?}"))?;
-        Ok(report)
-    })();
-
-    // Put the daemon back before reporting, mirroring the kg_facts
-    // identity backfill ordering.
-    if was_running {
-        let _ = daemon_start();
-    }
+    };
 
     match result {
         Ok(Some(report)) => {
@@ -884,38 +881,35 @@ fn run_corpus_counts_migration() {
         return;
     }
 
-    // Quiesce the daemon before opening SQLite (single-writer discipline).
-    // If the daemon will not stop, skip — nothing is half-done, and the next
-    // `mootx01 upgrade` retries.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
-        println!(
-            "  ✗ corpus-counts migration skipped — the resident daemon would not stop; \
-             run `mootx01 upgrade` again"
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped
+    // and the next `mootx01 upgrade` retries.
+    let Some(result) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "corpus-counts migration",
+        &PlatformDaemon,
+        || {
+        // Open the estate SQLite directly (no schema ladder — we are touching only
+        // pre-existing tables, not running migrations). This is the same surface
+        // used by run_kg_fact_identity_backfill. The sibling `db.key` is adopted
+        // automatically by SqliteStorage::new for encrypted estates.
+        let estate_config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: estate.display().to_string(),
+                busy_timeout_secs: 5.0,
+            },
         );
-        return;
-    }
 
-    // Open the estate SQLite directly (no schema ladder — we are touching only
-    // pre-existing tables, not running migrations). This is the same surface
-    // used by run_kg_fact_identity_backfill. The sibling `db.key` is adopted
-    // automatically by SqliteStorage::new for encrypted estates.
-    let estate_config = EstateConfiguration::new(
-        Uuid::new_v4(),
-        BackendConfiguration::Sqlite {
-            path: estate.display().to_string(),
-            busy_timeout_secs: 5.0,
+        let now_ms = wall_now_millis();
+
+        corpus_counts_migration_core(&estate_config, now_ms)
         },
-    );
-
-    let now_ms = wall_now_millis();
-
-    let result = corpus_counts_migration_core(&estate_config, now_ms);
-
-    // Restart the daemon before reporting.
-    if was_running {
-        let _ = daemon_start();
-    }
+    ) else {
+        return;
+    };
 
     match result {
         Ok((vocab_deleted, counts_updated)) => {
@@ -1135,11 +1129,26 @@ fn offer_estate_encryption_if_needed() {
         }
     };
 
+    // The daemon seam: the platform control when this is the resident
+    // estate, a no-op otherwise — a cloned estate is encrypted with the
+    // resident daemon left running over its own estate.
+    let resident = crate::core::paths::is_resident_estate(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+    );
+    if !resident {
+        println!(
+            "  data directory {} is not the resident estate; daemon left running",
+            data.display()
+        );
+    }
+    let daemon: &dyn DaemonControl = if resident { &PlatformDaemon } else { &NoDaemon };
+
     // Quiesce FIRST (never lose data): no write may land in the original
     // once the clone exists. Refusing to proceed when the daemon will not
     // stop is the safe direction — nothing has been touched yet.
-    let was_running = daemon_is_running();
-    if was_running && !daemon_stop() {
+    let was_running = daemon.is_running();
+    if was_running && !daemon.stop() {
         rollback_minted_key();
         println!(
             "The resident daemon would not stop; nothing was changed.\n\
@@ -1165,7 +1174,7 @@ fn offer_estate_encryption_if_needed() {
 
     match outcome {
         Ok((counts, swap)) => {
-            let restarted = if was_running { daemon_start() } else { true };
+            let restarted = if was_running { daemon.start() } else { true };
             println!("  ✓ Estate encrypted in place at {}", estate.display());
             println!("  ✓ Verified: {counts}");
             if was_running && !restarted {
@@ -1191,7 +1200,7 @@ fn offer_estate_encryption_if_needed() {
             // key-beside-plaintext state must be gone before it opens.
             rollback_minted_key();
             if was_running {
-                let _ = daemon_start();
+                let _ = daemon.start();
             }
             println!(
                 "Migration failed: {e}\n\
@@ -1231,47 +1240,123 @@ fn wall_now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-/// Platform daemon control for the migration's stop → swap → start
-/// sequence. Linux: the systemd unit. Windows: the scheduled task. Other
-/// platforms report "not running" so the migration never tries to manage a
-/// daemon it has no control surface for (the user was told to check).
-fn daemon_is_running() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        crate::core::service::is_active(crate::core::service::DAEMON_UNIT)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        crate::core::service::is_task_running(crate::core::service::DAEMON_TASK)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    false
+/// The daemon control seam every upgrade-time quiesce goes through.
+/// `PlatformDaemon` is the production implementation; `NoDaemon` stands in
+/// for a non-resident estate; tests inject a recorder so a step can be
+/// shown to leave the daemon alone. Twin of the Swift
+/// `EstateEncryptionMigrator.DaemonControl` seam.
+trait DaemonControl {
+    fn is_running(&self) -> bool;
+    fn stop(&self) -> bool;
+    fn start(&self) -> bool;
 }
 
-fn daemon_stop() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        crate::core::service::stop(crate::core::service::DAEMON_UNIT).is_ok()
+/// Platform daemon control for the stop → work → start sequence. Linux:
+/// the systemd unit. Windows: the scheduled task. Other platforms report
+/// "not running" so the upgrade never tries to manage a daemon it has no
+/// control surface for (the user was told to check).
+struct PlatformDaemon;
+
+impl DaemonControl for PlatformDaemon {
+    fn is_running(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            crate::core::service::is_active(crate::core::service::DAEMON_UNIT)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::core::service::is_task_running(crate::core::service::DAEMON_TASK)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        false
     }
-    #[cfg(target_os = "windows")]
-    {
-        crate::core::service::stop_task(crate::core::service::DAEMON_TASK).is_ok()
+
+    fn stop(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            crate::core::service::stop(crate::core::service::DAEMON_UNIT).is_ok()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::core::service::stop_task(crate::core::service::DAEMON_TASK).is_ok()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        true
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    true
+
+    fn start(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            crate::core::service::restart(crate::core::service::DAEMON_UNIT).is_ok()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::core::service::restart_task(crate::core::service::DAEMON_TASK).is_ok()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        true
+    }
 }
 
-fn daemon_start() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        crate::core::service::restart(crate::core::service::DAEMON_UNIT).is_ok()
+/// A control with no daemon behind it: never running, stop and start
+/// succeed. Selected for a non-resident estate, mirroring the Swift
+/// `DaemonControl.none`.
+struct NoDaemon;
+
+impl DaemonControl for NoDaemon {
+    fn is_running(&self) -> bool {
+        false
     }
-    #[cfg(target_os = "windows")]
-    {
-        crate::core::service::restart_task(crate::core::service::DAEMON_TASK).is_ok()
+    fn stop(&self) -> bool {
+        true
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    true
+    fn start(&self) -> bool {
+        true
+    }
+}
+
+/// Run `work` with the resident daemon quiesced when `data` is the resident
+/// estate; otherwise run it with the daemon untouched.
+///
+/// Resident estate (`paths::is_resident_estate`): capture whether the daemon
+/// is running, stop it — single-writer discipline, because the step opens
+/// the estate SQLite the daemon has open — run `work`, then start the daemon
+/// again if it was running. The restart happens on every outcome of `work`,
+/// so a failed step never leaves the daemon down.
+///
+/// Not the resident estate: print one line naming the directory so an
+/// operator sees why nothing restarted, then run `work`. The daemon serves a
+/// different estate and has no stake in this one.
+///
+/// Returns `work`'s result, or `None` when the daemon was running and would
+/// not stop — the step is skipped, nothing is half-done, and the next
+/// `mootx01 upgrade` retries. Twin of the Swift `ResidentDaemonQuiesce.run`.
+fn with_resident_daemon_quiesced<T>(
+    data: &std::path::Path,
+    resident: &std::path::Path,
+    step: &str,
+    daemon: &dyn DaemonControl,
+    work: impl FnOnce() -> T,
+) -> Option<T> {
+    if !crate::core::paths::is_resident_estate(data, resident) {
+        println!(
+            "  data directory {} is not the resident estate; daemon left running",
+            data.display()
+        );
+        return Some(work());
+    }
+    let was_running = daemon.is_running();
+    if was_running && !daemon.stop() {
+        println!(
+            "  ✗ {step} skipped — the resident daemon would not stop; run `mootx01 upgrade` again"
+        );
+        return None;
+    }
+    let out = work();
+    if was_running {
+        let _ = daemon.start();
+    }
+    Some(out)
 }
 
 fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: bool) -> ExitCode {
@@ -2205,5 +2290,159 @@ mod tests {
         );
         assert_eq!(active[&id].len(), 1, "exactly one active adornment must be returned");
         assert_eq!(active[&id][0].text, LEGACY_TEXT);
+    }
+
+    /// Records every daemon-control call in order; the recorder IS the
+    /// daemon, so no service manager is ever reached from a test.
+    struct RecordingDaemon {
+        running: bool,
+        stop_succeeds: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl RecordingDaemon {
+        fn new(running: bool, stop_succeeds: bool) -> Self {
+            Self { running, stop_succeeds, calls: std::cell::RefCell::new(Vec::new()) }
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl super::DaemonControl for RecordingDaemon {
+        fn is_running(&self) -> bool {
+            self.calls.borrow_mut().push("is_running");
+            self.running
+        }
+        fn stop(&self) -> bool {
+            self.calls.borrow_mut().push("stop");
+            self.stop_succeeds
+        }
+        fn start(&self) -> bool {
+            self.calls.borrow_mut().push("start");
+            true
+        }
+    }
+
+    fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resident = tmp.path().join("resident");
+        // A benchmark clone beside the resident directory: same parent,
+        // same prefix, a different estate.
+        let scratch = tmp.path().join("resident-bench");
+        std::fs::create_dir_all(&resident).expect("resident dir");
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        (tmp, resident, scratch)
+    }
+
+    #[test]
+    fn scratch_estate_runs_the_work_and_never_touches_the_daemon() {
+        let (_tmp, resident, scratch) = resident_and_scratch();
+        let daemon = RecordingDaemon::new(true, true);
+        let ran = std::cell::Cell::new(false);
+        let out = super::with_resident_daemon_quiesced(
+            &scratch,
+            &resident,
+            "kg_facts identity backfill",
+            &daemon,
+            || {
+                ran.set(true);
+                7
+            },
+        );
+        assert_eq!(out, Some(7));
+        assert!(ran.get());
+        assert!(daemon.calls().is_empty(), "a scratch estate must not touch the daemon");
+    }
+
+    #[test]
+    fn resident_estate_stops_then_restarts_a_running_daemon() {
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let daemon = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &resident,
+            &resident,
+            "adornment store migration",
+            &daemon,
+            || true,
+        );
+        assert_eq!(out, Some(true));
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+    }
+
+    #[test]
+    fn failed_work_still_restarts_the_daemon() {
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let daemon = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &resident,
+            &resident,
+            "shared-content reclaim",
+            &daemon,
+            || false,
+        );
+        assert_eq!(out, Some(false));
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+    }
+
+    #[test]
+    fn resident_estate_with_daemon_down_never_starts_one() {
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let daemon = RecordingDaemon::new(false, true);
+        let out = super::with_resident_daemon_quiesced(
+            &resident,
+            &resident,
+            "distilled representation convergence",
+            &daemon,
+            || true,
+        );
+        assert_eq!(out, Some(true));
+        assert_eq!(daemon.calls(), vec!["is_running"]);
+    }
+
+    #[test]
+    fn daemon_that_will_not_stop_skips_the_work() {
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let daemon = RecordingDaemon::new(true, false);
+        let ran = std::cell::Cell::new(false);
+        let out = super::with_resident_daemon_quiesced(
+            &resident,
+            &resident,
+            "kg_facts identity backfill",
+            &daemon,
+            || {
+                ran.set(true);
+                true
+            },
+        );
+        assert_eq!(out, None);
+        assert!(!ran.get(), "the work must not run when the daemon will not stop");
+        assert_eq!(daemon.calls(), vec!["is_running", "stop"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_the_resident_estate_is_quiesced() {
+        let (tmp, resident, _scratch) = resident_and_scratch();
+        let link = tmp.path().join("estate-link");
+        std::os::unix::fs::symlink(&resident, &link).expect("symlink");
+        let daemon = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &link,
+            &resident,
+            "corpus-counts migration",
+            &daemon,
+            || (),
+        );
+        assert_eq!(out, Some(()));
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+    }
+
+    #[test]
+    fn no_daemon_control_is_never_running_and_always_succeeds() {
+        use super::DaemonControl;
+        assert!(!super::NoDaemon.is_running());
+        assert!(super::NoDaemon.stop());
+        assert!(super::NoDaemon.start());
     }
 }
