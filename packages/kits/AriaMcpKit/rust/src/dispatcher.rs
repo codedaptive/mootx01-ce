@@ -33,6 +33,7 @@ use crate::mode_registry::ModeDeclaration;
 use crate::mode_session_state::ModeSessionState;
 use crate::periodic_coach;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
+use crate::estate_posture::EstatePosture;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::tool_list::build_tool_list;
 use crate::vault_tools::VaultJobLedger;
@@ -129,6 +130,15 @@ pub struct Dispatcher {
     /// or one per HTTP dispatcher for HTTP). Uses `Mutex` for interior mutability
     /// so `Dispatcher::handle` stays `&self`. Mirrors Swift `ToolDispatcher.modeSessionState`.
     mode_session_state: ModeSessionState,
+    /// Live or frozen. A frozen dispatcher refuses every tool in
+    /// `tool_mutation_inventory`, runs `moot_memory_search` with internal
+    /// origin (no recall-trace rows, no dreaming enqueue), and skips the
+    /// reward mark in `note_usage`. `new` derives it from `MOOTX01_FROZEN`
+    /// in the process environment (the CLI translates `--frozen` into that
+    /// variable before the runtime starts); `with_posture` overrides it for
+    /// hosts and tests that hold the posture explicitly. One process, one
+    /// posture. Mirrors Swift `ToolDispatcher.posture`.
+    posture: EstatePosture,
 }
 
 impl Dispatcher {
@@ -169,7 +179,23 @@ impl Dispatcher {
             // Overridden on the first tool call by provisioned_modes_config
             // read from the default estate's manifest (apply_preferences).
             mode_session_state: ModeSessionState::new(),
+            posture: EstatePosture::from_process_environment(),
         }
+    }
+
+    /// Builder-style override of the frozen/live posture. The serve host
+    /// derives the posture through the environment in `new`; tests and
+    /// hosts that resolved the flag themselves pass it here so the process
+    /// environment is never consulted (std::env is process-global and the
+    /// test runner is parallel).
+    pub fn with_posture(mut self, posture: EstatePosture) -> Self {
+        self.posture = posture;
+        self
+    }
+
+    /// The posture this dispatcher serves under.
+    pub fn posture(&self) -> EstatePosture {
+        self.posture
     }
 
     /// Test seam: return the current sticky recall answer mode raw value.
@@ -291,6 +317,18 @@ impl Dispatcher {
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
         let mut args_map = arguments.as_object().cloned().unwrap_or_default();
 
+        // Frozen posture: refuse every writing, mutating, or deleting tool
+        // before any runner fires and before the session state records the
+        // call, so the refusal leaves no side effect at all. `teachme:true`
+        // is answered first, as in the live path — a guide touches nothing.
+        // Returned as an isError tool result (not a JSON-RPC error) for the
+        // same reason substrate refusals are: the client keeps the call id
+        // and the model sees the reason. Mirrors Swift ToolDispatcher.dispatch.
+        let teachme = args_map.get("teachme").and_then(|v| v.as_bool()) == Some(true);
+        if self.posture.is_frozen() && !teachme && crate::tool_mutation_inventory::is_frozen_refused(name) {
+            return Ok(crate::dispatch::error_result(&EstatePosture::refusal_message(name)));
+        }
+
         // Decode the optional `mode` argument (modes are fail-open by spec).
         //
         // ## Fail-open vs. fail-closed contrast
@@ -339,7 +377,7 @@ impl Dispatcher {
 
         let mut result = crate::dispatch::dispatch_tool_with_ledgers(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
-            &self.build_serial, &self.version_skew,
+            self.posture, &self.build_serial, &self.version_skew,
             // Upstream-release advisory provider — evaluated by ping/status
             // only; None when the host wired none.
             self.update_advisory.as_ref(),

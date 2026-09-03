@@ -99,39 +99,12 @@ const READ_TOOLS: &[&str] = &[
     "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
 ];
 
-/// Additive-unconfirmed writes: create NEW content; nothing already
-/// committed is changed, moved, or removed.
-const ADDITIVE_WRITE_TOOLS: &[&str] =
-    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories"];
-
-/// Mutations of existing state: something already committed changes shape,
-/// is superseded, moves, or a background process alters estate-wide
-/// indexes/consolidation state.
-const MUTATION_TOOLS: &[&str] = &[
-    "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-    "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-    "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
-    "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
-    // Seed-file JSON import (MXE-JI-1): reads a seed file from the filesystem
-    // and bulk-writes the estate — same Ask posture as palace/vault import.
-    "moot_json_import",
-    // Dataset import (MX-TAB-7): creates a backend table and can read a
-    // csv_path from the filesystem — same Ask posture as palace/vault import.
-    "moot_file_dataset",
-    // Monitoring flag mutation: sets daemon telemetry state
-    // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
-    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
-    "moot_monitoring_status",
-    // Contradiction hunter: estate-wide sweep that persists PROPOSED
-    // contradicts tunnels (same sweep runs inside moot_dream, already ask
-    // tier). Review settles a proposed tunnel's lifecycle — a mutation of
-    // committed state, and rejection is durable (never re-proposed).
-    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
-    "moot_hunt_contradictions", "moot_review_tunnel",
-];
-
-/// Destructive, irreversible: hard-deletes content from the estate.
-const DESTRUCTIVE_TOOLS: &[&str] = &["moot_erase_memory"];
+/// The additive-write, mutation and destructive tables live in aria-mcp
+/// (`tool_mutation_inventory`), the crate that owns the tool surface: the
+/// tiered installer default here and the frozen serve posture in the
+/// dispatcher read the same tables, so a new mutating tool is triaged once.
+/// Only the read table is installer-local.
+use aria_mcp::tool_mutation_inventory::{ADDITIVE_WRITE_TOOLS, DESTRUCTIVE_TOOLS, MUTATION_TOOLS};
 
 /// Every tool name this module has explicitly triaged into a tier. Exposed
 /// so a test can assert this set equals the REAL tool inventory
@@ -717,9 +690,13 @@ mod tests {
         let untriaged: Vec<&String> = real_tools.iter().filter(|t| !classified.contains(t.as_str())).collect();
         assert!(untriaged.is_empty(), "real tool(s) with no explicit tier classification: {untriaged:?}");
 
+        // `moot_redistill` is dispatchable (aria_mcp recipe_tools) and
+        // triaged Ask in the shared inventory, but the tool list does not
+        // advertise it today; see aria_mcp::tool_mutation_inventory's test.
+        let known_unadvertised = ["moot_redistill"];
         let stale: Vec<&&str> = classified
             .iter()
-            .filter(|c| !real_tools.contains(**c))
+            .filter(|c| !real_tools.contains(**c) && !known_unadvertised.contains(c))
             .collect();
         assert!(stale.is_empty(), "classification table names tool(s) no longer in the real surface: {stale:?}");
     }
