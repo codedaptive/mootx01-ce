@@ -20,7 +20,10 @@ pub struct EstateFormatVersion {
 impl EstateFormatVersion {
     pub const V1_0: Self = Self { major: 1, minor: 0 };
     pub const V1_1: Self = Self { major: 1, minor: 1 };
-    pub const CURRENT: Self = Self::V1_1;
+    /// Format 1.2: the corpus_index_state composition_policy column reaches
+    /// populated estates through the migration catalog.
+    pub const V1_2: Self = Self { major: 1, minor: 2 };
+    pub const CURRENT: Self = Self::V1_2;
 }
 
 impl std::fmt::Display for EstateFormatVersion {
