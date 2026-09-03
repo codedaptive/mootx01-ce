@@ -578,6 +578,7 @@ public actor DrawerStore {
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
         "wikidataQidsSecondary",
         "distilled_pipeline_version", "distilled_token_count", "distilled_at",
+        "distilled_source_digest",
         // Subject trio (PR-01): the subject IS structured-tier data — it
         // exists precisely so candidate rows can be judged without
         // hydrating content, so the structured projection carries it.
@@ -3887,13 +3888,14 @@ public actor DrawerStore {
             "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
             "content_fingerprint": .blob(Data(fingerprint.toBytes())),
             // Distilled representation (SPEC §4): fresh captures carry nil
-            // in all four fields — population happens post-insert via
+            // in all five fields — population happens post-insert via
             // setDistilledRepresentation (drain-stage or sweep), never on
             // the capture path.
             "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
             "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
             "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
             "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null,
+            "distilled_source_digest": d.distilledSourceDigest.map { TypedValue.text($0) } ?? .null,
             // Subject trio (PR-01): same capture-path contract as the
             // distilled quad — a fresh capture MAY carry a subject (the
             // filing AI provides it at file time); backfill and the model
@@ -4136,6 +4138,7 @@ public actor DrawerStore {
             distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
             distilledTokenCount: optInt64(row["distilled_token_count"]),
             distilledAt: optDate(row["distilled_at"]),
+            distilledSourceDigest: optString(row["distilled_source_digest"]),
             // Subject trio (PR-01). NULL on any row not yet subjected;
             // decodes to nil — the backfill-eligibility signal.
             subject: optString(row["subject"]),
@@ -5151,7 +5154,8 @@ public actor DrawerStore {
     /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
     /// and the erasure scrub: distilled text and the subject line are both
     /// content-derived, so zeroing content must scrub them in the same
-    /// statement). Covers the distilled quad and the subject trio (PR-01).
+    /// statement). Covers the five representation columns and the subject
+    /// trio (PR-01).
     ///
     /// Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
     /// Adornment rows in the adornments table are NOT cleared on content edit;
@@ -5162,6 +5166,7 @@ public actor DrawerStore {
         "distilled_pipeline_version": .null,
         "distilled_token_count": .null,
         "distilled_at": .null,
+        "distilled_source_digest": .null,
         "subject": .null,
         "subject_pipeline_version": .null,
         "subject_at": .null,
@@ -5178,12 +5183,12 @@ public actor DrawerStore {
         values.merging(clearedRepresentationValues) { caller, _ in caller }
     }
 
-    /// Write the distilled representation of one drawer — all four columns
+    /// Write the distilled representation of one drawer — all five columns
     /// in ONE atomic UPDATE (SPEC §4 invariant: NULL together or populated
     /// together).
     ///
     /// A representation is a deterministic, regenerable function of
-    /// (content, pipeline version) — a view, not a belief-state change —
+    /// (content, converter ID) — a view, not a belief-state change —
     /// so, like `updateDatasetContent`, this is a direct column write: no
     /// audit event, no supersession cascade, no lifecycle or lineage field
     /// touched, and no content digest/revision bump (search isolation §9:
@@ -5194,7 +5199,12 @@ public actor DrawerStore {
     /// - Parameters:
     ///   - drawerId: The drawer row id (`Drawer.id`) of the SOURCE drawer.
     ///   - distilled: The distilled rendering (SPEC §5 format).
-    ///   - pipelineVersion: Format+pipeline contract identifier ("p1").
+    ///   - pipelineVersion: The ContextDistillLib converter ID that produced
+    ///     `distilled`.
+    ///   - sourceDigest: SHA-256 hex (ContextDistillLib `sourceDigest`) of the
+    ///     complete content `distilled` was rendered from; stored beside the
+    ///     converter ID so a reader can prove the representation still
+    ///     describes the row's content.
     ///   - tokenCount: Approximate token count of `distilled` (SPEC §6).
     ///   - at: Generation instant (deterministic clock — passed in, never
     ///     read here).
@@ -5203,15 +5213,17 @@ public actor DrawerStore {
         drawerId: String,
         distilled: String,
         pipelineVersion: String,
+        sourceDigest: String,
         tokenCount: Int64,
         at generatedAt: Date
     ) async throws -> Int {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(distilled, label: "distilled")
         try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
+        try Self.validateNonEmpty(sourceDigest, label: "sourceDigest")
         // Read-modify-write within a serializable transaction so the
         // has_current_representation bit (cookbook §2.4.1) is set in the
-        // SAME UPDATE as the four distillation columns (§4 invariant: bit
+        // SAME UPDATE as the five distillation columns (§4 invariant: bit
         // and columns travel together; skew is structurally impossible).
         return try await storage.transaction(isolation: .serializable) { txn in
             let rows = try await txn.rowStore.query(
@@ -5232,6 +5244,7 @@ public actor DrawerStore {
                     "distilled_pipeline_version": .text(pipelineVersion),
                     "distilled_token_count": .int(tokenCount),
                     "distilled_at": .timestamp(generatedAt),
+                    "distilled_source_digest": .text(sourceDigest),
                     "operationalBitmap": .bitmap(setOp),
                 ],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
@@ -5711,8 +5724,14 @@ public actor DrawerStore {
 
     /// Count of active drawers still awaiting distillation — the §7.1
     /// eligibility predicate as an aggregate: not tombstoned, non-empty
-    /// content, and representation absent (bit 19 clear) OR produced under
-    /// a different pipeline contract. This is the drain-accounting observable
+    /// content, and no representation that is current under
+    /// `pipelineVersion`. This is the storage-visible half of the currency
+    /// rule: bit 19 clear, OR `distilled_pipeline_version` differs, OR
+    /// `distilled_source_digest` IS NULL (written before the digest column
+    /// existed). The digest-equality half needs the row's content and is
+    /// applied by the sweep per drawer; under the NULL-on-content-write
+    /// invariant a populated digest always equals the digest of the content
+    /// beside it, so the two halves agree. This is the drain-accounting observable
     /// (SPEC_DISTILLATION_STORAGE §7.1 / FINDING_11X_MAINTENANCE_WALK
     /// constraint 6): `drainStatuses` reports it as the distillation
     /// drain's `pending`, so "fully drained" cannot read true while any
@@ -5744,6 +5763,9 @@ public actor DrawerStore {
                     ),
                     .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
                          .text(pipelineVersion)),
+                    // A representation without a source digest was written
+                    // before the digest column existed: stale by definition.
+                    .isNull(Column(table: "drawers", name: "distilled_source_digest")),
                 ]),
             ]),
             orderBy: [], limit: nil, offset: nil, columns: ["id"]
@@ -5752,15 +5774,16 @@ public actor DrawerStore {
     }
 
     /// Rooms containing at least one active, represented drawer whose stored
-    /// representation was produced by a different distillation pipeline.
+    /// representation is not current under `pipelineVersion`: the converter
+    /// ID differs, or the source digest is NULL.
     ///
-    /// This is the version companion to the room-level bit-19 aggregate used
+    /// This is the currency companion to the room-level bit-19 aggregate used
     /// by `distillItemsSweep`. Bit 19 proves representation presence only; it
-    /// cannot prove that `distilled_pipeline_version` matches the caller's
+    /// cannot prove that the stored converter ID and digest match the caller's
     /// current contract. The query projects only `parent_node_id`, then
     /// resolves the distinct room nodes, so a current estate pays no content
     /// hydration cost and stale rooms can bypass the otherwise-valid bitmap
-    /// skip.
+    /// skip. Mirrors Rust `rooms_with_stale_distilled_representations`.
     public func roomsWithStaleDistilledRepresentations(
         pipelineVersion: String
     ) async throws -> [(wing: String, room: String)] {
@@ -5772,8 +5795,11 @@ public actor DrawerStore {
                     Column(table: "drawers", name: "operationalBitmap"),
                     mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
                 ),
-                .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
-                     .text(pipelineVersion)),
+                .or([
+                    .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
+                         .text(pipelineVersion)),
+                    .isNull(Column(table: "drawers", name: "distilled_source_digest")),
+                ]),
             ]),
             orderBy: [], limit: nil, offset: nil, columns: ["parent_node_id"]
         )
@@ -5785,21 +5811,27 @@ public actor DrawerStore {
         }
     }
 
-    /// Active, non-empty drawers that already carry a distilled representation,
-    /// returned as `(id, distilledAt)` pairs with no content hydration.
+    /// Active, non-empty drawers whose distilled representation is current
+    /// under `pipelineVersion` (bit 19 set, converter ID equal, digest
+    /// present), returned as `(id, distilledAt)` pairs with no content
+    /// hydration.
     ///
     /// Used by GeniusLocusKit's `distilledRepresentationsAwaitingReindex` to
     /// compare each drawer's `distilledAt` instant against the corresponding
     /// corpus index row's `updatedAt`, so the convergence step can detect the
     /// mid-run crash scenario where the sweep committed but the reindex did not.
+    /// Stale rows are excluded on purpose: the sweep regenerates them first,
+    /// and only a current representation can be waiting on its reindex.
     ///
-    /// Query shape mirrors `countUndistilled`: tombstonedAt IS NULL, content ≠ "",
-    /// bit 19 (hasCurrentRepresentation) set. Projects only `id` and `distilled_at`
-    /// — no text column is materialized. The §4 invariant (bit and columns always
-    /// in agreement) guarantees `distilled_at` is non-null when bit 19 is set.
+    /// Query shape mirrors `countUndistilled` inverted. Projects only `id` and
+    /// `distilled_at` — no text column is materialized. The §4 invariant (bit
+    /// and columns always in agreement) guarantees `distilled_at` is non-null
+    /// when bit 19 is set.
     ///
     /// Mirrors Rust `DrawerStore::drawers_with_representations`.
-    public func drawersWithRepresentations() async throws -> [(id: String, distilledAt: Date)] {
+    public func drawersWithRepresentations(
+        pipelineVersion: String
+    ) async throws -> [(id: String, distilledAt: Date)] {
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: .and([
@@ -5810,6 +5842,10 @@ public actor DrawerStore {
                     Column(table: "drawers", name: "operationalBitmap"),
                     mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
                 ),
+                // Current under the caller's converter: ID equal and digest present.
+                .eq(Column(table: "drawers", name: "distilled_pipeline_version"),
+                    .text(pipelineVersion)),
+                .isNotNull(Column(table: "drawers", name: "distilled_source_digest")),
             ]),
             orderBy: [], limit: nil, offset: nil, columns: ["id", "distilled_at"]
         )
