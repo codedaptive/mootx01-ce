@@ -154,6 +154,7 @@ struct DistillationIntegrationTests {
                 drawerId: fixture.sourceID,
                 distilled: "stale rendering from an older contract",
                 pipelineVersion: "p0",
+                sourceDigest: "p0-digest",
                 tokenCount: 5,
                 at: t0)
 

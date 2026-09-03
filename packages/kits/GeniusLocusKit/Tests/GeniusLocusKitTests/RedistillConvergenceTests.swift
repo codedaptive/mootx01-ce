@@ -1,6 +1,7 @@
 // RedistillConvergenceTests.swift
 //
-// CDL-02: the product distiller is ContextDistillLib, keyed by converter ID.
+// The product distiller is ContextDistillLib's intent-span v23.2 converter,
+// keyed by converter ID and source digest.
 //
 //  §end-to-end   Filing the Debug-7 oracle originals into a corpus-wired
 //                estate and running the sweep stores exactly the oracle's
@@ -12,13 +13,22 @@
 //                trailer the artifact estates stored under p2.3. A mismatch
 //                means the regenerated trailer differs from the stored one and
 //                is a finding for review, not a test failure.
+//  §currency     The one currency rule: a row stamped with the v22 converter
+//                id regenerates on the next sweep and comes back stamped v23.2
+//                with the digest of its content; a row whose digest disagrees
+//                with its content regenerates; a row with the active id and
+//                the matching digest is left alone; identical source gives
+//                identical bytes and an identical digest; the CLI convergence
+//                call tree on a SQLite estate regenerates every v22 row.
 //
 // Rust twin: rust/tests/redistill_convergence_tests.rs
 
+import ContextDistillLib
 import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 import Testing
 import VectorKit
 
@@ -53,7 +63,7 @@ struct RedistillConvergenceTests {
             .deletingLastPathComponent()   // kits/
             .deletingLastPathComponent()   // packages/
             .appendingPathComponent("libs/ContextDistillLib/Tests/ContextDistillLibTests/Vectors")
-            .appendingPathComponent("\(bed)-intent-span-v22.jsonl")
+            .appendingPathComponent("\(bed)-intent-span-v23-attributed.jsonl")
         let text = try String(contentsOf: vectors, encoding: .utf8)
         let decoder = JSONDecoder()
         return try text.split(separator: "\n", omittingEmptySubsequences: true)
@@ -132,6 +142,7 @@ struct RedistillConvergenceTests {
             let expected = GeniusLocusKit.distilledRepresentation(forContent: row.original)
             #expect(drawer.distilled == expected, "stored text is the converter's representation for \(id)")
             #expect(drawer.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
+            #expect(drawer.distilledSourceDigest == sourceDigest(row.original))
             #expect(drawer.distilledTokenCount == GeniusLocusKit.distilledTokenCount(expected))
             // Oracle equality holds exactly when the regenerated trailer equals
             // the trailer the artifact stored under p2.3 (the parity report
@@ -307,6 +318,226 @@ struct RedistillConvergenceTests {
         // No corpus is registered for this estate kind.
         let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
         #expect(awaiting == 0)
+    }
+
+
+    // MARK: - §currency
+
+    /// The converter id v22 rows carry: the library's previous ruleset, kept
+    /// in the library and never routed to by the product.
+    private static let v22ConverterID = "intent-span@intent-span-v22-authority-closure"
+
+    @Test("the active converter is intent-span v23.2 (attributed prose)")
+    func activeConverterIsV23Attributed() {
+        #expect(GeniusLocusKit.distillationConverter == .intentSpanV23Attributed)
+        #expect(GeniusLocusKit.distillationConverterID
+            == "intent-span-v23-attributed@intent-span-v23.2-attributed-prose")
+        #expect(GeniusLocusKit.distillationConverterID != Self.v22ConverterID)
+    }
+
+    /// Stamp one row exactly as a v22-era build wrote it: the v22 converter
+    /// id beside the digest of the content it distilled.
+    private func stampV22(_ estate: LocusKit.Estate, drawer: Drawer, now: Date) async throws {
+        let written = try await estate.setDistilledRepresentation(
+            drawerId: drawer.id,
+            distilled: "v22 rendering of \(drawer.id)",
+            pipelineVersion: Self.v22ConverterID,
+            sourceDigest: sourceDigest(drawer.content),
+            tokenCount: 3,
+            at: now)
+        #expect(written == 1)
+    }
+
+    @Test("the converter bump forces regeneration: v22 rows regenerate, come back stamped v23.2 with the content digest, and reindex closes the gap")
+    func converterBumpForcesRegeneration() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        let now = Date()
+        let alpha = try await kit.capture(handle, captureFrame(Self.alphaContent), mode: .impatient)
+        let beta = try await kit.capture(handle, captureFrame(Self.betaContent), mode: .impatient)
+        // Settle the estate (hint rooms included) under the active converter.
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        try await kit.reindexCorpus(handle: handle, now: now)
+        #expect(try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil) == 0)
+
+        // Rewind the two filed rows to the v22 converter.
+        let estate = try await kit.estate(for: handle)
+        try await stampV22(estate, drawer: alpha, now: now)
+        try await stampV22(estate, drawer: beta, now: now)
+        #expect(try await estate.countUndistilled(pipelineVersion: GeniusLocusKit.distillationConverterID) == 2)
+        for id in [alpha.id, beta.id] {
+            let row = try #require(try await estate.getDrawers(ids: [id]).first)
+            #expect(!GeniusLocusKit.distilledRepresentationIsCurrent(row))
+        }
+
+        // The sweep regenerates exactly those two rows.
+        let later = now.addingTimeInterval(1)
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: later, limit: nil)
+        #expect(regenerated == 2)
+        for drawer in [alpha, beta] {
+            let row = try #require(try await estate.getDrawers(ids: [drawer.id]).first)
+            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
+            #expect(row.distilledSourceDigest == sourceDigest(drawer.content))
+            #expect(row.distilled == GeniusLocusKit.distilledRepresentation(forContent: drawer.content))
+            #expect(GeniusLocusKit.distilledRepresentationIsCurrent(row))
+        }
+        #expect(try await estate.countUndistilled(pipelineVersion: GeniusLocusKit.distillationConverterID) == 0)
+
+        // The regenerated rows postdate their index rows until the reindex runs.
+        #expect(try await kit.distilledRepresentationsAwaitingReindex(handle: handle) >= 2)
+        try await kit.reindexCorpus(handle: handle, now: later)
+        #expect(try await kit.distilledRepresentationsAwaitingReindex(handle: handle) == 0)
+    }
+
+    @Test("a row stamped with the active converter but a digest that does not match its content regenerates")
+    func digestMismatchRegenerates() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        let now = Date()
+        let alpha = try await kit.capture(handle, captureFrame(Self.alphaContent), mode: .impatient)
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+
+        let estate = try await kit.estate(for: handle)
+        let written = try await estate.setDistilledRepresentation(
+            drawerId: alpha.id,
+            distilled: "rendering of other content",
+            pipelineVersion: GeniusLocusKit.distillationConverterID,
+            sourceDigest: sourceDigest("other content"),
+            tokenCount: 4,
+            at: now)
+        #expect(written == 1)
+        let stale = try #require(try await estate.getDrawers(ids: [alpha.id]).first)
+        #expect(!GeniusLocusKit.distilledRepresentationIsCurrent(stale))
+
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now.addingTimeInterval(1), limit: nil)
+        #expect(regenerated == 1)
+        let row = try #require(try await estate.getDrawers(ids: [alpha.id]).first)
+        #expect(row.distilledSourceDigest == sourceDigest(alpha.content))
+        #expect(row.distilled == GeniusLocusKit.distilledRepresentation(forContent: alpha.content))
+        #expect(GeniusLocusKit.distilledRepresentationIsCurrent(row))
+    }
+
+    @Test("a row with the active converter id and the matching digest is left alone")
+    func matchingIDAndDigestIsLeftAlone() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        let now = Date()
+        let alpha = try await kit.capture(handle, captureFrame(Self.alphaContent), mode: .impatient)
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+
+        // A hand-written representation that satisfies the rule exactly.
+        let estate = try await kit.estate(for: handle)
+        _ = try await estate.setDistilledRepresentation(
+            drawerId: alpha.id,
+            distilled: "hand-written but current",
+            pipelineVersion: GeniusLocusKit.distillationConverterID,
+            sourceDigest: sourceDigest(alpha.content),
+            tokenCount: 4,
+            at: now)
+        let before = try #require(try await estate.getDrawers(ids: [alpha.id]).first)
+        #expect(GeniusLocusKit.distilledRepresentationIsCurrent(before))
+
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now.addingTimeInterval(1), limit: nil)
+        #expect(regenerated == 0)
+        let after = try #require(try await estate.getDrawers(ids: [alpha.id]).first)
+        #expect(after.distilled == "hand-written but current")
+        #expect(after.distilledAt == now)
+    }
+
+    @Test("distilling the same source twice yields identical bytes and identical digests")
+    func sameSourceTwiceIsByteIdentical() async throws {
+        // Pure function level: same content, same converter, same bytes.
+        let first = GeniusLocusKit.distilledRepresentation(forContent: Self.gammaContent)
+        let second = GeniusLocusKit.distilledRepresentation(forContent: Self.gammaContent)
+        #expect(first == second)
+        #expect(sourceDigest(Self.gammaContent) == sourceDigest(Self.gammaContent))
+
+        // Stored level: two forced distillations of one row store the same
+        // text and the same digest.
+        let (kit, handle) = try await provisionGLKEstate()
+        let now = Date()
+        let gamma = try await kit.capture(handle, captureFrame(Self.gammaContent), mode: .impatient)
+        let estate = try await kit.estate(for: handle)
+        #expect(try await kit.distillItem(
+            handle: handle, drawerID: gamma.id, content: gamma.content,
+            distillFn: GeniusLocusKit.defaultDistillFn, now: now))
+        let one = try #require(try await estate.getDrawers(ids: [gamma.id]).first)
+        #expect(try await kit.distillItem(
+            handle: handle, drawerID: gamma.id, content: gamma.content,
+            distillFn: GeniusLocusKit.defaultDistillFn, now: now.addingTimeInterval(1)))
+        let two = try #require(try await estate.getDrawers(ids: [gamma.id]).first)
+        #expect(one.distilled == two.distilled)
+        #expect(one.distilled == first)
+        #expect(one.distilledSourceDigest == two.distilledSourceDigest)
+        #expect(one.distilledSourceDigest == sourceDigest(Self.gammaContent))
+    }
+
+    @Test("the CLI convergence call tree on a SQLite estate regenerates every v22 row at the active converter")
+    func convergenceCallTreeRegeneratesEveryV22RowOnSQLite() async throws {
+        // The same call tree `mootx01 upgrade --backfill-only` runs after its
+        // migration catalog step: sweep, probe, reindex when either key fires.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-cdl05-convergence-\(UUID().uuidString).sqlite")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("sqlite-wal"))
+            try? FileManager.default.removeItem(at: url.appendingPathExtension("sqlite-shm"))
+        }
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-cdl05-convergence")
+        // `.ephemeral` keeps the file-backed estate's Ed25519 identity out of
+        // the login keychain (one orphaned entry per run otherwise).
+        let params = EstateProvisionParams(
+            estateName: "Convergence Estate",
+            kind: .glk,
+            zoomWindowLow: 1,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none,
+            lifetime: .ephemeral
+        )
+        let handle = try await kit.provision(
+            storage: storage, owner: owner, params: params,
+            embeddingModels: [.deterministic])
+        let now = Date()
+        let contents = [Self.alphaContent, Self.betaContent, Self.gammaContent]
+        var filed: [Drawer] = []
+        for content in contents {
+            filed.append(try await kit.capture(handle, captureFrame(content), mode: .impatient))
+        }
+        _ = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        try await kit.reindexCorpus(handle: handle, now: now)
+
+        // Every filed row rewinds to the v22 converter.
+        let estate = try await kit.estate(for: handle)
+        for drawer in filed { try await stampV22(estate, drawer: drawer, now: now) }
+        #expect(try await estate.countUndistilled(pipelineVersion: GeniusLocusKit.distillationConverterID) == filed.count)
+
+        // The convergence step.
+        let later = now.addingTimeInterval(1)
+        let regenerated = try await kit.distillItemsSweep(
+            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: later)
+        let awaiting = try await kit.distilledRepresentationsAwaitingReindex(handle: handle)
+        if regenerated > 0 || awaiting > 0 {
+            try await kit.reindexCorpus(handle: handle, now: later)
+        }
+        #expect(regenerated == filed.count)
+        #expect(awaiting >= filed.count)
+        #expect(try await kit.distilledRepresentationsAwaitingReindex(handle: handle) == 0)
+        #expect(try await estate.countUndistilled(pipelineVersion: GeniusLocusKit.distillationConverterID) == 0)
+        for drawer in filed {
+            let row = try #require(try await estate.getDrawers(ids: [drawer.id]).first)
+            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID)
+            #expect(row.distilledSourceDigest == sourceDigest(drawer.content))
+        }
+        try await kit.close(handle)
     }
 
     // MARK: - §trailer-parity (reported)

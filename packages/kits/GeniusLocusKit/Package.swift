@@ -72,14 +72,23 @@ let package = Package(
             description: "Compile the GLK 1.1 to 1.2 index-composition-column migration capsule."
         ),
         .trait(
+            name: "MigrationV1_2ToV1_3",
+            description: "Compile the GLK 1.2 to 1.3 distilled-source-digest-column migration capsule."
+        ),
+        .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3"]
         ),
         .trait(
             name: "MigrationFloor1_1",
             description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule).",
-            enabledTraits: ["MigrationV1_1ToV1_2"]
+            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3"]
+        ),
+        .trait(
+            name: "MigrationFloor1_2",
+            description: "Support estates as old as GLK format 1.2 (compiles only the 1.2->1.3 distilled-source-digest capsule).",
+            enabledTraits: ["MigrationV1_2ToV1_3"]
         ),
     ],
     dependencies: [
@@ -205,6 +214,24 @@ let package = Package(
                 ),
             ]
         ),
+        // GLK 1.2 -> 1.3 capsule: applies the drawers distilled_source_digest
+        // column (LocusKit schema v18) to populated estates that were written
+        // before the column existed. Mirrors the GLKMigrationV1_1ToV1_2 target.
+        .target(
+            name: "GLKMigrationV1_2ToV1_3",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKMigrationV1_2ToV1_3",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_2_TO_V1_3",
+                    .when(traits: ["MigrationV1_2ToV1_3"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKitMigrations",
             dependencies: [
@@ -223,6 +250,10 @@ let package = Package(
                     name: "GLKMigrationV1_1ToV1_2",
                     condition: .when(traits: ["MigrationV1_1ToV1_2"])
                 ),
+                .target(
+                    name: "GLKMigrationV1_2ToV1_3",
+                    condition: .when(traits: ["MigrationV1_2ToV1_3"])
+                ),
             ],
             path: "Sources/GeniusLocusKitMigrations",
             swiftSettings: [
@@ -233,6 +264,10 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_1_TO_V1_2",
                     .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_2_TO_V1_3",
+                    .when(traits: ["MigrationV1_2ToV1_3"])
                 ),
             ]
         ),
@@ -393,6 +428,41 @@ let package = Package(
             ],
             path: "Tests/GLKMigrationV1_1ToV1_2Tests",
             swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_1_TO_V1_2",
+                    .when(traits: ["MigrationV1_1ToV1_2"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        // Tests for the GLK 1.2 -> 1.3 distilled-source-digest-column capsule.
+        // Verifies that drawers gains distilled_source_digest on v1_2-stamped
+        // estates, and that the catalog chain (v1_0 -> v1_1 -> v1_2 -> v1_3)
+        // ends at v1_3.
+        .testTarget(
+            name: "GLKMigrationV1_2ToV1_3Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_2ToV1_3",
+                    condition: .when(traits: ["MigrationV1_2ToV1_3"])
+                ),
+                .product(name: "ContextDistillLib", package: "ContextDistillLib"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/GLKMigrationV1_2ToV1_3Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_2_TO_V1_3",
+                    .when(traits: ["MigrationV1_2ToV1_3"])
+                ),
                 .define(
                     "GLK_MIGRATION_V1_1_TO_V1_2",
                     .when(traits: ["MigrationV1_1ToV1_2"])

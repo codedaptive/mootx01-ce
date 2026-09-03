@@ -751,12 +751,11 @@ public extension GeniusLocusKit {
             for drawerID in drawerIDs {
                 guard let drawer = try? await estate.getDrawers(ids: [drawerID]).first,
                       !drawer.content.isEmpty,
-                      // Bit 19 (has_current_representation) clear means no
-                      // current representation — eligible for distillation.
-                      // Replaces the previous `distilled == nil` column-presence
-                      // check (cookbook §2.4.1 / SPEC §7.1).
-                      !drawer.hasCurrentRepresentation
-                        || drawer.distilledPipelineVersion != GeniusLocusKit.distillationConverterID
+                      // The one currency rule (cookbook §2.4.1 / SPEC §7.1):
+                      // a freshly encoded drawer normally carries no
+                      // representation; one that does is regenerated only
+                      // when its converter ID or source digest is stale.
+                      !GeniusLocusKit.distilledRepresentationIsCurrent(drawer)
                 else { continue }
                 let didDistill = (try? await self.distillItem(
                     handle: handle, drawerID: drawer.id, content: drawer.content,

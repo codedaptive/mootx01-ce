@@ -218,7 +218,7 @@ fn set_distilled_representation_updates_fingerprint() {
 
     // Distil the drawer post-capture — no estate reopen.
     let updated = estate
-        .set_distilled_representation(&drawer.id, "distilled text", "v1", 42, NOW + 1000)
+        .set_distilled_representation(&drawer.id, "distilled text", "v1", "digest-v1", 42, NOW + 1000)
         .unwrap();
     assert_eq!(updated, 1);
 

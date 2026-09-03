@@ -145,9 +145,12 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// Bit 19 — drawer carries a current distilled representation per
     /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
     ///
-    /// Set iff all four distillation columns (`distilled`,
+    /// Set iff all five distillation columns (`distilled`,
     /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`) are populated. Clear when those columns are NULL.
+    /// `distilled_at`, `distilled_source_digest`) are populated. Clear when
+    /// those columns are NULL. Presence only: whether the representation is
+    /// CURRENT is `GeniusLocusKit.distilledRepresentationIsCurrent`, which
+    /// also compares the converter ID and the source digest.
     ///
     /// The §4 invariant ("NULL together or populated together") makes this
     /// bit skew-impossible: it travels in the SAME SQL UPDATE statement as

@@ -491,14 +491,17 @@ fn run_adornment_store_migration() -> bool {
 /// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
 ///
-/// Bring every drawer's stored distilled representation up to the current
-/// converter (`genius_locus_kit::distillation_converter_id()`). Rows whose
-/// stored converter ID differs — every row written under the p2.3 pipeline on
-/// an estate that predates ContextDistillLib — are regenerated through the
-/// standard eligibility sweep, then every derived corpus lane (BM25 and dense)
-/// is rebuilt once, because the lexical lane admits trailer tokens scanned from
-/// the distilled text and the dense lane embeds it. Nothing is re-ingested,
-/// re-mined, or re-dreamed.
+/// Bring every drawer's stored distilled representation up to the active
+/// converter (`genius_locus_kit::distillation_converter_id()`). Rows the
+/// currency rule (`genius_locus_kit::distilled_representation_is_current`)
+/// calls stale — a converter ID other than the active one, or a source digest
+/// that is missing or differs from the digest of the row's content — are
+/// regenerated through the standard eligibility sweep, then every derived
+/// corpus lane (BM25 and dense) is rebuilt once, because the lexical lane
+/// admits trailer tokens scanned from the distilled text and the dense lane
+/// embeds it. Nothing is re-ingested, re-mined, or re-dreamed. The digest
+/// column itself reaches the estate through the migration chain the registry
+/// runs at open (estate format 1.3); this step adds nothing to it.
 ///
 /// Two-key eligibility: reindex runs when EITHER the sweep regenerated at least
 /// one row, OR at least one drawer's `distilled_at` millis is strictly newer
@@ -2290,6 +2293,127 @@ mod tests {
         );
         assert_eq!(active[&id].len(), 1, "exactly one active adornment must be returned");
         assert_eq!(active[&id][0].text, LEGACY_TEXT);
+    }
+
+    /// The convergence core on a small SQLite estate whose rows were written
+    /// under the v22 converter: the same operations
+    /// `run_distilled_representation_convergence` executes (registry open,
+    /// sweep, awaiting-reindex probe, reindex) minus the daemon quiesce and
+    /// path resolution. Every row comes back stamped with the active converter
+    /// and the digest of its content, and the printed converter is the kit
+    /// constant.
+    #[test]
+    fn distilled_representation_convergence_regenerates_every_v22_row() {
+        use context_distill_lib::digest::source_digest;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+
+        const V22_CONVERTER_ID: &str = "intent-span@intent-span-v22-authority-closure";
+        // Wall-clock instants, as the command uses: the registry seeds the
+        // hint drawers at open under the wall clock, and the awaiting-reindex
+        // probe compares index rows against those `distilled_at` instants. A
+        // fixed past clock would leave every hint row awaiting forever.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let estate_path = tmpdir.path().join("estate.sqlite").display().to_string();
+        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(&estate_path, "aria-mcp-default")
+            .expect("registry open");
+        let handle = reg.default.handle.clone();
+        let coord = reg.coord.lock().expect("coordinator lock");
+
+        // File three rows and settle the estate under the active converter.
+        let contents = [
+            "The upgrade convergence step regenerates rows the currency rule calls stale.",
+            "A row written under the v22 converter carries a different converter id.",
+            "After the sweep every row carries the active converter id and its digest.",
+        ];
+        let ids: Vec<String> = contents
+            .iter()
+            .map(|body| {
+                let frame = CaptureFrame::new(
+                    *body,
+                    CaptureChannel::Typed,
+                    "upgrade-convergence",
+                    LatticeAnchor::udc("000"),
+                    "upgrade-tests",
+                    "test-model-v1",
+                );
+                coord.capture(&handle, frame, now_ms).expect("capture").id
+            })
+            .collect();
+        coord.distill_items_sweep(&handle, now_ms, None).expect("settle sweep");
+        coord.reindex_corpus(&handle, now_ms).expect("settle reindex");
+
+        // Rewind the filed rows to the v22 converter.
+        let estate = coord.estate_for(&handle).expect("estate");
+        for (id, body) in ids.iter().zip(contents.iter()) {
+            let written = estate
+                .set_distilled_representation(
+                    id,
+                    "v22 rendering",
+                    V22_CONVERTER_ID,
+                    &source_digest(body),
+                    3,
+                    now_ms,
+                )
+                .expect("stamp v22");
+            assert_eq!(written, 1);
+        }
+        assert_eq!(
+            estate
+                .count_undistilled(genius_locus_kit::distillation_converter_id())
+                .expect("count"),
+            contents.len()
+        );
+
+        // The convergence core.
+        let later = now_ms + 1_000;
+        let regenerated = coord.distill_items_sweep(&handle, later, None).expect("sweep");
+        let awaiting = coord
+            .distilled_representations_awaiting_reindex(&handle)
+            .expect("awaiting");
+        if regenerated > 0 || awaiting > 0 {
+            coord.reindex_corpus(&handle, later).expect("reindex");
+        }
+        assert_eq!(regenerated, contents.len(), "every v22 row must regenerate");
+        assert!(awaiting >= contents.len());
+        assert_eq!(
+            coord
+                .distilled_representations_awaiting_reindex(&handle)
+                .expect("awaiting after reindex"),
+            0
+        );
+        assert_eq!(
+            estate
+                .count_undistilled(genius_locus_kit::distillation_converter_id())
+                .expect("count after"),
+            0
+        );
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let rows = coord.get_drawers(&handle, &refs).expect("get_drawers");
+        assert_eq!(rows.len(), contents.len());
+        for row in &rows {
+            assert_eq!(
+                row.distilled_pipeline_version.as_deref(),
+                Some(genius_locus_kit::distillation_converter_id())
+            );
+            assert_eq!(
+                row.distilled_source_digest.as_deref(),
+                Some(source_digest(&row.content).as_str())
+            );
+            assert!(genius_locus_kit::distilled_representation_is_current(row));
+        }
+
+        // The printed line is the kit constant: intent-span v23.2.
+        let printed = format!(
+            "  ✓ distilled representations: already at converter {}",
+            genius_locus_kit::distillation_converter_id()
+        );
+        assert!(printed.ends_with("intent-span-v23-attributed@intent-span-v23.2-attributed-prose"));
     }
 
     /// Records every daemon-control call in order; the recorder IS the

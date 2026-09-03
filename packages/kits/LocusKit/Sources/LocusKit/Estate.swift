@@ -505,6 +505,7 @@ public actor Estate {
         drawerId: String,
         distilled: String,
         pipelineVersion: String,
+        sourceDigest: String,
         tokenCount: Int64,
         at generatedAt: Date
     ) async throws -> Int {
@@ -512,6 +513,7 @@ public actor Estate {
             drawerId: drawerId,
             distilled: distilled,
             pipelineVersion: pipelineVersion,
+            sourceDigest: sourceDigest,
             tokenCount: tokenCount,
             at: generatedAt)
         if count == 1, let drawer = try await store.getDrawer(id: drawerId) {
@@ -536,9 +538,11 @@ public actor Estate {
         try await store.countUndistilled(pipelineVersion: pipelineVersion)
     }
 
-    /// Rooms whose populated distilled representation is stale for the
-    /// supplied pipeline contract. Used by the distillation sweep to keep its
-    /// room-level bitmap skip version-aware without loading drawer content.
+    /// Rooms whose populated distilled representation is stale under the
+    /// supplied converter ID (ID differs or digest NULL). Used by the
+    /// distillation sweep to keep its room-level bitmap skip currency-aware
+    /// without loading drawer content. Mirrors Rust
+    /// `Estate::rooms_with_stale_distilled_representations`.
     public func roomsWithStaleDistilledRepresentations(
         pipelineVersion: String
     ) async throws -> [(wing: String, room: String)] {
@@ -546,14 +550,17 @@ public actor Estate {
             pipelineVersion: pipelineVersion)
     }
 
-    /// Active, non-empty drawers that carry a distilled representation,
-    /// returned as `(id, distilledAt)` pairs with no content hydration.
-    /// Estate-level pass-through over `DrawerStore.drawersWithRepresentations`
-    /// — the metadata projection GeniusLocusKit uses to detect the mid-run
-    /// crash scenario (sweep committed, reindex did not). Mirrors Rust
+    /// Active, non-empty drawers whose distilled representation is current
+    /// under `pipelineVersion`, returned as `(id, distilledAt)` pairs with no
+    /// content hydration. Estate-level pass-through over
+    /// `DrawerStore.drawersWithRepresentations` — the metadata projection
+    /// GeniusLocusKit uses to detect the mid-run crash scenario (sweep
+    /// committed, reindex did not). Mirrors Rust
     /// `Estate::drawers_with_representations`.
-    public func drawersWithRepresentations() async throws -> [(id: String, distilledAt: Date)] {
-        try await store.drawersWithRepresentations()
+    public func drawersWithRepresentations(
+        pipelineVersion: String
+    ) async throws -> [(id: String, distilledAt: Date)] {
+        try await store.drawersWithRepresentations(pipelineVersion: pipelineVersion)
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through

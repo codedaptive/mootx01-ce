@@ -2120,12 +2120,11 @@ impl EstateCoordinator {
                 if drawer.content.is_empty() {
                     continue;
                 }
-                // Eligibility: bit 19 (has_current_representation)
-                // clear, OR pipeline version mismatch.
-                if drawer.has_current_representation()
-                    && drawer.distilled_pipeline_version.as_deref()
-                        == Some(crate::distillation_converter_id())
-                {
+                // Eligibility: the one currency rule — a freshly encoded
+                // drawer normally carries no representation; one that does
+                // is regenerated only when its converter ID or source
+                // digest is stale.
+                if crate::distilled_representation_is_current(&drawer) {
                     continue;
                 }
 
@@ -3678,7 +3677,7 @@ impl EstateCoordinator {
     /// For each active drawer with non-empty content whose representation
     /// is NULL or was produced under a different pipeline contract, this
     /// method performs exactly the two §7.2 writes:
-    ///   1. The four representation columns on the SOURCE drawer row,
+    ///   1. The five representation columns on the SOURCE drawer row,
     ///      atomically (`set_distilled_representation`).
     ///   2. One `distillation-features-v1` lane entry keyed by the SOURCE
     ///      drawer id (§8) — upsert-replace, only when the structural
@@ -3708,7 +3707,7 @@ impl EstateCoordinator {
     /// Distill a SINGLE item into its on-row representation (§7.2) — the
     /// one write seam every distillation caller shares.
     ///
-    /// Writes the four representation columns on the source drawer row in
+    /// Writes the five representation columns on the source drawer row in
     /// one atomic UPDATE, then replaces the item's
     /// `distillation-features-v1` lane entry when a non-zero structural
     /// fingerprint was computed. VectorStore absence is non-fatal: the
@@ -3746,12 +3745,16 @@ impl EstateCoordinator {
         }
         let (rendering, fingerprint) = render_distillation(drawer_id, content);
 
-        // Write 1 of 2 (§7.2): the four representation columns, atomically.
+        // Write 1 of 2 (§7.2): the five representation columns, atomically.
+        // The digest is computed over the complete content the converter
+        // received, so `distilled_representation_is_current` can later prove
+        // the stored text still describes the row.
         let token_count = distilled_token_count(&rendering);
         match estate.set_distilled_representation(
             drawer_id,
             &rendering,
             crate::distillation_converter_id(),
+            &context_distill_lib::digest::source_digest(content),
             token_count,
             now,
         ) {
@@ -3805,12 +3808,28 @@ impl EstateCoordinator {
         let rooms = estate
             .room_level_fingerprints()
             .map_err(|e| remap("distill_items_sweep", "", e))?;
+        // Bit 19 means the representation columns are populated; it does not
+        // encode which converter produced them or whether a digest is stored.
+        // Read the stale-room set once through a metadata-only projection so
+        // a fully represented room is skipped only when every representation
+        // carries the active converter ID and a digest. Current rooms retain
+        // the fast path: no drawer content is hydrated. Mirrors Swift
+        // distillItemsSweep.
+        let stale_rooms: std::collections::HashSet<(String, String)> = estate
+            .rooms_with_stale_distilled_representations(crate::distillation_converter_id())
+            .map_err(|e| remap("distill_items_sweep", "", e))?
+            .into_iter()
+            .collect();
 
         'rooms: for entry in &rooms {
             // Skip this room when the AND proves every active drawer already
-            // has bit 19 set.  The AND is an under-approximation so if it
-            // shows 1 for bit 19 the true AND is also 1 — safe to skip.
-            if (entry.fingerprint.operational_and & skip_bit) == skip_bit {
+            // has bit 19 set AND the metadata projection found no stale
+            // converter ID or missing digest. The AND is an under-approximation
+            // so if it shows 1 for bit 19 the true AND is also 1; the
+            // projection closes the separate stale-representation path.
+            if (entry.fingerprint.operational_and & skip_bit) == skip_bit
+                && !stale_rooms.contains(&(entry.wing.clone(), entry.room.clone()))
+            {
                 continue;
             }
 
@@ -3836,15 +3855,13 @@ impl EstateCoordinator {
             if drawer.content.is_empty() {
                 continue;
             }
-            // Eligibility (§7.1): bit 19 (has_current_representation) set
-            // AND pipeline version matches → already distilled, skip. The
-            // bitmap test replaces the previous `distilled.is_some()` column-
-            // presence check (cookbook §2.4.1 / SPEC §7.1). Both are correct
-            // by the §4 invariant, but the bit is the authoritative indicator.
-            if drawer.has_current_representation()
-                && drawer.distilled_pipeline_version.as_deref()
-                    == Some(crate::distillation_converter_id())
-            {
+            // Eligibility (§7.1): the one currency rule. Bit 19 clear means
+            // no representation yet; a converter ID other than the active
+            // one, or a digest that is None or differs from the digest of
+            // this content, means a stale one. The content is hydrated here
+            // (drawers_in_wing_room returns full rows), so the digest half
+            // of the rule is evaluated exactly.
+            if crate::distilled_representation_is_current(drawer) {
                 continue;
             }
 
@@ -3969,7 +3986,8 @@ impl EstateCoordinator {
     ///
     /// Eligibility predicate — a drawer counts when ALL of:
     ///   1. Active (not tombstoned), non-empty content.
-    ///   2. Carries a distilled representation (bit 19 set).
+    ///   2. Carries a representation that is current under the active
+    ///      converter (bit 19 set, converter ID equal, source digest stored).
     ///   3. The corpus has no index row for that drawer, OR the index row's
     ///      `updated_at_millis` is strictly earlier than the drawer's
     ///      `distilled_at` millis. Equal millis mean indexed (sweep and reindex
@@ -3993,8 +4011,10 @@ impl EstateCoordinator {
             return Ok(0);
         };
         // Fetch the two independent timestamp sets without hydrating content.
+        // Only rows current under the active converter can be waiting on
+        // their reindex; stale rows are the sweep's to regenerate first.
         let drawers = estate
-            .drawers_with_representations()
+            .drawers_with_representations(crate::distillation_converter_id())
             .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
                 verb: "distilled_representations_awaiting_reindex".to_string(),
                 reason: format!("{e:?}"),
@@ -9452,9 +9472,7 @@ impl EstateCoordinator {
                     .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
                     .unwrap_or(false)
                     && !d.content.is_empty()
-                    && (!d.has_current_representation()
-                        || d.distilled_pipeline_version.as_deref()
-                            != Some(crate::distillation_converter_id()))
+                    && !crate::distilled_representation_is_current(d)
             }) {
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside index_content keeps the
@@ -14473,6 +14491,10 @@ mod tests {
             );
             assert!(row.distilled_token_count.is_some());
             assert!(row.distilled_at.is_some());
+            assert_eq!(
+                row.distilled_source_digest.as_deref(),
+                Some(context_distill_lib::digest::source_digest(&row.content).as_str())
+            );
         }
     }
 
@@ -14520,6 +14542,7 @@ mod tests {
                 .set_distilled_representation(
                     id, "rendered",
                     crate::distillation_converter_id(),
+                    &context_distill_lib::digest::source_digest(long_content),
                     3, NOW,
                 )
                 .expect("set_distilled_representation");

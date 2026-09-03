@@ -106,3 +106,6 @@ unicode-normalization = "0.1"
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
+# context-distill-lib: the upgrade convergence test stamps rows with the
+# library's source digest to prove regeneration under the currency rule.
+context-distill-lib = { path = "../../../packages/libs/ContextDistillLib/rust" }

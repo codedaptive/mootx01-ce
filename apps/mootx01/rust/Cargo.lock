@@ -1370,6 +1370,7 @@ version = "0.1.0"
 dependencies = [
  "corpus-kit",
  "genius-locus-kit",
+ "locus-kit",
  "persistence-kit",
  "rusqlite",
  "serde",
@@ -1854,6 +1855,7 @@ version = "1.1.0-beta-19"
 dependencies = [
  "adornment-lib",
  "aria-mcp",
+ "context-distill-lib",
  "corpus-kit",
  "genius-locus-kit",
  "genius-locus-kit-migrations",
