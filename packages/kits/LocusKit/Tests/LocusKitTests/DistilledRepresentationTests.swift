@@ -1,5 +1,6 @@
 import Foundation
 import PersistenceKit
+import PersistenceKitSQLite
 import SubstrateTypes
 import Testing
 @testable import LocusKit
@@ -7,12 +8,16 @@ import Testing
 /// Distilled-representation columns on the drawer row per
 /// SPEC_DISTILLATION_STORAGE §4 (Wave 1, W1_DISTILL).
 ///
-/// A distilled representation is a VIEW of one item — four nullable columns
+/// A distilled representation is a VIEW of one item — five nullable columns
 /// (`distilled`, `distilled_pipeline_version`, `distilled_token_count`,
-/// `distilled_at`) plus bit 19 (`hasCurrentRepresentation`) in
-/// `operationalBitmap` — all written or cleared in one atomic UPDATE.
-/// The §4 invariant: the bit and the four columns are ALWAYS in agreement;
-/// they travel together in every statement. No Bool stored property.
+/// `distilled_at`, `distilled_source_digest`) plus bit 19
+/// (`hasCurrentRepresentation`) in `operationalBitmap` — all written or
+/// cleared in one atomic UPDATE. The §4 invariant: the bit and the five
+/// columns are ALWAYS in agreement; they travel together in every
+/// statement. No Bool stored property. The digest half of the currency rule
+/// is pinned here too: a NULL digest is stale, the current-rows projection
+/// excludes it, and the v17 → v18 ladder entry adds the column to a
+/// populated SQLite estate.
 ///
 /// The Rust suite `distilled_representation_tests` mirrors this file
 /// case-for-case (twin-parity gate).
@@ -43,6 +48,18 @@ struct DistilledRepresentationTests {
         return (store, url)
     }
 
+    private let digest = "digest-of-content"
+    private let digestColumn = "distilled_source_digest"
+
+    /// NULL the digest column on one row directly at the row-store layer —
+    /// the shape of every representation written before the column existed.
+    private func nullDigest(_ storage: SQLiteStorage, drawerId: String) async throws {
+        _ = try await storage.rowStore.update(
+            table: "drawers",
+            values: [digestColumn: .null],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+    }
+
     private func sampleDrawer(id: String = "d1") -> Drawer {
         Drawer(
             id: TestStorage.tid(id),
@@ -64,9 +81,10 @@ struct DistilledRepresentationTests {
         #expect(d.distilledPipelineVersion == nil)
         #expect(d.distilledTokenCount == nil)
         #expect(d.distilledAt == nil)
+        #expect(d.distilledSourceDigest == nil)
     }
 
-    @Test("Drawer Codable round-trips the four representation fields")
+    @Test("Drawer Codable round-trips the five representation fields")
     func drawerCodableRoundTripsRepresentation() throws {
         let d = Drawer(
             id: TestStorage.tid("dcodable"),
@@ -78,7 +96,8 @@ struct DistilledRepresentationTests {
             distilled: "Quarterly meeting moved Thursday.",
             distilledPipelineVersion: "p1",
             distilledTokenCount: 6,
-            distilledAt: t(1_700_000_100)
+            distilledAt: t(1_700_000_100),
+            distilledSourceDigest: "digest-codable"
         )
         let decoded = try JSONDecoder().decode(
             Drawer.self, from: JSONEncoder().encode(d))
@@ -86,12 +105,13 @@ struct DistilledRepresentationTests {
         #expect(decoded.distilledPipelineVersion == "p1")
         #expect(decoded.distilledTokenCount == 6)
         #expect(decoded.distilledAt == d.distilledAt)
+        #expect(decoded.distilledSourceDigest == "digest-codable")
         #expect(decoded == d)
     }
 
     // MARK: - Store round-trip
 
-    @Test("fresh row: all four representation columns read back NULL")
+    @Test("fresh row: all five representation columns read back NULL")
     func freshRowReadsNilRepresentation() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
@@ -102,11 +122,12 @@ struct DistilledRepresentationTests {
         #expect(loaded?.distilledPipelineVersion == nil)
         #expect(loaded?.distilledTokenCount == nil)
         #expect(loaded?.distilledAt == nil)
+        #expect(loaded?.distilledSourceDigest == nil)
         // §4 invariant: bit 19 matches column presence.
         #expect(loaded?.hasCurrentRepresentation == false)
     }
 
-    @Test("setDistilledRepresentation populates all four columns atomically")
+    @Test("setDistilledRepresentation populates all five columns atomically")
     func setRepresentationPopulatesAllFour() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
@@ -117,6 +138,7 @@ struct DistilledRepresentationTests {
             drawerId: d.id,
             distilled: "Quarterly planning meeting moved Thursday; Sarah sends invites Monday.",
             pipelineVersion: "p1",
+            sourceDigest: digest,
             tokenCount: 12,
             at: t(1_700_000_200)
         )
@@ -128,7 +150,8 @@ struct DistilledRepresentationTests {
         #expect(loaded?.distilledPipelineVersion == "p1")
         #expect(loaded?.distilledTokenCount == 12)
         #expect(loaded?.distilledAt == t(1_700_000_200))
-        // §4 invariant: bit 19 set alongside the four populated columns.
+        #expect(loaded?.distilledSourceDigest == digest)
+        // §4 invariant: bit 19 set alongside the five populated columns.
         #expect(loaded?.hasCurrentRepresentation == true)
         // Content and lifecycle fields are untouched by a representation write.
         #expect(loaded?.content == d.content)
@@ -143,10 +166,10 @@ struct DistilledRepresentationTests {
         try await store.addDrawer(d)
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "first", pipelineVersion: "p1",
-            tokenCount: 1, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 1, at: t(1_700_000_200))
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "second rendering", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_300))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_300))
         let loaded = try await store.getDrawer(id: d.id)
         #expect(loaded?.distilled == "second rendering")
         #expect(loaded?.distilledTokenCount == 2)
@@ -159,8 +182,8 @@ struct DistilledRepresentationTests {
         defer { cleanup(url) }
         let updated = try await store.setDistilledRepresentation(
             drawerId: "99999999-9999-4999-8999-999999999999",
-            distilled: "x", pipelineVersion: "p1", tokenCount: 1,
-            at: t(1_700_000_200))
+            distilled: "x", pipelineVersion: "p1", sourceDigest: digest,
+            tokenCount: 1, at: t(1_700_000_200))
         #expect(updated == 0)
     }
 
@@ -174,7 +197,7 @@ struct DistilledRepresentationTests {
         try await store.addDrawer(d)
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "derived text", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
 
         _ = try await store.expungeGated(
             drawerId: d.id, changedBy: "test",
@@ -189,7 +212,8 @@ struct DistilledRepresentationTests {
         #expect(after?.distilledPipelineVersion == nil)
         #expect(after?.distilledTokenCount == nil)
         #expect(after?.distilledAt == nil)
-        // §4 invariant: bit 19 cleared alongside the four NULL columns.
+        #expect(after?.distilledSourceDigest == nil)
+        // §4 invariant: bit 19 cleared alongside the five NULL columns.
         #expect(after?.hasCurrentRepresentation == false)
     }
 
@@ -219,10 +243,10 @@ struct DistilledRepresentationTests {
         try await store.addDrawer(v2)
         _ = try await store.setDistilledRepresentation(
             drawerId: v1.id, distilled: "v1 derived", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
         _ = try await store.setDistilledRepresentation(
             drawerId: v2.id, distilled: "v2 derived", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
 
         _ = try await store.expungeGated(
             drawerId: v2.id, changedBy: "test", reason: nil,
@@ -248,7 +272,7 @@ struct DistilledRepresentationTests {
         try await store.addDrawer(d)
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "stale rendering", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
 
         _ = try await store.updateDatasetContent(
             drawerId: d.id, content: "{\"patched\":true}")
@@ -261,7 +285,8 @@ struct DistilledRepresentationTests {
         #expect(after?.distilledPipelineVersion == nil)
         #expect(after?.distilledTokenCount == nil)
         #expect(after?.distilledAt == nil)
-        // §4 invariant: bit 19 cleared alongside the four NULL columns.
+        #expect(after?.distilledSourceDigest == nil)
+        // §4 invariant: bit 19 cleared alongside the five NULL columns.
         #expect(after?.hasCurrentRepresentation == false)
     }
 
@@ -281,7 +306,7 @@ struct DistilledRepresentationTests {
         // Step 2: distillation — bit set alongside columns.
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "rendering one", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
         let distilled = try await store.getDrawer(id: d.id)
         #expect(distilled?.hasCurrentRepresentation == true)
         #expect(distilled?.distilled != nil)
@@ -319,14 +344,14 @@ struct DistilledRepresentationTests {
         // After setDistilledRepresentation: both set.
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "some rendering", pipelineVersion: "p1",
-            tokenCount: 3, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 3, at: t(1_700_000_200))
         let afterSet = try await store.getDrawer(id: d.id)
         check(afterSet, bitExpected: true, columnsExpected: true)
 
         // After re-distillation with new version: still both set.
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "updated rendering", pipelineVersion: "p2",
-            tokenCount: 4, at: t(1_700_000_300))
+            sourceDigest: digest, tokenCount: 4, at: t(1_700_000_300))
         let afterReDistill = try await store.getDrawer(id: d.id)
         check(afterReDistill, bitExpected: true, columnsExpected: true)
 
@@ -338,7 +363,7 @@ struct DistilledRepresentationTests {
         // Re-distill again: both set once more.
         _ = try await store.setDistilledRepresentation(
             drawerId: d.id, distilled: "final rendering", pipelineVersion: "p2",
-            tokenCount: 5, at: t(1_700_000_400))
+            sourceDigest: digest, tokenCount: 5, at: t(1_700_000_400))
         let afterFinal = try await store.getDrawer(id: d.id)
         check(afterFinal, bitExpected: true, columnsExpected: true)
     }
@@ -355,7 +380,7 @@ struct DistilledRepresentationTests {
         for d in [d1, d2, d3] { try await store.addDrawer(d) }
         _ = try await store.setDistilledRepresentation(
             drawerId: d3.id, distilled: "distilled d3", pipelineVersion: "p1",
-            tokenCount: 2, at: t(1_700_000_200))
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
 
         // countUndistilled now uses bitmaskNone(bit19) predicate.
         let count = try await store.countUndistilled(pipelineVersion: "p1")
@@ -366,7 +391,7 @@ struct DistilledRepresentationTests {
         // After distilling d1: only d2 undistilled.
         _ = try await store.setDistilledRepresentation(
             drawerId: d1.id, distilled: "distilled d1", pipelineVersion: "p1",
-            tokenCount: 1, at: t(1_700_000_300))
+            sourceDigest: digest, tokenCount: 1, at: t(1_700_000_300))
         let countAfter = try await store.countUndistilled(pipelineVersion: "p1")
         #expect(countAfter == 1)
 
@@ -376,5 +401,136 @@ struct DistilledRepresentationTests {
         // d1 matches p1 but not p2 (so counted), d2 has no rep (counted),
         // d3 matches p1 but not p2 (counted) → 3 undistilled for p2.
         #expect(countV2 == 3)
+    }
+
+    // MARK: - Source digest (currency rule, second half)
+
+    @Test("setDistilledRepresentation rejects an empty source digest")
+    func setRepresentationRejectsEmptyDigest() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let d = sampleDrawer()
+        try await store.addDrawer(d)
+        // The digest is part of the atomic five-column write; an empty digest
+        // would store a representation the currency rule can never prove current.
+        await #expect(throws: (any Error).self) {
+            try await store.setDistilledRepresentation(
+                drawerId: d.id, distilled: "rendering", pipelineVersion: "p1",
+                sourceDigest: "", tokenCount: 2, at: t(1_700_000_200))
+        }
+        let after = try await store.getDrawer(id: d.id)
+        #expect(after?.hasCurrentRepresentation == false)
+        #expect(after?.distilled == nil)
+    }
+
+    @Test("countUndistilled counts a NULL digest as stale under the current converter")
+    func countUndistilledNullDigestIsStale() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let d = sampleDrawer()
+        try await store.addDrawer(d)
+        _ = try await store.setDistilledRepresentation(
+            drawerId: d.id, distilled: "rendering", pipelineVersion: "p1",
+            sourceDigest: digest, tokenCount: 2, at: t(1_700_000_200))
+        #expect(try await store.countUndistilled(pipelineVersion: "p1") == 0)
+
+        // A representation written before the digest column existed.
+        try await nullDigest(storage, drawerId: d.id)
+        #expect(try await store.countUndistilled(pipelineVersion: "p1") == 1,
+                "NULL digest under the current converter must count as undistilled")
+    }
+
+    @Test("drawersWithRepresentations lists only rows current under the converter")
+    func drawersWithRepresentationsListsOnlyCurrentRows() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let current = sampleDrawer(id: "cur")
+        let mismatch = sampleDrawer(id: "mis")
+        let noDigest = sampleDrawer(id: "nod")
+        for d in [current, mismatch, noDigest] { try await store.addDrawer(d) }
+        _ = try await store.setDistilledRepresentation(
+            drawerId: current.id, distilled: "current", pipelineVersion: "p1",
+            sourceDigest: digest, tokenCount: 1, at: t(1_700_000_200))
+        _ = try await store.setDistilledRepresentation(
+            drawerId: mismatch.id, distilled: "old converter", pipelineVersion: "p2",
+            sourceDigest: digest, tokenCount: 1, at: t(1_700_000_200))
+        _ = try await store.setDistilledRepresentation(
+            drawerId: noDigest.id, distilled: "pre-digest row", pipelineVersion: "p1",
+            sourceDigest: digest, tokenCount: 1, at: t(1_700_000_200))
+        try await nullDigest(storage, drawerId: noDigest.id)
+
+        let rows = try await store.drawersWithRepresentations(pipelineVersion: "p1")
+        #expect(rows.count == 1, "only the current row is listed: \(rows)")
+        #expect(rows.first?.id == current.id)
+        #expect(rows.first?.distilledAt == t(1_700_000_200))
+    }
+
+    /// The live LocusKit declaration with the drawers table rolled back to
+    /// its v17 layout: no `distilled_source_digest` column, version 17, and
+    /// no migrations list. Applying this to a fresh SQLite file simulates a
+    /// populated estate written before the column existed.
+    private func version17Schema() -> SchemaDeclaration {
+        let live = LocusKitSchema.schema
+        let tables = live.tables.map { table -> TableDeclaration in
+            guard table.name == "drawers" else { return table }
+            return TableDeclaration(
+                name: table.name,
+                columns: table.columns.filter { $0.name != digestColumn },
+                primaryKey: table.primaryKey,
+                uniqueConstraints: table.uniqueConstraints,
+                generatedColumns: table.generatedColumns,
+                appendOnly: table.appendOnly,
+                hashable: table.hashable
+            )
+        }
+        return SchemaDeclaration(
+            kitID: live.kitID, version: 17, tables: tables,
+            indices: live.indices, migrations: [])
+    }
+
+    @Test("opening a v17 SQLite estate through the live schema adds the digest column")
+    func openingV17EstateAddsDigestColumn() async throws {
+        // The v17 → v18 ladder entry is what every host open replays and what
+        // the estate-format 1.3 capsule replays; SQLite is the backend where
+        // a missing column is observable (an UPDATE naming it throws).
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        try await storage.open(schema: version17Schema())
+        #expect(try await storage.currentSchemaVersion(for: LocusKitSchema.kitID) == 17)
+
+        // Seed one row through the row store so the UPDATE below has a target.
+        let id = TestStorage.tid("v17")
+        _ = try await storage.rowStore.insert(table: "drawers", values: [
+            "id": .text(id),
+            "content": .text("v17 row"),
+            "parent_node_id": .text("test-parent"),
+            "addedBy": .text("bilby"),
+            "filedAt": .timestamp(t(1_700_000_000)),
+            "eventTime": .timestamp(t(1_700_000_000)),
+            "embeddingModelID": .text("minilm-v6"),
+            "lineageID": .text(UUID().uuidString),
+        ])
+        await #expect(throws: (any Error).self, "the v17 layout has no digest column") {
+            try await storage.rowStore.update(
+                table: "drawers", values: [digestColumn: .text(digest)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(id)))
+        }
+
+        // Replaying the live ladder adds the column and records v18.
+        try await storage.open(schema: LocusKitSchema.schema)
+        #expect(try await storage.currentSchemaVersion(for: LocusKitSchema.kitID) == LocusKitSchema.version)
+        let updated = try await storage.rowStore.update(
+            table: "drawers", values: [digestColumn: .text(digest)],
+            where: .eq(Column(table: "drawers", name: "id"), .text(id)))
+        #expect(updated == 1)
+
+        // Idempotent: a second open neither throws nor changes the version.
+        try await storage.open(schema: LocusKitSchema.schema)
+        #expect(try await storage.currentSchemaVersion(for: LocusKitSchema.kitID) == LocusKitSchema.version)
     }
 }

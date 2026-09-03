@@ -2,7 +2,7 @@
 //
 // Per-item distillation for GeniusLocusKit — SPEC_DISTILLATION_STORAGE §7.
 //
-// A distilled representation is a VIEW of one item: four nullable columns
+// A distilled representation is a VIEW of one item: five nullable columns
 // on the SOURCE drawer row plus one `distillation-features-v1` lane entry
 // keyed by the SOURCE drawer id. The factoid-drawer model (room
 // "_distilled", `_distilled_from` tunnels, "distillation-daemon"

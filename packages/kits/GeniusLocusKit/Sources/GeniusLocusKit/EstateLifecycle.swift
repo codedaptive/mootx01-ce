@@ -285,8 +285,9 @@ public extension GeniusLocusKit {
     /// the same index/distill/recompose transform a queued drawer receives at
     /// drain — so seeding returns with the estate settled and the
     /// "distillation" drain lane able to reach zero. The predicate is
-    /// representation-eligibility (bit 19 `hasCurrentRepresentation` clear, or
-    /// a stale pipeline version) over the `AI_Charter_Hint` room only: a hint
+    /// representation-eligibility (`distilledRepresentationIsCurrent` false:
+    /// bit 19 clear, a stale converter ID, or a missing or mismatched source
+    /// digest) over the `AI_Charter_Hint` room only: a hint
     /// that has already been indexed and distilled is never re-processed, so
     /// re-opening an estate stays a no-op — no spurious encode work per open.
     /// (The predicate deliberately does NOT key on `hintAddedBy`, which is
@@ -381,8 +382,7 @@ public extension GeniusLocusKit {
             for hint in drawers
             where nodeNames[hint.parentNodeId]?.room == LocusKit.hintRoom
                 && !hint.content.isEmpty
-                && (!hint.hasCurrentRepresentation
-                    || hint.distilledPipelineVersion != GeniusLocusKit.distillationConverterID) {
+                && !GeniusLocusKit.distilledRepresentationIsCurrent(hint) {
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside indexContent keeps the
                 // young basis covering the growing corpus.
