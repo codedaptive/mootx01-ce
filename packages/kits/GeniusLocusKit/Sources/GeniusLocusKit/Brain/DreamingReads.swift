@@ -257,4 +257,62 @@ public extension GeniusLocusKit {
         defer { derivedRebuildSpan(handle, open: false) }
         try await corpus.reindex(now: now)
     }
+
+    // MARK: - Mid-run crash recovery probe
+
+    /// Count of active, represented drawers whose corpus index row is missing
+    /// or was last updated strictly before the drawer's `distilledAt` timestamp.
+    ///
+    /// The distillation convergence step (`runDistilledRepresentationConvergence`
+    /// in the CLI) runs a sweep then a reindex. If the process dies after the
+    /// sweep commits but before the reindex runs, every drawer reads as
+    /// "current converter" — so a second run would skip the reindex entirely,
+    /// leaving the derived lanes built from the old text. This count detects
+    /// that gap by cross-referencing two independently-updated timestamps.
+    ///
+    /// Eligibility predicate — a drawer counts when ALL of:
+    ///   1. Active (not tombstoned), non-empty content.
+    ///   2. Carries a distilled representation (bit 19 set).
+    ///   3. The corpus has no index row for that drawer, OR the index row's
+    ///      `updatedAt` is strictly earlier than the drawer's `distilledAt`.
+    ///      Equal instants mean indexed (sweep and reindex ran under the same `now`).
+    ///
+    /// Returns 0 immediately when no Corpus is registered for the estate
+    /// (LocusOnly estate — no index to check).
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.
+    ///
+    /// Mirrors Rust `EstateCoordinator::distilled_representations_awaiting_reindex`.
+    public func distilledRepresentationsAwaitingReindex(handle: EstateHandle) async throws -> Int {
+        guard registry[handle] != nil else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        guard let corpus = corpusKits[handle] else {
+            // LocusOnly estate — no corpus index to check.
+            return 0
+        }
+        let estate = try estate(for: handle)
+
+        // Fetch the two independent timestamp sets without hydrating content.
+        let drawers = try await estate.drawersWithRepresentations()
+        let indexStates = try await corpus.allIndexStates()
+
+        // Build a lookup from contentID (== drawerID for non-passage mode) to
+        // the index row's updatedAt instant.
+        let indexedAt: [String: Date] = Dictionary(
+            indexStates.map { ($0.contentID, $0.updatedAt) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        // Count drawers with no index row OR whose index row is older than the
+        // representation. Strict `<`: equal instants mean sweep and reindex ran
+        // together under the same `now` — the drawer is fully indexed.
+        return drawers.filter { drawer in
+            guard let indexedDate = indexedAt[drawer.id] else {
+                // No index row at all — definitely awaiting reindex.
+                return true
+            }
+            return indexedDate < drawer.distilledAt
+        }.count
+    }
 }
