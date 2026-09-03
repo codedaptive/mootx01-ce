@@ -33,20 +33,23 @@ struct UpgradeCommandSourceTests {
         #expect(source.contains("backfillOnly"))
     }
 
-    @Test("--backfill-only branch calls only the three data-dir backfills")
+    @Test("--backfill-only branch calls only the four data-dir backfills and exits non-zero on failure")
     func backfillOnlyBranchIsHeadless() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
-        // The backfillOnly branch must contain all three backfill calls in order.
+        // The backfillOnly branch must contain all four backfill calls in order.
         let branchStart = try #require(
             source.range(of: "if backfillOnly {")?.lowerBound)
         let branchEnd = try #require(
             source.range(of: "return\n        }\n\n        // --check:", range: branchStart..<source.endIndex)?.upperBound)
         let branch = source[branchStart..<branchEnd]
-        // All three backfills must appear (runAdornmentRequiredBackfill renamed
+        // All four backfills must appear (runAdornmentRequiredBackfill renamed
         // to runAdornmentStoreMigration in ADORN-STORE-02 Part C).
         #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
         #expect(branch.contains("await runAdornmentStoreMigration(home: home)"))
         #expect(branch.contains("await runSharedContentReclaimIfPending(home: home)"))
+        #expect(branch.contains("await runDistilledRepresentationConvergence(home: home)"))
+        // A failed step must surface as a non-zero exit for scripted callers.
+        #expect(branch.contains("throw ExitCode.failure"))
         // launchd and network calls must NOT appear in the branch.
         #expect(!branch.contains("convergeDaemonBundle"))
         #expect(!branch.contains("restartAgents"))

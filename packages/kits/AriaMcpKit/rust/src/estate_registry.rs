@@ -58,7 +58,7 @@ use genius_locus_kit::EstateCoordinator;
 // gate `DrainStatus::encode_settled` (PERF_W1_DRAIN_RIDER Finding 3).
 pub use genius_locus_kit::DrainStatus;
 use genius_locus_kit_migrations::run_geometry_normalization;
-use genius_locus_kit_migrations::SharedContentMigrationExt;
+use genius_locus_kit_migrations::MigrationChainExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_postgres::PostgresDrawerStore;
@@ -848,19 +848,19 @@ fn wire_postgres_semantic_recall(
     // for PostgreSQL estates (blast-radius INTENTIONALLY_LEFT classification).
 
     // This binary declares a 1.0 floor, so prepare the estate through the
-    // separately compiled migration capsule before current-runtime wiring.
+    // separately compiled migration capsules before current-runtime wiring.
     // A crash leaves the persisted phase/cursor resumable on the next start.
     {
         let mut guard = coord.lock().unwrap();
         guard
-            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
-            .map_err(|error| format!("shared-content migration: {error:?}"))?;
+            .run_migration_chain(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("estate migration chain: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
+    // Shared-content 1.1 / index-composition 1.2: EVERY wired Corpus is the
+    // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter —
+    // canonical content lives once in Drawers; the engine keys every derived
+    // row by Drawer ID and resolves content by ID at work time (mirrors the
+    // GLK coordinator's provision wiring arms).
     let estate = {
         let guard = coord.lock().unwrap();
         guard
@@ -933,18 +933,18 @@ fn wire_sqlite_semantic_recall(
     let storage = shared_storage;
 
     // This binary declares a 1.0 floor, so prepare the estate through the
-    // separately compiled migration capsule before current-runtime wiring.
+    // separately compiled migration capsules before current-runtime wiring.
     {
         let mut guard = coord.lock().unwrap();
         guard
-            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
-            .map_err(|error| format!("shared-content migration for {path:?}: {error:?}"))?;
+            .run_migration_chain(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
+    // Shared-content 1.1 / index-composition 1.2: EVERY wired Corpus is the
+    // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter —
+    // canonical content lives once in Drawers; the engine keys every derived
+    // row by Drawer ID and resolves content by ID at work time (mirrors the
+    // GLK coordinator's provision wiring arms).
     let estate = {
         let guard = coord.lock().unwrap();
         guard
