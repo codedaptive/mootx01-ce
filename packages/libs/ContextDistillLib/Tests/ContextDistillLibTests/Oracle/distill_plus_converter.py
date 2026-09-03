@@ -14,6 +14,10 @@ Candidate contracts:
   with mandatory integer token-overlap redundancy suppression.
 * ``intent-span`` selects complete, exact source atoms around operative intent
   and dependency-closed document structure without rewriting their contents.
+* ``intent-span-v23`` preserves the frozen v22 behavior and adds a symmetric
+  peer-dialogue lane for transcripts whose speakers use ordinary names.
+* ``intent-span-v23-attributed`` renders that exact selection as inline
+  attributed prose so miners do not see an alternating chat-log topology.
 
 The existing enrichment trailer is split from the stored p2.3 representation.
 The first three candidates append it unchanged.  ``intent-span`` retains that
@@ -50,8 +54,13 @@ from record_shape_classifier import (
 
 CONVERTER_VERSION = "distill-plus-v1"
 RULESET_VERSION = "mechanical-v8-scoring-corrections"
-CANDIDATES = ("p23-current", "p23-core", "freq-mmr", "intent-span")
+CANDIDATES = (
+    "p23-current", "p23-core", "freq-mmr", "intent-span",
+    "intent-span-v23", "intent-span-v23-attributed",
+)
 INTENT_SPAN_VERSION = "intent-span-v22-authority-closure"
+INTENT_SPAN_V23_VERSION = "intent-span-v23-peer-dialogue"
+INTENT_SPAN_V23_ATTRIBUTED_VERSION = "intent-span-v23.2-attributed-prose"
 
 # Debug-7 membership is structural test-bed configuration, never an input to
 # classification or reduction.  Prefix matching mirrors protocol_lab.py.
@@ -138,6 +147,11 @@ COREF_EXCLUSIONS = frozenset({
 KNOWN_USER_SPEAKERS = frozenset({"user", "human", "customer", "interviewer"})
 KNOWN_ANSWER_SPEAKERS = frozenset({
     "assistant", "agent", "system", "interviewee",
+})
+PEER_FIELD_LABELS = frozenset({
+    "address", "country", "date", "email", "entity", "id", "location",
+    "name", "notes", "phone", "place", "quantity", "status", "subject",
+    "title", "type",
 })
 OPERATIVE_RE = re.compile(
     r"^\s*(?:please\s+)?(?:amend|analy[sz]e|answer|check|compare|convert|"
@@ -1029,6 +1043,55 @@ def _speaker_turns(source: str) -> list[SpeakerTurn]:
     return turns
 
 
+def _peer_speaker_turns(source: str) -> list[SpeakerTurn]:
+    """Parse a strict alternating two-person transcript with named peers.
+
+    The v22 classifier already recognized arbitrary repeated speaker names as
+    dialogue, but the intent selector accepted only pinned role labels such as
+    ``User`` and ``Assistant``.  Requiring two labels, at least six tagged
+    turns, at least 90 percent tagged-line coverage, and 75 percent switching
+    keeps metadata/field documents out of this lane while admitting ordinary
+    ``Alice:``/``Bob:`` conversation exports.
+    """
+
+    lines: list[tuple[int, int, str]] = []
+    markers: list[tuple[int, int, int, str]] = []
+    labels: list[str] = []
+    fence: str | None = None
+    for start, end, visible in _physical_lines(source):
+        fence_match = FENCE_OPEN_RE.match(visible)
+        if fence_match:
+            marker = fence_match.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is not None or not visible.strip():
+            continue
+        lines.append((start, end, visible))
+        match = TAG_LINE.match(visible)
+        if not match:
+            continue
+        speaker = match.group(1).strip().casefold()
+        labels.append(speaker)
+        markers.append((start, end, start + match.start(2), speaker))
+
+    distinct = set(labels)
+    switches = sum(left != right for left, right in zip(labels, labels[1:]))
+    if (len(labels) < 6 or len(distinct) != 2
+            or distinct & (KNOWN_SPEAKERS | PEER_FIELD_LABELS)
+            or len(labels) * 100 // max(1, len(lines)) < 90
+            or switches * 100 // max(1, len(labels) - 1) < 75):
+        return []
+
+    turns = []
+    for index, (start, first_end, body_start, speaker) in enumerate(markers):
+        end = markers[index + 1][0] if index + 1 < len(markers) else len(source)
+        turns.append(SpeakerTurn(start, end, first_end, body_start, speaker))
+    return turns
+
+
 def _heading_level(line: str) -> int | None:
     markdown = MARKDOWN_HEADING_RE.match(line)
     if markdown:
@@ -1478,8 +1541,8 @@ def _answer_coverage_ids(atoms: Sequence[IntentAtom],
     return covered
 
 
-def _intent_atoms(source: str) -> tuple[list[IntentAtom], set[int], set[int],
-                                          list[str], dict]:
+def _intent_atoms(source: str, *, peer_dialogue: bool = False) -> tuple[
+        list[IntentAtom], set[int], set[int], list[str], dict]:
     """Return atoms, hard IDs, query-coverage IDs, unsupported shapes, mode."""
 
     embedded_facts = _embedded_user_fact_atoms(source)
@@ -1549,6 +1612,58 @@ def _intent_atoms(source: str) -> tuple[list[IntentAtom], set[int], set[int],
                      "speaker": answer_turn.speaker,
                      "reason": "generated-transform-not-source-evidence",
                  }})
+
+    if peer_dialogue:
+        peer_turns = _peer_speaker_turns(source)
+        if peer_turns:
+            atoms = []
+            unsupported: list[str] = []
+            discarded = []
+            for turn in peer_turns:
+                body = _turn_body(source, turn)
+                if (not body or TURN_FILLER_RE.fullmatch(body)
+                        or GREETING_ONLY_RE.fullmatch(body)
+                        or DIALOGUE_FILLER_ONLY_RE.fullmatch(body)):
+                    discarded.append({
+                        "speaker": turn.speaker,
+                        "start": turn.start,
+                        "reason": "filler",
+                    })
+                    continue
+                prefix = _append_exact_atom(
+                    atoms, source, turn.start, turn.body_start,
+                    "peer-speaker-prefix", turn.speaker,
+                )
+                parts, problems = _structured_atoms(
+                    source, turn.body_start, turn.end)
+                unsupported.extend(problems)
+                if not parts:
+                    _append_exact_atom(
+                        atoms, source, turn.body_start, turn.end,
+                        "peer-dialogue-turn", turn.speaker,
+                        dependencies=(prefix.atom_id,),
+                    )
+                    continue
+                base_id = len(atoms)
+                for part in parts:
+                    dependencies = tuple(
+                        base_id + dependency for dependency in part.dependencies
+                    )
+                    _append_exact_atom(
+                        atoms, source, part.start, part.end,
+                        f"peer-{part.kind}", turn.speaker,
+                        dependencies=tuple(dict.fromkeys(
+                            (prefix.atom_id, *dependencies)
+                        )),
+                    )
+            if any(atom.kind != "peer-speaker-prefix" for atom in atoms):
+                return (atoms, set(), set(), sorted(set(unsupported)), {
+                    "mode": "peer-dialogue",
+                    "peer_speakers": sorted({turn.speaker
+                                             for turn in peer_turns}),
+                    "peer_turn_count": len(peer_turns),
+                    "discarded_turns": discarded,
+                })
 
     if len(turns) >= 2:
         atoms = []
@@ -1698,15 +1813,32 @@ def _render_exact(source: str, atoms: Sequence[IntentAtom],
                   selected: set[int],
                   hard_ids: set[int] | None = None) -> tuple[str, list[dict]]:
     hard_ids = hard_ids or set()
+    atom_by_id = {atom.atom_id: atom for atom in atoms}
+
+    def peer_group(atom: IntentAtom | None) -> int | None:
+        if atom is None or not atom.kind.startswith("peer-"):
+            return None
+        if atom.kind == "peer-speaker-prefix":
+            return atom.atom_id
+        for dependency in atom.dependencies:
+            candidate = atom_by_id.get(dependency)
+            if candidate is not None and candidate.kind == "peer-speaker-prefix":
+                return candidate.atom_id
+        return None
+
     chosen = sorted((atom for atom in atoms if atom.atom_id in selected),
                     key=lambda atom: (atom.start, atom.end))
     pieces = []
     spans = []
     previous_end: int | None = None
+    previous_atom: IntentAtom | None = None
     for atom in chosen:
         if previous_end is not None and atom.start > previous_end:
             gap = source[previous_end:atom.start]
-            pieces.append(gap if not gap.strip() else "\n\n")
+            same_peer_turn = (peer_group(previous_atom) is not None
+                              and peer_group(previous_atom) == peer_group(atom))
+            pieces.append(gap if not gap.strip()
+                          else " " if same_peer_turn else "\n\n")
         # Assertion is load-bearing: intent-span may never render a rewritten
         # or partially sliced protected atom.
         assert atom.text == source[atom.start:atom.end]
@@ -1721,6 +1853,7 @@ def _render_exact(source: str, atoms: Sequence[IntentAtom],
             "hard_required": atom.hard_required or atom.atom_id in hard_ids,
         })
         previous_end = atom.end
+        previous_atom = atom
     return "".join(pieces), spans
 
 
@@ -1825,10 +1958,12 @@ def project_intent_trailer(source: str, trailer: str) -> tuple[str, dict]:
     return projected, {"accepted": accepted, "rejected": rejected}
 
 
-def intent_span(source: str, trailer: str) -> tuple[str, list[dict], dict, str]:
+def intent_span(source: str, trailer: str, *, peer_dialogue: bool = False
+                ) -> tuple[str, list[dict], dict, str]:
     """Select complete exact source atoms with deterministic dependencies."""
 
-    atoms, hard, coverage, unsupported, mode_details = _intent_atoms(source)
+    atoms, hard, coverage, unsupported, mode_details = _intent_atoms(
+        source, peer_dialogue=peer_dialogue)
     projection_source = source
     excluded_projection_spans: list[dict] = []
     omitted = mode_details.get("derived_answer_omitted")
@@ -1878,7 +2013,9 @@ def intent_span(source: str, trailer: str) -> tuple[str, list[dict], dict, str]:
     }
     remaining = [atom for atom in atoms
                  if atom.atom_id not in selected
-                 and atom.kind not in {"heading", "answer-heading"}]
+                 and atom.kind not in {
+                     "heading", "answer-heading", "peer-speaker-prefix",
+                 }]
     budget_rejected = []
     while remaining:
         selected_terms = set().union(
@@ -1952,6 +2089,29 @@ def _combine(core: str, trailer: str) -> str:
     return core or trailer
 
 
+def render_peer_attributed_prose(text: str) -> str:
+    """Render selected named-peer turns as one attributed prose stream.
+
+    This changes presentation topology, not selected evidence.  It retains the
+    explicit speaker for every selected turn and leaves non-turn material
+    untouched.  Curly quotation marks avoid colliding with ordinary ASCII
+    quotations already present in the source text.
+    """
+
+    rendered = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(
+            r"^([A-Za-z][A-Za-z ._-]{0,31}):\s*(.*)$", line)
+        if match:
+            speaker, body = match.groups()
+            line = f"{speaker} said: “{body}”"
+        rendered.append(line)
+    return " ".join(rendered)
+
+
 def _portable_span_offsets(source: str, spans: Sequence[dict]) -> list[dict]:
     """Attach explicit UTF-8 byte offsets to Python code-point spans."""
 
@@ -1977,7 +2137,7 @@ def _portable_span_offsets(source: str, spans: Sequence[dict]) -> list[dict]:
 
 
 def candidate_rows(record: EstateRecord) -> dict[str, dict]:
-    """Generate all four attributed rows for one estate record."""
+    """Generate every attributed candidate row for one estate record."""
 
     decision = classify_record(record.content)
     units = semantic_units(record.content, decision)
@@ -1992,6 +2152,17 @@ def candidate_rows(record: EstateRecord) -> dict[str, dict]:
         units, original_bytes, len(trailer.encode("utf-8")))
     intent_text, intent_spans, intent_details, intent_trailer = intent_span(
         record.content, trailer)
+    v23_text, v23_spans, v23_details, v23_trailer = intent_span(
+        record.content, trailer, peer_dialogue=True)
+    attributed_text = (
+        render_peer_attributed_prose(v23_text)
+        if v23_details.get("mode") == "peer-dialogue" else v23_text
+    )
+    attributed_details = dict(v23_details)
+    attributed_details["rendering"] = (
+        "inline-attributed-prose"
+        if v23_details.get("mode") == "peer-dialogue" else "source-exact"
+    )
     variants = {
         "p23-current": (stored_body, current,
                         [{"unit_index": unit.index, "start": unit.start,
@@ -2003,12 +2174,23 @@ def candidate_rows(record: EstateRecord) -> dict[str, dict]:
                      mmr_spans, mmr_details, trailer),
         "intent-span": (intent_text, _combine(intent_text, intent_trailer),
                         intent_spans, intent_details, intent_trailer),
+        "intent-span-v23": (v23_text, _combine(v23_text, v23_trailer),
+                            v23_spans, v23_details, v23_trailer),
+        "intent-span-v23-attributed": (
+            attributed_text, _combine(attributed_text, v23_trailer),
+            v23_spans, attributed_details, v23_trailer,
+        ),
     }
     result = {}
     for candidate, (core, combined, spans, details, applied_trailer) in variants.items():
         combined_bytes = len(combined.encode("utf-8"))
-        candidate_ruleset = (INTENT_SPAN_VERSION if candidate == "intent-span"
-                             else RULESET_VERSION)
+        candidate_ruleset = (
+            INTENT_SPAN_VERSION if candidate == "intent-span"
+            else INTENT_SPAN_V23_VERSION if candidate == "intent-span-v23"
+            else INTENT_SPAN_V23_ATTRIBUTED_VERSION
+            if candidate == "intent-span-v23-attributed"
+            else RULESET_VERSION
+        )
         result[candidate] = {
             "schema_version": 1,
             "converter_version": CONVERTER_VERSION,
