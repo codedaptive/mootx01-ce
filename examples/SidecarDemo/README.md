@@ -2,7 +2,7 @@
 
 A small demonstration: a macOS application attaches a MOOT beside
 itself and opens that knowledge to an organization through the
-ARIA_MCP server. This is the headline pattern named in
+ARIA MCP server. This is the headline pattern named in
 `docs/concepts/MOOTX01_AND_ARIA_CANON.md` §"The sidecar pattern".
 
 The demo is intentionally small. The point is the pattern, not a
@@ -16,12 +16,12 @@ application.
 
 1. Opens an in-memory MOOT — a `LocusKit.Estate` with the
    `GeniusLocusKit` coordinator on top.
-2. Constructs an `ARIA_MCP` dispatcher pointed at that MOOT.
-3. Runs the ARIA_MCP JSON-RPC over stdio.
+2. Constructs an `AriaMCP` dispatcher pointed at that MOOT.
+3. Runs the ARIA MCP JSON-RPC over stdio.
 
-Any MCP client — Claude Desktop, Claude Code, MemPalace's own MCP
-client, the `mcp` CLI — can launch `sidecar-demo` and reach the
-attached MOOT over the standard ARIA_MCP tool surface.
+Any MCP client — Claude Desktop, Claude Code, Cursor, the `mcp` CLI —
+can launch `sidecar-demo` and reach the attached MOOT over the standard
+ARIA MCP tool surface.
 
 ## The two files an agent reads
 
@@ -31,7 +31,7 @@ attached MOOT over the standard ARIA_MCP tool surface.
   header comment names the three steps of the wiring (backend →
   estate-then-coordinator → dispatcher) in order.
 - `Sources/sidecar-demo/SidecarDemoMain.swift` — the driver. ~30 lines
-  showing how the attachment object plugs into the ARIA_MCP stdio loop.
+  showing how the attachment object plugs into the ARIA MCP stdio loop.
 
 Read those two files, in that order. They are the demo.
 
@@ -62,10 +62,9 @@ the same across Claude Desktop, Claude Code, and Cline:
 }
 ```
 
-The bundled installer (see `Installer/`) already ships an `aria-mcp`
-template; copy that template and point the command at this demo
-binary if you want to register the demo alongside the production
-ARIA_MCP server.
+`mootx01 install` registers the production ARIA MCP server for each
+client it detects; add a second entry of the shape above if you want
+the demo registered beside it.
 
 ## Test
 
@@ -108,16 +107,15 @@ can live.
 
 ## Dependencies
 
-This package links four kits and one MCP target from the surrounding
+This package links four kits from `packages/kits/` in the surrounding
 repository:
 
-- `AriaMCP` (from `../ARIA_MCP`) — the JSON-RPC dispatcher and stdio
+- `AriaMCP` (from `AriaMcpKit`) — the JSON-RPC dispatcher and stdio
   loop.
-- `GeniusLocusKit` (from `../GeniusLocusKit`) — the composition layer
-  and verb surface.
-- `LocusKit` (from `../LocusKit`) — the estate primitive.
-- `PersistenceKit` and `PersistenceKitInMemory` (from `../PersistenceKit`) — the
-  backend protocol and the in-memory backend the demo uses.
+- `GeniusLocusKit` — the composition layer and verb surface.
+- `LocusKit` — the estate primitive.
+- `PersistenceKit` and `PersistenceKitInMemory` (from `PersistenceKit`) —
+  the backend protocol and the in-memory backend the demo uses.
 
 QueueKit, SynapseKit, and CorpusKit are transitive through
 GeniusLocusKit; they are intentionally not listed in `Package.swift`.

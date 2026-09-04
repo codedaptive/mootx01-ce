@@ -31,13 +31,17 @@ never reaches around it into the substrate):
   free (`TodoModel.search`), and the **emptiness probe** used to decide whether
   to seed sample data (`TodoModel.seedSampleDataIfEmpty`).
 
-### Known SDK edge (documented in code)
+- `moot_memory_get { ids, depth: "full" }` — the **hydration** step. Search
+  rows are travel rows (id, subject, room) with no body; one batched call
+  returns the verbatim content of every hit.
 
-The tool surface returns **text, not structured drawers**. `moot_memory_search`
-hands back lines shaped `"<id>  [room]  <preview>"` after a `"found N"` header.
-`TodoModel.search` parses those lines (drops the header, shows the rest). A
-production app would want a structured recall tool returning typed drawers;
-there's a `NOTE(integrate)` marking that slot.
+### The result contract (documented in code)
+
+Every recall tool answers with text for people and a `structuredContent`
+block, `{ "results": [ { "id", "room", "subject", "content" }, … ] }`, exposed
+as `IntentCallResult.structured`. `TodoModel.search` reads the search rows
+for ids, fetches the bodies with `moot_memory_get`, and renders one
+`MemoryHit` per drawer. The app never parses the text block.
 
 ## Wiring
 
@@ -46,21 +50,8 @@ there's a `NOTE(integrate)` marking that slot.
      `Application Support/MootTodo/moot.sqlite`.
    - `GatewayRuntime.shared.bridge()` → handed to `TodoModel.attach(bridge:)`.
    - `seedSampleDataIfEmpty()` seeds three todos on a fresh estate.
-2. The UI gets its bridge from the **same** `GatewayRuntime.shared`, so UI
-   writes and App Intent writes share one estate.
-
-## App Intents (real / callable)
-
-Registered by `MootTodoShortcuts: AppShortcutsProvider` in the **app target**
-(the provider only registers when compiled into an app bundle). It references
-the library's public intent types:
-
-- `CaptureDrawerIntent` → `moot_file_memory` — "Capture in MootTodo …"
-- `RecallDrawerIntent` → `moot_memory_search` — "Recall in MootTodo …"
-
-Both resolve their estate via `GatewayRuntime.shared.bridge()`, so a Shortcut
-that captures a memory lands in the same SQLite estate the to-do sidecar
-mirrors into, and the app's search field finds it.
+2. The UI gets its bridge from the **same** `GatewayRuntime.shared`, so every
+   part of the app writes to one estate.
 
 ## Files
 
@@ -69,7 +60,6 @@ examples/MootTodo/
   App/MootTodoApp.swift        @main; launch-time MOOT wiring + seeding
   App/TodoModel.swift          primary store (Layer 1) + MOOT sidecar (Layer 2)
   App/ContentView.swift        SwiftUI UI: list (primary) + search (MOOT)
-  App/MootTodoShortcuts.swift  AppShortcutsProvider
   App/Localizable.xcstrings    string catalog (no literals in views)
   project.yml                  xcodegen project (universal app)
   SPEC.md / GUIDE.md / README.md
