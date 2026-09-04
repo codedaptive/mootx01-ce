@@ -7,8 +7,8 @@ import AriaMCP       // JSONValue (.string(…)) — how tool arguments are buil
 // =============================================================================
 //
 // This file has three parts:
-//   1. Note            — a plain value type for one row, plus the PARSER that
-//                        turns a moot_memory_search text line into a Note.
+//   1. Note            — a plain value type for one row, plus the DECODER that
+//                        turns a tool's structured result rows into Notes.
 //   2. NotepadModel    — the @MainActor view-model. EVERY MOOT call lives here.
 //   3. NotepadView     — the SwiftUI list + editor.
 //
@@ -18,90 +18,73 @@ import AriaMCP       // JSONValue (.string(…)) — how tool arguments are buil
 
 // MARK: - 1. Note  (a row in the list)
 
+enum NotepadRoom {
+    /// The MOOT "room" (location) every MootNotepad note is filed into.
+    static let value = "notes"
+}
+
 /// One note, as the app understands it.
 ///
-/// MOOT does not hand us a "Note" object — it hands us TEXT. A `Note` is what
-/// we reconstruct by parsing that text. The fields here are exactly what a
-/// `moot_memory_search` line gives us: a drawer `id`, the `room` it's filed
-/// in, and a short `preview` of its content.
+/// MOOT does not hand us a "Note" type of its own — it hands us structured
+/// result rows. Every recall-family tool (`moot_memory_search`,
+/// `moot_memory_get`, …) answers with a text block for humans AND a
+/// `structuredContent` block whose `results` array carries one object per
+/// drawer: `id`, and where known `room`, `subject`, `content`. A `Note` is
+/// what we build from one of those rows.
 struct Note: Identifiable, Hashable {
     /// The drawer id from the MOOT. This is the handle we pass to
     /// moot_withdraw_memory to delete the note. It is MOOT's id, not ours.
     let id: String
     /// The room (location) the drawer is filed in — always "notes" here.
     let room: String
-    /// A short preview of the note's content, as the search tool returned it.
-    /// NOTE(integrate): the search tool returns a *preview*, not the full body.
-    /// For this teaching example the preview IS the note text we show and edit.
-    /// A production app wanting the verbatim full body would call a structured
-    /// "get drawer by id" tool — see the edge note at the top of the app file.
-    var preview: String
+    /// The full note body, verbatim, as `moot_memory_get` returned it at
+    /// depth:full. Search rows do not carry content (they are travel rows:
+    /// id, subject, room); the body is fetched by id in a second call.
+    var content: String
 
     // -------------------------------------------------------------------------
-    // parse — the TEXT-RESULT EDGE, made concrete.
+    // decode — the STRUCTURED-RESULT contract, made concrete.
     // -------------------------------------------------------------------------
     //
-    // `moot_memory_search` returns lines shaped like:
+    // `IntentCallResult.structured` is the tool's `structuredContent` block,
+    // verbatim JSON. For the recall family it is:
     //
-    //     <id>  [room]  <preview text...>
+    //     { "results": [ { "id": "…", "room": "…", "subject": "…",
+    //                      "content": "…" }, … ] }
     //
-    // i.e. the id, then the room in square brackets, then the preview — fields
-    // separated by runs of whitespace. We split on the bracketed room to peel
-    // the three fields apart. This string-parsing is the single most important
-    // thing to understand about building on the current tool surface: the
-    // substrate speaks text, so the app re-derives structure from text.
-    //
-    // Returns nil for lines that aren't note rows (e.g. the "found N memory(s)"
-    // header, or a blank line), so callers can simply compactMap over them.
-    static func parse(line: String) -> Note? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return nil }
+    // Optional fields are ABSENT (never null) when the tool has nothing to
+    // say: search rows omit `content`; a drawer without a subject omits
+    // `subject`. The text block exists for people and for audit; an app reads
+    // the structured block and never re-parses the text.
 
-        // The room appears as "[notes]". Find that bracketed token; if a line
-        // has no bracketed room, it isn't a drawer row (it's the header), so
-        // we skip it.
-        guard let open = trimmed.firstIndex(of: "["),
-              let close = trimmed.firstIndex(of: "]"),
-              open < close else {
+    /// Every result row as a dictionary, or [] when the tool sent no block.
+    static func rows(in structured: JSONValue?) -> [[String: JSONValue]] {
+        guard case let .object(top)? = structured,
+              case let .array(items)? = top["results"] else { return [] }
+        return items.compactMap { item in
+            if case let .object(row) = item { return row }
             return nil
         }
+    }
 
-        // id = everything before the "[" (trimmed of trailing spaces).
-        let id = String(trimmed[trimmed.startIndex..<open])
-            .trimmingCharacters(in: .whitespaces)
-        guard !id.isEmpty else { return nil }
+    /// A `Note` from one `moot_memory_get` row at depth:full. Returns nil for
+    /// rows that are not a note we can show: no content (the drawer is gated
+    /// or opaque), or an id that is not a UUID.
+    static func from(row: [String: JSONValue]) -> Note? {
+        guard case let .string(id)? = row["id"],
+              case let .string(content)? = row["content"] else { return nil }
 
-        // Security: validate the extracted id is a UUID before accepting it.
-        //
-        // MOOT drawer ids default to a freshly-generated UUID string. A crafted
-        // note body could contain text before "[room]" that looks like a row
-        // header — for example, a note whose text begins with a fake id followed
-        // by "[notes]" could influence how this text line is parsed and inject a
-        // synthetic id into the moot_withdraw_memory call on delete.
-        //
-        // Validating as a UUID here means only real drawer ids (which are always
-        // UUIDs under the current substrate) can drive destructive operations.
-        // This is the safe pattern: derive action-bearing ids from a reliable
-        // structural contract, not from re-parsing free text.
-        //
-        // If the substrate ever permits non-UUID drawer ids, this guard needs
-        // to be relaxed together with a corresponding update to the deletion path.
+        // Security: only accept UUID ids. The id is what drives the
+        // moot_withdraw_memory call on delete, so it must come from the
+        // structural contract, never from anything a note body could contain.
+        // MOOT drawer ids are always UUIDs under the current substrate.
         guard UUID(uuidString: id) != nil else { return nil }
 
-        // room = the text inside the brackets.
-        let afterOpen = trimmed.index(after: open)
-        let room = String(trimmed[afterOpen..<close])
-
-        // preview = everything after the "]" (trimmed of leading spaces).
-        let afterClose = trimmed.index(after: close)
-        let preview = String(trimmed[afterClose...])
-            .trimmingCharacters(in: .whitespaces)
-
-        return Note(id: id, room: room, preview: preview)
+        let room: String
+        if case let .string(r)? = row["room"] { room = r } else { room = "" }
+        return Note(id: id, room: room, content: content)
     }
 }
-
-
 // MARK: - 2. NotepadModel  (every MOOT call lives here)
 
 /// The view-model. It owns the `MootBridge` and exposes plain async methods the
@@ -115,8 +98,7 @@ struct Note: Identifiable, Hashable {
 @Observable
 final class NotepadModel {
 
-    /// The room every note is filed into. Shared with the Shortcuts provider
-    /// via NotepadRoom so a voice-captured note lands where the UI reads.
+    /// The room every note is filed into.
     let room = NotepadRoom.value
 
     /// The notes currently shown in the list. Rebuilt by `refresh()` from the
@@ -151,12 +133,12 @@ final class NotepadModel {
 
     /// Rebuild `notes` from the MOOT.
     ///
-    /// We call `moot_memory_search` with a broad query and `limit: 200`.
+    /// Two calls. `moot_memory_search` with a broad query and `limit: 200`
+    /// returns travel rows — ids, subjects, rooms — but no bodies. We collect
+    /// the ids and hand them to `moot_memory_get` in one batched call at
+    /// depth:full, which returns the verbatim content and the room for each.
     /// Results are filtered to rows whose room is ours ("notes"). The limit
     /// bounds the list; it is not a guaranteed exhaustive search.
-    ///
-    /// THE TEXT EDGE: the result is text, so we split it into lines and run
-    /// each through Note.parse. See Note.parse for the line shape.
     func refresh(query: String = "") async {
         guard let bridge else { return }
 
@@ -164,30 +146,45 @@ final class NotepadModel {
         // generous limit recalls the whole notebook. When the user types a
         // search term we pass that instead — same tool, narrower query.
         let effectiveQuery = query.isEmpty ? "*" : query
-        let call = await bridge.callTool("moot_memory_search", arguments: [
+        let search = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string(effectiveQuery),
             "limit": .integer(200),
         ])
 
-        if call.isError {
-            lastError = String(localized: "Search failed: \(call.text)")
+        if search.isError {
+            lastError = String(localized: "Search failed: \(search.text)")
             return
         }
         lastError = nil
 
-        // Parse the text result into Note rows. The first line is usually the
-        // "found N memory(s)" header, which Note.parse returns nil for, so it
-        // drops out of the compactMap automatically.
-        let parsed = call.text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { Note.parse(line: String($0)) }
+        // Travel rows → ids. Nothing else on a search row is needed here.
+        let ids: [JSONValue] = Note.rows(in: search.structured).compactMap { row in
+            if case let .string(id)? = row["id"] { return .string(id) }
+            return nil
+        }
+        guard !ids.isEmpty else {
+            notes = []
+            await refreshStatus()
+            return
+        }
+
+        // Hydrate: one batched moot_memory_get at depth:full gives every
+        // drawer's room and verbatim content in one round trip.
+        let get = await bridge.callTool("moot_memory_get", arguments: [
+            "ids": .array(ids),
+            "depth": .string("full"),
+        ])
+        if get.isError {
+            lastError = String(localized: "Could not load notes: \(get.text)")
+            return
+        }
+
+        notes = Note.rows(in: get.structured)
+            .compactMap(Note.from(row:))
             // Keep only OUR room. (A drawer filed elsewhere isn't a notepad note.)
             .filter { $0.room == room }
-
-        notes = parsed
         await refreshStatus()
     }
-
     // -- CREATE: file a new note -------------------------------------------
 
     /// File a new note into the MOOT.
@@ -196,7 +193,7 @@ final class NotepadModel {
     /// the room. The tool returns text like "filed memory <id>\nroom: notes",
     /// which we don't need to parse — we just refresh the list afterward so the
     /// new drawer appears. (Re-reading from the MOOT after a write keeps the UI
-    /// honest: it shows what the substrate actually stored, not what we hoped.)
+    /// in step with it: it shows what the substrate actually stored, not what we hoped.)
     func add(content: String) async {
         guard let bridge else { return }
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -255,28 +252,20 @@ final class NotepadModel {
 
     /// Sample-data approach: if no notes are found in the opening probe, file
     /// three example notes so the list has content out of the box. The probe
-    /// uses `moot_memory_search` with `limit: 10`; if the first ten results
-    /// include no notes in our room, we seed. Delete the SQLite file to reset.
+    /// is a normal `refresh()`; if it leaves the list empty, we seed. Delete
+    /// the SQLite file to reset.
     func seedIfEmpty() async {
-        guard let bridge else { return }
+        guard bridge != nil else { return }
 
         // Ask the MOOT whether our room already has notes.
-        let probe = await bridge.callTool("moot_memory_search", arguments: [
-            "query": .string("*"),
-            "limit": .integer(10),
-        ])
-        let hasNotes = probe.text
-            .split(separator: "\n")
-            .compactMap { Note.parse(line: String($0)) }
-            .contains { $0.room == room }
-        guard !hasNotes else { return }
-
+        await refresh()
+        guard notes.isEmpty else { return }
         // File the three sample notes. We reuse `add`, which files into our
         // room and refreshes — so after seeding the list is already populated.
         let samples = [
             "Welcome to MootNotepad — every note here is a MOOT drawer.",
             "Try adding a note: tap the pencil, type, and save.",
-            "Ask Siri: \"Search my notes in MootNotepad.\"",
+            "Search as you type: the list is the MOOT's answer.",
         ]
         for sample in samples {
             await add(content: sample)
@@ -314,7 +303,7 @@ struct NotepadView: View {
                     }
                 }
 
-                // One row per note. Tapping shows the (preview) content inline
+                // One row per note. The row shows the full note body;
                 // by expanding; swipe-to-delete withdraws the drawer.
                 Section {
                     ForEach(model.notes) { note in
@@ -370,12 +359,12 @@ struct NotepadView: View {
     }
 }
 
-/// One note row: shows the preview text the MOOT search returned.
+/// One note row: shows the note body moot_memory_get returned.
 private struct NoteRow: View {
     let note: Note
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(note.preview)
+            Text(note.content)
                 .lineLimit(3)
             // The drawer id, shown small, so the MOOT's handle is visible —
             // this is the value passed to moot_withdraw_memory on delete.
