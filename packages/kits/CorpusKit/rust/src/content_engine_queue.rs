@@ -25,7 +25,7 @@ use queuekit::{
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use substrate_types::hlc::HLCGenerator;
@@ -110,7 +110,14 @@ impl CorpusContentEngine {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_queue = Arc::clone(&queue);
         let worker_stop = Arc::clone(&stop);
-        let worker_engine = Arc::clone(self);
+        // The worker holds the engine WEAKLY and upgrades for one pass at a
+        // time. A strong handle here would make the engine its own owner: a
+        // host that releases its last `Arc` without calling
+        // `drop_ingest_queue` would leave this thread indexing under an
+        // engine nobody can reach any more (its composition policy included).
+        // With the weak handle the last release runs `Drop`, which stops and
+        // joins the thread.
+        let worker_engine = Arc::downgrade(self);
         let handle = std::thread::Builder::new()
             .name("corpus-content-drain".to_string())
             .spawn(move || {
@@ -139,7 +146,7 @@ impl CorpusContentEngine {
         if let Some(mut state) = taken {
             state.stop.store(true, Ordering::SeqCst);
             if let Some(worker) = state.worker.take() {
-                let _ = worker.join();
+                join_unless_current(worker);
             }
         }
     }
@@ -451,8 +458,30 @@ impl CorpusContentEngine {
     }
 }
 
+/// Join a drain worker unless the caller IS that worker. `Drop` can run on
+/// the worker thread: the pass's upgraded handle may be the engine's last
+/// owner, so releasing it at the end of the pass tears the queue down from
+/// inside the loop. A thread cannot join itself; that worker observes the
+/// stop flag on its next pass and exits on its own.
+pub(crate) fn join_unless_current(worker: JoinHandle<()>) {
+    if worker.thread().id() != std::thread::current().id() {
+        let _ = worker.join();
+    }
+}
+
+/// The safety net for a host that releases its last `Arc` without calling
+/// `drop_ingest_queue`: stop and join the drain worker so no thread outlives
+/// the engine. Reachable because the worker holds the engine weakly (see
+/// `mount_ingest_queue`); idempotent with the explicit teardown. Twin of
+/// Swift `CorpusContentEngine.deinit`.
+impl Drop for CorpusContentEngine {
+    fn drop(&mut self) {
+        self.drop_ingest_queue();
+    }
+}
+
 fn run_content_drain_loop(
-    engine: Arc<CorpusContentEngine>,
+    engine: Weak<CorpusContentEngine>,
     queue: Arc<ContentQueue>,
     stop: Arc<AtomicBool>,
     lease: Option<DrainLease>,
@@ -497,6 +526,12 @@ fn run_content_drain_loop(
                 }
             }
         }
+        // One pass, one upgrade: the engine is held only while it works and
+        // released before the sleep. A failed upgrade means every owner has
+        // let the engine go, so the worker exits.
+        let Some(engine) = engine.upgrade() else {
+            break;
+        };
         match engine.drain_content_with_queue(&queue) {
             Ok(n) if n > 0 => {
                 pending_publish = true;
@@ -519,7 +554,13 @@ fn run_content_drain_loop(
                 eprintln!("mootx01 content drain loop error: {e:?}");
             }
         }
+        drop(engine);
         std::thread::sleep(Duration::from_millis(15));
+    }
+    // Release the lease on exit so a successor process can take over without
+    // waiting out the TTL, as the legacy loop and Swift `dropIngestQueue` do.
+    if let Some(lease) = &lease {
+        lease.release();
     }
 }
 
@@ -694,6 +735,7 @@ mod tests {
             .expect("configuration"),
             Arc::clone(&source) as Arc<dyn crate::CorpusContentSource>,
             vec![EmbeddingModelConfig::Deterministic],
+            false,
         )
         .expect("engine");
 
@@ -779,6 +821,7 @@ mod tests {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RetryCountsProvider::default()),
             }],
+            false,
         )
         .expect("engine");
         engine
@@ -851,6 +894,7 @@ mod tests {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RetryCountsProvider::default()),
             }],
+            false,
         )
         .expect("reopen engine");
         assert_eq!(

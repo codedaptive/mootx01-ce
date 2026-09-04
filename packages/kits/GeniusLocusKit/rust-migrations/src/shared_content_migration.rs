@@ -1069,6 +1069,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
                             // outer function wrapped the Vec in Some() before
                             // entering the closure.
                             models_opt.take().expect("models consumed once by closure"),
+                            false,
                         )
                         .map_err(|e| {
                             SharedContentMigrationError::StorageFailure {

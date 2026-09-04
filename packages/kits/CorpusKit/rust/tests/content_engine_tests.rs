@@ -195,6 +195,7 @@ fn make_standalone(
         config,
         Arc::clone(&store) as Arc<dyn CorpusContentSource>,
         vec![EmbeddingModelConfig::Deterministic],
+        false,
     )
     .expect("open engine");
     (engine, store, storage)
@@ -352,6 +353,7 @@ fn direct_revisions_use_the_same_restart_stable_counts_admission() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("engine");
     engine
@@ -401,6 +403,7 @@ fn direct_revisions_use_the_same_restart_stable_counts_admission() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("reopen engine");
     assert_eq!(reopened.maintained_vocab_anchor(), second_anchor);
@@ -432,6 +435,7 @@ fn direct_revisions_use_the_same_restart_stable_counts_admission() {
         config,
         source as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("reopen engine again");
     assert_eq!(reopened_again.maintained_vocab_anchor(), third_anchor);
@@ -480,6 +484,7 @@ fn direct_checkpoint_failure_rolls_back_counts_admission() {
         configuration,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("open engine");
     engine
@@ -610,6 +615,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RandomIndexingProvider::new()),
             }],
+            false,
         )
         .expect("open engine"),
     );
@@ -700,6 +706,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RandomIndexingProvider::new()),
             }],
+            false,
         )
         .expect("open engine"),
     );
@@ -787,6 +794,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         vec![EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
         }],
+        false,
     )
     .expect("reopen engine");
     assert_eq!(reopened.maintained_document_count(), 2);
@@ -821,6 +829,7 @@ fn provider_publication_marker_survives_reopen_before_admission() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("open engine");
     engine
@@ -844,6 +853,7 @@ fn provider_publication_marker_survives_reopen_before_admission() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("reopen engine");
     reopened
@@ -902,6 +912,7 @@ fn whole_content_reindex_uses_bounded_parallel_embedding_preparation() {
                 probe: Arc::clone(&probe),
             }),
         }],
+        false,
     )
     .expect("engine");
 
@@ -1186,6 +1197,7 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
         config,
         source,
         vec![EmbeddingModelConfig::Deterministic],
+        false,
     )
     .unwrap();
     engine.index_content("drawer-a", NOW).unwrap();
@@ -1237,6 +1249,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
         config,
         Arc::clone(&source),
         vec![EmbeddingModelConfig::Deterministic],
+        false,
     )
     .unwrap();
     small
@@ -1254,6 +1267,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 provider: Box::new(corpus_kit_providers::RandomIndexingProvider::new()),
             },
         ],
+        false,
     )
     .unwrap();
     big.reconcile_configured_providers(NOW).unwrap();
@@ -1285,6 +1299,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 provider: Box::new(corpus_kit_providers::RandomIndexingProvider::new()),
             },
         ],
+        false,
     )
     .unwrap();
     reopened.reconcile_configured_providers(NOW).unwrap();
@@ -1309,6 +1324,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
         config,
         source,
         vec![EmbeddingModelConfig::Deterministic],
+        false,
     )
     .unwrap();
     removed.reconcile_configured_providers(NOW).unwrap();
@@ -1507,7 +1523,7 @@ fn open_attached_engine(
     storage
         .migrate(&corpus_kit::attached_declaration())
         .expect("migrate attached");
-    CorpusContentEngine::open(Arc::clone(storage), config, source, models).expect("open engine")
+    CorpusContentEngine::open(Arc::clone(storage), config, source, models, false).expect("open engine")
 }
 
 /// G-5a: PPMI delta-fold positive.
