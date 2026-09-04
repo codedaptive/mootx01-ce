@@ -11,6 +11,8 @@ leaderboard and it does not contain a single product score.
 | `2026-05-22-apple-m5-max` | Apple M5 Max | Swift, Rust | Top-K cross-port baseline | 2 |
 | `2026-05-29-apple-m5-max` | Apple M5 Max | Swift, Rust | Hamming, SimHash, OR-reduce, top-K, SubstrateML | 10 |
 | `2026-05-29-apple-m5-max-88788de-crosslang` | Apple M5 Max | Rust, Go, Python | Hamming, SimHash, OR-reduce, top-K | 12 |
+| `2026-07-23-apple-m5-max-warmup` | Apple M5 Max | Swift, Rust | Warm-up pass for the 1.0.34 evidence run; not for citation | 17 |
+| `2026-07-23-apple-m5-max-run-01` … `run-05` | Apple M5 Max | Swift, Rust | Five repeated full runs behind `PERFORMANCE.md`: catalog, stress, top-K, ML, FDC | 17 each |
 
 The inventory describes what is present. It does not imply that runs from
 different dates or conditions are directly comparable.

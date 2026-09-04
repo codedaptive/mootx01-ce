@@ -48,8 +48,8 @@ When a future engineer proposes a new candidate, the protocol is:
 
 1. Implement the candidate as a new `SubstrateKernel` conformer.
 2. Register it in `kernel_registry` (Rust:
-   `test-harness/rust/src/harness/kernel_registry.rs`; Swift:
-   `test-harness/swift/Sources/Harness/Core/KernelRegistry.swift`).
+   `docs/validation/substrate_math_performance/test-harness/rust/src/harness/kernel_registry.rs`;
+   Swift: `docs/validation/substrate_math_performance/test-harness/swift/Sources/Harness/Core/KernelRegistry.swift`).
 3. Run `stress-test --all` on the dev hardware.
 4. Attach the resulting JSON files to the decision-doc PR.
 5. The decision doc cites the JSON file path + commit hash + hardware
@@ -59,13 +59,13 @@ No more "I calculated that X would be slower." The wallet has spoken.
 
 ## Running
 
-From `test-harness/rust/`:
+From `apps/moot-math-speedtest/rust-bench/`:
 
 ```
 cargo run --release --bin stress-test -- [flags]
 ```
 
-From `test-harness/swift/`:
+From `apps/moot-math-speedtest/swift-bench/`:
 
 ```
 swift run -c release stress-test [flags]
@@ -173,16 +173,15 @@ One JSON file per (op, language). All kernels for that op are in the
 
 ## Adding a new candidate kernel
 
-The candidate matrix (current at Phase 2.α-3):
+The candidate matrix:
 
 | Candidate | Swift | Rust | Status |
 |---|---|---|---|
-| Scalar | ✓ | ✓ | Always-on reference |
-| SimdKernel (portable SIMD) | ✓ | ✓ | Default for aarch64 |
-| Direct NEON intrinsics (Mula wide-accumulator) | planned | n/a | Phase 2.β-2 |
-| BNNS bit-as-byte (OR-reduce) | planned | n/a | Phase 2.α-4 |
-| BNNS float-encoded (Hamming) | planned | n/a | Phase 2.β-2 |
-| Metal compute kernel | planned | n/a | Phase 2.β-2 |
+| ScalarKernel | ✓ | ✓ | Always-on reference |
+| SimdKernel (portable SIMD) | ✓ | ✓ (nightly, `simd-nightly` feature) | Default for aarch64 |
+| NeonKernel (direct NEON intrinsics) | ✓ (aarch64) | n/a | Registered; measured by `stress-test --all` |
+| BnnsKernel | ✓ (Apple platforms) | n/a | Registered; measured by `stress-test --all` |
+| MetalKernel (GPU) | ✓ | n/a | Registered; measured by `stress-test --all` |
 
 Rust is for non-Apple ports. Apple-specific kernels (BNNS, Accelerate,
 Metal) are Swift-only; Rust skips them with a clear note in the
@@ -193,8 +192,7 @@ To add a new candidate (call it `FooKernel`):
 1. Add the implementation file alongside
    `packages/libs/SubstrateKernel/rust/src/kernel_simd.rs` and
    `packages/libs/SubstrateKernel/Sources/SubstrateKernel/PortableKernel-SIMD.swift`.
-   Make it a `SubstrateKernel` conformer (Phase 6.9b moved
-   kernels from SubstrateLib to their own package).
+   Make it a `SubstrateKernel` conformer.
 2. Add a `KernelKind` variant for it (Rust:
    `packages/libs/SubstrateKernel/rust/src/kernel.rs` enum +
    `parse()` + `as_str()`; Swift:
@@ -232,21 +230,19 @@ Full sweep: apps/moot-math-speedtest/results/2026-05-18-apple-m5-max/
             or_reduce-rust.json
 ```
 
-The JSON file path is gitignored locally but recoverable: anyone with
-the same hardware can re-run `stress-test --seed 0xcafebabedeadbeef
---op or_reduce` at the same commit and produce a byte-identical
-output (modulo timing noise). The reproducibility is the point.
+Anyone with the same hardware can re-run `stress-test --seed
+0xcafebabedeadbeef --op or_reduce` at the same commit and produce a
+byte-identical output (modulo timing noise). The reproducibility is the
+point.
 
 ## Top-K benchmark
 
 A parallel binary, `topk-bench`, writes to the same
-`benchmarks/results/{date}-{hw}/` directory but emits a
+`apps/moot-math-speedtest/results/{date}-{hw}/` directory but emits a
 distinct schema (`topk-1`) and is not part of the recurring
-stress-test sweep. It is the historical Phase 2.delta-1
-instrument for `hamming_top_k` latency; see the parent harness
-`README.md` section "Top-K benchmark (historical Phase 2.delta-1
-instrument)" for usage, the cited Phase 2.delta-1 number, and
-the 2026-05-22 cross-language baseline.
+stress-test sweep. It measures `hamming_top_k` latency across K and N;
+`SCHEMA.md` defines its output and `results/2026-05-22-apple-m5-max`
+holds the cross-language baseline.
 
 ## Caveats
 
