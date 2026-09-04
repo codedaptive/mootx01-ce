@@ -1,8 +1,9 @@
 # Published performance evidence
 
-This is the current evidence snapshot for `develop/1.0.x`, measured on
+This is the evidence snapshot for the 1.0.34 release, measured on
 2026-07-22 local time (2026-07-23 UTC) at commit
-`b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99`.
+`b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99`. It has not been re-run on the
+1.1 line; the numbers describe 1.0.34.
 
 The conditions and limitations of that run are required when citing a number
 from this page.
@@ -136,8 +137,7 @@ as a regression sentinel rather than generalized to natural-language input.
 - The product dataset is intentionally small and disposable.
 - The adversarial gauntlet is larger but still only 1,040 records, and its full
   run reuses a preloaded/dreamed estate; it does not measure ingest-to-ready time.
-- Cross-generation hardware conclusions await the matched Mac mini M4 vs
-  MacBook Pro M5 Max mission in
-  `docs/engineering/MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md`.
+- Cross-generation hardware conclusions need matched runs on more than one
+  machine; none have been published.
 
 These limits are part of the evidence. Claims outside them remain unverified.
