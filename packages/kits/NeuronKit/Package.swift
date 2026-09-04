@@ -61,7 +61,7 @@ let package = Package(
         // GeniusLocusKit resolves `EstateHandle` and the nine estate
         // verbs (notably `recall`). All substrate writes flow through
         // this surface; NeuronKit calls no write API on LocusKit,
-        // VectorKit, CorpusKit, or PersistenceKit (B-1 invariant). LocusKit
+        // SynapseKit, CorpusKit, or PersistenceKit (B-1 invariant). LocusKit
         // is also a direct dependency because the substrate's `Drawer`
         // value type and its read-only adjective-state extensions
         // (notably `isCurrentlyBelieved`) are used to shape the
@@ -79,7 +79,7 @@ let package = Package(
         // relevance and inter-candidate similarity from that distance.
         // This is a typed-math dependency only — no substrate, SQL, or
         // estate-verb access — so it is consistent with the B-1
-        // invariant that bars direct LocusKit/VectorKit/CorpusKit calls.
+        // invariant that bars direct LocusKit/SynapseKit/CorpusKit calls.
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/SubstrateTypes"),
         // SubstrateML supplies the gated reasoning-lens math primitives

@@ -48,7 +48,7 @@ struct ProvidersTests {
     }
 
     @Test func emptyStringReturnsZeroEngramAllProviders() async throws {
-        // VectorKit.EmbeddingProvider contract: empty input MUST return
+        // SynapseKit.EmbeddingProvider contract: empty input MUST return
         // Engram.zero. The text providers short-circuit before invoking
         // the inference closure — a closure that throws unconditionally
         // must never be reached on empty input. Covers MiniLM, MPNet,

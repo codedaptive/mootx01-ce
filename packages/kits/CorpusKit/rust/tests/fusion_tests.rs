@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 // Process-wide serialisation lock: shared with hybrid_recall_tests.rs and
 // corpuskit_telemetry_tests.rs to prevent concurrent telemetry-enabled tests

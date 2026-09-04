@@ -16,7 +16,7 @@
 //     timeIntervalSince1970). This upholds IntellectusLib's determinism
 //     contract (callers supply timestamps; the lib never reads a clock).
 //   - Metric namespace: `locuskit.<noun>.<operation>` and
-//     `locuskit.<noun>.<field>` — consistent with the vectorkit.* and
+//     `locuskit.<noun>.<field>` — consistent with the synapsekit.* and
 //     neuronkit.* naming used in sibling kits.
 //   - Tags are kept small: `estate` (UUID string) identifies the estate.
 //     Additional per-operation tags (`result_count`, `kind`) are included

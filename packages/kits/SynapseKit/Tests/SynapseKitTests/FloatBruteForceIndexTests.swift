@@ -1,0 +1,557 @@
+// FloatBruteForceIndexTests.swift
+//
+// Lane C tests: FloatBruteForceIndex round-trip, metric correctness,
+// and recall completeness.
+//
+// All tests use real on-disk SQLite storage (via makeScratchStorage) where
+// storage is involved. FloatBruteForceIndex itself does not interact with
+// storage — it operates in memory over a ResidentVectorArray — but the
+// test data paths are exercised through the same infrastructure.
+//
+// Float determinism note: these tests assert exact Float equality within
+// a single run on one platform. They do NOT assert cross-platform or
+// cross-build bit-identity; that is a documented property of the float
+// lane (arch spec §6). Any test that adds a "should be bit-identical across
+// Swift and Rust" assertion for float distances is WRONG and must be removed.
+
+import Foundation
+import Testing
+@testable import SynapseKit
+import PersistenceKit
+
+// MARK: - Helpers
+
+/// Build a VectorRecordKey for testing. Single-vector item (vectorIndex=0).
+private func key(_ itemID: String, model: String = "test-model", version: String = "1") -> VectorRecordKey {
+    VectorRecordKey(itemID: itemID, modelID: model, modelVersion: version)
+}
+
+/// Build a float32 VectorPayload from a [Float] literal.
+private func payload(_ floats: [Float]) -> VectorPayload {
+    VectorPayload(floats: floats)
+}
+
+/// Build a ResidentVectorArray from (VectorRecordKey, [Float]) pairs.
+/// Keys and vectors must all have the same dimension.
+private func buildArray(vectors: [(VectorRecordKey, [Float])]) -> ResidentVectorArray {
+    precondition(!vectors.isEmpty)
+    let dim = vectors[0].1.count
+    let stride = UInt32(dim * 4)
+    var storage = [UInt8]()
+    var keys = [VectorRecordKey]()
+    for (k, floats) in vectors {
+        var p = VectorPayload(floats: floats)
+        storage.append(contentsOf: p.bytes)
+        keys.append(k)
+        _ = p   // silence unused warning
+    }
+    let partitions = buildTestPartitions(keys: keys)
+    return ResidentVectorArray(
+        kind: .float32,
+        stride: stride,
+        count: UInt32(vectors.count),
+        storage: Data(storage),
+        keys: keys,
+        modelPartitions: partitions,
+        tombstones: []
+    )
+}
+
+private func buildTestPartitions(keys: [VectorRecordKey]) -> [ModelPartitionEntry] {
+    guard !keys.isEmpty else { return [] }
+    var result: [ModelPartitionEntry] = []
+    var runStart = 0
+    var runModel = keys[0].modelID
+    for i in 1..<keys.count {
+        if keys[i].modelID != runModel {
+            result.append(ModelPartitionEntry(modelID: runModel, range: runStart..<i))
+            runStart = i
+            runModel = keys[i].modelID
+        }
+    }
+    result.append(ModelPartitionEntry(modelID: runModel, range: runStart..<keys.count))
+    return result
+}
+
+// MARK: - Suite
+
+@Suite("FloatBruteForceIndex")
+struct FloatBruteForceIndexTests {
+
+    // MARK: - Build
+
+    @Test("build stores the array and kind is bruteForce")
+    func buildStoresArray() async {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0, 0.0]),
+            (key("b"), [0.0, 1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        #expect(idx.kind == .bruteForce)
+    }
+
+    @Test("build on empty array returns empty search results")
+    func buildEmptyArrayReturnsEmpty() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = ResidentVectorArray.empty(kind: .float32, stride: 12)
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0, 0.0])
+        let results = try await idx.search(probe: probe, metric: .cosine, k: 5, filter: nil)
+        #expect(results.isEmpty)
+    }
+
+    @Test("search before build returns empty")
+    func searchBeforeBuildReturnsEmpty() async throws {
+        let idx = FloatBruteForceIndex()
+        let probe = payload([1.0, 0.0])
+        let results = try await idx.search(probe: probe, metric: .l2, k: 3, filter: nil)
+        #expect(results.isEmpty)
+    }
+
+    // MARK: - Metric correctness: cosine
+
+    @Test("cosine: identical vectors have distance 0")
+    func cosineIdenticalVectorsDistance0() async throws {
+        let idx = FloatBruteForceIndex()
+        let v: [Float] = [0.6, 0.8]     // unit vector
+        let arr = buildArray(vectors: [(key("a"), v)])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload(v), metric: .cosine, k: 1, filter: nil)
+        #expect(results.count == 1)
+        let dist = results[0].floatDistance!
+        #expect(abs(dist) < 1e-5)
+    }
+
+    @Test("cosine: orthogonal vectors have distance 1")
+    func cosineOrthogonalDistance1() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0]),
+            (key("b"), [0.0, 1.0]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+        let results = try await idx.search(probe: probe, metric: .cosine, k: 2, filter: nil)
+        #expect(results.count == 2)
+        // a is the nearest (distance ~0), b is orthogonal (distance ~1)
+        let distA = results[0].floatDistance!
+        let distB = results[1].floatDistance!
+        #expect(abs(distA) < 1e-5)
+        #expect(abs(distB - 1.0) < 1e-5)
+    }
+
+    @Test("cosine: zero vector returns fallback distance 1")
+    func cosineZeroVectorFallback() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("zero"), [0.0, 0.0, 0.0])])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload([1.0, 0.0, 0.0]), metric: .cosine, k: 1, filter: nil)
+        #expect(results.count == 1)
+        // Cosine undefined for zero vector → safe fallback = 1.0
+        let dist = results[0].floatDistance!
+        #expect(abs(dist - 1.0) < 1e-5)
+    }
+
+    // MARK: - Metric correctness: L2
+
+    @Test("l2: identical vectors have distance 0")
+    func l2IdenticalDistance0() async throws {
+        let idx = FloatBruteForceIndex()
+        let v: [Float] = [3.0, 4.0]
+        let arr = buildArray(vectors: [(key("a"), v)])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload(v), metric: .l2, k: 1, filter: nil)
+        #expect(results.count == 1)
+        let dist = results[0].floatDistance!
+        #expect(abs(dist) < 1e-5)
+    }
+
+    @Test("l2: Pythagorean triple gives exact distance")
+    func l2PythagoreanTriple() async throws {
+        let idx = FloatBruteForceIndex()
+        // [0,0] to [3,4] = distance 5
+        let arr = buildArray(vectors: [(key("origin"), [0.0, 0.0])])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload([3.0, 4.0]), metric: .l2, k: 1, filter: nil)
+        #expect(results.count == 1)
+        let dist = results[0].floatDistance!
+        #expect(abs(dist - 5.0) < 1e-4)
+    }
+
+    @Test("l2: nearest of three returns closest by Euclidean distance")
+    func l2NearestOfThree() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("far"),    [10.0, 0.0]),
+            (key("medium"), [3.0, 0.0]),
+            (key("near"),   [1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([0.0, 0.0])
+        let results = try await idx.search(probe: probe, metric: .l2, k: 3, filter: nil)
+        #expect(results.count == 3)
+        #expect(results[0].key.itemID == "near")
+        #expect(results[1].key.itemID == "medium")
+        #expect(results[2].key.itemID == "far")
+    }
+
+    // MARK: - Metric correctness: dot
+
+    @Test("dot: higher inner product ranks first (after negation)")
+    func dotHigherProductRanksFirst() async throws {
+        let idx = FloatBruteForceIndex()
+        // dot = -Σ(aᵢ×bᵢ); lower stored distance = higher real dot product
+        let arr = buildArray(vectors: [
+            (key("weak"),   [0.1, 0.0]),
+            (key("strong"), [1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+        let results = try await idx.search(probe: probe, metric: .dot, k: 2, filter: nil)
+        #expect(results.count == 2)
+        // "strong" has higher dot product → lower negated distance → ranks first
+        #expect(results[0].key.itemID == "strong")
+        #expect(results[1].key.itemID == "weak")
+    }
+
+    // MARK: - Error handling
+
+    @Test("search throws on binary probe kind")
+    func searchThrowsOnBinaryProbe() async throws {
+        let idx = FloatBruteForceIndex()
+        let binaryPayload = VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0, count: 32))
+        await #expect(throws: (any Error).self) {
+            _ = try await idx.search(probe: binaryPayload, metric: .cosine, k: 1, filter: nil)
+        }
+    }
+
+    @Test("search throws on binary metric")
+    func searchThrowsOnBinaryMetric() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("a"), [1.0, 0.0])])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+        await #expect(throws: (any Error).self) {
+            _ = try await idx.search(probe: probe, metric: .hamming, k: 1, filter: nil)
+        }
+    }
+
+    @Test("search throws when probe dim does not match array stride")
+    func searchThrowsOnDimMismatch() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("a"), [1.0, 0.0, 0.0])])   // dim=3
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])                                  // dim=2
+        await #expect(throws: (any Error).self) {
+            _ = try await idx.search(probe: probe, metric: .cosine, k: 1, filter: nil)
+        }
+    }
+
+    // MARK: - Ordering and tie-break
+
+    @Test("tie-break: equal-distance results sorted by itemID ascending")
+    func tieBreakByItemIDAscending() async throws {
+        let idx = FloatBruteForceIndex()
+        // Two vectors equidistant from the probe (on the unit circle).
+        // cos(45°) distance from [1,0] to both [1,1]/√2 and... we use
+        // identical vectors to force identical distance.
+        let v: [Float] = [1.0, 0.0]
+        let arr = buildArray(vectors: [
+            (key("zzz"), v),
+            (key("aaa"), v),
+            (key("mmm"), v),
+        ])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload(v), metric: .cosine, k: 3, filter: nil)
+        #expect(results.count == 3)
+        // All have identical distance; must be sorted alphabetically by itemID.
+        #expect(results[0].key.itemID == "aaa")
+        #expect(results[1].key.itemID == "mmm")
+        #expect(results[2].key.itemID == "zzz")
+    }
+
+    @Test("k larger than corpus returns all results")
+    func kLargerThanCorpus() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0]),
+            (key("b"), [0.0, 1.0]),
+        ])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload([1.0, 0.0]), metric: .cosine, k: 100, filter: nil)
+        #expect(results.count == 2)
+    }
+
+    // MARK: - Filter
+
+    @Test("filter by modelID excludes other models")
+    func filterByModelIDExcludesOtherModels() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a", model: "model-a"), [1.0, 0.0]),
+            (key("b", model: "model-b"), [1.0, 0.0]),   // same vector, different model
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+        let filter = MetadataFilter(modelID: "model-a")
+        let results = try await idx.search(probe: probe, metric: .cosine, k: 5, filter: filter)
+        #expect(results.count == 1)
+        #expect(results[0].key.itemID == "a")
+    }
+
+    @Test("nil filter returns all results")
+    func nilFilterReturnsAll() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a", model: "model-a"), [1.0, 0.0]),
+            (key("b", model: "model-b"), [1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload([1.0, 0.0]), metric: .cosine, k: 5, filter: nil)
+        #expect(results.count == 2)
+    }
+
+    // MARK: - Tombstone
+
+    @Test("tombstoned slot is excluded from search")
+    func tombstonedSlotExcluded() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0]),   // slot 0
+            (key("b"), [0.0, 1.0]),   // slot 1
+        ])
+        await idx.build(from: arr)
+
+        // Tombstone slot 0 (itemID "a") — the nearer match for [1,0] under cosine
+        try await idx.remove(key: key("a"))
+
+        let results = try await idx.search(probe: payload([1.0, 0.0]), metric: .cosine, k: 2, filter: nil)
+        // Only "b" survives
+        #expect(results.count == 1)
+        #expect(results[0].key.itemID == "b")
+    }
+
+    // MARK: - Incremental add
+
+    @Test("add and then search finds the added vector")
+    func addThenSearch() async throws {
+        let idx = FloatBruteForceIndex()
+        let k = key("added")
+        let v: [Float] = [1.0, 0.0]
+        try await idx.add(key: k, vector: payload(v))
+        let results = try await idx.search(probe: payload(v), metric: .cosine, k: 1, filter: nil)
+        #expect(results.count == 1)
+        #expect(results[0].key.itemID == "added")
+    }
+
+    @Test("add throws on non-float32 vector")
+    func addThrowsOnBinaryVector() async throws {
+        let idx = FloatBruteForceIndex()
+        let binaryPayload = VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0, count: 32))
+        await #expect(throws: (any Error).self) {
+            try await idx.add(key: key("x"), vector: binaryPayload)
+        }
+    }
+
+    // P1-secfix: a vector whose dimension differs from the established index
+    // stride must throw rather than corrupt the resident array's flat byte
+    // buffer and cause an out-of-bounds slice on the next search call.
+    @Test("add throws on mixed-dimension vector (stride mismatch)")
+    func addThrowsOnMixedDimensionVector() async throws {
+        let idx = FloatBruteForceIndex()
+        // First add: establishes stride = 8 bytes (2 floats × 4 bytes).
+        let first = VectorPayload(floats: [1.0, 0.0])
+        try await idx.add(key: key("first", model: "test"), vector: first)
+
+        // Second add: different dimension (3 floats × 4 bytes = 12 bytes).
+        // Must throw SynapseKitError.invalidPayload, not crash.
+        let shortVector = VectorPayload(floats: [0.5, 0.5, 0.1])
+        await #expect(throws: SynapseKitError.self) {
+            try await idx.add(key: key("second", model: "test"), vector: shortVector)
+        }
+    }
+
+    // MARK: - DenseHit floatDistance accessor
+
+    @Test("DenseHit.floatDistance round-trips the stored bit pattern")
+    func denseHitFloatDistanceRoundTrip() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("a"), [1.0, 0.0])])
+        await idx.build(from: arr)
+        let results = try await idx.search(probe: payload([1.0, 0.0]), metric: .cosine, k: 1, filter: nil)
+        #expect(results.count == 1)
+        // floatDistance must not be nil for a float metric hit
+        #expect(results[0].floatDistance != nil)
+        // jaccardDistance must be nil (wrong metric)
+        #expect(results[0].jaccardDistance == nil)
+    }
+
+    // MARK: - Reproducibility (within-config)
+
+    @Test("cosine search is reproducible across identical calls on same platform")
+    func cosineSearchIsReproducible() async throws {
+        // Float lane is reproducible within one build/config (arch spec §6).
+        // This test asserts that two searches with identical input produce identical output.
+        // It does NOT assert cross-platform or cross-build bit identity.
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [0.6, 0.8]),
+            (key("b"), [0.0, 1.0]),
+            (key("c"), [0.8, 0.6]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([0.707, 0.707])
+
+        let first  = try await idx.search(probe: probe, metric: .cosine, k: 3, filter: nil)
+        let second = try await idx.search(probe: probe, metric: .cosine, k: 3, filter: nil)
+
+        #expect(first.map { $0.key.itemID } == second.map { $0.key.itemID })
+        for i in 0..<first.count {
+            #expect(first[i].rawDistance == second[i].rawDistance)
+        }
+    }
+
+    // MARK: - Farthest (anti-similarity, mission 6b-modifiers-antisim)
+
+    @Test("searchFarthest returns the most DISSIMILAR vector first")
+    func farthestReturnsMostDissimilarFirst() async throws {
+        let idx = FloatBruteForceIndex()
+        // Probe is [1,0]. "a" identical (most similar), "c" opposite-ish
+        // (most dissimilar). Farthest must rank c first, a last.
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0]),    // cosine sim 1.0 → distance 0   (nearest)
+            (key("b"), [1.0, 1.0]),    // cosine sim ~0.707 → distance ~0.293
+            (key("c"), [-1.0, 0.0]),   // cosine sim -1.0 → distance 2.0 (farthest)
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+
+        let farthest = try await idx.searchFarthest(probe: probe, metric: .cosine, k: 3, filter: nil)
+        #expect(farthest.count == 3)
+        #expect(farthest[0].key.itemID == "c")  // most dissimilar first
+        #expect(farthest[1].key.itemID == "b")
+        #expect(farthest[2].key.itemID == "a")  // most similar last
+    }
+
+    @Test("searchFarthest is the exact reverse of search on distinct distances")
+    func farthestIsReverseOfNearestOnDistinctDistances() async throws {
+        let idx = FloatBruteForceIndex()
+        // All distances distinct, so the only deterministic ordering is by
+        // distance; farthest must be the exact reverse of nearest.
+        let arr = buildArray(vectors: [
+            (key("near"),   [1.0, 0.0]),
+            (key("mid"),    [1.0, 1.0]),
+            (key("far"),    [-1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+
+        let nearest  = try await idx.search(probe: probe, metric: .cosine, k: 3, filter: nil)
+        let farthest = try await idx.searchFarthest(probe: probe, metric: .cosine, k: 3, filter: nil)
+        #expect(nearest.map { $0.key.itemID } == ["near", "mid", "far"])
+        #expect(farthest.map { $0.key.itemID } == ["far", "mid", "near"])
+    }
+
+    @Test("searchFarthest tie-break is itemID ascending (same as nearest)")
+    func farthestTieBreakItemIDAscending() async throws {
+        let idx = FloatBruteForceIndex()
+        // Three identical vectors → identical distance. Tie-break must be
+        // itemID ASCENDING in BOTH directions (the determinism contract).
+        let v: [Float] = [1.0, 0.0]
+        let arr = buildArray(vectors: [
+            (key("zzz"), v),
+            (key("aaa"), v),
+            (key("mmm"), v),
+        ])
+        await idx.build(from: arr)
+        let farthest = try await idx.searchFarthest(probe: payload(v), metric: .cosine, k: 3, filter: nil)
+        #expect(farthest.map { $0.key.itemID } == ["aaa", "mmm", "zzz"])
+    }
+
+    @Test("searchFarthest respects k and the modelID filter")
+    func farthestRespectsKAndFilter() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a", model: "model-a"), [1.0, 0.0]),
+            (key("b", model: "model-a"), [-1.0, 0.0]),
+            (key("z", model: "model-b"), [-1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let filter = MetadataFilter(modelID: "model-a")
+        let farthest = try await idx.searchFarthest(
+            probe: payload([1.0, 0.0]), metric: .cosine, k: 1, filter: filter)
+        #expect(farthest.count == 1)
+        // Only model-a rows considered; the dissimilar one ("b") ranks first.
+        #expect(farthest[0].key.itemID == "b")
+    }
+
+    @Test("searchFarthest throws on binary probe kind")
+    func farthestThrowsOnBinaryProbe() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("a"), [1.0, 0.0])])
+        await idx.build(from: arr)
+        let binaryProbe = VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0, count: 32))
+        await #expect(throws: SynapseKitError.self) {
+            _ = try await idx.searchFarthest(probe: binaryProbe, metric: .cosine, k: 1, filter: nil)
+        }
+    }
+
+    // MARK: - Regression: header/storage mismatch must not trap
+
+    /// A resident array whose header claims more bytes than `storage` holds
+    /// must be REFUSED, not scanned.
+    ///
+    /// This is the 2026-07-07 SIGTRAP (`16a323770`, "emergency vectorBytes
+    /// SIGTRAP hotfix") returning by a second route. That fix added
+    /// `guard end <= storage.endIndex` to the public `vectorBytes(at:)`; the
+    /// unchecked fast path added later for the hot loop kept its slice
+    /// arithmetic and dropped the guard. The crash was dormant only because
+    /// `residencyHint` defaulted to `.diskBacked` and this scan was
+    /// unreachable — VEC-RESIDENCY-01 made `.ramResident` the default and a
+    /// `moot_memory_search` killed the daemon mid-benchmark:
+    ///
+    ///   Data.subscript.getter  <-  vector_bytesUnchecked  <-  scan
+    ///     <-  _findNearestFloatCached  <-  runMemorySearch
+    ///
+    /// The scan now bounds `count * stride` against `storage.count` ONCE and
+    /// throws. If a future fast path deletes that check, this test traps
+    /// instead of failing — which is exactly the signal wanted.
+    @Test("scan refuses an array whose header overruns its storage")
+    func scanRefusesHeaderStorageMismatch() async throws {
+        let good = buildArray(vectors: [(key("a"), [1.0, 0.0, 0.0, 0.0])])
+
+        // Same storage, header claims four slots. Slots 1..3 have no bytes.
+        let lying = ResidentVectorArray(
+            kind: .float32,
+            stride: good.stride,
+            count: 4,
+            storage: good.storage,
+            keys: [key("a"), key("b"), key("c"), key("d")],
+            modelPartitions: good.modelPartitions,
+            tombstones: []
+        )
+
+        let idx = FloatBruteForceIndex()
+        await idx.build(from: lying)
+        await #expect(throws: SynapseKitError.self) {
+            _ = try await idx.search(
+                probe: payload([1.0, 0.0, 0.0, 0.0]), metric: .cosine, k: 1, filter: nil)
+        }
+    }
+
+    /// The honest array still scans — the guard must not reject valid input.
+    @Test("scan accepts an array whose header matches its storage")
+    func scanAcceptsMatchingHeader() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0, 0.0, 0.0]),
+            (key("b"), [0.0, 1.0, 0.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let hits = try await idx.search(
+            probe: payload([1.0, 0.0, 0.0, 0.0]), metric: .cosine, k: 2, filter: nil)
+        #expect(hits.isEmpty == false)
+    }
+
+}

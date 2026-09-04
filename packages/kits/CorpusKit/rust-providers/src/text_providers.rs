@@ -12,7 +12,7 @@
 //!    every stored vector per spec I-4.
 //! 2. **A tokenizer** — held internally as an impl detail (the
 //!    `EmbeddingProvider` trait carries no tokenizer; tokenization
-//!    stays out of vectorkit's contract). At v1.0 every named
+//!    stays out of synapsekit's contract). At v1.0 every named
 //!    provider holds a `DeterministicTokenizer`; see the tokenizer
 //!    note below for why that is the truthful state and not a gap
 //!    this port introduced.
@@ -70,7 +70,7 @@
 use corpus_kit::Tokenizer;
 use engram_lib::Engram;
 use substrate_ml::float_simhash;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 use crate::DeterministicTokenizer;
 
@@ -88,7 +88,7 @@ use crate::DeterministicTokenizer;
 /// out. Mirrors the Swift providers' `([Int32]) async throws ->
 /// [Float]` closure. Synchronous to match the Rust
 /// `EmbeddingProvider` trait and the sibling
-/// `vectorkit::FloatSimHashEmbeddingProvider`, which the Rust port
+/// `synapsekit::FloatSimHashEmbeddingProvider`, which the Rust port
 /// keeps synchronous; the host adapts any async model pass behind
 /// this boundary.
 pub type InferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static>;
@@ -128,7 +128,7 @@ fn embed_via_seam(
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
     seed: u64,
-) -> Result<Engram, VectorKitError> {
+) -> Result<Engram, SynapseKitError> {
     // EmbeddingProvider contract: empty input MUST return
     // Engram::ZERO. Short-circuit before the seam so the contract
     // holds even when the host closure would hash empty input to a
@@ -137,7 +137,7 @@ fn embed_via_seam(
         return Ok(Engram::ZERO);
     }
     let tokens = tokenizer.tokenize(text);
-    let pooled = inference(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+    let pooled = inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
     // float_simhash::project returns a Fingerprint256; Engram is a
     // type alias for Fingerprint256. The canonical projection IS the
     // engram — no reconstruction step.
@@ -152,12 +152,12 @@ fn embed_float_via_seam(
     text: &str,
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
-) -> Result<Vec<f32>, VectorKitError> {
+) -> Result<Vec<f32>, SynapseKitError> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
     let tokens = tokenizer.tokenize(text);
-    inference(&tokens).map_err(VectorKitError::EmbeddingFailed)
+    inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)
 }
 
 /// Single-pass override: run the host inference seam ONCE, then derive
@@ -174,12 +174,12 @@ fn embed_pair_via_seam(
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
     seed: u64,
-) -> Result<(Engram, Vec<f32>), VectorKitError> {
+) -> Result<(Engram, Vec<f32>), SynapseKitError> {
     if text.is_empty() {
         return Ok((Engram::ZERO, Vec::new()));
     }
     let tokens = tokenizer.tokenize(text);
-    let pooled = inference(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+    let pooled = inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
     Ok((float_simhash::project(&pooled, seed), pooled))
 }
 
@@ -245,13 +245,13 @@ impl EmbeddingProvider for MiniLMTextProvider {
     fn model_version(&self) -> &str {
         &self.model_version
     }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
     }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
@@ -318,13 +318,13 @@ impl EmbeddingProvider for MPNetTextProvider {
     fn model_version(&self) -> &str {
         &self.model_version
     }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
     }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
@@ -393,13 +393,13 @@ impl EmbeddingProvider for EmbeddingGemmaProvider {
     fn model_version(&self) -> &str {
         &self.model_version
     }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
     }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
@@ -467,7 +467,7 @@ mod tests {
     fn host_inference_error_surfaces_as_embedding_failed() {
         let p = MiniLMTextProvider::new(|_| Err("model not loaded".to_string()));
         match p.embed("text") {
-            Err(VectorKitError::EmbeddingFailed(msg)) => assert!(msg.contains("model not loaded")),
+            Err(SynapseKitError::EmbeddingFailed(msg)) => assert!(msg.contains("model not loaded")),
             other => panic!("expected EmbeddingFailed, got {other:?}"),
         }
     }

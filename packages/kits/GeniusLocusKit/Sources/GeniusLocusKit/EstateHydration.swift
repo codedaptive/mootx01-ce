@@ -32,7 +32,7 @@
 //   7. Register tier  — registerMatrixTier(_:for:) installs the rebuilt tier
 //                       so RecallDirector scoring is live from the first recall.
 //
-// The ANN/HNSW index does NOT need an explicit rebuild step: VectorKit uses
+// The ANN/HNSW index does NOT need an explicit rebuild step: SynapseKit uses
 // an O(N) in-process Hamming scan per query. The first query after hydrate
 // operates on the hydrated `vectors` table rows with zero additional setup.
 //
@@ -70,7 +70,7 @@ public extension GeniusLocusKit {
     ///      For `inMemory` this creates all schema-declared tables (blank, ready for hydration).
     ///      For `durable` this is idempotent — CREATE TABLE IF NOT EXISTS and a new
     ///      migration-version record for "GeniusLocusKit" (the data tables already
-    ///      exist from prior LocusKit/VectorKit/CorpusKit opens).
+    ///      exist from prior LocusKit/SynapseKit/CorpusKit opens).
     ///   2. Hydrate: copy all schema-declared tables + audit events from
     ///      `durable` into `inMemory` via `StorageReplicator.hydrate`.
     ///   3. Open: run `LocusKit.Estate.open` against the now-populated `inMemory`
@@ -111,7 +111,7 @@ public extension GeniusLocusKit {
         // The replication schema gate (StorageReplicator.replicateFull) checks
         // `currentSchemaVersion(for: schema.kitID)` on BOTH source and destination.
         // A GLK estate in normal operation has its component kit schemas opened
-        // individually (LocusKit opens "LocusKit" v1, VectorKit opens "VectorKit" v1,
+        // individually (LocusKit opens "LocusKit" v1, SynapseKit opens "SynapseKit" v1,
         // etc.), but the GLK composite kitID "GeniusLocusKit" is never registered
         // unless we explicitly open it. We do that here for both backends:
         //

@@ -303,7 +303,7 @@ fn measure_top_k(
     }
 }
 
-/// Brute-force Jaccard top-K — the production scan shape (VectorKit
+/// Brute-force Jaccard top-K — the production scan shape (SynapseKit
 /// serves BinaryMetric::Jaccard from the brute-force engine; per-pair
 /// math is substrate_types::jaccard). Descending insertion ladder,
 /// same workload shape as the kernels' hamming_top_k; scalar only.

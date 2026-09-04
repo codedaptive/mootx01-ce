@@ -13,17 +13,17 @@
 // provider takes the loaded MLModel handle and an embedding
 // closure so the kit stays testable without a model bundle.
 //
-// Conforms to VectorKit.EmbeddingProvider (the canonical embedding-
+// Conforms to SynapseKit.EmbeddingProvider (the canonical embedding-
 // provider abstraction). The tokenizer property is public, exposed
-// for injection and testing; tokenization stays out of VectorKit's contract per the
-// kit-graph design (port-maintenance isolation: VectorKit is pure
+// for injection and testing; tokenization stays out of SynapseKit's contract per the
+// kit-graph design (port-maintenance isolation: SynapseKit is pure
 // compute, text/weights/tokenizer live outside it).
 
 import Foundation
 import SubstrateTypes
 import EngramLib
 import CorpusKit
-import VectorKit
+import SynapseKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //

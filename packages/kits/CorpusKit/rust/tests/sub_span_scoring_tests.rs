@@ -36,7 +36,7 @@ use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -64,14 +64,14 @@ impl EmbeddingProvider for FirstTokenRoutingProvider {
         "1.0.0"
     }
 
-    fn embed(&self, _text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
         // Not called by sub_span_scoring::score — stub satisfies trait.
-        Err(VectorKitError::EmbeddingFailed(
+        Err(SynapseKitError::EmbeddingFailed(
             "FirstTokenRoutingProvider: embed() not needed for sub-span tests".into(),
         ))
     }
 
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         if text.is_empty() {
             return Ok(vec![]);
         }
@@ -99,8 +99,8 @@ impl EmbeddingProvider for ThrowingFloatProvider {
         "1.0.0"
     }
 
-    fn embed(&self, _text: &str) -> Result<Engram, VectorKitError> {
-        Err(VectorKitError::EmbeddingFailed(
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
+        Err(SynapseKitError::EmbeddingFailed(
             "ThrowingFloatProvider: embed() not used".into(),
         ))
     }

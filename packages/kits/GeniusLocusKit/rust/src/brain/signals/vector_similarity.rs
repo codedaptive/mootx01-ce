@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corpus_kit::CorpusContentEngine;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 use crate::brain::scheduler::api::*;
 
@@ -351,8 +351,8 @@ pub(crate) fn proximity_scan_candidates(
 /// land only on distance boundaries.
 fn ladder_neighbours<E>(
     units: usize,
-    mut fetch: impl FnMut(usize) -> Result<Vec<vectorkit::VectorMatch>, E>,
-) -> (Vec<vectorkit::VectorMatch>, bool) {
+    mut fetch: impl FnMut(usize) -> Result<Vec<synapsekit::VectorMatch>, E>,
+) -> (Vec<synapsekit::VectorMatch>, bool) {
     for factor in [3usize, 6] {
         let limit = units * factor;
         let matches = match fetch(limit) {
@@ -387,7 +387,7 @@ fn ladder_neighbours<E>(
 #[cfg(test)]
 mod ladder_tests {
     use super::ladder_neighbours;
-    use vectorkit::VectorMatch;
+    use synapsekit::VectorMatch;
 
     /// Synthetic match list: `groups` = (distance, count) runs in order.
     /// Twin of Swift `AssociateSweepLadderTests.matches`.

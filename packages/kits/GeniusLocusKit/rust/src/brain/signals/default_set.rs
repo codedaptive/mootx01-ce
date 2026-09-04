@@ -37,7 +37,7 @@
 // `SerialLaneScheduler` instance directly.
 
 use std::sync::Arc;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
