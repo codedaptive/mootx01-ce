@@ -37,14 +37,6 @@ Do these in order:
 5. Type a word like **standup** or **lunch** in the search box and tap
    **Search**. The MOOT shows you the matching event. It is now a memory.
 
-## You can also ask Siri
-
-Because this app registers shortcuts, you can say:
-
-- "Recall memories in MootCalendarIngest" — Siri searches the same MOOT, so it
-  finds your calendar events too.
-- "Capture a memory in MootCalendarIngest" — file any note by voice.
-
 ## The one thing to remember
 
 The calendar is never touched. The memory is built next to it, in the MOOT. That
