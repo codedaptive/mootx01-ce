@@ -910,6 +910,10 @@ public actor Corpus {
     /// already dropped via an explicit teardown call (the normal path for
     /// orchestrated estates).
     ///
+    /// Reachable while the queue is mounted because the drain workers resolve
+    /// the corpus for one pass at a time (see `mountIngestQueue`) and never
+    /// own it across the loop.
+    ///
     /// Rust twin: `impl Drop for Corpus { fn drop(&mut self) { self.drop_ingest_queue(); } }`
     deinit {
         ingestDrainWorker?.cancel()

@@ -798,6 +798,7 @@ fn wire_inmemory_semantic_recall(
             config,
             Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
+            false,
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
     corpus
@@ -908,6 +909,7 @@ fn wire_postgres_semantic_recall(
             config,
             Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
+            false,
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
     corpus
@@ -1002,6 +1004,7 @@ fn wire_sqlite_semantic_recall(
             config,
             Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
             default_ensemble(),
+            false,
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
     corpus
