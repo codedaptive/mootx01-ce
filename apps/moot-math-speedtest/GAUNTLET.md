@@ -73,8 +73,8 @@ two-path checkout.
 
 The tested binary SHA-256 is
 `bc940718884951b1f4ec98779e8e3094b6d4993ca73ba97eb962c36d6817bb38`.
-Corpus corpus dimensions and artifact hashes are recorded in the evidence bundle
-(archived in the workshop evidence directory). The corpus SHA-256 values are:
+Corpus dimensions and artifact hashes are recorded in the evidence bundle.
+The corpus SHA-256 values are:
 `b0169df07fd5830bb7de2fc124bc327cfda256d84483fef064cf794e2584eae9` (corpus JSONL)
 and `0f9d3395e04303aeb526dd8e58237e1639382d36fd81e69d947e9c0ad4540eec` (needles JSON).
 
@@ -84,7 +84,5 @@ latencies are query-phase measurements; corpus load and dream/reindex time are
 not included. Normal product background drain/governor activity remained
 enabled.
 
-The controlled follow-up is specified in
-[`MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md`](../../docs/engineering/MAC_M5_MAX_PERFORMANCE_COMPARISON_MISSION.md):
-matched Mac mini M4 and MacBook Pro M5 Max runs with fixed hashes, fresh
+A controlled follow-up would use matched machines, fixed hashes, fresh
 estates, repeated measurements, phase timing, and paired analysis.
