@@ -253,6 +253,11 @@ APP="$PAYLOAD/Mootx01Setup.app"
 mkdir -p "$APP/Contents/MacOS"
 cp "$SETUP_BIN"              "$APP/Contents/MacOS/Mootx01Setup"
 cp "$DIST_DIR/Info.plist"    "$APP/Contents/Info.plist"
+# Stamp the release version into the setup assistant's bundle. The tracked
+# Info.plist carries a placeholder; without this every shipped Setup app
+# reported itself as 1.0.0 build 1 regardless of the release it came from.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION#v}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION#v}" "$APP/Contents/Info.plist"
 chmod 755 "$APP/Contents/MacOS/Mootx01Setup"
 
 # Copy any SPM resource bundles beside the setup binary into the .app.
