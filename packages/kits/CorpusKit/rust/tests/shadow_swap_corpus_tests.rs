@@ -216,6 +216,7 @@ fn make_ri_engine(
         vec![EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
         }],
+        false,
     )
     .expect("RI engine open")
 }

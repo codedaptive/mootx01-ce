@@ -265,8 +265,10 @@ pub type ContentBackfillFaultHook = Box<dyn Fn(&str, usize) -> Result<(), String
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
 
-/// Reserved checkpoint row recording the last APPLIED feed cursor.
-const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
+/// Reserved checkpoint row recording the last APPLIED feed cursor. Crate-
+/// visible so `CorpusIndexStateStore` can skip the row when it scans for a
+/// composition-policy mismatch.
+pub(crate) const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
 
 #[cfg(target_os = "macos")]
 fn physical_memory_bytes() -> Option<u64> {
@@ -433,11 +435,20 @@ impl CorpusContentEngine {
 
     /// Construct the engine over a validated configuration and content
     /// source. In attached mode NO canonical content table is created.
+    ///
+    /// Refuses with `CorpusKitError::CompositionPolicyMismatch` when the
+    /// estate's active index rows were built under a composition policy other
+    /// than the configured one. `reindex_pending` skips that check: the
+    /// caller commits to `reindex` before the engine serves a query (the
+    /// `mootx01 db composition --set` path, whose rows still carry the id the
+    /// rebuild replaces). Every serving open passes `false`. Twin of Swift
+    /// `CorpusContentEngine.init(storage:configuration:source:models:reindexPending:)`.
     pub fn open(
         storage: Arc<dyn Storage>,
         configuration: CorpusContentConfiguration,
         source: Arc<dyn CorpusContentSource>,
         models: Vec<EmbeddingModelConfig>,
+        reindex_pending: bool,
     ) -> CorpusKitResult<Self> {
         if models.is_empty() {
             return Err(CorpusKitError::InvalidConfiguration(
@@ -534,6 +545,24 @@ impl CorpusContentEngine {
         };
         // Rehydrate the base snapshot plus crash-durable reference deltas.
         engine.reload_counts_from_storage()?;
+        // Refuse an estate whose active index rows were built under another
+        // composition policy: those indexes hold other text and cannot serve
+        // the configured policy. One O(rows) scan, once per open. Rows written
+        // before the policy column existed count as `current()`. Skipped when
+        // the caller has committed to a full rebuild before serving
+        // (`reindex_pending`): the disagreeing rows are the ones the rebuild
+        // replaces. Same rule and same detail string as the Swift engine.
+        if !reindex_pending {
+            let configured_id = engine.configuration.composition_policy().id();
+            if let Some(recorded) = engine
+                .index_state
+                .mismatched_composition_policy(&configured_id)?
+            {
+                return Err(CorpusKitError::CompositionPolicyMismatch(format!(
+                    "recorded={recorded};configured={configured_id}"
+                )));
+            }
+        }
         Ok(engine)
     }
 
@@ -556,6 +585,7 @@ impl CorpusContentEngine {
             )?,
             store as Arc<dyn CorpusContentSource>,
             models,
+            false,
         )
     }
 
@@ -576,6 +606,7 @@ impl CorpusContentEngine {
             CorpusContentConfiguration::new(CorpusOperatingMode::Standalone, index_unit)?,
             store as Arc<dyn CorpusContentSource>,
             models,
+            false,
         )
     }
 
