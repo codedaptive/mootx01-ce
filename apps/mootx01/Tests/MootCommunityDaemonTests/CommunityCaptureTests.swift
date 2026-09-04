@@ -193,7 +193,7 @@ private var contractTypesURL: URL {
         .deletingLastPathComponent()  // Tests/
         .deletingLastPathComponent()  // apps/mootx01/
         .deletingLastPathComponent()  // apps/
-        .appendingPathComponent("contracts/community/1.1/contract.json")
+        .appendingPathComponent("apps/mootx01/Contracts/community-1.1/contract.json")
 }
 
 // MARK: - A4-C18: choices on empty estate seeds the default inbox
