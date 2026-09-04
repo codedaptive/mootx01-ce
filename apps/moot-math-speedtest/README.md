@@ -60,7 +60,7 @@ win.
 | `stress-test` | Every (op, batch_size, mode) cell across all kernels |
 | `topk-bench`  | `hamming_top_k` across K ∈ {1, 4, 10, 32, 100} × N ∈ {256 … 1M} |
 | `ml-bench`    | The 15 SubstrateML cold-path algorithms (NMF, FFT, eigenvalue centrality, anomaly detection, …) — the dreaming-daemon math (schema `ml-1`) |
-| `catalog-bench` | All 29 canonical cookbook/conformance primitives, after a mandatory conformance pass (schema `catalog-1`) |
+| `catalog-bench` | All 31 canonical cookbook/conformance primitives, after a mandatory conformance pass (schema `catalog-1`) |
 | `fdc-bench` | Deterministic classifier v4 encode and semantic stages across resolved, unresolved, long, and code inputs (schema `fdc-1`) |
 | `product-bench.py` | Resident `mootx01` loopback MCP calls against a disposable estate (schema `product-1`) |
 | [`benchmarks/`](../../benchmarks/README.md) | Separate end-to-end suite for retrieval, answer quality, payload economics, storage behavior, latency, and throughput |
@@ -109,9 +109,9 @@ binaries build + run; full sweeps take a few minutes).
 2. Add the JSON files and run conditions to `results/<hostname>-<date>/`.
 3. Open a PR with title `bench: <hardware-tag> <date>` (e.g.
    `bench: apple-m3-max 2026-05-29`).
-4. Maintainers aggregate periodically. The aggregated table lives in
-   `results/AGGREGATED.md` and drives the default-kernel selection per
-   target triple.
+4. Maintainers review submissions against `results/README.md`, the
+   inventory of tracked evidence, and cite specific runs when a default
+   kernel changes.
 
 ## Conformance is separate
 
@@ -126,7 +126,7 @@ release-blocking scripts:
 - `check-lockstep.py`              — Swift/Rust 1:1 type parity
 - `check-test-locations.py`        — tests live with their source
 - `check-harness-builds-clean.sh`  — harness rebuilds clean +
-                                     29/29 primitives conformance
+                                     31/31 primitives conformance
 
 A backend that wins the benchmark but fails conformance is rejected.
 
