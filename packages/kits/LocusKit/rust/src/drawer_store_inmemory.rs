@@ -10617,6 +10617,14 @@ mod tests {
         fn current_schema_version(&self) -> persistence_kit::error::StorageResult<i32> {
             self.inner.current_schema_version()
         }
+        fn rename_schema_kit(
+            &self,
+            old_kit_id: &str,
+            new_kit_id: &str,
+        ) -> persistence_kit::error::StorageResult<persistence_kit::storage::SchemaKitRenameOutcome>
+        {
+            self.inner.rename_schema_kit(old_kit_id, new_kit_id)
+        }
         fn migrate(
             &self,
             schema: &persistence_kit::schema::SchemaDeclaration,
