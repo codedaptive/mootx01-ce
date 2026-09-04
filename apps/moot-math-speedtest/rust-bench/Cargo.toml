@@ -1,6 +1,6 @@
 [package]
 name = "moot-math-speedtest"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "moot-math-speedtest — cross-platform performance benchmarks for the GeniusLocus substrate primitives. Conformance is separate; see docs/validation/."

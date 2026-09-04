@@ -2,10 +2,9 @@
 
 Coverage was re-audited on 2026-08-20 against the canonical registry in
 `docs/validation/substrate_math_performance/test-harness/primitive-catalog.md`
-and the current tree on `bench/harness` (EE 1.1 line) at `7c98d337c`,
-after the W2.5 activation waves (M1 Jaccard, S4-C decayed projections,
-S8 QID-adjacency) landed. Previous audit: 2026-07-22 against
-`develop/1.0.x` at `b3fcd1dc`.
+after the Jaccard, decayed-projection, and QID-adjacency primitives landed
+on the 1.1 line. Previous audit: 2026-07-22 against the 1.0.34 tree at
+`b3fcd1dc`.
 
 ## Result
 
@@ -21,7 +20,7 @@ S8 QID-adjacency) landed. Previous audit: 2026-07-22 against
   `matrix_decayed_co_occurrence`/`matrix_rebuild_temporal_decayed` cells
   at entries∈{1k,10k,100k}), including `community_detection`, whose
   production reference is live but whose canonical vector harness is
-  still pending. The decayed-projection cells time the production S4-C
+  still pending. The decayed-projection cells time the production
   maintenance pass through a GeniusLocusKit dependency — the one place
   this benchmark reaches above the substrate libs, on purpose.
 - The `topk-bench` sweep gained a `--metric jaccard` variant
@@ -64,7 +63,7 @@ benchmark. It did find claims that need different workloads:
 
 | Claim | Current status | Evidence still needed |
 |---|---|---|
-| Float-NN metrics l2/dot (M2 unlock) | Deliberate gap | Null-by-construction until an unnormalized float provider ships (Part E); cells activate with Part E |
+| Float-NN metrics l2/dot | Deliberate gap | Null-by-construction until an unnormalized float provider ships; the cells activate with it |
 | Distillation-stage math (CorefStage, trailer scanner, TypedDecayWeighting) | Out of scope here | Deterministic per-item pipeline stages; fdc-bench covers classifier v4 only. A distill-bench suite is a separate ruling if wanted |
 | One-predicate bitmap filter at 1M rows | Unverified | Product/substrate benchmark with a materialized 1M-row bit-slice |
 | Full working-set scan around 1 ms | Unverified | Defined row schema, row count, projection, and cold/hot-cache runs |
