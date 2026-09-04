@@ -3,16 +3,14 @@
 # Regenerate the Xcode project with:   xcodegen generate   (run in this folder)
 #
 # Universal: one app target built for BOTH iOS and macOS from the same App/
-# sources. Real App Intents register because this is a true app bundle — Xcode
-# runs the App Intents metadata extractor over the app plus the linked
-# MootGateway product, which is what makes MootNotepadShortcuts callable.
+# sources, linking the MootGateway product from apps/Mootx01-App.
 
 name: MootNotepad
 options:
   bundleIdPrefix: com.codedaptive.mootx01.examples
   deploymentTarget:
-    iOS: "26.0"
-    macOS: "26.0"
+    iOS: "27.0"
+    macOS: "27.0"
   createIntermediateGroups: true
 
 packages:
