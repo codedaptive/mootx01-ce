@@ -100,7 +100,35 @@ pub fn dispatch_tool_with_ledgers(
 ) -> Result<serde_json::Value, JSONRPCError> {
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
-        crate::tool_list::vault_enabled(), build_serial, version_skew,
+        crate::tool_list::vault_enabled(), crate::tool_list::memory_enabled(),
+        build_serial, version_skew,
+        update_advisory, monitoring_control,
+    )
+}
+
+/// Dispatch with an explicit memory-enabled flag alongside the vault flag.
+/// The `Dispatcher` calls this so it can pass the value resolved once in
+/// `Dispatcher::new` rather than re-reading the process environment on every
+/// call. Production code goes through `dispatch_tool_with_ledgers`; this
+/// entry point is for `Dispatcher::handle_tool_call` only.
+pub(crate) fn dispatch_tool_with_ledgers_and_memory_flag(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    vault_ledger: &VaultJobLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
+    posture: EstatePosture,
+    memory_on: bool,
+    build_serial: &str,
+    version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    dispatch_tool_with_vault_ledger_and_flag(
+        name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
+        crate::tool_list::vault_enabled(), memory_on,
+        build_serial, version_skew,
         update_advisory, monitoring_control,
     )
 }
@@ -122,7 +150,7 @@ pub fn dispatch_tool_with_vault_flag(
     // Monitoring control: None — test/non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
-        EstatePosture::Live, vault_on, "", "", None, None,
+        EstatePosture::Live, vault_on, crate::tool_list::memory_enabled(), "", "", None, None,
     )
 }
 
@@ -146,7 +174,8 @@ pub fn dispatch_tool_with_vault_ledger(
     // Monitoring control: None — non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
-        EstatePosture::Live, crate::tool_list::vault_enabled(), build_serial, version_skew, None, None,
+        EstatePosture::Live, crate::tool_list::vault_enabled(), crate::tool_list::memory_enabled(),
+        build_serial, version_skew, None, None,
     )
 }
 
@@ -171,6 +200,11 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     sensitivity_ledger: &SensitivityGrantLedger,
     posture: EstatePosture,
     vault_on: bool,
+    // Whether the Anthropic memory_20250818 adapter is enabled. Resolved
+    // at construction time in `Dispatcher::new` (matching the posture pattern)
+    // and passed through so `dispatch_memory` never reads the process
+    // environment per call — eliminates per-dispatch std::env::var races.
+    memory_on: bool,
     build_serial: &str,
     version_skew: &str,
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
@@ -178,7 +212,7 @@ fn dispatch_tool_with_vault_ledger_and_flag(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let routed = route_tool(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
-        vault_on, build_serial, version_skew, update_advisory, monitoring_control,
+        vault_on, memory_on, build_serial, version_skew, update_advisory, monitoring_control,
     );
     // Apply unrecognized-arg hint after surface_dispatch_failure so error
     // results (isError:true) also get the stderr log but not the appended
@@ -232,6 +266,7 @@ fn route_tool(
     sensitivity_ledger: &SensitivityGrantLedger,
     posture: EstatePosture,
     vault_on: bool,
+    memory_on: bool,
     build_serial: &str,
     version_skew: &str,
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
@@ -270,7 +305,7 @@ fn route_tool(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, posture, build_serial, version_skew, update_advisory, monitoring_control)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, posture, memory_on, build_serial, version_skew, update_advisory, monitoring_control)?;
         return Ok(inject_hint(name, args, result));
     }
 

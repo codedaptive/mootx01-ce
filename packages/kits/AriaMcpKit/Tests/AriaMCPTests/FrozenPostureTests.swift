@@ -4,12 +4,19 @@
 //
 // Coverage:
 //   1. EstatePosture resolution: flag wins, MOOTX01_FROZEN=1 enables, else live.
-//   2. ToolMutationInventory names only real tools and covers the writers.
+//   2. ToolMutationInventory names only reachable tools, covers the writers,
+//      and classifies every reachable tool (under every opt-in flag
+//      combination) into exactly one of the read set, the refused set, or
+//      the command-classified set.
 //   3. A frozen dispatcher refuses moot_file_memory / moot_update_memory with
 //      the exact isError text and no side effect, allows moot_memory_search and
 //      moot_estate_status, and reports `frozen: true`.
 //   4. A frozen search then dereference writes no recall-trace rows and leaves
 //      the reward mark untouched (probed through kit.markRecallUsed).
+//   5. `memory` is view-only when frozen: every other command is refused
+//      before the adapter runs and before session state records the call,
+//      with the estate byte-identical on disk; the same delete lands live.
+//   6. The two dark mint tools are refused by name when frozen.
 //
 // SQLite-backed where trace rows are involved: the recall_trace table only
 // exists on the SQLite backend.
@@ -60,28 +67,103 @@ struct EstatePostureResolutionTests {
 @Suite("ToolMutationInventory")
 struct ToolMutationInventoryTests {
 
-    /// Every name in the inventory must be a tool the projection really
-    /// serves; a renamed or retired tool must fail here, not silently stop
-    /// being refused.
-    @Test func inventoryNamesOnlyRealTools() {
-        let real = Set(ToolProjection.tools().map(\.name))
-        let stale = ToolMutationInventory.frozenRefusedTools.subtracting(real)
-        #expect(stale.isEmpty, "inventory names tool(s) not in the projection: \(stale.sorted())")
+    /// Every tool name a serve launched with `environment` can dispatch: the
+    /// advertised projection, plus the dark mint tools when the mint gate is on.
+    private func reachable(_ environment: [String: String]) -> Set<String> {
+        var names = Set(ToolProjection.tools(environment: environment).map(\.name))
+        if RecipeTools.mintToolsEnabled(environment: environment) {
+            names.formUnion(ToolMutationInventory.darkMutationTools)
+        }
+        return names
+    }
+
+    /// Every flag combination a serve can be launched with.
+    private static let flagCombinations: [[String: String]] = {
+        var combinations: [[String: String]] = []
+        for vault in ["1", "0"] {
+            for memory in ["0", "1"] {
+                for mint in ["0", "1"] {
+                    combinations.append([
+                        "MOOTX01_VAULT": vault, "MOOTX01_MEMORY_TOOL": memory, "MOOTX01_MINT_TOOLS": mint,
+                    ])
+                }
+            }
+        }
+        return combinations
+    }()
+
+    /// Every opt-in on: the widest surface a serve can dispatch.
+    private static let widest = ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1", "MOOTX01_MINT_TOOLS": "1"]
+
+    /// Every name in the inventory must be a tool a serve can really
+    /// dispatch; a renamed or retired tool must fail here, not silently stop
+    /// being refused (or stop being allowed).
+    @Test func inventoryNamesOnlyReachableTools() {
+        let real = reachable(Self.widest)
+            .union(ToolMutationInventory.dispatchableUnadvertisedTools)
+        let classified = ToolMutationInventory.frozenReadTools
+            .union(ToolMutationInventory.frozenRefusedTools)
+            .union(ToolMutationInventory.commandClassifiedTools)
+        let stale = classified.subtracting(real)
+        #expect(stale.isEmpty, "inventory names tool(s) no serve can dispatch: \(stale.sorted())")
+    }
+
+    /// The structural guarantee: a tool a frozen serve can dispatch is in
+    /// exactly one of the read set, the refused set, or the command-classified
+    /// set, under every opt-in flag combination. A new tool in none of them
+    /// fails here with its name.
+    @Test func everyReachableToolIsInExactlyOneFrozenSet() {
+        for environment in Self.flagCombinations {
+            for name in reachable(environment).sorted() {
+                let buckets = [
+                    ToolMutationInventory.frozenReadTools.contains(name),
+                    ToolMutationInventory.frozenRefusedTools.contains(name),
+                    ToolMutationInventory.commandClassifiedTools.contains(name),
+                ].filter { $0 }.count
+                #expect(buckets == 1,
+                        "\(name) is in \(buckets) frozen sets under \(environment); every reachable tool must be in exactly one of frozenReadTools / frozenRefusedTools / commandClassifiedTools")
+            }
+        }
     }
 
     @Test func writersAreRefusedAndReadersAreNot() {
         let refused = ToolMutationInventory.frozenRefusedTools
         for tool in ["moot_file_memory", "moot_update_memory", "moot_redistill", "moot_erase_memory",
-                     "moot_dream", "moot_json_import"] {
+                     "moot_dream", "moot_json_import", "moot_file_packet",
+                     "moot_register_adornment_minter", "moot_run_adornment_pass"] {
             #expect(refused.contains(tool), "\(tool) must be refused when frozen")
         }
         for tool in ["moot_memory_search", "moot_estate_status", "moot_memory_get", "moot_recall_precise",
-                     "moot_lens_concepts", "moot_estate_ping", "moot_drain_status"] {
+                     "moot_lens_concepts", "moot_estate_ping", "moot_drain_status", "moot_packet_get"] {
             #expect(!refused.contains(tool), "\(tool) is a read and must stay callable when frozen")
+            #expect(ToolMutationInventory.frozenReadTools.contains(tool),
+                    "\(tool) is a read and must be in the explicit read set")
         }
-        // The three sets are disjoint: a tool has exactly one tier.
+        // The four sets are disjoint: a tool has exactly one tier.
         #expect(ToolMutationInventory.additiveWriteTools.isDisjoint(with: ToolMutationInventory.mutationTools))
         #expect(ToolMutationInventory.mutationTools.isDisjoint(with: ToolMutationInventory.destructiveTools))
+        #expect(ToolMutationInventory.additiveWriteTools.isDisjoint(with: ToolMutationInventory.destructiveTools))
+        for named in [ToolMutationInventory.additiveWriteTools, ToolMutationInventory.mutationTools,
+                      ToolMutationInventory.destructiveTools] {
+            #expect(ToolMutationInventory.darkMutationTools.isDisjoint(with: named))
+        }
+    }
+
+    /// The dark set is exactly the two dark mint tools the recipe surface
+    /// gates at launch, so the two tables cannot drift apart.
+    @Test func darkMutationToolsAreTheDarkMintTools() {
+        #expect(ToolMutationInventory.darkMutationTools.count == 2)
+        for tool in ToolMutationInventory.darkMutationTools {
+            #expect(RecipeTools.isDarkMintTool(tool), "\(tool) must be a dark mint tool")
+        }
+    }
+
+    @Test func memoryIsCommandClassifiedWithViewAsItsOnlyRead() {
+        #expect(ToolMutationInventory.frozenReadCommands["memory"] == ["view"])
+        #expect(ToolMutationInventory.commandClassifiedTools == ["memory"])
+        #expect(!ToolMutationInventory.frozenRefusedTools.contains("memory"),
+                "memory is classified by command, never by name")
+        #expect(!ToolMutationInventory.frozenReadTools.contains("memory"))
     }
 }
 
@@ -122,6 +204,16 @@ struct FrozenDispatcherTests {
 
     private func isError(_ result: JSONValue) -> Bool {
         result.objectValue?["isError"]?.boolValue ?? false
+    }
+
+    /// The on-disk estate: the main database file plus its WAL sibling (the
+    /// kit runs SQLite in WAL mode, so a write that has not been checkpointed
+    /// lives in `-wal`). Two snapshots that compare equal prove no byte of
+    /// committed or pending state changed between them.
+    private func estateBytes(_ url: URL) throws -> [Data] {
+        let wal = URL(fileURLWithPath: url.path + "-wal")
+        let walBytes = FileManager.default.fileExists(atPath: wal.path) ? try Data(contentsOf: wal) : Data()
+        return [try Data(contentsOf: url), walBytes]
     }
 
     private func fileMemory(_ dispatcher: ToolDispatcher, content: String, location: String) async throws -> String {
@@ -249,5 +341,88 @@ struct FrozenDispatcherTests {
         #expect(unmarked > 0,
                 "the seeded rows must still be unmarked after a frozen dereference (probe flipped \(unmarked))")
         #expect(try await kit.countRecallTraces(handle) == seeded)
+    }
+
+    // MARK: - Command-classified tool: memory is view-only when frozen
+
+    /// `memory` is classified per call: `view` proceeds and reads; every
+    /// other command, and a missing or unknown one, is refused before the
+    /// adapter runs and before session state records the call, with the
+    /// estate byte-identical on disk. The adapter itself is posture-blind:
+    /// the same `delete` lands through a live dispatcher.
+    @Test func frozenMemoryToolIsViewOnly() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle) = try await openSQLiteEstate(url: url)
+        let memoryOn = ["MOOTX01_MEMORY_TOOL": "1"]
+        let live = ToolDispatcher(kit: kit, handle: handle, environment: memoryOn)
+        let frozen = ToolDispatcher(kit: kit, handle: handle, environment: memoryOn, posture: .frozen)
+        let path = "/memories/frozen-notes.txt"
+
+        // One file created live, so view has something to read and delete a target.
+        let created = try await live.dispatch(name: "memory", arguments: .object([
+            "command": .string("create"), "path": .string(path),
+            "file_text": .string("frozen posture view-only test"),
+        ]))
+        #expect(firstText(created).contains("File created successfully"), "precondition; got: \(firstText(created))")
+
+        let before = try estateBytes(url)
+        let callsBefore = await frozen.modeSessionState.totalCallCount
+        let mutating: [(command: String?, arguments: [String: JSONValue])] = [
+            ("create", ["path": .string("/memories/other.txt"), "file_text": .string("must not land")]),
+            ("str_replace", ["path": .string(path), "old_str": .string("view-only"), "new_str": .string("must not land")]),
+            ("insert", ["path": .string(path), "insert_line": .integer(0), "insert_text": .string("must not land")]),
+            ("delete", ["path": .string(path)]),
+            ("rename", ["old_path": .string(path), "new_path": .string("/memories/renamed.txt")]),
+            ("frobnicate", ["path": .string(path)]),
+            (nil, ["path": .string(path)]),
+        ]
+        for (command, arguments) in mutating {
+            var args = arguments
+            if let command { args["command"] = .string(command) }
+            let result = try await frozen.dispatch(name: "memory", arguments: .object(args))
+            #expect(isError(result), "memory \(command ?? "(missing)") must be refused when frozen; got: \(firstText(result))")
+            #expect(firstText(result) == EstatePosture.refusalMessage(tool: "memory", command: command))
+        }
+        #expect(try estateBytes(url) == before, "refused memory commands must leave the estate byte-identical on disk")
+        let callsAfterRefusals = await frozen.modeSessionState.totalCallCount
+        #expect(callsAfterRefusals == callsBefore, "a refused memory command must not be recorded in session state")
+
+        // view proceeds and reads the live-created file; the dispatcher records it.
+        let view = try await frozen.dispatch(name: "memory",
+                                             arguments: .object(["command": .string("view"), "path": .string(path)]))
+        #expect(!isError(view) && firstText(view).contains("frozen posture view-only test"),
+                "memory view is a read and must work when frozen; got: \(firstText(view))")
+        let callsAfterView = await frozen.modeSessionState.totalCallCount
+        #expect(callsAfterView == callsBefore + 1, "a view the dispatcher lets through is recorded")
+
+        // The adapter is posture-blind: the same delete lands live.
+        let deleted = try await live.dispatch(name: "memory",
+                                              arguments: .object(["command": .string("delete"), "path": .string(path)]))
+        #expect(firstText(deleted).hasPrefix("Successfully deleted"), "live delete must still work; got: \(firstText(deleted))")
+        let gone = try await frozen.dispatch(name: "memory",
+                                             arguments: .object(["command": .string("view"), "path": .string(path)]))
+        #expect(firstText(gone).contains("does not exist"), "the deleted file must be gone; got: \(firstText(gone))")
+    }
+
+    // MARK: - Dark mint tools are refused by name
+
+    /// The two mint tools are never advertised and dispatch only behind the
+    /// `MOOTX01_MINT_TOOLS=1` launch gate; frozen, they are refused by name
+    /// before the gate is consulted, so a harness serve that is both frozen
+    /// and mint-enabled cannot mint through the snapshot.
+    @Test func frozenRefusesDarkMintTools() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle) = try await openSQLiteEstate(url: url)
+        let frozen = ToolDispatcher(kit: kit, handle: handle,
+                                    environment: ["MOOTX01_MINT_TOOLS": "1"], posture: .frozen)
+        let before = try estateBytes(url)
+        for tool in ToolMutationInventory.darkMutationTools.sorted() {
+            let result = try await frozen.dispatch(name: tool, arguments: .object(["batch_size": .integer(1)]))
+            #expect(isError(result), "\(tool) must be refused when frozen; got: \(firstText(result))")
+            #expect(firstText(result) == EstatePosture.refusalMessage(tool: tool))
+        }
+        #expect(try estateBytes(url) == before, "refused mint tools must leave the estate byte-identical on disk")
     }
 }
