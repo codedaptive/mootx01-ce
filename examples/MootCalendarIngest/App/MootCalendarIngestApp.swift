@@ -17,9 +17,7 @@ import AriaMCP       // JSONValue — every tool argument is a JSONValue.
 //
 //   1. Pick ONE durable SQLite file in the app sandbox to hold the MOOT.
 //   2. Tell `GatewayRuntime.shared` to use that file. The runtime is the
-//      process-wide holder of the single MootBridge. Both this app's UI AND any
-//      App Intents (Siri/Shortcuts) pull their bridge from this same runtime,
-//      so they all read and write the SAME estate.
+//      process-wide holder of the single MootBridge.
 //   3. On first launch, SEED a couple of sample MOOT drawers so the app is not
 //      empty out of the box (the simulator's MOOT starts blank).
 //
@@ -64,8 +62,6 @@ struct MootCalendarIngestApp: App {
         // STEP 1 — point the shared runtime at our durable estate. Calling
         // configure(databaseURL:) BEFORE anyone asks for a bridge guarantees
         // the first attachment lands on this SQLite file (not an in-memory one).
-        // This MUST happen before any App Intent runs so Siri/Shortcuts share
-        // the same MOOT as the UI.
         await GatewayRuntime.shared.configure(databaseURL: url)
 
         // STEP 2 — hand the model the bridge from the shared runtime. The model
@@ -75,7 +71,7 @@ struct MootCalendarIngestApp: App {
         await model.attach()
 
         // STEP 3 — SAMPLE DATA approach. The simulator's MOOT is empty on first
-        // run. We do a quick search; if the MOOT reports "found 0", we file two
+        // run. We do a quick search; if it returns no rows, we file two
         // sample drawers so the "Search memory" box has something to find before
         // the user has synced any real calendar events. This is purely demo
         // convenience — a real app would not seed fake memories.
