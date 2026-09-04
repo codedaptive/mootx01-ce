@@ -195,6 +195,9 @@ private final class FaultStorage: Storage, @unchecked Sendable {
     func currentSchemaVersion(for kitID: String) async throws -> Int {
         try await backing.currentSchemaVersion(for: kitID)
     }
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await backing.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
 
     func migrate(to schema: SchemaDeclaration) async throws {
         try await backing.migrate(to: schema)

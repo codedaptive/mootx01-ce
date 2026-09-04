@@ -91,6 +91,7 @@ private struct StubStorage: Storage {
     ) async throws -> T { fatalError("stub — test must not call transaction") }
     func currentSchemaVersion() async throws -> Int { 0 }
     func currentSchemaVersion(for kitID: String) async throws -> Int { 0 }
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome { .noRow }
     func migrate(to schema: SchemaDeclaration) async throws {}
     // `datasetStore` NOT overridden: inherits protocol-extension default.
 }

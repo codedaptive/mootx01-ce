@@ -84,6 +84,10 @@ public final class PostgreSQLStorage: Storage, Sendable {
         try await backend.currentSchemaVersion(for: kitID)
     }
 
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await backend.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
+
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await backend.applyMigrations(schema)
     }
@@ -248,6 +252,57 @@ actor PostgreSQLBackend {
 
     func applyMigrations(_ schema: SchemaDeclaration) async throws {
         try await open(schema: schema)
+    }
+
+    /// Move the per-kit version key `schema_version:<oldKitID>` to
+    /// `schema_version:<newKitID>` (SPEC I-7a). The presence checks and the
+    /// UPDATE run in one transaction on one connection, so the conflict check
+    /// and the rewrite are atomic. The global `schema_version` key is a
+    /// maximum across kits and does not change.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        let conn = try await pool.acquire()
+        defer { Task { await pool.release(conn) } }
+        try await conn.executeSimple("BEGIN", logger: logger)
+        do {
+            let outcome: SchemaKitRenameOutcome
+            if let oldVersion = try await ledgerVersion(kitID: oldKitID, connection: conn) {
+                if let newVersion = try await ledgerVersion(kitID: newKitID, connection: conn) {
+                    outcome = .conflict(oldVersion: oldVersion, newVersion: newVersion)
+                } else {
+                    _ = try await conn.executeParameterized(
+                        "UPDATE \"_storagekit_meta\" SET \"key\" = $1 WHERE \"key\" = $2",
+                        bindings: [.text("schema_version:\(newKitID)"), .text("schema_version:\(oldKitID)")],
+                        logger: logger
+                    )
+                    outcome = .renamed(version: oldVersion)
+                }
+            } else {
+                outcome = .noRow
+            }
+            try await conn.executeSimple("COMMIT", logger: logger)
+            return outcome
+        } catch {
+            try? await conn.executeSimple("ROLLBACK", logger: logger)
+            throw error
+        }
+    }
+
+    /// The per-kit version for `kitID`, or nil when no `schema_version:<kitID>`
+    /// key exists. Distinct from `readSchemaVersion(kitID:connection:)`, which
+    /// folds "no key" into 0; the rename must tell the two apart.
+    private func ledgerVersion(kitID: String, connection: PostgresConnection) async throws -> Int? {
+        let rows = try await connection.executeParameterized(
+            "SELECT \"value\" FROM \"_storagekit_meta\" WHERE \"key\" = $1",
+            bindings: [.text("schema_version:\(kitID)")],
+            logger: logger
+        )
+        for try await row in rows {
+            let access = row.makeRandomAccess()
+            if let s: String = try? access["value"].decode(String.self, context: .default), let v = Int(s) {
+                return v
+            }
+        }
+        return nil
     }
 
     // MARK: - Introspection

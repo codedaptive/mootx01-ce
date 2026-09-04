@@ -17,7 +17,7 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -25,9 +25,9 @@ use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
     ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
-    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
-    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
-    TableDeclaration, TypedValue,
+    RowKey, RowStore, SchemaDeclaration, SchemaKitRenameOutcome, Storage, StorageError,
+    StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
+    StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 
@@ -1319,6 +1319,58 @@ impl Storage for SqliteStorage {
             .unwrap_or(0);
         Ok(v as i32)
     }
+
+    /// Move the ledger row for `old_kit_id` to `new_kit_id` (SPEC I-7a). The
+    /// presence checks and the UPDATE run under the one connection lock, so
+    /// no other ledger write can interleave between the conflict check and
+    /// the rewrite; `kit_id` is the table's primary key and the check
+    /// guarantees the UPDATE cannot collide. `version` and `applied_at` are
+    /// untouched.
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        let guard = self.inner.lock().unwrap();
+        // "no row" and "row at version 0" must be told apart here, which is
+        // why this does not go through `current_schema_version_for`.
+        let ledger_version = |kit_id: &str| -> StorageResult<Option<i32>> {
+            guard
+                .conn
+                .query_row(
+                    r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+                    [kit_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map(|v| v.map(|v| v as i32))
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("ledger version: {e}"),
+                })
+        };
+        let Some(old_version) = ledger_version(old_kit_id)? else {
+            return Ok(SchemaKitRenameOutcome::NoRow);
+        };
+        if let Some(new_version) = ledger_version(new_kit_id)? {
+            return Ok(SchemaKitRenameOutcome::Conflict {
+                old_version,
+                new_version,
+            });
+        }
+        guard
+            .conn
+            .execute(
+                r#"UPDATE "_storagekit_migrations" SET "kit_id" = ? WHERE "kit_id" = ?"#,
+                [new_kit_id, old_kit_id],
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("rename schema kit: {e}"),
+            })?;
+        Ok(SchemaKitRenameOutcome::Renamed {
+            version: old_version,
+        })
+    }
+
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         apply_schema(&mut self.inner.lock().unwrap(), schema)
     }

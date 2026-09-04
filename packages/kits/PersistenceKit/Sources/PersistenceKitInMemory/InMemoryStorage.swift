@@ -84,6 +84,10 @@ public final class InMemoryStorage: Storage, Sendable {
         await stateActor.schemaVersion(for: kitID)
     }
 
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        await stateActor.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
+
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await stateActor.applyMigrations(schema)
     }
@@ -222,6 +226,19 @@ actor InMemoryStateActor {
     /// have been applied for this kit yet.
     func schemaVersion(for kitID: String) -> Int {
         state.kitSchemaVersions[kitID] ?? 0
+    }
+
+    /// Move the per-kit version entry for `oldKitID` to `newKitID` (SPEC
+    /// I-7a). The global `schemaVersion` is a maximum across kits and does
+    /// not change.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) -> SchemaKitRenameOutcome {
+        guard let oldVersion = state.kitSchemaVersions[oldKitID] else { return .noRow }
+        if let newVersion = state.kitSchemaVersions[newKitID] {
+            return .conflict(oldVersion: oldVersion, newVersion: newVersion)
+        }
+        state.kitSchemaVersions[newKitID] = oldVersion
+        state.kitSchemaVersions.removeValue(forKey: oldKitID)
+        return .renamed(version: oldVersion)
     }
 
     func openSchema(_ schema: SchemaDeclaration) throws {

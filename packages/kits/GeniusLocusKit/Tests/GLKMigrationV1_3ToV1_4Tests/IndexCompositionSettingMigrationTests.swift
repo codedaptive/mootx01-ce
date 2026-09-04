@@ -5,22 +5,23 @@
 // Verifies that GLKMigrationCatalog.prepare runs the 1.3→1.4 capsule, which
 // stores the index composition setting (manifest key
 // index_composition_policy) on populated estates written before the setting
-// existed and stamps the estate format v1_4.
+// existed and stamps the estate format v1_4; through prepare the chain then
+// continues to the 1.4→1.5 capsule and ends at v1_5.
 //
 // Tests:
 //   1. v1_3-stamped estate without the setting: after prepare the setting
 //      reads `.current` (no MOOT_INDEX_COMPOSITION in the environment) and
-//      the estate is stamped v1_4.
+//      the estate is stamped v1_5 (the chain continues through the 1.4→1.5 capsule).
 //   2. Idempotence: a second prepare is a no-op that leaves the stamp at
-//      v1_4 and the setting untouched.
+//      v1_5 and the setting untouched.
 //   3. A stored setting survives the capsule: an estate that already carries
 //      cell B keeps cell B.
 //   4. MOOT_INDEX_COMPOSITION set to a valid id at upgrade time seeds that
 //      id; an invalid value seeds `.current`.
-//   5. Fresh estate (nil stamp): prepare stamps v1_4 and seeds the setting
+//   5. Fresh estate (nil stamp): prepare stamps v1_5 and seeds the setting
 //      without running any capsule.
-//   6. v1_0-stamped estate: the full chain (v1_0→v1_1→v1_2→v1_3→v1_4) ends
-//      at v1_4 with the setting stored.
+//   6. v1_0-stamped estate: the full chain (v1_0→v1_1→v1_2→v1_3→v1_4→v1_5)
+//      ends at v1_5 with the setting stored.
 
 import CorpusKit
 import Foundation
@@ -74,7 +75,7 @@ private func withCreationSeed<T>(
 @Suite("IndexCompositionSettingMigration", .serialized)
 struct IndexCompositionSettingMigrationTests {
 
-    // MARK: §1 Core: v1_3 estate gains the stored setting and stamps v1_4
+    // MARK: §1 Core: v1_3 estate gains the stored setting; prepare ends at v1_5
 
     @Test
     func v1_3EstateGainsStoredSetting() async throws {
@@ -83,10 +84,10 @@ struct IndexCompositionSettingMigrationTests {
             #expect(try await kit.storedIndexCompositionPolicy(for: handle) == nil)
 
             let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-            #expect(prep.format == .v1_4)
+            #expect(prep.format == .v1_5)
             #expect(prep.format == .current)
             #expect(prep.migrated == false)
-            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_4)
+            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
             #expect(try await kit.storedIndexCompositionPolicy(for: handle) == .current)
             // The row is the policy id, verbatim.
             let estate = try await kit.estate(for: handle)
@@ -102,11 +103,11 @@ struct IndexCompositionSettingMigrationTests {
         try await withCreationSeed(nil) {
             let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_3)
             let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-            #expect(first.format == .v1_4)
+            #expect(first.format == .v1_5)
             let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-            #expect(second.format == .v1_4)
+            #expect(second.format == .v1_5)
             #expect(second.migrated == false)
-            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_4)
+            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
             #expect(try await kit.storedIndexCompositionPolicy(for: handle) == .current)
         }
     }
@@ -150,15 +151,15 @@ struct IndexCompositionSettingMigrationTests {
             let (kit, handle, storage) = try await makeEstate(stampedAt: nil)
             let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
             #expect(prep.format == .current)
-            #expect(prep.format == .v1_4)
+            #expect(prep.format == .v1_5)
             #expect(prep.migrated == false)
             #expect(prep.migrationState == nil)
-            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_4)
+            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
             #expect(try await kit.storedIndexCompositionPolicy(for: handle) == .current)
         }
     }
 
-    // MARK: §6 Full chain from v1_0 ends at v1_4
+    // MARK: §6 Full chain from v1_0 ends at v1_5
 
     #if GLK_MIGRATION_V1_0_TO_V1_1
     @Test
@@ -166,9 +167,9 @@ struct IndexCompositionSettingMigrationTests {
         try await withCreationSeed(nil) {
             let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_0)
             let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-            #expect(prep.format == .v1_4)
+            #expect(prep.format == .v1_5)
             #expect(prep.migrated == false)
-            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_4)
+            #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
             #expect(try await kit.storedIndexCompositionPolicy(for: handle) == .current)
         }
     }

@@ -527,6 +527,9 @@ private struct SetSubjectAuditFailingStorage: Storage {
     func currentSchemaVersion(for kitID: String) async throws -> Int {
         try await inner.currentSchemaVersion(for: kitID)
     }
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await inner.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
     func migrate(to schema: SchemaDeclaration) async throws {
         try await inner.migrate(to: schema)
     }
