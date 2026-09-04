@@ -6,7 +6,7 @@ import CorpusKit
 import EngramLib
 import LocusKit
 import PersistenceKit
-import VectorKit
+import SynapseKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -363,7 +363,7 @@ public extension GeniusLocusKit {
     ///   - `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     ///   - `VerbError.notSupportedByEstate` if no VectorStore is registered
     ///     for this estate.
-    ///   - `VerbError.underlyingEstateFailure` wrapping any `VectorKitError`
+    ///   - `VerbError.underlyingEstateFailure` wrapping any `SynapseKitError`
     ///     surfaced by `VectorStore.findNearest`.
     func findNearestDistilled(
         _ handle: EstateHandle,
@@ -383,7 +383,7 @@ public extension GeniusLocusKit {
         // Dispatch to the distillation lane. modelID is the fixed string for the
         // structural fingerprint lane — no semantic embedding model is involved.
         // limit: 0 returns [] without error (VectorStore.findNearest guards
-        // limit > 0 internally). VectorKitError is caught and re-raised as
+        // limit > 0 internally). SynapseKitError is caught and re-raised as
         // VerbError.underlyingEstateFailure so callers see a unified error type —
         // parity of the Rust port's `.map_err` wrapper.
         do {
@@ -686,7 +686,7 @@ public extension GeniusLocusKit {
     // MARK: - expunge
 
     /// Tombstone a drawer in the estate addressed by `handle`, zeroize its
-    /// content blob, and purge its vector embedding(s) from VectorKit/CorpusKit.
+    /// content blob, and purge its vector embedding(s) from SynapseKit/CorpusKit.
     ///
     /// Raises `VerbError.expungeNotConfirmed` at the GLK boundary when
     /// `frame.confirmation` is false; the substrate is not reached.

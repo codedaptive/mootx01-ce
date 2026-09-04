@@ -23,7 +23,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitSQLite
 @testable import AriaMCP

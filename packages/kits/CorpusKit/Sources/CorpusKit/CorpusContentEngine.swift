@@ -39,7 +39,7 @@ import PersistenceKit
 import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // Logger shared by the engine and its queue extension (CorpusContentEngineQueue.swift).
 private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
@@ -394,7 +394,7 @@ public actor CorpusContentEngine {
     }
 
     /// Construct the engine over a validated configuration and content
-    /// source. Applies the mode's profile declaration plus the VectorKit
+    /// source. Applies the mode's profile declaration plus the SynapseKit
     /// and claims schemas (all additive/idempotent). In attached mode NO
     /// canonical content table is created.
     ///
@@ -3704,7 +3704,7 @@ public actor CorpusContentEngine {
                     continue
                 }
                 probe = result
-            } catch VectorKitError.embedFloatVocabMiss {
+            } catch SynapseKitError.embedFloatVocabMiss {
                 Intellectus.report(.metric(
                     name: "corpus.float_lane.dark_vocab_miss", value: 1.0,
                     tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))

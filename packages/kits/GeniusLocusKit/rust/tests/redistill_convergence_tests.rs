@@ -33,7 +33,7 @@ use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 const NOW: i64 = 1_700_000_000_000;
 

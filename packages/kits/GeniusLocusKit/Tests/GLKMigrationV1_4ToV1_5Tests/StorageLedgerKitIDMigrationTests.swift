@@ -22,12 +22,21 @@
 //   6. v1_0-stamped estate carrying the old rows: the full chain ends at
 //      v1_5 (the rewrite runs before the 1.0→1.1 capsule, which opens the
 //      vector store).
-//   7. The capsule's pairs are the frozen literals.
+//   7. The capsule's pairs are the frozen literals, and the new ids are what
+//      the vector tier's stores declare, so a migrated ledger is the ledger
+//      those stores look their version up in.
+//   8. On a SQLite estate a pre-rename runtime left behind, the renamed
+//      store's ladder finds its row after the capsule and nothing runs;
+//      without the capsule the ladder replays from version 0: v5→v6
+//      rebuilds `vectors` and folds every row's generation to 0, and the
+//      ledger keeps a duplicate row under the old id (the failure, observed).
 
 import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
+import SynapseKit
 import Testing
 import GeniusLocusKitMigrations
 
@@ -182,12 +191,104 @@ struct StorageLedgerKitIDMigrationTests {
     }
     #endif
 
-    // MARK: §7 The pairs are frozen literals
+    // MARK: §7 The pairs are frozen literals and the new ids are the stores' ids
 
     @Test
-    func pairsAreFrozenLiterals() {
+    func pairsAreFrozenLiteralsAndTargetTheDeclaredStoreIds() {
         #expect(pairs.vectorStore == StorageLedgerKitIDRename(from: "VectorKit", to: "SynapseKit"))
         #expect(pairs.representationClaims == StorageLedgerKitIDRename(from: "VectorKitClaims", to: "SynapseKitClaims"))
+        // The ledger id a migrated estate carries is the id the store looks
+        // its version up under. A later rename of the tier breaks this pin
+        // on purpose: it needs its own capsule, not an edit to this one.
+        #expect(VectorStore.schemaDeclaration.kitID == pairs.vectorStore.to)
+        #expect(VectorRepresentationClaims.schemaDeclaration.kitID == pairs.representationClaims.to)
+    }
+
+    // MARK: §8 The renamed store opens the migrated estate without replaying
+
+    /// The vector ladder is applied by `storage.migrate(to:
+    /// VectorStore.schemaDeclaration)` at wire time. On a SQLite estate whose
+    /// ledger still says `VectorKit`, that call finds no `SynapseKit` row and
+    /// replays from version 0 against the v6 layout: the v5→v6 step rebuilds
+    /// `vectors` through a copy table that resets every row's `generation`
+    /// to 0 (a shadow-generation row is folded into the serving generation),
+    /// and the ledger gains a duplicate row under the old id. After the
+    /// capsule the row is found at v6 and nothing runs.
+    @Test
+    func renamedStoreOpensMigratedSQLiteEstateWithoutReplayingItsLadder() async throws {
+        let migrated = try await sqliteVectorStateAfterWire(prepareFirst: true)
+        #expect(migrated.rows == 1)
+        #expect(migrated.generation == 3)
+        #expect(migrated.newVersion == VectorStore.schemaDeclaration.version)
+        #expect(migrated.oldVersion == 0)
+
+        // Control: the same estate wired without the capsule replays. This
+        // is the failure the capsule exists to prevent, observed.
+        let replayed = try await sqliteVectorStateAfterWire(prepareFirst: false)
+        #expect(replayed.rows == 1)
+        #expect(replayed.generation == 0)
+        #expect(replayed.newVersion == VectorStore.schemaDeclaration.version)
+        #expect(replayed.oldVersion == VectorStore.schemaDeclaration.version)
+    }
+
+    /// Build a SQLite estate that a pre-rename runtime left behind: the
+    /// vector tables at their current layout, one `vectors` row at
+    /// generation 3, and the ledger row under the OLD id. Then (optionally)
+    /// run the catalog, wire the renamed store's schema, and report the
+    /// `vectors` row count, that row's generation, and the ledger versions
+    /// under the NEW and the OLD id.
+    private func sqliteVectorStateAfterWire(
+        prepareFirst: Bool
+    ) async throws -> (rows: Int, generation: Int64, newVersion: Int, oldVersion: Int) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-mig15-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: dir.appendingPathComponent("estate.sqlite"), busyTimeout: 5.0)))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: testOwner)
+
+        // The current vector layout, recorded under the pre-rename id.
+        let current = VectorStore.schemaDeclaration
+        let legacy = SchemaDeclaration(
+            kitID: pairs.vectorStore.from,
+            version: current.version,
+            tables: current.tables,
+            indices: current.indices,
+            migrations: current.migrations)
+        try await storage.migrate(to: legacy)
+        _ = try await storage.rowStore.insert(table: "vectors", values: [
+            "id": .uuid(UUID()),
+            "item_id": .text("item-1"),
+            "vector_index": .int(0),
+            "model_id": .text("model-1"),
+            "model_version": .text("1"),
+            "kind": .int(0),
+            "dim": .int(4),
+            "payload": .blob(Data([0, 1, 2, 3])),
+            "scale": .null,
+            "filed_at": .timestamp(testNow),
+            "ext": .null,
+            "generation": .int(3),
+        ])
+        try await EstateFormatStore(storage: storage).stamp(.v1_4, now: testNow)
+
+        let kit = GeniusLocusKit()
+        let handle = try await kit.open(
+            storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        if prepareFirst {
+            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        }
+        // The renamed store's open: its ladder applied under the new id.
+        try await storage.migrate(to: current)
+        let vectors = try await storage.rowStore.query(table: "vectors")
+        var generation: Int64 = -1
+        if case let .int(value)? = vectors.first?["generation"] { generation = value }
+        let newVersion = try await storage.currentSchemaVersion(for: pairs.vectorStore.to)
+        let oldVersion = try await storage.currentSchemaVersion(for: pairs.vectorStore.from)
+        try await kit.close(handle)
+        await storage.close()
+        return (vectors.count, generation, newVersion, oldVersion)
     }
 }
 

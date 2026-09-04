@@ -3,7 +3,7 @@
 // Frozen legacy corpus-lane fixture (GLK shared-content 1.1, P0).
 //
 // The historical composite-v7 layout (the 1.0.0-ship era: LocusKit v2 +
-// VectorKit v3 + CorpusKit/BundleStore v2) differs from the current
+// SynapseKit v3 + CorpusKit/BundleStore v2) differs from the current
 // pre-cutover corpus lane in exactly the marks the P4 legacy detector
 // keys on:
 //
@@ -29,7 +29,7 @@ import Foundation
 import PersistenceKit
 import SubstrateTypes
 import EngramLib
-import VectorKit
+import SynapseKit
 
 @testable import CorpusKit
 
@@ -65,9 +65,9 @@ enum LegacyCorpusFixtures {
         ]
     )
 
-    /// VectorKit schema as of v3 (pre idx_vectors_filed_at_item).
+    /// SynapseKit schema as of v3 (pre idx_vectors_filed_at_item).
     static let legacyVectorsDeclaration = SchemaDeclaration(
-        kitID: "VectorKit",
+        kitID: "SynapseKit",
         version: 3,
         tables: [
             TableDeclaration(

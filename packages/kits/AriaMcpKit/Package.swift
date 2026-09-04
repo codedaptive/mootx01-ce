@@ -56,7 +56,7 @@ let package = Package(
         .package(name: "SubstrateML", path: "../../libs/SubstrateML"),
         .package(name: "CognitionKit", path: "../CognitionKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
-        // CorpusKit + VectorKit: the aria-mcp executable wires semantic recall
+        // CorpusKit + SynapseKit: the aria-mcp executable wires semantic recall
         // for the durable SQLite estate (ARIA_MCP_SQLITE_PATH) by constructing a
         // Corpus + VectorStore after `kit.open` and registering both — the same
         // composition EstateLifecycle.provision wires for a .glk estate. Without
@@ -64,7 +64,7 @@ let package = Package(
         // kit layering (downstream→upstream), no inversion. Permitted per
         // in-repository dependency direction.
         .package(name: "CorpusKit", path: "../CorpusKit"),
-        .package(name: "VectorKit", path: "../VectorKit"),
+        .package(name: "SynapseKit", path: "../SynapseKit"),
         // SubstrateTypes provides RowVerb, consumed by HTTPServer.swift's
         // tombstone-instant resolution (audit-trail fallback) after the
         // topology-analysis relocation to NeuronKit. App → lib layering, no
@@ -176,12 +176,12 @@ let package = Package(
                 // layering (downstream→upstream), no inversion. The AriaMCP target
                 // itself still lists NeuronKit for its own direct uses (recall, lens
                 // tools, etc.); this dep is the AriaResident target's own declaration.
-                // VectorKit: AriaResident owns EstateHNSWGraphMaintenance, the production
+                // SynapseKit: AriaResident owns EstateHNSWGraphMaintenance, the production
                 // adapter behind NeuronKit's pure HNSWGraphMaintenance seam. The adapter
                 // holds a live VectorStore handle and calls three write methods, so it
                 // must sit at the app layer: NeuronKit may not hold storage (B-1). The
-                // seam protocol stays in NeuronKit and carries no VectorKit type.
-                .product(name: "VectorKit", package: "VectorKit"),
+                // seam protocol stays in NeuronKit and carries no SynapseKit type.
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 // CognitionKit: AriaResident injects the graphAnalyticsHandler closure
                 // (Keystones + ConstellationLens) into NeuronKit.AutonomicGovernor.
@@ -225,11 +225,11 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 // PostgreSQL backend: needed for the precedence-ladder config tests.
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
-                // CorpusKit + VectorKit: DurableSemanticRecallTests builds the same
+                // CorpusKit + SynapseKit: DurableSemanticRecallTests builds the same
                 // Corpus + VectorStore the aria-mcp durable branch wires, to assert
                 // the BM25/vector lanes light up and survive a restart.
                 .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "VaultKit", package: "VaultKit"),
                 // LoopbackHTTP: HTTPServerTests drive the HTTP transport directly.
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),

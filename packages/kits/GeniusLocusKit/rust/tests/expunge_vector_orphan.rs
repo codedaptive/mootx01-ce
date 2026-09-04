@@ -4,7 +4,7 @@
 // Rust mirror of Swift's ExpungeVectorOrphanTests.swift.
 //
 // The gap this closes: before GLK orchestration landed, Rust `expunge` called
-// only `estate.expunge` — the Corpus and standalone VectorKit were never
+// only `estate.expunge` — the Corpus and standalone SynapseKit were never
 // cleaned up. A user's "deleted" memory could still be recalled through the
 // BM25/vector semantic lanes.
 //
@@ -39,7 +39,7 @@ use locus_kit::{
 };
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, Storage};
 use substrate_ml::distillation_pipeline::DistillationPipeline;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 // CaptureChannel lives in drawer_operational in the Rust port.
 use locus_kit::drawer_operational::CaptureChannel;

@@ -22,7 +22,7 @@ import Foundation
 import EngramLib
 import GeniusLocusKit
 import LocusKit
-import VectorKit
+import SynapseKit
 import SubstrateML
 import PersistenceKit
 import PersistenceKitInMemory
