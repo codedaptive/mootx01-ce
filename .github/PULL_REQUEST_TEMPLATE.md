@@ -1,9 +1,9 @@
 <!-- Thanks for contributing to MOOTx01. -->
 
-> **Before this can be merged, you must sign the Contributor License
-> Agreement.** After you open this PR, the CLA bot will comment with a link to
-> [`CLA.md`](../CLA.md) and the phrase to reply with. See
-> [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the full contribution process.
+> **Every commit needs a `Signed-off-by` line** (`git commit -s`), certifying
+> the [Developer Certificate of Origin](../DCO.md). The DCO check on this PR
+> fails any commit without one. See [`CONTRIBUTING.md`](../CONTRIBUTING.md)
+> for the full contribution process.
 >
 > Note: the community edition tracks validated work from our upstream
 > codebase, so a large patch can collide with a change already in flight — if
