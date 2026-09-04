@@ -5,17 +5,17 @@
 // Verifies that GLKMigrationCatalog.prepare runs the 1.1→1.2 capsule, which
 // adds the composition_policy column to corpus_index_state on populated
 // estates created before corpus_index_state reached schema version 3. The
-// catalog chain continues through the 1.2→1.3 and 1.3→1.4 capsules, so every
-// prepared estate ends at the current format, v1_4.
+// catalog chain continues through the 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules, so
+// every prepared estate ends at the current format, v1_5.
 //
 // Tests:
 //   1. v1_1-stamped estate with pre-v3 (version 2) schema: after prepare the
-//      column exists, the estate is stamped current (v1_4), and a row can be
+//      column exists, the estate is stamped current (v1_5), and a row can be
 //      written and read back with a non-empty compositionPolicyID.
 //   2. Idempotence: a second prepare on the already-migrated estate is a no-op
-//      that leaves the stamp at v1_4.
-//   3. Fresh estate (nil stamp): prepare stamps v1_4 without running any capsule.
-//   4. v1_0-stamped estate: the full chain (v1_0→v1_1→v1_2→v1_3→v1_4) ends at v1_4.
+//      that leaves the stamp at v1_5.
+//   3. Fresh estate (nil stamp): prepare stamps v1_5 without running any capsule.
+//   4. v1_0-stamped estate: the full chain (v1_0→v1_1→v1_2→v1_3→v1_4→v1_5) ends at v1_5.
 //      Uses a simple v1_0 estate (no legacy chunks) to avoid duplicating the
 //      SharedContentMigration fixture.
 
@@ -109,13 +109,13 @@ struct IndexCompositionColumnMigrationTests {
 
     /// An estate stamped v1_1 with pre-v3 corpus_index_state schema:
     /// after GLKMigrationCatalog.prepare the column exists, the stamp is
-    /// current (v1_4), and a store-API write round-trips a compositionPolicyID.
+    /// current (v1_5), and a store-API write round-trips a compositionPolicyID.
     @Test
     func v1_1EstateGainsCompositionPolicyColumn() async throws {
         let (kit, handle) = try await makeVersion2Estate(stampedAt: .v1_1)
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_4)
+        #expect(prep.format == .v1_5)
         #expect(prep.migrated == false)
 
         // Verify the column exists by writing a row using the store API (no raw SQL).
@@ -148,15 +148,15 @@ struct IndexCompositionColumnMigrationTests {
         let (kit, handle) = try await makeVersion2Estate(stampedAt: .v1_1)
 
         let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(first.format == .v1_4)
+        #expect(first.format == .v1_5)
 
         // Second prepare must return early with "already current", stamp unchanged.
         let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(second.format == .v1_4)
+        #expect(second.format == .v1_5)
         #expect(second.migrated == false)
     }
 
-    // MARK: §3 Fresh estate (nil stamp): stamped v1_4 without running capsule
+    // MARK: §3 Fresh estate (nil stamp): stamped v1_5 without running capsule
 
     @Test
     func freshEstateStampsCurrentWithoutCapsule() async throws {
@@ -174,16 +174,16 @@ struct IndexCompositionColumnMigrationTests {
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
         #expect(prep.format == .current)
-        #expect(prep.format == .v1_4)
+        #expect(prep.format == .v1_5)
         #expect(prep.migrated == false)
         #expect(prep.migrationState == nil)
     }
 
-    // MARK: §4 Full chain from v1_0 ends at v1_4
+    // MARK: §4 Full chain from v1_0 ends at v1_5
 
     #if GLK_MIGRATION_V1_0_TO_V1_1
     /// A v1_0-stamped estate (no legacy chunks) runs the full catalog chain
-    /// (v1_0→v1_1→v1_2→v1_3→v1_4) and ends at v1_4. Uses the simplest possible
+    /// (v1_0→v1_1→v1_2→v1_3→v1_4→v1_5) and ends at v1_5. Uses the simplest possible
     /// fixture to avoid duplicating the SharedContentMigration legacy-estate
     /// builder.
     @Test
@@ -194,9 +194,9 @@ struct IndexCompositionColumnMigrationTests {
         // The v1_0→v1_1 capsule (SharedContentMigration) runs for a fresh-at-v1_0
         // estate (no legacy chunks) and stamps v1_1; the v1_1→v1_2 capsule
         // stamps v1_2; the v1_2→v1_3 capsule stamps v1_3; the v1_3→v1_4
-        // capsule stamps v1_4. migrated=false because no legacy chunk data
+        // capsule stamps v1_4; the v1_4→v1_5 capsule stamps v1_5. migrated=false because no legacy chunk data
         // was moved.
-        #expect(prep.format == .v1_4)
+        #expect(prep.format == .v1_5)
         #expect(prep.migrated == false)
 
         // Verify corpus_index_state is writable (composition_policy column present).
