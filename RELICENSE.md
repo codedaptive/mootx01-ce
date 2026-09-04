@@ -40,9 +40,10 @@ Apache License, Version 2.0 pursuant to this notice.
 ## Authority
 
 Codedaptive, LLC is the sole copyright holder of the relicensed code.
-External contributions were accepted under the Contributor License
-Agreement (`CLA.md`), which grants Codedaptive the rights necessary to
-make this change.
+External contributions up to this point were accepted under a Contributor
+License Agreement that granted Codedaptive the rights necessary to make
+this change. Contributions since are accepted under the Developer
+Certificate of Origin (`DCO.md`).
 
 Signed,
 Codedaptive, LLC — Austin, Texas
