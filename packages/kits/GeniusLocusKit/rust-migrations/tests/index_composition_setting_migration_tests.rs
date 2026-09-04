@@ -12,7 +12,7 @@
 //!      id; an invalid value seeds `current()`. Both cases share one test so
 //!      the environment mutation never races another test.
 //!   5. StorageUnavailable: an unregistered handle returns the error variant.
-//!   6. Full chain from v1_0 through the compiled catalog ends at V1_4 with
+//!   6. Full chain from v1_0 through the compiled catalog ends at V1_5 with
 //!      the setting stored. (Gated on feature = "migration-v1-0-to-v1-1".)
 
 use std::sync::Arc;
@@ -102,8 +102,9 @@ fn v1_3_estate_gains_stored_setting_and_stamps_v1_4() {
             .expect("migration must succeed on v1_3 estate");
 
         assert_eq!(policy, IndexCompositionPolicy::current());
+        // The capsule stamps its own format; the chain, not the capsule,
+        // carries the estate on to CURRENT (V1_5).
         assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_4);
-        assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
         assert_eq!(
             coord.stored_index_composition_policy(&handle).expect("read"),
             Some(IndexCompositionPolicy::current())
@@ -220,7 +221,7 @@ fn unregistered_handle_returns_storage_unavailable() {
 
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 #[test]
-fn v1_0_estate_runs_full_chain_to_v1_4() {
+fn v1_0_estate_runs_full_chain_to_current() {
     use corpus_kit_providers::default_ensemble;
     use genius_locus_kit_migrations::{compiled_floor, MigrationChainExt};
 
@@ -230,7 +231,8 @@ fn v1_0_estate_runs_full_chain_to_v1_4() {
         coord
             .run_migration_chain(&handle, NOW, default_ensemble())
             .expect("full chain must succeed on an empty v1_0 estate");
-        assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_4, "full chain must end at V1_4");
+        assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_5, "full chain must end at V1_5");
+        assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
         assert_eq!(
             coord.stored_index_composition_policy(&handle).expect("read"),
             Some(IndexCompositionPolicy::current())
