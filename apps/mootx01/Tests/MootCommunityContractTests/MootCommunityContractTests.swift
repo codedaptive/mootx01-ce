@@ -2,7 +2,7 @@
 //
 // CORE-10: Headless contract conformance harness — 60-case fixture suite.
 //
-// Runs all 60 fixture cases from contracts/community/1.1/fixtures/ against a
+// Runs all 60 fixture cases from apps/mootx01/Contracts/community-1.1/fixtures/ against a
 // REAL mootx01-daemon subprocess in headless mode.  No fixture playback: every
 // response comes from the live dispatcher.  Each response is validated against
 // the contract type definitions (ShapeValidator) and cross-field invariants
@@ -58,7 +58,7 @@ import MootDaemonProvider
 /// Resolved once at process start to avoid repeated file I/O.
 private struct ContractFixtures {
 
-    /// Absolute URL of the contracts/community/1.1 directory.
+    /// Absolute URL of the apps/mootx01/Contracts/community-1.1 directory.
     static let contractRoot: URL = {
         // Walk up from the test bundle to the repo root, then descend.
         // In SPM test runs the binary lives under .build/; the repo root is
@@ -77,7 +77,7 @@ private struct ContractFixtures {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        return repoRoot.appendingPathComponent("contracts/community/1.1")
+        return repoRoot.appendingPathComponent("apps/mootx01/Contracts/community-1.1")
     }()
 
     /// Parsed contract.json (cached).  Initialized once; read-only thereafter.
