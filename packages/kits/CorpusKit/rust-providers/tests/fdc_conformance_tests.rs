@@ -21,7 +21,7 @@
 
 use corpus_kit_providers::{fdc_node_vector, FDCProvider, FDC_DIMENSION, FDC_PROJECTION_SEED};
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 // The canonical file is emitted by the Swift leg's `FdcConformanceTests` test
 // into Tests/SharedVectors/. Embedded at compile time — two directories up

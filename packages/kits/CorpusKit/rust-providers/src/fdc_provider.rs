@@ -84,7 +84,7 @@ use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
 use substrate_ml::random_walks::SplitMix64;
 use substrate_types::fnv;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // MARK: - Constants
 //
@@ -271,7 +271,7 @@ impl EmbeddingProvider for FDCProvider {
     /// through float_simhash::project to produce the 256-bit Engram.
     ///
     /// Empty or UNRESOLVED input returns `Engram::ZERO`.
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         if text.is_empty() {
             return Ok(Engram::ZERO);
         }
@@ -290,7 +290,7 @@ impl EmbeddingProvider for FDCProvider {
     /// L2-normalised (unit vector) when non-empty.
     ///
     /// Mirrors Swift `FDCProvider.embedFloat(_:)`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         if text.is_empty() {
             return Ok(Vec::new());
         }
@@ -302,7 +302,7 @@ impl EmbeddingProvider for FDCProvider {
     /// Replaces the two independent `fdc_embedding_vector` calls that `embed` and
     /// `embed_float` would each make (Corpus ingest needs both per chunk).
     /// Outputs are byte-identical to calling `embed` and `embed_float` separately.
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         if text.is_empty() {
             return Ok((Engram::ZERO, Vec::new()));
         }
@@ -318,7 +318,7 @@ impl EmbeddingProvider for FDCProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vectorkit::EmbeddingProvider;
+    use synapsekit::EmbeddingProvider;
 
     // ── node vector properties ────────────────────────────────────────────
 

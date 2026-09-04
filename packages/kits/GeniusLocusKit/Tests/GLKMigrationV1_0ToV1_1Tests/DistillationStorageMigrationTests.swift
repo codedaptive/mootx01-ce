@@ -31,7 +31,7 @@ import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 import GeniusLocusKitMigrations
 
 @testable import GeniusLocusKit
@@ -207,7 +207,7 @@ struct DistillationStorageMigrationTests {
             originClass: .derived
         ))
 
-        // Register the VectorKit schema so the vectors table exists before
+        // Register the SynapseKit schema so the vectors table exists before
         // we insert lane entries. On a real 1.0.x estate this is already applied;
         // in tests it is applied here to mirror the production migration setup.
         try await storage.migrate(to: VectorStore.schemaDeclaration)

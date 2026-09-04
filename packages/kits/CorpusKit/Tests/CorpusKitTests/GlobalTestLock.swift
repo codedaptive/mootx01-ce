@@ -22,7 +22,7 @@
 //   release() resumes the oldest waiter (FIFO). No suspension point exists
 //   *inside* the actor that would allow re-entry while the lock is held.
 //
-//   Mirrors VectorKit's GlobalTestLock.swift and NeuronKit's
+//   Mirrors SynapseKit's GlobalTestLock.swift and NeuronKit's
 //   IntellectusTestLock.swift. Pattern is fleet-standard for kits that
 //   adopt IntellectusLib self-report telemetry.
 //

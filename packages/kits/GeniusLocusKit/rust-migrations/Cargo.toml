@@ -20,7 +20,7 @@ migration-v1-2-to-v1-3 = []
 # existed (estate format 1.3 → 1.4 capsule).
 migration-v1-3-to-v1-4 = []
 # migration-v1-4-to-v1-5: moves the vector tier's schema-version ledger rows
-# from their VectorKit ids to their SynapseKit ids on populated estates
+# from their SynapseKit ids to their SynapseKit ids on populated estates
 # (estate format 1.4 → 1.5 capsule).
 migration-v1-4-to-v1-5 = []
 # Floor features are the consumer-facing cumulative selections: each enables
@@ -40,7 +40,7 @@ corpus-kit = { path = "../../CorpusKit/rust" }
 # kit they migrate; no inversion.
 locus-kit = { path = "../../LocusKit/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # rusqlite: required by geometry_normalization.rs (production code) for the

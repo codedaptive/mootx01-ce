@@ -19,7 +19,7 @@
 //!   for their entire duration. This prevents interleaving between concurrent
 //!   tests that would corrupt exact-count assertions.
 //!
-//!   Pattern mirrors packages/kits/VectorKit/rust/tests/vectorkit_telemetry_tests.rs.
+//!   Pattern mirrors packages/kits/SynapseKit/rust/tests/synapsekit_telemetry_tests.rs.
 //!
 //!   Lock poisoning: if a prior test panicked while holding the lock,
 //!   `lock()` returns a PoisonError. We recover with `into_inner()` so
@@ -39,7 +39,7 @@ use rusqlite::Connection;
 use std::collections::BTreeMap;
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 // Process-wide serialisation lock for tests in this file. All tests in
 // this file acquire this lock for their entire duration. This static is

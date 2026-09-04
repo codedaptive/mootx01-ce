@@ -22,7 +22,7 @@ use substrate_types::merkle_root::MerkleRoot;
 
 /// Lightweight vector input for the hash pipeline.
 ///
-/// substrate-lib cannot depend on vectorkit (dependency inversion), so
+/// substrate-lib cannot depend on synapsekit (dependency inversion), so
 /// this struct captures the fields needed to serialize vectors into the
 /// canonical byte format under the node-tree model.
 #[derive(Debug, Clone)]

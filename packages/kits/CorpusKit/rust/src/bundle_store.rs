@@ -173,7 +173,7 @@ impl BundleStore {
             hashable_tables,
             hash_provider: Box::new(|_table, row_key, values| {
                 // Extract chunk text for hashing. Vectors live in
-                // VectorKit (not inline), so vector input is empty.
+                // SynapseKit (not inline), so vector input is empty.
                 let content_bytes: Vec<u8> = match values.get("text") {
                     Some(TypedValue::Text(t)) => t.as_bytes().to_vec(),
                     _ => Vec::new(),
