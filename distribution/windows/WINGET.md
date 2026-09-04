@@ -1,115 +1,60 @@
-# Winget submission — per-release process
+# Winget — how a release reaches the Windows Package Manager
 
-MOOTx01 is distributed on Windows both as a standalone setup EXE (download
-and double-click) and through the [Windows Package Manager][winget]
-(`winget install Codedaptive.MOOTx01`). This document is the per-release
-runbook for the winget path.
+MOOTx01 is distributed on Windows as a standalone setup EXE (download and
+double-click) and through the [Windows Package Manager][winget]
+(`winget install Codedaptive.MOOTx01`). Both come from the same release
+tag, and the winget path is automated. This document says what the
+automation does and what a maintainer does when it needs attention.
 
-The manifests live in [`winget/`](./winget/):
+## What a release tag does
+
+`.github/workflows/release.yml` runs on a `vX.Y.Z` tag:
+
+1. Builds `mootx01.exe` and `moot-mgr.exe` for x86_64 and arm64, signs them
+   (see [`SIGNING.md`](SIGNING.md)), builds the Inno Setup EXE for each
+   architecture, signs that, and publishes the four assets with
+   `checksums.txt` and its minisign signature.
+2. `update-winget` rewrites the three manifests in [`winget/`](./winget/)
+   with the new version, the two `InstallerUrl` values, and the SHA-256 of
+   the published EXEs, and commits them back to the release branch. The
+   manifests in the tree therefore describe the latest published release.
+3. `winget-tag` submits the release to the community [`winget-pkgs`][winget-pkgs]
+   repository with [`wingetcreate`][wingetcreate], which downloads the
+   published EXEs and computes their hashes itself. Pre-release tags
+   (`-beta`, `-rc`) are skipped: winget lists only final versions.
+
+The three manifests are:
 
 | File | Purpose |
 |---|---|
-| `Codedaptive.MOOTx01.yaml` | Version manifest — package id + version + default locale |
+| `Codedaptive.MOOTx01.yaml` | Version manifest: package id, version, default locale |
 | `Codedaptive.MOOTx01.installer.yaml` | Installer URLs, SHA-256, silent switches, scope |
 | `Codedaptive.MOOTx01.locale.en-US.yaml` | Publisher, license, name, description |
 
-These are the source of truth. The copies that land in the community
-[`winget-pkgs`][winget-pkgs] repo are generated from them each release.
+`PackageVersion` is identical across the three, and `License` in the locale
+manifest must match the repository `LICENSE`.
 
-## What the release build already produces
+## When a maintainer has to step in
 
-The GitHub release workflow (`.github/workflows/release.yml`) builds the
-Inno Setup EXE for both architectures and publishes them as release assets,
-alongside a `checksums.txt` file and a minisign signature. For a release tagged
-`vX.Y.Z-beta` the relevant assets are:
+- **The winget-pkgs PR fails validation.** The winget-pkgs CI installs and
+  uninstalls the package in a clean VM under `/VERYSILENT`. The installer's
+  post-install client-wiring step is `skipifsilent` and the uninstall notice
+  is gated on `not UninstallSilent`, so neither blocks the VM. A Defender
+  `validationDefender` failure means the EXE was not signed; check the
+  release run's signing step.
+- **Re-submitting without rebuilding.** Run `release.yml` manually with the
+  `winget-tag` input set to the tag. That re-runs only the submission.
+- **Hand-fixing a manifest.** `update-winget.sh <version>` rewrites the three
+  files from the published assets; hash the published EXE, never a local
+  build. Validate on a Windows box with
+  `winget validate --manifest distribution\windows\winget` before opening a
+  PR by hand.
 
-- `mootx01-X.Y.Z-windows-x86_64-setup.exe`
-- `mootx01-X.Y.Z-windows-arm64-setup.exe`
-- `checksums.txt` (contains the SHA-256 for every asset)
+## Publisher identity
 
-No extra CI is needed to *produce* the installer — the winget work is purely
-authoring the manifest and submitting it.
-
-## Per-release steps
-
-1. **Confirm the release is published** with both Windows setup EXEs attached.
-   Note the exact tag (e.g. `v1.0.5-beta`).
-
-2. **Bump the version** in all three manifest files. `PackageVersion` must be
-   identical across `Codedaptive.MOOTx01.yaml`,
-   `Codedaptive.MOOTx01.installer.yaml`, and
-   `Codedaptive.MOOTx01.locale.en-US.yaml`. Use the clean semver
-   (`1.0.5`), not the tag qualifier.
-
-3. **Update the two `InstallerUrl` values** in
-   `Codedaptive.MOOTx01.installer.yaml` to point at the new tag's assets.
-
-4. **Fill the two `InstallerSha256` values** from the published checksums.
-   Do NOT recompute locally from a local build — hash the *published* asset,
-   so the manifest matches what users actually download:
-
-   ```powershell
-   # From the release assets (x64 shown; repeat for arm64):
-   $u = "https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.5-beta/mootx01-1.0.5-windows-x86_64-setup.exe"
-   irm $u -OutFile setup.exe
-   (Get-FileHash setup.exe -Algorithm SHA256).Hash
-   ```
-
-   or read it straight out of the release's `checksums.txt`. Winget wants the
-   hash uppercase; the manifest accepts either case. The placeholder in the
-   committed manifest is 64 zeros — winget validation rejects it, which is
-   deliberate: a submission that skipped this step fails loudly instead of
-   shipping a wrong hash.
-
-5. **Validate locally** on a Windows box with winget's client installed:
-
-   ```powershell
-   winget validate --manifest distribution\windows\winget
-   # Optional end-to-end install test in a sandbox:
-   winget install --manifest distribution\windows\winget
-   ```
-
-6. **Submit to the community repo.** Fork/branch [`winget-pkgs`][winget-pkgs]
-   and copy the three files to the versioned path
-   `manifests/c/Codedaptive/MOOTx01/<version>/`, then open a PR. The
-   [`wingetcreate`][wingetcreate] tool automates the copy, version bump, and
-   PR:
-
-   ```powershell
-   wingetcreate update Codedaptive.MOOTx01 `
-     --version 1.0.5 `
-     --urls "<x64 url>" "<arm64 url>" `
-     --submit
-   ```
-
-   `wingetcreate update` re-downloads the URLs and computes the SHA-256 for
-   you, so step 4 is a cross-check when using it rather than a manual edit.
-
-7. **Wait for validation.** The winget-pkgs CI installs the package in a
-   clean VM and uninstalls it. This is why the installer must complete fully
-   unattended under `/VERYSILENT /SUPPRESSMSGBOXES` — the post-install
-   client-wiring checkbox is `skipifsilent` and the uninstall notice is
-   gated on `not UninstallSilent`, so neither blocks the VM.
-
-## Notes
-
-- **Pre-release / beta.** The community winget-pkgs repo does not list
-  pre-release versions. While MOOTx01 is in `-beta`, the standalone EXE and
-  the `install.ps1` script (download-then-run) are the Windows distribution
-  channels; the
-  manifests here are staged and validated so the winget submission is a
-  single clean step the moment a non-beta `X.Y.Z` release ships. Keep the
-  manifests current against the latest beta so the eventual submission is
-  not a from-scratch effort.
-
-- **Publisher identity.** `Codedaptive.MOOTx01` is the package identifier —
-  `<Publisher>.<Package>`. It is claimed on first accepted submission; keep
-  it stable across releases.
-
-- **SmartScreen.** The setup EXE is unsigned (no Authenticode cert), so a
-  direct download shows a SmartScreen warning on first run. Installing via
-  winget does not surface that prompt. Signing is a separate, cost-gated
-  decision (EV/OV code-signing certificate).
+`Codedaptive.MOOTx01` is the package identifier, `<Publisher>.<Package>`. It
+was claimed on the first accepted submission and stays stable across
+releases.
 
 [winget]: https://learn.microsoft.com/windows/package-manager/
 [winget-pkgs]: https://github.com/microsoft/winget-pkgs
