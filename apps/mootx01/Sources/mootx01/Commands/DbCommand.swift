@@ -292,13 +292,89 @@ struct DbCompositionCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // At-rest posture: the same shared decision serve, drain and redistill use.
+        let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+        guard let requestedID else {
+            // Show is a read: the daemon keeps serving.
+            do {
+                let storedID = try await Self.storedPolicyID(estateURL: estateURL, owner: owner)
+                print("estate: \(estateName)")
+                print("index_composition_policy: \(storedID ?? "none")")
+            } catch {
+                Logging.stderr.log("mootx01 db composition fatal: \(error)")
+                throw ExitCode.failure
+            }
+            return
+        }
+
+        // The rebuild rewrites every index row while a serving daemon would
+        // keep encoding captures under the policy it opened with, the
+        // single-writer hazard `mootx01 upgrade` already guards:
+        // ResidentDaemonQuiesce stops the daemon around the rebuild only when
+        // this data directory is the resident estate and restarts it
+        // afterwards; a clone is rebuilt with the daemon untouched. A nil
+        // result means the daemon would not stop; nothing was written.
+        let outcome = await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "index composition rebuild",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Result<RebuildReport, CompositionFailure> in
+            await Self.rebuild(
+                estateURL: estateURL, owner: owner, estateName: estateName, requestedID: requestedID)
+        }
+        guard let outcome else {
+            Logging.stderr.log("mootx01 db composition fatal: the resident daemon would not stop; nothing was changed. Stop it and run `mootx01 db composition --set` again")
+            throw ExitCode.failure
+        }
+        switch outcome {
+        case .success(let report):
+            for line in report.lines { print(line) }
+            if let stale = report.stale {
+                Logging.stderr.log("mootx01 db composition fatal: rows still carry another policy after the rebuild (\(stale))")
+                throw ExitCode.failure
+            }
+        case .failure(let failure):
+            Logging.stderr.log("mootx01 db composition fatal: \(failure)")
+            throw ExitCode.failure
+        }
+    }
+
+    /// Why a show or a rebuild stopped, in the operator-facing wording each
+    /// stage reports.
+    private enum CompositionFailure: Error, CustomStringConvertible {
+        case keyUnavailable(any Error)
+        case sqliteOpen(any Error)
+        case estateOpen(any Error)
+        case work(any Error)
+
+        var description: String {
+            switch self {
+            case .keyUnavailable(let error): return "estate encryption key unavailable: \(error)"
+            case .sqliteOpen(let error): return "SQLite open failed: \(error)"
+            case .estateOpen(let error): return "estate open failed: \(error)"
+            case .work(let error): return "\(error)"
+            }
+        }
+    }
+
+    /// The lines `--set` prints, and the stale-row detail when rows still
+    /// carry another policy after the rebuild.
+    private struct RebuildReport {
+        let lines: [String]
+        let stale: String?
+    }
+
+    /// Open the estate's SQLite under the shared at-rest posture serve, drain
+    /// and redistill use, then the kit plus the migration catalog (which
+    /// seeds the setting on an estate that predates it).
+    private static func openEstate(
+        estateURL: URL, owner: OwnerCredentials
+    ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle, storage: SQLiteStorage) {
         let encryption: EstateEncryptionConfig
         do {
             encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
         } catch {
-            Logging.stderr.log("mootx01 db composition fatal: estate encryption key unavailable: \(error)")
-            throw ExitCode.failure
+            throw CompositionFailure.keyUnavailable(error)
         }
         let storage: SQLiteStorage
         do {
@@ -307,58 +383,83 @@ struct DbCompositionCommand: AsyncParsableCommand {
                 backend: .sqlite(url: estateURL, busyTimeout: 5.0),
                 encryptionConfig: encryption))
         } catch {
-            Logging.stderr.log("mootx01 db composition fatal: SQLite open failed: \(error)")
-            throw ExitCode.failure
+            throw CompositionFailure.sqliteOpen(error)
         }
-
-        let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
         let kit = GeniusLocusKit()
-        let handle: EstateHandle
         do {
-            handle = try await kit.open(storage: storage, owner: owner)
-            // The catalog seeds the setting on an estate that predates it.
+            let handle = try await kit.open(storage: storage, owner: owner)
             _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+            return (kit, handle, storage)
         } catch {
-            Logging.stderr.log("mootx01 db composition fatal: estate open failed: \(error)")
-            throw ExitCode.failure
+            await storage.close()
+            throw CompositionFailure.estateOpen(error)
         }
+    }
 
+    /// The stored policy id through a plain kit open. Twin of the Rust show arm.
+    private static func storedPolicyID(estateURL: URL, owner: OwnerCredentials) async throws -> String? {
+        let (kit, handle, storage) = try await openEstate(estateURL: estateURL, owner: owner)
         do {
-            print("estate: \(estateName)")
-            guard let requestedID else {
-                let storedID = try await kit.storedIndexCompositionPolicyID(for: handle)
-                print("index_composition_policy: \(storedID ?? "none")")
-                try await kit.close(handle)
-                await storage.close()
-                return
-            }
-            let start = Date()
-            // 1. Store the setting. 2. Wire the Corpus under it with the
-            // rebuild committed (its rows still carry the old id). 3. Rebuild
-            // every lane. 4. Prove every active row now carries the new id.
-            let storedID = try await kit.setIndexCompositionPolicy(id: requestedID, for: handle)
-            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, reindexPending: true)
-            try await kit.reindexCorpus(handle: handle, now: Date())
-            let counts = try await kit.indexCompositionPolicyRowCounts(for: handle)
-            let reindexed = counts[storedID] ?? 0
-            let stale = counts.filter { $0.key != storedID }
-            print("index_composition_policy: \(storedID)")
-            print("rows reindexed: \(reindexed)")
-            print(String(format: "elapsed: %.1fs", Date().timeIntervalSince(start)))
+            let storedID = try await kit.storedIndexCompositionPolicyID(for: handle)
             try await kit.close(handle)
             await storage.close()
-            if !stale.isEmpty {
-                let detail = stale.map { "\($0.key): \($0.value)" }.sorted().joined(separator: ", ")
-                Logging.stderr.log("mootx01 db composition fatal: rows still carry another policy after the rebuild (\(detail))")
-                throw ExitCode.failure
-            }
-        } catch let exit as ExitCode {
-            throw exit
+            return storedID
         } catch {
-            Logging.stderr.log("mootx01 db composition fatal: \(error)")
             try? await kit.close(handle)
             await storage.close()
-            throw ExitCode.failure
+            throw CompositionFailure.work(error)
+        }
+    }
+
+    /// Store the setting and rebuild every index lane under it. 1. Store the
+    /// setting. 2. Wire the Corpus under it with the rebuild committed (its
+    /// rows still carry the old id). 3. Drain the encode queue. 4. Rebuild
+    /// every lane. 5. Count the rows under each id. Twin of the Rust
+    /// `run_composition_on_estate` `--set` arm.
+    private static func rebuild(
+        estateURL: URL, owner: OwnerCredentials, estateName: String, requestedID: String
+    ) async -> Result<RebuildReport, CompositionFailure> {
+        let opened: (kit: GeniusLocusKit, handle: EstateHandle, storage: SQLiteStorage)
+        do {
+            opened = try await openEstate(estateURL: estateURL, owner: owner)
+        } catch let failure as CompositionFailure {
+            return .failure(failure)
+        } catch {
+            return .failure(.estateOpen(error))
+        }
+        let (kit, handle, storage) = opened
+        let start = Date()
+        do {
+            let storedID = try await kit.setIndexCompositionPolicy(id: requestedID, for: handle)
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, reindexPending: true)
+            // Drain to empty BEFORE the rebuild. A job left pending by an
+            // earlier process (a capture whose encode had not run when that
+            // process exited) would otherwise be indexed by this command's
+            // own drain worker while `reindexCorpus` runs, and the
+            // interleaving would decide the row's final state. Drained here,
+            // every pending job is indexed under the stored setting first;
+            // the rebuild then rewrites every row.
+            try await kit.awaitEncodeDrain(for: handle)
+            try await kit.reindexCorpus(handle: handle, now: Date())
+            let counts = try await kit.indexCompositionPolicyRowCounts(for: handle)
+            try await kit.close(handle)
+            await storage.close()
+            let reindexed = counts[storedID] ?? 0
+            let stale = counts.filter { $0.key != storedID }
+            let lines = [
+                "estate: \(estateName)",
+                "index_composition_policy: \(storedID)",
+                "rows reindexed: \(reindexed)",
+                String(format: "elapsed: %.1fs", Date().timeIntervalSince(start)),
+            ]
+            let detail = stale.isEmpty
+                ? nil
+                : stale.map { "\($0.key): \($0.value)" }.sorted().joined(separator: ", ")
+            return .success(RebuildReport(lines: lines, stale: detail))
+        } catch {
+            try? await kit.close(handle)
+            await storage.close()
+            return .failure(.work(error))
         }
     }
 }

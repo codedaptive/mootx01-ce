@@ -1243,12 +1243,13 @@ fn wall_now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-/// The daemon control seam every upgrade-time quiesce goes through.
+/// The daemon control seam every resident-estate quiesce goes through
+/// (`mootx01 upgrade` steps and `mootx01 db composition --set`).
 /// `PlatformDaemon` is the production implementation; `NoDaemon` stands in
 /// for a non-resident estate; tests inject a recorder so a step can be
 /// shown to leave the daemon alone. Twin of the Swift
 /// `EstateEncryptionMigrator.DaemonControl` seam.
-trait DaemonControl {
+pub(crate) trait DaemonControl {
     fn is_running(&self) -> bool;
     fn stop(&self) -> bool;
     fn start(&self) -> bool;
@@ -1258,7 +1259,7 @@ trait DaemonControl {
 /// the systemd unit. Windows: the scheduled task. Other platforms report
 /// "not running" so the upgrade never tries to manage a daemon it has no
 /// control surface for (the user was told to check).
-struct PlatformDaemon;
+pub(crate) struct PlatformDaemon;
 
 impl DaemonControl for PlatformDaemon {
     fn is_running(&self) -> bool {
@@ -1334,7 +1335,7 @@ impl DaemonControl for NoDaemon {
 /// Returns `work`'s result, or `None` when the daemon was running and would
 /// not stop — the step is skipped, nothing is half-done, and the next
 /// `mootx01 upgrade` retries. Twin of the Swift `ResidentDaemonQuiesce.run`.
-fn with_resident_daemon_quiesced<T>(
+pub(crate) fn with_resident_daemon_quiesced<T>(
     data: &std::path::Path,
     resident: &std::path::Path,
     step: &str,
@@ -1496,8 +1497,46 @@ fn restart_services() {
     );
 }
 
+/// The recording daemon control shared by every command test that pins the
+/// resident-quiesce rule (`upgrade` steps and `db composition --set`).
+#[cfg(test)]
+pub(crate) mod daemon_test_support {
+    /// Records every daemon-control call in order; the recorder IS the
+    /// daemon, so no service manager is ever reached from a test.
+    pub(crate) struct RecordingDaemon {
+        running: bool,
+        stop_succeeds: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl RecordingDaemon {
+        pub(crate) fn new(running: bool, stop_succeeds: bool) -> Self {
+            Self { running, stop_succeeds, calls: std::cell::RefCell::new(Vec::new()) }
+        }
+        pub(crate) fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl super::DaemonControl for RecordingDaemon {
+        fn is_running(&self) -> bool {
+            self.calls.borrow_mut().push("is_running");
+            self.running
+        }
+        fn stop(&self) -> bool {
+            self.calls.borrow_mut().push("stop");
+            self.stop_succeeds
+        }
+        fn start(&self) -> bool {
+            self.calls.borrow_mut().push("start");
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::daemon_test_support::RecordingDaemon;
 
     /// REAL-PATH gate for the corpus-counts migration (Bob's ruling,
     /// 2026-08-15): drives `corpus_counts_migration_core` — the exact estate
@@ -2414,38 +2453,6 @@ mod tests {
             genius_locus_kit::distillation_converter_id()
         );
         assert!(printed.ends_with("intent-span-v23-attributed@intent-span-v23.2-attributed-prose"));
-    }
-
-    /// Records every daemon-control call in order; the recorder IS the
-    /// daemon, so no service manager is ever reached from a test.
-    struct RecordingDaemon {
-        running: bool,
-        stop_succeeds: bool,
-        calls: std::cell::RefCell<Vec<&'static str>>,
-    }
-
-    impl RecordingDaemon {
-        fn new(running: bool, stop_succeeds: bool) -> Self {
-            Self { running, stop_succeeds, calls: std::cell::RefCell::new(Vec::new()) }
-        }
-        fn calls(&self) -> Vec<&'static str> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl super::DaemonControl for RecordingDaemon {
-        fn is_running(&self) -> bool {
-            self.calls.borrow_mut().push("is_running");
-            self.running
-        }
-        fn stop(&self) -> bool {
-            self.calls.borrow_mut().push("stop");
-            self.stop_succeeds
-        }
-        fn start(&self) -> bool {
-            self.calls.borrow_mut().push("start");
-            true
-        }
     }
 
     fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {

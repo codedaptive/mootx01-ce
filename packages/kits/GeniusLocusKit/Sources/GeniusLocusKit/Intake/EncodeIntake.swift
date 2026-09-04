@@ -603,7 +603,7 @@ public extension GeniusLocusKit {
             // the next pass's enqueue.
             //
             // POLL, do not pump — the single lease-holding drain worker
-            // (runImportDrainLoop / runIngestDrainLoop) owns the drain; this loop
+            // (the importDrainPass / ingestDrainPass workers) owns the drain; this loop
             // only observes the read-only depth probe FOR THE STREAM the batch
             // was enqueued on.
             while true {
@@ -705,11 +705,13 @@ public extension GeniusLocusKit {
     /// starts the drain worker on the persisted queue, and a serve-open resumed
     /// backlog must find this rider already installed or its batches encode
     /// without distilling (SPEC_DISTILLATION_STORAGE §7.1). The closure captures
-    /// the GLK actor weakly so a torn-down estate leaves no retain cycle through
-    /// the Corpus.
+    /// the GLK actor AND the engine weakly: it is stored on the engine, so a
+    /// strong engine capture would make the engine own itself and outlive every
+    /// kit reference, its drain worker with it. The closure runs inside the
+    /// engine's own drain pass, so the engine resolves whenever it matters.
     internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
-        await corpus.setOnEncoded { [weak self] drawerIDs, unitSessionID in
-            guard let self else { return }
+        await corpus.setOnEncoded { [weak self, weak corpus] drawerIDs, unitSessionID in
+            guard let self, let corpus else { return }
             // Marker timestamp is captured at CALLBACK ENTRY — the moment the
             // drain unit's encode work completed — never after rollup or
             // distillation, so the A2 marker anchors on encode-end in BOTH
