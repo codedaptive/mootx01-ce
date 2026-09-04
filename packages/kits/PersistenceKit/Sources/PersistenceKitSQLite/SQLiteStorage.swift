@@ -90,6 +90,10 @@ public final class SQLiteStorage: Storage, Sendable {
         try await backend.currentSchemaVersion(kitID: kitID)
     }
 
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await backend.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
+
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await backend.applyMigrations(schema)
     }
@@ -422,6 +426,36 @@ actor SQLiteBackend {
             return Int(stmt.columnInt64(0))
         }
         return 0
+    }
+
+    /// The ledger row's version for `kitID`, or nil when the kit has no row.
+    /// Distinct from `currentSchemaVersion(kitID:)`, which folds "no row"
+    /// into 0; the rename below must tell the two apart.
+    private func ledgerVersion(kitID: String) throws -> Int? {
+        let stmt = try connection.prepare("SELECT \"version\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = ?")
+        defer { stmt.finalize() }
+        try stmt.bind(.text(kitID), at: 1)
+        if try stmt.step() { return Int(stmt.columnInt64(0)) }
+        return nil
+    }
+
+    /// Move the ledger row for `oldKitID` to `newKitID` (SPEC I-7a). The
+    /// presence checks and the UPDATE all run on this actor, so no other
+    /// ledger write can interleave between the conflict check and the
+    /// rewrite; `kit_id` is the table's primary key and the check above
+    /// guarantees the UPDATE cannot collide. `version` and `applied_at` are
+    /// untouched.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) throws -> SchemaKitRenameOutcome {
+        guard let oldVersion = try ledgerVersion(kitID: oldKitID) else { return .noRow }
+        if let newVersion = try ledgerVersion(kitID: newKitID) {
+            return .conflict(oldVersion: oldVersion, newVersion: newVersion)
+        }
+        let stmt = try connection.prepare("UPDATE \"_storagekit_migrations\" SET \"kit_id\" = ? WHERE \"kit_id\" = ?")
+        defer { stmt.finalize() }
+        try stmt.bind(.text(newKitID), at: 1)
+        try stmt.bind(.text(oldKitID), at: 2)
+        _ = try stmt.step()
+        return .renamed(version: oldVersion)
     }
 
     private func recordSchemaVersion(kitID: String, version: Int) throws {

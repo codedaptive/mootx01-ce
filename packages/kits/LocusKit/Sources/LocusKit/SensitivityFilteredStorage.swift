@@ -572,6 +572,10 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
         try await base.currentSchemaVersion(for: kitID)
     }
 
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await base.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
+
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await base.migrate(to: schema)
     }
