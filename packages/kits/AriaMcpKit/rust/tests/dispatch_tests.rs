@@ -3223,7 +3223,7 @@ fn estate_ping_includes_injected_build_serial() {
         &registry,
         &ledger,
         &sensitivity_ledger,
-        EstatePosture::Live, "TESTSERIAL-XYZ",
+        EstatePosture::Live, true, "TESTSERIAL-XYZ",
         "",
         None,
         None,
@@ -3252,7 +3252,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
 
     for tool in ["moot_estate_ping", "moot_estate_status"] {
         let with_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, "SERIAL", advisory, None, None,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, true, "SERIAL", advisory, None, None,
         )
         .expect("dispatch must not throw");
         let text = content_text(&with_skew);
@@ -3262,7 +3262,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
         );
 
         let without_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, "SERIAL", "", None, None,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, true, "SERIAL", "", None, None,
         )
         .expect("dispatch must not throw");
         let text2 = content_text(&without_skew);
@@ -3296,7 +3296,7 @@ fn update_advisory_surfaces_when_wired_and_omitted_when_none() {
 
     for tool in ["moot_estate_ping", "moot_estate_status"] {
         let with_update = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, "SERIAL", "",
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, true, "SERIAL", "",
             Some(&some_provider), None,
         )
         .expect("dispatch must not throw");
@@ -3307,7 +3307,7 @@ fn update_advisory_surfaces_when_wired_and_omitted_when_none() {
         );
 
         let without_update = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, "SERIAL", "",
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, EstatePosture::Live, true, "SERIAL", "",
             Some(&none_provider), None,
         )
         .expect("dispatch must not throw");
@@ -8261,7 +8261,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let before = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     ).expect("dispatch must not throw");
     assert!(
         !content_text(&before).contains("classified briefing"),
@@ -8273,7 +8273,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let after = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     ).expect("dispatch must not throw");
     assert!(
         content_text(&after).contains("classified briefing"),
@@ -8316,14 +8316,14 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
     let sensitivity_ledger = SensitivityGrantLedger::new();
     let before = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id.clone()],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     );
     assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
 
     sensitivity_ledger.grant_restricted(wall_now());
     let after = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     ).expect("with a live grant, moot_memory_get must find the drawer");
     assert!(content_text(&after).contains("restricted content body"));
 }
@@ -8352,7 +8352,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
     sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-search-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();
@@ -8383,7 +8383,7 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     sensitivity_ledger.grant_restricted(wall_now());
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-normal-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, "", "", None, None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, EstatePosture::Live, true, "", "", None, None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();

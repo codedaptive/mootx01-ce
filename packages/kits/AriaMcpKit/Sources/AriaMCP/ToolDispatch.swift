@@ -495,9 +495,21 @@ public struct ToolDispatcher: Sendable {
             // the call, so the refusal leaves no side effect at all. Returned
             // as an isError tool result (not a JSON-RPC error) for the same
             // reason substrate refusals are: the client keeps the call id and
-            // the model sees the reason.
-            if posture == .frozen, ToolMutationInventory.frozenRefusedTools.contains(name) {
-                return Self.errorResult(EstatePosture.refusalMessage(tool: name))
+            // the model sees the reason. Two checks: the name inventory, then
+            // the command-classified tools (`memory`), whose `command`
+            // argument decides per call — a read command proceeds; a
+            // mutating, unknown, or missing command is refused here so the
+            // adapter itself never learns about posture.
+            if posture == .frozen {
+                if ToolMutationInventory.frozenRefusedTools.contains(name) {
+                    return Self.errorResult(EstatePosture.refusalMessage(tool: name))
+                }
+                if let readCommands = ToolMutationInventory.frozenReadCommands[name] {
+                    let command = args["command"]?.stringValue
+                    if !readCommands.contains(command ?? "") {
+                        return Self.errorResult(EstatePosture.refusalMessage(tool: name, command: command))
+                    }
+                }
             }
 
             // Decode the optional `mode` argument (modes are fail-open by spec).
