@@ -27,7 +27,7 @@ The `metadata` field is the only legal place for per-chunk side data. If your co
 
 `Tokenizer` is CorpusKit's protocol. Each `TextEmbeddingProvider` carries a tokenizer; providers do not reach for their own tokenization library. If you need a new tokenizer (model-specific WordPiece, SentencePiece variant), conform to `Tokenizer` in CorpusKitProviders, not in product code.
 
-VectorKit's `MiniLMProvider` still carries an inline FNV stand-in for backward compatibility. New providers consume `CorpusKitProviders.MiniLMTextProvider` and pass a `Tokenizer` explicitly. The VectorKit-side stand-in is documented as migrating to CorpusKit's MiniLM tokenizer when the WordPiece vocab metadata lands in the CoreML bundle.
+SynapseKit's `MiniLMProvider` still carries an inline FNV stand-in for backward compatibility. New providers consume `CorpusKitProviders.MiniLMTextProvider` and pass a `Tokenizer` explicitly. The SynapseKit-side stand-in is documented as migrating to CorpusKit's MiniLM tokenizer when the WordPiece vocab metadata lands in the CoreML bundle.
 
 ## 4. FloatSimHash for the projection
 
@@ -57,7 +57,7 @@ Per-side weights are tunable. The substrate's parameter sensitivity work documen
 
 `CorpusKitSync.manifest(zoneIdentifier:)` returns a `SyncManifest`. The application picks a `SyncEngine` (CloudKit, Federation, or None) and calls `enable(manifest:storage:)`. CorpusKit does not import ConvergenceKit at runtime; the manifest declaration is the only contract with ConvergenceKit.
 
-If the application also enables VectorKit sync, both kits should sync into the same CloudKit zone so chunks and their vectors stay join-compatible across devices. This is a deployment choice, not a kit choice.
+If the application also enables SynapseKit sync, both kits should sync into the same CloudKit zone so chunks and their vectors stay join-compatible across devices. This is a deployment choice, not a kit choice.
 
 ## 8. BM25 is in-memory at v1.0
 
