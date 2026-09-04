@@ -17,9 +17,30 @@ import LocusKitEstateFixture
 import PersistenceKit
 import Testing
 @testable import MootInstallerCore
+#if canImport(Security)
+// PersistenceKitSQLite: KeychainKeyStore.deleteKey() — removes the Keychain
+// item that resolveOpenPosture mints for absent estates, keeping test runs clean.
+import PersistenceKitSQLite
+#endif
 
 @Suite("Estate open posture — new, ciphertext, and plaintext paths")
 struct EstateOpenPostureTests {
+
+    /// Remove the login-Keychain item that resolveOpenPosture minted for `estateURL`.
+    /// Tries both the shared access group and the default group (mirrors provideKey's
+    /// both-groups search), silences errors so a missing entitlement never breaks a test.
+    private func deleteKeychainKey(for estateURL: URL) {
+        #if canImport(Security)
+        for accessGroup in [EstateKeyProvider.sharedAccessGroup, nil] as [String?] {
+            let store = KeychainKeyStore(
+                service: EstateKeyProvider.keychainService,
+                estateURL: estateURL,
+                accessGroup: accessGroup
+            )
+            try? store.deleteKey()
+        }
+        #endif
+    }
 
     private func makeTempDirectory() throws -> URL {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -129,6 +150,9 @@ struct EstateOpenPostureTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("fresh.sqlite")
+        // Remove the Keychain item resolveOpenPosture mints; the directory defer
+        // only cleans the filesystem, leaving a stale Keychain artifact otherwise.
+        defer { deleteKeychainKey(for: estateURL) }
 
         #expect(EstateKeyProvider.detectEstateFileState(at: estateURL) == .absent,
             "test premise: no file yet")
@@ -155,6 +179,7 @@ struct EstateOpenPostureTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("fresh.sqlite")
+        defer { deleteKeychainKey(for: estateURL) }
 
         let first: (encryption: EstateEncryptionConfig, posture: EstateKeyProvider.OpenPosture)
         do {

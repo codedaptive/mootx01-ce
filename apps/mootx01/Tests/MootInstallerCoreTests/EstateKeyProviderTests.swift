@@ -12,6 +12,11 @@ import Foundation
 import LocusKitEstateFixture
 import Testing
 @testable import MootInstallerCore
+#if canImport(Security)
+// PersistenceKitSQLite: KeychainKeyStore.deleteKey() — used to clean up the
+// login-Keychain items that provideKey mints, so test runs are pollution-free.
+import PersistenceKitSQLite
+#endif
 
 @Suite("EstateKeyProvider — key custody and estate file detection")
 struct EstateKeyProviderTests {
@@ -32,6 +37,24 @@ struct EstateKeyProviderTests {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    /// Remove the login-Keychain item that EstateKeyProvider minted for `estateURL`.
+    /// Called from `defer` so the Keychain is left clean regardless of test outcome.
+    /// Tries both the shared access group and the default group because provideKey
+    /// searches both (legacy key-migration posture) and mints into the shared group.
+    /// No-ops on platforms without the Security framework.
+    private func deleteKeychainKey(for estateURL: URL) {
+        #if canImport(Security)
+        for accessGroup in [EstateKeyProvider.sharedAccessGroup, nil] as [String?] {
+            let store = KeychainKeyStore(
+                service: EstateKeyProvider.keychainService,
+                estateURL: estateURL,
+                accessGroup: accessGroup
+            )
+            try? store.deleteKey()
+        }
+        #endif
+    }
+
     // MARK: - 1. Key custody round-trip
 
     @Test("Key round-trips through the Keychain for the same estate URL")
@@ -45,6 +68,9 @@ struct EstateKeyProviderTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("estate.sqlite")
+        // Clean up the Keychain item provideKey mints; the directory defer only
+        // removes the filesystem path, leaving a stale Keychain artifact otherwise.
+        defer { deleteKeychainKey(for: estateURL) }
 
         do {
             let key = try EstateKeyProvider.provideKey(for: estateURL)
@@ -67,6 +93,7 @@ struct EstateKeyProviderTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("estate.sqlite")
+        defer { deleteKeychainKey(for: estateURL) }
 
         let first: Data
         do {
@@ -92,6 +119,8 @@ struct EstateKeyProviderTests {
 
         let firstURL = directory.appendingPathComponent("one.sqlite")
         let secondURL = directory.appendingPathComponent("two.sqlite")
+        defer { deleteKeychainKey(for: firstURL) }
+        defer { deleteKeychainKey(for: secondURL) }
 
         let first: Data
         do {

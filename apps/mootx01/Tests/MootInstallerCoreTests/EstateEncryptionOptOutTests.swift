@@ -15,9 +15,30 @@ import LocusKitEstateFixture
 import PersistenceKit
 import Testing
 @testable import MootInstallerCore
+#if canImport(Security)
+// PersistenceKitSQLite: KeychainKeyStore.deleteKey() — removes the Keychain
+// item that resolveOpenPosture mints for absent estates, keeping test runs clean.
+import PersistenceKitSQLite
+#endif
 
 @Suite("Estate encryption default and --no-encrypt opt-out")
 struct EstateEncryptionOptOutTests {
+
+    /// Remove the login-Keychain item that resolveOpenPosture minted for `estateURL`.
+    /// Tries both the shared access group and the default group (mirrors provideKey's
+    /// both-groups search), silences errors so a missing entitlement never breaks a test.
+    private func deleteKeychainKey(for estateURL: URL) {
+        #if canImport(Security)
+        for accessGroup in [EstateKeyProvider.sharedAccessGroup, nil] as [String?] {
+            let store = KeychainKeyStore(
+                service: EstateKeyProvider.keychainService,
+                estateURL: estateURL,
+                accessGroup: accessGroup
+            )
+            try? store.deleteKey()
+        }
+        #endif
+    }
 
     private func makeTempDirectory() throws -> URL {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -39,6 +60,8 @@ struct EstateEncryptionOptOutTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("estate.sqlite")
+        // Remove the Keychain item resolveOpenPosture mints for the absent estate.
+        defer { deleteKeychainKey(for: estateURL) }
 
         #expect(!EstateKeyProvider.hasEncryptionOptOut(forEstateAt: estateURL),
             "test premise: no opt-out recorded")
@@ -125,6 +148,7 @@ struct EstateEncryptionOptOutTests {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
         let estateURL = directory.appendingPathComponent("estate.sqlite")
+        defer { deleteKeychainKey(for: estateURL) }
 
         // Create an ENCRYPTED estate first.
         let created: (encryption: EstateEncryptionConfig, posture: EstateKeyProvider.OpenPosture)
