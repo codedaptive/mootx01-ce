@@ -2,7 +2,7 @@
 //
 // Supporting types and JSONValue builders for the six estate-lifecycle endpoints
 // (Wave A2a: CORE-03). All wire shapes are derived byte-exact from
-// contracts/community/1.1/contract.json — never from this comment block.
+// apps/mootx01/Contracts/community-1.1/contract.json — never from this comment block.
 //
 // Responsibilities:
 //   - Codable structs for the two sidecar files the coordinator persists:
@@ -178,7 +178,7 @@ public struct MigrationPlanData: Sendable {
 // MARK: - JSONValue builders for EstateLifecycleState variants
 
 /// Factory methods that build `[String: JSONValue]` dicts for each variant of
-/// `EstateLifecycleState` as defined in contracts/community/1.1/contract.json.
+/// `EstateLifecycleState` as defined in apps/mootx01/Contracts/community-1.1/contract.json.
 ///
 /// Every method is `internal` — callers are `CommunityEstateLifecycleCoordinator`
 /// and the dispatch layer; contract consumers never build these dicts directly.

@@ -2,7 +2,7 @@
 //
 // Contract model types for the five LAN-family endpoints (Wave D2: CORE-08).
 //
-// Every type here is byte-shape-exact from contracts/community/1.1/contract.json
+// Every type here is byte-shape-exact from apps/mootx01/Contracts/community-1.1/contract.json
 // and the lan.json fixture file. No field is added, removed, or renamed.
 // JSON encoding uses camelCase field names exactly as the contract defines them.
 //

@@ -125,7 +125,7 @@ private func stateString(_ sc: [String: JSONValue]?) -> String? {
 // MARK: - Contract shape validator
 //
 // Validates that a structuredContent dict matches the EstateLifecycleState
-// discriminated-union shape from contracts/community/1.1/contract.json.
+// discriminated-union shape from apps/mootx01/Contracts/community-1.1/contract.json.
 // This is the groundwork for the Wave E conformance harness; here it is
 // scoped to the estate-family tools only.
 
@@ -139,13 +139,13 @@ private var repoRoot: URL {
         .deletingLastPathComponent()  // apps/ → repo root
 }
 
-/// The contracts/community/1.1 directory.
+/// The apps/mootx01/Contracts/community-1.1 directory.
 private var contractRoot: URL {
-    repoRoot.appendingPathComponent("contracts/community/1.1")
+    repoRoot.appendingPathComponent("apps/mootx01/Contracts/community-1.1")
 }
 
 /// Known EstateLifecycleState variants and their required extra keys.
-/// Derived from contracts/community/1.1/contract.json — kept in sync by
+/// Derived from apps/mootx01/Contracts/community-1.1/contract.json — kept in sync by
 /// `A3-E11` which parses the live contract file.
 private let estateLifecycleVariantRequiredKeys: [String: Set<String>] = [
     "checking":          [],

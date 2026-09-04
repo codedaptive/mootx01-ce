@@ -1,8 +1,12 @@
 # MOOTx01 Community 1.1 frozen contract
 
-This directory is the immutable integration input shared by the Community macOS application and the resident daemon. It freezes the observable wire required by `CONTRACT-01` through `CONTRACT-09` in `docs_internal/engineering/Version_1.1_Finalization_Assignments.MD`.
-
-The contract does not assign storage algorithms, manager structure, watcher implementation, UI layout, or release packaging. It defines only what crosses the authenticated first-party MCP boundary and what both implementations must prove.
+This directory is the frozen wire contract between the Community macOS
+application and the resident daemon. It defines only what crosses the
+authenticated first-party MCP boundary: the endpoints, the argument and
+result shapes, the invariants both sides must hold, and the golden
+exchanges both implementations must reproduce. It does not assign
+storage, manager structure, watcher implementation, UI layout, or
+packaging.
 
 ## Identity
 
@@ -63,14 +67,18 @@ The type grammar validates shape; these invariants define semantic validity:
 
 ## Ownership
 
-The contract branch owns only `contracts/community/1.1/**`. Apple implementation branches consume it while modifying only Apple-owned paths. Daemon implementation branches consume it while modifying only daemon/core-owned paths. A contract change requires a new version and fixture digest; it is never folded silently into an implementation branch.
+The resident daemon package owns `apps/mootx01/Contracts/community-1.1/**`
+because it embeds and enforces the contract identity. The Community Apple
+application consumes the same frozen wire and verifies its gateway shapes
+against it. A contract change requires a new version and fixture digest; it
+is never folded silently into either implementation.
 
 ## Verification
 
 From the repository root:
 
 ```sh
-python3 contracts/community/1.1/verify_contract.py
+python3 apps/mootx01/Contracts/community-1.1/verify_contract.py
 ```
 
 The command prints the contract version, endpoint count, fixture count, scenario coverage, and verified digest. It performs no network or estate mutation.
