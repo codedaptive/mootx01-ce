@@ -184,6 +184,7 @@ fn orphaned_content_reference_is_reclaimed_and_hydrated_after_restart() {
             .expect("configuration"),
             Arc::clone(&source) as Arc<dyn CorpusContentSource>,
             vec![EmbeddingModelConfig::Deterministic],
+            false,
         )
         .expect("open content engine"),
     );
@@ -232,6 +233,7 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
             config,
             Arc::clone(&source) as Arc<dyn CorpusContentSource>,
             models(),
+            false,
         )
         .expect("engine"),
     );
@@ -284,6 +286,7 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         config,
         source as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("reopen engine");
     assert_eq!(reopened.maintained_document_count(), 2);
@@ -320,6 +323,7 @@ fn queue_remove_readd_does_not_double_fold_counts_reference() {
         vec![EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
         }],
+        false,
     )
     .expect("engine"));
     engine
@@ -415,6 +419,7 @@ fn queue_revisions_advance_restart_stable_governor_anchors() {
             config,
             Arc::clone(&source) as Arc<dyn CorpusContentSource>,
             models(),
+            false,
         )
         .expect("engine"),
     );
@@ -485,6 +490,7 @@ fn queue_revisions_advance_restart_stable_governor_anchors() {
             config,
             Arc::clone(&source) as Arc<dyn CorpusContentSource>,
             models(),
+            false,
         )
         .expect("reopen engine"),
     );
@@ -526,6 +532,7 @@ fn queue_revisions_advance_restart_stable_governor_anchors() {
         config,
         source as Arc<dyn CorpusContentSource>,
         models(),
+        false,
     )
     .expect("reopen engine again");
     assert_eq!(reopened_again.maintained_vocab_anchor(), third_anchor);

@@ -31,7 +31,7 @@
 // `ingest_batch` concurrent compute) carries forward unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -244,7 +244,11 @@ impl Corpus {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_queue = Arc::clone(&queue);
         let worker_stop = Arc::clone(&stop);
-        let worker_corpus = Arc::clone(self);
+        // Weak, upgraded for one pass at a time (see
+        // `CorpusContentEngine::mount_ingest_queue`): a strong handle would
+        // make the corpus its own owner and keep this thread alive after the
+        // host released its last `Arc`.
+        let worker_corpus = Arc::downgrade(self);
         let handle = std::thread::Builder::new()
             .name("corpus-ingest-drain".to_string())
             .spawn(move || {
@@ -263,7 +267,7 @@ impl Corpus {
             None => Arc::clone(&queue),
         };
         let import_stop = Arc::clone(&stop);
-        let import_corpus = Arc::clone(self);
+        let import_corpus = Arc::downgrade(self);
         let import_handle = std::thread::Builder::new()
             .name("corpus-import-drain".to_string())
             .spawn(move || {
@@ -296,10 +300,10 @@ impl Corpus {
         if let Some(mut state) = taken {
             state.stop.store(true, Ordering::SeqCst);
             if let Some(worker) = state.worker.take() {
-                let _ = worker.join();
+                crate::content_engine_queue::join_unless_current(worker);
             }
             if let Some(worker) = state.worker_import.take() {
-                let _ = worker.join();
+                crate::content_engine_queue::join_unless_current(worker);
             }
         }
     }
@@ -890,10 +894,10 @@ impl Drop for Corpus {
 /// encode batch via `drain_for_stream("encode")` and ingests it, then sleeps a
 /// short interval before polling again. The short idle cadence is the near-
 /// realtime latency floor; long enough that an idle corpus does not spin a core.
-/// Exits when the stop flag is set, releasing the drain lease.
-/// Mirrors Swift's `runIngestDrainLoop`.
+/// Exits when the stop flag is set or the corpus is gone, releasing the drain
+/// lease. Mirrors the Swift encode worker's `ingestDrainPass` loop.
 fn run_ingest_drain_loop(
-    corpus: Arc<Corpus>,
+    corpus: Weak<Corpus>,
     queue: Arc<IngestQueue>,
     stop: Arc<AtomicBool>,
     lease: Option<DrainLease>,
@@ -964,6 +968,12 @@ fn run_ingest_drain_loop(
                 }
             }
         }
+        // One pass, one upgrade: the corpus is held only while it works and
+        // released before the sleep. A failed upgrade means every owner has
+        // let the corpus go, so the worker exits.
+        let Some(corpus) = corpus.upgrade() else {
+            break;
+        };
         // Errors are non-fatal: the next pass / reindex reconciles.
         match corpus.drain_with_queue(&queue) {
             Ok(n) if n > 0 => {
@@ -976,6 +986,7 @@ fn run_ingest_drain_loop(
             let _ = corpus.publish_vector_index();
             pending_publish = false;
         }
+        drop(corpus);
         std::thread::sleep(Duration::from_millis(15));
     }
     // Release the lease on clean exit so another process can take over without
@@ -994,7 +1005,7 @@ fn run_ingest_drain_loop(
 /// mid-import leaves durable "cur" rows; the first lease acquire here reclaims
 /// them to "new" and the import resumes where it died.
 fn run_import_drain_loop(
-    corpus: Arc<Corpus>,
+    corpus: Weak<Corpus>,
     queue: Arc<IngestQueue>,
     stop: Arc<AtomicBool>,
     lease: Option<DrainLease>,
@@ -1041,6 +1052,9 @@ fn run_import_drain_loop(
                 }
             }
         }
+        let Some(corpus) = corpus.upgrade() else {
+            break;
+        };
         // Errors are non-fatal: the next pass / the import cycle reconciles.
         match corpus.drain_import_with_queue(&queue) {
             Ok(n) if n > 0 => {
@@ -1048,6 +1062,7 @@ fn run_import_drain_loop(
             }
             _ => {}
         }
+        drop(corpus);
         std::thread::sleep(Duration::from_millis(15));
     }
     if let Some(lease) = &lease {
