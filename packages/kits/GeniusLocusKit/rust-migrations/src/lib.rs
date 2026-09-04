@@ -53,17 +53,29 @@ mod index_composition_setting_migration;
 #[cfg(feature = "migration-v1-3-to-v1-4")]
 pub use index_composition_setting_migration::*;
 
+// GLK 1.4 → 1.5 capsule: moves the vector tier's schema-version ledger rows
+// from their VectorKit ids to their SynapseKit ids on populated estates
+// (parity with the Swift GLKMigrationV1_4ToV1_5 target).
+#[cfg(feature = "migration-v1-4-to-v1-5")]
+mod storage_ledger_kit_id_migration;
+
+#[cfg(feature = "migration-v1-4-to-v1-5")]
+pub use storage_ledger_kit_id_migration::*;
+
 use genius_locus_kit::estate_format::EstateFormatVersion;
 
 /// The compiled historical chain, run in format order. Every capsule reads
 /// its own persisted state and is idempotent, so the chain is safe to run on
 /// an estate at any compiled stamp; capsules whose work is already done
 /// return without touching the estate. Mirrors the Swift
-/// `GLKMigrationCatalog.prepare` dispatch: 1.0 -> 1.1 (distillation storage
+/// `GLKMigrationCatalog.prepare` dispatch: the 1.4 -> 1.5 ledger rewrite
+/// first (the 1.0 -> 1.1 capsule opens the vector store, whose ladder must
+/// find its row under the new id), then 1.0 -> 1.1 (distillation storage
 /// then shared content, which stamps 1.1), then 1.1 -> 1.2 (index composition
 /// column, which stamps 1.2), then 1.2 -> 1.3 (distilled source digest column,
 /// which stamps 1.3), then 1.3 -> 1.4 (index composition setting, which
-/// stamps 1.4).
+/// stamps 1.4), then the 1.4 -> 1.5 stamp (storage ledger kit ids, which
+/// stamps 1.5 only once every older capsule has stamped its own format).
 pub trait MigrationChainExt {
     /// Run every compiled capsule for `handle`, oldest first. `models` is the
     /// embedding ensemble the shared-content capsule rebuilds the derived
@@ -83,6 +95,16 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
         now_millis: i64,
         models: Vec<corpus_kit::EmbeddingModelConfig>,
     ) -> Result<(), String> {
+        #[cfg(feature = "migration-v1-4-to-v1-5")]
+        {
+            // Step 1 of the 1.4 -> 1.5 capsule, ahead of the chain: move the
+            // vector tier's ledger rows to their SynapseKit ids so no capsule
+            // below, and no store wired after this call, opens under the old
+            // id and replays the vector ladder (I-24). Idempotent; stamps
+            // nothing.
+            self.rewrite_storage_ledger_kit_ids(handle)
+                .map_err(|error| format!("storage-ledger-kit-id rewrite: {error:?}"))?;
+        }
         #[cfg(feature = "migration-v1-0-to-v1-1")]
         {
             self.run_shared_content_migration(handle, now_millis, models)
@@ -105,6 +127,15 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
             self.run_index_composition_setting_migration(handle, now_millis)
                 .map_err(|error| format!("index-composition-setting migration: {error:?}"))?;
         }
+        #[cfg(feature = "migration-v1-4-to-v1-5")]
+        {
+            // Step 2 of the 1.4 -> 1.5 capsule: the rewrite again (a no-op
+            // after the call at the top of the chain) and the V1_5 stamp,
+            // written only now that every older capsule has stamped its own
+            // format.
+            self.run_storage_ledger_kit_id_migration(handle, now_millis)
+                .map_err(|error| format!("storage-ledger-kit-id migration: {error:?}"))?;
+        }
         Ok(())
     }
 }
@@ -114,7 +145,7 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
-        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
     #[cfg(all(
@@ -122,7 +153,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Floor covers the 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
+        // Floor covers the 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         return Some(EstateFormatVersion::V1_1);
     }
     #[cfg(all(
@@ -131,7 +162,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Floor covers the 1.2→1.3 and 1.3→1.4 capsules.
+        // Floor covers the 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         return Some(EstateFormatVersion::V1_2);
     }
     #[cfg(all(
@@ -141,14 +172,26 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Only the 1.3→1.4 capsule is compiled.
+        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules.
         return Some(EstateFormatVersion::V1_3);
+    }
+    #[cfg(all(
+        feature = "migration-v1-4-to-v1-5",
+        not(feature = "migration-v1-3-to-v1-4"),
+        not(feature = "migration-v1-2-to-v1-3"),
+        not(feature = "migration-v1-1-to-v1-2"),
+        not(feature = "migration-v1-0-to-v1-1")
+    ))]
+    {
+        // Only the 1.4→1.5 capsule is compiled.
+        return Some(EstateFormatVersion::V1_4);
     }
     #[cfg(all(
         not(feature = "migration-v1-0-to-v1-1"),
         not(feature = "migration-v1-1-to-v1-2"),
         not(feature = "migration-v1-2-to-v1-3"),
-        not(feature = "migration-v1-3-to-v1-4")
+        not(feature = "migration-v1-3-to-v1-4"),
+        not(feature = "migration-v1-4-to-v1-5")
     ))]
     {
         None

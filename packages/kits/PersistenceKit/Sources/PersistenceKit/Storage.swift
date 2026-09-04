@@ -63,9 +63,33 @@ public protocol Storage: Sendable {
     /// global maximum across all kits.
     func currentSchemaVersion(for kitID: String) async throws -> Int
 
+    /// Move the schema-version ledger row recorded for `oldKitID` to
+    /// `newKitID`, keeping its version and its applied-at instant (SPEC I-7a).
+    ///
+    /// A kit's ledger row is keyed by its `kitID`. When a kit changes its id
+    /// the row must move with it, or `open(schema:)` under the new id reads
+    /// version 0 and replays the kit's ladder from the start on a populated
+    /// estate. The operation never creates a version and never runs a
+    /// migration step:
+    /// - `.renamed(version:)` when a row under `oldKitID` moved;
+    /// - `.noRow` when no row exists under `oldKitID` (nothing changed);
+    /// - `.conflict(oldVersion:newVersion:)` when rows exist under both ids
+    ///   (nothing changed; the caller decides).
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome
+
     /// Apply migrations forward to the schema's declared version.
     /// Forward-only, fail-fast per Q4.
     func migrate(to schema: SchemaDeclaration) async throws
+}
+
+/// The result of `Storage.renameSchemaKit(from:to:)` (SPEC I-7a).
+public enum SchemaKitRenameOutcome: Sendable, Equatable {
+    /// A row under the old id moved to the new id; `version` is the version it carried.
+    case renamed(version: Int)
+    /// No row exists under the old id; nothing changed.
+    case noRow
+    /// Rows exist under both ids; nothing changed.
+    case conflict(oldVersion: Int, newVersion: Int)
 }
 
 public extension Storage {
