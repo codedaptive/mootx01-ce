@@ -22,7 +22,7 @@ path = "src/lib.rs"
 test-seams = []
 
 # Standalone crate. There is no top-level Cargo workspace in this
-# repository; sibling kits (EngramLib/rust, VectorKit/rust, etc.) are
+# repository; sibling kits (EngramLib/rust, SynapseKit/rust, etc.) are
 # each standalone crates. LP-1B added persistence-kit (schema declaration
 # primitives) and uuid (estate_uuid parsing). LP-1C adds substrate-lib
 # for the SimHash / HyperplaneFamily / Fingerprint256 primitives that

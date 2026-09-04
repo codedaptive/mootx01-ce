@@ -15,7 +15,7 @@
 // meaning, not surface form, satisfying honest semantic fusion D-1's honesty
 // requirement: the dense lane must not lie about what it computes.
 //
-// The provider conforms to VectorKit.EmbeddingProvider:
+// The provider conforms to SynapseKit.EmbeddingProvider:
 //   embedFloat(_:)  → the D-dimensional normalised context vector
 //   embed(_:)       → FloatSimHash.project of that vector (Engram)
 //
@@ -61,7 +61,7 @@ import SubstrateTypes
 // bit-identity with the Rust port and with all other providers that
 // need L2 normalisation.
 import SubstrateKernel
-import VectorKit
+import SynapseKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -155,7 +155,7 @@ public func riIndexVector(term: String) -> [Float] {
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`. modelID = "random-indexing-v1",
+/// Conforms to `SynapseKit.EmbeddingProvider`. modelID = "random-indexing-v1",
 /// modelVersion = "1.1.0". Projection seed = `riProjectionSeed`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional
@@ -263,7 +263,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
     /// Empty input returns `[]` (EmbeddingProvider.embedFloat contract).
     ///
     /// When the provider HAS a trained basis (vocab non-empty) but all query
-    /// tokens are OOV, throws `VectorKitError.embedFloatVocabMiss` so the
+    /// tokens are OOV, throws `SynapseKitError.embedFloatVocabMiss` so the
     /// corpus layer can surface `FloatLaneOutcome.unavailableNoVocabHit`
     /// instead of misclassifying the miss as a structural opt-out.
     public func embedFloat(_ text: String) async throws -> [Float] {
@@ -286,7 +286,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
             // Trained provider, non-empty query, but all query terms OOV:
             // throw a vocab-miss error so the corpus layer maps to
             // unavailableNoVocabHit instead of the misleading providerOptOut.
-            throw VectorKitError.embedFloatVocabMiss(
+            throw SynapseKitError.embedFloatVocabMiss(
                 "random-indexing: vocab size \(vocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }

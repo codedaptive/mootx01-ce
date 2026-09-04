@@ -8,7 +8,7 @@
 //!
 //! ## Metric namespace
 //!
-//! `locuskit.<noun>.<field>` — consistent with `vectorkit.*` and
+//! `locuskit.<noun>.<field>` — consistent with `synapsekit.*` and
 //! `neuronkit.*` used in sibling kits:
 //!
 //! - `locuskit.drawer.capture_latency_ms`   — wall time for `add_drawer`

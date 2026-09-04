@@ -16,7 +16,7 @@
 // the telemetry test's exact-count assertions — producing intermittent
 // failures under the default parallel runner.
 //
-// SOLUTION (mirrors NeuronKit IntellectusTestLock, VectorKit GlobalTestLock)
+// SOLUTION (mirrors NeuronKit IntellectusTestLock, SynapseKit GlobalTestLock)
 // This is the Swift equivalent of the `GLOBAL_LOCK: Mutex<()>` held by
 // every test in cognitionkit_telemetry_tests.rs. A disabled-path test
 // that runs lock-free can interleave with a lock-held enabled-path test

@@ -33,7 +33,7 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 convergence-kit = { path = "../../ConvergenceKit/rust" }
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 # QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so it
 # mounts a QueueKit-backed encode queue (transient in-memory PersistenceKit
 # backend) and drains it directly — the SDK-standalone ingest pipeline (a

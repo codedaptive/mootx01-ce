@@ -17,7 +17,7 @@ import CorpusKitProviders
 import EngramLib
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 @testable import CorpusKit
 
 @Suite("ProviderCoverageCrashBoundary", .serialized)

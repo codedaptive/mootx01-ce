@@ -39,11 +39,11 @@ use persistence_kit::types::{Column, TypedValue};
 use persistence_kit::{IsolationLevel, Storage, StoragePredicate, StorageTransaction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 // MARK: - Domain constants
 
-/// VectorKit model lane holding structural fingerprints.
+/// SynapseKit model lane holding structural fingerprints.
 /// 1.0.x: keyed by factoid drawer ID. 1.1.x: keyed by source drawer ID.
 const K_DISTILLATION_LANE_MODEL_ID: &str = "distillation-features-v1";
 
@@ -196,7 +196,7 @@ pub fn representation_columns_declaration() -> SchemaDeclaration {
 pub fn run_distillation_data_migration(
     storage: &Arc<dyn Storage>,
 ) -> StorageResult<DistillationStorageMigrationReport> {
-    // Ensure the VectorKit schema (vectors table) is registered before
+    // Ensure the SynapseKit schema (vectors table) is registered before
     // querying it in step (c). On a 1.0.x estate the schema was already
     // applied; on a fresh 1.1.x estate the table may not exist yet.
     // Idempotent: if already at the current version, migrate() is a no-op.

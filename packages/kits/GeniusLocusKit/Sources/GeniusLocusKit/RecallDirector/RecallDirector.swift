@@ -4,7 +4,7 @@ import Foundation
 import OSLog
 import LocusKit
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 /// The Recall Director — routes a `GLKRecallRequest` through the appropriate
 /// lane and returns a fully scored `GLKRecallResult`.
