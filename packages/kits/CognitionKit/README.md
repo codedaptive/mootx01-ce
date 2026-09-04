@@ -21,12 +21,12 @@ Use CognitionKit to add to any GeniusLocusKit + NeuronKit application:
 - **Recipe composition primitives** — build new recipes from existing NeuronKit calls
 - **Webhook registration and confirmation** — async trigger → webhook delivery back through ARIA_MCP
 
-**CognitionKit has no direct substrate access.** Every read or write passes through NeuronKit or a GeniusLocusKit estate handle. It never executes SQL, never touches LocusKit, VectorKit, or CorpusKit directly.
+**CognitionKit has no direct substrate access.** Every read or write passes through NeuronKit or a GeniusLocusKit estate handle. It never executes SQL, never touches LocusKit, SynapseKit, or CorpusKit directly.
 
 ## What this kit does NOT provide
 
 - Algorithms of any kind → **NeuronKit**
-- Storage → **LocusKit / VectorKit / CorpusKit / GeniusLocusKit**
+- Storage → **LocusKit / SynapseKit / CorpusKit / GeniusLocusKit**
 - Estate verb definitions → **GeniusLocusKit**
 - MCP server → **ARIA_MCP**
 
