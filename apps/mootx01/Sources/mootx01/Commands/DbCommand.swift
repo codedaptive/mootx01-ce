@@ -15,6 +15,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 #endif
 
 struct DbCommand: AsyncParsableCommand {
@@ -385,9 +386,18 @@ struct DbCompositionCommand: AsyncParsableCommand {
         } catch {
             throw CompositionFailure.sqliteOpen(error)
         }
+
+        // MOOTX01_ESTATE_LIFETIME=ephemeral is the declared throwaway posture for
+        // test runs: the identity key stays in memory so no Keychain item is
+        // created. Mirrors ServeCommand's identical guard.
+        let lifetimeIsEphemeral =
+            (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                .lowercased() == "ephemeral"
+        let identityKeyStore: (any EstateIdentityKeyStore)? =
+            lifetimeIsEphemeral ? InMemoryEstateIdentityKeyStore() : nil
         let kit = GeniusLocusKit()
         do {
-            let handle = try await kit.open(storage: storage, owner: owner)
+            let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
             _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
             return (kit, handle, storage)
         } catch {
