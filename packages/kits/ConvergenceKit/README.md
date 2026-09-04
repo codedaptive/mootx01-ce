@@ -112,4 +112,4 @@ Once shipped, public API follows semantic versioning. Adding a case to `SyncDire
 
 ## Next missions
 
-ConvergenceKit sits in the substrate's storage layer. The remaining substrate kits (LocusKit, VectorKit, CorpusKit), GeniusLocusKit, NeuronKit, CognitionKit, and app integrations consume ConvergenceKit through this kit's public surface.
+ConvergenceKit sits in the substrate's storage layer. The remaining substrate kits (LocusKit, SynapseKit, CorpusKit), GeniusLocusKit, NeuronKit, CognitionKit, and app integrations consume ConvergenceKit through this kit's public surface.

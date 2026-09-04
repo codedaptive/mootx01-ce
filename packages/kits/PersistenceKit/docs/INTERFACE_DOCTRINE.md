@@ -1,6 +1,6 @@
 # PersistenceKit Interface Doctrine
 
-For coding agents implementing kits that consume PersistenceKit (LocusKit, VectorKit, CorpusKit, GeniusLocusKit, anything else). This document is the contract.
+For coding agents implementing kits that consume PersistenceKit (LocusKit, SynapseKit, CorpusKit, GeniusLocusKit, anything else). This document is the contract.
 
 If you violate the doctrine, the abstraction breaks and the kit graph rots. Read it before writing code.
 
@@ -138,7 +138,7 @@ HLC comes from SubstrateLib's HLCGenerator. One generator per estate. Generators
 
 ## 7. Never reach inside another kit's tables
 
-Each kit owns its tables. LocusKit owns `drawers`, `tunnels`, `kg_facts`, etc. VectorKit owns `rag_vectors`. CorpusKit owns `chunks`. Do not write SQL or queries that read another kit's tables from your kit. If you need cross-kit data, ask via that kit's API.
+Each kit owns its tables. LocusKit owns `drawers`, `tunnels`, `kg_facts`, etc. SynapseKit owns `rag_vectors`. CorpusKit owns `chunks`. Do not write SQL or queries that read another kit's tables from your kit. If you need cross-kit data, ask via that kit's API.
 
 The two tables PersistenceKit owns are internal and start with `_storagekit_`: `_storagekit_meta`, `_storagekit_blobs`, `_storagekit_audit`, `_storagekit_vectors`, `_storagekit_vector_meta`. Never touch them from downstream code.
 

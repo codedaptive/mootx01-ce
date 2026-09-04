@@ -36,7 +36,7 @@ ARIA_MCP is a boundary, not a processing layer. It does not implement algorithms
 - Estate verb semantics → **GeniusLocusKit**
 - Algorithms → **NeuronKit**
 - Recipes → **CognitionKit**
-- Storage → **LocusKit / VectorKit / CorpusKit**
+- Storage → **LocusKit / SynapseKit / CorpusKit**
 
 ## Platform
 

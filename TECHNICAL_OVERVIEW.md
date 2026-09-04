@@ -22,7 +22,7 @@ MOOTx01 is an SDK of composable kits. **GeniusLocusKit** composes them into a wo
 
 ```text
 Observe / Remember -> LocusKit (spatial memory + knowledge graph)
-                      VectorKit (on-device embeddings + ANN / hybrid search)
+                      SynapseKit (on-device embeddings + ANN / hybrid search)
                       CorpusKit (content-plus-vector RAG bundles)
 
 Dream             -> NeuronKit (hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit)
@@ -84,7 +84,7 @@ Composition (this repo):
 
 Standalone substrate (SDK: moot-memory):
     LocusKit        Spatial memory system plus knowledge graph
-    VectorKit       On-device embeddings plus nearest-neighbour search
+    SynapseKit       On-device embeddings plus nearest-neighbour search
     CorpusKit       Content-plus-vector RAG bundles
 
 Grounding (SDK: moot-semantics):
@@ -139,7 +139,7 @@ mootx01/
 ├── packages/
 │   ├── libs/     SubstrateTypes · SubstrateKernel · SubstrateML · SubstrateLib · EngramLib
 │   │             AriaLexiconLib · LatticeLib · EideticLib · IntellectusLib · ObserverSink · LoopbackHTTP
-│   ├── kits/     LocusKit · VectorKit · PersistenceKit · ConvergenceKit · QueueKit
+│   ├── kits/     LocusKit · SynapseKit · PersistenceKit · ConvergenceKit · QueueKit
 │   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit · AriaMcpKit
 │   └── PACKAGES.md
 ├── apps/         aria-mcp-server (MCP server) · mootx01 (CLI) · moot-mgr (console)
