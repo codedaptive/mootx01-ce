@@ -16,6 +16,10 @@
 @_exported import GLKMigrationV1_3ToV1_4
 #endif
 
+#if GLK_MIGRATION_V1_4_TO_V1_5
+@_exported import GLKMigrationV1_4ToV1_5
+#endif
+
 import Foundation
 
 /// Errors owned by the optional migration catalog. The current GLK runtime
@@ -56,17 +60,20 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_1_TO_V1_2
-        // Floor covers the 1.1→1.2, 1.2→1.3, and 1.3→1.4 capsules.
+        // Floor covers the 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         .v1_1
         #elseif GLK_MIGRATION_V1_2_TO_V1_3
-        // Floor covers the 1.2→1.3 and 1.3→1.4 capsules.
+        // Floor covers the 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
         .v1_2
         #elseif GLK_MIGRATION_V1_3_TO_V1_4
-        // Floor covers the 1.3→1.4 capsule only.
+        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules.
         .v1_3
+        #elseif GLK_MIGRATION_V1_4_TO_V1_5
+        // Floor covers the 1.4→1.5 capsule only.
+        .v1_4
         #else
         nil
         #endif
@@ -127,19 +134,27 @@ public enum GLKMigrationCatalog {
 
     /// Run the compiled capsules from `found` to the current format as one
     /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, 1.2 -> 1.3,
-    /// then 1.3 -> 1.4; found == v1_1 starts at 1.1 -> 1.2; found == v1_2
-    /// starts at 1.2 -> 1.3; found == v1_3 runs 1.3 -> 1.4 only. A build that
-    /// compiles no chain reaching the current format cannot serve a
-    /// historical estate at all.
+    /// 1.3 -> 1.4, then 1.4 -> 1.5; found == v1_1 starts at 1.1 -> 1.2;
+    /// found == v1_2 starts at 1.2 -> 1.3; found == v1_3 starts at 1.3 -> 1.4;
+    /// found == v1_4 runs 1.4 -> 1.5 only. The 1.4 -> 1.5 ledger rewrite runs
+    /// before every older capsule (the 1.0 -> 1.1 capsule opens the vector
+    /// store, whose ladder must find its row under the new id) and its stamp
+    /// is written last. A build that compiles no chain reaching the current
+    /// format cannot serve a historical estate at all.
     private static func runCompiledChain(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_3_TO_V1_4
+        #if GLK_MIGRATION_V1_4_TO_V1_5
         var migrated = false
         var migrationState: String? = nil
+        // Step 1 of the 1.4 -> 1.5 capsule, ahead of the chain: move the
+        // vector tier's ledger rows to their SynapseKit ids so no capsule
+        // below, and no store wired after this call, opens under the old id
+        // and replays the vector ladder (I-24). Idempotent; stamps nothing.
+        _ = try await kit.rewriteStorageLedgerKitIDs(handle: handle)
         #if GLK_MIGRATION_V1_0_TO_V1_1
         if found < .v1_1 {
             // Distillation storage migration (SPEC_DISTILLATION_STORAGE Appendix A.1)
@@ -170,9 +185,18 @@ public enum GLKMigrationCatalog {
             try await kit.runDistilledSourceDigestColumnMigration(handle: handle, now: now)
         }
         #endif
-        // Stores the index composition setting when the estate carries none
-        // (the creation-time seed) and stamps v1_4.
-        try await kit.runIndexCompositionSettingMigration(handle: handle, now: now)
+        #if GLK_MIGRATION_V1_3_TO_V1_4
+        if found < .v1_4 {
+            // Stores the index composition setting when the estate carries
+            // none (the creation-time seed) and stamps v1_4; the chain
+            // continues to 1.5.
+            try await kit.runIndexCompositionSettingMigration(handle: handle, now: now)
+        }
+        #endif
+        // Step 2 of the 1.4 -> 1.5 capsule: the rewrite again (a no-op after
+        // the call at the top of the chain) and the v1_5 stamp, written only
+        // now that every older capsule has stamped its own format.
+        try await kit.runStorageLedgerKitIDMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,
