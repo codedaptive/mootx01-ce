@@ -16,7 +16,7 @@ options:
   # iOS 26 / macOS 26 are the MOOTx01 SDK deployment floors. This app is
   # iOS-only (EventKit calendar UX targets iPhone/iPad), but the option block
   # lists both for template consistency.
-  deploymentTarget: { iOS: "26.0", macOS: "26.0" }
+  deploymentTarget: { iOS: "27.0", macOS: "27.0" }
   createIntermediateGroups: true
 
 packages:
@@ -33,7 +33,7 @@ targets:
     sources: [App]
     dependencies:
       # Link the MootGateway product. `import MootGateway` then gives us
-      # MootBridge, GatewayRuntime, GatewayCall, and the App Intent types.
+      # MootBridge, GatewayRuntime, and GatewayCall.
       - { package: Mootx01, product: MootGateway }
     settings:
       base:
