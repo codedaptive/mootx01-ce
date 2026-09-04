@@ -14,7 +14,7 @@
 //     run token-window rule mirrors the standalone-passages `PassageProduction`
 //     algorithm (same scalar classification, same sliding window arithmetic).
 //     The Rust twin (`sub_span_scoring.rs`) uses identical parameters.
-//   - Cosine similarity is computed inline (no VectorKit dependency):
+//   - Cosine similarity is computed inline (no SynapseKit dependency):
 //     pure IEEE-754 arithmetic — same result cross-port within a config.
 //   - A candidate absent from the source, a provider that returns an empty
 //     float vector, or a text with no tokens is scored 0.0 (safe neutral value).
@@ -35,7 +35,7 @@
 // Rust twin: `rust/src/sub_span_scoring.rs`.
 
 import Foundation
-import VectorKit
+import SynapseKit
 
 // MARK: - SubSpanScoring
 
@@ -234,7 +234,7 @@ public enum SubSpanScoring {
         return out
     }
 
-    // MARK: - Cosine similarity (inline, no VectorKit dependency)
+    // MARK: - Cosine similarity (inline, no SynapseKit dependency)
 
     /// L2-normalised cosine similarity between two equal-length float32 vectors.
     ///
@@ -242,7 +242,7 @@ public enum SubSpanScoring {
     /// 0.0 = orthogonal. Returns 0.0 when either vector is all-zero (no signal).
     ///
     /// **Why inline:** sub-span scoring is the only call site for on-the-fly
-    /// cosine over raw `[Float]` arrays. Adding a VectorKit import only for this
+    /// cosine over raw `[Float]` arrays. Adding a SynapseKit import only for this
     /// one computation would introduce a dependency edge that doesn't exist
     /// anywhere else in CorpusKit core. The pure arithmetic is tiny and correct.
     ///

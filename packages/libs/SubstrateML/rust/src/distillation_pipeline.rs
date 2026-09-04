@@ -96,9 +96,9 @@ pub struct DistillationOutput {
     pub succeeded: bool,
     /// Human-readable reason for failure when succeeded == false.
     pub failure_reason: Option<String>,
-    /// Structural fingerprint for the distilled tier's VectorKit lane.
+    /// Structural fingerprint for the distilled tier's SynapseKit lane.
     /// OR-reduce of feature_hash(f.value) for each feature f in F*.
-    /// Stored in VectorKit under model_id = "distillation-features-v1".
+    /// Stored in SynapseKit under model_id = "distillation-features-v1".
     /// No embedding model inference — pure Hamming arithmetic.
     pub feature_fingerprint: Fingerprint256,
 }

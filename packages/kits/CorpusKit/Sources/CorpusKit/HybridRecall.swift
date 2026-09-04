@@ -6,7 +6,7 @@
 // merged candidate list. Per paper section 10.2.
 //
 // The hybrid recall lives in CorpusKit because both inputs (vector
-// hits from VectorKit + keyword hits from BM25Index) are CorpusKit
+// hits from SynapseKit + keyword hits from BM25Index) are CorpusKit
 // concerns. NeuronKit's reasoning layer composes higher-level
 // recall pipelines on top.
 //
@@ -28,7 +28,7 @@
 import Foundation
 import EngramLib
 import IntellectusLib
-import VectorKit
+import SynapseKit
 
 public struct HybridRecallConfiguration: Sendable {
     public var vectorWeight: Double
@@ -65,7 +65,7 @@ public enum HybridRecall {
     ///   - modelID: stable model id; the kNN pass filters to this
     ///     model so cross-model comparisons cannot occur.
     ///   - limit: top-k cap.
-    ///   - vectorStore: VectorKit handle.
+    ///   - vectorStore: SynapseKit handle.
     ///   - invertedIndex: SQLite-backed durable inverted index (BM25 keyword
     ///     lane). Replaced the in-memory BM25Index so keyword state persists
     ///     across process restarts without replaying chunk bodies on open.

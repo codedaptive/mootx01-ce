@@ -1,7 +1,7 @@
 /// B-1 substrate boundary conformance test — READER files.
 ///
 /// The B-1 invariant: NeuronKit and CognitionKit must only reach the substrate
-/// (LocusKit, VectorKit, CorpusKit) through GeniusLocusKit's estate verb surface.
+/// (LocusKit, SynapseKit, CorpusKit) through GeniusLocusKit's estate verb surface.
 /// No direct `DrawerStore`, `Estate`, or raw storage calls from the BrainKit
 /// reader layer.
 ///

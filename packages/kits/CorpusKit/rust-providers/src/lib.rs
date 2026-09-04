@@ -1,6 +1,6 @@
 //! corpus-kit-providers -- Rust port of Swift's `CorpusKitProviders`
 //! target. Hosts concrete `Tokenizer` implementations and concrete
-//! `vectorkit::EmbeddingProvider` implementations (the named text
+//! `synapsekit::EmbeddingProvider` implementations (the named text
 //! providers) over a host-supplied inference seam.
 //!
 //! The crate ships:
@@ -9,7 +9,7 @@
 //!   strings through `substrate_types::fnv`).
 //! - `MiniLMTextProvider`, `MPNetTextProvider`,
 //!   `EmbeddingGemmaProvider` -- the named text providers, mirrors
-//!   of the Swift trio. Each conforms to `vectorkit::EmbeddingProvider`,
+//!   of the Swift trio. Each conforms to `synapsekit::EmbeddingProvider`,
 //!   holds a tokenizer and a model-specific projection seed, and
 //!   takes a host-supplied inference seam (token IDs -> pooled
 //!   vector). The kit bundles no model weights and links no
@@ -23,7 +23,7 @@
 //!
 //! Core `corpus-kit` (the sibling crate) is intentionally
 //! provider-free -- only the `Tokenizer` trait lives there. The
-//! `EmbeddingProvider` trait lives in `vectorkit` (consolidation
+//! `EmbeddingProvider` trait lives in `synapsekit` (consolidation
 //! 2026-05-27); the concrete text providers in this crate conform
 //! to it directly. This layout matches Swift's split between
 //! `CorpusKit` and `CorpusKitProviders`.

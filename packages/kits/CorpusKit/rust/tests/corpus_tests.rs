@@ -8,7 +8,7 @@
 //! INTELLECTUS LOCK: All tests that call corpus.ingest, corpus.recall, or
 //! corpus.remove hold GLOBAL_LOCK for their entire duration. Corpus.ingest
 //! internally calls BundleStore.insert (which emits corpuskit.ingest.*
-//! metrics) and VectorStore.add_vector (which emits vectorkit.* metrics)
+//! metrics) and VectorStore.add_vector (which emits synapsekit.* metrics)
 //! when monitoring is enabled. Concurrent telemetry tests that have a
 //! capturing sink installed would see spurious emissions without the lock.
 
@@ -421,18 +421,18 @@ fn float_lane_outcome_identical_with_monitoring_off_and_on() {
 
 struct ThrowingFloatProvider;
 
-impl vectorkit::EmbeddingProvider for ThrowingFloatProvider {
+impl synapsekit::EmbeddingProvider for ThrowingFloatProvider {
     fn model_id(&self) -> &str { "test-throwing-float-v1" }
     fn model_version(&self) -> &str { "1.0.0" }
 
-    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, synapsekit::SynapseKitError> {
         // Return the zero engram — satisfies the contract for empty/non-empty inputs.
         Ok(engram_lib::Engram::ZERO)
     }
 
-    fn embed_float(&self, _text: &str) -> Result<Vec<f32>, vectorkit::VectorKitError> {
+    fn embed_float(&self, _text: &str) -> Result<Vec<f32>, synapsekit::SynapseKitError> {
         // Always opt out — this provider has no float lane.
-        Err(vectorkit::VectorKitError::EmbeddingFailed(
+        Err(synapsekit::SynapseKitError::EmbeddingFailed(
             "ThrowingFloatProvider: embed_float is disabled (test-only opt-out)".to_string(),
         ))
     }

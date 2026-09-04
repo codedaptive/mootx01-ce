@@ -59,7 +59,7 @@ import LocusKit
 import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 @testable import GeniusLocusKit
 

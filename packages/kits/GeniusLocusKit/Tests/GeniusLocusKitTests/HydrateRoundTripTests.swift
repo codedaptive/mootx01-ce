@@ -41,7 +41,7 @@ import Foundation
 import SubstrateTypes
 import EngramLib
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory

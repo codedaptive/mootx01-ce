@@ -24,7 +24,7 @@ import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
 import Testing
-import VectorKit
+import SynapseKit
 import EngramLib
 
 @testable import CorpusKit

@@ -7,13 +7,13 @@ import PersistenceKit
 import QueueKit
 import SubstrateML
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 /// The composition layer for the GeniusLocus substrate.
 ///
 /// `GeniusLocusKit` is the public actor that coordinates N estates on
 /// one device. Each estate is its own composed substrate (LocusKit with
-/// VectorKit and CorpusKit wired in) with its own manifest and its own
+/// SynapseKit and CorpusKit wired in) with its own manifest and its own
 /// injected storage. Estates are isolated from one another: a handle
 /// reaches exactly one estate's data.
 ///

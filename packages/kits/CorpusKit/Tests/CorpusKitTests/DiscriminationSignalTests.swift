@@ -32,7 +32,7 @@ import PersistenceKit
 @testable import PersistenceKitSQLite
 @testable import CorpusKit
 import CorpusKitProviders
-import VectorKit
+import SynapseKit
 import EngramLib
 
 // MARK: - Shared constant
