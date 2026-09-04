@@ -53,7 +53,7 @@ for q in queries {
 
 ## 5. Distance semantics are Hamming
 
-All distance methods return Hamming distance, 0...256. Zero means identical engrams; 256 means bit-inverse. Cosine, Euclidean, Jaccard, and Hyperplane-family-aware distances live in VectorKit (mission 6) and federation-aware code (SubstrateLib + ConvergenceKit-Federation). EngramLib's stable contract is Hamming.
+All distance methods return Hamming distance, 0...256. Zero means identical engrams; 256 means bit-inverse. Cosine, Euclidean, Jaccard, and Hyperplane-family-aware distances live in SynapseKit (mission 6) and federation-aware code (SubstrateLib + ConvergenceKit-Federation). EngramLib's stable contract is Hamming.
 
 ## 6. Union semantics are bitwise OR
 

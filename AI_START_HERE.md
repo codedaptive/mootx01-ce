@@ -42,7 +42,7 @@ standalone Apache-2.0 SDK venues are:
 
 | Repository | Primary packages |
 |---|---|
-| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | LocusKit, VectorKit, CorpusKit |
+| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | LocusKit, SynapseKit, CorpusKit |
 | [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA grammar, FDC lattice, grounding |
 | [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queueing, sync, telemetry, loopback transport |
 | [`codedaptive/moot-core`](https://github.com/codedaptive/moot-core) | Typed substrate math, kernels, learning, graph algorithms |
