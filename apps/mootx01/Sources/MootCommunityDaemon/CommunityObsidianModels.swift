@@ -2,7 +2,7 @@
 //
 // Contract model types for the six obsidian-family endpoints (Wave C1: CORE-06).
 //
-// Every type here is byte-shape-exact from contracts/community/1.1/contract.json.
+// Every type here is byte-shape-exact from apps/mootx01/Contracts/community-1.1/contract.json.
 // No field is added, removed, or renamed. JSON encoding uses camelCase field names
 // exactly as the contract defines them.
 //
