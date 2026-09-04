@@ -30,7 +30,11 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// (LocusKit manifest key `index_composition_policy`), seeded on every
     /// populated estate through the migration catalog.
     public static let v1_4 = EstateFormatVersion(major: 1, minor: 4)
-    public static let current = v1_4
+    /// Format 1.5: the schema-version ledger carries the vector tier under
+    /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
+    /// every populated estate are moved there through the migration catalog.
+    public static let v1_5 = EstateFormatVersion(major: 1, minor: 5)
+    public static let current = v1_5
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)

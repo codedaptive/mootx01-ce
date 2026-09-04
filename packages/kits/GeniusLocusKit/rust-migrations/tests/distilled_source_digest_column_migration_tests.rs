@@ -9,7 +9,7 @@
 //!      that leaves the stamp at V1_3.
 //!   3. StorageUnavailable: an unregistered handle returns the error variant.
 //!   4. Full chain from v1_0 through the compiled catalog ends at CURRENT
-//!      (V1_4). (Gated on feature = "migration-v1-0-to-v1-1" being enabled.)
+//!      (V1_5). (Gated on feature = "migration-v1-0-to-v1-1" being enabled.)
 
 use std::sync::Arc;
 
@@ -193,12 +193,13 @@ fn v1_0_estate_runs_full_chain_to_v1_3() {
     // The whole compiled chain, as every Rust host runs it: 1.0 → 1.1 (shared
     // content, which stamps V1_1), 1.1 → 1.2 (index composition column, which
     // stamps V1_2), 1.2 → 1.3 (this capsule, which stamps V1_3), 1.3 → 1.4
-    // (index composition setting, which stamps V1_4).
+    // (index composition setting, which stamps V1_4), 1.4 → 1.5 (storage
+    // ledger kit ids, which stamps V1_5).
     coord
         .run_migration_chain(&handle, NOW, default_ensemble())
         .expect("full chain must succeed on an empty v1_0 estate");
 
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_4, "full chain must end at V1_4");
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_5, "full chain must end at V1_5");
     assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(
         write_and_read_digest(&store, "00000000-0000-4000-8000-00000000c004").as_deref(),

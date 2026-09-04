@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use persistence_kit::{
     AuditLog, BackendConfiguration, BlobStore, EstateConfiguration,
-    IsolationLevel, RowHandle, RowStore, SchemaDeclaration,
+    IsolationLevel, RowHandle, RowStore, SchemaDeclaration, SchemaKitRenameOutcome,
     SqliteStorage, Storage, StorageError, StorageObserver,
     StorageResult, StorageRow, StorageTransaction,
     TypedValue,
@@ -280,6 +280,14 @@ impl Storage for FaultStorage {
 
     fn current_schema_version(&self) -> StorageResult<i32> {
         self.inner.current_schema_version()
+    }
+
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        self.inner.rename_schema_kit(old_kit_id, new_kit_id)
     }
 
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {

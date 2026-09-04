@@ -80,24 +80,33 @@ let package = Package(
             description: "Compile the GLK 1.3 to 1.4 index-composition-setting migration capsule."
         ),
         .trait(
+            name: "MigrationV1_4ToV1_5",
+            description: "Compile the GLK 1.4 to 1.5 storage-ledger kit-id migration capsule (VectorKit ledger rows become SynapseKit rows)."
+        ),
+        .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_1",
             description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule).",
-            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4"]
+            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.2->1.3 and 1.3->1.4 capsules).",
-            enabledTraits: ["MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.2->1.3, 1.3->1.4, and 1.4->1.5 capsules).",
+            enabledTraits: ["MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_3",
-            description: "Support estates as old as GLK format 1.3 (compiles only the 1.3->1.4 index-composition-setting capsule).",
-            enabledTraits: ["MigrationV1_3ToV1_4"]
+            description: "Support estates as old as GLK format 1.3 (compiles the 1.3->1.4 and 1.4->1.5 capsules).",
+            enabledTraits: ["MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+        ),
+        .trait(
+            name: "MigrationFloor1_4",
+            description: "Support estates as old as GLK format 1.4 (compiles only the 1.4->1.5 storage-ledger kit-id capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5"]
         ),
     ],
     dependencies: [
@@ -260,6 +269,24 @@ let package = Package(
                 ),
             ]
         ),
+        // GLK 1.4 -> 1.5 capsule: moves the vector tier's schema-version
+        // ledger rows from their VectorKit ids to their SynapseKit ids on
+        // populated estates, through PersistenceKit's renameSchemaKit.
+        // Mirrors the GLKMigrationV1_3ToV1_4 target.
+        .target(
+            name: "GLKMigrationV1_4ToV1_5",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKMigrationV1_4ToV1_5",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_4_TO_V1_5",
+                    .when(traits: ["MigrationV1_4ToV1_5"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKitMigrations",
             dependencies: [
@@ -286,6 +313,10 @@ let package = Package(
                     name: "GLKMigrationV1_3ToV1_4",
                     condition: .when(traits: ["MigrationV1_3ToV1_4"])
                 ),
+                .target(
+                    name: "GLKMigrationV1_4ToV1_5",
+                    condition: .when(traits: ["MigrationV1_4ToV1_5"])
+                ),
             ],
             path: "Sources/GeniusLocusKitMigrations",
             swiftSettings: [
@@ -304,6 +335,10 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_3_TO_V1_4",
                     .when(traits: ["MigrationV1_3ToV1_4"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_4_TO_V1_5",
+                    .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
             ]
         ),
@@ -532,6 +567,38 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_3_TO_V1_4",
                     .when(traits: ["MigrationV1_3ToV1_4"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        // Tests for the GLK 1.4 -> 1.5 storage-ledger kit-id capsule.
+        // Verifies that a v1_4-stamped estate carrying the VectorKit ledger
+        // rows ends with SynapseKit rows at the same versions and a v1_5
+        // stamp, that a second run is a no-op, that an estate without the
+        // rows is stamped without change, and that the chain from v1_0 ends
+        // at v1_5.
+        .testTarget(
+            name: "GLKMigrationV1_4ToV1_5Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_4ToV1_5",
+                    condition: .when(traits: ["MigrationV1_4ToV1_5"])
+                ),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/GLKMigrationV1_4ToV1_5Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_4_TO_V1_5",
+                    .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",

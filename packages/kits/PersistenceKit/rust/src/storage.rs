@@ -516,6 +516,18 @@ pub trait StorageTransaction {
 /// `transaction` is non-generic — the block returns `StorageResult<()>`
 /// (Ok commits, Err rolls back) and surfaces results via its own closure
 /// environment.
+/// The result of `Storage::rename_schema_kit` (SPEC I-7a). Twin of Swift
+/// `SchemaKitRenameOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaKitRenameOutcome {
+    /// A row under the old id moved to the new id; `version` is the version it carried.
+    Renamed { version: i32 },
+    /// No row exists under the old id; nothing changed.
+    NoRow,
+    /// Rows exist under both ids; nothing changed.
+    Conflict { old_version: i32, new_version: i32 },
+}
+
 pub trait Storage: Send + Sync {
     fn configuration(&self) -> &EstateConfiguration;
     fn row_store(&self) -> Arc<dyn RowStore>;
@@ -558,6 +570,23 @@ pub trait Storage: Send + Sync {
         // Backends that track per-kit versions override this.
         self.current_schema_version()
     }
+
+    /// Move the schema-version ledger row recorded for `old_kit_id` to
+    /// `new_kit_id`, keeping its version and its applied-at instant (SPEC
+    /// I-7a). Twin of Swift `renameSchemaKit(from:to:)`.
+    ///
+    /// A kit's ledger row is keyed by its `kit_id`. When a kit changes its id
+    /// the row must move with it, or `open` under the new id reads version 0
+    /// and replays the kit's ladder from the start on a populated estate. The
+    /// operation never creates a version and never runs a migration step:
+    /// `Renamed { version }` when a row under `old_kit_id` moved; `NoRow` when
+    /// no row exists under `old_kit_id` (nothing changed); `Conflict { .. }`
+    /// when rows exist under both ids (nothing changed; the caller decides).
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome>;
 
     /// Apply migrations forward to the schema's declared version.
     /// Forward-only, fail-fast per Q4.
