@@ -352,6 +352,35 @@ fn memory_tool_enabled_flag_controls_dispatch_not_env() {
     let _ = std::fs::remove_file(&path_b);
 }
 
+/// `moot_synthesize` reads candidates and generates text; it writes no drawer,
+/// packet, journal, meta, trace, or reward. A frozen dispatcher must let it
+/// through, and the estate must be byte-identical before and after the call.
+/// FRZ-3: moved from MUTATION_TOOLS to FROZEN_READ_TOOLS.
+#[test]
+fn frozen_synthesize_proceeds_and_estate_is_unchanged() {
+    use aria_mcp::tool_mutation_inventory::{FROZEN_READ_TOOLS, is_frozen_refused};
+    let path = temp_sqlite_path("synthesize");
+    let registry = EstateRegistry::new_sqlite(&path, "frozen-tests").expect("open");
+    // Seed one drawer so synthesize has a candidate pool.
+    let _id = capture(&registry, "carbon compounds synthesis test");
+    let frozen = make_dispatcher(registry, EstatePosture::Frozen);
+    let before = estate_bytes(&path);
+
+    let result = tools_call(&frozen, "moot_synthesize",
+        serde_json::json!({"query": "carbon compounds", "limit": 5}));
+    assert!(!is_error(&result),
+        "moot_synthesize is a read and must work when frozen; got: {result:?}");
+    assert_eq!(estate_bytes(&path), before,
+        "moot_synthesize must leave the estate byte-identical on disk");
+    // The frozen refused-set must no longer name moot_synthesize.
+    assert!(!is_frozen_refused("moot_synthesize"),
+        "moot_synthesize must not be in the refused set after FRZ-3");
+    assert!(FROZEN_READ_TOOLS.contains(&"moot_synthesize"),
+        "moot_synthesize must be in the explicit read set after FRZ-3");
+
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The two mint tools are never advertised and dispatch only behind the
 /// `MOOTX01_MINT_TOOLS=1` launch gate; frozen, they are refused by name before
 /// the gate is consulted, so a harness serve that is both frozen and
