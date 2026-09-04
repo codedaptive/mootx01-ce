@@ -384,7 +384,10 @@ public actor CorpusContentEngine {
     public var onEncoded: (@Sendable ([String], String) async -> Void)?
 
     /// Cancel the drain worker and release the lease on teardown (mirror of
-    /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`).
+    /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`). Reachable
+    /// while the queue is mounted because the worker resolves the engine for
+    /// one pass at a time and the GLK rider captures it weakly. Rust twin:
+    /// `impl Drop for CorpusContentEngine`.
     deinit {
         ingestDrainWorker?.cancel()
         drainLease?.release()

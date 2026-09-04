@@ -13,7 +13,9 @@
 //! string (e.g. `"lex=original;dense=distilled"`).
 
 use crate::content::CorpusContentId;
+use crate::content_engine::FEED_CURSOR_ROW_ID;
 use crate::error::CorpusKitError;
+use crate::index_composition_policy::IndexCompositionPolicy;
 use crate::index_state_operational::{
     clearing_coverage_and_generation, is_lexically_indexed, is_removed, soft_removed_bitmap,
     INDEX_GENERATION_MODULUS,
@@ -317,6 +319,40 @@ impl CorpusIndexStateStore {
             .into_iter()
             .filter(|s| s.is_lexically_indexed() && !s.is_removed())
             .collect())
+    }
+
+    /// The first composition policy id among active rows (lexically indexed,
+    /// not removed) that differs from `configured_policy_id`; `None` when
+    /// every active row agrees or the table is empty. The feed-cursor
+    /// sentinel row carries no policy and is skipped. A row whose
+    /// `composition_policy_id` is empty was written before the column
+    /// existed and counts as `IndexCompositionPolicy::current()`, the policy
+    /// it was built under. One table scan per call; `CorpusContentEngine::open`
+    /// calls it once per open. Rows are visited in ascending content-id
+    /// order, so the id reported for a mixed table is deterministic. Twin of
+    /// Swift `mismatchedCompositionPolicy(configuredPolicyID:)`.
+    pub fn mismatched_composition_policy(
+        &self,
+        configured_policy_id: &str,
+    ) -> Result<Option<String>, CorpusKitError> {
+        let current_id = IndexCompositionPolicy::current().id();
+        for state in self.all_states()? {
+            if state.content_id == FEED_CURSOR_ROW_ID {
+                continue;
+            }
+            if !state.is_lexically_indexed() || state.is_removed() {
+                continue;
+            }
+            let effective_id = if state.composition_policy_id.is_empty() {
+                current_id.as_str()
+            } else {
+                state.composition_policy_id.as_str()
+            };
+            if effective_id != configured_policy_id {
+                return Ok(Some(effective_id.to_string()));
+            }
+        }
+        Ok(None)
     }
 
     // MARK: - Deletions (hard expunge only)
