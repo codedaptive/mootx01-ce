@@ -405,6 +405,36 @@ struct FrozenDispatcherTests {
         #expect(firstText(gone).contains("does not exist"), "the deleted file must be gone; got: \(firstText(gone))")
     }
 
+    // MARK: - moot_synthesize is a read under frozen
+
+    /// `moot_synthesize` reads candidates and generates text; it writes no
+    /// drawer, packet, journal, meta, trace, or reward. A frozen dispatcher
+    /// must let it through, and the estate must be byte-identical before and
+    /// after the call. FRZ-3: moved from mutationTools to frozenReadTools.
+    @Test func frozenSynthesizeProceedsAndEstateIsUnchanged() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle) = try await openSQLiteEstate(url: url)
+        let live = ToolDispatcher(kit: kit, handle: handle, environment: [:])
+        let frozen = ToolDispatcher(kit: kit, handle: handle, environment: [:], posture: .frozen)
+
+        _ = try await fileMemory(live, content: "carbon compounds synthesis test", location: "synth-room")
+        let before = try estateBytes(url)
+
+        let result = try await frozen.dispatch(
+            name: "moot_synthesize",
+            arguments: .object(["query": .string("carbon compounds"), "limit": .integer(5)]))
+        #expect(!isError(result),
+                "moot_synthesize is a read and must work when frozen; got: \(firstText(result))")
+        #expect(try estateBytes(url) == before,
+                "moot_synthesize must leave the estate byte-identical on disk")
+        // The frozen refused-set must no longer name moot_synthesize.
+        #expect(!ToolMutationInventory.frozenRefusedTools.contains("moot_synthesize"),
+                "moot_synthesize must not be in the refused set after FRZ-3")
+        #expect(ToolMutationInventory.frozenReadTools.contains("moot_synthesize"),
+                "moot_synthesize must be in the explicit read set after FRZ-3")
+    }
+
     // MARK: - Dark mint tools are refused by name
 
     /// The two mint tools are never advertised and dispatch only behind the
