@@ -170,6 +170,7 @@ fn open_estate_with_drawer_corpus() -> (EstateCoordinator, genius_locus_kit::han
             .expect("CorpusContentConfiguration::new"),
             source,
             vec![EmbeddingModelConfig::Deterministic],
+            false,
         )
         .expect("CorpusContentEngine::open"),
     );

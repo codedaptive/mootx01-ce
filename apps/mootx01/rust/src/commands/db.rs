@@ -10,11 +10,19 @@
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use aria_mcp::estate_registry::EstateRegistry;
-use genius_locus_kit::EstateCoordinator;
+use corpus_kit_providers::default_ensemble;
+use genius_locus_kit::{EstateCoordinator, EstateHandle};
+use genius_locus_kit_migrations::MigrationChainExt;
+use locus_kit::drawer_store::DrawerStore;
+use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+use locus_kit::estate_types::OwnerCredentials;
+use persistence_kit::Storage;
 
+use super::upgrade::{with_resident_daemon_quiesced, DaemonControl, PlatformDaemon};
 use crate::cli::DbCommand;
 use crate::core::{encrypt_optout, paths};
 use crate::exit;
@@ -210,11 +218,15 @@ fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
 /// `index_composition_policy`), read by GeniusLocusKit at every open.
 ///
 /// Without `--set` the command prints the stored id. With `--set` it
-/// validates the id before opening anything, writes the setting, reopens the
-/// estate (the registry wires the Corpus under the stored setting), and runs
-/// the same `reindex_corpus` the upgrade convergence step runs, so the stored
-/// policy and the index rows never disagree; it prints the rows reindexed and
-/// exits non-zero on any failure. Rust twin of Swift `DbCompositionCommand`.
+/// validates the id before opening anything, opens the estate through the
+/// kit with the rebuild committed (a serving open refuses a Corpus whose rows
+/// disagree with the stored setting), writes the setting, wires the Corpus
+/// under it, drains the encode queue, and runs the same `reindex_corpus` the
+/// upgrade convergence step runs, so the stored policy and the index rows
+/// never disagree; it prints the rows reindexed and exits non-zero on any
+/// failure. When the data directory is the resident estate the resident
+/// daemon is stopped around the rebuild and restarted afterwards, as
+/// `mootx01 upgrade` does. Rust twin of Swift `DbCompositionCommand`.
 fn composition(data: &Path, db: Option<String>, set: Option<String>) -> ExitCode {
     let name = db.unwrap_or_else(|| paths::active_estate(data));
     // Estate path: an explicit ARIA_MCP_SQLITE_PATH override wins; else the
@@ -228,7 +240,19 @@ fn composition(data: &Path, db: Option<String>, set: Option<String>) -> ExitCode
         eprintln!("mootx01 db composition fatal: estate '{name}' not found at {estate}");
         return ExitCode::from(exit::FAILURE);
     }
-    match run_composition_on_estate(&estate, &name, set.as_deref()) {
+    let outcome = match set.as_deref() {
+        // Show is a read: the daemon keeps serving.
+        None => run_composition_on_estate(&estate, &name, None),
+        Some(id) => set_composition_quiesced(
+            data,
+            &paths::resident_data_dir(),
+            &PlatformDaemon,
+            &estate,
+            &name,
+            id,
+        ),
+    };
+    match outcome {
         Ok(lines) => {
             for line in lines {
                 println!("{line}");
@@ -240,6 +264,30 @@ fn composition(data: &Path, db: Option<String>, set: Option<String>) -> ExitCode
             ExitCode::from(exit::FAILURE)
         }
     }
+}
+
+/// `--set` with the resident daemon quiesced. The rebuild rewrites every
+/// index row while a serving daemon would keep encoding captures under the
+/// policy it opened with, the single-writer hazard `mootx01 upgrade` already
+/// guards: `with_resident_daemon_quiesced` stops the daemon around
+/// `run_composition_on_estate` only when `data` is the resident estate and
+/// restarts it afterwards; a clone is rebuilt with the daemon untouched. A
+/// daemon that will not stop means nothing is written. Twin of the Swift
+/// command's `ResidentDaemonQuiesce.run` wrap.
+pub(crate) fn set_composition_quiesced(
+    data: &Path,
+    resident: &Path,
+    daemon: &dyn DaemonControl,
+    estate: &str,
+    name: &str,
+    id: &str,
+) -> Result<Vec<String>, String> {
+    with_resident_daemon_quiesced(data, resident, "index composition rebuild", daemon, || {
+        run_composition_on_estate(estate, name, Some(id))
+    })
+    .unwrap_or_else(|| {
+        Err("the resident daemon would not stop; nothing was changed. Stop it and run `mootx01 db composition --set` again".to_string())
+    })
 }
 
 /// Show the stored setting, or store `set` and rebuild every index lane
@@ -273,29 +321,36 @@ pub(crate) fn run_composition_on_estate(
         return Ok(lines);
     };
     let start = Instant::now();
-    // 1. Store the setting on the open estate.
-    let stored = {
-        let reg = EstateRegistry::new_sqlite(estate, OWNER)?;
-        let coord = reg.coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-        coord
-            .set_index_composition_policy_id(&reg.default.handle, &requested)
-            .map_err(|e| format!("{e:?}"))?
-    };
-    // 2. Reopen: the registry wires the Corpus under the stored setting.
-    // 3. Rebuild every lane. 4. Prove every active row carries the new id.
-    let reg = EstateRegistry::new_sqlite(estate, OWNER)?;
-    let handle = reg.default.handle.clone();
-    let counts = {
-        let coord = reg.coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
-        coord
-            .index_composition_policy_row_counts(&handle)
-            .map_err(|e| format!("{e:?}"))?
-    };
+    let now_ms = wall_now_millis();
+    // The estate opens through the kit, not the registry: the registry's
+    // serving open refuses a Corpus whose index rows disagree with the stored
+    // setting, and that is exactly the state this command creates between
+    // writing the setting and rebuilding the rows. Same call tree as Swift
+    // DbCompositionCommand: open + migration chain, then
+    // 1. Store the setting. 2. Wire the Corpus under it with the rebuild
+    // committed (its rows still carry the old id). 3. Drain the encode
+    // queue. 4. Rebuild every lane. 5. Prove every active row now carries
+    // the new id.
+    let (mut coord, handle, storage) = open_estate_for_rebuild(estate, now_ms)?;
+    let stored = coord
+        .set_index_composition_policy_id(&handle, &requested)
+        .map_err(|e| format!("{e:?}"))?;
+    coord
+        .wire_glk_substores(&handle, storage, default_ensemble(), now_ms, true)
+        .map_err(|e| format!("{e:?}"))?;
+    // Drain to empty BEFORE the rebuild. A job left pending by an earlier
+    // process (a capture whose encode had not run when that process exited)
+    // would otherwise be indexed by this command's own drain worker while
+    // `reindex_corpus` runs, and the interleaving would decide the row's
+    // final state. Drained here, every pending job is indexed under the
+    // stored setting first; the rebuild then rewrites every row. Twin of the
+    // Swift command's `awaitEncodeDrain(for:)`.
+    coord.await_encode_drain(&handle).map_err(|e| format!("{e:?}"))?;
+    coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
+    let counts = coord
+        .index_composition_policy_row_counts(&handle)
+        .map_err(|e| format!("{e:?}"))?;
+    coord.close(&handle).map_err(|e| format!("{e:?}"))?;
     let reindexed = counts.get(&stored).copied().unwrap_or(0);
     let stale: Vec<String> = counts
         .iter()
@@ -312,6 +367,52 @@ pub(crate) fn run_composition_on_estate(
         ));
     }
     Ok(lines)
+}
+
+/// SQLite busy timeout for the rebuild open, the registry's serving value.
+const SQLITE_BUSY_TIMEOUT_SECS: f64 = 5.0;
+
+/// Wall clock in epoch milliseconds at the command boundary; the kits never
+/// read the clock themselves.
+fn wall_now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Open `estate` through the kit for a rebuild: geometry normalization (the
+/// pre-open step every Rust host runs so VACUUM and ATTACH see a reserve-0
+/// file), `SqliteDrawerStore::from_path` (adopts the sibling install key),
+/// `EstateCoordinator::open`, then the compiled migration chain, which seeds
+/// the setting on an estate that predates it. No Corpus is wired here; the
+/// caller wires it with the rebuild committed. Returns the coordinator, the
+/// handle, and the estate's own storage for the Corpus to build on. Twin of
+/// Swift DbCompositionCommand's `kit.open` + `GLKMigrationCatalog.prepare`.
+fn open_estate_for_rebuild(
+    estate: &str,
+    now_ms: i64,
+) -> Result<(EstateCoordinator, EstateHandle, Arc<dyn Storage>), String> {
+    if let Err(e) = genius_locus_kit_migrations::run_geometry_normalization(Path::new(estate)) {
+        eprintln!(
+            "mootx01 db composition: geometry normalization for {estate}: {e:?} (parked; VACUUM will surface this)"
+        );
+    }
+    let store: Arc<dyn DrawerStore> = Arc::new(
+        SqliteDrawerStore::from_path(estate, now_ms, None, SQLITE_BUSY_TIMEOUT_SECS)
+            .map_err(|e| format!("cannot open SQLite estate at {estate}: {e}"))?,
+    );
+    let storage = store
+        .storage()
+        .ok_or_else(|| format!("SqliteDrawerStore at {estate} did not expose its backing Storage"))?;
+    let mut coord = EstateCoordinator::new();
+    let handle = coord
+        .open(store, OwnerCredentials::new(OWNER), 0, 100)
+        .map_err(|e| format!("{e:?}"))?;
+    coord
+        .run_migration_chain(&handle, now_ms, default_ensemble())
+        .map_err(|e| format!("estate migration chain: {e}"))?;
+    Ok((coord, handle, storage))
 }
 
 #[cfg(test)]
@@ -401,7 +502,11 @@ mod tests {
         (dir, path)
     }
 
-    fn file_memory(estate: &str, content: &str) {
+    /// File one memory through a serving registry and, when `drain` is
+    /// set, wait for its encode job to be indexed before the registry goes.
+    /// Undrained, the job may still be pending on disk when the registry is
+    /// released; releasing the registry stops its drain worker either way.
+    fn file_memory_with(estate: &str, content: &str, drain: bool) {
         use aria_mcp::jsonrpc::JsonValue;
         use aria_mcp::surfaced_recall_ledger::SurfacedRecallLedger;
         let reg = EstateRegistry::new_sqlite(estate, OWNER).expect("open");
@@ -412,6 +517,124 @@ mod tests {
         let result = aria_mcp::dispatch::dispatch_tool("moot_file_memory", &args, &reg, &SurfacedRecallLedger::new())
             .expect("file memory");
         assert!(!result["isError"].as_bool().unwrap_or(false), "{result}");
+        if drain {
+            reg.coord
+                .lock()
+                .unwrap()
+                .await_encode_drain(&reg.default.handle)
+                .expect("await the encode drain");
+        }
+    }
+
+    /// File one memory and wait for it to be indexed: the fixture every
+    /// test that reasons about index rows starts from.
+    fn file_memory(estate: &str, content: &str) {
+        file_memory_with(estate, content, true);
+    }
+
+    fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resident = tmp.path().join("resident");
+        let scratch = tmp.path().join("resident-bench");
+        std::fs::create_dir_all(&resident).expect("resident dir");
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        (tmp, resident, scratch)
+    }
+
+    /// Two memories filed with their encode jobs left undrained on purpose,
+    /// then `--set`: the command drains the queue under the new setting
+    /// before the rebuild, every active row ends under the new id, and a
+    /// plain serving open succeeds. The hazard this pins: a drain worker
+    /// that outlives its released registry indexes the second memory under
+    /// the old id after the rebuild, and the reopen refuses the estate; the
+    /// kits' drain_worker_ownership_tests pin that no worker outlives its
+    /// engine.
+    #[test]
+    fn composition_set_rebuilds_with_encode_jobs_left_undrained() {
+        let (_dir, estate) = temp_estate();
+        file_memory_with(&estate, "composition cli undrained content one", false);
+        file_memory_with(&estate, "composition cli undrained content two", false);
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        let set = run_composition_on_estate(&estate, "t", Some(new_id)).expect("set");
+        assert_eq!(set[1], format!("index_composition_policy: {new_id}"));
+        let reindexed: usize = set[2]
+            .strip_prefix("rows reindexed: ")
+            .and_then(|n| n.parse().ok())
+            .expect("rows reindexed line");
+        assert!(reindexed >= 2, "{set:?}");
+
+        let reg = EstateRegistry::new_sqlite(&estate, OWNER).expect("a serving open succeeds");
+        let coord = reg.coord.lock().unwrap();
+        let counts = coord
+            .index_composition_policy_row_counts(&reg.default.handle)
+            .expect("row counts");
+        assert_eq!(counts.keys().collect::<Vec<_>>(), vec![new_id], "{counts:?}");
+        assert!(counts[new_id] >= 2, "{counts:?}");
+    }
+
+    /// The resident estate: the daemon is stopped before the rebuild and
+    /// restarted after it, and the rebuild itself lands.
+    #[test]
+    fn composition_set_on_the_resident_estate_stops_then_restarts_the_daemon() {
+        use crate::commands::upgrade::daemon_test_support::RecordingDaemon;
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli resident content");
+        let daemon = RecordingDaemon::new(true, true);
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        let lines = set_composition_quiesced(&resident, &resident, &daemon, &estate, "t", new_id)
+            .expect("set on the resident estate");
+        assert_eq!(lines[1], format!("index_composition_policy: {new_id}"));
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+        EstateRegistry::new_sqlite(&estate, OWNER).expect("the estate serves again");
+    }
+
+    /// A clone beside the resident directory: the daemon has no stake in it
+    /// and is left alone.
+    #[test]
+    fn composition_set_on_a_clone_leaves_the_daemon_alone() {
+        use crate::commands::upgrade::daemon_test_support::RecordingDaemon;
+        let (_tmp, resident, scratch) = resident_and_scratch();
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli clone content");
+        let daemon = RecordingDaemon::new(true, true);
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        let lines = set_composition_quiesced(&scratch, &resident, &daemon, &estate, "t", new_id)
+            .expect("set on a clone");
+        assert_eq!(lines[1], format!("index_composition_policy: {new_id}"));
+        assert!(daemon.calls().is_empty(), "a clone must not touch the daemon: {:?}", daemon.calls());
+    }
+
+    /// The resident estate with the daemon down: nothing is started.
+    #[test]
+    fn composition_set_with_the_daemon_down_never_starts_one() {
+        use crate::commands::upgrade::daemon_test_support::RecordingDaemon;
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli daemon down content");
+        let daemon = RecordingDaemon::new(false, true);
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        set_composition_quiesced(&resident, &resident, &daemon, &estate, "t", new_id)
+            .expect("set with the daemon down");
+        assert_eq!(daemon.calls(), vec!["is_running"]);
+    }
+
+    /// A daemon that will not stop: the rebuild is refused and the stored
+    /// setting is untouched.
+    #[test]
+    fn composition_set_is_refused_when_the_daemon_will_not_stop() {
+        use crate::commands::upgrade::daemon_test_support::RecordingDaemon;
+        let (_tmp, resident, _scratch) = resident_and_scratch();
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli stubborn daemon content");
+        let daemon = RecordingDaemon::new(true, false);
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        let err = set_composition_quiesced(&resident, &resident, &daemon, &estate, "t", new_id)
+            .expect_err("refused");
+        assert!(err.contains("would not stop"), "{err}");
+        assert_eq!(daemon.calls(), vec!["is_running", "stop"]);
+        let shown = run_composition_on_estate(&estate, "t", None).expect("show");
+        assert_eq!(shown[1], "index_composition_policy: lex=original;dense=distilled");
     }
 
     /// A fresh estate shows the production default; `--set` stores a new id,
@@ -453,6 +676,61 @@ mod tests {
         );
         assert_eq!(
             coord.index_composition_policy(&reg.default.handle).map(|p| p.id()),
+            Some(new_id.to_string())
+        );
+    }
+
+    /// Rows built under the default policy with the stored setting flipped
+    /// to another id and no rebuild: the registry's serving open refuses the
+    /// estate with the engine's exact mismatch detail, and `--set` still
+    /// rebuilds it because its open commits to the rebuild. Afterwards the
+    /// estate serves again with every active row under the new id.
+    #[test]
+    fn composition_set_rebuilds_an_estate_a_serving_open_refuses() {
+        const NOW: i64 = 1_700_000_000_000;
+        let (_dir, estate) = temp_estate();
+        file_memory(&estate, "composition cli mismatch content one");
+        file_memory(&estate, "composition cli mismatch content two");
+        let new_id = "lex=originalPlusAdornments;dense=distilled";
+        {
+            let reg = EstateRegistry::new_sqlite(&estate, OWNER).expect("open");
+            let coord = reg.coord.lock().unwrap();
+            coord.reindex_corpus(&reg.default.handle, NOW).expect("reindex under the default");
+            let counts = coord
+                .index_composition_policy_row_counts(&reg.default.handle)
+                .expect("row counts");
+            assert_eq!(counts.keys().collect::<Vec<_>>(), vec!["lex=original;dense=distilled"]);
+            assert!(counts["lex=original;dense=distilled"] >= 2, "{counts:?}");
+            coord
+                .set_index_composition_policy_id(&reg.default.handle, new_id)
+                .expect("flip the stored setting without a rebuild");
+        }
+        let refused = EstateRegistry::new_sqlite(&estate, OWNER)
+            .err()
+            .expect("a serving open must refuse rows built under another policy");
+        assert!(
+            refused.contains(
+                "CompositionPolicyMismatch(\"recorded=lex=original;dense=distilled;configured=lex=originalPlusAdornments;dense=distilled\")"
+            ),
+            "{refused}"
+        );
+
+        let set = run_composition_on_estate(&estate, "t", Some(new_id)).expect("set");
+        assert_eq!(set[1], format!("index_composition_policy: {new_id}"));
+        let reindexed: usize = set[2]
+            .strip_prefix("rows reindexed: ")
+            .and_then(|n| n.parse().ok())
+            .expect("rows reindexed line");
+        assert!(reindexed >= 2, "{set:?}");
+
+        let reg = EstateRegistry::new_sqlite(&estate, OWNER).expect("the estate serves again");
+        let coord = reg.coord.lock().unwrap();
+        let counts = coord
+            .index_composition_policy_row_counts(&reg.default.handle)
+            .expect("row counts");
+        assert_eq!(counts.keys().collect::<Vec<_>>(), vec![new_id]);
+        assert_eq!(
+            coord.stored_index_composition_policy_id(&reg.default.handle).expect("read"),
             Some(new_id.to_string())
         );
     }
