@@ -369,6 +369,10 @@ pub fn dispatch(
     // and the `frozen:` status line read it. Mutating tools never reach this
     // function when frozen — the dispatcher refuses them first.
     posture: EstatePosture,
+    // Whether the Anthropic memory_20250818 adapter is enabled — resolved
+    // once at Dispatcher construction (matching the posture pattern) and
+    // threaded here so dispatch_memory never reads std::env per call.
+    memory_on: bool,
     build_serial: &str,
     version_skew: &str,
     // Upstream-release advisory provider — consumed by ping/status only.
@@ -380,7 +384,7 @@ pub fn dispatch(
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
-        "memory" => crate::memory_adapter::dispatch_memory(args, registry),
+        "memory" => crate::memory_adapter::dispatch_memory(args, registry, memory_on),
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger, posture),
         "moot_memory_list" => run_memory_list(args, registry),
