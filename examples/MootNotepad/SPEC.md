@@ -8,11 +8,10 @@ is rebuilt by recalling those drawers from the substrate.
 
 - **Building a brand-new app on top of MOOT as the database.** The app keeps no
   authoritative state of its own; `NotepadModel.notes` is a cache of what the
-  MOOT holds. Every write re-reads from the substrate to stay honest.
-- **The four-tool CRUD surface** over the ARIA tool API.
-- **The text-result parsing edge** — turning `moot_memory_search` text lines
-  into structured note rows.
-- **Real, system-registered App Intents** sharing one estate with the UI.
+  MOOT holds. Every write re-reads from the substrate to stay in step with it.
+- **The five-tool CRUD surface** over the ARIA tool API.
+- **The structured-result contract** — reading `structuredContent.results`
+  rows instead of the human-readable text, and hydrating bodies by id.
 - **Sample-data seeding** on first launch.
 
 ## The MOOT calls used
@@ -21,50 +20,34 @@ All calls go through one `MootBridge`, acquired from `GatewayRuntime.shared`.
 
 | App action | Tool | Arguments | Result handling |
 |---|---|---|---|
-| List / search notes | `moot_memory_search` | `query` (`"*"` or term), `limit` | **Parse** text lines `"<id>  [room]  <preview>"` into `Note` rows; filter to room `notes` |
+| List / search notes | `moot_memory_search` | `query` (`"*"` or term), `limit` | Collect the `id` of every structured result row |
+| Load note bodies | `moot_memory_get` | `ids` (from the search), `depth: "full"` | Build `Note` rows from `id`, `room`, `content`; filter to room `notes` |
 | New note | `moot_file_memory` | `content`, `location: "notes"` | Ignore returned text; `refresh()` to re-read |
-| Delete note | `moot_withdraw_memory` | `id` (drawer id from parse) | `refresh()` to re-read |
+| Delete note | `moot_withdraw_memory` | `id` (drawer id from the result row) | `refresh()` to re-read |
 | Toolbar summary | `moot_estate_status` | — | Show first line |
 
 Arguments are `JSONValue` (`import AriaMCP`): `.string(…)`, `.double(…)`.
 
-## The text-result edge (known SDK edge)
+## The structured-result contract
 
-The ARIA tool surface returns **text**, not structured drawers.
-`moot_memory_search` answers with:
+Every recall-family tool answers twice: a text block for people, and a
+`structuredContent` block the app reads. `IntentCallResult.structured` is
+that block, verbatim:
 
 ```
-found N memory(s)
-<id>  [room]  <preview>
-<id>  [room]  <preview>
+{ "results": [ { "id": "…", "room": "…", "subject": "…", "content": "…" }, … ] }
 ```
 
-`Note.parse(line:)` peels each row apart on the bracketed room token to recover
-`id`, `room`, and `preview`. Consequences for this example:
+Optional fields are absent, never null, when the tool has nothing to say.
+Consequences for this example:
 
-- The list shows the **preview**, not the verbatim full body. A production app
-  would call a structured "get drawer by id" tool for the full content; that
-  tool does not exist on the current surface, so the preview is what we show and
-  treat as the note text. Flagged in code with `// NOTE(integrate):`.
-- The header line (`found N memory(s)`) parses to `nil` and is dropped.
-
-A production app would prefer a **structured recall tool** returning real drawer
-objects. Until then, text parsing is the documented integration path.
-
-## App Intents
-
-The intent **types** are public in `MootGateway`. The app target ships an
-`AppShortcutsProvider` (`MootNotepadShortcuts`) — required for the metadata
-extractor to register them with the system.
-
-| Intent | Verb | Tool | Note |
-|---|---|---|---|
-| `CaptureDrawerIntent` | capture | `moot_file_memory` | Constructed with `location: "notes"` so voice captures land in the app's room |
-| `RecallDrawerIntent` | recall | `moot_memory_search` | Searches notes by query |
-
-Both reach the estate via `GatewayRuntime.shared.bridge()` — the same singleton
-the app configures at launch — so voice-captured notes appear in the UI list and
-vice versa. **One estate, two entry points.**
+- `moot_memory_search` rows are travel rows: `id`, `subject`, `room`, no
+  body. The list needs the body, so `refresh()` collects the ids and calls
+  `moot_memory_get` once with `ids:[…]` and `depth:"full"`, whose rows carry
+  `content` and `room`.
+- `Note.from(row:)` accepts only rows with a UUID `id` and a `content`; a
+  gated or opaque drawer has neither and is dropped.
+- The app never parses the text block.
 
 ## Estate location
 
@@ -82,8 +65,7 @@ reset and re-seed.
 | File | Role |
 |---|---|
 | `App/MootNotepadApp.swift` | `@main`; launch wiring (configure runtime, attach bridge, seed, refresh) |
-| `App/MootNotepadShortcuts.swift` | `AppShortcutsProvider`; the room constant |
-| `App/NotepadView.swift` | `Note` + parser, `NotepadModel` (all MOOT calls), `NotepadView` UI |
+| `App/NotepadView.swift` | `Note` + row decoder, `NotepadModel` (all MOOT calls), `NotepadView` UI |
 | `project.yml` | xcodegen spec; universal iOS + macOS app target |
 
 ## Concurrency
