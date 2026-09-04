@@ -532,7 +532,10 @@ fn run_distilled_representation_convergence() -> bool {
         &PlatformDaemon,
         || {
         let result = (|| -> Result<(usize, usize), String> {
-            let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
+            // Maintenance open: skips default-wing seeding so upgrade never
+            // creates content. Mirrors Swift's bare `GeniusLocusKit.open(storage:owner:)`
+            // which does not call `seedDefaultWings`.
+            let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
                 &estate.display().to_string(),
                 "aria-mcp-default",
             )?;
@@ -2349,17 +2352,18 @@ mod tests {
         use locus_kit::frames::CaptureFrame;
 
         const V22_CONVERTER_ID: &str = "intent-span@intent-span-v22-authority-closure";
-        // Wall-clock instants, as the command uses: the registry seeds the
-        // hint drawers at open under the wall clock, and the awaiting-reindex
-        // probe compares index rows against those `distilled_at` instants. A
-        // fixed past clock would leave every hint row awaiting forever.
+        // Wall-clock instants match what the command uses: the awaiting-reindex
+        // probe compares index rows against `distilled_at` instants. A fixed past
+        // clock would leave every row awaiting forever.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let tmpdir = tempfile::tempdir().expect("tempdir");
         let estate_path = tmpdir.path().join("estate.sqlite").display().to_string();
-        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(&estate_path, "aria-mcp-default")
+        // Use the maintenance open — same path as the production upgrade command.
+        // This avoids seeding default wings before the test captures the drawer count.
+        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(&estate_path, "aria-mcp-default")
             .expect("registry open");
         let handle = reg.default.handle.clone();
         let coord = reg.coord.lock().expect("coordinator lock");
@@ -2575,5 +2579,59 @@ mod tests {
         assert!(!super::NoDaemon.is_running());
         assert!(super::NoDaemon.stop());
         assert!(super::NoDaemon.start());
+    }
+
+    /// REAL-PATH gate: a fresh estate opened through `new_sqlite_for_maintenance`
+    /// (the path the upgrade command uses) must contain zero drawers — the
+    /// default wings must NOT be seeded at open. Upgrade is a migration vehicle;
+    /// it converges existing content and creates none.
+    ///
+    /// Mirrors the Swift invariant: `UpgradeCommand.runDistilledRepresentationConvergence`
+    /// opens through the bare `GeniusLocusKit.open(storage:owner:)` path, which
+    /// does not call `seedDefaultWings`.
+    #[test]
+    fn maintenance_open_creates_no_default_wings() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let estate_path = tmpdir.path().join("estate.sqlite").display().to_string();
+
+        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+            &estate_path,
+            "aria-mcp-default",
+        )
+        .expect("maintenance open");
+        let handle = reg.default.handle.clone();
+        let coord = reg.coord.lock().expect("coordinator lock");
+
+        let drawers = coord.all_drawers(&handle).expect("all_drawers");
+        assert_eq!(
+            drawers.len(),
+            0,
+            "maintenance open must create zero drawers; found {}: {:?}",
+            drawers.len(),
+            drawers.iter().map(|d| d.content.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Guard the boundary in the other direction: the regular `new_sqlite` open
+    /// (used by `serve`) still seeds the default wings. This test confirms that
+    /// fixing the upgrade path did not silently break the serve path.
+    #[test]
+    fn regular_open_seeds_default_wings() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let estate_path = tmpdir.path().join("estate.sqlite").display().to_string();
+
+        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite(
+            &estate_path,
+            "aria-mcp-default",
+        )
+        .expect("regular open");
+        let handle = reg.default.handle.clone();
+        let coord = reg.coord.lock().expect("coordinator lock");
+
+        let drawers = coord.all_drawers(&handle).expect("all_drawers");
+        assert!(
+            !drawers.is_empty(),
+            "regular (serve) open must seed default wings but found zero drawers"
+        );
     }
 }

@@ -17,7 +17,7 @@
 //!   (drawers, tunnels, kg_facts) and the CorpusKit/SynapseKit tables (chunks,
 //!   vectors) are disjoint namespaces — two handles on the same ephemeral store
 //!   is the in-memory equivalent of the SQLite two-handle pattern.
-//! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
+//! - **SQLite** (`new_sqlite`, `new_sqlite_for_maintenance`, `register_sqlite`): WAL-mode durable estate
 //!   at a caller-supplied filesystem path. Database file is created if absent.
 //!   **Semantic recall lanes (BM25 + vector) are wired** after `coord.open` by
 //!   registering a `Corpus` and borrowing its single dense `VectorStore`
@@ -130,6 +130,16 @@ pub struct EstateRegistry {
     /// so the shared dispatcher stamps the correct provenance for whichever
     /// binary is hosting it. Mirrors Swift `ToolDispatcher.serverIdentity`.
     pub server_identity: String,
+}
+
+/// Whether a SQLite open seeds the default wings and registers the default
+/// minter. `serve` and provisioning seed; `mootx01 upgrade` must not, because
+/// upgrade is a migration vehicle and creates no content (a user who deleted
+/// the default wings must not get them back from a migration).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqliteOpenSeeding {
+    SeedDefaults,
+    None,
 }
 
 impl EstateRegistry {
@@ -259,6 +269,36 @@ impl EstateRegistry {
     /// if the semantic-recall wiring (Corpus/VectorStore construction) fails.
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, SqliteOpenSeeding::SeedDefaults)
+    }
+
+    /// Open a SQLite estate for maintenance callers (e.g. `mootx01 upgrade`).
+    ///
+    /// Same open path as `new_sqlite` except that **default-wing seeding and default-minter
+    /// registration are skipped**. Upgrade is a migration vehicle: it converges what
+    /// already exists and must never create content. If a user deleted their default
+    /// wings, a maintenance open must not silently recreate them.
+    ///
+    /// Mirrors the shape of `UpgradeCommand.runDistilledRepresentationConvergence` in
+    /// Swift, which opens through the bare `GeniusLocusKit.open(storage:owner:)` path
+    /// (no `seedDefaultWings` call).
+    ///
+    /// Semantic recall lanes (BM25 + vector) are still wired so corpus operations
+    /// (`distill_items_sweep`, `reindex_corpus`) work correctly.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as `new_sqlite`.
+    pub fn new_sqlite_for_maintenance(path: &str, owner: &str) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, SqliteOpenSeeding::None)
+    }
+
+    /// Shared SQLite open path behind `new_sqlite` and `new_sqlite_for_maintenance`.
+    /// The two public entry points differ only in `seeding`; everything else
+    /// (geometry normalization, store open, estate-id read-back, coordinator
+    /// admission, semantic-recall wiring) is one implementation so the ports
+    /// cannot drift between the serve and upgrade opens.
+    fn open_sqlite(path: &str, owner: &str, seeding: SqliteOpenSeeding) -> Result<Self, String> {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         // Geometry normalization must precede the estate connection so VACUUM and
         // all maintenance paths receive a reserve-0 file. SQLCipher's `attachFunc`
@@ -324,11 +364,21 @@ impl EstateRegistry {
         })?;
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, path);
-        register_default_minter_non_fatal(store.as_ref(), path);
+        match seeding {
+            SqliteOpenSeeding::SeedDefaults => {
+                // Idempotently seed the seven default wings. Non-fatal: seeding
+                // failure logs and continues — the estate is open and functional.
+                // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
+                seed_wings_non_fatal(&coord, &handle, path);
+                register_default_minter_non_fatal(store.as_ref(), path);
+            }
+            SqliteOpenSeeding::None => {
+                // Maintenance callers (`mootx01 upgrade`) converge existing content
+                // and create none: no wings, no minter registration. Mirrors the
+                // Swift upgrade path, which opens through the bare
+                // `GeniusLocusKit.open(storage:owner:)` without `seedDefaultWings`.
+            }
+        }
 
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
