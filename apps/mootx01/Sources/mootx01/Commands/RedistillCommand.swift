@@ -19,6 +19,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 import PersistenceKitSQLite
 import MootInstallerCore
 
@@ -81,11 +82,22 @@ struct RedistillCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // MOOTX01_ESTATE_LIFETIME=ephemeral is the declared throwaway posture for
+        // test runs: the identity key stays in memory so no Keychain item is
+        // created. Mirrors ServeCommand's identical guard. The estate file is
+        // still written to disk (for content access) but is unrecoverable after
+        // this process exits.
+        let lifetimeIsEphemeral =
+            (environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                .lowercased() == "ephemeral"
+        let identityKeyStore: (any EstateIdentityKeyStore)? =
+            lifetimeIsEphemeral ? InMemoryEstateIdentityKeyStore() : nil
+
         let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
         let kit = GeniusLocusKit()
         let handle: EstateHandle
         do {
-            handle = try await kit.open(storage: storage, owner: owner)
+            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
             _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         } catch {
