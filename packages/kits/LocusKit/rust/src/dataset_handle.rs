@@ -123,7 +123,7 @@ impl DatasetHandleContent {
 ///
 /// Dataset handles carry no vector embedding — there is no content blob to
 /// embed. The sentinel satisfies `DrawerStore::add_drawer`'s non-empty
-/// validation while making the intent explicit. The VectorKit encode pipeline
+/// validation while making the intent explicit. The SynapseKit encode pipeline
 /// skips drawers whose model ID does not match a registered model.
 ///
 /// Mirrors Swift `datasetHandleEmbeddingModelID` in `DatasetHandle.swift`.

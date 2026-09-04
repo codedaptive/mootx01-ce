@@ -49,7 +49,7 @@ import CorpusKitProviders
 import EngramLib
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 
 @Suite("BasisPersistence", .serialized)
 struct BasisPersistenceTests {

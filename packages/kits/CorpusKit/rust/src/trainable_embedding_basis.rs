@@ -2,10 +2,10 @@
 //! embedding provider be trained on a corpus and serialized to (and
 //! reconstructed from) a basis blob, without a layering inversion.
 //!
-//! ## Why this trait lives in core `corpus-kit` (not `vectorkit`)
+//! ## Why this trait lives in core `corpus-kit` (not `synapsekit`)
 //!
 //! Training-on-corpus is a corpus-kit concern, not a generic embedding
-//! concern. `vectorkit::EmbeddingProvider` is the universal embed surface; it
+//! concern. `synapsekit::EmbeddingProvider` is the universal embed surface; it
 //! must stay narrow so a future pre-trained encoder can conform WITHOUT being
 //! forced to declare a training method it cannot honour. `TrainableEmbeddingBasis`
 //! is the opt-in capability for the distributional providers (RI/PPMI/LSA/NMF)
@@ -40,7 +40,7 @@
 //! Swift port: packages/kits/CorpusKit/Sources/CorpusKit/TrainableEmbeddingBasis.swift
 
 use crate::error::CorpusKitError;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.

@@ -19,7 +19,7 @@ use persistence_kit::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use vectorkit::{VectorRepresentationClaims, VectorRepresentationKey};
+use synapsekit::{VectorRepresentationClaims, VectorRepresentationKey};
 
 const NOW: i64 = 1_700_000_000_000;
 
