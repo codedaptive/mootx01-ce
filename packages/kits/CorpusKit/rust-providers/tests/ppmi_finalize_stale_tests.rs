@@ -10,7 +10,7 @@
 //! That is the post-reset expected result for every term.
 
 use corpus_kit_providers::PpmiProvider;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 /// Returns a serialised empty-counts blob that decodes cleanly through
 /// `restore_counts`, matching the real production path (countsRestore

@@ -29,7 +29,7 @@ use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
 use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationState};
-use vectorkit::engine::metric::FloatMetric;
+use synapsekit::engine::metric::FloatMetric;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;

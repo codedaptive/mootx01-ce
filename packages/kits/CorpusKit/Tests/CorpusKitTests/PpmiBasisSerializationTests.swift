@@ -13,7 +13,7 @@ import Foundation
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 private let ppmiBasisCorpus: [[String]] = [
     ["car", "engine", "drive", "road", "vehicle"],

@@ -55,7 +55,7 @@
 
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import SubstrateML
 
 /// A `contradicts` tunnel the hunter proposed this pass.

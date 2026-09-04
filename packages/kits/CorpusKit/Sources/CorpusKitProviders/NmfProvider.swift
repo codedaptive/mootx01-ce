@@ -86,7 +86,7 @@ import SubstrateKernel
 // SubstrateML: NMFAlternatingLeastSquares (reused, deterministic via
 // tolerance=0), FloatSimHash.project (canonical projection to Engram).
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -150,7 +150,7 @@ public let nmfFactorizationSeed: UInt64 = 0xDEADBEEFCAFEBABE
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`.
+/// Conforms to `SynapseKit.EmbeddingProvider`.
 /// modelID = "nmf-v1", modelVersion = "1.1.0".
 /// Projection seed = `nmfProjectionSeed`.
 ///
@@ -339,7 +339,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// Returns `[]` when finalize() has not been called (no basis).
     ///
-    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// Throws `SynapseKitError.embedFloatVocabMiss` when the provider HAS a
     /// finalized basis and non-empty vocabulary, but all query tokens are
     /// OOV — distinguishing a vocabulary coverage gap from a structural
     /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
@@ -353,7 +353,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         // basis is trained but none of the query tokens hit the reduced vocab.
         let hasInVocab = terms.contains { basisVocab[$0] != nil }
         guard hasInVocab else {
-            throw VectorKitError.embedFloatVocabMiss(
+            throw SynapseKitError.embedFloatVocabMiss(
                 "nmf: reduced vocab size \(basisVocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }

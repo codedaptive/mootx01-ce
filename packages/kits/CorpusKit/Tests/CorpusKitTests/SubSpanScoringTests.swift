@@ -38,7 +38,7 @@ import PersistenceKit
 @testable import PersistenceKitSQLite
 @testable import CorpusKit
 import CorpusKitProviders
-import VectorKit
+import SynapseKit
 import EngramLib
 
 // MARK: - Shared constant
@@ -68,7 +68,7 @@ private struct FirstTokenRoutingProvider: EmbeddingProvider, @unchecked Sendable
 
     /// Not exercised by SubSpanScoring — stub satisfies protocol requirement.
     func embed(_ text: String) async throws -> Engram {
-        throw VectorKitError.embeddingFailed(
+        throw SynapseKitError.embeddingFailed(
             "FirstTokenRoutingProvider: embed() not needed for sub-span tests")
     }
 
@@ -89,12 +89,12 @@ private struct ThrowingFloatProvider: EmbeddingProvider, @unchecked Sendable {
     let modelVersion = "1.0.0"
 
     func embed(_ text: String) async throws -> Engram {
-        throw VectorKitError.embeddingFailed(
+        throw SynapseKitError.embeddingFailed(
             "ThrowingFloatProvider: embed() not used in sub-span tests")
     }
 
     func embedFloat(_ text: String) async throws -> [Float] {
-        throw VectorKitError.embeddingFailed(
+        throw SynapseKitError.embeddingFailed(
             "ThrowingFloatProvider: no float lane — embedFloat always throws")
     }
 }

@@ -32,7 +32,7 @@ import CorpusKit
 import CorpusKitProviders
 import EngramLib
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 @Suite("EmbeddingProviderConformance")
 struct EmbeddingProviderConformanceTests {

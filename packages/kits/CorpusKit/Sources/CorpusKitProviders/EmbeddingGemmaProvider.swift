@@ -8,14 +8,14 @@
 // lands in the v1.1 model-bundle mission
 
 //
-// Conforms to VectorKit.EmbeddingProvider. The stored tokenizer
+// Conforms to SynapseKit.EmbeddingProvider. The stored tokenizer
 // property is public, matching the initializer's public injection seam.
 
 import Foundation
 import SubstrateTypes
 import EngramLib
 import CorpusKit
-import VectorKit
+import SynapseKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //

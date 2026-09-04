@@ -27,7 +27,7 @@
 //
 // Dependencies are listed as repo-relative package paths because every kit in
 // this repository is published the same way (see packages/kits/AriaMcpKit/Package.swift).
-// QueueKit, VectorKit, CorpusKit are transitive through GeniusLocusKit and
+// QueueKit, SynapseKit, CorpusKit are transitive through GeniusLocusKit and
 // are intentionally NOT listed here; adding them would only create
 // version-resolution noise.
 //

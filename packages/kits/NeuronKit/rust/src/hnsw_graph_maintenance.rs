@@ -5,7 +5,7 @@
 // aligned with the current vector corpus across THETA and BETA cycles.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
-// HNSWIndex (VectorKit) is an approximate nearest-neighbour index for the
+// HNSWIndex (SynapseKit) is an approximate nearest-neighbour index for the
 // float lane (Lane D). It activates at/above a configurable threshold
 // (default 5 000 vectors per modelID partition). Two dreaming cadences
 // have maintenance duties over this graph (THETA and BETA); ALPHA manages
@@ -34,7 +34,7 @@
 //
 // ── Seam idiom ───────────────────────────────────────────────────────────
 // Mirrors the `ThetaBasisRetrainHook` injection pattern: the trait is pure
-// (no VectorKit import in the daemon itself), the production adapter holds
+// (no SynapseKit import in the daemon itself), the production adapter holds
 // a VectorStore reference and delegates to its public HNSW maintenance
 // surface. `DreamingDaemon`'s `_with_hnsw` method variants accept an
 // `Option<&mut M>` so passing `None` safely disables all HNSW duties for

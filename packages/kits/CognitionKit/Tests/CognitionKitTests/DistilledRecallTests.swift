@@ -24,7 +24,7 @@ import EngramLib
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
-import VectorKit
+import SynapseKit
 import SubstrateML
 import PersistenceKit
 import PersistenceKitInMemory

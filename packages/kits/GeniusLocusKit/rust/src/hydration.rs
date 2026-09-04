@@ -7,7 +7,7 @@
 // HYDRATE SEQUENCE (authoritative, from REPLICATION_GROUND_TRUTH.md §7):
 //
 //   1. Schema open    — open both in_memory and durable with the composite
-//                       GLK schema (LocusKit + VectorKit + CorpusKit + grants).
+//                       GLK schema (LocusKit + SynapseKit + CorpusKit + grants).
 //                       This advances both storages to the composite version so
 //                       the replication schema gate (global version check) passes.
 //   2. Row snapshot   — replication::hydrate copies all schema-declared
@@ -128,14 +128,14 @@ use uuid::Uuid;
 /// tables at once.
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
-    let vk = vectorkit::VectorStore::schema_declaration();
+    let vk = synapsekit::VectorStore::schema_declaration();
     // Shared-content 1.1: the composite carries the CorpusKit ATTACHED
-    // profile (derived state only, Drawer-ID keyed) plus the VectorKit
+    // profile (derived state only, Drawer-ID keyed) plus the SynapseKit
     // representation-claims ledger — NO canonical content table. The legacy
     // BundleStore chunks/corpus_metadata copy lane is gone from fresh
     // estates and retired by the shared-content migration on existing ones.
     let ck = corpus_kit::attached_declaration();
-    let claims = vectorkit::VectorRepresentationClaims::schema_declaration();
+    let claims = synapsekit::VectorRepresentationClaims::schema_declaration();
     let estate_format = crate::estate_format::EstateFormatStore::schema_declaration();
 
     // Composite version = sum of the three GLK-composed component versions
@@ -208,8 +208,8 @@ mod composite_version_tests {
     #[test]
     fn composite_version_equals_component_sum() {
         let lk = locus_kit::schema::SCHEMA_VERSION;
-        let vk = vectorkit::VectorStore::schema_declaration().version;
-        let claims = vectorkit::VectorRepresentationClaims::schema_declaration().version;
+        let vk = synapsekit::VectorStore::schema_declaration().version;
+        let claims = synapsekit::VectorRepresentationClaims::schema_declaration().version;
         let ck = corpus_kit::attached_declaration().version;
         let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();

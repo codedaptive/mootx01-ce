@@ -19,7 +19,7 @@ import EngramLib
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import GeniusLocusKit
 
 @Suite("findNearestDistilled capability")

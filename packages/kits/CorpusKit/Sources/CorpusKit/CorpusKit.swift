@@ -5,11 +5,11 @@
 // The actor composes BundleStore (chunk persistence), InvertedIndexStore
 // (durable SQLite-backed BM25 keyword recall), VectorStore (vector kNN),
 // and an EmbeddingProvider (text → engram) behind a sealed surface.
-// Callers see only documents and queries — no VectorKit type is exposed
+// Callers see only documents and queries — no SynapseKit type is exposed
 // on the public API.
 //
 // EmbeddingModel is a CorpusKit-owned enum so the host can select an
-// embedding model without importing VectorKit or naming EmbeddingProvider.
+// embedding model without importing SynapseKit or naming EmbeddingProvider.
 // The deterministic default requires no CoreML model bundle; the named
 // model cases (miniLM, mpNet, embeddingGemma) accept a host-supplied
 // inference closure and handle tokenization + projection internally.
@@ -32,7 +32,7 @@ import QueueKit
 import SubstrateLib
 import SubstrateML
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // MARK: - FloatLaneOutcome
 
@@ -57,7 +57,7 @@ public enum FloatLaneOutcome: Sendable {
 
     /// Provider opted out of the float lane — expected, not an error.
     ///
-    /// The configured `EmbeddingProvider` threw `VectorKitError.embeddingFailed`
+    /// The configured `EmbeddingProvider` threw `SynapseKitError.embeddingFailed`
     /// on the embed call, indicating it has no float lane at all (structural
     /// opt-out). This is the normal outcome for the default `.deterministic`
     /// provider and for any provider that does not override `embedFloat`. The
@@ -156,7 +156,7 @@ private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKi
 
 /// Selects the embedding model the Corpus actor uses internally.
 ///
-/// The caller names a CorpusKit case; no VectorKit type is required
+/// The caller names a CorpusKit case; no SynapseKit type is required
 /// at the call site.
 ///
 /// `.deterministic` is the permanent, federation-grade vector provider
@@ -416,7 +416,7 @@ public enum EmbeddingModel: Sendable {
 ///
 /// Corpus composes BundleStore, InvertedIndexStore, VectorStore, and one OR MORE
 /// EmbeddingProviders internally. The public surface exposes only
-/// `ingest`, `recall`, `remove`, and `count`. No VectorKit type
+/// `ingest`, `recall`, `remove`, and `count`. No SynapseKit type
 /// appears in any public signature — the sealed-vector principle is
 /// enforced here, not by the caller.
 ///
@@ -2572,14 +2572,14 @@ public actor Corpus {
     /// `.deterministic` provider DOES implement `embedFloat` (FNV-1a + FloatSimHash),
     /// so Lane D is live from the first capture under the default. Providers that
     /// choose not to produce a dense float vector throw
-    /// `VectorKitError.embeddingFailed`; the caller treats a throw as "this
+    /// `SynapseKitError.embeddingFailed`; the caller treats a throw as "this
     /// corpus has no float lane" and skips the dense lane rather than failing
     /// the whole recall. Empty input returns `[]` (no dense direction for the
     /// empty string), matching the storage-side contract in `ingest`.
     ///
     /// - Parameter text: the query text to embed.
     /// - Returns: the pooled float vector, or `[]` for empty input.
-    /// - Throws: `VectorKitError.embeddingFailed` when the provider opts out.
+    /// - Throws: `SynapseKitError.embeddingFailed` when the provider opts out.
     public func embedFloat(_ text: String) async throws -> [Float] {
         // Single-signal entry point: embeds on the DEFAULT signal.
         try await defaultProvider.embedFloat(text)
@@ -2676,7 +2676,7 @@ public actor Corpus {
         //   2. Result is empty ([] from an untrained provider, or text that
         //      tokenises to nothing) → structural opt-out. Emit the
         //      dark_provider counter and return .unavailableProviderOptOut.
-        //   3. Throw VectorKitError.embedFloatVocabMiss → the provider HAS a
+        //   3. Throw SynapseKitError.embedFloatVocabMiss → the provider HAS a
         //      trained basis but all query tokens are OOV. This is a vocabulary
         //      coverage miss, not a structural opt-out. Return
         //      .unavailableNoVocabHit with its own counter so callers observe
@@ -2702,7 +2702,7 @@ public actor Corpus {
                 return .unavailableProviderOptOut
             }
             probe = result
-        } catch VectorKitError.embedFloatVocabMiss {
+        } catch SynapseKitError.embedFloatVocabMiss {
             // Trained distributional provider: basis exists but query tokens
             // are all OOV. This is a vocabulary coverage miss — truthfully
             // distinct from a structural opt-out. Emit a separate counter

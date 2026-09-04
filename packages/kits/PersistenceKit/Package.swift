@@ -7,7 +7,7 @@
 // swappable backends (SQLite, PostgreSQL, InMemory for tests).
 //
 // PersistenceKit owns no vector-search engine. Dense-embedding k-NN
-// lives solely in VectorKit (VectorKit-owned vector search persistencekit-vector-contract-
+// lives solely in SynapseKit (SynapseKit-owned vector search persistencekit-vector-contract-
 // correction). Every backend instead guarantees the ACCOMMODATION
 // contract: it accommodates vector workloads' storage needs (vector-
 // payload round-trip, bulk hydration, count, delete) through the

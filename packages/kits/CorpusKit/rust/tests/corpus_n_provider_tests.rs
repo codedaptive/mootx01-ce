@@ -119,7 +119,7 @@ struct NPerSignalFixture {
 /// matching the Swift `encodeOutcome`. The cross-port contract is RANK IDENTITY
 /// (outcome kind + ranked itemID order); raw cosine similarity is NOT compared —
 /// the float lane is reproducible-within-config, not four-way bit-identical
-/// (arch spec §6 / VECTORKIT_SPEC), so cosine accumulation/FMA differences
+/// (arch spec §6 / SYNAPSEKIT_SPEC), so cosine accumulation/FMA differences
 /// perturb the low float bits without changing the rank order.
 fn encode_outcome(outcome: &FloatLaneOutcome) -> (String, Vec<String>) {
     match outcome {

@@ -133,7 +133,7 @@ pub fn distilled_token_count(representation: &str) -> i64 {
 
 // MARK: - Distillation lane constants
 
-/// VectorKit model ID for the structural fingerprint distillation lane
+/// SynapseKit model ID for the structural fingerprint distillation lane
 /// (§8). Keyed by the SOURCE drawer id; the no-inference Hamming NN
 /// structure is the Phase 2 consolidation cluster-detection substrate.
 /// No Phase 1 recall route consumes it.

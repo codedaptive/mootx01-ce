@@ -11,7 +11,7 @@ import Testing
 import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 
 @testable import CorpusKit
 
@@ -38,7 +38,7 @@ struct LegacyCorpusFixtureTests {
         #expect(legacy != current)
 
         // The distinguishing marks the detector keys on:
-        // v3 BundleStore added content_hash + corpus_metadata; VectorKit v4
+        // v3 BundleStore added content_hash + corpus_metadata; SynapseKit v4
         // added the filed_at index.
         #expect(!legacy.contains("col=content_hash"))
         #expect(current.contains("col=content_hash"))

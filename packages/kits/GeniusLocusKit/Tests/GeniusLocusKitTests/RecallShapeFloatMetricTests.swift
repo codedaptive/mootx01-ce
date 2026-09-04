@@ -27,7 +27,7 @@ import Testing
 import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 @testable import GeniusLocusKit
 
 // MARK: - Scratch storage (SQLite, same as FloatLaneStoreTests)

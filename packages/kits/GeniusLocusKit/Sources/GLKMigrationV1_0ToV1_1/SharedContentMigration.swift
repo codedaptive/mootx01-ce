@@ -32,7 +32,7 @@ import GeniusLocusKit
 import LocusKit
 import OSLog
 import PersistenceKit
-import VectorKit
+import SynapseKit
 
 private let migrationLog = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 
@@ -1026,7 +1026,7 @@ public extension GeniusLocusKit {
     private func protectedVectorsFold(
         storage: any Storage, legacyVectorKeys: Set<String>
     ) async throws -> String {
-        // Pin the DECLARED VectorKit schema before reading (P6 scale
+        // Pin the DECLARED SynapseKit schema before reading (P6 scale
         // finding): row decode forms depend on the connection's accumulated
         // schema view, and the baseline capture runs BEFORE any engine has
         // declared the vectors schema while verification runs AFTER — same

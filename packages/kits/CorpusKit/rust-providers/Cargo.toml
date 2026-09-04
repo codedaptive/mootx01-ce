@@ -3,7 +3,7 @@ name = "corpus-kit-providers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Rust port of Swift's CorpusKitProviders target: concrete vectorkit::EmbeddingProvider and Tokenizer implementations. Ships the named text providers (MiniLM, mpnet, EmbeddingGemma) over a host-supplied inference seam plus the DeterministicTokenizer fallback. No model weights or ML-runtime crates are bundled; the host injects the inference pass on every platform (CoreML on Apple, host-chosen runtime on Windows/Linux)."
+description = "Rust port of Swift's CorpusKitProviders target: concrete synapsekit::EmbeddingProvider and Tokenizer implementations. Ships the named text providers (MiniLM, mpnet, EmbeddingGemma) over a host-supplied inference seam plus the DeterministicTokenizer fallback. No model weights or ML-runtime crates are bundled; the host injects the inference pass on every platform (CoreML on Apple, host-chosen runtime on Windows/Linux)."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -23,13 +23,13 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # is downstream of substrate-kernel — no inversion.
 # Repository-owned dependencies use local package paths.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
-# B2-5: the named text providers conform to vectorkit::EmbeddingProvider
+# B2-5: the named text providers conform to synapsekit::EmbeddingProvider
 # and project pooled vectors through substrate_ml::float_simhash::project
 # (the conformance-gated, bit-identical Swift/Rust SimHash). engram-lib
 # supplies the Engram type the providers return. These mirror the deps
-# Swift's CorpusKitProviders target carries (VectorKit, SubstrateML,
+# Swift's CorpusKitProviders target carries (SynapseKit, SubstrateML,
 # EngramLib); the seam shape is identical across ports.
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 # FDCProvider: text → FDC code via lattice-lib's Fdc::encode (the Rust port

@@ -21,7 +21,7 @@
 //   6. Write exactly one cycle diary entry.
 //
 // ── Why this daemon talks to seams, not to GLK verbs ─────────────────
-// B-1: NeuronKit never executes SQL and never calls LocusKit / VectorKit
+// B-1: NeuronKit never executes SQL and never calls LocusKit / SynapseKit
 // / CorpusKit directly. Even with `propose` now live (Brain layer landed
 // in GLK-02), no estate verb reads drawers, reads a `UnifiedAuditLog`,
 // or writes a `DiaryEntry`. So the daemon depends on the NeuronKit-owned

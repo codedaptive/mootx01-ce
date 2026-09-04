@@ -78,7 +78,7 @@ import Foundation
 import CorpusKit
 import EngramLib
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

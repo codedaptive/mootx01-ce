@@ -4,7 +4,7 @@
 // Intellectus global singleton (enabled flag + installed sink).
 //
 // Copied verbatim from SubstrateML's GlobalTestLock.swift (itself copied
-// from VectorKit's) as the canonical pattern. Any change here must be
+// from SynapseKit's) as the canonical pattern. Any change here must be
 // mirrored there and in any other kit that copies this pattern.
 //
 // Background:

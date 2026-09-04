@@ -2,7 +2,7 @@
 //!
 //! Mirrors Swift's `Corpus` actor. Composes `BundleStore`,
 //! `InvertedIndexStore` (SQLite-backed BM25 keyword recall), `VectorStore`,
-//! and an `EmbeddingProvider` internally; no VectorKit type appears in
+//! and an `EmbeddingProvider` internally; no SynapseKit type appears in
 //! the public API. Callers see documents and queries only.
 //!
 //! Concurrency: `InvertedIndexStore` wraps its own internal `Mutex<State>`;
@@ -41,12 +41,12 @@ use intellectus_lib::{report, StatSample};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use substrate_ml::float_simhash;
-use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
-use vectorkit::vector_store::{VectorPayloadInput, VectorStore};
-use vectorkit::EmbeddingProvider;
-use vectorkit::SearchDirection;
-use vectorkit::VectorKitError;
-use vectorkit::VectorPayload;
+use synapsekit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
+use synapsekit::vector_store::{VectorPayloadInput, VectorStore};
+use synapsekit::EmbeddingProvider;
+use synapsekit::SearchDirection;
+use synapsekit::SynapseKitError;
+use synapsekit::VectorPayload;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -630,7 +630,7 @@ pub(crate) struct CountsState {
 ///
 /// Rust mirror of Swift's `Corpus` actor. Composes `BundleStore`,
 /// `InvertedIndexStore` (SQLite-backed BM25), `VectorStore`, and an
-/// `EmbeddingProvider` internally. No VectorKit type appears in any
+/// `EmbeddingProvider` internally. No SynapseKit type appears in any
 /// public method signature.
 ///
 /// Lifecycle: construct via `Corpus::open`, then call `ingest` to add
@@ -3187,7 +3187,7 @@ impl Corpus {
                 ));
                 return FloatLaneOutcome::UnavailableProviderOptOut;
             }
-            Err(VectorKitError::EmbedFloatVocabMiss(_)) => {
+            Err(SynapseKitError::EmbedFloatVocabMiss(_)) => {
                 // Trained distributional provider: all query tokens were OOV.
                 // Truthful relabel: the provider HAS a basis but none of the
                 // query terms are in it — this is vocabMiss, not providerOptOut.
@@ -3232,13 +3232,13 @@ impl Corpus {
                 &probe,
                 &slot.model_id,
                 limit.saturating_mul(4),
-                vectorkit::engine::metric::FloatMetric::Cosine,
+                synapsekit::engine::metric::FloatMetric::Cosine,
             ),
             SearchDirection::Farthest => self.vector_store.find_farthest_float(
                 &probe,
                 &slot.model_id,
                 limit.saturating_mul(4),
-                vectorkit::engine::metric::FloatMetric::Cosine,
+                synapsekit::engine::metric::FloatMetric::Cosine,
             ),
         };
         let matches = match store_result {
@@ -3979,13 +3979,13 @@ impl EmbeddingProvider for CorpusTextProvider {
     fn model_version(&self) -> &str {
         &self.model_version
     }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         // Empty-input contract: Engram::ZERO without touching the seam.
         if text.is_empty() {
             return Ok(Engram::ZERO);
         }
         let tokens = self.tokenize(text);
-        let pooled = (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+        let pooled = (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
         Ok(float_simhash::project(&pooled, self.projection_seed))
     }
 
@@ -3993,12 +3993,12 @@ impl EmbeddingProvider for CorpusTextProvider {
     /// returned unprojected. This is the production float-lane path for
     /// the named models; without it they would have NO float lane (the
     /// trait default opts out by erroring). Empty input returns `vec![]`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         if text.is_empty() {
             return Ok(Vec::new());
         }
         let tokens = self.tokenize(text);
-        (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)
+        (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)
     }
 
     /// Single-inference override: `embed` and `embed_float` both tokenize and
@@ -4009,12 +4009,12 @@ impl EmbeddingProvider for CorpusTextProvider {
     /// halving inference cost on the capture/reembed path. Output is identical
     /// to calling `embed` and `embed_float` separately: empty input opts out of
     /// the float lane (`vec![]`) and yields `Engram::ZERO`, matching both.
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         if text.is_empty() {
             return Ok((Engram::ZERO, Vec::new()));
         }
         let tokens = self.tokenize(text);
-        let pooled = (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+        let pooled = (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
         Ok((float_simhash::project(&pooled, self.projection_seed), pooled))
     }
 }

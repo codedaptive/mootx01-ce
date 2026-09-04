@@ -35,7 +35,7 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 

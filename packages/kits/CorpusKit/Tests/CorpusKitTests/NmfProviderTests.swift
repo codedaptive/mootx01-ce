@@ -27,7 +27,7 @@ import CorpusKit
 import CorpusKitProviders
 import EngramLib
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // MARK: - Canonical corpus fixture
 
@@ -86,7 +86,7 @@ struct NmfProviderTests {
         do {
             let v = try await p.embedFloat("xyz999 qqq111")
             Issue.record("expected embedFloatVocabMiss throw for all-OOV query; got \(v)")
-        } catch VectorKitError.embedFloatVocabMiss {
+        } catch SynapseKitError.embedFloatVocabMiss {
             // Expected — trained provider + all-OOV query → vocabMiss.
         } catch {
             Issue.record("expected embedFloatVocabMiss but got unexpected error: \(error)")

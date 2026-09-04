@@ -1,6 +1,6 @@
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 
 /// Registration helper for the thirteen standing signals — architecture
 /// spec §11.2 plus the contradiction scout (signal 10, the hunter's

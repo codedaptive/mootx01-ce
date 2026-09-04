@@ -23,7 +23,7 @@
 //! GLOBAL_LOCK for their entire duration. This prevents interleaving
 //! between concurrent tests that would corrupt exact-count assertions.
 //!
-//! Pattern mirrors packages/kits/VectorKit/rust/tests/vectorkit_telemetry_tests.rs.
+//! Pattern mirrors packages/kits/SynapseKit/rust/tests/synapsekit_telemetry_tests.rs.
 //!
 //! For enabled-path count assertions, each test creates a fresh store
 //! with a unique estate UUID. Metrics are filtered by `estate` tag to

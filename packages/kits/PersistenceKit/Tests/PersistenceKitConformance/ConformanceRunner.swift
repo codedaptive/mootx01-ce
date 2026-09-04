@@ -409,7 +409,7 @@ public struct ConformanceRunner {
 
     // MARK: - Vector accommodation schema
 
-    /// Schema that mirrors how VectorKit stores embeddings on a backend: a
+    /// Schema that mirrors how SynapseKit stores embeddings on a backend: a
     /// keyed row carrying an opaque binary vector payload (`payload_binary`,
     /// e.g. a 32-byte packed Engram/fingerprint) and a float32 payload
     /// (`payload_float32`, e.g. a 384-d MiniLM embedding serialized to bytes).
@@ -437,9 +437,9 @@ public struct ConformanceRunner {
 
     // MARK: - Vector accommodation fixtures
 
-    /// The vector-storage accommodation guarantee (VectorKit-owned vector search / PERSISTENCEKIT_SPEC
+    /// The vector-storage accommodation guarantee (SynapseKit-owned vector search / PERSISTENCEKIT_SPEC
     /// "Vector accommodation contract"). PersistenceKit does NOT own a k-NN
-    /// engine; dense-embedding search lives in VectorKit. What every backend
+    /// engine; dense-embedding search lives in SynapseKit. What every backend
     /// MUST guarantee is that it accommodates a vector workload's STORAGE needs:
     ///   1. vector-payload row round-trip — a 32-byte binary payload and a
     ///      384-d float32 payload survive insert→query byte-for-byte;

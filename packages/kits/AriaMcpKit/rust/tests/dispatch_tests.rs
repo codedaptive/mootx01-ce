@@ -1267,7 +1267,7 @@ fn memory_search_missing_query_returns_invalid_params() {
 //   3. The tool succeeds with the default scoring (no arg).
 //   4. The result text includes a score value in the expected format.
 //
-// Without CorpusKit/VectorKit registration (the test estate is locus-only),
+// Without CorpusKit/SynapseKit registration (the test estate is locus-only),
 // all three paths fall back to rank-normalised locus scoring, producing
 // valid results. The score value is present in the output text, proving the
 // recall_scored path ran (plain recall + substring did not emit scores).

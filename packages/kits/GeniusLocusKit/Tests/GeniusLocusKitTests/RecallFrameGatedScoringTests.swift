@@ -26,7 +26,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 

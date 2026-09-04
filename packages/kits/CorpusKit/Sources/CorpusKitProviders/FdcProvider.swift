@@ -78,7 +78,7 @@ import LatticeLib
 import SubstrateKernel
 import SubstrateML
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -227,7 +227,7 @@ func fdcEmbeddingVector(text: String) -> [Float]? {
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`. modelID = "fdc-v1",
+/// Conforms to `SynapseKit.EmbeddingProvider`. modelID = "fdc-v1",
 /// modelVersion = "1.0.0". Projection seed = `fdcProjectionSeed`.
 ///
 /// ## Float lane

@@ -16,7 +16,7 @@ use locus_kit::{
 };
 use persistence_kit::inmemory::InMemoryStorage;
 use substrate_types::Fingerprint256;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 

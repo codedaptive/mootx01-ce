@@ -6,7 +6,7 @@
 //
 // ── Why the daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
-// LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
+// LocusKit / SynapseKit / CorpusKit directly; the estate handle is the only
 // write surface. The seam protocols decouple the daemon from the GLK surface
 // so the daemon can be constructed, tested, and reasoned about without a live
 // estate. The production adapters (`EstateMaintenanceSink`,

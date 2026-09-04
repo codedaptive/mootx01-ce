@@ -15,7 +15,7 @@
 import Testing
 import Foundation
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory

@@ -20,7 +20,7 @@
 
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 
 // MARK: - Report
@@ -260,7 +260,7 @@ public extension GeniusLocusKit {
     /// has no stochastic steps. Probe order is `ORDER BY filed_at DESC, item_id ASC`
     /// from `VectorStore.recentItemIDs(limit:)` — a total order (no tied sort
     /// keys survive: filed_at ties break on item_id). `findNearest` returns
-    /// `(distance ASC, vecHash ASC, itemID ASC)` — VECTORKIT_SPEC 1.9.0's
+    /// `(distance ASC, vecHash ASC, itemID ASC)` — SYNAPSEKIT_SPEC 1.9.0's
     /// content-stable total order, so the k-cut keeps the SAME neighbours
     /// across independent provisionings of the same content (a UUID-only
     /// tie-break varied per estate build and made the association graph —

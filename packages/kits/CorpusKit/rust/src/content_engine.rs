@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex};
 pub type ContentOnEncoded = Box<dyn Fn(&[String], &str) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
-use vectorkit::{
+use synapsekit::{
     engine::metric::FloatMetric,
     EmbeddingProvider, VectorExactKey, VectorPayload, VectorPayloadInput,
     VectorRepresentationClaims, VectorRepresentationKey, VectorStore,
@@ -988,7 +988,7 @@ impl CorpusContentEngine {
                         continue;
                     }
                     Ok(v) => v,
-                    Err(vectorkit::VectorKitError::EmbedFloatVocabMiss(_)) => {
+                    Err(synapsekit::SynapseKitError::EmbedFloatVocabMiss(_)) => {
                         emit_engine_metric("corpus.float_lane.dark_vocab_miss", 1.0);
                         results.push((model_id, FloatLaneOutcome::UnavailableNoVocabHit));
                         continue;
@@ -1484,7 +1484,7 @@ impl CorpusContentEngine {
                     .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let providers: Vec<&dyn vectorkit::EmbeddingProvider> =
+        let providers: Vec<&dyn synapsekit::EmbeddingProvider> =
             guards.iter().map(|guard| guard.provider()).collect();
         let metadata: Vec<(String, String, String, bool)> = selected
             .iter()
@@ -3714,7 +3714,7 @@ impl CorpusContentEngine {
                 let (model_id, model_version, trainable): (String, String, bool) = match config {
                     EmbeddingModelConfig::Deterministic => {
                         let p = crate::corpus::make_deterministic_provider();
-                        let pref = &p as &dyn vectorkit::EmbeddingProvider;
+                        let pref = &p as &dyn synapsekit::EmbeddingProvider;
                         (
                             pref.model_id().to_string(),
                             pref.model_version().to_string(),

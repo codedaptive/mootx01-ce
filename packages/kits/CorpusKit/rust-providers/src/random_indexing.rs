@@ -15,7 +15,7 @@
 //! meaning, not surface form, satisfying honest semantic fusion D-1's honesty
 //! requirement: the dense lane must not lie about what it computes.
 //!
-//! The provider conforms to `vectorkit::EmbeddingProvider`:
+//! The provider conforms to `synapsekit::EmbeddingProvider`:
 //!   `embed_float(_)` → the D-dimensional normalised context vector
 //!   `embed(_)`       → `float_simhash::project` of that vector (Engram)
 //!
@@ -72,7 +72,7 @@ use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
 use substrate_ml::random_walks::SplitMix64;
 use substrate_types::fnv;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // MARK: - Constants
 //
@@ -157,7 +157,7 @@ pub fn ri_index_vector(term: &str) -> Vec<f32> {
 ///
 /// ## Conformance
 ///
-/// Conforms to `vectorkit::EmbeddingProvider`. `model_id = "random-indexing-v1"`,
+/// Conforms to `synapsekit::EmbeddingProvider`. `model_id = "random-indexing-v1"`,
 /// `model_version = "1.1.0"`. Projection seed = `RI_PROJECTION_SEED`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional provider
@@ -468,7 +468,7 @@ impl EmbeddingProvider for RandomIndexingProvider {
     /// Computes the normalised D-dimensional context vector and projects
     /// it through `float_simhash::project` to produce the 256-bit Engram.
     /// Empty input returns `Engram::ZERO` (EmbeddingProvider contract).
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         match self.context_vector(text) {
             None => Ok(Engram::ZERO),
             Some(v) => Ok(float_simhash::project(&v, self.projection_seed)),
@@ -481,10 +481,10 @@ impl EmbeddingProvider for RandomIndexingProvider {
     ///   opt-out, no basis exists yet.
     /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
     /// - Trained provider, all query tokens OOV: returns
-    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   `Err(SynapseKitError::EmbedFloatVocabMiss(...))` so the corpus layer
     ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit` rather than the
     ///   misleading `UnavailableProviderOptOut`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         // Untrained provider: return [] (structural opt-out, not vocabMiss).
         if self.vocab.is_empty() {
             return Ok(vec![]);
@@ -502,7 +502,7 @@ impl EmbeddingProvider for RandomIndexingProvider {
             None => {
                 // context_vector returns None only when hit_count == 0 (all OOV),
                 // because we already guarded empty text and empty tokens above.
-                Err(VectorKitError::EmbedFloatVocabMiss(format!(
+                Err(SynapseKitError::EmbedFloatVocabMiss(format!(
                     "random-indexing: vocab size {}, but 0 of {} query token(s) matched",
                     self.vocab.len(),
                     terms.len()
@@ -525,7 +525,7 @@ impl EmbeddingProvider for RandomIndexingProvider {
     /// opt-out contract). An empty vocab makes `context_vector` return `None`,
     /// so the engram is `Engram::ZERO` and floats are empty — identical to the
     /// separate calls.
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         match self.context_vector(text) {
             None => Ok((Engram::ZERO, Vec::new())),
             Some(v) => Ok((float_simhash::project(&v, self.projection_seed), v)),
@@ -679,7 +679,7 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vectorkit::EmbeddingProvider;
+    use synapsekit::EmbeddingProvider;
 
     #[test]
     fn index_vector_is_deterministic_for_same_term() {

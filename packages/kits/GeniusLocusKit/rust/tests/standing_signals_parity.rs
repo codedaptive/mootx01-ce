@@ -32,7 +32,7 @@ use genius_locus_kit::{
 use persistence_kit::inmemory::InMemoryStorage;
 use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
 use substrate_types::hlc::HLCGenerator;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const T0_NANOS: i64 = 1_700_000_000_000_000_000;
 const NANOS_PER_SEC: i64 = 1_000_000_000;

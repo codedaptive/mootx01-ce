@@ -1,6 +1,6 @@
 //! Candle-based in-process NL embedding provider — all-MiniLM-L6-v2.
 //!
-//! `CandleNLProvider` implements `vectorkit::EmbeddingProvider` using
+//! `CandleNLProvider` implements `synapsekit::EmbeddingProvider` using
 //! Hugging Face's `candle` ML crate for BERT forward passes. It is the
 //! Rust-port analogue of Swift's `AppleNLProvider` (which uses Apple's
 //! `NaturalLanguage` framework): both produce dense float embeddings
@@ -69,8 +69,8 @@ mod inner {
     use std::path::Path;
     use substrate_ml::float_simhash;
     use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
-    use vectorkit::{EmbeddingProvider, VectorKitError};
-    // VectorKitError is used in forward_batch, embed, embed_float, embed_pair,
+    use synapsekit::{EmbeddingProvider, SynapseKitError};
+    // SynapseKitError is used in forward_batch, embed, embed_float, embed_pair,
     // embed_batch return types. EmbeddingProvider is implemented for CandleNLProvider.
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -222,12 +222,12 @@ mod inner {
         /// dominates at batch-size-1, so grouping non-empty texts into a
         /// single forward pass is the throughput strategy. See the gate-8
         /// disposition in the module doc.
-        fn forward_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, VectorKitError> {
+        fn forward_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SynapseKitError> {
             debug_assert!(!texts.is_empty(), "forward_batch: empty slice is a caller bug");
             let encodings = self
                 .tokenizer
                 .encode_batch(texts.iter().map(|t| t.to_string()).collect(), true)
-                .map_err(|e| VectorKitError::EmbeddingFailed(format!("tokenizing: {e}")))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(format!("tokenizing: {e}")))?;
 
             let batch = encodings.len();
             let seq_len = encodings[0].get_ids().len(); // pad-to-longest: uniform after BatchLongest
@@ -242,16 +242,16 @@ mod inner {
 
             let shape = (batch, seq_len);
             let input_ids = Tensor::from_vec(ids, shape, &self.device)
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
             let token_type_ids = Tensor::from_vec(type_ids, shape, &self.device)
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
             let attention_mask = Tensor::from_vec(mask, shape, &self.device)
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
 
             let hidden = self
                 .model
                 .forward(&input_ids, &token_type_ids, Some(&attention_mask))
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 384)
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 384)
 
             // Attention-masked mean pooling: PAD positions contribute nothing
             // to the sum; the divisor is the real token count per sequence.
@@ -260,24 +260,24 @@ mod inner {
             let mask_f = attention_mask
                 .to_dtype(DType::F32)
                 .and_then(|t| t.unsqueeze(2))
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 1)
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 1)
             let summed = hidden
                 .broadcast_mul(&mask_f)
                 .and_then(|t| t.sum(1))
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?; // (b, 384)
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 384)
             let counts = mask_f
                 .sum(1)
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?; // (b, 1)
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 1)
             let pooled = summed
                 .broadcast_div(&counts)
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
 
             let vecs = pooled
                 .to_vec2::<f32>()
-                .map_err(|e| VectorKitError::EmbeddingFailed(e.to_string()))?;
+                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
             for v in &vecs {
                 if v.len() != DIMENSION {
-                    return Err(VectorKitError::EmbeddingFailed(format!(
+                    return Err(SynapseKitError::EmbeddingFailed(format!(
                         "dimension mismatch: expected {DIMENSION}, got {}",
                         v.len()
                     )));
@@ -289,7 +289,7 @@ mod inner {
         /// Embed one non-empty text. Delegates to `forward_batch` with
         /// a batch of 1 — there is exactly ONE call path (soft-SDK
         /// equality: no separate single/batch paths that could drift).
-        fn embed_single_nonempty(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        fn embed_single_nonempty(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
             let mut vecs = self.forward_batch(std::slice::from_ref(&text))?;
             Ok(vecs.pop().expect("batch of 1 always returns 1 vector"))
         }
@@ -314,7 +314,7 @@ mod inner {
         ///
         /// Empty input returns `Engram::ZERO` per the `EmbeddingProvider`
         /// contract without touching the inference seam.
-        fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+        fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
             if text.is_empty() {
                 return Ok(Engram::ZERO);
             }
@@ -330,7 +330,7 @@ mod inner {
         /// `float_simhash` is scale-invariant, and normalization is opt-in
         /// at the benchmark level via `--normalize`. Empty input returns
         /// `vec![]` (no dense direction for the empty string).
-        fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
             if text.is_empty() {
                 return Ok(Vec::new());
             }
@@ -340,7 +340,7 @@ mod inner {
         /// Produce both the binary engram and the float vector from a SINGLE
         /// forward pass. Empty input returns `(Engram::ZERO, vec![])` without
         /// touching inference.
-        fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+        fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
             if text.is_empty() {
                 return Ok((Engram::ZERO, Vec::new()));
             }
@@ -355,7 +355,7 @@ mod inner {
         /// Empty texts are short-circuited to `Engram::ZERO` without reaching
         /// the model. Non-empty texts are collected, forwarded in one batch,
         /// projected, and merged back at their original positions.
-        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Engram>, VectorKitError> {
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Engram>, SynapseKitError> {
             if texts.is_empty() {
                 return Ok(Vec::new());
             }
@@ -410,7 +410,7 @@ pub use inner::{
 #[cfg(all(test, feature = "candle"))]
 mod tests {
     use super::inner::*;
-    use vectorkit::EmbeddingProvider;
+    use synapsekit::EmbeddingProvider;
     use engram_lib::Engram;
 
     // The default model directory mirrors tools/neural-embed/models so that

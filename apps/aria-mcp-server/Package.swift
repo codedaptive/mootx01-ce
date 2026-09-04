@@ -33,7 +33,7 @@ let package = Package(
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "CorpusKit", path: "../../packages/kits/CorpusKit"),
-        .package(name: "VectorKit", path: "../../packages/kits/VectorKit"),
+        .package(name: "SynapseKit", path: "../../packages/kits/SynapseKit"),
     ],
     targets: [
         .executableTarget(
@@ -58,7 +58,7 @@ let package = Package(
                 // Dependency per in-repository dependency direction; the
                 // server is downstream of the providers, no layering inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
             ],
             path: "Sources/aria-mcp"
         ),

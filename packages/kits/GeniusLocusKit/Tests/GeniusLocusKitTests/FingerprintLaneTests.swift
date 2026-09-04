@@ -31,7 +31,7 @@ import CorpusKit
 @testable import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateML
 @testable import GeniusLocusKit
 

@@ -7,7 +7,7 @@ import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // EstateLifecycle.swift — Composition-aware estate provisioning and lifecycle.
 //
@@ -468,7 +468,7 @@ public extension GeniusLocusKit {
             // calling this seam; an unstamped/older estate fails explicitly.
             try await EstateFormatStore(storage: backingStorage).requireCurrent()
             // Apply the GLK composite schema so all component kit tables (LocusKit,
-            // VectorKit, CorpusKit) are registered on backingStorage under the
+            // SynapseKit, CorpusKit) are registered on backingStorage under the
             // GeniusLocusKit composite kit ID. The plain `open(storage:owner:)` path
             // applies only the LocusKit component schema — it never registers the
             // composite — so opening the composite here ensures the version gate in

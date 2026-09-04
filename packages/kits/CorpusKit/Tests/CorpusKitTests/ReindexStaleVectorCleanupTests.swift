@@ -25,7 +25,7 @@ import CorpusKitProviders
 import EngramLib
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 
 @Suite("ReindexStaleVectorCleanup", .serialized)
 struct ReindexStaleVectorCleanupTests {

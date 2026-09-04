@@ -24,7 +24,7 @@ import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 @testable import SubstrateML
 @testable import GeniusLocusKit

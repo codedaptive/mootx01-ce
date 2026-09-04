@@ -79,9 +79,9 @@ public struct DistillationOutput: Sendable {
     public let succeeded: Bool
     /// Human-readable reason for failure when succeeded == false.
     public let failureReason: String?
-    /// Structural fingerprint for the distilled tier's VectorKit lane.
+    /// Structural fingerprint for the distilled tier's SynapseKit lane.
     /// OR-reduce of featureHash(f.value) for each feature f in F*.
-    /// Stored in VectorKit under modelID = "distillation-features-v1".
+    /// Stored in SynapseKit under modelID = "distillation-features-v1".
     /// No embedding model inference — pure Hamming arithmetic.
     public let featureFingerprint: Fingerprint256
 }

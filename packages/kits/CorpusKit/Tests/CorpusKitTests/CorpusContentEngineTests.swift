@@ -13,7 +13,7 @@ import Foundation
 import EngramLib
 import PersistenceKit
 @testable import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 import CorpusKitProviders
 
 @testable import CorpusKit

@@ -30,7 +30,7 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import Testing
-import VectorKit
+import SynapseKit
 
 @testable import GeniusLocusKit
 

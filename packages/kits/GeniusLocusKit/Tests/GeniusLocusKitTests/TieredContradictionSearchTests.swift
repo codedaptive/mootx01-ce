@@ -12,7 +12,7 @@
 import Testing
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 import SubstrateML
 import PersistenceKit

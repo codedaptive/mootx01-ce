@@ -4,7 +4,7 @@
 //
 // Storage is RowStore + BlobStore + AuditLog + StorageObserver. It does
 // NOT own a vector-search engine: dense-embedding k-NN lives solely in
-// VectorKit (VectorKit-owned vector search persistencekit-vector-contract-correction). What
+// SynapseKit (SynapseKit-owned vector search persistencekit-vector-contract-correction). What
 // PersistenceKit guarantees instead is the ACCOMMODATION contract — every
 // backend must support vector workloads' STORAGE needs (vector-payload row
 // round-trip, bulk hydration at scale, count, delete) through the general

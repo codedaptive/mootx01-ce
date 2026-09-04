@@ -37,7 +37,7 @@ import PersistenceKit
 @testable import CorpusKit
 import CorpusKitProviders
 import IntellectusLib
-import VectorKit
+import SynapseKit
 import EngramLib
 
 // MARK: - Helpers
@@ -96,7 +96,7 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 
 // MARK: - ThrowingProvider (test-only seam)
 //
-// A minimal EmbeddingProvider whose `embedFloat` always throws VectorKitError.embeddingFailed.
+// A minimal EmbeddingProvider whose `embedFloat` always throws SynapseKitError.embeddingFailed.
 // `embed` returns a valid (deterministic) engram so ingest and BM25 recall work normally;
 // only the float lane is dark. Injected via Corpus.init(storage:provider:) — the internal
 // test seam added specifically to make the providerOptOut path force-testable.
@@ -117,7 +117,7 @@ private struct ThrowingFloatProvider: EmbeddingProvider, @unchecked Sendable {
     /// This is the production default for any provider that does not override
     /// embedFloat — replicated here explicitly so the force-test is crystal clear.
     func embedFloat(_ text: String) async throws -> [Float] {
-        throw VectorKitError.embeddingFailed(
+        throw SynapseKitError.embeddingFailed(
             "ThrowingFloatProvider: embedFloat is disabled (test-only opt-out)")
     }
 }
@@ -506,7 +506,7 @@ struct FloatLaneConformanceTests {
 // The storeError outcome fires when findNearestFloat throws unexpectedly.
 // The _testForceFloatStoreError internal hook simulates this by making the
 // actor's next floatNearest call return .storeError without touching the store.
-// This is the least-invasive seam: no VectorKit changes, no SQL corruption,
+// This is the least-invasive seam: no SynapseKit changes, no SQL corruption,
 // no mock VectorStore. Documented as test-only in the Corpus source.
 //
 // Gate criteria:

@@ -19,7 +19,7 @@
 //   any test suite that manipulates process-global state (Intellectus
 //   enabled flag + installed sink). GlobalTestLock is retained as a
 //   secondary guard for any tests that escape the `.serialized` parent.
-//   See VectorKit's GlobalTestLock.swift for the canonical explanation.
+//   See SynapseKit's GlobalTestLock.swift for the canonical explanation.
 
 import Foundation
 import Testing

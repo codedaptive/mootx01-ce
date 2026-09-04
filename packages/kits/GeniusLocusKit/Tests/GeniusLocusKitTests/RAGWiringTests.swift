@@ -16,7 +16,7 @@ import Foundation
 import SubstrateTypes
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit

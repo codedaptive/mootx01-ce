@@ -8,7 +8,7 @@
 //                   associations, learned_references, source_catalog,
 //                   node_bundles, container_fingerprints, recall_trace, keys,
 //                   snapshot_registry, snapshot_attestations
-//   VectorKit     — vectors (+ the vector_rep_claims consumer ledger)
+//   SynapseKit     — vectors (+ the vector_rep_claims consumer ledger)
 //   CorpusKit     — the ATTACHED derived profile only: iix_termfreqs,
 //                   iix_doclens, corpus_provider_basis,
 //                   corpus_provider_counts, corpus_index_state.
@@ -53,14 +53,14 @@
 
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 import PersistenceKit
 
 public enum GeniusLocusKitSchema {
 
     /// The kit identifier recorded in PersistenceKit's migrations table for
-    /// the composite GLK estate schema. Distinct from "LocusKit", "VectorKit",
+    /// the composite GLK estate schema. Distinct from "LocusKit", "SynapseKit",
     /// and "CorpusKit" so the schema gate distinguishes a GLK-level open from
     /// a single-kit open against the same database.
     public static let kitID = "GeniusLocusKit"
@@ -122,7 +122,7 @@ public enum GeniusLocusKitSchema {
         LocusKitSchema.schema.indices
     }
 
-    /// The 1 VectorKit table, extracted from `VectorStore.schemaDeclaration`.
+    /// The 1 SynapseKit table, extracted from `VectorStore.schemaDeclaration`.
     private static var vectorKitTables: [TableDeclaration] {
         VectorStore.schemaDeclaration.tables
     }
@@ -145,7 +145,7 @@ public enum GeniusLocusKitSchema {
         CorpusSchemaProfile.attachedDeclaration.indices
     }
 
-    /// The VectorKit representation-consumer ledger (`vector_rep_claims`) —
+    /// The SynapseKit representation-consumer ledger (`vector_rep_claims`) —
     /// ownership state the scoped lifecycle paths consult; hydrate/flush
     /// must carry it with the vectors it describes.
     private static var claimsTables: [TableDeclaration] {
