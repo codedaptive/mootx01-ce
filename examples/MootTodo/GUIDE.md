@@ -40,12 +40,10 @@ have something to play with right away.
 3. Tap a task to check it off. The MOOT learns the new "done" state too.
 4. Type a word like `milk` in the **Search memory** box and tap **Search**. The
    results come from the MOOT, not the list.
-5. Try the voice shortcuts. Say "Capture in MootTodo" to save a memory, or
-   "Recall in MootTodo" to search one. These talk to the same MOOT the app uses.
 
 ## One thing to know
 
-The search results look a bit raw — each line shows an id, a room name, and a
-preview. That is because the MOOT answers in plain text today, not in tidy
-objects. A real app would clean this up. We left it raw so you can see exactly
-what the MOOT sends back.
+Searching the MOOT happens in two steps. First the MOOT says which drawers
+match. Then the app asks for those drawers in full and shows what each one
+says, with the id the MOOT knows it by underneath. Everything the app shows
+came straight from the MOOT's own rows.
