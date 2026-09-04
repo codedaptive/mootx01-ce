@@ -119,7 +119,7 @@ repository:
 - `PersistenceKit` and `PersistenceKitInMemory` (from `../PersistenceKit`) — the
   backend protocol and the in-memory backend the demo uses.
 
-QueueKit, VectorKit, and CorpusKit are transitive through
+QueueKit, SynapseKit, and CorpusKit are transitive through
 GeniusLocusKit; they are intentionally not listed in `Package.swift`.
 
 ## Platform

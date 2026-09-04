@@ -11,7 +11,7 @@ Rust port of the Swift `CorpusKit` Swift Package. The RAG layer of the GeniusLoc
 - `Chunker` -- sentence-aware chunking with delimiter fallback (matches Swift's Linux fallback path since there's no `NaturalLanguage` framework on Rust)
 - `BM25Index` -- in-memory BM25 inverted index (k1=1.5, b=0.75 defaults, tunable)
 - `BundleStore` -- storage-kit-backed CRUD over the `chunks` table; same schema as Swift's `BundleStore`
-- `recall` -- hybrid retrieval composition: vector kNN (via vectorkit's `VectorStore`) + BM25 keyword scoring fused via Reciprocal Rank Fusion
+- `recall` -- hybrid retrieval composition: vector kNN (via synapsekit's `VectorStore`) + BM25 keyword scoring fused via Reciprocal Rank Fusion
 - `CorpusKitSync::manifest` -- builds a `sync_kit::SyncManifest` for the chunks table with append-only conflict policy
 
 ## Tests
@@ -29,7 +29,7 @@ Core `rag-kit` integration tests (in `tests/`):
 
 ## What does NOT ship at v1.0
 
-- Real model-inference bundles conforming to `vectorkit::EmbeddingProvider` (the engine-neutral `neural-embed` backend lives as a standalone tool crate, `tools/neural-embed`, outside the kits). The Swift consolidation (2026-05-27) moved text providers onto VectorKit's `EmbeddingProvider`; the Rust mirror is now the same trait. Closure-injected paths can be wired through `FloatSimHashEmbeddingProvider` from vectorkit today.
+- Real model-inference bundles conforming to `synapsekit::EmbeddingProvider` (the engine-neutral `neural-embed` backend lives as a standalone tool crate, `tools/neural-embed`, outside the kits). The Swift consolidation (2026-05-27) moved text providers onto SynapseKit's `EmbeddingProvider`; the Rust mirror is now the same trait. Closure-injected paths can be wired through `FloatSimHashEmbeddingProvider` from synapsekit today.
 - MMR diversification in `recall` (configuration field is reserved; the implementation lands in a follow-on)
 - BM25 persistence (rebuilt in-memory from `BundleStore` today; persistent IDF/posting-list backed by storage-kit is deferred to v1.x per the Swift kit's own note)
 - Apple `NaturalLanguage`-quality sentence segmentation (the delimiter fallback is identical to Swift's Linux path)
@@ -42,7 +42,7 @@ cargo build
 cargo test
 ```
 
-Requires Rust 1.75+ and sibling `substrate-kit`, `engram-kit`, `storage-kit`, `sync-kit`, `vectorkit` crates. Tests additionally pull in `rag-kit-providers` via dev-dependency.
+Requires Rust 1.75+ and sibling `substrate-kit`, `engram-kit`, `storage-kit`, `sync-kit`, `synapsekit` crates. Tests additionally pull in `rag-kit-providers` via dev-dependency.
 
 ## See also
 

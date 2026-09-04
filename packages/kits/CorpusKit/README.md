@@ -289,7 +289,7 @@ CorpusKit does not provide:
 - Structured memory, knowledge-graph facts, or audit semantics:
   [`LocusKit`](../LocusKit/)
 - Raw vector ownership and nearest-neighbor storage:
-  [`VectorKit`](../VectorKit/)
+  [`SynapseKit`](../SynapseKit/)
 - The composed nine-verb estate:
   [`GeniusLocusKit`](../GeniusLocusKit/)
 - Reasoning and dreaming:

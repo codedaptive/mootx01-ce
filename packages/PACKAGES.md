@@ -22,7 +22,7 @@ Packages compose bottom-up. Each layer depends only on layers below it.
 ```
 REASONING   CognitionKit        NeuronKit           VaultKit
 ORCHESTRAT  GeniusLocusKit
-STANDALONE  LocusKit            VectorKit           CorpusKit
+STANDALONE  LocusKit            SynapseKit           CorpusKit
 GROUNDING   LatticeLib          EideticLib
 FOUNDATION  EngramLib           AriaLexiconLib
 STORAGE     PersistenceKit      ConvergenceKit      QueueKit
@@ -376,7 +376,7 @@ need composition, vectors, or the Brain layer.
 
 ---
 
-### VectorKit
+### SynapseKit
 
 **Role:** On-device embeddings and nearest-neighbor search.
 The vector storage tier of the substrate.
@@ -387,8 +387,8 @@ The vector storage tier of the substrate.
 - `StoredVector` — model-tagged vector (embedding + model identity)
 - `VectorStore` — queryable vector store (exact linear scan; ANN/HNSW is a separate decision, not yet adopted)
 - `VectorMatch` — result with similarity score
-- `VectorKit.embed(_:using:)` — text → embedding
-- `VectorKit.findNearest(query:in:k:)` — nearest-neighbour search (linear scan)
+- `SynapseKit.embed(_:using:)` — text → embedding
+- `SynapseKit.findNearest(query:in:k:)` — nearest-neighbour search (linear scan)
 - `FloatSimHashEmbeddingProvider` — built-in deterministic provider
 
 **Does NOT:** No content storage, no RAG bundles, no chunking. Stores and
@@ -431,7 +431,7 @@ recall tier (structured knowledge, KG facts, diary, associations).
 **Does NOT:** No KG facts, no audit trail, no tunnels, no diary entries.
 Those live in LocusKit. CorpusKit is content-for-retrieval, not content-for-memory.
 
-**Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateLib, QueueKit  
+**Dependencies:** SynapseKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateLib, QueueKit  
 **Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`
 
@@ -440,7 +440,7 @@ Those live in LocusKit. CorpusKit is content-for-retrieval, not content-for-memo
 ### GeniusLocusKit
 
 **Role:** The Spirit of the Place. The composition layer.
-Composes LocusKit, VectorKit, and CorpusKit into unified estates and defines
+Composes LocusKit, SynapseKit, and CorpusKit into unified estates and defines
 the Brain layer types (standing-signal registry, matrix tier, training-daemon) — emitting signals
 the AutonomicGovernor (in NeuronKit, started by the AriaResident host) drives.
 
@@ -488,11 +488,11 @@ reflects the live dispatch behavior asserted by
 **Critical invariants:**
 
 **B-1:** NeuronKit and CognitionKit reach the substrate (LocusKit,
-VectorKit, CorpusKit) only through GeniusLocusKit's estate verb surface —
+SynapseKit, CorpusKit) only through GeniusLocusKit's estate verb surface —
 no estate/IO call, no SQL. The one exception is **read-only value types**:
 they MAY import LocusKit to name value types (e.g. `Drawer`, `ContentKind`,
 `RecallFrame`, `Filter`) in their inputs and outputs. They MUST NOT call any
-LocusKit (or VectorKit / CorpusKit) estate, verb, or storage surface. Both
+LocusKit (or SynapseKit / CorpusKit) estate, verb, or storage surface. Both
 ports hold this posture — Swift held it from the start; the Rust BrainKit
 reader layer was brought into compliance by TASK-MXE-2026-0070 (stream
 `rb-rust-brainkit-substrate-boundary`). The Swift port re-exports
@@ -513,7 +513,7 @@ queue + drain worker pool). NeuronKit and CognitionKit never import QueueKit
 directly. Each queue has one owner; GLK orchestrates the encode path but does
 not own its queue.
 
-**Dependencies:** AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit  
+**Dependencies:** AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, SynapseKit  
 **Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`, `docs/specs/NEURONKIT_SPEC_v0.1.md`
 
@@ -628,9 +628,9 @@ PersistenceKit  ← SubstrateTypes
 ConvergenceKit  ← SubstrateTypes, PersistenceKit
 QueueKit        ← SubstrateTypes, PersistenceKit
 LocusKit        ← SubstrateTypes, SubstrateKernel, SubstrateML, SubstrateLib, PersistenceKit
-VectorKit       ← EngramLib, SubstrateTypes, SubstrateML, PersistenceKit
-CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML, QueueKit
-GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit, SubstrateTypes, SubstrateKernel
+SynapseKit       ← EngramLib, SubstrateTypes, SubstrateML, PersistenceKit
+CorpusKit       ← SynapseKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML, QueueKit
+GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, SynapseKit, SubstrateTypes, SubstrateKernel
 NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit, SubstrateTypes
 CognitionKit    ← GeniusLocusKit, NeuronKit, LocusKit, SubstrateTypes
 VaultKit        ← GeniusLocusKit, LocusKit, EideticLib, PersistenceKit
@@ -658,7 +658,7 @@ the precise sub-package(s) it uses.
 | LatticeLib | ✅ | ✅ | Built |
 | EideticLib | ✅ | ✅ | Built |
 | LocusKit | ✅ | ✅ | Built |
-| VectorKit | ✅ | ✅ | Built |
+| SynapseKit | ✅ | ✅ | Built |
 | CorpusKit | ✅ | ✅ | Built |
 | GeniusLocusKit | ✅ | ✅ | Built |
 | NeuronKit | ✅ | ✅ | Built |

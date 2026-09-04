@@ -36,7 +36,7 @@ Use NeuronKit to add to any GeniusLocusKit application:
 
 ## What this kit does NOT provide
 
-- Storage of any kind → **LocusKit / VectorKit / CorpusKit / GeniusLocusKit**
+- Storage of any kind → **LocusKit / SynapseKit / CorpusKit / GeniusLocusKit**
 - Behaviour recipes (sequencing of NeuronKit calls) → **CognitionKit**
 - MCP server → **ARIA_MCP**
 
