@@ -4,7 +4,7 @@
 //
 // Test coverage:
 //   A1b-CT1  SHA-256 fixture-bundle digest matches embedded constant AND
-//            the frozen value in contracts/community/1.1/fixture-bundle.sha256.
+//            the frozen value in apps/mootx01/Contracts/community-1.1/fixture-bundle.sha256.
 //   A1b-C1   Identity endpoint returns exact contract identity with live estateID.
 //   A1b-C2   Unknown moot_community_* method → methodNotFound.
 //   A1b-C3   Non-empty arguments → invalidParams (fail-closed).
@@ -27,7 +27,7 @@ import PersistenceKitSQLite
 // MARK: - Helpers
 
 /// Root URL of the repository (derived from this test file's path).
-/// Used to locate contracts/community/1.1/ without hard-coding absolute paths.
+/// Used to locate apps/mootx01/Contracts/community-1.1/ without hard-coding absolute paths.
 private var repoRoot: URL {
     URL(filePath: #filePath)
         .deletingLastPathComponent()  // CommunityContractTests.swift dir
@@ -37,9 +37,9 @@ private var repoRoot: URL {
         .deletingLastPathComponent()  // apps/
 }
 
-/// The contracts/community/1.1 directory.
+/// The apps/mootx01/Contracts/community-1.1 directory.
 private var contractRoot: URL {
-    repoRoot.appendingPathComponent("contracts/community/1.1")
+    repoRoot.appendingPathComponent("apps/mootx01/Contracts/community-1.1")
 }
 
 /// Plaintext key provider for test estates. No encryption, no Keychain.
@@ -86,7 +86,7 @@ func fixtureDigestHonesty() throws {
         let data = try Data(contentsOf: fileURL)
 
         // Relative path from contractRoot (NOT from repoRoot), matching Python's
-        // path.relative_to(ROOT).as_posix() where ROOT = contracts/community/1.1/.
+        // path.relative_to(ROOT).as_posix() where ROOT = apps/mootx01/Contracts/community-1.1/.
         // Produces "contract.json" and "fixtures/<name>.json", which is exactly
         // what verify_contract.py feeds to SHA-256.
         let relativePath = fileURL.path.hasPrefix(contractRoot.path + "/")

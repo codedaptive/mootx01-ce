@@ -2,7 +2,7 @@
 //
 // Contract model types for the nine transfer-family endpoints (Wave D1: CORE-07).
 //
-// Every type is byte-shape-exact from contracts/community/1.1/contract.json.
+// Every type is byte-shape-exact from apps/mootx01/Contracts/community-1.1/contract.json.
 // No field is added, removed, or renamed. JSON discriminators match contract
 // field names exactly (e.g. "state", "outcome", "stage").
 //

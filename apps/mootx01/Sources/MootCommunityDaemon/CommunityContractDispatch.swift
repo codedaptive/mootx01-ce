@@ -818,7 +818,7 @@ public struct CommunityContractDispatch: CommunityToolHandler {
     //   3. Required fields are present and valid.
     //
     // The contract type names (Empty, NameArguments, etc.) live in
-    // contracts/community/1.1/contract.json; these parsers are the
+    // apps/mootx01/Contracts/community-1.1/contract.json; these parsers are the
     // Swift implementation of those shapes.
 
     /// Empty: `{}`. Rejects any field (including nulls).

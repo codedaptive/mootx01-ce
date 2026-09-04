@@ -2,7 +2,7 @@
 //
 // Contract model types for the two capture-family endpoints (Wave A2b: CORE-04).
 //
-// Every type here is byte-shape-exact from contracts/community/1.1/contract.json.
+// Every type here is byte-shape-exact from apps/mootx01/Contracts/community-1.1/contract.json.
 // No field is added, removed, or renamed. JSON encoding uses the field names
 // exactly as the contract defines them (snake_case is NOT used — the contract
 // specifies camelCase).
