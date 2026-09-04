@@ -36,7 +36,8 @@ struct CalendarRow: Identifiable, Sendable {
 //           the demo creates so the simulator has something to show.
 //
 //   RIGHT — MootGateway. We WRITE each event into the MOOT via the ARIA tool
-//           `moot_file_memory`, and we READ the MOOT back via `moot_memory_search`.
+//           `moot_file_memory`, and we READ the MOOT back via `moot_memory_search`
+//           plus `moot_memory_get` for the bodies.
 //
 // The bridge between them is the loop in `syncThisWeekToMoot()`: for each event
 // EventKit hands us, we call one MOOT tool. That is the entire "give a legacy
@@ -84,8 +85,7 @@ final class CalendarIngestModel: ObservableObject {
 
     /// Pull the shared bridge. The App already called
     /// GatewayRuntime.shared.configure(databaseURL:) at launch, so this lands on
-    /// the durable SQLite estate. Both the UI (this model) and the App Intents
-    /// share this one runtime, so they see the same drawers.
+    /// the durable SQLite estate.
     func attach() async {
         do {
             bridge = try await GatewayRuntime.shared.bridge()
@@ -98,21 +98,21 @@ final class CalendarIngestModel: ObservableObject {
     // MARK: Sample MOOT data (so the app is not empty on first run)
 
     /// Seed approach: on first launch the MOOT is empty. We ask the MOOT for any
-    /// memory; if it answers "found 0", we file two sample drawers so the Search
+    /// memory; if it answers with no rows, we file two sample drawers so the Search
     /// box finds something before the user has synced any real events. A real
     /// app would NOT seed fake memories — this is purely demo convenience.
     func seedSampleMemoriesIfEmpty() async {
         guard let bridge else { return }
 
-        // moot_memory_search returns TEXT, and an empty estate's text begins
-        // "found 0". We sniff for that to decide whether to seed.
+        // An empty estate answers with an empty `results` array in the
+        // structured block; that decides whether to seed.
         let probe = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string("calendar"),
             // JSONValue's integer case is `.integer(Int64)` (there is no
             // `.number`); the MOOT tool surface reads `limit` as an integer.
             "limit": .integer(1)
         ])
-        guard probe.text.contains("found 0") else { return }  // already has data
+        guard resultRows(in: probe.structured).isEmpty else { return }  // already has data
 
         // File two starter drawers in the "calendar" room — the same room our
         // real ingested events will land in — so search results look coherent.
@@ -295,14 +295,12 @@ final class CalendarIngestModel: ObservableObject {
     /// Search the MOOT and show the result. This proves the ingested calendar
     /// events became real, searchable MOOT memories.
     ///
-    /// KNOWN SDK EDGE (important for SDK readers): moot_memory_search returns
-    /// human-readable TEXT, not structured drawer objects. Its lines look like
-    ///     found N memory(s)
-    ///     <id>  [room]  <preview>
-    /// A production app would want a STRUCTURED recall tool so it could render a
-    /// proper list (tappable rows, typed fields). For this teaching example we
-    /// simply display the text verbatim and note where the structured result
-    /// would plug in.
+    /// THE RESULT CONTRACT (important for SDK readers): every recall tool
+    /// answers with text for people AND a `structuredContent` block,
+    /// `{ "results": [ { "id", "room", "subject", "content" }, … ] }`, exposed
+    /// as `IntentCallResult.structured`. Search rows are travel rows with no
+    /// body, so we collect their ids and fetch the bodies with one batched
+    /// `moot_memory_get` at depth:full, then render one line per drawer.
     func searchMemory() async {
         guard let bridge else {
             status = "MOOT not attached yet."
@@ -314,15 +312,46 @@ final class CalendarIngestModel: ObservableObject {
             return
         }
 
-        let call = await bridge.callTool("moot_memory_search", arguments: [
+        let search = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string(q)
         ])
+        if search.isError {
+            searchResult = "Search failed: \(search.text)"
+            return
+        }
+        let ids: [JSONValue] = resultRows(in: search.structured).compactMap { row in
+            if case let .string(id)? = row["id"] { return .string(id) }
+            return nil
+        }
+        guard !ids.isEmpty else {
+            searchResult = "No memories matched \"\(q)\"."
+            return
+        }
+        let get = await bridge.callTool("moot_memory_get", arguments: [
+            "ids": .array(ids),
+            "depth": .string("full"),
+        ])
+        if get.isError {
+            searchResult = "Recall failed: \(get.text)"
+            return
+        }
+        let lines: [String] = resultRows(in: get.structured).compactMap { row in
+            guard case let .string(content)? = row["content"] else { return nil }
+            if case let .string(room)? = row["room"] { return "[\(room)] \(content)" }
+            return content
+        }
+        searchResult = lines.joined(separator: "\n")
+    }
 
-        // NOTE(integrate): when a structured recall tool exists, parse the
-        // "<id>  [room]  <preview>" lines into typed rows here instead of
-        // displaying the raw text. For now we render the text the tool returns.
-        searchResult = call.isError
-            ? "Search failed: \(call.text)"
-            : call.text
+    /// Every result row of a recall tool's `structuredContent` block as a
+    /// dictionary, or [] when the tool sent no block. Optional fields are
+    /// ABSENT (never null) when the tool has nothing to say.
+    private func resultRows(in structured: JSONValue?) -> [[String: JSONValue]] {
+        guard case let .object(top)? = structured,
+              case let .array(items)? = top["results"] else { return [] }
+        return items.compactMap { item in
+            if case let .object(row) = item { return row }
+            return nil
+        }
     }
 }

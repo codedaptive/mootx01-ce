@@ -65,13 +65,17 @@ struct ContentView: View {
                             Text(String(localized: "search.empty.hint"))
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(model.searchResults, id: \.self) { line in
-                                // We show the raw line the MOOT returned. Recall
-                                // the known edge: the tool surface answers in
-                                // text, so each line is "<id>  [room]  <preview>".
-                                Text(line)
-                                    .font(.callout)
-                                    .monospaced()
+                            ForEach(model.searchResults) { hit in
+                                // Each hit is a drawer from the MOOT's structured
+                                // result rows: its verbatim content, and the id
+                                // the MOOT knows it by.
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(hit.content)
+                                        .font(.callout)
+                                    Text(hit.id)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
