@@ -88,6 +88,12 @@ genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/ru
 # via aria-mcp; naming it directly keeps the upgrade wiring honest and
 # removable (same rationale as persistence-kit above).
 corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
+# corpus-kit-providers: `mootx01 db composition --set` wires the Corpus it
+# rebuilds with `default_ensemble()`, the same five-signal ensemble the ARIA
+# registry serves with, so the rebuilt rows are the rows serve will read.
+# Already in the product graph via aria-mcp; naming it directly keeps the
+# command honest and removable (same rationale as persistence-kit above).
+corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
 # adornment-lib: AdornmentMinterDescriptor and StoredAdornment value types
 # used by run_adornment_store_migration to register legacy minter rows and
 # move drawers.adornment text to the normalized adornments table

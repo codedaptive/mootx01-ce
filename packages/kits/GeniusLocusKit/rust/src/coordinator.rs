@@ -2066,7 +2066,11 @@ impl EstateCoordinator {
         // worker's callback can distill and recompose without re-entering
         // the coordinator (the worker thread must never take the
         // coordinator lock — the drain can run while a tool call holds it).
-        let corpus_for_callback = corpus.clone();
+        // Weak: the callback is stored ON the engine, so a strong clone here
+        // would make the engine own itself and outlive every host reference,
+        // its drain worker with it. The callback runs inside the engine's own
+        // drain pass, so the upgrade below succeeds whenever it matters.
+        let corpus_for_callback = Arc::downgrade(&corpus);
         // VectorStore for the fingerprint lane (§8); may be absent — the
         // representation columns are still written (lane dark, matching the
         // estate's semantic-tier wiring).
@@ -2131,8 +2135,9 @@ impl EstateCoordinator {
                     // call would be skipped — recompose_dense_vector
                     // passes force=true to bypass it.
                     // Swift parity: on_encoded in wireCorpusRoomRollup.
-                    let _ = corpus_for_callback
-                        .recompose_dense_vector(&drawer.id, now_ms);
+                    if let Some(corpus) = corpus_for_callback.upgrade() {
+                        let _ = corpus.recompose_dense_vector(&drawer.id, now_ms);
+                    }
                 }
             }
 
@@ -9718,6 +9723,135 @@ impl EstateCoordinator {
         Ok(())
     }
 
+    /// Wire the sub-stores an open estate's kind calls for. `Glk` and
+    /// `CorpusOnly` get the ATTACHED-mode `CorpusContentEngine` (BM25 +
+    /// internal vectors, Drawer-ID keyed) over the LocusKit-backed adapter,
+    /// the on_encoded drain-stage rider, and the engine's ingest queue; `Glk`
+    /// also borrows the engine's shared dense `VectorStore` for the
+    /// scored-recall lane and applies the GLK composite schema. `LocusOnly`
+    /// wires nothing. Registering over an already-wired estate replaces the
+    /// entries. Twin of Swift
+    /// `wireSubstores(for:kind:backingStorage:embeddingModels:reindexPending:)`.
+    ///
+    /// The engine opens under the estate's stored index composition setting
+    /// (`active_index_composition_policy`). `reindex_pending`: the caller
+    /// commits to `reindex_corpus` before the estate serves a query, so the
+    /// engine opens even when its index rows were built under another policy
+    /// (the path `mootx01 db composition --set` takes after it rewrites the
+    /// stored setting). Every serving open passes `false`, and the engine
+    /// refuses a mismatched estate with
+    /// `CorpusKitError::CompositionPolicyMismatch`. `now_millis` stamps the
+    /// provider reconciliation; the engine interior never reads the clock.
+    pub fn wire_substores(
+        &mut self,
+        handle: &EstateHandle,
+        kind: EstateKind,
+        backing_storage: Arc<dyn Storage>,
+        embedding_models: Vec<EmbeddingModelConfig>,
+        now_millis: i64,
+        reindex_pending: bool,
+    ) -> Result<(), GeniusLocusKitError> {
+        if kind == EstateKind::LocusOnly {
+            // LocusKit only — no sub-store wiring needed.
+            return Ok(());
+        }
+        // EVERY GLK Corpus is constructed attached + WholeContent over the
+        // LocusKit-backed adapter (shared-content 1.1 decision lock); the
+        // configuration constructor rejects standalone/passage registration.
+        let estate = self
+            .estate_for(handle)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("estate lookup for engine wiring failed: {:?}", e),
+            })?
+            .clone();
+        // The index composition policy is the estate's stored setting, read at
+        // every open and threaded to both the configuration (the id recorded
+        // on every index row) and the content source (which text each lane
+        // receives).
+        let composition_policy = self.active_index_composition_policy(handle)?;
+        let config = CorpusContentConfiguration::new(
+            CorpusOperatingMode::Attached,
+            CorpusIndexUnitPolicy::WholeContent,
+        )
+        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+            reason: format!("engine configuration: {:?}", e),
+        })?
+        .with_composition_policy(composition_policy);
+        let corpus = CorpusContentEngine::open(
+            Arc::clone(&backing_storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
+            embedding_models,
+            reindex_pending,
+        )
+        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+            reason: format!("engine open failed for {:?} estate: {:?}", kind, e),
+        })?;
+        corpus
+            .reconcile_configured_providers(now_millis)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("provider reconciliation failed: {e:?}"),
+            })?;
+        let corpus = Arc::new(corpus);
+        self.register_corpus(handle, Arc::clone(&corpus));
+        if kind == EstateKind::Glk {
+            // BORROW the engine's single dense VectorStore for GLK's
+            // scored-recall lane — one store, one resident array, one sidecar.
+            self.register_vector_store(handle, corpus.shared_vector_store());
+            // Apply the composite GLK schema so all component kit tables
+            // (LocusKit, VectorKit, CorpusKit) are registered under the
+            // "GeniusLocusKit" composite kit ID, so the version gate in the
+            // replication primitive sees the correct composite version for
+            // this estate. Idempotent (CREATE TABLE IF NOT EXISTS). Mirrors
+            // Swift `wireSubstores` opening `GeniusLocusKitSchema
+            // .estateSchemaDeclaration` on the backing storage.
+            backing_storage
+                .open(&crate::hydration::composite_schema())
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("GLK composite schema open failed: {e:?}"),
+                })?;
+        }
+        // CorpusKit owns the encode pipeline: install the on_encoded
+        // drain-stage rider (rollup + distillation + dense recompose + A2
+        // marker), then mount the Corpus's own ingest queue + drain worker
+        // pool. Rider BEFORE mount: the mount opens the persisted queue and
+        // starts the drain worker at once, so a backlog resumed at serve open
+        // must find the rider already installed or it encodes without
+        // distilling (SPEC_DISTILLATION_STORAGE §7.1). A provisioned estate
+        // mounts an empty queue, so the ordering is equally correct there.
+        // GLK only coordinates the two kits — it never performs the encode.
+        self.wire_corpus_on_encoded(handle);
+        corpus
+            .mount_ingest_queue()
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
+            })?;
+        Ok(())
+    }
+
+    /// Wire a served estate as a full GLK composition: `wire_substores` with
+    /// `EstateKind::Glk`. The host entry points open a durable SQLite estate
+    /// and want the complete semantic layer without naming `EstateKind`.
+    /// Twin of Swift
+    /// `wireGLKSubstores(for:backingStorage:embeddingModels:reindexPending:)`.
+    pub fn wire_glk_substores(
+        &mut self,
+        handle: &EstateHandle,
+        backing_storage: Arc<dyn Storage>,
+        embedding_models: Vec<EmbeddingModelConfig>,
+        now_millis: i64,
+        reindex_pending: bool,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.wire_substores(
+            handle,
+            EstateKind::Glk,
+            backing_storage,
+            embedding_models,
+            now_millis,
+            reindex_pending,
+        )
+    }
+
     /// Provision a new estate: create, open, wire sub-stores, and record kind metadata.
     ///
     /// This is the Rust parity of Swift
@@ -9873,18 +10007,16 @@ impl EstateCoordinator {
         // policy id, else `current()`). Every later open reads this row;
         // nothing reads the environment again. A seed failure closes the
         // estate, as a wiring failure does.
-        let composition_policy = match self.seed_index_composition_policy_if_absent(&handle) {
-            Ok(policy) => policy,
-            Err(e) => {
-                let _ = self.close(&handle);
-                return Err(e);
-            }
-        };
+        if let Err(e) = self.seed_index_composition_policy_if_absent(&handle) {
+            let _ = self.close(&handle);
+            return Err(e);
+        }
 
-        // Step 2b: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
-        // Wiring runs BEFORE seeding the wings (step 2c) so the hint drawers carry
-        // the corpus's real model id, not a sentinel — matching the serve open path
-        // and the Swift provision order.
+        // Step 2b: Wire sub-stores by kind through the shared seam (Swift twin:
+        // EstateLifecycle.swift wireSubstores, which provision and serve open
+        // both call). Wiring runs BEFORE seeding the wings (step 2c) so the hint
+        // drawers carry the corpus's real model id, not a sentinel — matching
+        // the serve open path and the Swift provision order.
         // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;
         // falls back to the primary `storage` when no separate corpus_storage is supplied.
         let backing_storage = corpus_storage.unwrap_or(storage);
@@ -9895,160 +10027,20 @@ impl EstateCoordinator {
             .map_err(|error| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("estate-format stamp failed: {error:?}"),
             })?;
-        let wiring_result = match params.kind {
-            EstateKind::Glk => {
-                // Full composition: the ATTACHED-mode CorpusContentEngine
-                // (BM25 + internal vectors, Drawer-ID keyed) + standalone
-                // VectorStore. EVERY GLK Corpus is constructed attached +
-                // WholeContent over the LocusKit-backed adapter
-                // (shared-content 1.1 decision lock); the configuration
-                // constructor rejects standalone/passage registration.
-                self.estate_for(&handle)
-                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("estate lookup for engine wiring failed: {:?}", e),
-                    })
-                    .map(|estate| estate.clone())
-                    .and_then(|estate| {
-                        let config = CorpusContentConfiguration::new(
-                            CorpusOperatingMode::Attached,
-                            CorpusIndexUnitPolicy::WholeContent,
-                        )
-                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("engine configuration: {:?}", e),
-                        })?
-                        .with_composition_policy(composition_policy);
-                        CorpusContentEngine::open(
-                            Arc::clone(&backing_storage),
-                            config,
-                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
-                            embedding_models,
-                        )
-                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("engine open failed for GLK estate: {:?}", e),
-                        })
-                        .and_then(|corpus| {
-                            corpus.reconcile_configured_providers(0).map_err(|e| {
-                                GeniusLocusKitError::UnderlyingEstateFailure {
-                                    reason: format!("provider reconciliation failed: {e:?}"),
-                                }
-                            })?;
-                            Ok(corpus)
-                        })
-                    })
-                    .map(|corpus| {
-                        // BORROW the engine's single dense VectorStore for
-                        // GLK's scored-recall lane — one store, one resident
-                        // array, one sidecar.
-                        let corpus = Arc::new(corpus);
-                        let vs = corpus.shared_vector_store();
-                        (Some(corpus), Some(vs))
-                    })
-            }
-            EstateKind::CorpusOnly => {
-                // LocusKit core + the attached engine. No standalone
-                // VectorStore registration. Same construction rule.
-                self.estate_for(&handle)
-                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("estate lookup for engine wiring failed: {:?}", e),
-                    })
-                    .map(|estate| estate.clone())
-                    .and_then(|estate| {
-                        let config = CorpusContentConfiguration::new(
-                            CorpusOperatingMode::Attached,
-                            CorpusIndexUnitPolicy::WholeContent,
-                        )
-                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("engine configuration: {:?}", e),
-                        })?
-                        .with_composition_policy(composition_policy);
-                        CorpusContentEngine::open(
-                            Arc::clone(&backing_storage),
-                            config,
-                            Arc::new(LocusDrawerContentSource::new_with_policy(estate, composition_policy)),
-                            embedding_models,
-                        )
-                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("engine open failed for CorpusOnly estate: {:?}", e),
-                        })
-                        .and_then(|corpus| {
-                            corpus.reconcile_configured_providers(0).map_err(|e| {
-                                GeniusLocusKitError::UnderlyingEstateFailure {
-                                    reason: format!("provider reconciliation failed: {e:?}"),
-                                }
-                            })?;
-                            Ok(corpus)
-                        })
-                    })
-                    .map(|corpus| (Some(Arc::new(corpus)), None))
-            }
-            EstateKind::LocusOnly => {
-                // LocusKit only — no sub-store wiring needed.
-                Ok((None, None))
-            }
-        };
-
-        match wiring_result {
-            Ok((corpus_opt, vs_opt)) => {
-                // Register the wired sub-stores. Arc<CorpusContentEngine> and Arc<VectorStore> are
-                // what the registry holds (matching Swift's corpusKits / vectorStores dicts).
-                if let Some(corpus) = corpus_opt {
-                    self.corpus_kits.insert(handle, corpus);
-                }
-                if let Some(vs) = vs_opt {
-                    self.vector_stores.insert(handle, vs);
-                }
-                // GLK estate: apply the composite GLK schema so all component kit
-                // tables (LocusKit, VectorKit, CorpusKit) are registered under the
-                // "GeniusLocusKit" composite kit ID. This ensures the version gate in
-                // the replication primitive sees the correct composite version for
-                // this estate. Idempotent (CREATE TABLE IF NOT EXISTS).
-                //
-                // Mirrors Swift `GeniusLocusKit.provision` calling
-                // `storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)`
-                // in the test fixture — here we do it automatically at provision
-                // so callers do not need to apply the schema separately.
-                //
-                // `params.kind` is still available because `wiring_result` does not
-                // consume it (only the match arms move `embedding_models`).
-                if params.kind == EstateKind::Glk {
-                    let glk_schema = crate::hydration::composite_schema();
-                    backing_storage
-                        .open(&glk_schema)
-                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("GLK composite schema open failed: {e:?}"),
-                        })?;
-                }
-                // CorpusKit owns the encode pipeline: mount the Corpus's own
-                // ingest queue + drain worker pool for estates with a Corpus to
-                // feed (Glk / CorpusOnly), and wire its on_encoded callback to
-                // roll up the touched LocusKit rooms for each encoded batch. GLK
-                // only coordinates the two kits — it never performs the encode.
-                // LocusOnly estates register no corpus, so they get no queue (a
-                // regular write degrades to row-only). Mirrors Swift
-                // `EstateLifecycle.swift` wireSubstores.
-                if let Some(corpus) = self.corpus_kits.get(&handle).cloned() {
-                    corpus.mount_ingest_queue().map_err(|e| {
-                        GeniusLocusKitError::UnderlyingEstateFailure {
-                            reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
-                        }
-                    })?;
-                    // Install the on_encoded drain-stage rider (rollup +
-                    // distillation + dense recompose + A2 marker) through the
-                    // shared seam. The SAME seam serves the AriaMcpKit
-                    // registry wiring path, so provision and serve-open run
-                    // one identical rider (Swift twin: wireCorpusRoomRollup,
-                    // called from wireSubstores on both paths). The queue was
-                    // mounted empty just above, so mount-then-wire cannot
-                    // race a resumed backlog here.
-                    self.wire_corpus_on_encoded(&handle);
-                }
-            }
-            Err(e) => {
-                // Sub-store wiring failed. Close the estate to avoid a half-wired zombie
-                // in the registry, mirroring Swift's `try? await close(handle)` rollback.
-                let _ = self.close(&handle);
-                return Err(e);
-            }
+        // A fresh estate has no index rows, so the engine's composition-policy
+        // check passes at `reindex_pending = false`. A wiring failure closes
+        // the estate so no half-wired zombie stays in the registry, mirroring
+        // Swift's `try? await close(handle)` rollback.
+        if let Err(e) = self.wire_substores(
+            &handle,
+            params.kind,
+            Arc::clone(&backing_storage),
+            embedding_models,
+            0,
+            false,
+        ) {
+            let _ = self.close(&handle);
+            return Err(e);
         }
 
         // Step 2b-prov: Record embedding-provider provenance.
