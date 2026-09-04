@@ -26,10 +26,11 @@ Platform: **iOS only** (EventKit full-access flow + iPhone/iPad UX).
 
 ## MOOT calls used (via `MootBridge` over the ARIA tool surface)
 
-| Tool | When | Arguments | Returns (text) |
+| Tool | When | Arguments | Returns |
 |---|---|---|---|
-| `moot_memory_search` | seed probe + Search box | `query`, `limit?` | `found N memory(s)\n<id> [room] <preview>…` |
-| `moot_file_memory` | seed + each event sync | `content`, `location` | `filed memory <id>\nroom: …\nlineage: …` |
+| `moot_memory_search` | seed probe + Search box | `query`, `limit?` | structured rows: `id`, `subject`, `room` |
+| `moot_memory_get` | Search box, after the search | `ids`, `depth: "full"` | structured rows: `id`, `room`, `content` |
+| `moot_file_memory` | seed + each event sync | `content`, `location` | text: `filed memory <id>\nroom: …\nlineage: …` |
 
 All arguments are `JSONValue` (`import AriaMCP`). `location` is the drawer's
 **room** — every ingested event files into room `"calendar"`.
@@ -39,25 +40,15 @@ All arguments are `JSONValue` (`import AriaMCP`). `location` is the drawer's
 - `MootCalendarIngestApp` calls `GatewayRuntime.shared.configure(databaseURL:)`
   at launch, pointing at a durable SQLite file in Application Support, then
   triggers `model.attach()` and `seedSampleMemoriesIfEmpty()`.
-- `CalendarIngestModel` gets its bridge from `GatewayRuntime.shared.bridge()`, so
-  the **UI and the App Intents share one estate**.
+- `CalendarIngestModel` gets its bridge from `GatewayRuntime.shared.bridge()`.
 
-## App Intents
+## The result contract (called out in code)
 
-`MootCalendarIngestShortcuts` (an `AppShortcutsProvider` in the **app target**)
-registers the SDK's public intents with the system:
-
-- `CaptureDrawerIntent` — file a memory by voice (`moot_file_memory`).
-- `RecallDrawerIntent` — recall memories by query (`moot_memory_search`),
-  including the ingested calendar events, because the intents reach the same
-  `GatewayRuntime.shared` estate the app filled.
-
-## Known SDK edge (called out in code)
-
-`moot_memory_search` returns **text**, not structured drawer objects. The app
-displays the raw `<id> [room] <preview>` lines verbatim and marks where a typed
-result would plug in (`NOTE(integrate)` in `CalendarIngestModel.searchMemory()`).
-A production app would want a structured recall tool.
+Every recall tool answers with text for people and a `structuredContent`
+block, `{ "results": [ { "id", "room", "subject", "content" }, … ] }`, exposed
+as `IntentCallResult.structured`. `searchMemory()` reads the search rows for
+ids, fetches the bodies with one batched `moot_memory_get` at depth:full, and
+renders one line per drawer. The app never parses the text block.
 
 ## Permissions
 
