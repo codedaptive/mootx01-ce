@@ -1535,7 +1535,8 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs: [release]
     runs-on: ubuntu-latest
-    # Writes the updated manifests back to develop/1.0.x. Declared explicitly
+    # Writes the updated manifests back to develop/1.1.x, the line releases
+    # are cut from. Declared explicitly
     # because the workflow-wide default is now contents: read. NOTE: the actual
     # git push authenticates with the WINGET_PUSH_PAT persisted by the checkout
     # below (persist-credentials stays at its default so that PAT survives into
@@ -1545,7 +1546,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: develop/1.0.x
+          ref: develop/1.1.x
           # persist-credentials intentionally left at its default (true): the
           # git push below relies on this PAT being written to .git/config.
           token: ${{ secrets.WINGET_PUSH_PAT }}
