@@ -139,6 +139,13 @@ pub struct Dispatcher {
     /// hosts and tests that hold the posture explicitly. One process, one
     /// posture. Mirrors Swift `ToolDispatcher.posture`.
     posture: EstatePosture,
+    /// Whether the Anthropic memory_20250818 adapter (`memory` tool) is
+    /// enabled for this serve session. Derived once in `new` from the
+    /// `MOOTX01_MEMORY_TOOL` env var — matching the posture pattern so the
+    /// process environment is never consulted per-call inside `dispatch_memory`.
+    /// Tests set this via `with_memory_tool_enabled` so no env mutation is needed.
+    /// Mirrors Swift `ToolDispatcher.memoryToolEnabled`.
+    memory_tool_enabled: bool,
 }
 
 impl Dispatcher {
@@ -180,6 +187,9 @@ impl Dispatcher {
             // read from the default estate's manifest (apply_preferences).
             mode_session_state: ModeSessionState::new(),
             posture: EstatePosture::from_process_environment(),
+            // Resolved once here so dispatch_memory never re-reads the process
+            // environment. Mirrors how posture is resolved once in new().
+            memory_tool_enabled: crate::tool_list::memory_enabled(),
         }
     }
 
@@ -190,6 +200,14 @@ impl Dispatcher {
     /// test runner is parallel).
     pub fn with_posture(mut self, posture: EstatePosture) -> Self {
         self.posture = posture;
+        self
+    }
+
+    /// Builder-style override of the memory-tool gate. Tests use this so no
+    /// env-var mutation is needed — `std::env::set_var` is not thread-safe
+    /// under the parallel Rust test runner. Mirrors `with_posture`.
+    pub fn with_memory_tool_enabled(mut self, enabled: bool) -> Self {
+        self.memory_tool_enabled = enabled;
         self
     }
 
@@ -323,10 +341,24 @@ impl Dispatcher {
         // is answered first, as in the live path — a guide touches nothing.
         // Returned as an isError tool result (not a JSON-RPC error) for the
         // same reason substrate refusals are: the client keeps the call id
-        // and the model sees the reason. Mirrors Swift ToolDispatcher.dispatch.
+        // and the model sees the reason. Two checks: the name inventory, then
+        // the command-classified tools (`memory`), whose `command` argument
+        // decides per call — a read command proceeds; a mutating, unknown, or
+        // missing command is refused here so the adapter itself never learns
+        // about posture. Mirrors Swift ToolDispatcher.dispatch.
         let teachme = args_map.get("teachme").and_then(|v| v.as_bool()) == Some(true);
-        if self.posture.is_frozen() && !teachme && crate::tool_mutation_inventory::is_frozen_refused(name) {
-            return Ok(crate::dispatch::error_result(&EstatePosture::refusal_message(name)));
+        if self.posture.is_frozen() && !teachme {
+            if crate::tool_mutation_inventory::is_frozen_refused(name) {
+                return Ok(crate::dispatch::error_result(&EstatePosture::refusal_message(name)));
+            }
+            if let Some(read_commands) = crate::tool_mutation_inventory::frozen_read_commands(name) {
+                let command = args_map.get("command").and_then(|v| v.as_str());
+                if !command.is_some_and(|c| read_commands.contains(&c)) {
+                    return Ok(crate::dispatch::error_result(
+                        &EstatePosture::refusal_message_for_command(name, command),
+                    ));
+                }
+            }
         }
 
         // Decode the optional `mode` argument (modes are fail-open by spec).
@@ -375,9 +407,9 @@ impl Dispatcher {
             }
         }
 
-        let mut result = crate::dispatch::dispatch_tool_with_ledgers(
+        let mut result = crate::dispatch::dispatch_tool_with_ledgers_and_memory_flag(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
-            self.posture, &self.build_serial, &self.version_skew,
+            self.posture, self.memory_tool_enabled, &self.build_serial, &self.version_skew,
             // Upstream-release advisory provider — evaluated by ping/status
             // only; None when the host wired none.
             self.update_advisory.as_ref(),
@@ -419,4 +451,54 @@ fn append_hint_to_result(mut result: serde_json::Value, text: &str) -> serde_jso
         }
     }
     result
+}
+
+#[cfg(test)]
+mod frozen_command_tests {
+    //! The session-state record is a private field, so the "refused before
+    //! the call is recorded" half of the frozen `memory` contract is held
+    //! here, in-crate. The integration half (estate bytes untouched, `view`
+    //! proceeds, live `delete` still works, mint tools refused) lives in
+    //! tests/frozen_posture_tests.rs.
+    use super::*;
+
+    fn frozen_dispatcher() -> Dispatcher {
+        Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", "", None)
+            .with_posture(EstatePosture::Frozen)
+    }
+
+    fn call(dispatcher: &Dispatcher, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let raw = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments }
+        });
+        let request = JSONRPCRequest::decode(&raw).expect("request must decode");
+        serde_json::to_value(dispatcher.handle(&request)).expect("response must serialize")
+    }
+
+    #[test]
+    fn frozen_memory_mutating_commands_are_refused_before_the_session_records_them() {
+        let frozen = frozen_dispatcher();
+        for command in [Some("create"), Some("str_replace"), Some("insert"), Some("delete"), Some("rename"), Some("frobnicate"), None] {
+            let mut arguments = serde_json::json!({"path": "/memories/frozen.txt", "file_text": "must not land"});
+            if let Some(command) = command {
+                arguments["command"] = serde_json::Value::String(command.to_owned());
+            }
+            let response = call(&frozen, "memory", arguments);
+            assert_eq!(response["result"]["isError"], serde_json::json!(true), "memory {command:?} must be refused; got {response}");
+            assert_eq!(
+                response["result"]["content"][0]["text"].as_str().unwrap_or(""),
+                EstatePosture::refusal_message_for_command("memory", command)
+            );
+        }
+        assert_eq!(
+            frozen.mode_session_state.snapshot().total_calls, 0,
+            "a refused memory command must not be recorded in session state"
+        );
+        // Control: a read the same dispatcher lets through is recorded, so
+        // the zero above is the refusal's doing.
+        let ping = call(&frozen, "moot_estate_ping", serde_json::json!({}));
+        assert_ne!(ping["result"]["isError"], serde_json::json!(true), "moot_estate_ping is a read; got {ping}");
+        assert_eq!(frozen.mode_session_state.snapshot().total_calls, 1);
+    }
 }

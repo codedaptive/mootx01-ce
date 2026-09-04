@@ -13,7 +13,8 @@ installs. One tool, three roles:
   single-writer estate and runs background maintenance. `--frozen` or
   `MOOTX01_FROZEN=1` serves the estate as a read-only snapshot over stdio:
   no background workers, no recall traces or reward marks, every mutating
-  tool refused, `moot_estate_status` reports `frozen: true`. Benchmarks and
+  tool refused (the `memory` tool, when enabled, answers `view` only),
+  `moot_estate_status` reports `frozen: true`. Benchmarks and
   debugging sessions use it so a served estate never changes under them.
 - **`mootx01 redistill [--db <name>] [--dry-run]`** — force-redistill every
   active item of an estate with the active converter and rebuild both recall
