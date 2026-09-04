@@ -8,6 +8,12 @@
 //!   2. A frozen search then dereference writes no recall-trace rows and
 //!      leaves the reward mark untouched (probed through `mark_recall_used`,
 //!      which returns the number of rows it flips).
+//!   3. `memory` is view-only when frozen: every other command is refused
+//!      before the adapter runs, with the estate byte-identical on disk, and
+//!      the same delete lands live (the adapter is posture-blind). The
+//!      "not recorded in session state" half lives in-crate, beside the
+//!      private field it observes (`dispatcher::frozen_command_tests`).
+//!   4. The two dark mint tools are refused by name when frozen.
 //!
 //! The posture is injected with `with_posture`, never through the process
 //! environment: std::env is process-global and the test runner is parallel.
@@ -191,5 +197,175 @@ fn frozen_search_then_dereference_leaves_traces_unmarked() {
     assert!(unmarked > 0, "the seeded rows must still be unmarked after a frozen dereference (probe flipped {unmarked})");
     assert_eq!(count_traces(&probe), seeded);
 
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Serialize the tests that set or clear `MOOTX01_MEMORY_TOOL`: `Dispatcher::new`
+/// reads the process environment once at construction, and the test runner is
+/// parallel, so tests that mutate the env before constructing a dispatcher must
+/// not race with each other.
+fn memory_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The on-disk estate: the main database file plus its WAL sibling (the
+/// backend runs SQLite in WAL mode, so a write that has not been checkpointed
+/// lives in `-wal`). Two snapshots that compare equal prove no byte of
+/// committed or pending state changed between them.
+fn estate_bytes(path: &str) -> (Vec<u8>, Vec<u8>) {
+    (
+        std::fs::read(path).expect("estate file"),
+        std::fs::read(format!("{path}-wal")).unwrap_or_default(),
+    )
+}
+
+/// `memory` is classified per call: `view` proceeds and reads; every other
+/// command, and a missing or unknown one, is refused before the adapter runs,
+/// with the estate byte-identical on disk. The adapter itself is
+/// posture-blind: the same `delete` lands through a live dispatcher.
+#[test]
+fn frozen_memory_tool_is_view_only_and_the_estate_is_untouched() {
+    let _guard = memory_env_lock();
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+    let path = temp_sqlite_path("memory");
+    let file = "/memories/frozen-notes.txt";
+
+    // One file created live, so view has something to read and delete a target.
+    let live = make_dispatcher(EstateRegistry::new_sqlite(&path, "frozen-tests").expect("open"), EstatePosture::Live);
+    let created = tools_call(&live, "memory",
+        serde_json::json!({"command": "create", "path": file, "file_text": "frozen posture view-only test"}));
+    assert!(first_text(&created).contains("File created successfully"), "precondition; got: {created}");
+    drop(live);
+
+    let frozen = make_dispatcher(EstateRegistry::new_sqlite(&path, "frozen-tests").expect("reopen"), EstatePosture::Frozen);
+    let before = estate_bytes(&path);
+    let mutating: [(Option<&str>, JsonValue); 7] = [
+        (Some("create"), serde_json::json!({"path": "/memories/other.txt", "file_text": "must not land"})),
+        (Some("str_replace"), serde_json::json!({"path": file, "old_str": "view-only", "new_str": "must not land"})),
+        (Some("insert"), serde_json::json!({"path": file, "insert_line": 0, "insert_text": "must not land"})),
+        (Some("delete"), serde_json::json!({"path": file})),
+        (Some("rename"), serde_json::json!({"old_path": file, "new_path": "/memories/renamed.txt"})),
+        (Some("frobnicate"), serde_json::json!({"path": file})),
+        (None, serde_json::json!({"path": file})),
+    ];
+    for (command, mut args) in mutating {
+        if let Some(command) = command {
+            args["command"] = JsonValue::String(command.to_owned());
+        }
+        let response = tools_call(&frozen, "memory", args);
+        assert!(is_error(&response), "memory {command:?} must be refused when frozen; got: {response}");
+        assert_eq!(first_text(&response), EstatePosture::refusal_message_for_command("memory", command));
+    }
+    assert_eq!(estate_bytes(&path), before, "refused memory commands must leave the estate byte-identical on disk");
+
+    // view proceeds and reads the live-created file.
+    let view = tools_call(&frozen, "memory", serde_json::json!({"command": "view", "path": file}));
+    assert!(
+        !is_error(&view) && first_text(&view).contains("frozen posture view-only test"),
+        "memory view is a read and must work when frozen; got: {view}"
+    );
+    drop(frozen);
+
+    // The adapter is posture-blind: the same delete lands live.
+    let live = make_dispatcher(EstateRegistry::new_sqlite(&path, "frozen-tests").expect("reopen live"), EstatePosture::Live);
+    let deleted = tools_call(&live, "memory", serde_json::json!({"command": "delete", "path": file}));
+    assert!(first_text(&deleted).starts_with("Successfully deleted"), "live delete must still work; got: {deleted}");
+    let gone = tools_call(&live, "memory", serde_json::json!({"command": "view", "path": file}));
+    assert!(first_text(&gone).contains("does not exist"), "the deleted file must be gone; got: {gone}");
+
+    std::env::remove_var("MOOTX01_MEMORY_TOOL");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `with_memory_tool_enabled` is the construction-time gate: the flag stored at
+/// `Dispatcher::new` controls whether `memory` dispatches, regardless of what
+/// `MOOTX01_MEMORY_TOOL` contains after construction. Two sub-cases:
+///
+/// (a) env says enabled; builder says disabled → memory is refused
+/// (b) env is unset; builder says enabled → memory view works on a frozen estate
+///
+/// Extends `frozen_memory_tool_is_view_only_and_the_estate_is_untouched`, which
+/// owns the full frozen-posture coverage. This test focuses only on the flag
+/// resolution contract.
+#[test]
+fn memory_tool_enabled_flag_controls_dispatch_not_env() {
+    let _guard = memory_env_lock();
+
+    // ── sub-case (a): env on, builder off → memory disabled ──────────────────
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+    let path_a = temp_sqlite_path("mem_flag_off");
+    let dispatcher_off = Dispatcher::new(
+        EstateRegistry::new_sqlite(&path_a, "flag-off-tests").expect("open"),
+        "ARIA_MCP_Rust", "test", "test-serial", "", None,
+    )
+    .with_posture(EstatePosture::Live)
+    .with_memory_tool_enabled(false);
+
+    // The env still says "1" at this point. The flag must win.
+    let refused = tools_call(
+        &dispatcher_off,
+        "memory",
+        serde_json::json!({"command": "view", "path": "/memories/x.txt"}),
+    );
+    assert!(
+        is_error(&refused),
+        "memory must be refused when flag is off, even with MOOTX01_MEMORY_TOOL=1 in env; got: {refused}"
+    );
+    assert!(
+        first_text(&refused).contains("memory tool is disabled"),
+        "refusal text must mention 'memory tool is disabled'; got: {}",
+        first_text(&refused)
+    );
+    let _ = std::fs::remove_file(&path_a);
+
+    // ── sub-case (b): env unset, builder on → memory view works frozen ────────
+    std::env::remove_var("MOOTX01_MEMORY_TOOL");
+    let path_b = temp_sqlite_path("mem_flag_on");
+    let file = "/memories/canary.txt";
+
+    // Seed a file via a live dispatcher with the flag on so view has a target.
+    let seeder = Dispatcher::new(
+        EstateRegistry::new_sqlite(&path_b, "flag-on-tests").expect("open"),
+        "ARIA_MCP_Rust", "test", "test-serial", "", None,
+    )
+    .with_posture(EstatePosture::Live)
+    .with_memory_tool_enabled(true);
+    let created = tools_call(&seeder, "memory",
+        serde_json::json!({"command": "create", "path": file, "file_text": "flag-on canary"}));
+    assert!(first_text(&created).contains("File created successfully"), "precondition; got: {created}");
+    drop(seeder);
+
+    // Frozen dispatcher with flag on, env still unset: view must succeed.
+    let frozen_on = Dispatcher::new(
+        EstateRegistry::new_sqlite(&path_b, "flag-on-tests").expect("reopen"),
+        "ARIA_MCP_Rust", "test", "test-serial", "", None,
+    )
+    .with_posture(EstatePosture::Frozen)
+    .with_memory_tool_enabled(true);
+    let view = tools_call(&frozen_on, "memory",
+        serde_json::json!({"command": "view", "path": file}));
+    assert!(
+        !is_error(&view) && first_text(&view).contains("flag-on canary"),
+        "memory view must work when flag is on (env unset) and posture is frozen; got: {view}"
+    );
+    let _ = std::fs::remove_file(&path_b);
+}
+
+/// The two mint tools are never advertised and dispatch only behind the
+/// `MOOTX01_MINT_TOOLS=1` launch gate; frozen, they are refused by name before
+/// the gate is consulted, so a harness serve that is both frozen and
+/// mint-enabled cannot mint through the snapshot.
+#[test]
+fn frozen_refuses_dark_mint_tools() {
+    let path = temp_sqlite_path("mint");
+    let frozen = make_dispatcher(EstateRegistry::new_sqlite(&path, "frozen-tests").expect("open"), EstatePosture::Frozen);
+    let before = estate_bytes(&path);
+    for tool in aria_mcp::tool_mutation_inventory::DARK_MUTATION_TOOLS {
+        let response = tools_call(&frozen, tool, serde_json::json!({"batch_size": 1}));
+        assert!(is_error(&response), "{tool} must be refused when frozen; got: {response}");
+        assert_eq!(first_text(&response), EstatePosture::refusal_message(tool));
+    }
+    assert_eq!(estate_bytes(&path), before, "refused mint tools must leave the estate byte-identical on disk");
     let _ = std::fs::remove_file(&path);
 }
