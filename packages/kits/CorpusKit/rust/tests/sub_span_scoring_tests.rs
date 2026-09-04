@@ -190,6 +190,7 @@ fn make_engine(
         config,
         Arc::clone(&store) as Arc<dyn CorpusContentSource>,
         vec![EmbeddingModelConfig::MiniLM { inference }],
+        false,
     )
     .expect("open engine");
     (engine, store)
