@@ -23,7 +23,7 @@
 import Testing
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 import PersistenceKit
 @testable import GeniusLocusKit

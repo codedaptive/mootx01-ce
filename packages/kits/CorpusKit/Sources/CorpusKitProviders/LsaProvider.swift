@@ -85,7 +85,7 @@ import SubstrateKernel
 // SubstrateML: JacobiSVD (deterministic one-sided Jacobi SVD) and
 // FloatSimHash.project (canonical projection to Engram).
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -139,7 +139,7 @@ public let lsaDefaultRank: Int = 64
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`.
+/// Conforms to `SynapseKit.EmbeddingProvider`.
 /// modelID = "lsa-v1", modelVersion = "1.1.0".
 /// Projection seed = `lsaProjectionSeed`.
 ///
@@ -357,7 +357,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// the projection produces an all-zero result (e.g. all-zero SVD from a
     /// 1-doc corpus — a basis quality issue, not a vocabulary miss).
     ///
-    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// Throws `SynapseKitError.embedFloatVocabMiss` when the provider HAS a
     /// finalized basis and non-empty vocabulary, but all query tokens are
     /// OOV — distinguishing a vocabulary coverage gap from a structural
     /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
@@ -375,7 +375,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         // throw embedFloatVocabMiss so the corpus layer surfaces the reason.
         let hasInVocab = terms.contains { basisVocab[$0] != nil }
         guard hasInVocab else {
-            throw VectorKitError.embedFloatVocabMiss(
+            throw SynapseKitError.embedFloatVocabMiss(
                 "lsa: reduced vocab size \(basisVocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }

@@ -214,7 +214,7 @@ func measureTopK(_ kernel: SubstrateKernel,
 }
 
 /// Brute-force Jaccard top-K over SubstrateTypes fingerprints — the
-/// production scan shape (VectorKit serves BinaryMetric.jaccard from
+/// production scan shape (SynapseKit serves BinaryMetric.jaccard from
 /// the brute-force engine; per-pair math is SubstrateTypes.Jaccard).
 /// Descending insertion ladder, same workload shape as the kernels'
 /// hammingTopK; scalar only.

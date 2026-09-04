@@ -3,7 +3,7 @@
 // GeniusLocusKit — the composition layer.
 //
 // GeniusLocusKit assembles three standalone substrate kits — LocusKit
-// (spatial / KG), VectorKit (vectors), CorpusKit (RAG bundles) — into a
+// (spatial / KG), SynapseKit (vectors), CorpusKit (RAG bundles) — into a
 // single device-local actor surface that can coordinate N estates.
 //
 // This package ships the scaffold for that composition: the public
@@ -81,7 +81,7 @@ let package = Package(
         ),
         .trait(
             name: "MigrationV1_4ToV1_5",
-            description: "Compile the GLK 1.4 to 1.5 storage-ledger kit-id migration capsule (VectorKit ledger rows become SynapseKit rows)."
+            description: "Compile the GLK 1.4 to 1.5 storage-ledger kit-id migration capsule (SynapseKit ledger rows become SynapseKit rows)."
         ),
         .trait(
             name: "MigrationFloor1_0",
@@ -120,7 +120,7 @@ let package = Package(
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(name: "LocusKit", path: "../LocusKit"),
-        .package(name: "VectorKit", path: "../VectorKit"),
+        .package(name: "SynapseKit", path: "../SynapseKit"),
         .package(name: "CorpusKit", path: "../CorpusKit"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
         // EideticLib: the deterministic FDC text-to-anchor utility. GeniusLocusKit's
@@ -209,7 +209,7 @@ let package = Package(
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
             ],
             path: "Sources/GLKMigrationV1_0ToV1_1"
@@ -270,7 +270,7 @@ let package = Package(
             ]
         ),
         // GLK 1.4 -> 1.5 capsule: moves the vector tier's schema-version
-        // ledger rows from their VectorKit ids to their SynapseKit ids on
+        // ledger rows from their SynapseKit ids to their SynapseKit ids on
         // populated estates, through PersistenceKit's renameSchemaKit.
         // Mirrors the GLKMigrationV1_3ToV1_4 target.
         .target(
@@ -349,7 +349,7 @@ let package = Package(
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 // CorpusKitProviders: the concrete embedding providers. GLK's
                 // provision path defaults the Corpus to CorpusEnsemble.defaultEnsemble()
@@ -412,7 +412,7 @@ let package = Package(
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
@@ -466,7 +466,7 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
             ],
             path: "Tests/GLKMigrationV1_0ToV1_1Tests",
             swiftSettings: [
@@ -575,7 +575,7 @@ let package = Package(
             ]
         ),
         // Tests for the GLK 1.4 -> 1.5 storage-ledger kit-id capsule.
-        // Verifies that a v1_4-stamped estate carrying the VectorKit ledger
+        // Verifies that a v1_4-stamped estate carrying the SynapseKit ledger
         // rows ends with SynapseKit rows at the same versions and a v1_5
         // stamp, that a second run is a no-op, that an estate without the
         // rows is stamped without change, and that the chain from v1_0 ends
@@ -593,6 +593,7 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
             ],
             path: "Tests/GLKMigrationV1_4ToV1_5Tests",
             swiftSettings: [

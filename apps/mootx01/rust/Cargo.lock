@@ -111,9 +111,9 @@ dependencies = [
  "sha2 0.10.9",
  "substrate-ml",
  "substrate-types",
+ "synapsekit",
  "uuid",
  "vault-kit",
- "vectorkit",
 ]
 
 [[package]]
@@ -534,8 +534,8 @@ dependencies = [
  "substrate-lib",
  "substrate-ml",
  "substrate-types",
+ "synapsekit",
  "uuid",
- "vectorkit",
 ]
 
 [[package]]
@@ -549,7 +549,7 @@ dependencies = [
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",
- "vectorkit",
+ "synapsekit",
 ]
 
 [[package]]
@@ -1359,8 +1359,8 @@ dependencies = [
  "substrate-lib",
  "substrate-ml",
  "substrate-types",
+ "synapsekit",
  "uuid",
- "vectorkit",
  "zeroize",
 ]
 
@@ -1375,7 +1375,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "vectorkit",
+ "synapsekit",
 ]
 
 [[package]]
@@ -2974,6 +2974,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "synapsekit"
+version = "0.2.0"
+dependencies = [
+ "engram-lib",
+ "intellectus-lib",
+ "persistence-kit",
+ "substrate-ml",
+ "substrate-types",
+ "uuid",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3360,18 +3372,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "vectorkit"
-version = "0.2.0"
-dependencies = [
- "engram-lib",
- "intellectus-lib",
- "persistence-kit",
- "substrate-ml",
- "substrate-types",
- "uuid",
-]
 
 [[package]]
 name = "version_check"

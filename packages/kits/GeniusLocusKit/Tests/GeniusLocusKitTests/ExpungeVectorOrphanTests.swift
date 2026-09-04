@@ -4,7 +4,7 @@
 //
 // The gap this closes: before GLK orchestration landed, expunge only tombstoned
 // the LocusKit drawer row and zeroed its content — the drawer's vector
-// embedding remained in VectorKit and CorpusKit, so the semantic recall lane
+// embedding remained in SynapseKit and CorpusKit, so the semantic recall lane
 // could still surface the "deleted" content's neighbors, and the embedding
 // leaked semantic content of a memory the user believed was irreversibly
 // destroyed.
@@ -23,7 +23,7 @@
 import Testing
 import Foundation
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import SubstrateTypes

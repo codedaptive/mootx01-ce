@@ -12,7 +12,7 @@
 
 use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
 use engram_lib::Engram;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 use persistence_kit::database_inventory::canonical_value_encoding;
 use persistence_kit::{
     BackendConfiguration, EstateConfiguration, SqliteStorage, Storage, TypedValue,

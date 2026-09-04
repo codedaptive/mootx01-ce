@@ -29,7 +29,7 @@ import EideticLib
 import Foundation
 import LocusKit
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 import EngramLib
 import SubstrateKernel
 import SubstrateML

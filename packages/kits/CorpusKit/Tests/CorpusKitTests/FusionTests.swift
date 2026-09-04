@@ -26,7 +26,7 @@ import Testing
 import Foundation
 import SubstrateTypes
 @testable import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKitSQLite
 import PersistenceKit
 import EngramLib

@@ -38,13 +38,13 @@ import Foundation
 import GeniusLocusKit
 import OSLog
 import PersistenceKit
-import VectorKit
+import SynapseKit
 
 private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 
 // MARK: - Domain constants
 
-/// VectorKit model lane that holds structural fingerprints.
+/// SynapseKit model lane that holds structural fingerprints.
 /// 1.0.x: keyed by factoid drawer ID. 1.1.x: keyed by source drawer ID.
 private let kDistillationLaneModelID = "distillation-features-v1"
 
@@ -266,7 +266,7 @@ private extension GeniusLocusKit {
         storage: any Storage
     ) async throws -> DistillationStorageMigrationReport {
 
-        // Ensure the VectorKit schema (vectors table) is registered before
+        // Ensure the SynapseKit schema (vectors table) is registered before
         // we query it in step (c). On a 1.0.x estate the schema was already
         // applied; on a fresh 1.1.x estate the table may not exist yet.
         // This mirrors the pattern in SharedContentMigration (line 832).

@@ -71,7 +71,7 @@ with the same determinism guarantees as the rest of the framework.
 | Package | What it is |
 |---|---|
 | `LocusKit` | Spatial memory system plus knowledge graph |
-| `VectorKit` | On-device embeddings plus nearest-neighbour and hybrid search |
+| `SynapseKit` | On-device embeddings plus nearest-neighbour and hybrid search |
 | `CorpusKit` | Content-plus-vector RAG bundles |
 
 **Use it when:** you are building memory, search, or retrieval into your own

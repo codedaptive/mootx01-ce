@@ -4,10 +4,10 @@
 // corpus and serialized to (and reconstructed from) a basis blob — without
 // the layering inversion that would otherwise be required.
 //
-// ## Why this protocol lives in CorpusKit core (not VectorKit)
+// ## Why this protocol lives in CorpusKit core (not SynapseKit)
 //
 // Training-on-corpus is a CorpusKit concern, not a generic embedding
-// concern. VectorKit's `EmbeddingProvider` is the universal embed surface;
+// concern. SynapseKit's `EmbeddingProvider` is the universal embed surface;
 // it must stay narrow so a future pre-trained CoreML encoder can conform to
 // it WITHOUT being forced to declare a training method it cannot honour.
 // `TrainableEmbeddingBasis` is the opt-in capability for the distributional
@@ -34,7 +34,7 @@
 // (the `TrainableEmbeddingBasis` trait).
 
 import Foundation
-import VectorKit
+import SynapseKit
 
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.

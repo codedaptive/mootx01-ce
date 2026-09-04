@@ -14,7 +14,7 @@
 //!   on process exit. Used by default when neither env var is set.
 //!   **Semantic recall lanes are wired** via a separate `InMemoryStorage`
 //!   handle used exclusively by the Corpus + VectorStore. The LocusKit tables
-//!   (drawers, tunnels, kg_facts) and the CorpusKit/VectorKit tables (chunks,
+//!   (drawers, tunnels, kg_facts) and the CorpusKit/SynapseKit tables (chunks,
 //!   vectors) are disjoint namespaces — two handles on the same ephemeral store
 //!   is the in-memory equivalent of the SQLite two-handle pattern.
 //! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
@@ -314,7 +314,7 @@ impl EstateRegistry {
         // matching the Swift pattern and closing the platform-specific bug.
         //
         // Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts;
-        // CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through
+        // CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through
         // the single shared connection handle.
         //
         // Embedding model: Deterministic — reproducible across Swift/Rust ports,
@@ -945,7 +945,7 @@ fn wire_postgres_semantic_recall(
 /// WAL-mode estate fails to receive `PRAGMA key` and returns NOTADB on the first SQL.
 ///
 /// Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts/…;
-/// CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through the
+/// CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through the
 /// shared connection.
 ///
 /// Recall ensemble is the five honest signals (`default_ensemble()`:

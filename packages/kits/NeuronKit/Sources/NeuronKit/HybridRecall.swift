@@ -6,7 +6,7 @@
 // (k = 60), reranks with Maximal Marginal Relevance (λ = 0.7 by
 // default), and pages the reranked output into an `AsyncSequence`.
 //
-// MOOTx01 invariant B-1: NeuronKit never calls LocusKit, VectorKit, or
+// MOOTx01 invariant B-1: NeuronKit never calls LocusKit, SynapseKit, or
 // CorpusKit directly. The estate handle is the only substrate boundary
 // available. The estate's `recall` verb today returns a single
 // `[Drawer]` array — its underlying RecallStream is drained inside the

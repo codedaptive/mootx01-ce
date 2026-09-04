@@ -36,7 +36,7 @@
 
 import Testing
 import Foundation
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import CorpusKitProviders
 @testable import CorpusKit

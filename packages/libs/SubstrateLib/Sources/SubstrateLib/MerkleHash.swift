@@ -23,10 +23,10 @@ import SubstrateKernel
 
 /// Lightweight vector input for the hash pipeline.
 ///
-/// SubstrateLib cannot import VectorKit (dependency inversion), so this
+/// SubstrateLib cannot import SynapseKit (dependency inversion), so this
 /// struct captures the fields needed to serialize vectors into the
 /// canonical byte format under the node-tree model. The caller (a kit that has
-/// VectorKit in scope) converts VectorPayload to MerkleVectorInput
+/// SynapseKit in scope) converts VectorPayload to MerkleVectorInput
 /// before calling MerkleHash.leaf.
 public struct MerkleVectorInput: Sendable {
     /// The embedding model identifier, used for sort ordering.

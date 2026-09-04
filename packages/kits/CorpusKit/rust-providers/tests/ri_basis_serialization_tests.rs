@@ -19,7 +19,7 @@
 
 use corpus_kit_providers::RandomIndexingProvider;
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 mod basis_fixture;
 use basis_fixture::{decode_base64, BasisEmbeddingEntry};

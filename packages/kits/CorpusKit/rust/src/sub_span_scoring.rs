@@ -38,7 +38,7 @@
 
 use crate::content::{CorpusContentId, CorpusContentSource};
 use std::collections::HashMap;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 // ── Public constants ──────────────────────────────────────────────────────────
 

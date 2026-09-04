@@ -3,7 +3,7 @@
 // Process-wide serialisation lock for SubstrateMLTests that touch the
 // Intellectus global singleton (enabled flag + installed sink).
 //
-// Copied verbatim from VectorKit's GlobalTestLock.swift as the canonical
+// Copied verbatim from SynapseKit's GlobalTestLock.swift as the canonical
 // pattern (per mission instruction). Any change here must be mirrored there
 // and in any other kit that copies this pattern.
 //

@@ -17,7 +17,7 @@ import Foundation
 import GeniusLocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import NeuronKit
 @testable import AriaResident
 

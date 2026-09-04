@@ -5,7 +5,7 @@
 // in shape across THETA and BETA cycles.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
-// HNSWIndex (VectorKit) is an approximate nearest-neighbour index for the
+// HNSWIndex (SynapseKit) is an approximate nearest-neighbour index for the
 // float lane (Lane D). It activates at/above a configurable threshold
 // (default 5 000 vectors per modelID partition). Two dreaming cadences
 // have maintenance duties over this graph (THETA and BETA); ALPHA manages
@@ -35,7 +35,7 @@
 //
 // ── Seam idiom ───────────────────────────────────────────────────────────
 // Mirrors the `ThetaBasisRetrainHook` injection pattern: the protocol is
-// pure (no VectorKit type in any signature, and no VectorKit import in
+// pure (no SynapseKit type in any signature, and no SynapseKit import in
 // this package at all). The production adapter,
 // `EstateHNSWGraphMaintenance`, holds a `VectorStore` reference and
 // delegates to its public HNSW maintenance surface. It lives in

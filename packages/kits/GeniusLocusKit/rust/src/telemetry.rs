@@ -11,7 +11,7 @@
 //
 // METRIC NAMESPACE
 // All metrics are under `geniuslocus.estate.*` to distinguish these per-estate
-// rollups from per-kit metrics emitted by LocusKit, VectorKit, and CorpusKit.
+// rollups from per-kit metrics emitted by LocusKit, SynapseKit, and CorpusKit.
 //
 // TIMESTAMPS
 // Rust is synchronous; timestamps are produced via

@@ -18,7 +18,7 @@ import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 import EngramLib
 import SubstrateTypes
 import GeniusLocusKitMigrations

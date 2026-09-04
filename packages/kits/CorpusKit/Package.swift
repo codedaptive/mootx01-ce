@@ -62,7 +62,7 @@ let package = Package(
         .package(path: "../../libs/IntellectusLib"),
         .package(path: "../PersistenceKit"),
         .package(path: "../ConvergenceKit"),
-        .package(path: "../VectorKit"),
+        .package(path: "../SynapseKit"),
         // QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so
         // it mounts a QueueKit-backed encode queue and drains it directly — the
         // SDK-standalone ingest pipeline (a Corpus queues, drains, and encodes
@@ -99,7 +99,7 @@ let package = Package(
                 // Authority: in-repository dependency direction.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
-                "VectorKit",
+                "SynapseKit",
                 // QueueKit backs the Corpus-owned ingest queue + drain worker
                 // pool (the SDK-standalone encode pipeline). See Package
                 // dependency note above.
@@ -125,7 +125,7 @@ let package = Package(
                 "SubstrateKernel",
                 "SubstrateML",
                 "EngramLib",
-                "VectorKit",
+                "SynapseKit",
                 // FDCProvider: text → FDC code via LatticeLib's FDC runtime
                 // (FDC.encode). Ancestor chain via FDC.ancestors(of:), the
                 // runtime façade over FDCFrame.ancestors(of:). FDC math lives
@@ -140,10 +140,10 @@ let package = Package(
             dependencies: [
                 "CorpusKit",
                 "CorpusKitProviders",
-                // VectorKit supplies the EmbeddingProvider protocol the
+                // SynapseKit supplies the EmbeddingProvider protocol the
                 // embedding-provider conformance gate references directly
                 // (EmbeddingProviderConformanceTests, B2-5 parity gate).
-                "VectorKit",
+                "SynapseKit",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitSQLite is required by the SQLite-backed chunk HLC
                 // round-trip test (ChunkHLCRoundTripTests), which exercises the

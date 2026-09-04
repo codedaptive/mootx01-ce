@@ -29,7 +29,7 @@ use persistence_kit::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use vectorkit::{VectorExactKey, VectorRepresentationClaims, VectorStore};
+use synapsekit::{VectorExactKey, VectorRepresentationClaims, VectorStore};
 
 // MARK: - State machine
 
@@ -1446,7 +1446,7 @@ fn protected_vectors_fold(
     storage: &Arc<dyn Storage>,
     excluded_keys: &BTreeSet<String>,
 ) -> Result<String, SharedContentMigrationError> {
-    // Pin the DECLARED VectorKit schema before reading (P6 scale finding):
+    // Pin the DECLARED SynapseKit schema before reading (P6 scale finding):
     // row decode forms depend on the connection's accumulated schema view,
     // and the baseline capture runs BEFORE any engine has declared the
     // vectors schema while verification runs AFTER — same bytes decoded

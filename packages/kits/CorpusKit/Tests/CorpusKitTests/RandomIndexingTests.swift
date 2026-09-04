@@ -40,7 +40,7 @@ import CorpusKit
 import CorpusKitProviders
 import EngramLib
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // MARK: - Shared canonical fixture
 //

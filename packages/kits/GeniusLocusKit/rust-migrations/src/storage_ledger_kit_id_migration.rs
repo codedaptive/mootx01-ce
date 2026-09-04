@@ -6,8 +6,11 @@
 //! kit ids are stored values: one row each in PersistenceKit's schema-version
 //! ledger in every populated estate. A store that finds no ledger row under
 //! its declared id treats the estate as version 0 and replays its ladder from
-//! the start; the vector store's v5→v6 step drops and recreates `vectors`.
-//! This capsule moves both rows to their new ids through
+//! the start against the v6 layout: the vector store's v5→v6 step rebuilds
+//! `vectors` through a copy table that folds every row's generation to 0 (and
+//! fails outright when a serving and a shadow row share a key), and the
+//! ledger keeps a duplicate row under the old id. This capsule moves both
+//! rows to their new ids through
 //! `Storage::rename_schema_kit` (PERSISTENCEKIT_SPEC I-7a), keeping version
 //! and applied-at, then stamps the estate format V1_5 (GENIUSLOCUSKIT_SPEC
 //! I-24).

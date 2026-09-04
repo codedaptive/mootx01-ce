@@ -22,7 +22,7 @@ import LocusKit
 import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import GeniusLocusKit
 
 /// Number of default wings seeded by provision(). Hint drawers == one per wing.

@@ -24,7 +24,7 @@ use corpus_kit_providers::{
 };
 use corpus_kit::Tokenizer;
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 // The canonical file ships under Tests/SharedVectors/, two levels up
 // from rust-providers/tests/. Embedded at compile time so the test has

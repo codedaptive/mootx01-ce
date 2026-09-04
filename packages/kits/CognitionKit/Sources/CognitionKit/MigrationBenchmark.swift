@@ -34,7 +34,7 @@
 //
 // ── Intentional benchmark contract ──
 // The benchmark recall path is LocusKit content-match (BM25/substring) via
-// `asRecallFrames()` — this is deliberate. VectorKit and CorpusKit have shipped
+// `asRecallFrames()` — this is deliberate. SynapseKit and CorpusKit have shipped
 // and their vector recall lane (Lane D) is live at runtime, but the benchmark
 // intentionally measures structural recall fidelity: whether a migration plan
 // preserves content recallability, independent of embedding-space ranking.

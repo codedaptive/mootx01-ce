@@ -1,7 +1,7 @@
 // BundleStore.swift
 //
 // Storage for RAG chunks (the "content half" of a content-plus-
-// vector bundle). The vector half lives in VectorKit's vectors
+// vector bundle). The vector half lives in SynapseKit's vectors
 // table; the bundle store maintains the chunks table and the
 // join via (chunk.id.uuidString == vector.item_id) by convention
 // (Lane F rename: drawer_id → item_id, arch spec §4.1).
@@ -211,7 +211,7 @@ public actor BundleStore {
             hashableTables: hashableTables,
             hashProvider: { table, rowKey, values -> ContentHash in
                 // Extract the chunk text for hashing. The text column
-                // is the chunk's content; vectors live in VectorKit
+                // is the chunk's content; vectors live in SynapseKit
                 // (not inline), so the vector input is empty.
                 let contentBytes: [UInt8]
                 if case let .text(text) = values["text"] ?? .null {

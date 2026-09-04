@@ -187,7 +187,7 @@ fn transaction_fixtures(backend: &str, factory: &Factory) {
     storage.close().unwrap();
 }
 
-/// Schema mirroring how VectorKit stores embeddings on a backend: a keyed row
+/// Schema mirroring how SynapseKit stores embeddings on a backend: a keyed row
 /// with an opaque binary vector payload (`payload_binary`, e.g. a 32-byte
 /// packed Engram/fingerprint) and a float32 payload (`payload_float32`, e.g. a
 /// 384-d MiniLM embedding serialized to bytes). Plain BLOB columns —
@@ -211,7 +211,7 @@ fn vector_accommodation_schema() -> SchemaDeclaration {
 }
 
 /// Vector-storage accommodation guarantee. PersistenceKit owns no
-/// k-NN engine; dense-embedding search lives in VectorKit. Every backend MUST
+/// k-NN engine; dense-embedding search lives in SynapseKit. Every backend MUST
 /// accommodate a vector workload's STORAGE needs through RowStore:
 ///   1. vector-payload row round-trip — 32-byte binary + 384-d float32 survive
 ///      insert→query byte-for-byte;

@@ -44,13 +44,13 @@ import LocusKit
 import OSLog
 import SubstrateML
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // MARK: - Per-item distillation (intra-item reduction)
 
 public extension GeniusLocusKit {
 
-    /// The fixed VectorKit lane for structural fingerprints (§8). Keyed by
+    /// The fixed SynapseKit lane for structural fingerprints (§8). Keyed by
     /// the SOURCE drawer id; the no-inference Hamming NN structure is the
     /// Phase 2 consolidation cluster-detection substrate. No Phase 1
     /// recall route consumes it.

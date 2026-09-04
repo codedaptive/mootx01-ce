@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
 use substrate_ml::svd::JacobiSvd;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // MARK: - Constants
 
@@ -541,7 +541,7 @@ impl EmbeddingProvider for LsaProvider {
     ///
     /// Returns `Engram::ZERO` if finalize() was not called, text is empty,
     /// or all tokens are OOV.
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         Ok(self.lsa_engram(text))
     }
 
@@ -550,11 +550,11 @@ impl EmbeddingProvider for LsaProvider {
     /// - Not finalized / no basis: returns `Ok(vec![])` — structural opt-out.
     /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
     /// - Trained basis, all query tokens OOV: returns
-    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   `Err(SynapseKitError::EmbedFloatVocabMiss(...))` so the corpus layer
     ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
     /// - Degenerate SVD (all-zero result): returns `Ok(vec![])` — basis quality
     ///   issue, not a vocabulary miss.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         // No finalized basis or empty input: structural opt-out.
         if !self.is_finalized() || self.basis_vocab.is_empty() {
             return Ok(vec![]);
@@ -570,7 +570,7 @@ impl EmbeddingProvider for LsaProvider {
         // trained but query hits nothing in the reduced vocab.
         let has_in_vocab = terms.iter().any(|t| self.basis_vocab.contains_key(t.as_str()));
         if !has_in_vocab {
-            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+            return Err(SynapseKitError::EmbedFloatVocabMiss(format!(
                 "lsa: reduced vocab size {}, but 0 of {} query token(s) matched",
                 self.basis_vocab.len(),
                 terms.len()
@@ -591,7 +591,7 @@ impl EmbeddingProvider for LsaProvider {
     /// degenerate all-zero fold-in) yields `(Engram::ZERO, vec![])` — matching
     /// `embed`'s `ZERO` and `embed_float`'s `vec![]` (its all-OOV `EmbedFloatVocabMiss`
     /// is swallowed to `vec![]` by the default `embed_pair`'s `unwrap_or_default`).
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         match LsaProvider::embed_float(self, text) {
             Some(v) if !v.is_empty() => {
                 Ok((float_simhash::project(&v, self.projection_seed), v))

@@ -21,23 +21,23 @@
 //     internally, exposed as Float for consumer ergonomics).
 //   - FusedHit.perLane uses LaneTag string values as keys.
 //
-// LaneTag is defined canonically in VectorKit (DenseHit.swift), the lower kit
-// (CorpusKit depends on VectorKit). CorpusKit ALIASES it here rather than
+// LaneTag is defined canonically in SynapseKit (DenseHit.swift), the lower kit
+// (CorpusKit depends on SynapseKit). CorpusKit ALIASES it here rather than
 // defining a second enum: two byte-identical Swift enums are still DISTINCT
 // TYPES, which makes `.binaryDense` ambiguous in any consumer that imports both
-// VectorKit and CorpusKit (e.g. ARIA_MCP). One type, aliased — mirroring the
-// Rust port, where CorpusKit re-exports `vectorkit::engine::hit::LaneTag`.
+// SynapseKit and CorpusKit (e.g. ARIA_MCP). One type, aliased — mirroring the
+// Rust port, where CorpusKit re-exports `synapsekit::engine::hit::LaneTag`.
 
 import Foundation
-import VectorKit
+import SynapseKit
 
-// MARK: - LaneTag (aliased from VectorKit, the canonical owner)
+// MARK: - LaneTag (aliased from SynapseKit, the canonical owner)
 
 /// Identifies which retrieval lane produced a score in FusedHit.perLane.
-/// The canonical enum lives in VectorKit.DenseHit; this alias gives CorpusKit
-/// consumers the same single type. New lanes are added to VectorKit's enum
+/// The canonical enum lives in SynapseKit.DenseHit; this alias gives CorpusKit
+/// consumers the same single type. New lanes are added to SynapseKit's enum
 /// (FT-1 Lane F update) — never as a second local definition.
-public typealias LaneTag = VectorKit.LaneTag
+public typealias LaneTag = SynapseKit.LaneTag
 
 // MARK: - ImpactPosting
 

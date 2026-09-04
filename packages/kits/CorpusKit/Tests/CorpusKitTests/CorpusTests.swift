@@ -8,7 +8,7 @@
 // the provider (no CoreML required). All assertions are behavioral, not
 // implementation:
 // they verify the public surface (ingest / recall / remove / count)
-// and the sealed-vector principle (no VectorKit type imported here).
+// and the sealed-vector principle (no SynapseKit type imported here).
 //
 // INTELLECTUS LOCK: All tests that call corpus.ingest (which calls
 // BundleStore.insert, emitting corpuskit.ingest.* metrics) or
@@ -234,22 +234,22 @@ struct CorpusTests {
 
     // MARK: - Sealed-vector principle
 
-    /// This file imports only CorpusKit (no VectorKit import). The fact
+    /// This file imports only CorpusKit (no SynapseKit import). The fact
     /// that this test compiles confirms that Corpus, EmbeddingModel, and
-    /// ScoredChunk are usable without any VectorKit dependency. Any
-    /// future change that leaks a VectorKit type onto the public surface
+    /// ScoredChunk are usable without any SynapseKit dependency. Any
+    /// future change that leaks a SynapseKit type onto the public surface
     /// would break this file at compile time.
     ///
     /// The grep step in Part 5 verifies this at the source level; this
     /// test documents the requirement as a compile-time assertion.
     @Test func noVectorTypesRequiredByPublicSurface() async throws {
         try await GlobalTestLock.shared.withLock {
-            // Corpus and EmbeddingModel are named from CorpusKit; no VectorKit import.
+            // Corpus and EmbeddingModel are named from CorpusKit; no SynapseKit import.
             let storage = try makeScratchStorage()
             let corpus = try await Corpus(storage: storage, model: .deterministic)
             try await corpus.ingest("hello world", sourceID: "test", now: fixedNow)
             let results: [ScoredChunk] = try await corpus.recall("hello", limit: 1, now: fixedNow)
-            // ScoredChunk is a CorpusKit type — no VectorKit type used here.
+            // ScoredChunk is a CorpusKit type — no SynapseKit type used here.
             _ = results.first?.chunk.text
             _ = results.first?.score
         }

@@ -1,6 +1,6 @@
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 
 /// Async closure type for checking whether a persisted association already

@@ -47,7 +47,7 @@ use locus_kit::filter::RecallFrame;
 /// implementation executes the mode semantics:
 ///
 ///   `LocusOnly`   — bitmap-index scan through LocusKit.
-///   `CorpusOnly`  — BM25 + vector lanes via registered CorpusKit/VectorKit.
+///   `CorpusOnly`  — BM25 + vector lanes via registered CorpusKit/SynapseKit.
 ///   `Hybrid`      — locus + BM25 + vector lanes, RRF-fused (k=60).
 ///   `UnionBest`   — all lanes with union profile and greedy MMR deduplication.
 ///   `NodeTreeNative` — host-tree topology path (see below).

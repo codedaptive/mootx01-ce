@@ -26,7 +26,7 @@ import Foundation
 import LocusKit
 import CorpusKit
 @testable import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import IntellectusLib

@@ -143,7 +143,7 @@ impl CorpusContentSource for PublicationRaceSource {
     }
 }
 
-impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
+impl synapsekit::EmbeddingProvider for ReindexConcurrencyProvider {
     fn model_id(&self) -> &str {
         "reindex-concurrency-probe"
     }
@@ -152,14 +152,14 @@ impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
         "1.0.0"
     }
 
-    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, synapsekit::SynapseKitError> {
         Ok(engram_lib::Engram::ZERO)
     }
 
     fn embed_pair(
         &self,
         _text: &str,
-    ) -> Result<(engram_lib::Engram, Vec<f32>), vectorkit::VectorKitError> {
+    ) -> Result<(engram_lib::Engram, Vec<f32>), synapsekit::SynapseKitError> {
         self.probe.enter();
         std::thread::sleep(Duration::from_millis(20));
         self.probe.leave();
@@ -1349,7 +1349,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
             "retired provider residue survived in {table}",
         );
     }
-    let claims = vectorkit::VectorRepresentationClaims::new(Arc::clone(&storage));
+    let claims = synapsekit::VectorRepresentationClaims::new(Arc::clone(&storage));
     assert!(claims
         .claims(corpus_kit::CLAIMS_CONSUMER)
         .unwrap()
@@ -1368,14 +1368,14 @@ fn engine_claims_its_representations() {
     store.put("Claimed content.", "drawer-c", NOW).unwrap();
     engine.index_content("drawer-c", NOW).unwrap();
 
-    let claims = vectorkit::VectorRepresentationClaims::new(storage);
+    let claims = synapsekit::VectorRepresentationClaims::new(storage);
     let claimed = claims.claims(corpus_kit::CLAIMS_CONSUMER).unwrap();
-    assert!(claimed.contains(&vectorkit::VectorRepresentationKey::new(
+    assert!(claimed.contains(&synapsekit::VectorRepresentationKey::new(
         "corpus-deterministic-v1",
         "1.0.0",
         0
     )));
-    assert!(claimed.contains(&vectorkit::VectorRepresentationKey::new(
+    assert!(claimed.contains(&synapsekit::VectorRepresentationKey::new(
         "corpus-deterministic-v1",
         "1.0.0",
         1

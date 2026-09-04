@@ -56,11 +56,11 @@ substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 # depend on GLK). persistence-kit supplies the in-memory `Storage` backend.
 locus-kit = { path = "../../LocusKit/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
-# GLK_RAG_WIRING_001: VectorKit and CorpusKit are the RAG and vector
+# GLK_RAG_WIRING_001: SynapseKit and CorpusKit are the RAG and vector
 # seam dependencies. VectorSimilaritySignal queries VectorStore.find_nearest
 # for row-pair proximity; ExternalCorpus.hybrid_recall routes through
 # Corpus.recall for hybrid BM25+vector retrieval.
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 corpus-kit = { path = "../../CorpusKit/rust" }
 # Dual-Path Intake (G7): the per-estate encode queue is a real QueueKit
 # mounted on the in-memory PersistenceKit backend (D-B), so GLK depends on
@@ -102,7 +102,7 @@ convergence-kit = { path = "../../ConvergenceKit/rust" }
 # The `find_nearest_distilled` function takes `&Engram` in its public signature —
 # the probe is a structural fingerprint computed by DistillationPipeline — so
 # Engram must be nameable in production code. Engram was already a transitive dep
-# via vectorkit → engram-lib; this entry makes the dependency explicit per the
+# via synapsekit → engram-lib; this entry makes the dependency explicit per the
 # production signature. Layering: genius-locus-kit (composition) → engram-lib
 # (substrate primitive) does NOT invert. Per in-repository dependency direction.
 engram-lib = { path = "../../../libs/EngramLib/rust" }
@@ -141,7 +141,7 @@ test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
 # integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
-# engram-lib is already a transitive dependency via vectorkit → engram-lib;
+# engram-lib is already a transitive dependency via synapsekit → engram-lib;
 # this dev-dep makes it directly nameable in tests/ without altering the
 # production dependency graph.
 # Per in-repository dependency direction (dev-dep, no layering inversion:

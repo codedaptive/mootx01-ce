@@ -45,7 +45,7 @@ import CorpusKitProviders
 import EngramLib
 import LatticeLib
 import SubstrateKernel
-import VectorKit
+import SynapseKit
 
 // MARK: - Helpers
 

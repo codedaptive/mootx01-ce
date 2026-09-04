@@ -35,7 +35,7 @@ import LocusKit
 @testable import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 import QueueKit
 @testable import GeniusLocusKit

@@ -307,7 +307,7 @@ mod tests {
         let c2 = capture(
             &coord,
             &h,
-            "vector storage uses sqlite-vec; embeddings live in VectorKit",
+            "vector storage uses sqlite-vec; embeddings live in SynapseKit",
             SourceType::Canonical,
         );
         // One derived drawer — lower trust tier.

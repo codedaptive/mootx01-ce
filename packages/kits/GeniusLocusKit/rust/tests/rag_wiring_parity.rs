@@ -24,7 +24,7 @@ use persistence_kit::inmemory::InMemoryStorage;
 use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
 use substrate_types::hlc::HLCGenerator;
 use substrate_types::Fingerprint256;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const T0_MILLIS: i64 = 1_700_000_000_000;
 const T0_NANOS: i64 = T0_MILLIS * 1_000_000;
@@ -261,7 +261,7 @@ fn corpus_lane_emits_drawer_level_associations() {
     // sharing most tokens land near each other in engram space — the
     // semantic property production's distributional ensemble provides (the
     // whole-text Deterministic hash does not).
-    let provider = vectorkit::FloatSimHashEmbeddingProvider::new(
+    let provider = synapsekit::FloatSimHashEmbeddingProvider::new(
         "assoc-token-bag-v1",
         "1.0",
         0xC0FF_EE01,

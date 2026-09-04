@@ -20,7 +20,7 @@ import Foundation
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 // MARK: - Shared canonical fixture corpus
 

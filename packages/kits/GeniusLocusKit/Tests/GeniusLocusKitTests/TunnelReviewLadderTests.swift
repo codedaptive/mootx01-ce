@@ -8,7 +8,7 @@
 import Testing
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import SubstrateML

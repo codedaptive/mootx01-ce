@@ -19,7 +19,7 @@ import GeniusLocusKit
 import LocusKit
 import NeuronKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import CognitionKit

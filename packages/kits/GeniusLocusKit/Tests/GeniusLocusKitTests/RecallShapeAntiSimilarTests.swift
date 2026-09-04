@@ -31,7 +31,7 @@ import Testing
 import Foundation
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit

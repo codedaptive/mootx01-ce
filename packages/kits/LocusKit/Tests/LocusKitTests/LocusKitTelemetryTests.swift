@@ -61,7 +61,7 @@ import Testing
 /// emitting functions on DIFFERENT stores will have different `estate`
 /// tags and are invisible to these assertions.
 ///
-/// This approach is equivalent to the VectorKit/NeuronKit per-function
+/// This approach is equivalent to the SynapseKit/NeuronKit per-function
 /// lock approach in correctness: each test is isolated by its unique
 /// estate UUID tag rather than by a process-wide mutex. The
 /// `intellectusTestMutex` is still acquired by tests that need to reason

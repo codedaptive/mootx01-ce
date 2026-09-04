@@ -27,7 +27,7 @@
 // Scoring modes implemented:
 //   GLKRecallMode::LocusOnly — bitmap-index scan with RecallScoreVector::locus(1.0)
 //   GLKRecallMode::Hybrid   — all three lanes active when corpus/vector registered:
-//                              locus (bitmap), BM25 (CorpusKit), vector (VectorKit).
+//                              locus (bitmap), BM25 (CorpusKit), vector (SynapseKit).
 //                              RRF fusion (k=60) over all populated lists.
 //                              Falls back to rank-normalised locus-only when neither
 //                              corpus nor vector store is registered for the handle.
@@ -69,7 +69,7 @@ use corpus_kit::{
 };
 use crate::intake::LocusDrawerContentSource;
 use engram_lib::Engram;
-use vectorkit::vector_store::{VectorMatch, VectorStore};
+use synapsekit::vector_store::{VectorMatch, VectorStore};
 use persistence_kit::storage::{Storage, BackendConfiguration};
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::sqlite::SqliteStorage;
@@ -669,7 +669,7 @@ pub fn format_sync_state_token(state: &SyncState, backend_name: &str) -> String 
 /// lanes in `recall_scored`. Callers wire them via `register_corpus` and
 /// `register_vector_store` after opening the estate. Absent registrations
 /// cause Hybrid/CorpusOnly/UnionBest to fall back to locus-only ranked
-/// scoring — the same behavior as before CorpusKit/VectorKit were wired.
+/// scoring — the same behavior as before CorpusKit/SynapseKit were wired.
 /// Mirroring the Swift actor's `corpusKits` and `vectorStores` dictionaries.
 
 /// The dreaming-queue job payload.
@@ -1159,7 +1159,7 @@ pub struct EstateCoordinator {
     /// precedent); tests inject stubs. While empty for a handle, the
     /// subject_backfill drain lane does not render and the sweep refuses.
     pub(crate) subject_producers: HashMap<EstateHandle, Arc<dyn SubjectProducer>>,
-    /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
+    /// Per-estate SynapseKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
     /// accessor that would expose the type externally.
@@ -6603,7 +6603,7 @@ impl EstateCoordinator {
     // MARK: - expunge
 
     /// Tombstone a drawer, zeroize its content, and purge its vector
-    /// embedding(s) from VectorKit/CorpusKit. Raises
+    /// embedding(s) from SynapseKit/CorpusKit. Raises
     /// `VerbError::ExpungeNotConfirmed` at the boundary when `confirmation`
     /// is false (the substrate is not reached) — parity of the Swift guard.
     ///
@@ -9799,7 +9799,7 @@ impl EstateCoordinator {
             // scored-recall lane — one store, one resident array, one sidecar.
             self.register_vector_store(handle, corpus.shared_vector_store());
             // Apply the composite GLK schema so all component kit tables
-            // (LocusKit, VectorKit, CorpusKit) are registered under the
+            // (LocusKit, SynapseKit, CorpusKit) are registered under the
             // "GeniusLocusKit" composite kit ID, so the version gate in the
             // replication primitive sees the correct composite version for
             // this estate. Idempotent (CREATE TABLE IF NOT EXISTS). Mirrors
@@ -9872,7 +9872,7 @@ impl EstateCoordinator {
     ///        - `LocusOnly`  → no sub-store wiring.
     ///
     /// Trait impedance resolution: `DrawerStore` (LocusKit's trait) and
-    /// `persistence_kit::Storage` (VectorKit/CorpusKit's trait) are distinct. The
+    /// `persistence_kit::Storage` (SynapseKit/CorpusKit's trait) are distinct. The
     /// caller supplies both the `Arc<dyn DrawerStore>` for the estate and an
     /// `Arc<dyn Storage>` for sub-store construction, mirroring the Swift surface
     /// where the caller also constructs the storage instances and passes them in.
@@ -10611,7 +10611,7 @@ impl EstateCoordinator {
     ///   registered). Score = (256 - hamming_distance) / 256.0.
     ///
     /// Fallback: when neither corpus nor vector is registered, falls back to
-    /// rank-normalised locus-only (identical to before CorpusKit/VectorKit
+    /// rank-normalised locus-only (identical to before CorpusKit/SynapseKit
     /// were wired). This preserves existing behaviour for callers that have not
     /// yet registered corpus/vector stores.
     ///
@@ -10963,11 +10963,11 @@ impl EstateCoordinator {
                         let model = c.model_id().to_string();
                         // find_nearest stage — may be forced by a test seam.
                         // The seam returns StoreUnavailable so type inference resolves to
-                        // Result<Vec<VectorMatch>, VectorKitError>, matching find_nearest's signature.
+                        // Result<Vec<VectorMatch>, SynapseKitError>, matching find_nearest's signature.
                         // Over-fetch 4× for the same K-boundary reason as BM25 above.
                         let nearest_result =
                             if let Some(ref err_msg) = force_vector_hamming_error {
-                                Err(vectorkit::VectorKitError::StoreUnavailable(err_msg.clone()))
+                                Err(synapsekit::SynapseKitError::StoreUnavailable(err_msg.clone()))
                             } else {
                                 vs.find_nearest_with_metric(
                                     &probe,
@@ -13360,7 +13360,7 @@ mod tests {
         use persistence_kit::inmemory::InMemoryStorage;
         use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
         use std::sync::Arc;
-        use vectorkit::vector_store::VectorStore;
+        use synapsekit::vector_store::VectorStore;
 
         // Store-less estate: zeros, not an error.
         let (coord0, h0) = open_one();
@@ -15385,7 +15385,7 @@ mod tests {
         // — the semantic property production's distributional ensemble
         // provides (the whole-text Deterministic hash does not; it leaves
         // every distinct sentence ~128 bits apart).
-        let provider = vectorkit::FloatSimHashEmbeddingProvider::new(
+        let provider = synapsekit::FloatSimHashEmbeddingProvider::new(
             "hunt-token-bag-v1",
             "1.0",
             0xC0FF_EE00,
@@ -15592,10 +15592,10 @@ mod tests {
 /// Resolve a shape's binary-lane metric (W2.5 M1). Unknown values degrade
 /// to Hamming per the shape contract. Twin of Swift
 /// `RecallDirector.binaryMetric(for:)`.
-fn binary_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::DenseMetric {
+fn binary_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric::DenseMetric {
     match shape.map(|s| s.binary_metric.as_str()) {
-        Some("jaccard") => vectorkit::engine::metric::DenseMetric::JACCARD,
-        _ => vectorkit::engine::metric::DenseMetric::HAMMING,
+        Some("jaccard") => synapsekit::engine::metric::DenseMetric::JACCARD,
+        _ => synapsekit::engine::metric::DenseMetric::HAMMING,
     }
 }
 
@@ -15604,10 +15604,10 @@ fn binary_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::
 /// Unknown strings and `None` shapes both degrade to cosine per the shape
 /// contract — a shape must degrade, never fail. Twin of Swift
 /// `RecallDirector.floatMetric(for:)`.
-fn float_metric_for(shape: Option<&RecallShape>) -> vectorkit::engine::metric::FloatMetric {
+fn float_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric::FloatMetric {
     match shape.map(|s| s.float_metric.as_str()) {
-        Some("l2") => vectorkit::engine::metric::FloatMetric::L2,
-        Some("dot") => vectorkit::engine::metric::FloatMetric::Dot,
-        _ => vectorkit::engine::metric::FloatMetric::Cosine,
+        Some("l2") => synapsekit::engine::metric::FloatMetric::L2,
+        Some("dot") => synapsekit::engine::metric::FloatMetric::Dot,
+        _ => synapsekit::engine::metric::FloatMetric::Cosine,
     }
 }

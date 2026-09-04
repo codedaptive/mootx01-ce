@@ -15,7 +15,7 @@ import CorpusKit
 import EngramLib
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 
 @Suite("DestroyRecallOwnership", .serialized)
 struct DestroyRecallOwnershipTests {
