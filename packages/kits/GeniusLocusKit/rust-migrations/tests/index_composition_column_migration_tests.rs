@@ -261,7 +261,18 @@ fn v1_0_estate_runs_full_chain_to_v1_3() {
         .read_if_present()
         .expect("read format")
         .expect("version set");
-    assert_eq!(final_stamp, EstateFormatVersion::V1_4, "estate must be stamped V1_4 after full chain");
+    assert_eq!(final_stamp, EstateFormatVersion::V1_4, "the 1.3→1.4 capsule stamps V1_4, not current");
+    // The 1.4 → 1.5 capsule (storage ledger kit ids) carries the estate to
+    // CURRENT; the capsule-by-capsule walk above stops one short of it.
+    use genius_locus_kit_migrations::StorageLedgerKitIdMigrationExt;
+    coord
+        .run_storage_ledger_kit_id_migration(&handle, NOW)
+        .expect("storage ledger kit id migration must succeed");
+    let final_stamp = EstateFormatStore::new(Arc::clone(&storage))
+        .read_if_present()
+        .expect("read format")
+        .expect("version set");
+    assert_eq!(final_stamp, EstateFormatVersion::V1_5, "estate must be stamped V1_5 after full chain");
     assert_eq!(final_stamp, EstateFormatVersion::CURRENT);
 
     // Verify corpus_index_state is writable (composition_policy column present).

@@ -30,7 +30,11 @@ impl EstateFormatVersion {
     /// (LocusKit manifest key `index_composition_policy`), seeded on every
     /// populated estate through the migration catalog.
     pub const V1_4: Self = Self { major: 1, minor: 4 };
-    pub const CURRENT: Self = Self::V1_4;
+    /// Format 1.5: the schema-version ledger carries the vector tier under
+    /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
+    /// every populated estate are moved there through the migration catalog.
+    pub const V1_5: Self = Self { major: 1, minor: 5 };
+    pub const CURRENT: Self = Self::V1_5;
 }
 
 impl std::fmt::Display for EstateFormatVersion {
