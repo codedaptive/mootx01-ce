@@ -1,6 +1,5 @@
 import SwiftUI
-import MootGateway   // The MOOTx01 SDK product. Gives us MootBridge, GatewayRuntime,
-                     // and (re-exported through the App Intent types) the parallel estate.
+import MootGateway   // The MOOTx01 SDK product: MootBridge and GatewayRuntime.
 
 // ============================================================================
 // MootTodoApp — the SIDECAR pattern, demonstrated end to end.
@@ -29,11 +28,9 @@ import MootGateway   // The MOOTx01 SDK product. Gives us MootBridge, GatewayRun
 // HOW MOOTx01 IS WIRED IN (the three touch points)
 // -------------------------------------------------
 //   1. At launch we point the process-wide GatewayRuntime at a durable SQLite
-//      estate (configure(databaseURL:)). Calling bridge() registers the bridge
-//      with IntentRuntimeBridge; App Intents resolve through
-//      IntentRuntimeBridge.shared.bridge(), so Siri/Shortcuts and our UI share ONE MOOT.
+//      estate (configure(databaseURL:)).
 //   2. Our UI gets its bridge from GatewayRuntime.shared.bridge() — NOT a
-//      separate attach — so UI writes and intent writes land in the same MOOT.
+//      separate attach — so every write lands in the same MOOT.
 //   3. We seed sample data on first launch if the MOOT is empty.
 //
 // Everything MOOT-related funnels through MootBridge.callTool(...), the public
@@ -76,13 +73,9 @@ struct MootTodoApp: App {
         // have to mkdir by hand.
         let dbURL = MootTodoApp.estateURL()
 
-        // STEP 2: Point the PROCESS-WIDE runtime at that estate. The App
-        // Intents (CaptureDrawerIntent / RecallDrawerIntent, registered by
-        // MootTodoShortcuts) reach the MOOT through GatewayRuntime.shared too —
-        // so configuring it here means Siri, Shortcuts, the Action Button, and
-        // our own UI all operate on the SAME estate. configure() is a no-op if
-        // something already attached (first attachment wins), which is exactly
-        // what we want.
+        // STEP 2: Point the PROCESS-WIDE runtime at that estate. configure()
+        // is a no-op if something already attached (first attachment wins),
+        // which is exactly what we want.
         await GatewayRuntime.shared.configure(databaseURL: dbURL)
 
         // STEP 3: Get the shared bridge and hand it to our model. From here on
