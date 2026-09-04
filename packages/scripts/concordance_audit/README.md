@@ -43,7 +43,7 @@ It does **not** edit any docs. Closing the gaps is per-kit mission work.
 python3 packages/scripts/concordance_audit/concordance_audit.py
 
 # Scope to one or more packages (used by Adams post-flight on changed kits):
-python3 packages/scripts/concordance_audit/concordance_audit.py --package LocusKit --package VectorKit
+python3 packages/scripts/concordance_audit/concordance_audit.py --package LocusKit --package SynapseKit
 
 # CI-gate mode: nonzero exit if any scanned package has gaps or no section:
 python3 packages/scripts/concordance_audit/concordance_audit.py --strict
