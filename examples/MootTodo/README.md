@@ -5,9 +5,7 @@ pattern**: an ordinary to-do app keeps its own primary store (a tiny Codable
 JSON file) while mirroring every write into a **parallel MOOT** with about five
 lines of glue. The MOOT accumulates a full-text-searchable memory beside the
 app — surfaced by a "Search memory" field — showing that an app can gain memory
-"for free" by sidecaring. App Intents (`CaptureDrawerIntent`,
-`RecallDrawerIntent`) share the same estate via `GatewayRuntime.shared`, so
-Siri/Shortcuts and the app's own UI read and write one MOOT.
+"for free" by sidecaring.
 
 Open in Xcode via:
 

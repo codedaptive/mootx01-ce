@@ -111,8 +111,8 @@ final class TodoModel {
     // ========================================================================
     //
     // The bridge onto the parallel MOOT. Handed to us at launch by the app
-    // (which got it from GatewayRuntime.shared.bridge(), so it's the SAME
-    // estate the App Intents use). Optional because the to-do list must work
+    // (which got it from GatewayRuntime.shared.bridge()). Optional because
+    // the to-do list must work
     // even if the MOOT failed to attach — the sidecar is additive, never
     // load-bearing.
     private var bridge: MootBridge?
@@ -124,7 +124,7 @@ final class TodoModel {
 
     /// Search results, rendered under the search field. Each entry is one line
     /// the MOOT returned. (See the note below about why these are strings.)
-    private(set) var searchResults: [String] = []
+    private(set) var searchResults: [MemoryHit] = []
 
     /// A human-readable note about the last MOOT problem, if any, for the UI.
     private(set) var mootStatus: String = ""
@@ -183,39 +183,42 @@ final class TodoModel {
         }
 
         // moot_memory_search does the full-text recall over the MOOT.
-        let call = await bridge.callTool("moot_memory_search", arguments: [
+        let search = await bridge.callTool("moot_memory_search", arguments: [
             "query": .string(trimmed),
             "limit": .integer(20),
         ])
 
-        if call.isError {
-            mootStatus = "MOOT search failed: \(call.text)"
+        if search.isError {
+            mootStatus = "MOOT search failed: \(search.text)"
             searchResults = []
             return
         }
 
-        // KNOWN SDK EDGE — comment this clearly for the reader:
-        // The ARIA tool surface returns TEXT, not structured drawer objects. So
-        // moot_memory_search hands back lines shaped like:
-        //
-        //     found N memory(s)
-        //     <id>  [room]  <preview>
-        //     <id>  [room]  <preview>
-        //     ...
-        //
-        // To list results we parse those lines ourselves. A production app would
-        // want a STRUCTURED recall tool that returns typed drawers; until that
-        // ships, parsing the text is the documented approach. We keep the parse
-        // intentionally forgiving: drop the "found N" header and any blank
-        // lines, and show the rest verbatim.
-        // NOTE(integrate): replace this text-parse with a structured recall
-        // tool when the SDK exposes one.
-        let lines = call.text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
-            .filter { !$0.lowercased().hasPrefix("found ") }
-
-        searchResults = lines
+        // THE RESULT CONTRACT — worth reading closely:
+        // Every recall tool answers with text for people AND a
+        // `structuredContent` block, `{ "results": [ { "id", "room",
+        // "subject", "content" }, … ] }`, exposed as `IntentCallResult
+        // .structured`. Search rows are travel rows (id, subject, room) with
+        // no body, so we collect the ids and fetch the bodies with ONE batched
+        // `moot_memory_get` at depth:full. The app never re-parses the text.
+        let ids: [JSONValue] = MemoryHit.rows(in: search.structured).compactMap { row in
+            if case let .string(id)? = row["id"] { return .string(id) }
+            return nil
+        }
+        guard !ids.isEmpty else {
+            searchResults = []
+            return
+        }
+        let get = await bridge.callTool("moot_memory_get", arguments: [
+            "ids": .array(ids),
+            "depth": .string("full"),
+        ])
+        if get.isError {
+            mootStatus = "MOOT recall failed: \(get.text)"
+            searchResults = []
+            return
+        }
+        searchResults = MemoryHit.rows(in: get.structured).compactMap(MemoryHit.from(row:))
     }
 
     // ------------------------------------------------------------------------
@@ -238,10 +241,10 @@ final class TodoModel {
             "limit": .integer(1),
         ])
 
-        // moot_memory_search returns "found 0 memory(s)" when the estate is
-        // empty for this query. If we see a "found 0" (or an error), treat the
+        // An empty estate answers with an empty `results` array in the
+        // structured block. If it is empty (or the call failed), treat the
         // MOOT as fresh and seed it. Otherwise leave it alone.
-        let isEmpty = probe.isError || probe.text.lowercased().contains("found 0")
+        let isEmpty = probe.isError || MemoryHit.rows(in: probe.structured).isEmpty
         guard isEmpty, todos.isEmpty else { return }
 
         // Seed via the normal add path so the sidecar mirrors each one too.
@@ -250,3 +253,39 @@ final class TodoModel {
         add(title: "Read the MOOTx01 sidecar guide")
     }
 }
+
+// =============================================================================
+// MemoryHit — one drawer as the MOOT's structured result rows describe it.
+// =============================================================================
+//
+// `IntentCallResult.structured` is the tool's `structuredContent` block,
+// verbatim JSON. For the recall family it is `{ "results": [ … ] }`, one
+// object per drawer with `id` and, where known, `room`, `subject`, `content`.
+// Optional fields are ABSENT (never null) when the tool has nothing to say.
+struct MemoryHit: Identifiable, Hashable {
+    let id: String
+    let room: String
+    /// Verbatim drawer content, from `moot_memory_get` at depth:full.
+    let content: String
+
+    /// Every result row as a dictionary, or [] when the tool sent no block.
+    static func rows(in structured: JSONValue?) -> [[String: JSONValue]] {
+        guard case let .object(top)? = structured,
+              case let .array(items)? = top["results"] else { return [] }
+        return items.compactMap { item in
+            if case let .object(row) = item { return row }
+            return nil
+        }
+    }
+
+    /// A hit from one depth:full row. nil when the row carries no content
+    /// (a gated or opaque drawer) — there is nothing to show for it.
+    static func from(row: [String: JSONValue]) -> MemoryHit? {
+        guard case let .string(id)? = row["id"],
+              case let .string(content)? = row["content"] else { return nil }
+        let room: String
+        if case let .string(r)? = row["room"] { room = r } else { room = "" }
+        return MemoryHit(id: id, room: room, content: content)
+    }
+}
+
