@@ -42,6 +42,15 @@ public enum EstatePosture: String, Sendable, Equatable {
         "estate is frozen (serve --frozen): \(tool) is a mutating tool and was refused"
     }
 
+    /// The `isError` text a frozen dispatcher returns for a command-classified
+    /// tool (`ToolMutationInventory.frozenReadCommands`) whose `command`
+    /// argument is not a read. `command` is nil when the argument is absent
+    /// or not a string and renders as `(missing)`. Byte-identical in both
+    /// ports.
+    public static func refusalMessage(tool: String, command: String?) -> String {
+        "estate is frozen (serve --frozen): \(tool) command \(command ?? "(missing)") is not a read command and was refused"
+    }
+
     /// Value rendered on the `frozen:` line of `moot_estate_status`.
     public var statusValue: String {
         self == .frozen ? "true" : "false"

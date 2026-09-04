@@ -54,6 +54,17 @@ impl EstatePosture {
         format!("estate is frozen (serve --frozen): {tool} is a mutating tool and was refused")
     }
 
+    /// The `isError` text a frozen dispatcher returns for a command-classified
+    /// tool (`tool_mutation_inventory::frozen_read_commands`) whose `command`
+    /// argument is not a read. `None` (absent or not a string) renders as
+    /// `(missing)`. Byte-identical in both ports.
+    pub fn refusal_message_for_command(tool: &str, command: Option<&str>) -> String {
+        format!(
+            "estate is frozen (serve --frozen): {tool} command {} is not a read command and was refused",
+            command.unwrap_or("(missing)")
+        )
+    }
+
     /// Value rendered on the `frozen:` line of `moot_estate_status`.
     pub fn status_value(self) -> &'static str {
         match self {
@@ -100,6 +111,14 @@ mod tests {
         assert_eq!(
             EstatePosture::refusal_message("moot_file_memory"),
             "estate is frozen (serve --frozen): moot_file_memory is a mutating tool and was refused"
+        );
+        assert_eq!(
+            EstatePosture::refusal_message_for_command("memory", Some("delete")),
+            "estate is frozen (serve --frozen): memory command delete is not a read command and was refused"
+        );
+        assert_eq!(
+            EstatePosture::refusal_message_for_command("memory", None),
+            "estate is frozen (serve --frozen): memory command (missing) is not a read command and was refused"
         );
         assert_eq!(EstatePosture::Frozen.status_value(), "true");
         assert_eq!(EstatePosture::Live.status_value(), "false");
