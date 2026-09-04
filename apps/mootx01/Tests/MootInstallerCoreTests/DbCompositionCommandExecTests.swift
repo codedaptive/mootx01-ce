@@ -1,7 +1,7 @@
 // DbCompositionCommandExecTests.swift — `mootx01 db composition` end to end
 // through the built binary, against a throwaway unencrypted estate under a
-// temporary MOOTX01_DATA_DIR. Nothing here touches the Keychain or the
-// user's estates.
+// temporary MOOTX01_DATA_DIR. MOOTX01_ESTATE_LIFETIME=ephemeral keeps identity
+// keys in memory so no login-Keychain item is written or left behind.
 
 #if os(macOS)
 import Foundation
@@ -28,6 +28,9 @@ struct DbCompositionCommandExecTests {
         var environment = ProcessInfo.processInfo.environment
         environment["MOOTX01_DATA_DIR"] = dataDir.path
         environment["MOOTX01_SKIP_CHARTERS"] = "1"
+        // ephemeral lifetime: the spawned binary uses InMemoryEstateIdentityKeyStore
+        // so no login-Keychain item is created for this throwaway estate.
+        environment["MOOTX01_ESTATE_LIFETIME"] = "ephemeral"
         environment.removeValue(forKey: "ARIA_MCP_SQLITE_PATH")
         // The estate is created under the production default, whatever the
         // test runner's environment says.
