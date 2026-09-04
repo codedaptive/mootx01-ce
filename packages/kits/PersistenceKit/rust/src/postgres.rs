@@ -32,8 +32,9 @@ use crate::{
     AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore,
     ChangeOrigin, ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration,
     IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
-    Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
-    StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
+    SchemaKitRenameOutcome, Storage, StorageError, StorageEvent, StorageObserver,
+    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
+    TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 // Mode 2 (RowEncryption) content seam — shared with the SQLite backend so the
@@ -1090,6 +1091,76 @@ impl Storage for PostgresStorage {
                 })
             }
         }
+    }
+
+    /// Move the per-kit version key `schema_version:<old_kit_id>` to
+    /// `schema_version:<new_kit_id>` (SPEC I-7a). The presence checks and
+    /// the UPDATE run in one transaction on one connection, so the conflict
+    /// check and the rewrite are atomic. The global `schema_version` key is
+    /// a maximum across kits and does not change.
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        let mut conn = self.checkout()?;
+        let client = conn.get_mut();
+        let mut txn = client.transaction().map_err(|e| StorageError::BackendError {
+            underlying: format!("rename schema kit begin: {}", pg_err_text(&e)),
+        })?;
+        // "no key" and "key at version 0" must be told apart here, which is
+        // why this does not go through `current_schema_version_for`.
+        let mut ledger_version = |kit_id: &str| -> StorageResult<Option<i32>> {
+            let kit_key = format!("schema_version:{}", kit_id);
+            let rows = txn
+                .query(
+                    r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = $1"#,
+                    &[&kit_key],
+                )
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("ledger version: {}", pg_err_text(&e)),
+                })?;
+            match rows.first() {
+                None => Ok(None),
+                Some(r) => {
+                    let s: String = r.get(0);
+                    s.parse::<i32>()
+                        .map(Some)
+                        .map_err(|_| StorageError::CorruptStoredValue {
+                            table: "_storagekit_meta".to_string(),
+                            column: "value".to_string(),
+                            stored_text: s.clone(),
+                        })
+                }
+            }
+        };
+        let outcome = match ledger_version(old_kit_id)? {
+            None => SchemaKitRenameOutcome::NoRow,
+            Some(old_version) => match ledger_version(new_kit_id)? {
+                Some(new_version) => SchemaKitRenameOutcome::Conflict {
+                    old_version,
+                    new_version,
+                },
+                None => {
+                    let old_key = format!("schema_version:{}", old_kit_id);
+                    let new_key = format!("schema_version:{}", new_kit_id);
+                    txn.execute(
+                        r#"UPDATE "_storagekit_meta" SET "key" = $1 WHERE "key" = $2"#,
+                        &[&new_key, &old_key],
+                    )
+                    .map_err(|e| StorageError::BackendError {
+                        underlying: format!("rename schema kit: {}", pg_err_text(&e)),
+                    })?;
+                    SchemaKitRenameOutcome::Renamed {
+                        version: old_version,
+                    }
+                }
+            },
+        };
+        txn.commit().map_err(|e| StorageError::BackendError {
+            underlying: format!("rename schema kit commit: {}", pg_err_text(&e)),
+        })?;
+        Ok(outcome)
     }
 
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {

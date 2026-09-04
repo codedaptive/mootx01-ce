@@ -13,6 +13,7 @@
 use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
+use crate::storage::SchemaKitRenameOutcome;
 use crate::generated_column::GeneratedColumn;
 use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ChangeOrigin, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
@@ -218,6 +219,33 @@ impl Storage for InMemoryStorage {
 
     fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32> {
         Ok(self.state.lock().unwrap().kit_schema_versions.get(kit_id).copied().unwrap_or(0))
+    }
+
+    /// Move the per-kit version entry for `old_kit_id` to `new_kit_id` (SPEC
+    /// I-7a). The global `schema_version` is a maximum across kits and does
+    /// not change.
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        let mut state = self.state.lock().unwrap();
+        let Some(old_version) = state.kit_schema_versions.get(old_kit_id).copied() else {
+            return Ok(SchemaKitRenameOutcome::NoRow);
+        };
+        if let Some(new_version) = state.kit_schema_versions.get(new_kit_id).copied() {
+            return Ok(SchemaKitRenameOutcome::Conflict {
+                old_version,
+                new_version,
+            });
+        }
+        state.kit_schema_versions.remove(old_kit_id);
+        state
+            .kit_schema_versions
+            .insert(new_kit_id.to_string(), old_version);
+        Ok(SchemaKitRenameOutcome::Renamed {
+            version: old_version,
+        })
     }
 
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
