@@ -20,7 +20,7 @@
 
 use corpus_kit_providers::{PpmiProvider, PPMI_DIMENSION, PPMI_PROJECTION_SEED, PPMI_WINDOW};
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 // The canonical file is emitted by the Swift leg's `emitCanonicalIfRequested`
 // test into Tests/SharedVectors/. Embedded at compile time — two directories

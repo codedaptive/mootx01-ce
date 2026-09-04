@@ -27,7 +27,7 @@
 import Testing
 import Foundation
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import SubstrateTypes

@@ -34,7 +34,7 @@ import Foundation
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 @Suite("TrainableEmbeddingBasis")
 struct TrainableEmbeddingBasisTests {

@@ -202,7 +202,7 @@ struct CognitionKitTelemetrySuite {
         @Test("two GroundedSynthesis runs emit four recipe.run metrics")
         func twoRunsEmitFourMetrics() async throws {
             try await withCognitionLock {
-                // Build the estate BEFORE enabling monitoring so the VectorKit
+                // Build the estate BEFORE enabling monitoring so the SynapseKit
                 // emit sites inside GeniusLocusKit.capture do not leak into the
                 // capturing sink. CognitionKit.recipe.run is the ONLY metric
                 // category we assert on, and recipes run AFTER setEnabled(true).
@@ -217,7 +217,7 @@ struct CognitionKitTelemetrySuite {
                 _ = try await recipe.run(input: .init(frame: frame), estate: handle, kit: kit)
                 _ = try await recipe.run(input: .init(frame: frame), estate: handle, kit: kit)
 
-                // Filter to only CognitionKit recipe.run metrics so VectorKit
+                // Filter to only CognitionKit recipe.run metrics so SynapseKit
                 // rerank emissions (from hybridRecall inside GroundedSynthesis)
                 // are counted separately. Both runs emit start+complete = 4 total.
                 let recipeMetrics = sink.metrics(named: CognitionKitMetrics.recipeRun)

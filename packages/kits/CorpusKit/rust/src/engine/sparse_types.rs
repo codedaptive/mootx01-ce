@@ -3,7 +3,7 @@
 //! Parallel to Swift `SparseTypes.swift` in CorpusKit.
 //!
 //! - `LaneTag` — canonical enum identifying the retrieval lane that
-//!   produced a score. Re-exported from VectorKit's engine::hit so
+//!   produced a score. Re-exported from SynapseKit's engine::hit so
 //!   that the types are physically identical; this module is the
 //!   documentation-canonical home.
 //! - `ImpactPosting` — one row in a SPLADE impact list. Integer-only
@@ -17,10 +17,10 @@
 
 use std::collections::HashMap;
 
-// Canonical `LaneTag` definition lives in vectorkit::engine::hit.
+// Canonical `LaneTag` definition lives in synapsekit::engine::hit.
 // Re-export from there so the Swift/Rust type systems share the same
 // set of variants.
-pub use vectorkit::engine::hit::LaneTag;
+pub use synapsekit::engine::hit::LaneTag;
 
 /// One row in a SPLADE-style impact list.
 ///

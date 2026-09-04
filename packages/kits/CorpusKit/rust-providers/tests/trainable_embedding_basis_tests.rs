@@ -23,7 +23,7 @@ use corpus_kit_providers::{
     NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED, PPMI_PROJECTION_SEED, RI_PROJECTION_SEED,
 };
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 mod basis_fixture;
 use basis_fixture::decode_base64;
