@@ -15,16 +15,22 @@ const MEMORIES_ROOT: &str = "/memories";
 const ADAPTER_WING: &str = "memories";
 const MAX_FILE_SIZE: usize = 100 * 1024;
 
+/// Dispatch the Anthropic memory_20250818 adapter tool.
+///
+/// `memory_on` is resolved once at `Dispatcher::new` from the process
+/// environment and passed through the dispatch chain — matching the
+/// `EstatePosture` pattern. Never re-read from `std::env` here.
 pub fn dispatch_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    memory_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL == "1"). The flag
     // gated only tool projection (the tool is absent from tools/list), so a
     // hard-coded tools/call to `memory` still reached this read/write surface.
     // Enforce the flag at dispatch too, mirroring the vault disabled-refusal.
-    let enabled = std::env::var("MOOTX01_MEMORY_TOOL").map(|v| v == "1").unwrap_or(false);
-    if !enabled {
+    // `memory_on` was resolved once in Dispatcher::new — not re-read per call.
+    if !memory_on {
         return Ok(error_result(
             "memory tool is disabled; run `mootx01 enable memory-tool` to activate it",
         ));

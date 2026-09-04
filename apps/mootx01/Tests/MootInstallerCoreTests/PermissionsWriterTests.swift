@@ -8,11 +8,12 @@
 // namespaces). Tool names are injected (the real caller derives them from
 // the linked AriaMCP ToolProjection at runtime); most tests use a fixed
 // fixture list, but `classificationTableIsExhaustive` uses a PINNED copy of
-// the real 73-tool inventory (see its own doc comment for why it is pinned
+// the real 82-tool inventory (see its own doc comment for why it is pinned
 // rather than fetched live). All I/O uses sandbox directories.
 
 import Testing
 import Foundation
+import AriaMCP
 @testable import MootInstallerCore
 
 @Suite("PermissionsWriter")
@@ -112,7 +113,7 @@ struct PermissionsWriterTests {
     /// of `readTools` (here) or `ToolMutationInventory.additiveWriteTools` /
     /// `.mutationTools` / `.destructiveTools` (AriaMcpKit) the new tool
     /// belongs in.
-    @Test("classify's tier tables are exhaustive over the real 77-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 82-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
@@ -120,7 +121,7 @@ struct PermissionsWriterTests {
             "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
-            "moot_file_memory", "moot_hunt_contradictions",
+            "moot_file_memory", "moot_file_packet", "moot_hunt_contradictions",
             "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
             "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts",
             "moot_lens_constellation", "moot_lens_contradiction", "moot_lens_divergence",
@@ -140,6 +141,11 @@ struct PermissionsWriterTests {
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_redistill", "moot_write_journal",
+            // +3 (FRZ-2 follow-up): work-packet read tools that were in frozenReadTools
+            // but absent from this pin; Allow tier.
+            "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
+            // +1 (FRZ-2 follow-up): rebuild-progress diagnostic; Allow tier.
+            "moot_rebuild_status",
         ]
         // Count guard (see doc comment): 71 = 68 (contradiction hunter era) +
         // 3 dataset tools (MX-TAB-7: moot_file_dataset, moot_dataset_query,
@@ -158,7 +164,13 @@ struct PermissionsWriterTests {
         // shipped recall recipes the pin had missed; all Allow-tier reads.
         // +1 (CDL-02): moot_redistill — force-redistill all active items +
         // full laneScope .all reindex; Mutation tier.
-        #expect(realTools.count == 77, "pinned tool inventory drifted from the real surface count")
+        // +1 (frozen-posture inventory): moot_file_packet — work-packet filing,
+        // an additive write (Allow tier) in ToolMutationInventory.
+        // +4 (FRZ-2 follow-up): moot_packet_get, moot_packet_list,
+        // moot_packet_lineage (work-packet reads), moot_rebuild_status
+        // (rebuild progress read) — all Allow tier; were in frozenReadTools
+        // but absent from this installer pin.
+        #expect(realTools.count == 82, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
@@ -166,6 +178,41 @@ struct PermissionsWriterTests {
 
         let stale = classified.subtracting(realTools)
         #expect(stale.isEmpty, "classification table names tool(s) no longer in the real surface: \(stale.sorted())")
+    }
+
+    /// Safety-net: compare the pinned inventory against the live ToolProjection
+    /// under every opt-in flag combination so future drift fails this test
+    /// instead of landing silently in `ask`. The test mirrors the approach
+    /// FrozenPostureTests uses to check completeness of the frozen sets.
+    ///
+    /// Only `moot_`-prefixed tools are checked: the `memory` tool (Anthropic
+    /// adapter, opt-in via MOOTX01_MEMORY_TOOL) is not managed by the
+    /// installer and therefore not in the classification tables.
+    @Test("every moot_ tool reachable under any flag combination is explicitly classified")
+    func classificationCoversLiveProjectionUnderAllFlags() {
+        // Eight combinations: MOOTX01_VAULT × MOOTX01_MEMORY_TOOL × MOOTX01_MINT_TOOLS.
+        let flagCombinations: [[String: String]] = {
+            var combos: [[String: String]] = []
+            for vault in ["1", "0"] {
+                for memory in ["0", "1"] {
+                    combos.append(["MOOTX01_VAULT": vault, "MOOTX01_MEMORY_TOOL": memory])
+                }
+            }
+            return combos
+        }()
+
+        let classified = PermissionsWriter.explicitlyClassifiedTools
+
+        for env in flagCombinations {
+            let projected = ToolProjection.tools(environment: env)
+                .map(\.name)
+                .filter { $0.hasPrefix("moot_") }
+            let unclassified = Set(projected).subtracting(classified)
+            #expect(
+                unclassified.isEmpty,
+                "live tool(s) with no tier classification under \(env): \(unclassified.sorted())"
+            )
+        }
     }
 
     @Test("permissionEntries all carry the mcp__mootx01__ prefix")
