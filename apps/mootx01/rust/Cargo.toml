@@ -48,7 +48,7 @@ aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
 # Reuse-estate installer repair: open the existing SQLCipher database with its
 # sibling install key, then retire the legacy Rust audit-column dialect before
 # the new binary serves it. Both crates are already in the product graph via
-# aria-mcp; naming them directly keeps the install code honest and removable.
+# aria-mcp; naming them directly keeps the install code plain and removable.
 persistence-kit = { path = "../../../packages/kits/PersistenceKit/rust" }
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # queuekit: dream command acquires the "dreaming" DrainLease to prevent
@@ -70,7 +70,7 @@ trash = "5.2.3"
 # DrawerMapping stable-source-key resolver, injected at this app layer
 # because locus-kit sits below vault-kit and must not depend on it. Both
 # crates are already in the product graph via aria-mcp; naming them directly
-# keeps the upgrade wiring honest and removable (same rationale as
+# keeps the upgrade wiring plain and removable (same rationale as
 # persistence-kit above). locus-kit also serves the installer reuse
 # integration gate in this crate's tests.
 locus-kit = { path = "../../../packages/kits/LocusKit/rust" }
@@ -79,20 +79,20 @@ vault-kit = { path = "../../../packages/kits/VaultKit/rust" }
 # shared-content reclaim (MXE_RC_01). EstateCoordinator::open is the
 # migration-host seam; SharedContentMigrationExt provides the P5 step.
 # Both are already in the product graph via aria-mcp; naming them directly
-# keeps the upgrade wiring honest and removable.
+# keeps the upgrade wiring plain and removable.
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/rust-migrations" }
 # corpus-kit: `mootx01 upgrade` corpus-counts migration (CORPUS-COUNTS-01).
 # Owns the reindex latch (reindex_required) called at the tail of the
 # vocab-table clear + counts-blob zeroing step. Already in the product graph
-# via aria-mcp; naming it directly keeps the upgrade wiring honest and
+# via aria-mcp; naming it directly keeps the upgrade wiring plain and
 # removable (same rationale as persistence-kit above).
 corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
 # corpus-kit-providers: `mootx01 db composition --set` wires the Corpus it
 # rebuilds with `default_ensemble()`, the same five-signal ensemble the ARIA
 # registry serves with, so the rebuilt rows are the rows serve will read.
 # Already in the product graph via aria-mcp; naming it directly keeps the
-# command honest and removable (same rationale as persistence-kit above).
+# command plain and removable (same rationale as persistence-kit above).
 corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
 # adornment-lib: AdornmentMinterDescriptor and StoredAdornment value types
 # used by run_adornment_store_migration to register legacy minter rows and
