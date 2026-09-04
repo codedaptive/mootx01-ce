@@ -5,8 +5,8 @@ contribute.
 
 The short version: **contributions are open.** Open an issue to report a
 problem or propose an idea, or open a pull request to contribute code.
-Pull requests require a signed Contributor License Agreement before they
-can be merged — see below.
+Pull requests need a `Signed-off-by` line on each commit, certifying the
+Developer Certificate of Origin — see below.
 
 ---
 
@@ -40,24 +40,21 @@ We will say more about review process, coding standards, and conformance
 expectations over time; for now, keep changes focused, include tests where
 they apply, and describe what the change does and why.
 
-### Contributor License Agreement
+### Developer Certificate of Origin
 
-Code contributions require a signed **Contributor License Agreement (CLA)**
-before they can be merged. The full text is in [`CLA.md`](CLA.md).
+Code contributions are accepted under the **Developer Certificate of
+Origin** (DCO). The full text is in [`DCO.md`](DCO.md).
 
-This is not a formality imposed for its own sake. The repository is open
-source under the Apache License, Version 2.0 (see `LICENSE` and
-`LICENSING.md`), and commercial products (MOOTx01 Pro, MOOTx01 Enterprise,
-and Enterprise Edition offerings) are built from the same substrate. For
-all of that to hold together, the project needs clear, documented rights to
-include a contribution in the community edition, to relicense it under the
-future Apache license on schedule, and to include it in the commercial
-edition. The CLA is what makes those rights unambiguous, for the project and
-for the contributor both.
+Sign off each commit with `git commit -s`. That adds a
+`Signed-off-by: Your Name <you@example.com>` line certifying that you wrote
+the change, or otherwise have the right to submit it, under the Apache
+License, Version 2.0 (see `LICENSE` and `LICENSING.md`). A check on every
+pull request fails any commit without the line.
 
-You confirm the CLA on your first pull request; it then covers that
-contribution and any future contributions you submit. If you are weighing a
-larger contribution and want to discuss the terms first, open an issue.
+There is nothing else to sign. The DCO grants the project no rights beyond
+the Apache license everyone already receives; it records that the
+contribution came in cleanly. If you are weighing a larger contribution and
+want to discuss direction first, open an issue.
 
 ---
 
