@@ -152,7 +152,7 @@ public struct DatasetHandleContent: Codable, Sendable, Equatable {
 /// Dataset handles carry no vector embedding — there is no content blob
 /// to embed. The sentinel satisfies `DrawerStore.addDrawer`'s non-empty
 /// validation while making the intent explicit at the storage layer.
-/// The VectorKit encode pipeline skips drawers whose embeddingModelID
+/// The SynapseKit encode pipeline skips drawers whose embeddingModelID
 /// does not match a registered model, so no embedding is generated.
 ///
 /// Mirrors the Rust constant `DATASET_HANDLE_EMBEDDING_MODEL_ID` in
@@ -305,7 +305,7 @@ public extension Estate {
             filedAt: now,
             eventTime: now,
             // Dataset handles carry no vector embedding. The sentinel
-            // satisfies DrawerStore's non-empty validation; the VectorKit
+            // satisfies DrawerStore's non-empty validation; the SynapseKit
             // encode pipeline skips drawers whose model ID is unregistered.
             embeddingModelID: datasetHandleEmbeddingModelID,
             provenance: provenanceBitmap,

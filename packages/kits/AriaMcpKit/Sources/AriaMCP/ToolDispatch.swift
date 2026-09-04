@@ -1384,7 +1384,7 @@ public struct ToolDispatcher: Sendable {
             return "verb \(verb) is not accepted on noun \(noun) by the AriaLexicon acceptance matrix."
         case .crossKitVectorDeleteFailed(let rowID, let reason):
             // The LocusKit storage expunge succeeded (verbatim content is gone) but
-            // the vector embedding in VectorKit or CorpusKit was NOT deleted. Privacy
+            // the vector embedding in SynapseKit or CorpusKit was NOT deleted. Privacy
             // contract: the expunge is INCOMPLETE. The caller must NOT report this
             // row as fully deleted — the vector embedding is still semantically
             // recoverable. Retry the expunge or surface this error to the user.

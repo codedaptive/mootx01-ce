@@ -507,10 +507,10 @@ public enum HydrationLevel: Sendable {
 /// Result ordering for recall. Per spec § 7.8.3.
 ///
 /// Relevance ordering (`byRelevanceDesc`) is not present on this enum.
-/// Relevance requires the vector index from VectorKit; LocusKit is a
+/// Relevance requires the vector index from SynapseKit; LocusKit is a
 /// bitmap-filter engine with no scoring signal. Callers that need
 /// relevance-ranked results must go through GLK RecallDirector's scored
-/// lane (NeuronKit/HybridRecall), which composes VectorKit on top of
+/// lane (NeuronKit/HybridRecall), which composes SynapseKit on top of
 /// LocusKit. Exposing a relevance case here produced input-order results
 /// advertised as relevance-ordered — an honest API must either implement
 /// the behaviour or remove the case. It was removed.

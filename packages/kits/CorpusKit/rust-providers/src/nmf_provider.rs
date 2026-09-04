@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
 use substrate_ml::nmf::NMFAlternatingLeastSquares;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // MARK: - Constants
 
@@ -573,7 +573,7 @@ impl EmbeddingProvider for NmfProvider {
     ///
     /// Returns `Engram::ZERO` if finalize() was not called, text is empty,
     /// or all tokens are OOV.
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         Ok(self.nmf_engram(text))
     }
 
@@ -582,10 +582,10 @@ impl EmbeddingProvider for NmfProvider {
     /// - Not finalized / no basis: returns `Ok(vec![])` — structural opt-out.
     /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
     /// - Trained basis, all query tokens OOV: returns
-    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   `Err(SynapseKitError::EmbedFloatVocabMiss(...))` so the corpus layer
     ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
     /// - Degenerate projection (all-zero result): returns `Ok(vec![])`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         // No finalized basis: structural opt-out, not vocabMiss.
         if !self.is_finalized() || self.basis_vocab.is_empty() {
             return Ok(vec![]);
@@ -600,7 +600,7 @@ impl EmbeddingProvider for NmfProvider {
         // OOV check before full NMF fold-in projection.
         let has_in_vocab = terms.iter().any(|t| self.basis_vocab.contains_key(t.as_str()));
         if !has_in_vocab {
-            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+            return Err(SynapseKitError::EmbedFloatVocabMiss(format!(
                 "nmf: reduced vocab size {}, but 0 of {} query token(s) matched",
                 self.basis_vocab.len(),
                 terms.len()
@@ -619,7 +619,7 @@ impl EmbeddingProvider for NmfProvider {
     /// or a degenerate all-zero fold-in) yields `(Engram::ZERO, vec![])` — matching
     /// `embed`'s `ZERO` and `embed_float`'s `vec![]` (its all-OOV `EmbedFloatVocabMiss`
     /// is swallowed to `vec![]` by the default `embed_pair`'s `unwrap_or_default`).
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         match NmfProvider::embed_float_nmf(self, text) {
             Some(v) if !v.is_empty() => {
                 Ok((float_simhash::project(&v, self.projection_seed), v))

@@ -8,7 +8,7 @@
 // ARIA_LEXICON.md; this module makes it first-class in code.
 //
 // Foundational: depends on nothing. It sits above SubstrateLib and
-// PersistenceKit and below LocusKit, VectorKit, and CorpusKit, because every
+// PersistenceKit and below LocusKit, SynapseKit, and CorpusKit, because every
 // one of them conforms to it.
 
 import PackageDescription

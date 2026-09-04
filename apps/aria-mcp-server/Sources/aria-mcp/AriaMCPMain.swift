@@ -10,7 +10,7 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import PersistenceKitPostgreSQL
-import VectorKit
+import SynapseKit
 import AriaResident
 
 // Entry point for the ARIA_MCP server (stdio or loopback HTTP transport,
@@ -98,7 +98,7 @@ struct AriaMCPMain {
         let storage: any Storage
 
         // All three backends wire the LocusKit semantic recall lane and the
-        // CorpusKit/VectorKit vector recall lane after `open`. LocusKit owns
+        // CorpusKit/SynapseKit vector recall lane after `open`. LocusKit owns
         // LocusKit-native semantic recall (structural, BM25, matrix-tier).
         // CorpusKit + VectorStore own the dense float vector recall lane (Lane D).
         //
@@ -235,14 +235,14 @@ struct AriaMCPMain {
                 exit(1)
             }
             // Durable, explicit-path estate → wire LocusKit semantic recall
-            // (structural/BM25) and CorpusKit/VectorKit deterministic vector
+            // (structural/BM25) and CorpusKit/SynapseKit deterministic vector
             // recall (Lane D) after `open`.
             wireSemanticRecall = true
         } else {
             // Neither set → in-memory ephemeral estate. The estate UUID is
             // fresh each run so the server serves one ephemeral estate per
             // process, matching the v1.0 owner-by-default credential model.
-            // Both recall lanes (LocusKit semantic + CorpusKit/VectorKit vector)
+            // Both recall lanes (LocusKit semantic + CorpusKit/SynapseKit vector)
             // are wired after open using the same InMemoryStorage handle — all
             // tables coexist in one instance. BM25 + deterministic Lane D are
             // live from the first capture, same as the SQLite branch.
@@ -361,7 +361,7 @@ struct AriaMCPMain {
                 // correct from the first recall. Idempotent — rebuild from the same
                 // log is deterministic, and the dreaming cycle refreshes it later.
                 try await kit.rebuildDerivedAccelerators(for: handle)
-                Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/VectorKit vector recall (five-signal honest ensemble Lane D — RI/PPMI/LSA/NMF/FDC, trained on-corpus and fused) + matrix tier registered. Learned semantic embedding (MiniLM/MPNet/Gemma): additive v1.1 on-device lane, not wired here.")
+                Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/SynapseKit vector recall (five-signal honest ensemble Lane D — RI/PPMI/LSA/NMF/FDC, trained on-corpus and fused) + matrix tier registered. Learned semantic embedding (MiniLM/MPNet/Gemma): additive v1.1 on-device lane, not wired here.")
             } catch {
                 fputs("ARIA_MCP fatal: cannot wire semantic recall: \(error)\n", stderr)
                 exit(1)

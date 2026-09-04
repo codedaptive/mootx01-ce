@@ -10,7 +10,7 @@
 //
 // ── Why this daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
-// LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
+// LocusKit / SynapseKit / CorpusKit directly; the estate handle is the only
 // write surface. Even with `propose` now live (Brain layer landed in
 // GLK-02), no estate verb reads RecallTraceItem rows, reads existing
 // Tunnels, or writes a DiaryEntry. So the daemon depends on

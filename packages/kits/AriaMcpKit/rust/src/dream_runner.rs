@@ -48,11 +48,11 @@ use crate::estate_registry::EstateRegistry;
 ///
 /// `pub` so integration tests in AriaMcpKit can verify the production wiring
 /// sequence without internal access to the governor's private field.
-pub struct VectorStoreHNSWAdapter(std::sync::Arc<vectorkit::VectorStore>);
+pub struct VectorStoreHNSWAdapter(std::sync::Arc<synapsekit::VectorStore>);
 
 impl VectorStoreHNSWAdapter {
     /// Wrap a live `Arc<VectorStore>` into the HNSW maintenance adapter.
-    pub fn new(vs: std::sync::Arc<vectorkit::VectorStore>) -> Self {
+    pub fn new(vs: std::sync::Arc<synapsekit::VectorStore>) -> Self {
         Self(vs)
     }
 }

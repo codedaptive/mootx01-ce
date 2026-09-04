@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,10 +60,10 @@ fn legacy_chunks_declaration() -> SchemaDeclaration {
     ])
 }
 
-/// VectorKit schema as of v3 (pre idx_vectors_filed_at_item). Literal, frozen.
+/// SynapseKit schema as of v3 (pre idx_vectors_filed_at_item). Literal, frozen.
 fn legacy_vectors_declaration() -> SchemaDeclaration {
     SchemaDeclaration::new(
-        "VectorKit",
+        "SynapseKit",
         3,
         vec![TableDeclaration::new(
             "vectors",
@@ -254,7 +254,7 @@ fn legacy_layout_is_distinguishable_from_current_layout() {
     assert_ne!(legacy, current);
 
     // The distinguishing marks the detector keys on: v3 BundleStore added
-    // content_hash + corpus_metadata; VectorKit v4 added the filed_at index.
+    // content_hash + corpus_metadata; SynapseKit v4 added the filed_at index.
     assert!(!legacy.contains("col=content_hash"));
     assert!(current.contains("col=content_hash"));
     assert!(!legacy.contains("table=corpus_metadata"));

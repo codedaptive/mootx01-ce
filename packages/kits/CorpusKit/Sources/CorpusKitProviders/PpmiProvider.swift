@@ -80,7 +80,7 @@ import CorpusKit
 import EngramLib
 import SubstrateTypes
 import SubstrateKernel
-import VectorKit
+import SynapseKit
 import SubstrateML
 
 // ─────────────────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ public let ppmiProjectionSeed: UInt64 = 0x5050_4D49_5F56_314D
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`.
+/// Conforms to `SynapseKit.EmbeddingProvider`.
 /// modelID = "ppmi-v1", modelVersion = "1.1.0".
 /// Projection seed = `ppmiProjectionSeed`.
 ///
@@ -376,7 +376,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// Returns `[]` when the provider has no trained basis (ppmiVectors empty).
     ///
-    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// Throws `SynapseKitError.embedFloatVocabMiss` when the provider HAS a
     /// trained basis (ppmiVectors non-empty) but all query tokens are OOV —
     /// distinguishing a vocabulary coverage gap from a structural opt-out so
     /// `Corpus.floatNearest` maps to the correct dark-lane reason.
@@ -390,7 +390,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         // none of the query tokens appear in the PPMI vector table.
         let hasInVocab = terms.contains { ppmiVectors[$0.lowercased()] != nil }
         guard hasInVocab else {
-            throw VectorKitError.embedFloatVocabMiss(
+            throw SynapseKitError.embedFloatVocabMiss(
                 "ppmi: vocab size \(ppmiVectors.count), but 0 of \(terms.count) query token(s) matched"
             )
         }

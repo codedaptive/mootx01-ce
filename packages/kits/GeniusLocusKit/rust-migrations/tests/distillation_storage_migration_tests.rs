@@ -34,7 +34,7 @@ use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const NOW: i64 = 1_750_000_000_000; // millis
 
@@ -202,7 +202,7 @@ fn build_fixture() -> Fixture {
         )
         .expect("capture shortItem");
 
-    // Register VectorKit schema so the vectors table exists before we insert.
+    // Register SynapseKit schema so the vectors table exists before we insert.
     // The migration also calls this idempotently at the start of step (c).
     storage
         .migrate(&VectorStore::schema_declaration())

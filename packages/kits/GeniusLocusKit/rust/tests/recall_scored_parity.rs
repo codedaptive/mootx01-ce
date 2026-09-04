@@ -617,7 +617,7 @@ fn b10_plain_recall_unchanged_after_scored_recall() {
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 fn make_corpus_for_test() -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
