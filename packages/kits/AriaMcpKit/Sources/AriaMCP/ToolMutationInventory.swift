@@ -44,7 +44,7 @@ public enum ToolMutationInventory {
     public static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
+        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill",
         // Force-redistill all active items + full laneScope .all reindex (CDL-02):
         // overwrites every active non-empty drawer's representation unconditionally
         // and rebuilds BM25 + dense indexes. Ask posture: same as moot_distill.
@@ -133,6 +133,10 @@ public enum ToolMutationInventory {
         "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
         "moot_recall_connected", "moot_recall_distilled", "moot_recall_vague",
         "moot_recall_walk",
+        // Grounded synthesis: reads candidates via recall and generates text;
+        // writes no drawer, packet, journal, meta, trace, or reward — pure read.
+        // Moved from mutationTools (FRZ-3): a frozen serve must answer it.
+        "moot_synthesize",
         "moot_recollect",
         // The 23 reasoning lenses.
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
