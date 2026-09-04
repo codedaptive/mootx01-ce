@@ -2,7 +2,7 @@
 //
 // Contract model types for the six review-family endpoints (Wave B1: CORE-05).
 //
-// Every type here is byte-shape-exact from contracts/community/1.1/contract.json.
+// Every type here is byte-shape-exact from apps/mootx01/Contracts/community-1.1/contract.json.
 // No field is added, removed, or renamed. JSON encoding uses camelCase field names
 // exactly as the contract defines them.
 //
