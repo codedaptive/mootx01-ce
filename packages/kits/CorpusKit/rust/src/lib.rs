@@ -1,14 +1,14 @@
 //! corpus-kit -- the RAG layer of the GeniusLocus substrate.
 //!
 //! Rust version of the Swift `CorpusKit` Swift Package. Depends on
-//! vectorkit (vector primitives), persistence-kit (content and bundle
+//! synapsekit (vector primitives), persistence-kit (content and bundle
 //! persistence), convergence-kit (replication), engram-lib (the Engram
 //! type), and substrate-lib (HLC, fingerprints).
 //!
 //! Concrete tokenizer implementations -- including the
 //! `DeterministicTokenizer` test stub -- live in the sibling
 //! `corpus-kit-providers` crate. Concrete embedding providers
-//! conform to `vectorkit::EmbeddingProvider` directly (Swift/Rust
+//! conform to `synapsekit::EmbeddingProvider` directly (Swift/Rust
 //! consolidation 2026-05-27). This split mirrors
 //! Swift's `CorpusKit` / `CorpusKitProviders` target layout: core kit
 //! ships the traits, primitives, and persistence-kit-backed engines;

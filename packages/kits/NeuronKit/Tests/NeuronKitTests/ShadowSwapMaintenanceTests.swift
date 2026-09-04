@@ -19,7 +19,7 @@ import Foundation
 import GeniusLocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import NeuronKit
 
 // MARK: - Fakes

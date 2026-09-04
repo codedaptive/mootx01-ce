@@ -54,7 +54,7 @@ mod index_composition_setting_migration;
 pub use index_composition_setting_migration::*;
 
 // GLK 1.4 → 1.5 capsule: moves the vector tier's schema-version ledger rows
-// from their VectorKit ids to their SynapseKit ids on populated estates
+// from their SynapseKit ids to their SynapseKit ids on populated estates
 // (parity with the Swift GLKMigrationV1_4ToV1_5 target).
 #[cfg(feature = "migration-v1-4-to-v1-5")]
 mod storage_ledger_kit_id_migration;

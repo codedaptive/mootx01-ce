@@ -585,7 +585,7 @@ mod tests {
         documents: u64,
     }
 
-    impl vectorkit::EmbeddingProvider for RetryCountsProvider {
+    impl synapsekit::EmbeddingProvider for RetryCountsProvider {
         fn model_id(&self) -> &str {
             "retry-counts-v1"
         }
@@ -594,11 +594,11 @@ mod tests {
             "1.0.0"
         }
 
-        fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+        fn embed(&self, _text: &str) -> Result<engram_lib::Engram, synapsekit::SynapseKitError> {
             Ok(engram_lib::Engram::ZERO)
         }
 
-        fn embed_float(&self, _text: &str) -> Result<Vec<f32>, vectorkit::VectorKitError> {
+        fn embed_float(&self, _text: &str) -> Result<Vec<f32>, synapsekit::SynapseKitError> {
             Ok(vec![1.0])
         }
     }
@@ -621,7 +621,7 @@ mod tests {
         fn reconstruct_basis(
             &self,
             basis: &[u8],
-        ) -> Result<Box<dyn vectorkit::EmbeddingProvider>, CorpusKitError> {
+        ) -> Result<Box<dyn synapsekit::EmbeddingProvider>, CorpusKitError> {
             Ok(Box::new(Self::from_bytes(basis)?))
         }
 
@@ -775,7 +775,7 @@ mod tests {
         assert!(format!("{error:?}").contains("content reply batch"));
         assert_eq!(queue.in_flight().expect("in-flight").len(), 1);
         assert!(engine
-            .float_nearest_per_signal("completion failure remains durable", 5, vectorkit::engine::metric::FloatMetric::Cosine)
+            .float_nearest_per_signal("completion failure remains durable", 5, synapsekit::engine::metric::FloatMetric::Cosine)
             .iter()
             .any(|(model_id, outcome)| {
                 model_id == "corpus-deterministic-v1"

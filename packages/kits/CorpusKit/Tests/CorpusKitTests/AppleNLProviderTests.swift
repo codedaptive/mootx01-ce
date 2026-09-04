@@ -52,7 +52,7 @@ import Testing
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - AppleNLProvider tests

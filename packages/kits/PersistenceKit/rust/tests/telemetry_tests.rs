@@ -49,7 +49,7 @@ fn global_lock() -> std::sync::MutexGuard<'static, ()> {
 // ─── Capturing sink ───────────────────────────────────────────────────────────
 
 /// Records every received StatSample. Thread-safe via Mutex.
-/// Mirrors the Swift CapturingSink in VectorKitTelemetryTests.swift.
+/// Mirrors the Swift CapturingSink in SynapseKitTelemetryTests.swift.
 struct CapturingSink {
     samples: Mutex<Vec<StatSample>>,
 }
