@@ -3,7 +3,7 @@
 **Status:** ✅ Built — Mission 8 (GLK-01..08) complete; review gate pending  
 **Standalone:** Yes — the full substrate; use when you need multiple estates or the full Brain layer
 
-The unified personal knowledge substrate. GeniusLocusKit composes LocusKit + VectorKit + CorpusKit and adds the ability to coordinate N estates — cross-estate queries, federation, and the Brain layer running across the composition. If LocusKit gives you one estate, GeniusLocusKit gives you a fleet of them working together.
+The unified personal knowledge substrate. GeniusLocusKit composes LocusKit + SynapseKit + CorpusKit and adds the ability to coordinate N estates — cross-estate queries, federation, and the Brain layer running across the composition. If LocusKit gives you one estate, GeniusLocusKit gives you a fleet of them working together.
 
 ## Standalone value
 
@@ -23,7 +23,7 @@ Use GeniusLocusKit to build:
 
 ## What this kit provides
 
-GeniusLocusKit composes LocusKit + VectorKit + CorpusKit and adds:
+GeniusLocusKit composes LocusKit + SynapseKit + CorpusKit and adds:
 
 - **One canonical content object** — LocusKit owns each GLK Drawer; CorpusKit builds BM25/provider-derived state over that same Drawer and never stores a copied chunk/document body in GLK mode
 - **Optional historical migrations** — the current runtime is history-free; applications declare their oldest supported estate-format floor and compile only the required migration capsules
@@ -41,7 +41,7 @@ GeniusLocusKit composes LocusKit + VectorKit + CorpusKit and adds:
 ## What this kit does NOT provide
 
 - Single-estate only → use **LocusKit** standalone
-- Raw vector search only → use **VectorKit** standalone
+- Raw vector search only → use **SynapseKit** standalone
 - Raw RAG only → use **CorpusKit** standalone
 - AI reasoning functions → **NeuronKit**
 - Behaviour recipes → **CognitionKit**
@@ -51,15 +51,15 @@ GeniusLocusKit composes LocusKit + VectorKit + CorpusKit and adds:
 
 - **Swift** — Apple Silicon, macOS 15+, iOS 18+
 - **Rust** — PC/Linux x86_64, Linux aarch64 (built in parallel; conformance-gated against shared test vectors)
-- Imports LocusKit, VectorKit, CorpusKit
+- Imports LocusKit, SynapseKit, CorpusKit
 - Swift 6 strict concurrency
 
 ## Build order
 
 ```
-Phase 1 (parallel):  LocusKit ←→ VectorKit
-Phase 2:                          VectorKit → CorpusKit
-Phase 3:   LocusKit + VectorKit + CorpusKit → GeniusLocusKit  ← here
+Phase 1 (parallel):  LocusKit ←→ SynapseKit
+Phase 2:                          SynapseKit → CorpusKit
+Phase 3:   LocusKit + SynapseKit + CorpusKit → GeniusLocusKit  ← here
 Phase 4:                                   GeniusLocusKit → ARIA_MCP
 ```
 
