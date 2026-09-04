@@ -31,8 +31,8 @@ fn fixture_path() -> PathBuf {
 fn composite_version_is_sum_of_live_component_versions() {
     let composite = composite_schema();
     let expected = locus_kit::schema::schema().version
-        + vectorkit::VectorStore::schema_declaration().version
-        + vectorkit::VectorRepresentationClaims::schema_declaration().version
+        + synapsekit::VectorStore::schema_declaration().version
+        + synapsekit::VectorRepresentationClaims::schema_declaration().version
         + corpus_kit::attached_declaration().version
         + genius_locus_kit::estate_format::EstateFormatStore::schema_declaration().version
         + 1  // grants

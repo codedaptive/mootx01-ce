@@ -173,7 +173,7 @@ struct NProviderTests {
     /// and the RANKED `itemID` ORDER must match Swift↔Rust. Raw cosine
     /// similarity values are NOT in the fixture — the float lane is
     /// reproducible-within-config, not four-way bit-identical (arch spec §6 /
-    /// VECTORKIT_SPEC): cosine accumulation/FMA differences across ports perturb
+    /// SYNAPSEKIT_SPEC): cosine accumulation/FMA differences across ports perturb
     /// the low float bits without changing the rank order. The order is the seam
     /// the 6b RRF consumer relies on, so the order is what is pinned.
     struct NPerSignalFixture: Codable, Equatable {

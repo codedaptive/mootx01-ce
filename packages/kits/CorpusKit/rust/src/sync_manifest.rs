@@ -1,5 +1,5 @@
 //! CorpusKitSync manifest helper. Per-estate sync manifest for RAG
-//! content. Pairs with VectorKit's vectors-table sync (when both
+//! content. Pairs with SynapseKit's vectors-table sync (when both
 //! enabled): chunks and their vectors travel together in the
 //! same federation zone so they remain join-compatible across
 //! devices.

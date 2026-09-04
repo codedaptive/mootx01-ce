@@ -28,7 +28,7 @@ use corpus_kit_providers::{
     ri_index_vector,
 };
 use serde::Deserialize;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
 
 // The canonical file is emitted by the Swift leg's
 // `emitCanonicalIfRequested` test into Tests/SharedVectors/. Embedded

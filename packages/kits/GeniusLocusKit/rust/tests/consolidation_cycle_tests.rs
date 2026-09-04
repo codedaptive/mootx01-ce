@@ -20,7 +20,7 @@ use locus_kit::recall_trace_item::RecallTraceItem;
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 const DAY: i64 = 86_400;

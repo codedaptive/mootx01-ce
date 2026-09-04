@@ -68,7 +68,7 @@ use engram_lib::Engram;
 use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 // MARK: - Constants
 //
@@ -122,7 +122,7 @@ pub const PPMI_COUNTS_MAGIC: &[u8; 4] = b"PPMC";
 ///
 /// ## Conformance
 ///
-/// Conforms to `vectorkit::EmbeddingProvider`.
+/// Conforms to `synapsekit::EmbeddingProvider`.
 /// `model_id = "ppmi-v1"`, `model_version = "1.1.0"`.
 /// Projection seed = `PPMI_PROJECTION_SEED`.
 ///
@@ -538,7 +538,7 @@ impl EmbeddingProvider for PpmiProvider {
     /// Computes the L2-normalised PPMI context vector and projects it through
     /// `float_simhash::project` to produce the 256-bit Engram.
     /// Empty or all-OOV input returns `Engram::ZERO`.
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         match self.ppmi_context_vector(text) {
             None => Ok(Engram::ZERO),
             Some(v) => Ok(float_simhash::project(&v, self.projection_seed)),
@@ -550,9 +550,9 @@ impl EmbeddingProvider for PpmiProvider {
     /// - No trained basis (ppmi_vectors empty): returns `Ok(vec![])` — structural opt-out.
     /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
     /// - Trained basis, all query tokens OOV: returns
-    ///   `Err(VectorKitError::EmbedFloatVocabMiss(...))` so the corpus layer
+    ///   `Err(SynapseKitError::EmbedFloatVocabMiss(...))` so the corpus layer
     ///   maps to `FloatLaneOutcome::UnavailableNoVocabHit`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         // No trained basis: structural opt-out, not vocabMiss.
         if self.ppmi_vectors.is_empty() {
             return Ok(vec![]);
@@ -569,7 +569,7 @@ impl EmbeddingProvider for PpmiProvider {
             .iter()
             .any(|t| self.ppmi_vectors.contains_key(t.as_str()));
         if !has_in_vocab {
-            return Err(VectorKitError::EmbedFloatVocabMiss(format!(
+            return Err(SynapseKitError::EmbedFloatVocabMiss(format!(
                 "ppmi: vocab size {}, but 0 of {} query token(s) matched",
                 self.ppmi_vectors.len(),
                 terms.len()
@@ -592,7 +592,7 @@ impl EmbeddingProvider for PpmiProvider {
     /// (the `embed_pair` opt-out contract). An untrained basis makes
     /// `ppmi_context_vector` return `None`, so the engram is `Engram::ZERO` and
     /// floats are empty — identical to the separate calls.
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         match self.ppmi_context_vector(text) {
             None => Ok((Engram::ZERO, Vec::new())),
             Some(v) => Ok((float_simhash::project(&v, self.projection_seed), v)),
@@ -739,7 +739,7 @@ impl TrainableEmbeddingBasis for PpmiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vectorkit::EmbeddingProvider;
+    use synapsekit::EmbeddingProvider;
 
     /// Build and finalize a provider trained on the canonical mini-corpus.
     fn build_trained_provider() -> PpmiProvider {
