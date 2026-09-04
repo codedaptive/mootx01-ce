@@ -41,6 +41,33 @@ import SubstrateTypes
 /// scope so the drain worker does not reconstruct a Logger on every pass.
 private let corpusIngestLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
+/// The bookkeeping a drain worker carries between passes. The loop itself
+/// lives in the worker task, which resolves its corpus or engine afresh for
+/// every pass and holds no reference in between; the state travels through
+/// the pass call instead of living on the actor.
+struct DrainLoopState: Sendable {
+    /// Publish the deferred resident index once a burst drains to empty, not
+    /// per pass: while jobs keep arriving the loop spin-drains (no sleep, no
+    /// publish) so the index is rebuilt ONCE per burst — O(N) bulk import. A
+    /// single steady-state capture drains in one pass, then the next empty pass
+    /// publishes it, so near-realtime searchability is preserved.
+    var pendingPublish = false
+    /// Single-drainer lease bookkeeping (T2): the instant of our last confirmed
+    /// hold. The heartbeat is refreshed at most every `heartbeatInterval` while
+    /// holding (not on every 15 ms pass) to avoid needless lease-file writes;
+    /// the interval is well inside the lease TTL so the hold never lapses. No
+    /// lease (in-memory estate) → always drain.
+    var heldLeaseAt: Date? = nil
+    /// Crash-recovery: reclaim stale "cur" jobs once — and only once — when
+    /// this drainer FIRST acquires its lease. A successful tryAcquire means the
+    /// prior holder is dead (lease absent or stale > TTL = 15 s), so every "cur"
+    /// row for the stream is an orphan from the prior crash; they are reset to
+    /// "new" before the first drain pass so they are reprocessed. Safety:
+    /// tryAcquire succeeds iff no OTHER drainer holds a fresh lease, so the
+    /// reclaim never yanks a "cur" job out from under a live drainer.
+    var reclaimedOnMount = false
+}
+
 public extension Corpus {
 
     // MARK: - Mount / drop
@@ -122,19 +149,35 @@ public extension Corpus {
         // signal jobs that share the queue.sqlite in the future. The pass only
         // drains while this process holds the encode drain lease (T2). Cancelled in
         // `dropIngestQueue`.
+        //
+        // The worker resolves `self` for ONE pass at a time and releases it
+        // before sleeping. A strong capture across the loop would make the
+        // corpus its own owner: a host that released its last reference without
+        // calling `dropIngestQueue` would leave this task ingesting under a
+        // corpus nobody can reach any more. With the per-pass resolve the last
+        // release runs `deinit`, which cancels the task; the next resolve fails
+        // in any case and the task returns.
         let worker = Task { [weak self] in
-            guard let self else { return }
-            await self.runIngestDrainLoop()
+            var state = DrainLoopState()
+            while !Task.isCancelled {
+                guard let next = await self?.ingestDrainPass(state) else { return }
+                state = next.state
+                if next.pause > .zero { try? await Task.sleep(for: next.pause) }
+            }
         }
         ingestDrainWorker = worker
 
         // Discrete IMPORT drain worker — same queue, own stream ("import"), own
         // lease, own task. Claims only bulk-import jobs and processes them via
         // ingestBatchImport (chunk + BM25, no embed/train). Daily-driving encode
-        // jobs above are untouched.
+        // jobs above are untouched. Same per-pass resolve as the encode worker.
         let importWorker = Task { [weak self] in
-            guard let self else { return }
-            await self.runImportDrainLoop()
+            var state = DrainLoopState()
+            while !Task.isCancelled {
+                guard let next = await self?.importDrainPass(state) else { return }
+                state = next.state
+                if next.pause > .zero { try? await Task.sleep(for: next.pause) }
+            }
         }
         importDrainWorker = importWorker
     }
@@ -428,91 +471,74 @@ public extension Corpus {
 
     // MARK: - Internals
 
-    /// The foreground drain loop for the corpus's ingest queue.
+    /// One pass of the foreground drain loop for the corpus's ingest queue.
     ///
-    /// Each pass drains the whole available encode batch (`drainIngestQueueOnce`)
-    /// and ingests it, then sleeps a short interval before polling again. The
-    /// short idle cadence is the near-realtime latency floor; long enough that an
-    /// idle corpus does not spin a core. Cancelled in `dropIngestQueue`.
-    private func runIngestDrainLoop() async {
-        // Publish the deferred resident index once a burst drains to empty, not
-        // per pass: while jobs keep arriving the loop spin-drains (no sleep, no
-        // publish) so the index is rebuilt ONCE per burst — O(N) bulk import. A
-        // single steady-state capture drains in one pass, then the next empty pass
-        // publishes it, so near-realtime searchability is preserved.
-        var pendingPublish = false
-        // Single-drainer lease bookkeeping (T2): the instant of our last confirmed
-        // hold. We refresh the heartbeat at most every `leaseHeartbeat` while
-        // holding (not on every 15 ms pass) to avoid needless lease-file writes;
-        // the interval is well inside the lease TTL so the hold never lapses. No
-        // lease (in-memory estate) → always drain.
-        var heldLeaseAt: Date? = nil
-        // Crash-recovery: reclaim stale "cur" jobs once — and only once — when
-        // this drainer FIRST acquires the encode lease. A successful tryAcquire
-        // means the prior holder is dead (lease absent or stale > TTL = 15 s), so
-        // every "cur" row for the encode stream is an orphan from the prior crash.
-        // We reset them to "new" before the first drain pass so they are reprocessed.
-        // Safety: tryAcquire succeeds iff no OTHER drainer holds a fresh lease,
-        // so this call never yanks a "cur" job out from under a live drainer.
-        var reclaimedOnMount = false
-        while !Task.isCancelled {
-            if let lease = drainLease {
-                let now = Date()
-                let refreshDue = heldLeaseAt.map {
-                    now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
-                } ?? true
-                if refreshDue {
-                    if lease.tryAcquire(now: now) {
-                        heldLeaseAt = now
-                        // On-mount crash recovery: reclaim orphaned "cur" jobs the
-                        // FIRST time this process acquires the lease. tryAcquire
-                        // succeeds only when the prior holder is dead or absent;
-                        // reclaimInFlight resets its stale "cur" rows to "new" so
-                        // the drain re-drives them — the encode stream's AT-LEAST-ONCE
-                        // guarantee after a drainer crash.
-                        if !reclaimedOnMount, let queue = ingestQueue {
-                            do {
-                                let n = try await queue.reclaimInFlight(stream: Self.encodeStreamID)
-                                if n > 0 {
-                                    corpusIngestLog.info(
-                                        "encode drain mount: reclaimed \(n) orphaned in-flight job(s) — prior drainer died mid-encode")
-                                }
-                            } catch {
-                                corpusIngestLog.error(
-                                    "encode drain mount: reclaimInFlight failed: \(error, privacy: .public)")
+    /// Lease bookkeeping first, then the whole available encode batch
+    /// (`drainIngestQueueOnce`), then the deferred resident-index publish once
+    /// a burst has drained to empty. Returns the updated bookkeeping and how
+    /// long the worker sleeps before the next pass: nothing while a burst is
+    /// still draining, the standby interval while another process holds the
+    /// lease, the poll cadence otherwise. The short idle cadence is the
+    /// near-realtime latency floor; long enough that an idle corpus does not
+    /// spin a core. The worker task holds `self` only for the pass (see
+    /// `mountIngestQueue`); cancelled in `dropIngestQueue`.
+    private func ingestDrainPass(_ input: DrainLoopState) async -> (state: DrainLoopState, pause: Duration) {
+        var state = input
+        if let lease = drainLease {
+            let now = Date()
+            let refreshDue = state.heldLeaseAt.map {
+                now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
+            } ?? true
+            if refreshDue {
+                if lease.tryAcquire(now: now) {
+                    state.heldLeaseAt = now
+                    // On-mount crash recovery: reclaim orphaned "cur" jobs the
+                    // FIRST time this process acquires the lease. tryAcquire
+                    // succeeds only when the prior holder is dead or absent;
+                    // reclaimInFlight resets its stale "cur" rows to "new" so
+                    // the drain re-drives them — the encode stream's AT-LEAST-ONCE
+                    // guarantee after a drainer crash.
+                    if !state.reclaimedOnMount, let queue = ingestQueue {
+                        do {
+                            let n = try await queue.reclaimInFlight(stream: Self.encodeStreamID)
+                            if n > 0 {
+                                corpusIngestLog.info(
+                                    "encode drain mount: reclaimed \(n) orphaned in-flight job(s) — prior drainer died mid-encode")
                             }
-                            reclaimedOnMount = true
+                        } catch {
+                            corpusIngestLog.error(
+                                "encode drain mount: reclaimInFlight failed: \(error, privacy: .public)")
                         }
-                    } else {
-                        // Another process holds a fresh lease — stand down as a warm
-                        // standby and re-check well within the TTL so we take over
-                        // promptly if it dies. (Idempotent ingest makes a rare brief
-                        // two-drainer overlap during takeover harmless.)
-                        heldLeaseAt = nil
-                        try? await Task.sleep(for: .seconds(3))
-                        continue
+                        state.reclaimedOnMount = true
                     }
-                } else if let held = heldLeaseAt, now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
-                    // Heartbeat: refresh while we hold without re-acquiring.
-                    lease.heartbeat(now: now)
-                    heldLeaseAt = now
+                } else {
+                    // Another process holds a fresh lease — stand down as a warm
+                    // standby and re-check well within the TTL so we take over
+                    // promptly if it dies. (Idempotent ingest makes a rare brief
+                    // two-drainer overlap during takeover harmless.)
+                    state.heldLeaseAt = nil
+                    return (state, .seconds(3))
                 }
+            } else if let held = state.heldLeaseAt, now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
+                // Heartbeat: refresh while we hold without re-acquiring.
+                lease.heartbeat(now: now)
+                state.heldLeaseAt = now
             }
-            do {
-                let drained = try await drainIngestQueueOnce()
-                if drained > 0 {
-                    pendingPublish = true
-                    continue  // drain the rest of the burst before publishing
-                }
-                if pendingPublish {
-                    try await publishVectorIndex()
-                    pendingPublish = false
-                }
-            } catch {
-                corpusIngestLog.error("ingest drain loop error: \(error, privacy: .public)")
-            }
-            try? await Task.sleep(for: .milliseconds(15))
         }
+        do {
+            let drained = try await drainIngestQueueOnce()
+            if drained > 0 {
+                state.pendingPublish = true
+                return (state, .zero)  // drain the rest of the burst before publishing
+            }
+            if state.pendingPublish {
+                try await publishVectorIndex()
+                state.pendingPublish = false
+            }
+        } catch {
+            corpusIngestLog.error("ingest drain loop error: \(error, privacy: .public)")
+        }
+        return (state, .milliseconds(15))
     }
 
     /// Ingest one drained job and reply terminal (the serial per-job body shared
@@ -614,58 +640,54 @@ public extension Corpus {
         return batch.count
     }
 
-    /// The IMPORT poll drain loop — the discrete bulk-import twin of
-    /// `runIngestDrainLoop`. Same shape: lease-guarded single drainer, on-mount
+    /// One pass of the IMPORT drain loop — the discrete bulk-import twin of
+    /// `ingestDrainPass`. Same shape: lease-guarded single drainer, on-mount
     /// crash-recovery reclaim, poll cadence. Differences: claims the `"import"`
     /// stream, ingests via `ingestBatchImport` (chunk + BM25 — no embed), and has
     /// NO vector-index publish step (the import drain writes no vectors; the
     /// import cycle's tail `reindex` embeds + publishes once). Cold start: a
     /// crash mid-import leaves durable "cur" rows; the first lease acquire here
     /// reclaims them to "new" and the import resumes where it died.
-    private func runImportDrainLoop() async {
-        var heldLeaseAt: Date? = nil
-        var reclaimedOnMount = false
-        while !Task.isCancelled {
-            if let lease = importDrainLease {
-                let now = Date()
-                let refreshDue = heldLeaseAt.map {
-                    now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
-                } ?? true
-                if refreshDue {
-                    if lease.tryAcquire(now: now) {
-                        heldLeaseAt = now
-                        if !reclaimedOnMount, let queue = importQueue ?? ingestQueue {
-                            do {
-                                let n = try await queue.reclaimInFlight(stream: Self.importStreamID)
-                                if n > 0 {
-                                    corpusIngestLog.info(
-                                        "import drain mount: reclaimed \(n) orphaned in-flight job(s) — prior import drainer died mid-ingest")
-                                }
-                            } catch {
-                                corpusIngestLog.error(
-                                    "import drain mount: reclaimInFlight failed: \(error, privacy: .public)")
+    private func importDrainPass(_ input: DrainLoopState) async -> (state: DrainLoopState, pause: Duration) {
+        var state = input
+        if let lease = importDrainLease {
+            let now = Date()
+            let refreshDue = state.heldLeaseAt.map {
+                now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
+            } ?? true
+            if refreshDue {
+                if lease.tryAcquire(now: now) {
+                    state.heldLeaseAt = now
+                    if !state.reclaimedOnMount, let queue = importQueue ?? ingestQueue {
+                        do {
+                            let n = try await queue.reclaimInFlight(stream: Self.importStreamID)
+                            if n > 0 {
+                                corpusIngestLog.info(
+                                    "import drain mount: reclaimed \(n) orphaned in-flight job(s) — prior import drainer died mid-ingest")
                             }
-                            reclaimedOnMount = true
+                        } catch {
+                            corpusIngestLog.error(
+                                "import drain mount: reclaimInFlight failed: \(error, privacy: .public)")
                         }
-                    } else {
-                        // Another process holds a fresh import lease — warm standby.
-                        heldLeaseAt = nil
-                        try? await Task.sleep(for: .seconds(3))
-                        continue
+                        state.reclaimedOnMount = true
                     }
-                } else if let held = heldLeaseAt, now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
-                    lease.heartbeat(now: now)
-                    heldLeaseAt = now
+                } else {
+                    // Another process holds a fresh import lease — warm standby.
+                    state.heldLeaseAt = nil
+                    return (state, .seconds(3))
                 }
+            } else if let held = state.heldLeaseAt, now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
+                lease.heartbeat(now: now)
+                state.heldLeaseAt = now
             }
-            do {
-                let drained = try await drainImportQueueOnce()
-                if drained > 0 { continue }  // spin-drain the rest of the burst
-            } catch {
-                corpusIngestLog.error("import drain loop error: \(error, privacy: .public)")
-            }
-            try? await Task.sleep(for: .milliseconds(15))
         }
+        do {
+            let drained = try await drainImportQueueOnce()
+            if drained > 0 { return (state, .zero) }  // spin-drain the rest of the burst
+        } catch {
+            corpusIngestLog.error("import drain loop error: \(error, privacy: .public)")
+        }
+        return (state, .milliseconds(15))
     }
 
     /// Ingest one drained IMPORT job (chunk + BM25 only) and reply terminal —
