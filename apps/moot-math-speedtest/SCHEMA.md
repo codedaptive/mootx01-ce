@@ -2,7 +2,7 @@
 
 Every moot-math-speedtest port — Rust, Swift, Go, Python, anything else
 — emits results in one of the schema families below. Tooling that ingests
-results (`results/AGGREGATED.md` generator, decision-doc citations,
+results (decision-doc citations,
 default-kernel-selection scripts) treats these as a hard contract:
 *every field is required*, *no unknown fields*, *types must match
 exactly*. If your new port can't produce these shapes byte-for-byte,
@@ -327,7 +327,7 @@ The `kernel` string identifies which backend was used. Stable values:
 
 If you implement a kernel under a new name (e.g. `riscv-vector`), add it
 to this table in your PR. The aggregation tooling tolerates unknown
-kernel names — they just don't get a column in `AGGREGATED.md` until
+kernel names — they are just not comparable across ports until
 named here.
 
 ---
