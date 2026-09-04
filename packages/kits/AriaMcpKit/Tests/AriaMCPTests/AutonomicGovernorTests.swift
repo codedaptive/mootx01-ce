@@ -7,7 +7,7 @@ import LocusKit
 import NeuronKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import AriaMCP
 
 /// Deterministic coverage for the resident Autonomic Governor: cadence firing

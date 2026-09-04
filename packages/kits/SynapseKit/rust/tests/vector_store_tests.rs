@@ -1,0 +1,836 @@
+//! Tests for the Rust `VectorStore` -- persistence-kit-backed CRUD over
+//! the `vectors` table. Parallel to the Swift `VectorStoreTests`.
+//!
+//! Lane F: schema uses `item_id` (renamed from `drawer_id`),
+//! `vector_index`, `kind`, `dim`, `payload`, `scale`.
+//! UNIQUE(item_id, vector_index, model_id).
+//!
+//! All tests that previously used `drawer_id` / `vectors_for_drawer`
+//! now use `item_id` / `vectors_for_item` per the Lane F rename.
+
+use engram_lib::Engram;
+use std::sync::Arc;
+use persistence_kit::{inmemory::InMemoryStorage, Storage};
+use uuid::Uuid;
+use synapsekit::{engine::metric::FloatMetric, VectorStore};
+
+const FILED_AT_1: i64 = 1_700_000_000;
+const FILED_AT_2: i64 = 1_700_000_100;
+const FILED_AT_3: i64 = 1_700_000_200;
+
+fn fresh_store() -> VectorStore {
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    VectorStore::open(storage).expect("open")
+}
+
+#[test]
+fn add_get_round_trip_preserves_engram_bytes() {
+    let store = fresh_store();
+    let engram = Engram::new(0xDEAD_BEEF_CAFE_BABE,
+                             0x0123_4567_89AB_CDEF,
+                             0xFFFF_0000_FFFF_0000,
+                             0x0000_FFFF_0000_FFFF);
+    store
+        .add_vector("item-A", &engram, "minilm", "1.0.0", FILED_AT_1)
+        .expect("add");
+
+    let fetched = store
+        .get_vector("item-A", "minilm")
+        .expect("get");
+    assert_eq!(fetched, Some(engram));
+}
+
+#[test]
+fn get_vector_returns_none_for_unknown_item() {
+    let store = fresh_store();
+    let result = store.get_vector("never-existed", "minilm").expect("get");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn multiple_models_stored_for_same_item() {
+    let store = fresh_store();
+    let minilm = Engram::new(0x1111, 0x2222, 0x3333, 0x4444);
+    let gemma  = Engram::new(0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD);
+    store.add_vector("item-X", &minilm, "minilm", "1.0.0", FILED_AT_1)
+         .expect("add minilm");
+    store.add_vector("item-X", &gemma, "gemma", "300m", FILED_AT_1)
+         .expect("add gemma");
+
+    assert_eq!(store.get_vector("item-X", "minilm").unwrap(), Some(minilm));
+    assert_eq!(store.get_vector("item-X", "gemma").unwrap(), Some(gemma));
+}
+
+#[test]
+fn vectors_for_item_returns_all_ordered_by_filed_at_ascending() {
+    let store = fresh_store();
+    let e1 = Engram::new(1, 0, 0, 0);
+    let e2 = Engram::new(2, 0, 0, 0);
+    let e3 = Engram::new(3, 0, 0, 0);
+
+    // Insert out of chronological order to exercise the ORDER BY.
+    store.add_vector("item-Y", &e2, "mB", "1", FILED_AT_2).expect("add e2");
+    store.add_vector("item-Y", &e3, "mC", "1", FILED_AT_3).expect("add e3");
+    store.add_vector("item-Y", &e1, "mA", "1", FILED_AT_1).expect("add e1");
+
+    let all = store.vectors_for_item("item-Y").expect("list");
+    assert_eq!(all.len(), 3);
+    let engrams: Vec<Engram> = all.iter().map(|r| r.engram).collect();
+    assert_eq!(engrams, vec![e1, e2, e3]);
+    let models: Vec<&str> = all.iter().map(|r| r.model_id.as_str()).collect();
+    assert_eq!(models, vec!["mA", "mB", "mC"]);
+    let filed: Vec<i64> = all.iter().map(|r| r.filed_at).collect();
+    assert_eq!(filed, vec![FILED_AT_1, FILED_AT_2, FILED_AT_3]);
+}
+
+#[test]
+fn delete_vector_removes_row() {
+    let store = fresh_store();
+    let engram = Engram::new(0x42, 0, 0, 0);
+    store.add_vector("item-Z", &engram, "minilm", "1.0.0", FILED_AT_1)
+         .expect("add");
+    store.delete_vector("item-Z", "minilm").expect("delete");
+
+    let fetched = store.get_vector("item-Z", "minilm").expect("get");
+    assert_eq!(fetched, None);
+}
+
+#[test]
+fn model_and_version_round_trip() {
+    let store = fresh_store();
+    let engram = Engram::new(0xAA, 0xBB, 0xCC, 0xDD);
+    store
+        .add_vector("item-V", &engram, "minilm-v6", "1.0.0-alpha.3", FILED_AT_1)
+        .expect("add");
+
+    let rows = store.vectors_for_item("item-V").expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].item_id, "item-V");
+    assert_eq!(rows[0].vector_index, 0);
+    assert_eq!(rows[0].model_id, "minilm-v6");
+    assert_eq!(rows[0].model_version, "1.0.0-alpha.3");
+    assert_eq!(rows[0].engram, engram);
+    assert_eq!(rows[0].filed_at, FILED_AT_1);
+}
+
+#[test]
+fn add_vector_upserts_on_same_item_and_model() {
+    let store = fresh_store();
+    let first  = Engram::new(1, 2, 3, 4);
+    let second = Engram::new(5, 6, 7, 8);
+
+    store.add_vector("item-UP", &first, "minilm", "1.0.0", FILED_AT_1)
+         .expect("add first");
+    store.add_vector("item-UP", &second, "minilm", "1.0.1", FILED_AT_2)
+         .expect("add second");
+
+    // The conflict path UPDATEs in place; the stored engram is the
+    // most recent one and only one row exists for this item.
+    assert_eq!(store.get_vector("item-UP", "minilm").unwrap(), Some(second));
+    let rows = store.vectors_for_item("item-UP").expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].engram, second);
+    assert_eq!(rows[0].model_version, "1.0.1");
+}
+
+#[test]
+fn fresh_store_returns_empty_for_unknown_item() {
+    let store = fresh_store();
+    let rows = store.vectors_for_item("no-such-item").expect("list");
+    assert!(rows.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// VEC-04 — find_nearest / find_by_keyword
+// ---------------------------------------------------------------------------
+
+/// Seed a 4-row corpus. Hamming distance from the zero probe equals
+/// popcount(engram), so expected sort order is alpha < bravo < charlie < delta.
+fn seed_corpus(store: &VectorStore, model_id: &str) {
+    let entries: &[(&str, u64)] = &[
+        ("alpha-doc",   0x1),
+        ("bravo-doc",   0x3),
+        ("charlie-doc", 0x7),
+        ("delta-doc",   0xF),
+    ];
+    for (item, bits) in entries {
+        let engram = Engram::new(*bits, 0, 0, 0);
+        store
+            .add_vector(item, &engram, model_id, "1.0.0", FILED_AT_1)
+            .expect("seed add_vector");
+    }
+}
+
+#[test]
+fn find_nearest_returns_k_results_sorted_by_distance_ascending() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let probe = Engram::new(0, 0, 0, 0);
+
+    let matches = store
+        .find_nearest(&probe, "minilm", 2)
+        .expect("find_nearest");
+    assert_eq!(matches.len(), 2);
+    let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
+    assert_eq!(ids, vec!["alpha-doc", "bravo-doc"]);
+    let distances: Vec<i32> = matches.iter().map(|m| m.distance).collect();
+    assert_eq!(distances, vec![1, 2]);
+    for i in 1..matches.len() {
+        assert!(matches[i - 1].distance <= matches[i].distance);
+    }
+}
+
+#[test]
+fn find_nearest_with_k_larger_than_corpus_returns_all_rows() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let probe = Engram::new(0, 0, 0, 0);
+
+    let matches = store
+        .find_nearest(&probe, "minilm", 10)
+        .expect("find_nearest");
+    assert_eq!(matches.len(), 4);
+    let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
+    assert_eq!(ids, vec!["alpha-doc", "bravo-doc", "charlie-doc", "delta-doc"]);
+    let distances: Vec<i32> = matches.iter().map(|m| m.distance).collect();
+    assert_eq!(distances, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn find_nearest_on_empty_store_returns_empty() {
+    let store = fresh_store();
+    let probe = Engram::new(0xFFFF, 0, 0, 0);
+    let matches = store
+        .find_nearest(&probe, "minilm", 5)
+        .expect("find_nearest");
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn find_nearest_indices_map_to_correct_item_ids() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let probe = Engram::new(0, 0, 0, 0);
+
+    let matches = store
+        .find_nearest(&probe, "minilm", 4)
+        .expect("find_nearest");
+    assert_eq!(matches.len(), 4);
+    for m in &matches {
+        let stored = store
+            .get_vector(&m.item_id, "minilm")
+            .expect("get_vector")
+            .expect("row must exist");
+        let computed = engram_lib::EngramLib::distance(&probe, &stored);
+        assert_eq!(
+            m.distance as u32, computed,
+            "item {}: distance mismatch", m.item_id
+        );
+        assert_eq!(m.model_id, "minilm");
+    }
+}
+
+/// SPEC 1.9.0: equal-distance ties order by vec_hash — the FNV-1a content
+/// hash of the payload bytes — so the order is identical across estate
+/// provisionings regardless of which item drew which id. item_id remains
+/// the final backstop for byte-identical payloads (see the engine tests).
+/// Twin of Swift `findNearestTieBreakByVecHashIsStable`.
+#[test]
+fn find_nearest_equal_distance_tiebreak_by_vec_hash() {
+    let store = fresh_store();
+    // Two items with the same Hamming distance from the zero probe.
+    // Both have popcount 1: bit 0 vs bit 1 — different content.
+    let e_yyy = Engram::new(0x1, 0, 0, 0);
+    let e_aaa = Engram::new(0x2, 0, 0, 0);
+    store.add_vector("yyy-item", &e_yyy, "m", "1", FILED_AT_1).unwrap();
+    store.add_vector("aaa-item", &e_aaa, "m", "1", FILED_AT_1).unwrap();
+    let probe = Engram::new(0, 0, 0, 0);
+    let matches = store.find_nearest(&probe, "m", 2).unwrap();
+    assert_eq!(matches.len(), 2);
+    // Derive the expected winner from the content hashes alone (the same
+    // FNV-1a the engines use; constants pinned by fnv1a64_golden_pin).
+    fn fnv(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes { h ^= b as u64; h = h.wrapping_mul(0x100000001b3); }
+        h
+    }
+    let first = if fnv(&e_yyy.wire_bytes()) < fnv(&e_aaa.wire_bytes()) {
+        "yyy-item"
+    } else {
+        "aaa-item"
+    };
+    assert_eq!(matches[0].item_id, first);
+    assert_ne!(matches[1].item_id, first);
+}
+
+#[test]
+fn find_by_keyword_returns_matching_items() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let hits = store.find_by_keyword("alpha", 10).expect("find_by_keyword");
+    assert_eq!(hits, vec!["alpha-doc".to_string()]);
+}
+
+/// `limit` counts DISTINCT item IDs, not table rows. The vectors table
+/// holds many rows per item (one binary row per model slot, plus float
+/// rows), so a row-scoped limit silently shrinks the probe window ~10× on
+/// production ensembles — the contradiction hunter and
+/// VectorSimilaritySignal both size their sweeps in ITEMS. Regression:
+/// three items under two models each (6 rows); limit 3 must return all
+/// three items, not the two items the first three rows dedupe to.
+/// Mirrors Swift testFindByKeywordLimitCountsDistinctItemsNotRows.
+#[test]
+fn find_by_keyword_limit_counts_distinct_items_not_rows() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    for item in ["probe-a", "probe-b", "probe-c"] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", FILED_AT_1)
+                .expect("add_vector");
+        }
+    }
+    let hits = store.find_by_keyword("probe", 3).expect("find_by_keyword");
+    assert_eq!(
+        hits,
+        vec![
+            "probe-a".to_string(),
+            "probe-b".to_string(),
+            "probe-c".to_string()
+        ],
+        "limit must count distinct items — a row-scoped limit returns only the items the first N rows cover"
+    );
+}
+
+/// `recent_item_ids` returns distinct items newest-first — the probe
+/// surface for bounded sweeps (contradiction hunter,
+/// VectorSimilaritySignal), so a bounded window always contains the
+/// latest captures. Multiple rows per item must not duplicate or
+/// displace items. Mirrors Swift testRecentItemIDsNewestFirstDistinct.
+#[test]
+fn recent_item_ids_newest_first_distinct() {
+    let store = fresh_store();
+    let engram = Engram::new(9, 9, 9, 9);
+    for (item, at) in [("old-item", FILED_AT_1), ("mid-item", FILED_AT_1 + 100), ("new-item", FILED_AT_1 + 200)] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", at)
+                .expect("add_vector");
+        }
+    }
+    let recent = store.recent_item_ids(2).expect("recent_item_ids");
+    assert_eq!(
+        recent,
+        vec!["new-item".to_string(), "mid-item".to_string()],
+        "recent_item_ids must return distinct items newest-first"
+    );
+    let all = store.recent_item_ids(10).expect("recent_item_ids");
+    assert_eq!(
+        all,
+        vec![
+            "new-item".to_string(),
+            "mid-item".to_string(),
+            "old-item".to_string()
+        ]
+    );
+}
+
+#[test]
+fn find_by_keyword_returns_empty_for_no_match() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let hits = store.find_by_keyword("zebra", 10).expect("find_by_keyword");
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn hybrid_find_nearest_and_find_by_keyword_overlap() {
+    let store = fresh_store();
+    seed_corpus(&store, "minilm");
+    let probe = Engram::new(0, 0, 0, 0);
+
+    let nearest = store
+        .find_nearest(&probe, "minilm", 4)
+        .expect("find_nearest");
+    let keyword = store.find_by_keyword("alpha", 10).expect("find_by_keyword");
+
+    assert!(nearest.iter().any(|m| m.item_id == "alpha-doc"));
+    assert!(keyword.contains(&"alpha-doc".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// SQLite round-trip test (real on-disk backend)
+// ---------------------------------------------------------------------------
+// This test validates that the schema serialises and deserialises correctly
+// through a real SQLite file. InMemory hid the reopen decode bugs previously.
+
+#[test]
+fn sqlite_round_trip_fresh_schema() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let db_path: PathBuf = dir.join(format!("vk_lane_f_test_{}.db", Uuid::new_v4()));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        Arc::new(SqliteStorage::new(cfg).expect("open SQLite"))
+    };
+
+    // --- write phase ---
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for write");
+        let e1 = Engram::new(0xCAFE_BABE_DEAD_BEEF, 0x1, 0x2, 0x3);
+        let e2 = Engram::new(0x0, 0xFFFF_FFFF, 0x0, 0xAAAA_BBBB);
+        store.add_vector("item-sql-1", &e1, "test-model", "1.0", FILED_AT_1).unwrap();
+        store.add_vector("item-sql-2", &e2, "test-model", "1.0", FILED_AT_2).unwrap();
+    }
+
+    // --- read phase (reopen) ---
+    {
+        // Calling open() again on an existing schema is idempotent (CREATE IF NOT EXISTS).
+        let store = VectorStore::open(make_storage()).expect("open store for read");
+
+        let e1 = Engram::new(0xCAFE_BABE_DEAD_BEEF, 0x1, 0x2, 0x3);
+        let e2 = Engram::new(0x0, 0xFFFF_FFFF, 0x0, 0xAAAA_BBBB);
+
+        assert_eq!(store.get_vector("item-sql-1", "test-model").unwrap(), Some(e1));
+        assert_eq!(store.get_vector("item-sql-2", "test-model").unwrap(), Some(e2));
+        assert_eq!(store.get_vector("item-sql-1", "other-model").unwrap(), None);
+
+        // vectors_for_item — row present with correct fields
+        let all_1 = store.vectors_for_item("item-sql-1").unwrap();
+        assert_eq!(all_1.len(), 1);
+        assert_eq!(all_1[0].item_id, "item-sql-1");
+        assert_eq!(all_1[0].vector_index, 0);
+    }
+
+    // Clean up temp file.
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-restart conformance: find_nearest survives a drop-and-reopen over the
+// SAME on-disk SQLite file (A-11). Parallel to the Swift
+// `findNearestSurvivesReopenSQLite` (Tests/SynapseKitTests/VectorStoreTests).
+// ---------------------------------------------------------------------------
+// The deliverable the SQLite backend exists for: after the writing store is
+// dropped (nothing stays resident), a NEW VectorStore on the same file must
+// rebuild the resident binary array from the durable `vectors` table on first
+// search, so find_nearest returns the persisted vector at distance 0. This is
+// the test that would have caught the dark-recall-on-reopen bug — the SQLite
+// backend hands `id` back as Text and `filed_at` as Int, which the row
+// decoders must tolerate (decode_stored_vector_light), or find_nearest sees
+// an empty array on reopen.
+
+#[test]
+fn find_nearest_survives_reopen_sqlite() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let db_path: PathBuf = dir.join(format!("vk_reopen_find_{}.db", Uuid::new_v4()));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        Arc::new(SqliteStorage::new(cfg).expect("open SQLite"))
+    };
+
+    let engram = Engram::new(
+        0xDEAD_BEEF_CAFE_BABE,
+        0x0123_4567_89AB_CDEF,
+        0xFFFF_0000_FFFF_0000,
+        0x0000_FFFF_0000_FFFF,
+    );
+
+    // Session 1: write a vector over a real SQLite estate, then drop the store
+    // so nothing stays resident.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for write");
+        store
+            .add_vector("drawer-reopen", &engram, "minilm", "1.0.0", FILED_AT_1)
+            .expect("add");
+    }
+
+    // Session 2: a brand-new VectorStore over the SAME on-disk estate. The
+    // persisted vector must decode from the SQLite read-back primitives, or
+    // find_nearest returns nothing.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for read");
+        let matches = store.find_nearest(&engram, "minilm", 5).expect("find_nearest");
+        // The reopened store rebuilt the resident array from the table and
+        // ranks the identical probe at Hamming distance 0.
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.item_id == "drawer-reopen" && m.distance == 0),
+            "find_nearest over a reopened SQLite estate must surface the persisted vector at distance 0; got {matches:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-restart conformance WITH a .vec sidecar (A-11). The resident array is
+// persisted to the sidecar via flush() and reloaded on reopen. No table rebuild
+// is required when the sidecar parses successfully and live_count (recomputed
+// from the tombstone bitmap) matches the table row count (sidecar_rebuild_count
+// stays 0). Either way, the reopened find_nearest top-k is identical.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_nearest_survives_reopen_sqlite_with_sidecar() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let stamp = Uuid::new_v4();
+    let db_path: PathBuf = dir.join(format!("vk_reopen_sidecar_{stamp}.db"));
+    let sidecar_path: PathBuf = dir.join(format!("vk_reopen_sidecar_{stamp}.vec"));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(cfg).expect("open SQLite");
+        // `new()` (sidecar path) does not open the schema; do it explicitly so
+        // the `vectors` table exists before the store writes.
+        storage
+            .open(&VectorStore::schema_declaration())
+            .expect("open schema");
+        Arc::new(storage)
+    };
+
+    let e_a = Engram::new(0xAAAA_AAAA_AAAA_AAAA, 0x1, 0x2, 0x3);
+    let e_b = Engram::new(0x0, 0xFFFF_FFFF_FFFF_FFFF, 0x0, 0xBBBB_CCCC_DDDD_EEEE);
+
+    // Pre-close ranking captured from the writing session, to assert the
+    // reopened session is identical.
+    let pre_close: Vec<(String, i32)>;
+
+    // Session 1: write two vectors WITH a sidecar, flush so the sidecar is
+    // persisted, then drop the store.
+    {
+        let store = VectorStore::new(make_storage(), Some(sidecar_path.clone()));
+        store
+            .add_vector("alpha", &e_a, "minilm", "1.0.0", FILED_AT_1)
+            .expect("add alpha");
+        store
+            .add_vector("beta", &e_b, "minilm", "1.0.0", FILED_AT_2)
+            .expect("add beta");
+        store.flush().expect("flush sidecar");
+        let matches = store.find_nearest(&e_a, "minilm", 5).expect("find_nearest");
+        pre_close = matches
+            .iter()
+            .map(|m| (m.item_id.clone(), m.distance))
+            .collect();
+    }
+
+    // Session 2: a new store on the SAME db AND the SAME sidecar. Because the
+    // sidecar live_count matches the table row count, the array loads from the
+    // sidecar with no rebuild (sidecar_rebuild_count stays 0).
+    {
+        let store = VectorStore::new(make_storage(), Some(sidecar_path.clone()));
+        let matches = store.find_nearest(&e_a, "minilm", 5).expect("find_nearest reopen");
+        let post: Vec<(String, i32)> = matches
+            .iter()
+            .map(|m| (m.item_id.clone(), m.distance))
+            .collect();
+        // Resident arrays + nearest results identical to before close.
+        assert_eq!(post, pre_close, "reopened top-k must equal pre-close top-k");
+        // The identical probe ranks at distance 0.
+        assert!(post.iter().any(|(id, d)| id == "alpha" && *d == 0));
+        // Loaded from the current sidecar — no table rebuild was needed.
+        assert_eq!(
+            store.sidecar_rebuild_count(),
+            0,
+            "a current sidecar must load without a table rebuild"
+        );
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&sidecar_path);
+}
+
+// F3: default_sidecar_path derives a `.vec` path beside the SQLite database, and
+// returns None for non-file (in-memory) backends. Mirrors the Swift
+// VectorStore.defaultSidecarURL assertions.
+#[test]
+fn default_sidecar_path_derives_vec_beside_sqlite_and_none_for_inmemory() {
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+    use std::path::PathBuf;
+
+    // SQLite backend → `<estate>.vectors.vec` beside the database file.
+    let db_path = std::env::temp_dir().join(format!("vk_sidecar_path_{}.sqlite", Uuid::new_v4()));
+    let cfg = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: db_path.to_string_lossy().to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let sqlite: Arc<dyn Storage> = Arc::new(SqliteStorage::new(cfg).expect("open SQLite"));
+    let derived = VectorStore::default_sidecar_path(&sqlite).expect("sqlite backend yields a sidecar path");
+    let expected: PathBuf = db_path.with_extension("vectors.vec");
+    assert_eq!(derived, expected);
+    assert_eq!(derived.extension().and_then(|e| e.to_str()), Some("vec"));
+
+    // In-memory backend → no local sidecar (rebuilds from table each open).
+    let mem: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    assert!(VectorStore::default_sidecar_path(&mem).is_none());
+}
+
+// VK-PERF-FIX-2026-07-13: schema v4 index + projection guard tests.
+// Mirrors the Swift VectorStoreTests "VK-PERF-FIX" section.
+
+/// Schema version is v5 (VEC-HNSW-01: hnsw_graph table added).
+///
+/// Guards the version bump: if schema_version drifts below 6, the shadow-swap
+/// generation columns and vector_generations registry will not be created for
+/// new estates. v4 added idx_vectors_filed_at_item; v5 added hnsw_graph;
+/// v6 adds generation columns, vector_generations registry, and widens the
+/// UNIQUE constraint on vectors to (item_id, vector_index, model_id, generation).
+#[test]
+fn schema_declaration_is_version_five() {
+    let schema = VectorStore::schema_declaration();
+    assert_eq!(schema.version, 6, "SynapseKit schema must be v6 after shadow-swap generation support was added");
+}
+
+/// The schema declaration includes idx_vectors_filed_at_item (added at v4).
+///
+/// Guards that the index is present in the declared schema so fresh installs
+/// get it immediately and existing estates receive it via the v3→v4 migration.
+/// The index covers `recent_item_ids` ORDER BY filed_at DESC, item_id ASC —
+/// without it every call performs a full-table scan + filesort on large estates.
+#[test]
+fn schema_declaration_contains_filed_at_item_index() {
+    let schema = VectorStore::schema_declaration();
+    let idx = schema.indices.iter().find(|i| i.name == "idx_vectors_filed_at_item");
+    assert!(idx.is_some(), "idx_vectors_filed_at_item must be declared in schema");
+    let idx = idx.unwrap();
+    assert_eq!(idx.table, "vectors");
+    assert_eq!(idx.columns, vec!["filed_at", "item_id"]);
+    assert!(!idx.unique);
+}
+
+/// v3→v4 migration is declared and well-formed.
+///
+/// Guards the migration path for existing estates: a v3 estate must receive
+/// exactly one migration that adds idx_vectors_filed_at_item. If this migration
+/// is absent, existing production estates keep their full-scan behaviour after
+/// upgrading.
+#[test]
+fn schema_declaration_has_v3_to_v4_index_migration() {
+    use persistence_kit::SchemaOperation;
+    let schema = VectorStore::schema_declaration();
+    let m = schema.migrations.iter().find(|m| m.from_version == 3 && m.to_version == 4);
+    assert!(m.is_some(), "v3→v4 migration must be present");
+    let m = m.unwrap();
+    assert_eq!(m.operations.len(), 1, "v3→v4 migration must contain exactly one operation");
+    match &m.operations[0] {
+        SchemaOperation::AddIndex(decl) => {
+            assert_eq!(decl.name, "idx_vectors_filed_at_item");
+            assert_eq!(decl.columns, vec!["filed_at", "item_id"]);
+        }
+        other => panic!("v3→v4 migration operation must be AddIndex, got {other:?}"),
+    }
+}
+
+/// The schema declaration includes the `hnsw_graph` table (added at v5).
+///
+/// Guards that the table is present with the correct columns and primary key so
+/// fresh installs get it directly and existing v4 estates receive it via the
+/// v4→v5 migration. Column order and PK must match the Swift declaration
+/// byte-for-byte so the GLK composite schema fixture stays in sync.
+#[test]
+fn schema_declaration_contains_hnsw_graph_table() {
+    let schema = VectorStore::schema_declaration();
+    let tbl = schema.tables.iter().find(|t| t.name == "hnsw_graph");
+    assert!(tbl.is_some(), "hnsw_graph table must be declared in v5 schema");
+    let tbl = tbl.unwrap();
+
+    // Column names in declaration order (must match Swift for fixture parity).
+    // v6 added the `generation` column so hnsw_graph rows carry their generation tag —
+    // `load_hnsw_graph_if_present` filters by expected_generation (§4 identity check).
+    let col_names: Vec<&str> = tbl.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours", "generation"],
+        "hnsw_graph columns must match Swift declaration order (v6 adds generation)");
+
+    // Primary key.
+    assert_eq!(tbl.primary_key, vec!["model_id", "node_idx", "layer"],
+        "hnsw_graph PK must be (model_id, node_idx, layer)");
+
+    // Not append-only; not hashable (device-local derived state, not audited).
+    assert!(!tbl.append_only, "hnsw_graph must not be append_only");
+    assert!(!tbl.hashable, "hnsw_graph must not be hashable");
+}
+
+/// v4→v5 migration is declared and creates the hnsw_graph table.
+///
+/// Guards the migration path for existing v4 estates: they must receive a
+/// CreateTable(hnsw_graph) migration so the HNSW graph storage is available
+/// after upgrade. Without this migration, v4 estates opened post-upgrade would
+/// fail any write to hnsw_graph on their first HNSW rebuild.
+#[test]
+fn schema_declaration_has_v4_to_v5_hnsw_graph_migration() {
+    use persistence_kit::SchemaOperation;
+    let schema = VectorStore::schema_declaration();
+    let m = schema.migrations.iter().find(|m| m.from_version == 4 && m.to_version == 5);
+    assert!(m.is_some(), "v4→v5 migration must be present");
+    let m = m.unwrap();
+    assert_eq!(m.operations.len(), 1, "v4→v5 migration must contain exactly one operation");
+    match &m.operations[0] {
+        SchemaOperation::CreateTable(decl) => {
+            assert_eq!(decl.name, "hnsw_graph",
+                "v4→v5 migration must create the hnsw_graph table");
+            let col_names: Vec<&str> = decl.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(col_names, vec!["model_id", "node_idx", "node_id", "layer", "neighbours"],
+                "hnsw_graph migration columns must match schema declaration");
+            assert_eq!(decl.primary_key, vec!["model_id", "node_idx", "layer"],
+                "hnsw_graph migration PK must match schema declaration");
+        }
+        other => panic!("v4→v5 migration operation must be CreateTable, got {other:?}"),
+    }
+}
+
+/// `find_nearest_float` routes through HNSW above the activation threshold.
+///
+/// Mirrors Swift HI-6: uses a low HNSW threshold (10) so 20 inserts suffice to
+/// activate the approximate index. At n=20 the efSearch=50 beam exceeds the
+/// corpus size, making HNSW behave as an exact scan — results are rank-correct.
+/// The probe is item-0's vector, so item-0 must rank first.
+#[test]
+fn find_nearest_float_routes_through_hnsw_above_threshold() {
+    use synapsekit::VectorPayload;
+    use std::sync::Arc;
+    use persistence_kit::inmemory::InMemoryStorage;
+    use uuid::Uuid;
+
+    let storage: Arc<dyn persistence_kit::Storage> =
+        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // Threshold of 10: 20 inserts will cross it and activate HNSW.
+    let store = VectorStore::open_with_hnsw_threshold(storage, 10)
+        .expect("open_with_hnsw_threshold");
+
+    // Seed a deterministic PRNG to generate reproducible float vectors.
+    // SplitMix64 with the same seed as the Swift test for cross-port parity.
+    let mut state: u64 = 0x12345678_ABCDEF00;
+    let next_f32 = |s: &mut u64| -> f32 {
+        *s = s.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = *s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z = z ^ (z >> 31);
+        // Map to [0, 1) then to [-1, 1).
+        let u = (z >> 11) as f32 / (1u64 << 53) as f32;
+        u * 2.0 - 1.0
+    };
+
+    let dim = 8_usize;
+    let filed_at: i64 = 1_700_000_000;
+    let model_id = "cross-model";
+    let mut first_vector: Option<Vec<f32>> = None;
+
+    for i in 0..20usize {
+        let v: Vec<f32> = (0..dim).map(|_| next_f32(&mut state)).collect();
+        if i == 0 {
+            first_vector = Some(v.clone());
+        }
+        let payload = VectorPayload::from_f32(&v);
+        store.add_payload(
+            &format!("item-{i}"), 0, &payload, model_id, "1", filed_at,
+        ).expect("add_payload");
+    }
+
+    // Probe is item-0's vector: it must rank first under cosine distance.
+    let probe = first_vector.unwrap();
+    let results = store.find_nearest_float(&probe, model_id, 5, FloatMetric::Cosine)
+        .expect("find_nearest_float");
+
+    assert!(!results.is_empty(), "find_nearest_float must return results after HNSW crossover");
+    assert_eq!(results[0].item_id, "item-0",
+        "probe direction must rank nearest after HNSW routing activates at threshold 10");
+}
+
+/// `find_by_keyword` returns correct results with column projection.
+///
+/// Regression guard: before VK-PERF-FIX-2026-07-13 the query read full rows
+/// including payload blobs. After the fix, only item_id is projected. This
+/// test verifies correct item-ID results still come back when the code uses
+/// query_projected — confirming no dependency on payload being present.
+#[test]
+fn find_by_keyword_correct_after_column_projection() {
+    let store = fresh_store();
+    let engram = Engram::new(0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111,
+                             0x2222_3333_4444_5555, 0x6666_7777_8888_9999);
+    for item in &["proj-alpha", "proj-bravo", "proj-charlie"] {
+        for model in &["model-a", "model-b"] {
+            store.add_vector(item, &engram, model, "1.0", FILED_AT_1).expect("add_vector");
+        }
+    }
+    let hits = store.find_by_keyword("proj", 3).expect("find_by_keyword");
+    assert_eq!(hits.len(), 3, "limit 3 must return all three projected items");
+    let hit_set: std::collections::HashSet<_> = hits.iter().map(|s| s.as_str()).collect();
+    assert!(hit_set.contains("proj-alpha"));
+    assert!(hit_set.contains("proj-bravo"));
+    assert!(hit_set.contains("proj-charlie"));
+}
+
+/// `recent_item_ids` returns correct results with column projection.
+///
+/// Regression guard: the column projection `["item_id", "filed_at"]` must
+/// not break distinct-item dedup or newest-first ordering. Projected rows
+/// carry only item_id and filed_at — this confirms the function works
+/// correctly without payload, model_id, or other columns present.
+#[test]
+fn recent_item_ids_correct_after_column_projection() {
+    let store = fresh_store();
+    let engram = Engram::new(7, 7, 7, 7);
+    // Three items at distinct filing times; two models each.
+    for (item, ts) in &[("oldest", FILED_AT_1), ("middle", FILED_AT_2), ("newest", FILED_AT_3)] {
+        for model in &["model-x", "model-y"] {
+            store.add_vector(item, &engram, model, "1.0", *ts).expect("add_vector");
+        }
+    }
+    let top2 = store.recent_item_ids(2).expect("recent_item_ids");
+    assert_eq!(top2, vec!["newest", "middle"],
+        "projection must not break newest-first ordering");
+    let all3 = store.recent_item_ids(10).expect("recent_item_ids");
+    assert_eq!(all3, vec!["newest", "middle", "oldest"],
+        "projection must not break full enumeration");
+}
+
+/// `find_by_keyword` returns empty immediately when the query is empty.
+///
+/// Regression guard: an empty query must short-circuit before issuing any SQL,
+/// not match every row via LIKE '%%'.
+#[test]
+fn find_by_keyword_empty_query_returns_empty() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    // Insert a row so the table is non-empty; a LIKE '%%' scan would match it.
+    store.add_vector("some-item", &engram, "test-model", "1.0", FILED_AT_1)
+         .expect("add_vector");
+    let result = store.find_by_keyword("", 100).expect("find_by_keyword");
+    assert!(result.is_empty(), "empty query must return empty without scanning");
+}

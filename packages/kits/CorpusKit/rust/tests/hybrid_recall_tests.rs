@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use convergence_kit::{ConflictPolicy, SyncDirection};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 // Process-wide serialisation lock shared with corpuskit_telemetry_tests.rs
 // and bundle_store_tests.rs. All tests that call BundleStore::insert or

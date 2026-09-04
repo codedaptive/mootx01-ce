@@ -11,7 +11,7 @@ import Foundation
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 private let nmfBasisCorpus: [String] = [
     "car engine drive road vehicle",

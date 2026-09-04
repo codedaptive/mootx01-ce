@@ -38,7 +38,7 @@ use locus_kit::{
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 const NOW2: i64 = 1_700_000_001;

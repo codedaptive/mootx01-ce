@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
-use vectorkit::{engine::metric::FloatMetric, VectorPayload, VectorStore};
+use synapsekit::{engine::metric::FloatMetric, VectorPayload, VectorStore};
 
 use genius_locus_kit::recall::RecallShape;
 

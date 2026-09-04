@@ -23,7 +23,7 @@ import Testing
 import CorpusKit
 import CorpusKitProviders
 import EngramLib
-import VectorKit
+import SynapseKit
 
 @Suite("NeuralEmbedProvider — engine-neutral Swift twin")
 struct NeuralEmbedProviderTests {
