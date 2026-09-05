@@ -749,7 +749,7 @@ impl RecallShape {
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
     /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 35] = [
+    pub const PRESET_NAMES: [&'static str; 37] = [
         "balanced",
         "precise",
         "conceptual",
@@ -798,6 +798,8 @@ impl RecallShape {
         "no_graph",
         "no_preference",
         "no_agreement",
+        "no_bm25",
+        "no_vector",
     ];
 
     /// The `signal:*` lane keys (COL-1), spelled once. Each names a
@@ -1046,6 +1048,8 @@ impl RecallShape {
             "no_graph" => Some(shape(&[(Self::SIGNAL_GRAPH, 0.0)], None)),
             "no_preference" => Some(shape(&[(Self::SIGNAL_PREFERENCE, 0.0)], None)),
             "no_agreement" => Some(shape(&[(Self::SIGNAL_AGREEMENT, 0.0)], None)),
+            "no_bm25" => Some(shape(&[(Self::SIGNAL_BM25, 0.0)], None)),
+            "no_vector" => Some(shape(&[(Self::SIGNAL_VECTOR, 0.0)], None)),
 
             _ => None,
         }
@@ -1092,6 +1096,8 @@ impl RecallShape {
             "no_graph" => "Ablation — exclude the graph column and redistribute its budget; matrixAware scoring only.",
             "no_preference" => "Ablation — exclude the preference column and redistribute its budget; matrixAware scoring only.",
             "no_agreement" => "Ablation — drop the fixed signal-agreement bonus; matrixAware scoring only.",
+            "no_bm25" => "Ablation — exclude the BM25 column and redistribute its budget; candidates from the lexical lane still enter the pool; matrixAware scoring only.",
+            "no_vector" => "Ablation — exclude the vector column (Hamming + dense) and redistribute its budget; candidates from the excluded lane still enter the pool; matrixAware scoring only.",
             _ => "",
         }
     }
