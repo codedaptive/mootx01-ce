@@ -364,6 +364,8 @@ public struct RecallShape: Sendable, Codable, Equatable {
         "no_graph",
         "no_preference",
         "no_agreement",
+        "no_bm25",
+        "no_vector",
     ]
 
     /// Resolve a named preset to its documented signed-weight shape.
@@ -650,6 +652,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return RecallShape(laneWeights: [SignalKey.preference: 0])
         case "no_agreement":
             return RecallShape(laneWeights: [SignalKey.agreement: 0])
+        case "no_bm25":
+            return RecallShape(laneWeights: [SignalKey.bm25: 0])
+        case "no_vector":
+            return RecallShape(laneWeights: [SignalKey.vector: 0])
 
         default:
             return nil
@@ -735,6 +741,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Ablation — exclude the preference column and redistribute its budget; matrixAware scoring only."
         case "no_agreement":
             return "Ablation — drop the fixed signal-agreement bonus; matrixAware scoring only."
+        case "no_bm25":
+            return "Ablation — exclude the BM25 column and redistribute its budget; candidates from the lexical lane still enter the pool; matrixAware scoring only."
+        case "no_vector":
+            return "Ablation — exclude the vector column (Hamming + dense) and redistribute its budget; candidates from the excluded lane still enter the pool; matrixAware scoring only."
         default:
             return ""
         }
