@@ -851,9 +851,11 @@ public actor AutonomicGovernor {
     /// `NeuronKit.learnedPreference` (the `Bias` lens, anchor reduction); the duty
     /// only shapes the outcomes and caches the strengths.
     ///
-    /// Window: all retained recall traces up to `now` (`since = .distantPast`).
-    /// Retention is bounded by the maintenance prune cycle. Deterministic — a
-    /// pure function of the recorded rows and `now`; never reads `Date()` here.
+    /// Window: the most-recent `preferenceTracesWindowLimit` (1,000) recall
+    /// traces by ascending `recalledAt`, fetched since `.distantPast` and
+    /// suffix-capped before fitting. Retention is bounded by the maintenance
+    /// prune cycle. Deterministic — a pure function of the recorded rows and
+    /// `now`; never reads `Date()` here.
     ///
     /// - Parameters:
     ///   - kit:    The live GeniusLocusKit actor.
