@@ -12101,6 +12101,40 @@ impl EstateCoordinator {
                 }
             }
 
+            // Step 5.8 — sub-span dense refinement. Twin of Swift RecallDirector
+            // step 5.8 (recallUnionBest, matrixAware only, which is exactly this
+            // branch). When a CorpusContentEngine is registered and the request
+            // carries query text, transient sentence-level sub-span vectors are
+            // computed for EVERY candidate in the buffer and the dense column
+            // takes max(col_dense[i], subSpanMaxCosine). Sub-span vectors are
+            // discarded at once (zero persistence); compute is bounded by the
+            // candidate pool, not the corpus.
+            //
+            // BLEND RULE: max-cosine. The sub-span score can only raise the dense
+            // column, so the whole-doc cosine survives when it is already high and
+            // a saturated whole-doc score is rescued when one sub-span matches the
+            // query. This is what populates `dense` for locus- and BM25-supplied
+            // candidates the dense lane never ranked; without it those candidates
+            // carry a zero dense column, the fused scores sit lower, and
+            // locus-only candidates tie at the presentation cut.
+            //
+            // Degradation: an empty map (provider has no float lane, source
+            // unavailable) leaves the column unchanged. Non-throwing, non-fatal.
+            if !query_str.is_empty() {
+                if let Some(ref c) = corpus {
+                    let candidate_ids: Vec<&str> = ordered_ids.iter().map(|id| id.as_str()).collect();
+                    let sub_span_scores = c.score_sub_spans(&query_str, &candidate_ids);
+                    if !sub_span_scores.is_empty() {
+                        for (i, id) in ordered_ids.iter().enumerate() {
+                            if let Some(&sub_span) = sub_span_scores.get(id) {
+                                // max-cosine blend: sub-span only improves the dense column.
+                                col_dense[i] = col_dense[i].max(sub_span);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Initial final column = per-lane RRF before normalisation.
             // normalizeFinals will overwrite with the weighted path, but the
             // normaliser needs a populated `final` column to sort top-16 for
@@ -12621,20 +12655,11 @@ impl EstateCoordinator {
                 if bm25_contributed   && bm25_score_map.contains_key(&id)   { sources.push(RecallEvidencePath::CorpusBm25); }
                 if vector_contributed && vector_score_map.contains_key(&id) { sources.push(RecallEvidencePath::VectorHamming); }
                 if dense_contributed  && dense_score_map.contains_key(&id)  { sources.push(RecallEvidencePath::VectorDense); }
-                // Matrix / graph / preference evidence paths when their column is
-                // non-zero. This follows the Rust port's established matrix-evidence
-                // convention (the matrix paths above): graphCoherence / learnedPreference
-                // are surfaced exactly when col_graph[i] / col_preference[i] carry mass
-                // from a registered GraphCache / PreferenceStore. (Swift's director does
-                // not surface any matrix/graph/preference path in `sources`; that is a
-                // pre-existing Swift↔Rust sources divergence NOT introduced here — the
-                // score-column parity that closes cross-port RecallShape steering is over `final` and the
-                // graph/preference columns, both of which now agree cross-port.)
-                if ff_s > 0.0 { sources.push(RecallEvidencePath::MatrixFieldPresence); }
-                if co_s > 0.0 { sources.push(RecallEvidencePath::MatrixCoOccurrence); }
-                if t_s  > 0.0 { sources.push(RecallEvidencePath::MatrixTemporal); }
-                if g_s  > 0.0 { sources.push(RecallEvidencePath::GraphCoherence); }
-                if p_s  > 0.0 { sources.push(RecallEvidencePath::LearnedPreference); }
+                // `sources` names the candidate-SUPPLY lanes only, exactly as Swift
+                // step 11 reads the five sourceMask bits. The matrix, graph and
+                // preference columns are scoring signals, not suppliers; they travel
+                // in the score vector and in the explanation's `score:` line, never
+                // in `sources`. An empty set falls back to locusBitmap in both ports.
                 if sources.is_empty() { sources.push(RecallEvidencePath::LocusBitmap); }
                 let score = RecallScoreVector {
                     locus: locus_s,
@@ -12649,29 +12674,38 @@ impl EstateCoordinator {
                     final_score: final_s,
                     dense: dense_s,
                 };
-                let mut explanation = Vec::new();
-                if locus_s > 0.0 { explanation.push("locusBitmap".to_string()); }
-                if bm25_s  > 0.0 { explanation.push("bm25".to_string()); }
-                if vec_s   > 0.0 { explanation.push("vector".to_string()); }
-                if dense_s > 0.0 { explanation.push("vectorDense".to_string()); }
-                if ff_s    > 0.0 { explanation.push("matrixFieldPresence".to_string()); }
-                if co_s    > 0.0 { explanation.push("matrixCoOccurrence".to_string()); }
-                if t_s     > 0.0 { explanation.push("matrixTemporal".to_string()); }
-                if g_s     > 0.0 { explanation.push("graphCoherence".to_string()); }
-                if p_s     > 0.0 { explanation.push("learnedPreference".to_string()); }
-                if explanation.is_empty() { explanation.push("locusBitmap".to_string()); }
+                // Explanation, per mode, byte-identical to the Swift director:
+                //   UnionBest  — the RecallExplainer block (sources / score / mode |
+                //                scoring / why), built from a bare hit exactly as
+                //                Swift step 11 does before wiring the lines on.
+                //   Hybrid and CorpusOnly — the sorted source raw values, the
+                //                Swift hybrid path's `sources.map(rawValue).sorted()`.
+                let bare = RecallHit { id, drawer, sources, score, explanation: Vec::new() };
+                let mut explanation = if request.mode == GLKRecallMode::UnionBest {
+                    crate::recall_explainer::explain(
+                        &bare,
+                        request.query_text.is_some(),
+                        &plan,
+                        request.scoring,
+                    )
+                } else {
+                    let mut names: Vec<String> =
+                        bare.sources.iter().map(|s| s.raw_value().to_string()).collect();
+                    names.sort_unstable();
+                    names
+                };
                 // PER-SIGNAL DENSE PROVENANCE (6b-core): name the dense signals that
                 // voted for this id, in slot order. Mirrors Swift's step-11
                 // "denseSignals: vectorDense:<modelID>, ..." line. Additive — only
                 // present when the dense lane surfaced this id.
-                if let Some(voters) = dense_signals_by_id.get(&id) {
+                if let Some(voters) = dense_signals_by_id.get(&bare.id) {
                     if !voters.is_empty() {
                         let names: Vec<String> =
                             voters.iter().map(|m| format!("vectorDense:{m}")).collect();
                         explanation.push(format!("denseSignals: {}", names.join(", ")));
                     }
                 }
-                RecallHit { id, drawer, sources, score, explanation }
+                RecallHit { explanation, ..bare }
             })
             .collect();
 

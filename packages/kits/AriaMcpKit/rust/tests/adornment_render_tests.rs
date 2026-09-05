@@ -139,10 +139,11 @@ fn register_minter_and_write_adornment(
 // Test 1: adornment appears in search payload when active minter is present
 // ---------------------------------------------------------------------------
 
-/// Active minter + adornment row → "adornment: <text>" surfaces in the search
-/// payload. Provisioned via the normalized adornments store (ADORN-STORE-02).
+/// Active minter + adornment row → the adornment text surfaces as column 5 of
+/// the S1 row in the search payload. Provisioned via the normalized adornments
+/// store (ADORN-STORE-02).
 ///
-/// Failure mode: "adornment: …" absent from the payload — `active_adornments`
+/// Failure mode: the adornment text absent from the payload — `active_adornments`
 /// batch read missing from the search render loop, or minter not active.
 #[test]
 fn adornment_appears_in_search_payload() {
@@ -169,11 +170,14 @@ fn adornment_appears_in_search_payload() {
 
     assert!(is_success(&result), "search must succeed; got: {result:?}");
     let body = content_text(&result);
-    let expected_line = format!("adornment: {}", adornment_text);
+    // S1 row format: id · subject · firstSentence · SSC · <adornmentText> · eventTime · score
+    // The adornment text is column 5 (no label prefix) per ARIA_MCP_INTERFACE.md §11.2,
+    // the same assertion AdornmentRenderTests.swift makes.
+    let expected_column = format!(" · {} · ", adornment_text);
     assert!(
-        body.contains(&expected_line),
-        "adorned drawer must surface 'adornment: <text>' in the search payload;\n\
-         expected line: {expected_line}\n\
+        body.contains(&expected_column),
+        "adorned drawer must surface adornment text as column 5 of the S1 row;\n\
+         expected column: {expected_column}\n\
          got: {body}"
     );
 }
@@ -185,7 +189,7 @@ fn adornment_appears_in_search_payload() {
 /// No active minters → adornment line absent from the search payload.
 /// Zero-active-minters IS the suppression arm (replaces retired MOOT_SUPPRESS_ADORNMENT).
 ///
-/// Failure mode: "adornment: …" still appears — active_adornments batch read
+/// Failure mode: the adornment text still appears — active_adornments batch read
 /// not filtering by active minter, or old d.adornment path still live.
 #[test]
 fn zero_active_minters_suppresses_adornment_line() {
@@ -207,10 +211,10 @@ fn zero_active_minters_suppresses_adornment_line() {
 
     assert!(is_success(&result), "search must succeed; got: {result:?}");
     let body = content_text(&result);
-    // No adornment rows in the store → no "adornment:" line in the payload.
+    // No adornment rows in the store → column 5 renders '-' and the text is absent.
     assert!(
-        !body.contains("adornment:"),
-        "no active minters → adornment line must be absent from payload;\n\
+        !body.contains(&adornment_text),
+        "no active minters → adornment text must be absent from payload;\n\
          got: {body}\n\
          (fixture adornment_text was: {adornment_text})"
     );

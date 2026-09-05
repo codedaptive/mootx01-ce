@@ -493,7 +493,11 @@ pub struct RecallHit {
     pub sources: Vec<RecallEvidencePath>,
     /// Score decomposition across all evidence lanes.
     pub score: RecallScoreVector,
-    /// Human-readable explanation tokens, one per active evidence lane.
+    /// Human-readable explanation lines. UnionBest hits carry the
+    /// `recall_explainer` block (`sources:`, `score:`, `mode: … | scoring: …`,
+    /// `why:`) plus a `denseSignals:` line when the dense lane voted; Hybrid and
+    /// CorpusOnly hits carry the sorted source raw values; the locus-only
+    /// fallbacks carry `["locusBitmap"]`. Byte-identical to Swift `RecallHit.explanation`.
     pub explanation: Vec<String>,
 }
 
