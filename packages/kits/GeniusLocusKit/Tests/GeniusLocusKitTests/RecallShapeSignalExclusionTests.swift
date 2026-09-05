@@ -182,6 +182,34 @@ struct RecallShapeSignalExclusionTests {
         try await kit.close(handle)
     }
 
+    @Test("(g) no_vector / no_bm25 presets exclude only the scoring column: the candidate set survives")
+    func candidateLanePresetsKeepTheirCandidates() async throws {
+        let (kit, handle) = try await openTwoDrawerEstate(owner: "signal-candidate-lane-owner")
+        func textReq(_ shape: RecallShape?) -> GLKRecallRequest {
+            GLKRecallRequest(
+                frame: RecallFrame(filterChain: [], hydrationLevel: .structured,
+                                   ordering: .byCaptureTimeDesc),
+                mode: .unionBest, scoring: .matrixAware, limit: 10,
+                fallback: .allowDegraded, queryText: "alpha content",
+                origin: .internal, recallShape: shape)
+        }
+        let neutral = try await kit.recall(handle, textReq(nil))
+        #expect(!neutral.hits.isEmpty)
+        for (name, key) in [("no_vector", RecallShape.SignalKey.vector), ("no_bm25", RecallShape.SignalKey.bm25)] {
+            let preset = try #require(RecallShape.preset(name))
+            let viaPreset = try await kit.recall(handle, textReq(preset))
+            let viaKey = try await kit.recall(handle, textReq(RecallShape(laneWeights: [key: 0])))
+            // The preset is exactly the explicit key at 0: same hits, same finals.
+            #expect(viaPreset.hits.map(\.id) == viaKey.hits.map(\.id), "\(name) must equal explicit \(key) = 0")
+            #expect(viaPreset.hits.map(\.score.final) == viaKey.hits.map(\.score.final))
+            // Exclusion drops a scoring column, never the lane's candidates: the
+            // hit SET is the neutral set (order may change, membership may not).
+            #expect(Set(viaPreset.hits.map(\.id)) == Set(neutral.hits.map(\.id)),
+                "\(name) must keep every candidate the lanes produced")
+        }
+        try await kit.close(handle)
+    }
+
     @Test("(d) each ablation preset sets exactly one signal:* key at 0")
     func ablationPresetsSetOneSignalKey() throws {
         let expected: [(String, String)] = [
@@ -191,6 +219,8 @@ struct RecallShapeSignalExclusionTests {
             ("no_graph", RecallShape.SignalKey.graph),
             ("no_preference", RecallShape.SignalKey.preference),
             ("no_agreement", RecallShape.SignalKey.agreement),
+            ("no_bm25", RecallShape.SignalKey.bm25),
+            ("no_vector", RecallShape.SignalKey.vector),
         ]
         for (name, key) in expected {
             let s = try #require(RecallShape.preset(name), "preset \(name) must resolve")
