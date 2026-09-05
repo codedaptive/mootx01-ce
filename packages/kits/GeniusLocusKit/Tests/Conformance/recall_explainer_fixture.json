@@ -1,16 +1,31 @@
 {
-  "description": "Shared cross-port vector for the RecallExplainer lines that moot_memory_search explain:true renders under each candidate row. Each case gives a hit's sources and score columns (f32), whether the request carried query text, the plan's effective mode and the request scoring, and the exact lines both ports must produce. Asserted by RecallExplainerCrossPortFixtureTests.swift and rust/tests/recall_explainer_parity.rs.",
+  "description": "Shared cross-port vector for the RecallExplainer lines that moot_memory_search explain:true renders under each candidate row. Each case gives a hit's sources and score columns (f32), the agreement bonus the hit earned, whether the request carried query text, the plan's effective mode and the request scoring, and the exact lines both ports must produce. The score: line renders every column (zero or not) in step-9 order, then agreement= and final= (3 dp); expected lines were re-pinned from the Swift output after COL-1 changed the format (COL-2). Asserted by RecallExplainerCrossPortFixtureTests.swift and rust/tests/recall_explainer_parity.rs.",
   "cases": [
     {
       "name": "bm25 and locus with a dense vote, matrixAware",
-      "sources": ["locusBitmap", "corpusBM25"],
-      "score": {"locus": 0.84, "bm25": 0.69, "vector": 0, "dense": 0.57, "fieldFit": 0, "coOccurrence": 0, "temporal": 0, "graph": 0, "preference": 0, "final": 0.33},
+      "sources": [
+        "locusBitmap",
+        "corpusBM25"
+      ],
+      "score": {
+        "locus": 0.84,
+        "bm25": 0.69,
+        "vector": 0,
+        "dense": 0.57,
+        "fieldFit": 0,
+        "coOccurrence": 0,
+        "temporal": 0,
+        "graph": 0,
+        "preference": 0,
+        "final": 0.33
+      },
+      "agreement": 0.02,
       "hasQueryText": true,
       "mode": "unionBest",
       "scoring": "matrixAware",
       "expected": [
         "sources: corpusBM25, locusBitmap",
-        "score: locus=0.84 bm25=0.69 dense=0.57",
+        "score: locus=0.84 bm25=0.69 vector=0.00 dense=0.57 fieldFit=0.00 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.330",
         "mode: unionBest | scoring: matrixAware",
         "why: content query; BM25 and vector weighted high; dense float cosine match"
       ]
@@ -18,27 +33,55 @@
     {
       "name": "bitmap filter match with no lane columns",
       "sources": [],
-      "score": {"locus": 0, "bm25": 0, "vector": 0, "dense": 0, "fieldFit": 0, "coOccurrence": 0, "temporal": 0, "graph": 0, "preference": 0, "final": 0.33},
+      "score": {
+        "locus": 0,
+        "bm25": 0,
+        "vector": 0,
+        "dense": 0,
+        "fieldFit": 0,
+        "coOccurrence": 0,
+        "temporal": 0,
+        "graph": 0,
+        "preference": 0,
+        "final": 0.33
+      },
+      "agreement": 0.0,
       "hasQueryText": false,
       "mode": "unionBest",
       "scoring": "rrf",
       "expected": [
         "sources: none",
-        "score: final=0.33",
+        "score: locus=0.00 bm25=0.00 vector=0.00 dense=0.00 fieldFit=0.00 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.00 final=0.330",
         "mode: unionBest | scoring: rrf",
         "why: bitmap filter match"
       ]
     },
     {
       "name": "every column lit, three supply lanes, raw scoring",
-      "sources": ["vectorHamming", "locusGraph", "locusBitmap"],
-      "score": {"locus": 0.5, "bm25": 0, "vector": 0.25, "dense": 0, "fieldFit": 0.44, "coOccurrence": 0.3, "temporal": 0.2, "graph": 0.1, "preference": 0.05, "final": 0.4},
+      "sources": [
+        "vectorHamming",
+        "locusGraph",
+        "locusBitmap"
+      ],
+      "score": {
+        "locus": 0.5,
+        "bm25": 0,
+        "vector": 0.25,
+        "dense": 0,
+        "fieldFit": 0.44,
+        "coOccurrence": 0.3,
+        "temporal": 0.2,
+        "graph": 0.1,
+        "preference": 0.05,
+        "final": 0.4
+      },
+      "agreement": 0.0,
       "hasQueryText": true,
       "mode": "unionBest",
       "scoring": "raw",
       "expected": [
         "sources: locusBitmap, locusGraph, vectorHamming",
-        "score: locus=0.50 vector=0.25 fieldFit=0.44 coOccurrence=0.30 temporal=0.20 graph=0.10 preference=0.05",
+        "score: locus=0.50 bm25=0.00 vector=0.25 dense=0.00 fieldFit=0.44 coOccurrence=0.30 temporal=0.20 graph=0.10 preference=0.05 agreement=0.00 final=0.400",
         "mode: unionBest | scoring: raw",
         "why: content query; BM25 and vector weighted high; MatrixO cluster preserved; temporal pattern matched; graph coherence signal active"
       ]

@@ -571,6 +571,15 @@ impl Default for RecallOrigin {
 ///   - `"temporal"`        — the MatrixTier temporal-relevance column.
 ///   - `"graph"`           — the connection-graph column.
 ///   - `"preference"`      — the learned-preference column.
+///   Column-budget keys, namespace `signal:` (COL-1; steer ONLY the unionBest
+///   MatrixAware weighted score). Where the per-lane keys SCALE a column's
+///   term, a `signal:*` key at 0 EXCLUDES the whole column and REDISTRIBUTES
+///   its `RecallWeights` budget over the remaining columns (see
+///   `recall_signal_budget::RecallSignalBudget`). `1.0`/absent neutral, `<0`
+///   suppresses, other positive values scale without redistribution:
+///   - `"signal:locus"`, `"signal:bm25"`, `"signal:vector"` (Hamming + dense),
+///     `"signal:fieldFit"`, `"signal:matrix"` (coOccurrence + temporal),
+///     `"signal:graph"`, `"signal:preference"`, `"signal:agreement"`.
 ///
 /// A lane whose key is ABSENT uses the default weight `1.0`; an empty map
 /// reproduces the uniform fusion exactly (the back-compat contract — a `None`
@@ -740,7 +749,7 @@ impl RecallShape {
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
     /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 29] = [
+    pub const PRESET_NAMES: [&'static str; 35] = [
         "balanced",
         "precise",
         "conceptual",
@@ -780,7 +789,34 @@ impl RecallShape {
         // Multi-column matrix presets: amplify two matrixAware columns together.
         "temporal_connection",
         "field_preference",
+        // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
+        // column of the MatrixAware weighted score via its `signal:*` key and
+        // redistributes that column's budget over the rest. Mirrors Swift.
+        "no_locus",
+        "no_field_fit",
+        "no_matrix",
+        "no_graph",
+        "no_preference",
+        "no_agreement",
     ];
+
+    /// The `signal:*` lane keys (COL-1), spelled once. Each names a
+    /// `recall_signal_budget::SignalColumn`. Mirrors Swift `RecallShape.SignalKey`.
+    pub const SIGNAL_LOCUS: &'static str = "signal:locus";
+    /// BM25 column budget key.
+    pub const SIGNAL_BM25: &'static str = "signal:bm25";
+    /// Vector budget key (Hamming + dense share it).
+    pub const SIGNAL_VECTOR: &'static str = "signal:vector";
+    /// Field-fit column budget key.
+    pub const SIGNAL_FIELD_FIT: &'static str = "signal:fieldFit";
+    /// Matrix budget key (coOccurrence + temporal share it).
+    pub const SIGNAL_MATRIX: &'static str = "signal:matrix";
+    /// Graph column budget key.
+    pub const SIGNAL_GRAPH: &'static str = "signal:graph";
+    /// Preference column budget key.
+    pub const SIGNAL_PREFERENCE: &'static str = "signal:preference";
+    /// Fixed signal-agreement bonus key.
+    pub const SIGNAL_AGREEMENT: &'static str = "signal:agreement";
 
     /// Resolve a named preset to its documented signed-weight shape. Mirrors
     /// Swift `RecallShape.preset`.
@@ -1002,6 +1038,15 @@ impl RecallShape {
                 None,
             )),
 
+            // Column-exclusion presets (COL-1): one `signal:*` key at 0 each; the
+            // excluded column's budget is redistributed (RecallSignalBudget).
+            "no_locus" => Some(shape(&[(Self::SIGNAL_LOCUS, 0.0)], None)),
+            "no_field_fit" => Some(shape(&[(Self::SIGNAL_FIELD_FIT, 0.0)], None)),
+            "no_matrix" => Some(shape(&[(Self::SIGNAL_MATRIX, 0.0)], None)),
+            "no_graph" => Some(shape(&[(Self::SIGNAL_GRAPH, 0.0)], None)),
+            "no_preference" => Some(shape(&[(Self::SIGNAL_PREFERENCE, 0.0)], None)),
+            "no_agreement" => Some(shape(&[(Self::SIGNAL_AGREEMENT, 0.0)], None)),
+
             _ => None,
         }
     }
@@ -1041,6 +1086,12 @@ impl RecallShape {
             "session_hybrid" => "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal.",
             "temporal_connection" => "Recent + co-filed — amplify temporal (recency) + coOccurrence (shared filing neighbourhood) together; matrixAware scoring only.",
             "field_preference" => "Filed + preferred — amplify fieldFit (FDC facet match) + preference (learned user preference) together; matrixAware scoring only.",
+            "no_locus" => "Ablation — exclude the locus (bitmap recency-rank) column and redistribute its budget; matrixAware scoring only.",
+            "no_field_fit" => "Ablation — exclude the fieldFit column and redistribute its budget; matrixAware scoring only.",
+            "no_matrix" => "Ablation — exclude the coOccurrence + temporal matrix columns and redistribute their budget; matrixAware scoring only.",
+            "no_graph" => "Ablation — exclude the graph column and redistribute its budget; matrixAware scoring only.",
+            "no_preference" => "Ablation — exclude the preference column and redistribute its budget; matrixAware scoring only.",
+            "no_agreement" => "Ablation — drop the fixed signal-agreement bonus; matrixAware scoring only.",
             _ => "",
         }
     }
