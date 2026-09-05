@@ -180,6 +180,8 @@ fn ablation_presets_set_one_signal_key_each() {
         ("no_graph", RecallShape::SIGNAL_GRAPH),
         ("no_preference", RecallShape::SIGNAL_PREFERENCE),
         ("no_agreement", RecallShape::SIGNAL_AGREEMENT),
+        ("no_bm25", RecallShape::SIGNAL_BM25),
+        ("no_vector", RecallShape::SIGNAL_VECTOR),
     ];
     for (name, key) in expected {
         let s = RecallShape::preset(name).unwrap_or_else(|| panic!("preset {name} must resolve"));
@@ -279,4 +281,54 @@ fn locus_column_is_excluded_for_text_queries_only() {
     let fc: Vec<f32> = c.hits.iter().map(|x| x.score.final_score).collect();
     let fd: Vec<f32> = d.hits.iter().map(|x| x.score.final_score).collect();
     assert_ne!(fc, fd, "structured browse: the locus recency rank must stay in the score");
+}
+
+// MARK: - (g) NOVEC-1: candidate-lane presets exclude only the scoring column
+
+/// `no_vector` and `no_bm25` drop a scoring column and redistribute its budget;
+/// they never remove the lane's candidates from the pool. The preset is exactly
+/// the explicit `signal:*` = 0 shape (same hits, same finals), and the hit SET
+/// under the preset is the neutral hit set (order may change, membership may not).
+#[test]
+fn candidate_lane_presets_keep_their_candidates() {
+    use std::collections::HashSet;
+    let (coord, h) = two_drawer_estate();
+    let text_req = |shape: Option<RecallShape>| {
+        let mut r = GLKRecallRequest::new(
+            RecallFrame::new(vec![]),
+            GLKRecallMode::UnionBest,
+            GLKRecallScoring::MatrixAware,
+            10,
+            RecallFallbackPolicy::AllowDegraded,
+            RecallOrigin::Internal,
+        )
+        .with_query_text("alpha content");
+        if let Some(s) = shape {
+            r = r.with_recall_shape(s);
+        }
+        r
+    };
+    let neutral = coord.recall_scored(&h, text_req(None), NOW + 10).expect("neutral");
+    assert!(!neutral.hits.is_empty());
+    let neutral_ids: HashSet<String> = neutral.hits.iter().map(|x| x.id.clone()).collect();
+    for (i, (name, key)) in [("no_vector", RecallShape::SIGNAL_VECTOR), ("no_bm25", RecallShape::SIGNAL_BM25)]
+        .into_iter()
+        .enumerate()
+    {
+        let preset = RecallShape::preset(name).expect("preset resolves");
+        let via_preset = coord
+            .recall_scored(&h, text_req(Some(preset)), NOW + 20 + i as i64)
+            .expect("via preset");
+        let via_key = coord
+            .recall_scored(&h, text_req(Some(shape(&[(key, 0.0)]))), NOW + 30 + i as i64)
+            .expect("via key");
+        let p_ids: Vec<&str> = via_preset.hits.iter().map(|x| x.id.as_str()).collect();
+        let k_ids: Vec<&str> = via_key.hits.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(p_ids, k_ids, "{name} must equal explicit {key} = 0");
+        let p_f: Vec<f32> = via_preset.hits.iter().map(|x| x.score.final_score).collect();
+        let k_f: Vec<f32> = via_key.hits.iter().map(|x| x.score.final_score).collect();
+        assert_eq!(p_f, k_f);
+        let p_set: HashSet<String> = via_preset.hits.iter().map(|x| x.id.clone()).collect();
+        assert_eq!(p_set, neutral_ids, "{name} must keep every candidate the lanes produced");
+    }
 }
