@@ -10867,7 +10867,7 @@ impl EstateCoordinator {
         sorted_4n.sort_by(|a, b| presentation(a, b));
         let tied_score = scores[sorted_2n[presentation_cut - 1]];
         if let Some(break_at) = sorted_4n.iter().position(|&i| scores[i] < tied_score) {
-            // Break found within 4N: return the WHOLE tie group (honest
+            // Break found within 4N: return the WHOLE tie group (deliberate
             // expansion past the requested limit — the scores decide).
             sorted_4n.truncate(break_at);
             sorted_4n

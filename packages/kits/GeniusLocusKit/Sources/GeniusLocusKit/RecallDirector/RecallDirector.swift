@@ -2854,7 +2854,7 @@ public extension GeniusLocusKit {
             // where score drops below tiedScore. Items at tiedScore are the
             // tie group; items strictly above tiedScore are the clear prefix.
             if let breakAt = sorted4N.firstIndex(where: { scores[$0] < tiedScore }) {
-                // Break found within 4N: return the WHOLE tie group (honest
+                // Break found within 4N: return the WHOLE tie group (deliberate
                 // expansion past the requested limit — the scores decide).
                 selected = Array(sorted4N[0..<breakAt])
             } else if unselected.isEmpty {
