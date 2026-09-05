@@ -277,7 +277,7 @@ struct RandomIndexingTests {
     func singleDocumentCorpusHasNoSignal() async throws {
         // With N = 1 every term appears in every document, so idf = ln(2/2) = 0
         // for all of them: nothing distinguishes the document from the corpus.
-        // The pooled vector collapses to zero — an honest opt-out (empty), not
+        // The pooled vector collapses to zero — an explicit opt-out (empty), not
         // a vocabulary miss (the terms ARE in the vocabulary).
         let provider = RandomIndexingProvider()
         provider.train(terms: ["car", "engine", "drive"], window: 4)

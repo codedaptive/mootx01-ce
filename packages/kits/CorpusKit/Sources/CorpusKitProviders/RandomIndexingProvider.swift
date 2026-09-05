@@ -155,7 +155,7 @@ public func riIndexVector(term: String) -> [Float] {
 /// `train(terms:window:)` once per document; `finalize()` then fits the
 /// pooling state. An unfinalized provider returns the empty vector / `.zero`
 /// for any text (no basis), and a finalized provider returns them for text
-/// whose every term is OOV (the honest no-context signal, surfaced as a
+/// whose every term is OOV (the explicit no-context signal, surfaced as a
 /// vocabulary miss on the float lane).
 ///
 /// ## Thread safety
@@ -352,7 +352,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
             )
         }
         // Terms matched but the pooled vector collapsed to zero (every matched
-        // term weighs 0, or the text is the corpus mean itself): honest
+        // term weighs 0, or the text is the corpus mean itself): explicit
         // no-signal, reported as an opt-out rather than a vocabulary miss.
         return pooled.vector ?? []
     }
