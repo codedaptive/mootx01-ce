@@ -13,13 +13,14 @@
 // Jaccard is computed in two kits: NeuronKit
 // (`HybridRecallEngine.shingleSimilarity`, the MMR rerank similarity
 // term on the hybrid-recall page path) and GeniusLocusKit
-// (`RecallDirector.glkShingleSimilarity`, the unionBest MMR
-// deduplication term). Those copies exist because GLK cannot depend on
-// NeuronKit (layering — GLK is the composition layer, above NeuronKit's
-// siblings). Both kits already depend on SubstrateML, which sits below
-// both, so the math has a single correct home here. One implementation
-// per substrate atomic; both kits' similarity wrappers delegate to it
-// (rewire complete — no duplicated math remains in GLK or NeuronKit).
+// (`RecallDirector.recallUnionBest` step 10, the unionBest MMR
+// deduplication term). GLK cannot depend on NeuronKit (layering — GLK is
+// the composition layer, above NeuronKit's siblings). Both kits already
+// depend on SubstrateML, which sits below both, so the math has a single
+// correct home here. One implementation per substrate atomic; both kits
+// shingle each text once with `shingles(_:)` and compare the sets with
+// the set overload of `similarity(_:_:)` (no duplicated math remains in
+// GLK or NeuronKit).
 //
 // DETERMINISM AND CONFORMANCE. The math is a pure function of the two
 // input strings — no locale-sensitive transforms, no stemming, no
