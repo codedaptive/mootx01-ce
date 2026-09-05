@@ -129,6 +129,9 @@ let package = Package(
                 // adapter delegates all three reads correctly.
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // PreferenceLensTests constructs RecallTraceItem values directly
+                // for the 1,000-trace window conformance vector (PREF-1).
+                .product(name: "LocusKit", package: "LocusKit"),
             ],
             // Shared conformance vectors — one artifact read by this
             // suite AND rust/tests/lens_conformance.rs (QueueKit's
