@@ -275,4 +275,77 @@ struct SubjectSurfaceTests {
             #expect(error.message.contains("missing_subject"))
         }
     }
+
+    // MARK: - moot_file_fact subject contract (ARIA-MSG-2)
+
+    @Test func fileFactOversizeSubjectReturnsContractError() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "fact-subject-oversize"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let oversize = String(repeating: "x", count: DrawerStore.subjectLengthContract + 1)
+        // Subject contract violation surfaces as isError:true so the model sees
+        // the message instead of a bare "Tool execution failed" from the generic
+        // catch wrapper (ARIA-MSG-2 fix). Mirrors the Rust port's
+        // file_fact_oversize_subject_returns_contract_error test.
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_fact",
+            arguments: .object([
+                "subject": .string(oversize),
+                "predicate": .string("worksAt"),
+                "object": .string("Acme"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize fact subject must return isError:true result, got: \(result)")
+            return
+        }
+        #expect(
+            errorText.contains("subject must be 1–\(DrawerStore.subjectLengthContract) characters"),
+            "error text must contain the contract message, got: \(errorText)")
+        #expect(
+            errorText.contains("\(DrawerStore.subjectLengthContract + 1)"),
+            "error text must contain the offending length, got: \(errorText)")
+    }
+
+    @Test func fileFactOversizeSubjectMessageMatchesRustPort() async throws {
+        // Cross-port parity: the wire error text for moot_file_fact with an oversize
+        // subject must be byte-identical in Swift and Rust. This test encodes the
+        // exact expected string so either port drifting produces an immediate failure.
+        // The Rust twin is subject_contract_message_matches_swift_port in
+        // subject_surface_tests.rs (ARIA-MSG-2 extension).
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "fact-subject-parity"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let n = DrawerStore.subjectLengthContract + 1
+        let oversize = String(repeating: "x", count: n)
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_fact",
+            arguments: .object([
+                "subject": .string(oversize),
+                "predicate": .string("worksAt"),
+                "object": .string("Acme"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize fact subject must return isError:true result, got: \(result)")
+            return
+        }
+        let expected = "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+            + "(got \(n)). One telegraphic sentence in the AI-facing "
+            + "register \u{2014} compress, don't truncate."
+        #expect(errorText == expected,
+                "file_fact error text must match Rust port verbatim, got: \(errorText)")
+    }
 }
