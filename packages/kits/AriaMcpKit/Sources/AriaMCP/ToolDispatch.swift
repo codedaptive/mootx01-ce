@@ -3137,6 +3137,19 @@ extension ToolDispatcher {
     func runFileFact(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let subject = try requireString(args, "subject")
+        let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
+            // Return as an isError result rather than throwing a JSON-RPC protocol error.
+            // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
+            // and discard the message. An isError result puts the contract text in front
+            // of the model so it can compress and retry. Mirrors the Rust port's
+            // TOOL_DISPATCH_FAILURE path in run_file_fact (interface_tools.rs).
+            return Self.errorResult(
+                "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                    + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
+                    + "register — compress, don't truncate."
+            )
+        }
         let predicate = try requireString(args, "predicate")
         let object = try requireString(args, "object")
         // source_id anchors the fact to a drawer in this estate. It is a local
@@ -3147,14 +3160,14 @@ extension ToolDispatcher {
         let providedSource = try optionalString(args["source_id"], argument: "source_id") ?? ""
         let fact = try await kit.captureKGFact(
             handle,
-            subject: subject,
+            subject: trimmedSubject,
             predicate: predicate,
             object: object,
             sourceDrawerID: providedSource,
             addedBy: serverIdentity,
             now: now
         )
-        return Self.textResult("filed fact \(fact.id): [\(subject)] \(predicate) [\(object)]")
+        return Self.textResult("filed fact \(fact.id): [\(trimmedSubject)] \(predicate) [\(object)]")
     }
 
     /// `moot_fact_search` — retrieve all currently-active KG facts.
