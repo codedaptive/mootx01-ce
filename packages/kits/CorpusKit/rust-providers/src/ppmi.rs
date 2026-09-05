@@ -668,7 +668,7 @@ impl EmbeddingProvider for PpmiProvider {
                 terms.len()
             )));
         }
-        // Terms matched but the pooled vector collapsed to zero: honest
+        // Terms matched but the pooled vector collapsed to zero: explicit
         // no-signal, reported as an opt-out rather than a vocabulary miss.
         Ok(vector.unwrap_or_default())
     }
