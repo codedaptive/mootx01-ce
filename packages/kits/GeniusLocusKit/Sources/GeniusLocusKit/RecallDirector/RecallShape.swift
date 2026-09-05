@@ -37,6 +37,18 @@
 ///   - `"graph"`        — the connection-graph column.
 ///   - `"preference"`   — the learned-preference column.
 ///
+///   Column-budget keys, namespace `signal:` (COL-1; steer ONLY the unionBest
+///   `.matrixAware` weighted score). Where the per-lane keys above SCALE a
+///   column's term, a `signal:*` key at 0 EXCLUDES the whole column and
+///   REDISTRIBUTES its `RecallWeights` budget over the remaining columns, so
+///   an excluded column never stands as a zero term that inflates the fixed
+///   agreement and pinned bonuses. `1.0`/absent is neutral, `<0` suppresses,
+///   other positive values scale (no redistribution). See `RecallSignalBudget`:
+///   - `"signal:locus"`, `"signal:bm25"`, `"signal:vector"` (Hamming + dense),
+///     `"signal:fieldFit"`, `"signal:matrix"` (coOccurrence + temporal),
+///     `"signal:graph"`, `"signal:preference"`, `"signal:agreement"` (the
+///     fixed signal-agreement bonus; it has no budget slice to redistribute).
+///
 /// A lane whose key is ABSENT from `laneWeights` uses the default weight `1.0`
 /// (forward at full strength) — so an empty map reproduces today's uniform fusion
 /// exactly. This is the back-compat contract: `nil` shape ⇒ all-1.0 ⇒ byte-identical
@@ -240,6 +252,34 @@ public struct RecallShape: Sendable, Codable, Equatable {
         return min(Self.frontierKCeiling, max(Self.frontierKFloor, override))
     }
 
+    // MARK: - Column-budget keys
+
+    /// The `signal:*` lane keys (COL-1) that exclude or scale a WHOLE scoring
+    /// column of the unionBest `.matrixAware` weighted score with budget
+    /// redistribution. Spelled once here so a preset or an optimizer emission
+    /// cannot mistype a key into a silent no-op. Each key names a
+    /// `RecallSignalBudget.Column`.
+    public enum SignalKey {
+        /// The locus (bitmap-lane) column budget.
+        public static let locus = "signal:locus"
+        /// The BM25 column budget.
+        public static let bm25 = "signal:bm25"
+        /// The vector budget shared by the Hamming and dense columns.
+        public static let vector = "signal:vector"
+        /// The field-fit column budget.
+        public static let fieldFit = "signal:fieldFit"
+        /// The matrix budget shared by the coOccurrence and temporal columns.
+        public static let matrix = "signal:matrix"
+        /// The graph column budget.
+        public static let graph = "signal:graph"
+        /// The preference column budget (drawn from the graph slice).
+        public static let preference = "signal:preference"
+        /// The fixed signal-agreement bonus.
+        public static let agreement = "signal:agreement"
+        /// Every column-budget key, in step-9 column order.
+        public static let all: [String] = [locus, bm25, vector, fieldFit, matrix, graph, preference, agreement]
+    }
+
     // MARK: - Named preset roster
 
     /// The per-signal DENSE lane key for a held embedding provider, by its
@@ -312,6 +352,18 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // simultaneously so both signals strengthen each other's ranking.
         "temporal_connection",
         "field_preference",
+        // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
+        // column of the matrixAware weighted score via its `signal:*` key and
+        // redistributes that column's budget over the rest. They exist so a
+        // harness arm can ask "what does ranking look like without this
+        // column" through the ARIA verb that carries a shape (moot_recall_shaped),
+        // which accepts a preset name and no inline shape.
+        "no_locus",
+        "no_field_fit",
+        "no_matrix",
+        "no_graph",
+        "no_preference",
+        "no_agreement",
     ]
 
     /// Resolve a named preset to its documented signed-weight shape.
@@ -583,6 +635,22 @@ public struct RecallShape: Sendable, Codable, Equatable {
                     "preference": 1.5,
                 ])
 
+        // Column-exclusion presets (COL-1): one `signal:*` key at 0 each. The
+        // excluded column's budget is redistributed (RecallSignalBudget), so the
+        // arm measures the ranking WITHOUT the column, not with a zero term.
+        case "no_locus":
+            return RecallShape(laneWeights: [SignalKey.locus: 0])
+        case "no_field_fit":
+            return RecallShape(laneWeights: [SignalKey.fieldFit: 0])
+        case "no_matrix":
+            return RecallShape(laneWeights: [SignalKey.matrix: 0])
+        case "no_graph":
+            return RecallShape(laneWeights: [SignalKey.graph: 0])
+        case "no_preference":
+            return RecallShape(laneWeights: [SignalKey.preference: 0])
+        case "no_agreement":
+            return RecallShape(laneWeights: [SignalKey.agreement: 0])
+
         default:
             return nil
         }
@@ -655,6 +723,18 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Recent + co-filed — amplify temporal (recency) + coOccurrence (shared filing neighbourhood) together; matrixAware scoring only."
         case "field_preference":
             return "Filed + preferred — amplify fieldFit (FDC facet match) + preference (learned user preference) together; matrixAware scoring only."
+        case "no_locus":
+            return "Ablation — exclude the locus (bitmap recency-rank) column and redistribute its budget; matrixAware scoring only."
+        case "no_field_fit":
+            return "Ablation — exclude the fieldFit column and redistribute its budget; matrixAware scoring only."
+        case "no_matrix":
+            return "Ablation — exclude the coOccurrence + temporal matrix columns and redistribute their budget; matrixAware scoring only."
+        case "no_graph":
+            return "Ablation — exclude the graph column and redistribute its budget; matrixAware scoring only."
+        case "no_preference":
+            return "Ablation — exclude the preference column and redistribute its budget; matrixAware scoring only."
+        case "no_agreement":
+            return "Ablation — drop the fixed signal-agreement bonus; matrixAware scoring only."
         default:
             return ""
         }
