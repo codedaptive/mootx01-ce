@@ -7,12 +7,13 @@
 // ## Algorithm
 //
 //   1. Build a term-document matrix V (terms × documents) with
-//      TF weighting (log-smoothed raw count). TF (not TF-IDF) is
-//      used because NMF requires non-negative input AND the Lee-Seung
-//      multiplicative updates are most stable when the input is
-//      uniformly scaled. TF satisfies non-negativity; the log-smoothing
-//      tf(t, d) = log(1 + raw_count(t, d)) keeps the values bounded.
-//      CANONICAL tokenizer: CorpusKit.defaultKeywordTokens.
+//      TF-IDF weighting: tf(t, d) = log(1 + raw_count(t, d)) times the
+//      smoothed IDF idf(t) = max(0, log((N+1)/(df+1))). Both factors are
+//      non-negative, so V >= 0 as NMF requires; the log-smoothed TF keeps
+//      the values bounded and the IDF keeps a term that appears in every
+//      document out of the factorization (its column weight is 0), so the
+//      latent factors describe what distinguishes documents rather than
+//      what they share. CANONICAL tokenizer: CorpusKit.defaultKeywordTokens.
 //
 //      NOTE: V is arranged as terms × documents (vocabSize × numDocs) so
 //      that the H matrix is rank × numDocs and column j of H is the
@@ -29,19 +30,29 @@
 //      independent of floating-point convergence — a requirement for the
 //      recall identity contract.
 //
-//   3. Document embedding: H[:, docIdx] — column docIdx of H, i.e. the
-//      k-dim row H[r][docIdx] for r in 0..<k. L2-normalised via
-//      FloatVecOps.l2Normalize.
+//   3. Training-document factor loading: H[:, docIdx] — column docIdx of
+//      H, i.e. the k-dim row H[r][docIdx] for r in 0..<k, L2-normalised via
+//      FloatVecOps.l2Normalize (`documentEmbedding(at:)`, a raw-factor read
+//      for conformance; the product embeds every text through step 4).
 //
-//   4. Query embedding: for query text Q, compute the TF-weighted term
-//      vector q (sparse, length vocabSize), then project into the NMF
-//      space via the pseudo-inverse of W:
+//   4. Text embedding (documents at index time AND queries at recall time —
+//      one function): compute the TF-IDF term vector q (sparse, length
+//      vocabSize) with the fitted IDF weights, project into the NMF space
+//      via the pseudo-inverse of W:
 //        queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
-//      This is the standard NMF query folding-in (analogous to LSA's
-//      fold-in via Vᵀ). L2-normalised. OOV terms contribute nothing.
+//      (the standard NMF folding-in, analogous to LSA's fold-in via Vᵀ),
+//      L2-normalise, remove the component along the unit corpus-mean
+//      direction m̂ (`u − (u·m̂) m̂`), and L2-normalise again. OOV terms
+//      contribute nothing.
 //
-//   5. L2-normalise and project to Engram via FloatSimHash.project with
-//      `nmfProjectionSeed`.
+//   5. Project to Engram via FloatSimHash.project with `nmfProjectionSeed`.
+//
+//   The corpus-mean direction is fitted at finalize: every training
+//   document's TF-IDF column is folded in through step 4's projection and
+//   normalised, the mean of those unit vectors is taken, and m̂ is that
+//   mean normalised. Without it the fold-in vectors of long documents all
+//   point at the same dominant factor (measured mean pairwise cosine 0.990
+//   on a 13,817 drawer estate); with it, cosine measures what differs.
 //
 // ## NMF kernel reuse
 //
@@ -56,15 +67,14 @@
 //   documented: for retrieval the bit-identity requirement overrides
 //   the convergence-stopping behaviour.
 //
-// ## TF weighting (non-negative, per NMF requirement)
+// ## TF-IDF weighting (non-negative, per NMF requirement)
 //
-//   tf(t, d) = log(1 + raw_count(t, d))   — log-smoothed, always >= 0
+//   tf(t, d)   = log(1 + raw_count(t, d))         — log-smoothed, >= 0
+//   idf(t)     = max(0, log((N + 1) / (df(t) + 1))) — the one shared IDF
+//   V[t][d]    = tf(t, d) * idf(t)                 — >= 0
 //
-//   IDF is deliberately NOT applied. IDF would require a corpus-wide
-//   document count and would change the per-entry values in V, but
-//   the multiplicative update rules are most stable when V has entries
-//   in a compact range. Log-TF without IDF keeps the matrix well-
-//   conditioned for small estates while still satisfying V >= 0.
+//   The same idf(t) weights the query vector, so documents and queries are
+//   projected through W from the same weighting the factorization saw.
 //
 // ## Constants
 //
@@ -194,9 +204,18 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// NMF factorization result. Nil until finalize() is called.
     private var nmf: NMFFactorization?
 
-    /// Per-document embeddings (H column per doc), populated at finalize().
+    /// Per-document factor loadings (H column per doc), populated at finalize().
     /// docEmbeddings[d] = L2-normalised H[:, d] of length effectiveRank.
     private var docEmbeddings: [[Float]]
+
+    /// Smoothed IDF per REDUCED vocabulary column, fitted at `finalize()`.
+    /// Weights both the factorized matrix V and every folded-in text.
+    private var idfWeights: [Float]
+
+    /// Unit corpus-mean direction in the k-dim fold-in space, fitted at
+    /// `finalize()` from the training documents, or empty when no document
+    /// folded in. Removed from every embedded text.
+    private var meanDirection: [Float]
 
     /// The frozen reduced vocabulary (term → reduced row) the basis was trained
     /// on. Query projection and basis serialization key on THIS, not
@@ -224,6 +243,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         self.counts = TermDocumentCounts()
         self.nmf = nil
         self.docEmbeddings = []
+        self.idfWeights = []
+        self.meanDirection = []
         self.basisVocab = [:]
     }
 
@@ -256,7 +277,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// columns). H is rank × numDocs; column d of H is the k-dimensional
     /// embedding for document d.
     ///
-    /// V[i][j] = log(1 + tf[j][i])  — i is the term, j is the document.
+    /// V[i][j] = log(1 + tf[j][i]) * idf(i)  — i is the term, j is the document.
     ///
     /// ## Fixed iteration count
     ///
@@ -280,11 +301,21 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         )
         basisVocab = reduced.termToColumn
         let vocabSize = reduced.size
-        guard vocabSize > 0 else { nmf = nil; docEmbeddings = []; return }
+        guard vocabSize > 0 else {
+            nmf = nil; docEmbeddings = []; idfWeights = []; meanDirection = []; return
+        }
 
-        // V is K × numDocs: V[reducedRow][doc] = log(1 + tf[doc][term]). Map each
-        // doc's TF entries whose term is in the reduced vocab to its reduced row;
-        // full-vocab terms outside the reduced set are dropped.
+        // IDF over REDUCED rows, using the full-corpus df (informativeness is
+        // corpus-wide) through the one shared smoothed IDF.
+        idfWeights = [Float](repeating: 0, count: vocabSize)
+        for (fullIdx, row) in reduced.fullIndexToColumn {
+            idfWeights[row] = smoothedInverseDocumentFrequency(
+                documentFrequency: counts.dfCounts[fullIdx] ?? 0, documentCount: numDocs)
+        }
+
+        // V is K × numDocs: V[reducedRow][doc] = log(1 + tf[doc][term]) * idf.
+        // Map each doc's TF entries whose term is in the reduced vocab to its
+        // reduced row; full-vocab terms outside the reduced set are dropped.
         var V: [[Float]] = [[Float]](
             repeating: [Float](repeating: 0, count: numDocs),
             count: vocabSize
@@ -292,7 +323,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         for (docIdx, docTF) in counts.tfCounts.enumerated() {
             for (fullIdx, count) in docTF {
                 guard let row = reduced.fullIndexToColumn[fullIdx] else { continue }
-                V[row][docIdx] = log(1 + Float(count))
+                V[row][docIdx] = log(1 + Float(count)) * idfWeights[row]
             }
         }
 
@@ -311,8 +342,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
             seed: seed
         )
 
-        // Pre-compute document embeddings: column d of H = H[r][d] for r in 0..<k.
-        // L2-normalise via the substrate's conformance-gated primitive.
+        // Pre-compute document factor loadings: column d of H = H[r][d] for r
+        // in 0..<k. L2-normalise via the substrate's conformance-gated primitive.
         guard let result = nmf else { return }
         let k = result.rank
         docEmbeddings = (0..<numDocs).map { d in
@@ -320,14 +351,34 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
             let normalised = FloatVecOps.l2Normalize(col)
             return normalised
         }
+
+        // Corpus-mean direction: fold every training document's TF-IDF column
+        // through the SAME projection texts use, average the unit vectors,
+        // normalise. Documents that fold to nothing (all-zero column) are skipped.
+        var meanSum = [Float](repeating: 0, count: k)
+        var folded = 0
+        for d in 0..<numDocs {
+            let column: [Float] = (0..<vocabSize).map { i in V[i][d] }
+            guard let unit = foldInUnit(column, factorization: result) else { continue }
+            for r in 0..<k { meanSum[r] += unit[r] }
+            folded += 1
+        }
+        if folded > 0 {
+            let divisor = Float(folded)
+            let mean = meanSum.map { $0 / divisor }
+            let unit = FloatVecOps.l2Normalize(mean)
+            meanDirection = unit.contains { $0 != 0 } ? unit : []
+        } else {
+            meanDirection = []
+        }
     }
 
     // MARK: EmbeddingProvider
 
     /// Return the k-dimensional NMF embedding for `text`.
     ///
-    /// Uses the query folding-in formula: project the TF query vector
-    /// through W columns via the pseudo-inverse.
+    /// Uses the folding-in formula: project the TF-IDF vector of the text
+    /// through W columns via the pseudo-inverse, then centre and normalise.
     ///
     /// Returns Engram.zero if finalize() not called or all terms are OOV.
     public func embed(_ text: String) async throws -> Engram {
@@ -376,18 +427,19 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
 
     // MARK: Private helpers
 
-    /// Compute the NMF embedding vector for `text` using the fold-in formula.
+    /// Compute the NMF embedding vector for `text` — the one function for
+    /// documents and queries.
     ///
-    /// For a query with TF-weighted term vector q (sparse, vocabSize entries):
-    ///   queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
-    ///
-    /// This is the pseudo-inverse projection of q onto each latent factor
-    /// column of W. Analogous to LSA fold-in (Σ^{-1} Vᵀ q).
+    /// Builds the TF-IDF vector q of the text over the reduced vocabulary
+    /// (`log(1 + count) * idf`, the training matrix's weighting), folds it in
+    /// through `foldInUnit`, removes the component along the fitted
+    /// corpus-mean direction, and L2-normalises.
     ///
     /// Returns nil when:
     ///   - finalize() not called
     ///   - text is empty
     ///   - all tokens are OOV
+    ///   - the projection or the centred vector collapses to zero
     private func nmfVector(for text: String) -> [Float]? {
         guard let result = nmf else { return nil }
         guard !text.isEmpty else { return nil }
@@ -395,14 +447,12 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return nil }
 
-        let k = result.rank
         // Query projection keys on the REDUCED basis vocab. Reduced-set
         // terms map to their row; OOV terms (outside top-K) contribute nothing
         // and are covered by RI.
         let vocabSize = basisVocab.count
-        let eps: Float = 1e-9
 
-        // Build sparse TF query vector.
+        // Build the sparse TF query vector.
         var hasInVocab = false
         var rawCounts: [Int: Int] = [:]
         for term in terms {
@@ -413,13 +463,31 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         }
         guard hasInVocab else { return nil }
 
-        // TF weights: log(1 + count), same as the training matrix.
+        // TF-IDF weights: log(1 + count) * idf, same as the training matrix.
         var q: [Float] = [Float](repeating: 0, count: vocabSize)
         for (termIdx, count) in rawCounts {
-            q[termIdx] = log(1 + Float(count))
+            q[termIdx] = log(1 + Float(count)) * (termIdx < idfWeights.count ? idfWeights[termIdx] : 0)
         }
 
-        // Fold-in: queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
+        guard let unit = foldInUnit(q, factorization: result) else { return nil }
+        let centred = DistributionalPooling.removeMeanDirection(from: unit, meanDirection: meanDirection)
+        let normalised = FloatVecOps.l2Normalize(centred)
+        let allZero = normalised.allSatisfy { $0 == 0 }
+        return allZero ? nil : normalised
+    }
+
+    /// Fold a TF-IDF vector `q` (length vocabSize) into the NMF space and
+    /// L2-normalise:
+    ///   queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
+    ///
+    /// This is the pseudo-inverse projection of q onto each latent factor
+    /// column of W. Analogous to LSA fold-in (Σ^{-1} Vᵀ q). Shared by the
+    /// text path and the corpus-mean fit so both see the same projection.
+    /// Returns nil when the projection is all-zero.
+    private func foldInUnit(_ q: [Float], factorization result: NMFFactorization) -> [Float]? {
+        let k = result.rank
+        let vocabSize = q.count
+        let eps: Float = 1e-9
         // W is vocabSize × k (result.W[i][r] is the (i, r) entry).
         // Column r of W is: W[0][r], W[1][r], ..., W[vocabSize-1][r].
         var queryVec = [Float](repeating: 0, count: k)
@@ -443,13 +511,13 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         return allZero ? nil : normalised
     }
 
-    // MARK: Document embedding (training documents)
+    // MARK: Document factor loadings (training documents)
 
-    /// Return the k-dimensional NMF document embedding for training
-    /// document at index `docIdx`.
-    ///
-    /// This is the L2-normalised column docIdx of H (pre-computed at
-    /// finalize()). Only valid after finalize().
+    /// Return the k-dimensional NMF factor loading of training document
+    /// `docIdx`: the L2-normalised column docIdx of H (pre-computed at
+    /// finalize()). A raw-factor read for conformance; the product embeds
+    /// every text — documents included — through `embedFloat`/`embedPair`.
+    /// Only valid after finalize().
     ///
     /// - Returns: L2-normalised k-dim float vector, or nil if docIdx is
     ///   out of range or finalize() has not been called.
@@ -473,7 +541,12 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// the corpus has fewer documents or terms than requested).
     public var effectiveRank: Int { nmf?.rank ?? 0 }
 
-    // MARK: Basis serialization (mission 6a-i)
+    /// The fitted unit corpus-mean direction in the fold-in space (k long),
+    /// or empty when the basis is not finalized or no document folded in.
+    /// Conformance-test accessor.
+    public var corpusMeanDirection: [Float] { meanDirection }
+
+    // MARK: Basis serialization
 
     /// 4-byte magic identifying an NMF basis blob ("NMB1").
     static let basisMagic: [UInt8] = Array("NMB1".utf8)
@@ -488,15 +561,17 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     ///   - vocab (term → index) and `documentCount` — query tokens map to
     ///     vocab positions; documentCount bounds `documentEmbedding(at:)`.
     ///   - factors `W` (vocabSize × k) and `H` (k × numDocs), plus
-    ///     `effectiveRank`. W drives the query fold-in; H drives document
-    ///     embeddings. Both are PORT-NEUTRAL raw factors, so the same trained
-    ///     state produces a byte-identical blob on both ports.
+    ///     `effectiveRank`. W drives the fold-in; H drives the document
+    ///     factor loadings. Both are PORT-NEUTRAL raw factors, so the same
+    ///     trained state produces a byte-identical blob on both ports.
+    ///   - `idfWeights` (per reduced column) and `meanDirection` (k long) —
+    ///     the pooling fit every embedded text is weighted and centred by.
     ///
     /// Blob layout (after MAGIC + version):
     ///   modelID (string) | modelVersion (string) | rank (u32) |
     ///   maxIterations (u32) | seed (u64) | projectionSeed (u64) |
     ///   documentCount (u32) | effectiveRank (u32) | vocab (String→u32 map) |
-    ///   W (matrix) | H (matrix)
+    ///   W (matrix) | H (matrix) | idfWeights ([Float]) | meanDirection ([Float])
     public func serializeBasis() -> Data {
         var w = BasisWriter()
         w.writeMagic(NmfProvider.basisMagic)
@@ -515,6 +590,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeStringU32Map(basisVocab)
         w.writeFloatMatrix(nmf?.W ?? [])
         w.writeFloatMatrix(nmf?.H ?? [])
+        w.writeFloatArray(idfWeights)
+        w.writeFloatArray(meanDirection)
         return w.data
     }
 
@@ -539,6 +616,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         let vocab = try r.readStringU32Map()
         let W = try r.readFloatMatrix()
         let H = try r.readFloatMatrix()
+        let idf = try r.readFloatArray()
+        let mean = try r.readFloatArray()
 
         self.init(modelID: modelID,
                   modelVersion: modelVersion,
@@ -552,6 +631,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         // (round-trip). The FULL vocab lives in the counts blob, not here.
         self.basisVocab = vocab
         self.counts = TermDocumentCounts(restoredVocab: vocab, documentCount: documentCount)
+        self.idfWeights = idf
+        self.meanDirection = mean
 
         // An empty factor section means the source provider was never
         // finalized; leave `nmf` nil so the restored provider is unfinalized.
@@ -561,8 +642,8 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         // configured iteration count and a zero error placeholder.
         self.nmf = NMFFactorization(W: W, H: H, rank: effectiveRank,
                                     iterations: maxIterations, finalError: 0)
-        // Re-derive the per-document embeddings exactly as finalize() does:
-        // L2-normalised column d of H.
+        // Re-derive the per-document factor loadings exactly as finalize()
+        // does: L2-normalised column d of H.
         let numDocs = documentCount
         self.docEmbeddings = (0..<numDocs).map { d in
             let col: [Float] = (0..<effectiveRank).map { rr in H[rr][d] }
@@ -615,7 +696,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 extension NmfProvider: TrainableEmbeddingBasis {
 
@@ -628,7 +709,7 @@ extension NmfProvider: TrainableEmbeddingBasis {
     /// TF matrix and runs the SubstrateML NMF factorization (tolerance=0, fixed
     /// iterations, deterministic). This reproduces the exact trained+finalized
     /// state of per-document `train` + `finalize`, so a basis serialized after
-    /// `trainOnCorpus` is byte-identical to the 6a-i fixture trained on the
+    /// `trainOnCorpus` is byte-identical to the shared fixture trained on the
     /// same texts.
     public func trainOnCorpus(texts: [String]) {
         for text in texts {
@@ -650,16 +731,18 @@ extension NmfProvider: TrainableEmbeddingBasis {
     }
 
     /// Reconstruct a fresh `NmfProvider` from a serialized basis, type-erased.
-    /// Delegates to `init(deserializing:)` (6a-i).
+    /// Delegates to `init(deserializing:)`.
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try NmfProvider(deserializing: basis)
     }
 
-    /// release the in-memory NMF factorization and embeddings.
+    /// Release the in-memory NMF factorization, factor loadings, and pooling fit.
     public func releaseBasis() {
         nmf = nil
         docEmbeddings.removeAll(keepingCapacity: false)
         basisVocab.removeAll(keepingCapacity: false)
+        idfWeights.removeAll(keepingCapacity: false)
+        meanDirection.removeAll(keepingCapacity: false)
     }
 
     // MARK: Maintained counts (incremental-counts change set, P3)
