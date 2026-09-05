@@ -41,8 +41,8 @@ fn preset_names_are_discoverable_and_each_resolves() {
         }
     }
     // 22 original + 3 anti_redundant_* + 2 multi-column + 2 float-metric
-    // + 6 column-exclusion ablation presets (COL-1) = 35 presets.
-    assert_eq!(RecallShape::PRESET_NAMES.len(), 35);
+    // + 6 column-exclusion ablation presets (COL-1) + 2 bm25/vector ablation presets = 37 presets.
+    assert_eq!(RecallShape::PRESET_NAMES.len(), 37);
 }
 
 #[test]
