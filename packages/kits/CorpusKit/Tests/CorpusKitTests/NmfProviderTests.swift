@@ -183,35 +183,35 @@ struct NmfProviderTests {
         guard v.count == 3 else { return }
 
         // Bits from: cargo test nmf_provider::tests::emit_canonical_nmf_values -- --nocapture
-        // embed_float[0] = 0.84187937 (bits: 0x3F578568)
-        // embed_float[1] = 0.53966576 (bits: 0x3F0A2789)
-        // embed_float[2] = 0          (bits: 0x00000000)
-        #expect(v[0].bitPattern == 0x3F578568, "embed_float[0] bit-identity with Rust")
-        #expect(v[1].bitPattern == 0x3F0A2789, "embed_float[1] bit-identity with Rust")
-        #expect(v[2].bitPattern == 0x00000000, "embed_float[2] bit-identity with Rust")
+        // embed_float[0] =  0.5184791 (bits: 0x3F04BB0C)
+        // embed_float[1] = -0.6073682 (bits: 0xBF1B7C7B)
+        // embed_float[2] = -0.6018996 (bits: 0xBF1A1618)
+        #expect(v[0].bitPattern == 0x3F04BB0C, "embed_float[0] bit-identity with Rust")
+        #expect(v[1].bitPattern == 0xBF1B7C7B, "embed_float[1] bit-identity with Rust")
+        #expect(v[2].bitPattern == 0xBF1A1618, "embed_float[2] bit-identity with Rust")
     }
 
     /// Cross-port Engram bit-identity gate.
     ///
     /// Engram from: cargo test nmf_provider::tests::emit_canonical_nmf_values -- --nocapture
-    /// block0=0xB7AB5528EF12D061 block1=0xC452A7DEFE999697
-    /// block2=0x325CFC0C6D14A93F block3=0xA1591A2717EBC02B
+    /// block0=0x47B1D448F653A0E1 block1=0x84C8AB96FA01369F
+    /// block2=0x39DCF5AFED957063 block3=0xA11538649FBBE00B
     @Test("canonical NMF Engram matches Rust port bit-for-bit")
     func canonicalNmfConformanceEngram() async throws {
         let p = trainedProvider()
         let eng = try await p.embed("car engine")
-        #expect(eng.block0 == 0xB7AB5528EF12D061, "Engram block0 bit-identity with Rust")
-        #expect(eng.block1 == 0xC452A7DEFE999697, "Engram block1 bit-identity with Rust")
-        #expect(eng.block2 == 0x325CFC0C6D14A93F, "Engram block2 bit-identity with Rust")
-        #expect(eng.block3 == 0xA1591A2717EBC02B, "Engram block3 bit-identity with Rust")
+        #expect(eng.block0 == 0x47B1D448F653A0E1, "Engram block0 bit-identity with Rust")
+        #expect(eng.block1 == 0x84C8AB96FA01369F, "Engram block1 bit-identity with Rust")
+        #expect(eng.block2 == 0x39DCF5AFED957063, "Engram block2 bit-identity with Rust")
+        #expect(eng.block3 == 0xA11538649FBBE00B, "Engram block3 bit-identity with Rust")
     }
 
     /// Cross-port document embedding bit-identity gate for doc 0.
     ///
     /// doc[0] from: cargo test nmf_provider::tests::emit_canonical_nmf_values -- --nocapture
-    /// doc[0][0] = 0.015156989 (bits: 0x3C785505)
-    /// doc[0][1] = 0.9998851   (bits: 0x3F7FF878)
-    /// doc[0][2] = 0           (bits: 0x00000000)
+    /// doc[0][0] = 1.0 (bits: 0x3F800000)
+    /// doc[0][1] = 0.0 (bits: 0x00000000)
+    /// doc[0][2] = 0.0 (bits: 0x00000000)
     @Test("canonical document embedding matches Rust port bit-for-bit")
     func canonicalDocumentEmbeddingConformance() {
         let p = trainedProvider()
@@ -222,8 +222,8 @@ struct NmfProviderTests {
         #expect(d0.count == 3, "rank-3 NMF must produce 3-dim document embedding")
         guard d0.count == 3 else { return }
 
-        #expect(d0[0].bitPattern == 0x3C785505, "doc[0][0] bit-identity with Rust")
-        #expect(d0[1].bitPattern == 0x3F7FF878, "doc[0][1] bit-identity with Rust")
+        #expect(d0[0].bitPattern == 0x3F800000, "doc[0][0] bit-identity with Rust")
+        #expect(d0[1].bitPattern == 0x00000000, "doc[0][1] bit-identity with Rust")
         #expect(d0[2].bitPattern == 0x00000000, "doc[0][2] bit-identity with Rust")
     }
 

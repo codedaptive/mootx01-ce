@@ -33,21 +33,27 @@ struct UpgradeCommandSourceTests {
         #expect(source.contains("backfillOnly"))
     }
 
-    @Test("--backfill-only branch calls only the four data-dir backfills and exits non-zero on failure")
+    @Test("--backfill-only branch calls only the five data-dir backfills and exits non-zero on failure")
     func backfillOnlyBranchIsHeadless() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
-        // The backfillOnly branch must contain all four backfill calls in order.
+        // The backfillOnly branch must contain all five backfill calls in order.
         let branchStart = try #require(
             source.range(of: "if backfillOnly {")?.lowerBound)
         let branchEnd = try #require(
             source.range(of: "return\n        }\n\n        // --check:", range: branchStart..<source.endIndex)?.upperBound)
         let branch = source[branchStart..<branchEnd]
-        // All four backfills must appear (runAdornmentRequiredBackfill renamed
+        // All five backfills must appear (runAdornmentRequiredBackfill renamed
         // to runAdornmentStoreMigration in ADORN-STORE-02 Part C).
         #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
         #expect(branch.contains("await runAdornmentStoreMigration(home: home)"))
         #expect(branch.contains("await runSharedContentReclaimIfPending(home: home)"))
+        #expect(branch.contains("await runDensePoolingConvergence(home: home)"))
         #expect(branch.contains("await runDistilledRepresentationConvergence(home: home)"))
+        // The dense pooling convergence runs BEFORE the distilled representation
+        // convergence, so the latter's estate open never absorbs the rebuild unreported.
+        let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(home: home)")?.lowerBound)
+        let distilledAt = try #require(branch.range(of: "await runDistilledRepresentationConvergence(home: home)")?.lowerBound)
+        #expect(denseAt < distilledAt, "dense pooling convergence must precede the distilled representation convergence")
         // A failed step must surface as a non-zero exit for scripted callers.
         #expect(branch.contains("throw ExitCode.failure"))
         // launchd and network calls must NOT appear in the branch.
@@ -72,7 +78,10 @@ struct UpgradeCommandSourceTests {
         let steps: [(name: String, start: String, end: String)] = [
             ("runKGFactIdentityBackfill",
              "private func runKGFactIdentityBackfill",
-             "/// Bring every drawer's stored distilled representation up to the active"),
+             "/// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)"),
+            ("runDensePoolingConvergence",
+             "private func runDensePoolingConvergence",
+             "/// Provider keys (`model_id@model_version`) whose part-0 basis row carries"),
             ("runDistilledRepresentationConvergence",
              "private func runDistilledRepresentationConvergence",
              "/// ADORN-STORE-02 Part C:"),
