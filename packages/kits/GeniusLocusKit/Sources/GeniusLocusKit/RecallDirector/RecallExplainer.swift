@@ -6,9 +6,16 @@
 ///
 /// Each explanation is a small array of strings, one per semantic line:
 ///   "sources: locusBitmap, corpusBM25"
-///   "score: locus=0.82 bm25=0.71 fieldFit=0.44"
+///   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412"
 ///   "mode: unionBest | scoring: matrixAware"
 ///   "why: content query; BM25 and vector weighted high; MatrixO cluster preserved"
+///
+/// The `score:` line renders EVERY scoring column, zero or not (COL-1): a
+/// column that reads 0.00 is evidence in its own right when the question is
+/// which column moved a ranking, and a reader must not have to infer absence
+/// from a missing token. `agreement` is the fixed signal-agreement bonus the
+/// hit earned in the unionBest weighted score (0 under `.raw`/`.rrf`, which
+/// never add it), and `final` is the fused ranking score.
 struct RecallExplainer {
 
     /// Explain one selected recall hit.
@@ -23,30 +30,38 @@ struct RecallExplainer {
     ///   - sketch:  The compiled query sketch (text, tokens, engram, filters).
     ///   - plan:    The execution plan the director used for this request.
     ///   - scoring: The scoring strategy active for this recall.
+    ///   - agreement: The signal-agreement bonus this hit earned in the weighted
+    ///     score (`0.05 × popcount(sourceMask) / 5`, scaled by the resolved
+    ///     `signal:agreement` budget). Callers on paths that add no bonus pass 0.
     func explain(hit: RecallHit,
                  sketch: RecallQuerySketch,
                  plan: RecallPlan,
-                 scoring: GLKRecallScoring) -> [String] {
+                 scoring: GLKRecallScoring,
+                 agreement: Float = 0) -> [String] {
         var lines: [String] = []
 
         // Line 1 — active evidence sources, sorted for deterministic output.
         let sourceNames = hit.sources.map(\.rawValue).sorted().joined(separator: ", ")
         lines.append("sources: \(sourceNames.isEmpty ? "none" : sourceNames)")
 
-        // Line 2 — non-zero score components formatted to 2 dp.
+        // Line 2 — every score column, 2 dp, in the fixed column order of the
+        // weighted score, then the agreement bonus and the fused final (3 dp so
+        // two hits that differ only in the third decimal still read as ordered).
         let sv = hit.score
-        var scoreTokens: [String] = []
-        if sv.locus        > 0 { scoreTokens.append(String(format: "locus=%.2f",        sv.locus))        }
-        if sv.bm25         > 0 { scoreTokens.append(String(format: "bm25=%.2f",         sv.bm25))         }
-        if sv.vector       > 0 { scoreTokens.append(String(format: "vector=%.2f",        sv.vector))       }
-        if sv.dense        > 0 { scoreTokens.append(String(format: "dense=%.2f",         sv.dense))        }
-        if sv.fieldFit     > 0 { scoreTokens.append(String(format: "fieldFit=%.2f",      sv.fieldFit))     }
-        if sv.coOccurrence > 0 { scoreTokens.append(String(format: "coOccurrence=%.2f",  sv.coOccurrence)) }
-        if sv.temporal     > 0 { scoreTokens.append(String(format: "temporal=%.2f",      sv.temporal))     }
-        if sv.graph        > 0 { scoreTokens.append(String(format: "graph=%.2f",         sv.graph))        }
-        if sv.preference   > 0 { scoreTokens.append(String(format: "preference=%.2f",    sv.preference))   }
-        let scoreStr = scoreTokens.isEmpty ? "final=\(String(format: "%.2f", sv.final))" : scoreTokens.joined(separator: " ")
-        lines.append("score: \(scoreStr)")
+        let scoreTokens: [String] = [
+            String(format: "locus=%.2f",        sv.locus),
+            String(format: "bm25=%.2f",         sv.bm25),
+            String(format: "vector=%.2f",       sv.vector),
+            String(format: "dense=%.2f",        sv.dense),
+            String(format: "fieldFit=%.2f",     sv.fieldFit),
+            String(format: "coOccurrence=%.2f", sv.coOccurrence),
+            String(format: "temporal=%.2f",     sv.temporal),
+            String(format: "graph=%.2f",        sv.graph),
+            String(format: "preference=%.2f",   sv.preference),
+            String(format: "agreement=%.2f",    agreement),
+            String(format: "final=%.3f",        sv.final),
+        ]
+        lines.append("score: \(scoreTokens.joined(separator: " "))")
 
         // Line 3 — mode and scoring strategy.
         lines.append("mode: \(plan.effectiveMode.rawValue) | scoring: \(scoring.rawValue)")

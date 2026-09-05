@@ -9,7 +9,7 @@
 //! the two ports must render them byte-identically (the ARIA `explain`
 //! argument surfaces them verbatim under each candidate row):
 //!   "sources: corpusBM25, locusBitmap"
-//!   "score: locus=0.82 bm25=0.71 fieldFit=0.44"
+//!   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412"
 //!   "mode: unionBest | scoring: matrixAware"
 //!   "why: content query; BM25 and vector weighted high; MatrixO cluster preserved"
 
@@ -21,12 +21,16 @@ use crate::recall::{GLKRecallScoring, RecallHit, RecallPlan};
 /// score decomposition, recall mode, and a "why" sentence. `has_query_text`
 /// is the request's `query_text.is_some()` (Swift reads the compiled sketch's
 /// `queryText`; the sketch carries the request text unchanged, so the request
-/// field is the same predicate).
+/// field is the same predicate). `agreement` is the signal-agreement bonus the
+/// hit earned in the UnionBest MatrixAware weighted score
+/// (`budget.agreement × 0.05 × popcount(sourceMask) / 5`); callers on paths
+/// that add no bonus pass 0.
 pub fn explain(
     hit: &RecallHit,
     has_query_text: bool,
     plan: &RecallPlan,
     scoring: GLKRecallScoring,
+    agreement: f32,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::with_capacity(4);
 
@@ -39,26 +43,19 @@ pub fn explain(
     let sources = if source_names.is_empty() { "none".to_string() } else { source_names.join(", ") };
     lines.push(format!("sources: {sources}"));
 
-    // Line 2 — non-zero score components to 2 dp. `{:.2}` on an f32 and
-    // Swift's `String(format: "%.2f", Float)` both round the exact binary
-    // value to nearest-even, so the rendered digits agree.
+    // Line 2 — EVERY score column to 2 dp in the fixed column order of the
+    // weighted score, then the agreement bonus and the fused final to 3 dp (so
+    // two hits that differ only in the third decimal still read as ordered). A
+    // column that reads 0.00 is evidence in its own right when the question is
+    // which column moved a ranking (COL-1). `{:.2}` on an f32 and Swift's
+    // `String(format: "%.2f", Float)` both round the exact binary value to
+    // nearest-even, so the rendered digits agree.
     let sv = &hit.score;
-    let mut tokens: Vec<String> = Vec::new();
-    if sv.locus         > 0.0 { tokens.push(format!("locus={:.2}",        sv.locus)); }
-    if sv.bm25          > 0.0 { tokens.push(format!("bm25={:.2}",         sv.bm25)); }
-    if sv.vector        > 0.0 { tokens.push(format!("vector={:.2}",       sv.vector)); }
-    if sv.dense         > 0.0 { tokens.push(format!("dense={:.2}",        sv.dense)); }
-    if sv.field_fit     > 0.0 { tokens.push(format!("fieldFit={:.2}",     sv.field_fit)); }
-    if sv.co_occurrence > 0.0 { tokens.push(format!("coOccurrence={:.2}", sv.co_occurrence)); }
-    if sv.temporal      > 0.0 { tokens.push(format!("temporal={:.2}",     sv.temporal)); }
-    if sv.graph         > 0.0 { tokens.push(format!("graph={:.2}",        sv.graph)); }
-    if sv.preference    > 0.0 { tokens.push(format!("preference={:.2}",   sv.preference)); }
-    let score = if tokens.is_empty() {
-        format!("final={:.2}", sv.final_score)
-    } else {
-        tokens.join(" ")
-    };
-    lines.push(format!("score: {score}"));
+    lines.push(format!(
+        "score: locus={:.2} bm25={:.2} vector={:.2} dense={:.2} fieldFit={:.2} coOccurrence={:.2} temporal={:.2} graph={:.2} preference={:.2} agreement={:.2} final={:.3}",
+        sv.locus, sv.bm25, sv.vector, sv.dense, sv.field_fit, sv.co_occurrence,
+        sv.temporal, sv.graph, sv.preference, agreement, sv.final_score
+    ));
 
     // Line 3 — mode and scoring strategy.
     lines.push(format!(
