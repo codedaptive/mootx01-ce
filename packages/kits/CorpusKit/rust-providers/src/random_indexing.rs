@@ -165,7 +165,7 @@ pub fn ri_index_vector(term: &str) -> Vec<f32> {
 /// document, then `finalize` before embedding. An unfinalized provider
 /// returns `Engram::ZERO` and an empty float vector for any text (no basis);
 /// a finalized provider returns them for text whose every term is OOV (the
-/// honest no-context signal, surfaced as a vocabulary miss on the float lane).
+/// explicit no-context signal, surfaced as a vocabulary miss on the float lane).
 ///
 /// Training is NOT concurrency-safe. Callers must complete all `train`
 /// calls and the `finalize` before concurrent `embed`/`embed_float` calls.
