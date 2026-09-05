@@ -449,7 +449,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
                 "ppmi: vocab size \(ppmiVectors.count), but 0 of \(terms.count) query token(s) matched"
             )
         }
-        // Terms matched but the pooled vector collapsed to zero: honest
+        // Terms matched but the pooled vector collapsed to zero: explicit
         // no-signal, reported as an opt-out rather than a vocabulary miss.
         return pooled.vector ?? []
     }
