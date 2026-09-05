@@ -61,10 +61,15 @@ const QUERY: &str = "quarterly budget review meeting notes finance team";
 /// The order UnionBestMMRShingleOnceTests.swift pins for limit 2, `.full`,
 /// matrixAware. With the sourceMask proxy alone (every body is supplied by the
 /// same lanes, so every pair scores 1.0) the view is the top-4 by relevance and
-/// the second slot is body 2; the shingle term moves body 8 into it.
+/// the second slot is a near-duplicate; the shingle term, scaled by the step
+/// 8.5 redistribution factor ρ (COL-2), keeps the three near-duplicates out
+/// and body 6 (the diverse body with the highest bm25 + vector relevance)
+/// holds the second slot. Before COL-1 the slot was body 8, the newest
+/// capture, paid by the locus recency rank; a build that leaves the
+/// similarity term unscaled returns body 1, the first near-duplicate.
 const PINNED_ORDER: [&str; 2] = [
     "quarterly budget review meeting notes finance team",
-    "team meeting notes quarterly budget review by finance on the new office lease",
+    "quarterly finance team notes: budget review meeting covering software licences",
 ];
 
 #[derive(serde::Deserialize)]

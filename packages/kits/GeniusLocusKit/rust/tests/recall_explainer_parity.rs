@@ -46,7 +46,7 @@ fn scoring(raw: &str) -> GLKRecallScoring {
 }
 
 fn f(v: &serde_json::Value, key: &str) -> f32 {
-    v[key].as_f64().unwrap_or_else(|| panic!("score.{key} must be a number")) as f32
+    v[key].as_f64().unwrap_or_else(|| panic!("{key} must be a number")) as f32
 }
 
 #[test]
@@ -100,6 +100,7 @@ fn fixture_cases_render_verbatim() {
             has_query_text,
             &plan,
             scoring(case["scoring"].as_str().expect("scoring")),
+            f(case, "agreement"),
         );
         let expected: Vec<String> = case["expected"]
             .as_array()
