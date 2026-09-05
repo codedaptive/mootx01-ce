@@ -1024,6 +1024,10 @@ fn run_memory_search(
                 ))?,
             None => genius_locus_kit::PackagerAnswerMode::Never,
         };
+    // `explain` (default false): print the GLK explanation block (sources /
+    // score / mode | scoring / why / denseSignals) under each candidate row.
+    // Mirrors Swift runMemorySearch `explain` decode.
+    let explain = optional_bool(args, "explain")?.unwrap_or(false);
 
     // B-10a: RecallOrigin::External causes the coordinator to write recall-trace
     // rows for the reward pipeline and enqueue a dreaming item. The ARIA_MCP
@@ -1153,9 +1157,11 @@ fn run_memory_search(
     );
     // For the never fast path the rows list equals all hits (byte-identical).
     // For non-never the packager may have applied cliff cutoff; use packaged rows.
+    // Display cap: at most 50 rows are rendered whatever `limit` asked for,
+    // the same `prefix(50)` Swift runMemorySearch applies to its shown hits.
     let shown_hits: &[genius_locus_kit::RecallHit] = match packaged.level {
         genius_locus_kit::GLKResponseLevel::L0AnswerOnly => &[],
-        _ => &packaged.rows,
+        _ => &packaged.rows[..packaged.rows.len().min(50)],
     };
 
     // S2-row reply (COMPOSER-02B §11.5): UUID · subject · firstSentence · SSC ·
@@ -1178,45 +1184,22 @@ fn run_memory_search(
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e)))?
         .active_adornments(&shown_drawer_id_refs)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, e.to_string()))?;
-    let total_count = packaged.total_count;
-    // ARIA_MCP_SPEC 2.0.0 §11.2 S1 header: singular when exactly 1, plural otherwise.
-    let header = if total_count == 1 {
-        "found 1 candidate memory, one per line".to_string()
-    } else {
-        format!("found {} candidate memories, one per line", total_count)
+    // S1 surface through the shared composer (COMPOSER-02B, the twin of Swift
+    // runMemorySearch): one typed CandidateRowData per shown hit; the composer
+    // renders the text rows and the structured twin from the same list, so the
+    // two blocks can never cover different sets. Byte-identical to the Swift
+    // reply: the adornment text is column 5 of the row (never a separate line),
+    // `score` / `eventTime` / `firstSentence` / `adornment(s)` / `room` travel
+    // in the structured row, and the FULL content is handed to the composer,
+    // which truncates the first sentence to 120 chars and de-duplicates it
+    // against the subject (§11.1 rules 2–3).
+    //
+    // Room is resolved in ONE batched node-name read over the shown rows (the
+    // same resolution `memory_get_full_record_lines` uses per drawer).
+    use crate::result_composer::{
+        iso8601_flex, render_empty_s1, render_s1_surface, AdornmentEntry, CandidateRowData,
+        ControlSignals, RESTRICTED_MARKER, SECRET_MARKER,
     };
-    let mut lines = vec![header];
-
-    // Prepend answer block for L0AnswerOnly and L1Full levels.
-    // The Rust port has no synthesis text, so the answer line is intentionally
-    // empty — the confidence/citations/signals lines still prove the gate ran.
-    if let Some(ref block) = packaged.answer_block {
-        if matches!(packaged.level, genius_locus_kit::GLKResponseLevel::L0AnswerOnly | genius_locus_kit::GLKResponseLevel::L1Full) {
-            if !block.answer.is_empty() {
-                lines.push(format!("answer: {}", block.answer));
-            }
-            lines.push(format!("confidence: {}", block.confidence_label));
-            let citation_line = block.citation_ids.iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
-            if !citation_line.is_empty() {
-                lines.push(format!("citations: {}", citation_line));
-            }
-            lines.push(format!(
-                "signals: m1={:.3} m2={:.3} m3={:.3} m4={}",
-                block.signals.m1, block.signals.m2, block.signals.m3, block.signals.m4
-            ));
-        }
-    }
-
-    // Structured twin (MXE-SS): room is resolved in ONE batched node-name
-    // read over the shown rows (the same resolution
-    // `memory_get_full_record_lines` uses per drawer) — disclosed in the BRR
-    // §Part 0 (2). Rows are built in the SAME loop as the text lines so the
-    // two blocks can never cover different sets. Mirrors Swift
-    // runMemorySearch.
     let shown_parent_ids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
         shown_hits.iter()
@@ -1226,52 +1209,65 @@ fn run_memory_search(
     };
     let search_node_names =
         coord.resolve_drawer_node_names(&estate.handle, &shown_parent_ids);
-    let mut results: Vec<StructuredRow> = Vec::new();
+    let mut candidate_rows: Vec<CandidateRowData> = Vec::with_capacity(shown_hits.len());
     for hit in shown_hits.iter() {
         match hit.drawer.as_ref() {
             Some(d) => {
-                // Score transparency (DECISION_SCORE_TRANSPARENT_ORDERING
-                // 2026-08-24): the final composite score travels with the row,
-                // 4 decimals, appended after the dense row so DenseRow::render
-                // and its fixtures are unchanged. final_score uses the Rust
-                // field name (Swift uses `final`; `final` is a keyword in Rust).
-                lines.push(format!(
-                    "{} · {:.4}",
-                    crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)),
-                    hit.score.final_score
-                ));
-                // Adornment short form (SPEC_ADORNMENT §4): appended as a separate
-                // line so the AI sees the pre-minted claim without hauling the full
-                // body. Absent when the adornments table has no active rows for this
-                // drawer (zero-active-minters is the suppression arm; no env seam).
-                // Multiple minters → texts joined with " || " (same as Swift port).
-                if let Some(adornments) = search_adornment_map.get(&d.id) {
-                    if !adornments.is_empty() {
-                        let text: String = adornments.iter()
-                            .map(|a| a.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" || ");
-                        lines.push(format!("adornment: {}", text));
-                    }
-                }
-                results.push(structured_recall_row(
-                    &d.id,
-                    search_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone()),
-                    Some(d.content.clone()),
-                    d,
-                ));
+                // Provenance-sensitivity redaction: subject/firstSentence are
+                // content-derived; restricted/secret rows replace them with the
+                // redaction marker so the body's access control cannot be
+                // bypassed through the summary. Same switch as Swift.
+                use locus_kit::provenance::Sensitivity;
+                let (subject, first_sentence): (Option<String>, Option<String>) = match d.sensitivity() {
+                    Sensitivity::Restricted => (Some(RESTRICTED_MARKER.to_string()), None),
+                    Sensitivity::Secret => (Some(SECRET_MARKER.to_string()), None),
+                    _ => (
+                        d.subject.clone(),
+                        // Full content: the composer truncates to 120 chars and
+                        // de-duplicates against the subject (§11.1 rules 2–3).
+                        if d.content.is_empty() { None } else { Some(d.content.clone()) },
+                    ),
+                };
+                // Adornments: ascending minter-ID order (caller's responsibility
+                // per composer contract; the composer never re-sorts).
+                let mut entries: Vec<AdornmentEntry> = search_adornment_map
+                    .get(&d.id)
+                    .map(|rows| rows.iter()
+                        .map(|a| AdornmentEntry { minter_id: a.minter_id.clone(), text: a.text.clone() })
+                        .collect())
+                    .unwrap_or_default();
+                entries.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
+                let mut row = CandidateRowData::new(
+                    d.id.clone(),
+                    subject,
+                    first_sentence,
+                    None, // SSC not yet surfaced by GLK in this build; renders '-'
+                    entries,
+                    iso8601_flex(d.event_time),
+                    Some(hit.score.final_score as f64),
+                );
+                row.room = search_node_names.get(&d.parent_node_id).map(|(_, room)| room.clone());
+                candidate_rows.push(row);
             }
             None => {
-                lines.push(crate::result_composer::render_s2_row_unhydrated(&hit.id));
-                results.push(opaque_structured_row(&hit.id));
+                // Unhydrated hit: id only; all columns render '-'.
+                candidate_rows.push(CandidateRowData::new(
+                    hit.id.clone(),
+                    None::<String>,
+                    None::<String>,
+                    None,
+                    vec![],
+                    "-",
+                    Some(hit.score.final_score as f64),
+                ));
             }
         }
     }
-    // Deviation-only narration (PR-03): the discrimination line appears ONLY
-    // when the EFFECTIVE signal is low or medium (the dense-lane-dark cap is
-    // applied first so a dark-capped high still surfaces as medium+caveat).
-    // A clear top result and the single/zero case stay silent — the advisory
-    // paragraph lives in the tool description now.
+
+    // ControlSignals (deviation-only per §11.3 absolute trailing order).
+    // Discrimination: dense-lane-dark caps "high" → "medium" so "high — clear
+    // top result" is never reported on a lexical-only ranking. Only low and
+    // medium render a line; high, single, and not-found stay silent.
     let effective = if dense_lane_dark
         && discrimination == crate::recall_discrimination::DiscriminationLevel::High
     {
@@ -1279,41 +1275,94 @@ fn run_memory_search(
     } else {
         discrimination
     };
-    if matches!(
-        effective,
-        crate::recall_discrimination::DiscriminationLevel::Low
-            | crate::recall_discrimination::DiscriminationLevel::Medium
-    ) {
-        lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
+    let discrimination_arg: Option<String> = match effective {
+        crate::recall_discrimination::DiscriminationLevel::Low => Some("low".to_string()),
+        crate::recall_discrimination::DiscriminationLevel::Medium => Some("medium".to_string()),
+        _ => None,
+    };
+    // Degradation: any skipped stage renders the `retrieval: degraded` line; the
+    // stage vocabulary itself is log-side (ARIA_MCP_INTERFACE §11.3: this
+    // surface carries no `recall_provenance:` line). Tie note: the
+    // windowed 4N tie resolution was exhausted (DECISION_SCORE_TRANSPARENT_ORDERING
+    // ruling 1) and only the determinate prefix was returned.
+    let control = ControlSignals {
+        discrimination: discrimination_arg,
+        degraded: !result.degraded_stages.is_empty(),
+        tie_note: result.degraded_stages.iter().any(|s| s == "tie.nonDeterminate"),
+        ..ControlSignals::default()
+    };
+    let composed = if candidate_rows.is_empty() {
+        render_empty_s1(None)
+    } else {
+        render_s1_surface(&candidate_rows, &control)
+    };
+
+    // Explain lines follow the row they annotate, two-space indented, outside
+    // the composer row. The composed text is header, rows, control lines; the
+    // rebuild interleaves each hit's explanation after its row exactly as the
+    // Swift rebuild loop does.
+    let mut final_text = composed.text;
+    if explain {
+        let raw_lines: Vec<&str> = final_text.split('\n').collect();
+        let n = candidate_rows.len();
+        let mut rebuilt: Vec<String> = Vec::with_capacity(raw_lines.len() + n * 5);
+        if let Some(header) = raw_lines.first() {
+            rebuilt.push((*header).to_string());
+        }
+        for i in 0..n {
+            let row_idx = 1 + i;
+            if row_idx < raw_lines.len() {
+                rebuilt.push(raw_lines[row_idx].to_string());
+            }
+            if i < shown_hits.len() {
+                for line in &shown_hits[i].explanation {
+                    rebuilt.push(format!("  {line}"));
+                }
+            }
+        }
+        let control_start = 1 + n;
+        if control_start < raw_lines.len() {
+            rebuilt.extend(raw_lines[control_start..].iter().map(|l| (*l).to_string()));
+        }
+        let joined = rebuilt.join("\n");
+        final_text = joined;
     }
-    // Recall provenance — DEVIATION-ONLY (PR-03): the line appears only when
-    // something is off-nominal (dense lane dark, or degraded stages). Its
-    // absence now MEANS nominal. The response labels embedding provenance
-    // accurately whenever it deviates. Mirrors Swift runMemorySearch.
-    if result.dense_lane_status.is_some() || !result.degraded_stages.is_empty() {
-        let dense_part = match &result.dense_lane_status {
-            Some(reason) => format!("dense_lane:{}", reason),
-            None => "dense_lane:active".to_string(),
-        };
-        let degraded_part = if result.degraded_stages.is_empty() {
-            "degraded_stages:none".to_string()
-        } else {
-            format!("degraded_stages:[{}]", result.degraded_stages.join(","))
-        };
-        lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
+
+    // Answer block (answer:always|auto) goes ABOVE the composed text, after the
+    // composer and the explain interleave, exactly where Swift prepends it.
+    // The Rust port has no synthesis text, so the answer line is intentionally
+    // absent when empty — the confidence/citations/signals lines still prove
+    // the gate ran.
+    if let Some(ref block) = packaged.answer_block {
+        let mut header_lines: Vec<String> = Vec::new();
+        if !block.answer.is_empty() {
+            header_lines.push(format!("answer: {}", block.answer));
+        }
+        header_lines.push(format!("confidence: {}", block.confidence_label));
+        let citation_line = block.citation_ids.iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !citation_line.is_empty() {
+            header_lines.push(format!("citations: {}", citation_line));
+        }
+        header_lines.push(format!(
+            "signals: m1={:.3} m2={:.3} m3={:.3} m4={}",
+            block.signals.m1, block.signals.m2, block.signals.m3, block.signals.m4
+        ));
+        final_text = format!("{}\n{}", header_lines.join("\n"), final_text);
     }
-    // Non-determinate tie disclosure (DECISION_SCORE_TRANSPARENT_ORDERING
-    // ruling 1): emitted when the windowed 4N window was exhausted without
-    // finding a score break. The system returned only the determinate prefix
-    // above the tied group; the AI should refine the query for specificity.
-    // Mirrors Swift ToolDispatch.runMemorySearch.
-    if result.degraded_stages.iter().any(|s| s == "tie.nonDeterminate") {
-        lines.push(
-            "note: additional results share this score on a non-deterministic tie; \
-             refine the query".to_string()
-        );
+    // Envelope: text block plus the composer's structured twin. Wire-identical
+    // to Swift `ToolDispatcher.composedResult`.
+    let mut envelope = serde_json::json!({
+        "content": [{ "type": "text", "text": final_text }],
+        "isError": false
+    });
+    if let Some(structured) = composed.structured {
+        envelope["structuredContent"] = structured;
     }
-    Ok(structured_text_result(&lines.join("\n"), &results))
+    Ok(envelope)
 }
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
