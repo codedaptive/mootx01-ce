@@ -26,7 +26,9 @@ private let ppmiBasisCorpus: [[String]] = [
 private let ppmiBasisProbeTexts: [String] = ["car engine", "vehicle road", "dog animal", ""]
 
 private func buildTrainedPpmiProvider() -> PpmiProvider {
-    let provider = PpmiProvider()
+    // The shared fixture pins the historical 1.0 provider envelope; the Rust
+    // leg constructs the same identity explicitly (with_parameters "1.0.0").
+    let provider = PpmiProvider(modelVersion: "1.0.0")
     for doc in ppmiBasisCorpus { provider.train(terms: doc, window: ppmiWindow) }
     provider.finalize()
     return provider
@@ -65,7 +67,7 @@ struct PpmiBasisSerializationTests {
         #expect(restored.vocabularySize == original.vocabularySize)
     }
 
-    @Test("blob begins with the PPB1 magic and the v1 format byte")
+    @Test("blob begins with the PPB1 magic and the current format byte")
     func blobHeaderIsVersioned() {
         let bytes = [UInt8](buildTrainedPpmiProvider().serializeBasis())
         #expect(bytes.count >= 5)
@@ -157,7 +159,7 @@ struct PpmiBasisSerializationTests {
         }
     }
 
-    @Test("counts blob begins with the PPMC magic and the v1 format byte")
+    @Test("counts blob begins with the PPMC magic and the current format byte")
     func countsBlobHeaderIsVersioned() {
         let p = PpmiProvider()
         for doc in ppmiBasisCorpus { p.train(terms: doc, window: ppmiWindow) }

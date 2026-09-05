@@ -20,8 +20,10 @@
 //!      (RI adds the full index vector for every co-occurrence; PPMI scales
 //!      each addition by the informative weight.  The distinction is real:
 //!      this is NOT a plain RI accumulation.)
-//!   5. A document/query embedding = the L2-normalised sum of its terms'
-//!      PPMI context vectors.
+//!   5. A document/query embedding = the pooled PPMI context vectors of its
+//!      distinct terms: IDF-weighted sum, L2-normalised, corpus-mean
+//!      direction removed, L2-normalised (`distributional_pooling` — the
+//!      same function for documents and queries).
 //!
 //! ## Constants (documented, cross-port identical)
 //!
@@ -62,11 +64,12 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
+use crate::distributional_pooling;
 use crate::random_indexing::ri_index_vector;
+use crate::term_document_counts::TermDocumentCounts;
 use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use engram_lib::Engram;
 use std::collections::HashMap;
-use substrate_kernel::float_vec_ops;
 use substrate_ml::float_simhash;
 use synapsekit::{EmbeddingProvider, SynapseKitError};
 
@@ -153,6 +156,19 @@ pub struct PpmiProvider {
     /// Raw (unnormalised) PPMI-weighted sums of context-term index vectors.
     /// Normalisation happens at embed time.
     ppmi_vectors: HashMap<String, Vec<f32>>,
+
+    /// Document frequency and document count accumulated by `train`, one
+    /// document per call. Training-phase state: persisted in the counts blob
+    /// (it feeds `finalize`), never in the basis blob.
+    counts: TermDocumentCounts,
+
+    /// Smoothed IDF per term that has a PPMI vector, fitted at `finalize`.
+    /// Applied to documents and queries alike by `distributional_pooling::pool`.
+    idf_table: HashMap<String, f32>,
+
+    /// Unit corpus-mean direction fitted at `finalize` (D long), or empty
+    /// when no term contributed. Removed from every pooled vector.
+    mean_direction: Vec<f32>,
 }
 
 impl PpmiProvider {
@@ -178,6 +194,9 @@ impl PpmiProvider {
             total_pairs: 0,
             total_terms: 0,
             ppmi_vectors: HashMap::new(),
+            counts: TermDocumentCounts::new(),
+            idf_table: HashMap::new(),
+            mean_direction: Vec::new(),
         }
     }
 
@@ -187,7 +206,9 @@ impl PpmiProvider {
     ///
     /// For each target term t at position i, every term c in
     /// `[i-window, i+window]` (excluding i) is a context term.
-    /// Increments `co_count[t][c]` and `term_count[t]` accordingly.
+    /// Increments `co_count[t][c]` and `term_count[t]` accordingly. The call
+    /// is one document: every distinct term counts once toward its document
+    /// frequency (an empty call is not a document).
     ///
     /// Training is additive: multiple `train` calls extend the count tables
     /// without resetting them.  Call `finalize` after all documents are done.
@@ -197,6 +218,11 @@ impl PpmiProvider {
     /// same increment logic.
     pub fn train(&mut self, terms: &[&str], window: usize) {
         let n = terms.len();
+        if n == 0 {
+            return;
+        }
+        // Document frequency: one document per call, each distinct term once.
+        self.counts.add_document_terms(terms);
         for (i, target) in terms.iter().enumerate() {
             let lo = i.saturating_sub(window);
             let hi = (i + window).min(n - 1);
@@ -245,6 +271,15 @@ impl PpmiProvider {
     ///
     /// Only terms with at least one nonzero-weight context pair get a
     /// ppmi_vector entry.
+    ///
+    /// ## Pooling fit
+    ///
+    /// After the vector table is built, the smoothed IDF of every term that
+    /// has a vector and the unit corpus-mean direction
+    /// `l2_normalize(Σ_t df(t)·idf(t)·ppmi_vec(t))` are fitted from the
+    /// document frequencies `train` accumulated. Both are pure functions of
+    /// the count tables, so the counts path (restore counts → finalize) fits
+    /// the same bytes as the corpus path.
     pub fn finalize(&mut self) {
         // Clear unconditionally first. If counts were emptied (all content deleted, or
         // restore_counts loaded an empty blob), returning early without clearing would
@@ -252,6 +287,8 @@ impl PpmiProvider {
         // exists — deleted content would keep answering embed calls, breaking the
         // hard-delete contract. The clear must precede the guard.
         self.ppmi_vectors.clear();
+        self.idf_table.clear();
+        self.mean_direction = Vec::new();
 
         if self.total_pairs == 0 || self.total_terms == 0 {
             return;
@@ -320,6 +357,20 @@ impl PpmiProvider {
                 self.ppmi_vectors.insert(target.clone(), vec);
             }
         }
+
+        // Pooling fit over the terms that have a vector.
+        let mut idf: HashMap<String, f32> = HashMap::with_capacity(self.ppmi_vectors.len());
+        for term in self.ppmi_vectors.keys() {
+            idf.insert(term.clone(), self.counts.inverse_document_frequency(term));
+        }
+        self.idf_table = idf;
+        let counts = &self.counts;
+        self.mean_direction = distributional_pooling::mean_direction(
+            &self.ppmi_vectors,
+            &self.idf_table,
+            |term| counts.document_frequency(term),
+            PPMI_DIMENSION,
+        );
     }
 
     // MARK: - Vocabulary access (for conformance tests)
@@ -329,6 +380,24 @@ impl PpmiProvider {
     /// Used by conformance tests to verify PPMI accumulation.
     pub fn ppmi_vector_for_term(&self, term: &str) -> Option<&Vec<f32>> {
         self.ppmi_vectors.get(&term.to_lowercase())
+    }
+
+    /// The fitted smoothed IDF weight of a term with a PPMI vector, or `None`
+    /// when the term has no vector or the basis is not finalized.
+    /// Conformance accessor.
+    pub fn inverse_document_frequency_for_term(&self, term: &str) -> Option<f32> {
+        self.idf_table.get(&term.to_lowercase()).copied()
+    }
+
+    /// The fitted unit corpus-mean direction (D long), or empty when the
+    /// basis is not finalized or no term contributed. Conformance accessor.
+    pub fn corpus_mean_direction(&self) -> &[f32] {
+        &self.mean_direction
+    }
+
+    /// Number of documents folded by `train` (the IDF corpus size N).
+    pub fn document_count(&self) -> usize {
+        self.counts.document_count()
     }
 
     /// The current trained vocabulary size (terms with a PPMI vector).
@@ -342,15 +411,19 @@ impl PpmiProvider {
         self.co_count.len()
     }
 
-    // MARK: - Basis serialization (mission 6a-i)
+    // MARK: - Basis serialization
 
     /// Serialize the finalized PPMI basis to a versioned, little-endian blob.
     ///
     /// PPMI's `embed`/`embed_float` output is fully determined by the
-    /// finalized `ppmi_vectors` map plus the projection seed. The raw
-    /// co-occurrence count tables are training-phase scratch and are NOT
-    /// part of the embed-relevant basis, so they are intentionally excluded.
-    /// Byte layout mirrors Swift's `serializeBasis()` exactly.
+    /// finalized `ppmi_vectors` map, the pooling fit (IDF table and
+    /// corpus-mean direction), and the projection seed. The raw
+    /// co-occurrence count tables and document frequencies are training-phase
+    /// scratch and are NOT part of the embed-relevant basis, so they are
+    /// intentionally excluded. Byte layout mirrors Swift's `serializeBasis()`:
+    ///
+    ///   model_id | model_version | projection_seed
+    ///   | ppmi_vectors (String→[f32] map) | idf (String→f32 map) | mean_direction ([f32])
     pub fn serialize_basis(&self) -> Vec<u8> {
         let mut w = BasisWriter::new();
         w.write_magic(PPMI_BASIS_MAGIC);
@@ -359,6 +432,8 @@ impl PpmiProvider {
         w.write_string(&self.model_version);
         w.write_u64(self.projection_seed);
         w.write_string_f32_vector_map(&self.ppmi_vectors);
+        w.write_string_f32_map(&self.idf_table);
+        w.write_f32_array(&self.mean_direction);
         w.into_bytes()
     }
 
@@ -376,8 +451,12 @@ impl PpmiProvider {
         let model_version = r.read_string()?;
         let projection_seed = r.read_u64()?;
         let ppmi_vectors = r.read_string_f32_vector_map()?;
+        let idf_table = r.read_string_f32_map()?;
+        let mean_direction = r.read_f32_array()?;
         let mut provider = PpmiProvider::with_parameters(model_id, model_version, projection_seed);
         provider.ppmi_vectors = ppmi_vectors;
+        provider.idf_table = idf_table;
+        provider.mean_direction = mean_direction;
         Ok(provider)
     }
 
@@ -396,6 +475,7 @@ impl PpmiProvider {
     ///   | term_count (String→u32 map, byte-sorted keys)
     ///   | co_count: u32 outer-count, then per byte-sorted outer key:
     ///       outer key (string) | inner (String→u32 map, byte-sorted keys)
+    ///   | document_count (u32) | document_frequencies (String→u32 map, byte-sorted keys)
     pub fn serialize_counts(&self) -> Vec<u8> {
         let mut w = BasisWriter::new();
         w.write_magic(PPMI_COUNTS_MAGIC);
@@ -416,6 +496,8 @@ impl PpmiProvider {
             w.write_string(key);
             w.write_string_u32_map(&self.co_count[key]);
         }
+        w.write_u32(self.counts.document_count() as u32);
+        w.write_string_u32_map(&self.counts.document_frequencies());
         w.into_bytes()
     }
 
@@ -441,18 +523,25 @@ impl PpmiProvider {
             let key = r.read_string()?;
             co_count.insert(key, r.read_string_u32_map()?);
         }
+        let document_count = r.read_u32()? as usize;
+        let document_frequencies = r.read_string_u32_map()?;
         let mut provider = PpmiProvider::with_parameters(model_id, model_version, projection_seed);
         provider.co_count = co_count;
         provider.term_count = term_count;
         provider.total_pairs = total_pairs;
         provider.total_terms = total_terms;
+        provider.counts = TermDocumentCounts::from_restored_document_frequencies(
+            document_frequencies,
+            document_count,
+        );
         Ok(provider)
     }
 
-    /// Restore the accumulated co-occurrence counts in place from a counts blob,
-    /// so incremental maintenance resumes after a restart. Sets `co_count`,
-    /// `term_count`, and the running totals WITHOUT clearing the derived
-    /// `ppmi_vectors` (the serving basis is restored separately from the basis
+    /// Restore the accumulated co-occurrence counts and document frequencies in
+    /// place from a counts blob, so incremental maintenance resumes after a
+    /// restart. Sets `co_count`, `term_count`, the running totals, and the
+    /// document-frequency table WITHOUT clearing the derived `ppmi_vectors` and
+    /// pooling fit (the serving basis is restored separately from the basis
     /// blob). Mirrors `from_serialized_counts`, but mutates self. Returns
     /// `Err(BasisCodecError)` on a bad blob — never panics.
     pub fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), BasisCodecError> {
@@ -472,49 +561,49 @@ impl PpmiProvider {
             let key = r.read_string()?;
             co_count.insert(key, r.read_string_u32_map()?);
         }
+        let document_count = r.read_u32()? as usize;
+        let document_frequencies = r.read_string_u32_map()?;
         self.co_count = co_count;
         self.term_count = term_count;
         self.total_pairs = total_pairs;
         self.total_terms = total_terms;
+        self.counts = TermDocumentCounts::from_restored_document_frequencies(
+            document_frequencies,
+            document_count,
+        );
         Ok(())
     }
 
     // MARK: - Private helpers
 
-    /// Compute the L2-normalised PPMI context vector for `text`.
-    /// Returns `None` for empty text or when all terms are OOV.
-    fn ppmi_context_vector(&self, text: &str) -> Option<Vec<f32>> {
+    /// Pool `text` through the finalized basis. Returns `None` for empty
+    /// text, all-OOV text, or a pooled vector that collapsed to zero; the
+    /// second element counts the distinct terms that had a PPMI vector
+    /// (0 = vocabulary miss).
+    fn pooled(&self, text: &str) -> (Option<Vec<f32>>, usize) {
         if text.is_empty() {
-            return None;
+            return (None, 0);
         }
         // corpus_kit::default_keyword_tokens is the single canonical keyword
-        // tokenizer shared by all distributional providers (RI, PPMI, and
-        // future LSA/NMF). It is byte-identical to Swift's
-        // distributionalKeywordTokenize in DistributionalBase.swift.
+        // tokenizer shared by all distributional providers (RI, PPMI, LSA,
+        // NMF) and by BM25; parity with Swift's `defaultKeywordTokens`.
         let terms = corpus_kit::default_keyword_tokens(text);
         if terms.is_empty() {
-            return None;
+            return (None, 0);
         }
+        distributional_pooling::pool(
+            &terms,
+            &self.ppmi_vectors,
+            &self.idf_table,
+            &self.mean_direction,
+            PPMI_DIMENSION,
+        )
+    }
 
-        let mut sum = vec![0.0f32; PPMI_DIMENSION];
-        let mut hit_count = 0usize;
-
-        for term in &terms {
-            if let Some(cv) = self.ppmi_vectors.get(term.as_str()) {
-                for d in 0..PPMI_DIMENSION {
-                    sum[d] += cv[d];
-                }
-                hit_count += 1;
-            }
-        }
-
-        if hit_count == 0 {
-            return None;
-        }
-        // Delegate to the substrate's canonical scalar implementation.
-        // float_vec_ops::l2_normalize is conformance-gated against the Swift
-        // port; using it here guarantees bit-identical output.
-        Some(float_vec_ops::l2_normalize(sum))
+    /// Compute the pooled PPMI unit vector for `text`, or `None` when there
+    /// is no signal (see `pooled`).
+    fn ppmi_context_vector(&self, text: &str) -> Option<Vec<f32>> {
+        self.pooled(text).0
     }
 }
 
@@ -545,7 +634,7 @@ impl EmbeddingProvider for PpmiProvider {
         }
     }
 
-    /// Return the D-dimensional L2-normalised PPMI context vector for `text`.
+    /// Return the D-dimensional pooled PPMI unit vector for `text`.
     ///
     /// - No trained basis (ppmi_vectors empty): returns `Ok(vec![])` — structural opt-out.
     /// - Empty or non-tokenisable input: returns `Ok(vec![])`.
@@ -564,18 +653,24 @@ impl EmbeddingProvider for PpmiProvider {
         if terms.is_empty() {
             return Ok(vec![]);
         }
-        // OOV check: throw vocabMiss when basis is trained but no query term hits.
-        let has_in_vocab = terms
-            .iter()
-            .any(|t| self.ppmi_vectors.contains_key(t.as_str()));
-        if !has_in_vocab {
+        let (vector, hits) = distributional_pooling::pool(
+            &terms,
+            &self.ppmi_vectors,
+            &self.idf_table,
+            &self.mean_direction,
+            PPMI_DIMENSION,
+        );
+        // OOV check: vocabMiss when the basis is trained but no query term hits.
+        if hits == 0 {
             return Err(SynapseKitError::EmbedFloatVocabMiss(format!(
                 "ppmi: vocab size {}, but 0 of {} query token(s) matched",
                 self.ppmi_vectors.len(),
                 terms.len()
             )));
         }
-        Ok(self.ppmi_context_vector(text).unwrap_or_default())
+        // Terms matched but the pooled vector collapsed to zero: honest
+        // no-signal, reported as an opt-out rather than a vocabulary miss.
+        Ok(vector.unwrap_or_default())
     }
 
     /// Produce the engram AND the normalised PPMI context vector from a SINGLE
@@ -600,7 +695,7 @@ impl EmbeddingProvider for PpmiProvider {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 impl TrainableEmbeddingBasis for PpmiProvider {
     /// Train the PPMI basis on a corpus of raw document texts.
@@ -612,7 +707,7 @@ impl TrainableEmbeddingBasis for PpmiProvider {
     /// once after all documents are counted. This reproduces the exact
     /// trained+finalized state of `train` + `finalize` driven from token slices,
     /// so a basis serialized after `train_on_corpus` is byte-identical to the
-    /// 6a-i fixture whose corpus is the same texts tokenized.
+    /// shared fixture whose corpus is the same texts tokenized.
     fn train_on_corpus(&mut self, texts: &[&str]) {
         for text in texts {
             let terms = corpus_kit::default_keyword_tokens(text);
@@ -636,13 +731,13 @@ impl TrainableEmbeddingBasis for PpmiProvider {
         self.finalize();
     }
 
-    /// Serialize the finalized PPMI basis (6a-i codec), surfaced through the seam.
+    /// Serialize the finalized PPMI basis (basis codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         PpmiProvider::serialize_basis(self)
     }
 
     /// Reconstruct a fresh `PpmiProvider` from a basis blob, boxed. Delegates to
-    /// `from_serialized_basis` (6a-i); a codec error maps to
+    /// `from_serialized_basis`; a codec error maps to
     /// `CorpusKitError::DecodingFailure`.
     fn reconstruct_basis(
         &self,
@@ -656,6 +751,9 @@ impl TrainableEmbeddingBasis for PpmiProvider {
     fn release_basis(&mut self) {
         self.ppmi_vectors.clear();
         self.ppmi_vectors.shrink_to_fit();
+        self.idf_table.clear();
+        self.idf_table.shrink_to_fit();
+        self.mean_direction = Vec::new();
         self.co_count.clear();
         self.co_count.shrink_to_fit();
         self.term_count.clear();
@@ -685,7 +783,7 @@ impl TrainableEmbeddingBasis for PpmiProvider {
         self.train(&term_refs, PPMI_WINDOW);
     }
 
-    /// Serialize the accumulated co-occurrence counts (6a-i counts codec),
+    /// Serialize the accumulated co-occurrence counts (counts codec),
     /// surfaced through the seam.
     fn serialize_counts(&self) -> Vec<u8> {
         PpmiProvider::serialize_counts(self)
@@ -711,8 +809,9 @@ impl TrainableEmbeddingBasis for PpmiProvider {
     /// Derive the serving PPMI basis from restored co-occurrence counts.
     ///
     /// PPMI maintained counts hold the full raw co-occurrence state (`co_count`,
-    /// `term_count`, `total_pairs`, `total_terms`) — exactly what `finalize()`
-    /// consumes to derive `ppmi_vectors`. `finalize()` is a pure function of the
+    /// `term_count`, `total_pairs`, `total_terms`, document frequencies,
+    /// document count) — exactly what `finalize()` consumes to derive
+    /// `ppmi_vectors` and the pooling fit. `finalize()` is a pure function of the
     /// accumulated counts state. An empty `co_count` finalizes to an empty
     /// `ppmi_vectors` map, matching `train_on_corpus` over an empty corpus, so
     /// returning `true` unconditionally is honest.
@@ -995,7 +1094,9 @@ mod tests {
         // Without finalize, ppmi_vectors is empty → embed_float returns empty
         // immediately (no-basis opt-out before OOV detection).
         let mut provider = PpmiProvider::new();
-        let corpus = vec![vec!["car", "engine", "drive"]];
+        // Two documents: with a single document every term has IDF 0 and
+        // the pooled vector is empty by construction.
+        let corpus = vec![vec!["car", "engine", "drive"], vec!["dog", "bark", "run"]];
         for doc in &corpus {
             provider.train(doc, PPMI_WINDOW);
         }

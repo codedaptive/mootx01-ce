@@ -25,7 +25,9 @@ private let nmfBasisProbeTexts: [String] = ["car engine", "vehicle road", "dog a
 
 /// Rank 3, 100 iterations (matches the established NMF conformance suite).
 private func buildTrainedNmfProvider() -> NmfProvider {
-    let provider = NmfProvider(rank: 3, maxIterations: 100)
+    // The shared fixture pins the historical 1.0 provider envelope; the Rust
+    // leg constructs the same identity explicitly (with_parameters "1.0.0").
+    let provider = NmfProvider(modelVersion: "1.0.0", rank: 3, maxIterations: 100)
     for doc in nmfBasisCorpus { provider.train(document: doc) }
     provider.finalize()
     return provider
@@ -54,7 +56,7 @@ struct NmfBasisSerializationTests {
         #expect(restored.documentCount == original.documentCount)
     }
 
-    @Test("counts blob begins with the NMFC magic and the v1 format byte")
+    @Test("counts blob begins with the NMFC magic and the current format byte")
     func countsBlobHeaderIsVersioned() {
         let bytes = [UInt8](buildTrainedNmfProvider().serializeCounts())
         #expect(bytes.count >= 5)
@@ -108,7 +110,7 @@ struct NmfBasisSerializationTests {
         #expect(restored.documentCount == original.documentCount)
     }
 
-    @Test("blob begins with the NMB1 magic and the v1 format byte")
+    @Test("blob begins with the NMB1 magic and the current format byte")
     func blobHeaderIsVersioned() {
         let bytes = [UInt8](buildTrainedNmfProvider().serializeBasis())
         #expect(bytes.count >= 5)

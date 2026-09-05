@@ -1,8 +1,7 @@
 // BasisStore.swift
 //
-// Persistence for a trained embedding provider's serialized basis blob
-// (mission 6a-ii-β). The "trained brain" of a distributional provider
-// (RI/PPMI/LSA/NMF) is a versioned byte blob produced by the 6a-i codec
+// Persistence for a trained embedding provider's serialized basis blob. The "trained brain" of a distributional provider
+// (RI/PPMI/LSA/NMF) is a versioned byte blob produced by the basis codec
 // via `TrainableEmbeddingBasis.serializeBasis()`. This store persists that
 // blob so the dense lane is trained-ready immediately after a process
 // restart, without re-running training on every open.
@@ -39,7 +38,7 @@
 //   - part_index: 0-based chunk sequence number. All parts for the same
 //     provider key are loaded in ascending part_index order and
 //     concatenated. A single-chunk basis has exactly one row at index 0.
-//   - basis: one chunk of the 6a-i serialized blob. BLOB (not TEXT) because
+//   - basis: one chunk of the serialized basis blob. BLOB (not TEXT) because
 //     it is raw little-endian bytes; TEXT would force a lossy/avoidable
 //     encoding round-trip.
 //   - trained_at: WHEN the basis was last (re)trained. TEXT ISO8601 per the
@@ -85,6 +84,15 @@
 // imports CorpusKitProviders — the blob bytes are opaque here; only the
 // trainable provider (reached through the TrainableEmbeddingBasis seam)
 // interprets them.
+//
+// ## Format-version gate (not here)
+//
+//   The store returns whatever bytes are persisted. Whether those bytes are
+//   a CURRENT basis is decided by the open path: `Corpus.resolveProvider`
+//   compares the persisted blob's five-byte frame (`BasisBlobFrame`) with
+//   the frame the fresh provider writes and serves the slot untrained on a
+//   version mismatch; `CorpusProviderCountsStore.restoreCounts(into:)` does
+//   the same for counts rows. A retrain then UPSERTs a current blob here.
 
 import Foundation
 import PersistenceKit
@@ -96,7 +104,7 @@ import SubstrateTypes
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
 // docs/engineering/HARNESS_REFERENCE.md. The basis blob is produced
-// by the 6a-i codec via the TrainableEmbeddingBasis seam; this store
+// by the basis codec via the TrainableEmbeddingBasis seam; this store
 // only persists and returns the opaque bytes. It computes nothing.
 // ─────────────────────────────────────────────────────────────────
 
@@ -107,7 +115,7 @@ public struct PersistedBasis: Sendable, Equatable {
     public let modelID: String
     /// The provider modelVersion the basis was trained for.
     public let modelVersion: String
-    /// The 6a-i serialized basis blob (all parts reassembled into one Data).
+    /// The serialized basis blob (all parts reassembled into one Data).
     public let basis: Data
     /// When the basis was last (re)trained (the `now` passed by the caller).
     public let trainedAt: Date
@@ -184,7 +192,7 @@ public actor BasisStore {
                     // (model_id, model_version) are loaded in this order and
                     // concatenated to reconstruct the full basis blob.
                     ColumnDeclaration(name: "part_index", type: .int, nullable: false, defaultValue: .int(0)),
-                    // BLOB: one chunk of the raw little-endian 6a-i basis bytes.
+                    // BLOB: one chunk of the raw little-endian basis bytes.
                     .blob("basis", nullable: false),
                     // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
                     // Stored identically on every part row for the same provider key.

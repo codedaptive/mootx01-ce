@@ -29,15 +29,21 @@
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
-// Mission 6a-i: shared little-endian binary codec for distributional-provider
+// Shared little-endian binary codec for distributional-provider
 // basis serialization. PROVIDER-FORMAT code (not a math primitive) used by
 // RandomIndexing, PPMI, LSA, and NMF. Swift port: Sources/CorpusKitProviders/
 // BasisCodec.swift. The byte layout is the cross-port contract.
 pub mod basis_codec;
-// Shared term-document count builder reused by LSA and NMF.
-// Owns vocab encounter-order construction, TF counts, and DF counts.
+// Shared term-document count builder reused by LSA, NMF, RI, and PPMI.
+// Owns vocab encounter-order construction, TF counts, DF counts, and the
+// one smoothed IDF function.
 // Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
 pub mod term_document_counts;
+// The ONE pooling function for the term-vector distributional providers
+// (RI, PPMI): IDF-weighted sum of the distinct terms' vectors, L2-normalised,
+// corpus-mean direction removed, L2-normalised. Documents and queries share it.
+// Swift port: Sources/CorpusKitProviders/DistributionalPooling.swift.
+pub mod distributional_pooling;
 // shared IDF-reduced vocabulary selection for the dense LSA/NMF
 // factorizations (bit-identical with Swift's CorpusKitProviders/ReducedVocab).
 pub mod reduced_vocab;
@@ -57,7 +63,7 @@ pub mod text_providers;
 // The decimal hierarchy math lives in LatticeLib — not reimplemented here.
 // Stateless — no training required.
 pub mod fdc_provider;
-// Mission 6a-iii-wire: the ONE definition of the default recall ensemble.
+// The ONE definition of the default recall ensemble.
 // Constructs the five honest signals (RI/PPMI/LSA/NMF/FDC) fresh per call.
 // Mirrors Swift's CorpusEnsemble.defaultEnsemble() in CorpusKitProviders.
 pub mod default_ensemble;
@@ -69,7 +75,8 @@ pub mod candle_provider;
 
 pub use basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 pub use deterministic_tokenizer::DeterministicTokenizer;
-pub use term_document_counts::TermDocumentCounts;
+pub use term_document_counts::{smoothed_inverse_document_frequency, TermDocumentCounts};
+pub use distributional_pooling::{mean_direction, pool, remove_mean_direction};
 pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};
 pub use nmf_provider::{
     NmfProvider, NMF_DEFAULT_ITERATIONS, NMF_DEFAULT_RANK, NMF_FACTORIZATION_SEED,
