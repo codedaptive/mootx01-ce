@@ -125,6 +125,7 @@ pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
+pub mod recall_explainer;
 pub mod training;
 pub mod verbs;
 
