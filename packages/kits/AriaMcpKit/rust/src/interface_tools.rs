@@ -2487,7 +2487,25 @@ fn run_file_fact(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
-    let subject = require_string(args, "subject")?;
+    let subject_raw = require_string(args, "subject")?;
+    let subject = subject_raw.trim();
+    // Subject length contract: same boundary as moot_file_memory (ARIA-MSG-1).
+    // Returns TOOL_DISPATCH_FAILURE so the dispatcher converts it to isError:true —
+    // the model sees the contract message and can compress rather than losing the
+    // call to a bare "Tool execution failed". Mirrors Swift runFileFact (ToolDispatch.swift).
+    {
+        let n = subject.chars().count();
+        if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "subject must be 1\u{2013}{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
+                     One telegraphic sentence in the AI-facing register \u{2014} compress, \
+                     don't truncate."
+                ),
+            ));
+        }
+    }
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
     // source_id anchors the fact to a drawer in this estate. It is a local drawer

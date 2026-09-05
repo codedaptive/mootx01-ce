@@ -417,3 +417,64 @@ fn update_memory_note_is_generic_not_set_subject_special_cased() {
         trail.iter().map(|e| e.reason.clone()).collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. moot_file_fact subject contract (ARIA-MSG-2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn file_fact_oversize_subject_returns_contract_error() {
+    // Subject contract violation on moot_file_fact surfaces as isError:true
+    // so the model sees the message instead of a bare "Tool execution failed"
+    // from the generic catch wrapper (ARIA-MSG-2 fix). Mirrors Swift
+    // fileFactOversizeSubjectReturnsContractError in SubjectSurfaceTests.swift.
+    let registry = EstateRegistry::new_inmemory();
+    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
+    let oversize: String = "x".repeat(n);
+    let result = dispatch_tool(
+        "moot_file_fact",
+        &args!["subject" => oversize.as_str(),
+               "predicate" => "worksAt",
+               "object" => "Acme"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("oversize fact subject must return Ok(isError), not Err");
+    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
+    let text = content_text(&result);
+    assert!(
+        text.contains(&format!("subject must be 1\u{2013}{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
+        "error text must contain the contract message, got: {text}"
+    );
+    assert!(
+        text.contains(&n.to_string()),
+        "error text must contain the offending length ({n}), got: {text}"
+    );
+}
+
+#[test]
+fn file_fact_oversize_subject_message_matches_swift_port() {
+    // Cross-port parity: the wire error text for moot_file_fact with an oversize
+    // subject must be byte-identical in Swift and Rust. The Swift twin is
+    // fileFactOversizeSubjectMessageMatchesRustPort in SubjectSurfaceTests.swift.
+    let registry = EstateRegistry::new_inmemory();
+    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
+    let oversize: String = "x".repeat(n);
+    let result = dispatch_tool(
+        "moot_file_fact",
+        &args!["subject" => oversize.as_str(),
+               "predicate" => "worksAt",
+               "object" => "Acme"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("must return Ok(isError)");
+    let text = content_text(&result);
+    let expected = format!(
+        "subject must be 1\u{2013}{} characters (got {}). One telegraphic sentence in the AI-facing register \u{2014} compress, don't truncate.",
+        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
+        n
+    );
+    assert_eq!(text, expected,
+        "file_fact error text must match Swift port verbatim");
+}
