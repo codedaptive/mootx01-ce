@@ -10749,9 +10749,16 @@ impl EstateCoordinator {
     /// - `content_key` / `shingles`: from `union_best_mmr_bodies`.
     /// - `subjects`: the presentation-sort secondary key (nil subject as "").
     ///
-    /// Selection: each pick is the argmax of λ·score − (1−λ)·maxSim, where
+    /// Selection: each pick is the argmax of λ·score − (1−λ)·ρ·maxSim, where
     /// maxSim is the highest similarity to any already-selected slot (updated
-    /// incrementally after each pick, O(n·k) not O(n²·k)). The argmax is a
+    /// incrementally after each pick, O(n·k) not O(n²·k)) and ρ is
+    /// `similarity_scale`: the step 8.5 budget redistribution factor
+    /// (`RecallSignalBudget::redistribution`) on the MatrixAware branch, 1.0 on
+    /// the raw/rrf/discriminative branch whose relevance no budget touches. The
+    /// redistributed score is ρ× the score the same columns produced before
+    /// exclusion while maxSim is a Jaccard in [0, 1]; scaling the penalty by ρ
+    /// keeps the admission decision invariant under column exclusion (COL-2;
+    /// Swift `similarityScale` twin). The argmax is a
     /// TOTAL order — higher MMR score wins; on an exact tie the lower content
     /// key wins (content is stable for a seed, ids are minted per estate) —
     /// so two identical recalls select identically. Similarity is the shingle
@@ -10779,6 +10786,7 @@ impl EstateCoordinator {
         shingles: &[Option<BTreeSet<String>>],
         subjects: &[&str],
         lambda: f32,
+        similarity_scale: f32,
         limit: usize,
         degraded_stages: &mut Vec<String>,
     ) -> Vec<usize> {
@@ -10795,7 +10803,7 @@ impl EstateCoordinator {
             let mut best: Option<(usize, usize)> = None; // (position in unselected, slot)
             let mut best_mmr = -f32::MAX;
             for (pos, &i) in unselected.iter().enumerate() {
-                let mmr = lambda * scores[i] - (1.0 - lambda) * max_sim[i];
+                let mmr = lambda * scores[i] - (1.0 - lambda) * similarity_scale * max_sim[i];
                 let better = match best {
                     None => true,
                     Some((_, b)) => mmr > best_mmr
@@ -10888,6 +10896,61 @@ impl EstateCoordinator {
     ///   - All-zero column: slots remain 0.0 (absent signal contributes nothing).
     ///   - Non-zero uniform column: slots set to 0.5 (measured but informationally flat).
     ///   - Varying column: standard min-max scale to [0, 1].
+    /// Name the scoring columns whose signal store is EMPTY for this recall
+    /// (COL-1 automatic rule): such a column is excluded from the weighted score
+    /// and its budget redistributed (`RecallSignalBudget`), instead of standing
+    /// as a zero column that silently shifts weight onto the fixed agreement
+    /// bonus. Read from the NORMALISED columns: `normalize_column` leaves an
+    /// all-zero column at 0.0 and lifts a non-zero uniform column to 0.5, so
+    /// "every slot reads 0" is exactly "no measurement was taken".
+    ///   - FieldFit and Matrix are absent when no MatrixTier is registered or the
+    ///     tier produced no measurement for any candidate (no matrix rows behind
+    ///     the query coords).
+    ///   - Graph is absent when no candidate has a graph score (no cache, or no
+    ///     tunnels behind the frontier); Preference when no candidate carries a
+    ///     preference mark.
+    ///   - Locus is absent when the request carries query text: the column is the
+    ///     candidate's RANK in the frame's filedAt DESC slice and the pool is
+    ///     frame-filtered, so for a text query it measures recency, not relevance
+    ///     (COL-1). Without query text the recency rank IS the requested ordering
+    ///     (a structured browse), so the column stays.
+    /// bm25, vector and the agreement bonus are never absent by this rule: they
+    /// are supply lanes, not cold-path signal stores.
+    /// Mirrors Swift `RecallDirector.absentSignalColumns(in:hasMatrix:hasQueryText:)`.
+    fn absent_signal_columns(
+        has_matrix: bool,
+        has_query_text: bool,
+        field_fit: &[f32],
+        co_occur: &[f32],
+        temporal: &[f32],
+        graph: &[f32],
+        preference: &[f32],
+        count: usize,
+    ) -> std::collections::HashSet<crate::recall_signal_budget::SignalColumn> {
+        use crate::recall_signal_budget::SignalColumn;
+        let mut absent = std::collections::HashSet::new();
+        if count == 0 {
+            return absent;
+        }
+        let all_zero = |col: &[f32]| col.iter().take(count).all(|v| *v == 0.0);
+        if has_query_text {
+            absent.insert(SignalColumn::Locus);
+        }
+        if !has_matrix || all_zero(field_fit) {
+            absent.insert(SignalColumn::FieldFit);
+        }
+        if !has_matrix || (all_zero(co_occur) && all_zero(temporal)) {
+            absent.insert(SignalColumn::Matrix);
+        }
+        if all_zero(graph) {
+            absent.insert(SignalColumn::Graph);
+        }
+        if all_zero(preference) {
+            absent.insert(SignalColumn::Preference);
+        }
+        absent
+    }
+
     fn normalize_column(col: &mut Vec<f32>, count: usize) {
         if count == 0 { return; }
         for v in &mut col[..count] {
@@ -11884,6 +11947,11 @@ impl EstateCoordinator {
         //         field_fit, co_occurrence, temporal, graph, preference).
         #[allow(clippy::type_complexity)]
         let fused_scored: Vec<(String, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>;
+        // `budget.agreement × agreementBonus` from the UnionBest + MatrixAware
+        // branch, for the explainer's `agreement=` token (the bonus that hit
+        // earned is this × popcount(sourceMask) / 5). Every other path adds no
+        // bonus and reports 0 — the Swift `agreementEarned` twin.
+        let mut explain_agreement_scale: f32 = 0.0;
 
         let union_profile: Option<RecallUnionProfile>;
 
@@ -11957,7 +12025,15 @@ impl EstateCoordinator {
             let mut col_graph:        Vec<f32> = vec![0.0; count];
             let mut col_preference:   Vec<f32> = vec![0.0; count];
 
-            if let Some(ref tier) = matrix_tier {
+            // The top-locus anchor is only a QUERY signature when the frame carries
+            // bitmap predicates (the top locus row then satisfies the query's own
+            // field values). Without predicates the locus lane is the estate in
+            // filedAt DESC order and its first row is merely the newest drawer, so
+            // anchoring on it scores co-occurrence with an arbitrary drawer (COL-1).
+            // With no anchor the columns stay 0 and step 8.5 excludes them as empty.
+            // Mirrors Swift RecallDirector step 5.6.
+            let has_matrix_anchor = !request.frame.filter_chain.is_empty();
+            if let (Some(ref tier), true) = (&matrix_tier, has_matrix_anchor) {
                 // Derive query coords from the first (highest-ranked) locus candidate.
                 // If the locus lane has no candidates, query_coords is empty and all
                 // matrix signals remain 0.0 — correct behaviour (no reference point).
@@ -12182,11 +12258,41 @@ impl EstateCoordinator {
             let has_query_text = request.query_text.as_deref().map_or(false, |t| !t.is_empty());
             let weights = RecallWeights::adaptive(has_bitmap_predicates, has_query_text, &profile);
 
+            // Step 8.5 — resolve the per-column budget (COL-1). A `signal:*`
+            // key at 0 EXCLUDES a whole scoring column and its adaptive budget
+            // is redistributed over the columns that remain, so the included
+            // columns keep summing to the optimizer's total instead of leaving
+            // a zero column that inflates the fixed agreement bonus. Neutral
+            // keys and no absent column resolve to a budget byte-identical to
+            // `weights` (see recall_signal_budget). A column whose signal store
+            // is EMPTY for this recall is excluded automatically (COL-1 Part C,
+            // Bob's rule): absence is read from the normalised columns, so it
+            // is shape-independent and needs no new cache protocol requirement.
+            // Mirrors Swift RecallDirector step 8.5 / `absentSignalColumns`.
+            let shape_signal_weight = |key: &str| -> f32 {
+                match &request.recall_shape {
+                    Some(s) => s.weight(key),
+                    None => 1.0,
+                }
+            };
+            let absent = Self::absent_signal_columns(
+                matrix_tier.is_some(),
+                request.query_text.as_deref().map_or(false, |t| !t.is_empty()),
+                &col_field_fit, &col_co_occur, &col_temporal, &col_graph, &col_preference,
+                count,
+            );
+            let budget = crate::recall_signal_budget::RecallSignalBudget::resolve(
+                &weights,
+                shape_signal_weight,
+                &absent,
+            );
+
             // Compute final score per candidate (step 9 — matrixAware formula).
-            // Formula mirrors Swift RecallDirector step 9:
+            // Formula mirrors Swift RecallDirector step 9 (weights read from the
+            // resolved `budget`, which equals `weights` unless a column is excluded):
             //   matrixSignal = (coOccurrence + temporal) * 0.5
             //   dense shares the vector weight budget.
-            //   agreementBonus = 0.05 * popcount(sourceMask) / 4.
+            //   agreementBonus = budget.agreement * 0.05 * popcount(sourceMask) / 5.
             //
             // Fixed-lane RecallShape steering (6b-modifiers-core-2): each retrieval
             // lane's column contribution is scaled by its signed shape weight ON TOP
@@ -12234,13 +12340,14 @@ impl EstateCoordinator {
             // nil/all-ones score is byte-identical (no float reassociation).
             let matrix_neutral = sh_co_occur == 1.0 && sh_temporal == 1.0;
             let agreement_bonus: f32 = 0.05;
+            explain_agreement_scale = budget.agreement * agreement_bonus;
             for (i, v) in col_final.iter_mut().take(count).enumerate() {
                 let matrix_term = if matrix_neutral {
                     let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5;
-                    weights.matrix * matrix_signal
+                    budget.matrix * matrix_signal
                 } else {
-                    sh_co_occur  * weights.matrix * 0.5 * col_co_occur[i]
-                        + sh_temporal * weights.matrix * 0.5 * col_temporal[i]
+                    sh_co_occur  * budget.matrix * 0.5 * col_co_occur[i]
+                        + sh_temporal * budget.matrix * 0.5 * col_temporal[i]
                 };
                 // DISCRIMINATION DISCOUNT (Item 3, MISSION_11X_RECALL_GAP_01):
                 // `dense_discrimination_factor` ∈ [0, 1] (computed above from the
@@ -12257,20 +12364,22 @@ impl EstateCoordinator {
                 // The Hamming column does not carry the saturation discount (structural
                 // fingerprints are contrastive by design). dense_discrimination_factor applies
                 // to col_dense only, not col_vector — parity with Swift.
-                *v = sh_locus   * weights.locus              * col_locus[i]
-                   + sh_bm25    * weights.bm25               * col_bm25[i]
-                   + sh_hamming * weights.vector * 0.5       * col_vector[i]
-                   + dense_discrimination_factor * sh_dense * weights.vector * 0.5 * col_dense[i]
-                   + sh_field_fit * weights.field_fit * col_field_fit[i]
+                *v = sh_locus   * budget.locus               * col_locus[i]
+                   + sh_bm25    * budget.bm25                * col_bm25[i]
+                   + sh_hamming * budget.vector * 0.5        * col_vector[i]
+                   + dense_discrimination_factor * sh_dense * budget.vector * 0.5 * col_dense[i]
+                   + sh_field_fit * budget.field_fit * col_field_fit[i]
                    + matrix_term
                    // graph + preference share the `weights.graph` budget slice, exactly
-                   // as Swift (RecallDirector step 9: both columns multiply weights.graph).
-                   + sh_graph      * weights.graph * col_graph[i]
-                   + sh_preference * weights.graph * col_preference[i]
+                   // as Swift (RecallDirector step 9: budget.preference is resolved from
+                   // weights.graph).
+                   + sh_graph      * budget.graph      * col_graph[i]
+                   + sh_preference * budget.preference * col_preference[i]
                    // Denominator 5.0: five primary candidate-supply bits
                    // (locus, locusGraph, bm25, vectorHamming, vectorDense).
-                   // Mirrors Swift RecallDirector agreementBonus / 5.0.
-                   + agreement_bonus * source_masks[i].count_ones() as f32 / 5.0;
+                   // Mirrors Swift RecallDirector agreementBonus / 5.0; budget.agreement
+                   // is 1.0 unless `signal:agreement` excludes or scales the bonus.
+                   + budget.agreement * agreement_bonus * source_masks[i].count_ones() as f32 / 5.0;
             }
 
             // Steps 9.5 and 10 — post-hydration shingle MMR and windowed tie
@@ -12289,9 +12398,11 @@ impl EstateCoordinator {
             let subjects: Vec<&str> = id_refs.iter().map(|id| {
                 drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
             }).collect();
+            // ρ = budget.redistribution keeps the similarity term on the
+            // redistributed relevance scale (COL-2; see union_best_mmr_select).
             let selected = Self::union_best_mmr_select(
                 &col_final, &source_masks, &admissible, &content_key, &shingles,
-                &subjects, lambda, request.limit, &mut degraded_stages);
+                &subjects, lambda, budget.redistribution, request.limit, &mut degraded_stages);
 
             fused_scored = selected.into_iter().map(|i| {
                 let id = ordered_ids[i].clone();
@@ -12568,9 +12679,12 @@ impl EstateCoordinator {
                 let subjects: Vec<&str> = id_refs.iter().map(|id| {
                     drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
                 }).collect();
+                // No budget touches the normalised fused score, so the
+                // similarity term runs at scale 1.0 (Swift: similarityScale is
+                // 1.0 for every scoring other than .matrixAware).
                 let selected = Self::union_best_mmr_select(
                     &col_final_norm, &source_masks, &admissible, &content_key, &shingles,
-                    &subjects, lambda, request.limit, &mut degraded_stages);
+                    &subjects, lambda, 1.0, request.limit, &mut degraded_stages);
                 fused_scored = selected.into_iter().map(|i| scored[i].clone()).collect();
             } else {
                 // Presentation sort: (score DESC, subject ASC). subject is content-derived
@@ -12660,6 +12774,9 @@ impl EstateCoordinator {
                 // preference columns are scoring signals, not suppliers; they travel
                 // in the score vector and in the explanation's `score:` line, never
                 // in `sources`. An empty set falls back to locusBitmap in both ports.
+                // popcount(sourceMask) for the agreement token, read BEFORE the
+                // empty-set fallback below (a hit with no supply bit earned 0).
+                let supply_bits = sources.len() as f32;
                 if sources.is_empty() { sources.push(RecallEvidencePath::LocusBitmap); }
                 let score = RecallScoreVector {
                     locus: locus_s,
@@ -12687,6 +12804,7 @@ impl EstateCoordinator {
                         request.query_text.is_some(),
                         &plan,
                         request.scoring,
+                        explain_agreement_scale * supply_bits / 5.0,
                     )
                 } else {
                     let mut names: Vec<String> =
