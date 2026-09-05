@@ -811,8 +811,8 @@ impl VectorStore {
     /// - `sidecar_path`: Optional path to a `.vec` packed binary sidecar.
     ///   When supplied, the resident array is loaded from this file on first
     ///   use (one OS read, amortised) and kept in sync on every write. A stale
-    ///   or absent sidecar is detected by comparing its slot count to the
-    ///   table binary-row count; if they disagree the array is rebuilt and the
+    ///   or absent sidecar is detected by comparing its live-slot count to the
+    ///   table's serving-generation binary-row count; if they disagree the array is rebuilt and the
     ///   sidecar is rewritten. When `None`, the array is built from the table
     ///   on first use and held in memory only.
     ///
@@ -3053,8 +3053,9 @@ impl VectorStore {
     /// `select_index` is called to initialise the threshold routing.
     ///
     /// Build strategy (in priority order):
-    ///   1. Sidecar present and its count matches the table binary-row count:
-    ///      load from sidecar (one OS read, amortised).
+    ///   1. Sidecar present and its live count matches the table's
+    ///      serving-generation binary-row count: load from sidecar (one OS
+    ///      read, amortised).
     ///   2. Otherwise: fetch all binary rows once from the table (source of
     ///      truth), build the resident array, rewrite the sidecar if present.
     fn ensure_index_built_locked(
@@ -3091,8 +3092,10 @@ impl VectorStore {
             // Compare live-vs-live: snap.live_count() is the number of
             // non-tombstoned slots in the sidecar (written to the header
             // at flush time and recomputed here from the bitmap).
-            // table_count is the number of live rows in the `vectors` table.
-            // They agree iff the sidecar is up-to-date (C5 fix: using
+            // table_count is the number of serving-generation binary rows in
+            // the `vectors` table — the same row set fetch_all_binary_records
+            // builds the sidecar from, so superseded rows pending reclaim do
+            // not count. They agree iff the sidecar is up-to-date (C5 fix: using
             // snap.count here counts tombstoned slots and spuriously
             // triggers a full rebuild after every delete).
             if snap.live_count() == table_count {
