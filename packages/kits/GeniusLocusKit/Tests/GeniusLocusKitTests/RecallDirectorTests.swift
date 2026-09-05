@@ -1219,7 +1219,8 @@ struct RecallDirector004Tests {
         let plan = RecallPlan(effectiveMode: .unionBest, frontierK: 64, weights: .uniform)
 
         let lines = explainer.explain(hit: hit, sketch: sketch,
-                                      plan: plan, scoring: .matrixAware)
+                                      plan: plan, scoring: .matrixAware,
+                                      agreement: 0.02)
 
         // Must return exactly 4 lines per the spec output format.
         #expect(lines.count == 4, "explain must return 4 lines, got \(lines.count)")
@@ -1230,6 +1231,10 @@ struct RecallDirector004Tests {
         // Score line must mention non-zero components.
         #expect(lines[1].contains("locus="),    "score line must include locus component")
         #expect(lines[1].contains("bm25="),     "score line must include bm25 component")
+        // COL-1: every column renders, zero or not, plus the agreement bonus and the final.
+        #expect(lines[1].contains("temporal=0.00"), "score line must render zero columns")
+        #expect(lines[1].contains("agreement=0.02"), "score line must include the agreement bonus")
+        #expect(lines[1].contains("final=0.780"), "score line must include the fused final")
         #expect(lines[1].contains("fieldFit="), "score line must include fieldFit component")
         // Mode line must include both mode and scoring.
         #expect(lines[2].contains("unionBest"),   "mode line must include effectiveMode")
