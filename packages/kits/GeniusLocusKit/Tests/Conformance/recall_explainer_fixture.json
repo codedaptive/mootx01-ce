@@ -1,0 +1,47 @@
+{
+  "description": "Shared cross-port vector for the RecallExplainer lines that moot_memory_search explain:true renders under each candidate row. Each case gives a hit's sources and score columns (f32), whether the request carried query text, the plan's effective mode and the request scoring, and the exact lines both ports must produce. Asserted by RecallExplainerCrossPortFixtureTests.swift and rust/tests/recall_explainer_parity.rs.",
+  "cases": [
+    {
+      "name": "bm25 and locus with a dense vote, matrixAware",
+      "sources": ["locusBitmap", "corpusBM25"],
+      "score": {"locus": 0.84, "bm25": 0.69, "vector": 0, "dense": 0.57, "fieldFit": 0, "coOccurrence": 0, "temporal": 0, "graph": 0, "preference": 0, "final": 0.33},
+      "hasQueryText": true,
+      "mode": "unionBest",
+      "scoring": "matrixAware",
+      "expected": [
+        "sources: corpusBM25, locusBitmap",
+        "score: locus=0.84 bm25=0.69 dense=0.57",
+        "mode: unionBest | scoring: matrixAware",
+        "why: content query; BM25 and vector weighted high; dense float cosine match"
+      ]
+    },
+    {
+      "name": "bitmap filter match with no lane columns",
+      "sources": [],
+      "score": {"locus": 0, "bm25": 0, "vector": 0, "dense": 0, "fieldFit": 0, "coOccurrence": 0, "temporal": 0, "graph": 0, "preference": 0, "final": 0.33},
+      "hasQueryText": false,
+      "mode": "unionBest",
+      "scoring": "rrf",
+      "expected": [
+        "sources: none",
+        "score: final=0.33",
+        "mode: unionBest | scoring: rrf",
+        "why: bitmap filter match"
+      ]
+    },
+    {
+      "name": "every column lit, three supply lanes, raw scoring",
+      "sources": ["vectorHamming", "locusGraph", "locusBitmap"],
+      "score": {"locus": 0.5, "bm25": 0, "vector": 0.25, "dense": 0, "fieldFit": 0.44, "coOccurrence": 0.3, "temporal": 0.2, "graph": 0.1, "preference": 0.05, "final": 0.4},
+      "hasQueryText": true,
+      "mode": "unionBest",
+      "scoring": "raw",
+      "expected": [
+        "sources: locusBitmap, locusGraph, vectorHamming",
+        "score: locus=0.50 vector=0.25 fieldFit=0.44 coOccurrence=0.30 temporal=0.20 graph=0.10 preference=0.05",
+        "mode: unionBest | scoring: raw",
+        "why: content query; BM25 and vector weighted high; MatrixO cluster preserved; temporal pattern matched; graph coherence signal active"
+      ]
+    }
+  ]
+}

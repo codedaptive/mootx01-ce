@@ -1292,12 +1292,11 @@ fn memory_search_with_scoring_arg_rrf_succeeds() {
         text.contains("found 1 candidate memory"),
         "must find the filed memory; got: {text}"
     );
-    // Per-row score annotation was removed for Swift output parity.
-    // Swift runMemorySearch emits scores only via the discrimination summary line,
-    // not per-row. Verify scored recall ran via recall_provenance line instead.
+    // The scored path is proven by the S1 row's structured `score` field,
+    // the same evidence the Swift reply carries (no per-row "(score:" text).
     assert!(
-        text.contains("recall_provenance:"),
-        "recall_scored output must include recall_provenance line; got: {text}"
+        result["structuredContent"]["results"][0]["score"].is_number(),
+        "scored recall must carry a structured score field; got: {result:?}"
     );
     assert!(
         !text.contains("(score:"),
@@ -1325,10 +1324,10 @@ fn memory_search_with_scoring_arg_matrix_aware_succeeds() {
         text.contains("found 1 candidate memory"),
         "must find the filed memory; got: {text}"
     );
-    // Per-row score annotation removed for Swift parity. Verify via recall_provenance.
+    // The scored path is proven by the S1 row's structured `score` field.
     assert!(
-        text.contains("recall_provenance:"),
-        "recall_scored output must include recall_provenance line; got: {text}"
+        result["structuredContent"]["results"][0]["score"].is_number(),
+        "scored recall must carry a structured score field; got: {result:?}"
     );
     assert!(
         !text.contains("(score:"),
@@ -1359,8 +1358,8 @@ fn memory_search_with_scoring_arg_discriminative_succeeds() {
         "must find the filed memory; got: {text}"
     );
     assert!(
-        text.contains("recall_provenance:"),
-        "recall_scored output must include recall_provenance line; got: {text}"
+        result["structuredContent"]["results"][0]["score"].is_number(),
+        "scored recall must carry a structured score field; got: {result:?}"
     );
     assert!(
         !text.contains("(score:"),
@@ -1501,11 +1500,10 @@ fn memory_search_ordering_by_relevance_desc_succeeds_and_finds_memory() {
         text.contains("found 1 candidate memory"),
         "byRelevanceDesc must find the filed memory; got: {text}"
     );
-    // Per-row score annotation removed for Swift parity. Verify the scored path
-    // ran via the recall_provenance line (always present in recall_scored output).
+    // The scored path is proven by the S1 row's structured `score` field.
     assert!(
-        text.contains("recall_provenance:"),
-        "byRelevanceDesc must route through recall_scored (recall_provenance expected); got: {text}"
+        result["structuredContent"]["results"][0]["score"].is_number(),
+        "byRelevanceDesc must route through recall_scored (structured score expected); got: {result:?}"
     );
     assert!(
         !text.contains("(score:"),
@@ -11082,12 +11080,15 @@ fn memory_search_door_guess_with_provisioned_config_uses_manifest_scoring() {
     );
     // The provisioned rrf scoring on unionBest mode degrades to the raw
     // lane-normalised score (unionBest has no distinct equal-weight RRF
-    // fusion), recording "unionBest.rrf" in degraded_stages. This proves
-    // the provisioned scoring — not the matrixAware default — was used.
+    // fusion), recording "unionBest.rrf" in degraded_stages, which the S1
+    // composer renders as the `retrieval: degraded` control line (the stage
+    // names themselves are log-side). This proves the provisioned scoring,
+    // not the matrixAware default, was used. Same assertion as the Swift
+    // DoorDispatchTests twin.
     let text = content_text(&result);
     assert!(
-        text.contains("degraded_stages:[unionBest.rrf]"),
-        "provisioned rrf scoring on unionBest must record unionBest.rrf degraded stage \
+        text.contains("retrieval: degraded"),
+        "provisioned rrf scoring on unionBest must surface the degraded-retrieval line \
          (proving door=guess read the provisioned config, not the default); text: {text}"
     );
 }
@@ -11144,8 +11145,8 @@ fn memory_search_door_raw_succeeds() {
 // rrf on unionBest mode has no distinct equal-weight RRF fusion and records
 // "unionBest.rrf" in degraded_stages. matrixAware on unionBest runs the full
 // matrix pipeline with no degradation. The response text therefore differs:
-//   door wins (rrf)   → "degraded_stages:[unionBest.rrf]"
-//   scoring wins (matrixAware) → "degraded_stages:none"
+//   door wins (rrf)   → the `retrieval: degraded` control line (unionBest.rrf stage)
+//   scoring wins (matrixAware) → no degradation line
 // This discriminating assertion proves which path ran — not just that the
 // call succeeded.
 #[test]
@@ -11171,14 +11172,15 @@ fn memory_search_door_overrides_scoring_when_both_present() {
         is_success(&result),
         "door takes precedence over scoring; must succeed; got: {result:?}"
     );
-    // Discriminating assertion: "unionBest.rrf" in the response text proves
-    // door=rrf won over scoring=matrixAware. If scoring won instead, the
-    // matrixAware full-pipeline path would record no scoring fallback and
-    // the text would contain "degraded_stages:none" instead.
+    // Discriminating assertion: the `retrieval: degraded` control line proves
+    // door=rrf won over scoring=matrixAware (unionBest.rrf is the recorded
+    // stage). If scoring won instead, the matrixAware full-pipeline path
+    // would record no scoring fallback and render no degradation line.
+    // Same assertion as the Swift DoorDispatchTests twin.
     let text = content_text(&result);
     assert!(
-        text.contains("degraded_stages:[unionBest.rrf]"),
-        "door=rrf must win over scoring=matrixAware — response must contain \
-         degraded_stages:[unionBest.rrf]; text: {text}"
+        text.contains("retrieval: degraded"),
+        "door=rrf must win over scoring=matrixAware — response must show degraded \
+         retrieval; text: {text}"
     );
 }
