@@ -777,7 +777,7 @@ public actor VectorStore {
     ///     first use (one OS read via mmap, amortised) and kept in sync on
     ///     every write. A stale or absent sidecar is detected by comparing
     ///     its live-slot count (sidecar header `live_count` field) to the
-    ///     table binary-row count; if they disagree the array is rebuilt
+    ///     table's serving-generation binary-row count; if they disagree the array is rebuilt
     ///     from the table and the sidecar is rewritten (C5 fix: comparing
     ///     live-vs-live avoids spurious rebuilds after tombstone operations).
     ///     When nil, the array is built from the table on first use and held
@@ -3685,8 +3685,9 @@ public actor VectorStore {
     /// Ensure both DenseIndexes are populated. Idempotent — no-op once built.
     ///
     /// Build strategy (in priority order):
-    ///   1. Sidecar present and its live_count matches the table binary-row count:
-    ///      load from sidecar (one OS mmap read, no per-row SQLite fetch).
+    ///   1. Sidecar present and its live_count matches the table's
+    ///      serving-generation binary-row count: load from sidecar (one OS
+    ///      mmap read, no per-row SQLite fetch).
     ///   2. Otherwise: fetch all binary rows once from the table (the
     ///      source of truth), build the resident array, rewrite the sidecar
     ///      if present. This one-time cost is amortised across all queries.
@@ -3709,9 +3710,11 @@ public actor VectorStore {
 
             // Compare live-vs-live: sidecar.liveCount is the number of
             // non-tombstoned slots written to the header at flush time.
-            // tableCount is the number of live rows in the `vectors` table.
-            // They agree iff the sidecar is up-to-date (C5 fix: using
-            // snap.count here counts tombstoned slots and spuriously
+            // tableCount is the number of serving-generation binary rows in
+            // the `vectors` table — the same row set _fetchAllBinaryRecords
+            // builds the sidecar from, so superseded rows pending reclaim do
+            // not count. They agree iff the sidecar is up-to-date (C5 fix:
+            // using snap.count here counts tombstoned slots and spuriously
             // triggers a full rebuild after every delete).
             if snap.liveCount == tableCount {
                 // Sidecar and table agree on live records — use it directly.
@@ -4010,15 +4013,27 @@ public actor VectorStore {
         // No-op when already on the correct index.
     }
 
-    /// Count binary rows in the `vectors` table.
+    /// Count serving-generation binary rows in the `vectors` table.
     ///
-    /// Used by _ensureIndexBuilt to detect a stale sidecar. One table
-    /// query with no per-row decode — just the count.
+    /// Used by _ensureIndexBuilt to detect a stale sidecar. The count applies
+    /// the SAME serving-generation predicate as _fetchAllBinaryRecords: the
+    /// sidecar is built from serving-generation rows only, so the freshness
+    /// comparison must count that same set (SPEC B-3a). Counting every binary
+    /// row would include superseded generations awaiting reclaim
+    /// (shadow_state 'pending-reclaim') and report the sidecar stale on every
+    /// open of an estate that has completed a shadow swap — a full table read,
+    /// resident-array rebuild, and sidecar rewrite per process start. The Rust
+    /// port counts with the same predicate (`binary_row_count(&gen_pred)`).
+    /// One table query with no per-row decode — just the count.
     private func _binaryRowCount() async throws -> UInt32 {
+        let genFilter = try await _servingGenPredicate()
         let rows = try await storage.rowStore.query(
             table: "vectors",
-            where: .eq(Column(table: "vectors", name: "kind"),
-                       .int(Int64(VectorKind.binary.rawValue))),
+            where: .and([
+                .eq(Column(table: "vectors", name: "kind"),
+                    .int(Int64(VectorKind.binary.rawValue))),
+                genFilter
+            ]),
             orderBy: [],
             limit: nil,
             offset: nil
