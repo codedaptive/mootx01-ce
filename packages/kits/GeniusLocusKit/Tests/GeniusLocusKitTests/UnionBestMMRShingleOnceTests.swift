@@ -57,15 +57,29 @@ struct UnionBestMMRShingleOnceTests {
 
     static let query = "quarterly budget review meeting notes finance team"
 
-    /// Pinned order (by body text) captured from the pre-change build for
-    /// `limit: 2` at `hydrationLevel: .full`, `.matrixAware` scoring. Only
-    /// matrixAware is pinned: under `.rrf` every candidate ties at the
-    /// presentation cut, the 4N widening exhausts the pool, and the whole tie
-    /// group is returned, so the MMR term cannot move membership there.
+    /// Pinned order (by body text) for `limit: 2` at `hydrationLevel: .full`,
+    /// `.matrixAware` scoring. Only matrixAware is pinned: under `.rrf` every
+    /// candidate ties at the presentation cut, the 4N widening exhausts the
+    /// pool, and the whole tie group is returned, so the MMR term cannot move
+    /// membership there.
+    ///
+    /// The order captured before COL-1 was [body 0, body 8]: body 8 ("team
+    /// meeting notes ... new office lease") is the LAST capture, and the locus
+    /// column (rank in the `filedAt DESC` slice, 0.3/1.3 of the budget under
+    /// the `.unconfirmed` predicate) paid it for being newest. With the locus
+    /// column excluded from text-query scoring (COL-1) and the MMR similarity
+    /// term scaled by the step 8.5 redistribution factor ρ (COL-2) the working
+    /// view is the one the MMR selects on the pre-exclusion score scale: the
+    /// three near-duplicates stay out and body 6 ("quarterly finance team
+    /// notes: budget review meeting covering software licences"), the diverse
+    /// body with the highest bm25 + vector relevance, holds the second slot.
+    /// Two mutation controls: a build that still scores the recency rank
+    /// returns body 8 here; a build that leaves the similarity term unscaled
+    /// (ρ = 2.67 on this shape) returns body 1, the first near-duplicate.
     static let pinnedOrder: [GLKRecallScoring: [String]] = [
         .matrixAware: [
             "quarterly budget review meeting notes finance team",
-            "team meeting notes quarterly budget review by finance on the new office lease",
+            "quarterly finance team notes: budget review meeting covering software licences",
         ],
     ]
 

@@ -25,6 +25,7 @@ struct RecallExplainerCrossPortFixtureTests {
         let sources: [String]
         let score: FixtureScore
         let hasQueryText: Bool
+        let agreement: Float
         let mode: String
         let scoring: String
         let expected: [String]
@@ -73,7 +74,8 @@ struct RecallExplainerCrossPortFixtureTests {
                 queryEngram: nil,
                 queryFingerprint: nil,
                 latticeAnchor: nil)
-            let lines = RecallExplainer().explain(hit: hit, sketch: sketch, plan: plan, scoring: scoring)
+            let lines = RecallExplainer().explain(hit: hit, sketch: sketch, plan: plan,
+                                                  scoring: scoring, agreement: c.agreement)
             #expect(lines == c.expected, "case '\(c.name)': got \(lines)")
         }
     }

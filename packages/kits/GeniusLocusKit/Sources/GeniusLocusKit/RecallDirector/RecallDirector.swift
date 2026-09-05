@@ -1509,10 +1509,14 @@ public extension GeniusLocusKit {
     /// 6. Normalise score columns to [0, 1].
     /// 7. Compute a `RecallUnionProfile`.
     /// 8. Compute adaptive weights from sketch + profile.
+    /// 8.5. Resolve the per-column budget (`RecallSignalBudget`): `signal:*`
+    ///    exclusions and empty-store columns drop out and their budget is
+    ///    redistributed over the remaining columns.
     /// 9. Score each candidate: weighted sum of normalised columns
-    ///    + signal-agreement bonus (0.05 × popcount(sourceMask) / 3).
+    ///    + signal-agreement bonus (0.05 × popcount(sourceMask) / 5).
     /// 10. Greedy MMR (λ adaptive from `weights.diversity`, range 0.5–0.9): iteratively
-    ///    pick the candidate that maximises λ·relevance − (1−λ)·maxSimilarityToSelected,
+    ///    pick the candidate that maximises λ·relevance − (1−λ)·ρ·maxSimilarityToSelected
+    ///    (ρ: the step 8.5 redistribution factor under `.matrixAware`, 1.0 otherwise),
     ///    where similarity uses post-hydration content shingle overlap (3-gram Jaccard)
     ///    when drawer content is non-empty, and sourceMask bit-overlap Jaccard when
     ///    content is stripped (bitmapOnly hydration) or absent.
@@ -2303,8 +2307,17 @@ public extension GeniusLocusKit {
         // Populates fieldFit, coOccurrence, and temporal buffer columns.
         // queryCoords are derived from the top locus candidate — the
         // highest-ranked bitmap hit sets the reference field-value signature
-        // that all other candidates are scored against.
-        if request.scoring == .matrixAware, let matrix = matrixTiers[handle] {
+        // that all other candidates are scored against. That anchor is only a
+        // QUERY signature when the frame carries bitmap predicates: the top
+        // locus row then satisfies the query's own field values. Without
+        // predicates the locus lane is the estate in `filedAt DESC` order and
+        // its first row is merely the newest drawer, so anchoring on it scores
+        // every candidate's co-occurrence with an arbitrary drawer (COL-1: on a
+        // 13,817-drawer import this measured as noise that displaced BM25 and
+        // dense evidence). With no anchor the columns stay 0 and step 8.5
+        // excludes them as empty, redistributing their budget.
+        if request.scoring == .matrixAware, let matrix = matrixTiers[handle],
+           !sketch.bitmapPredicates.isEmpty {
             let scorer = RecallMatrixScorer()
             let queryCoords: [MatrixValueCoord] = locusSlice.first.map {
                 matrixCoordsFor(drawer: $0)
@@ -2417,12 +2430,37 @@ public extension GeniusLocusKit {
         // signal contributions).
         let weights = RecallWeights.adaptive(for: sketch, profile: profile)
 
+        // Step 8.5 — resolve the per-column budget (COL-1). A `signal:*` key at
+        // 0 EXCLUDES a whole scoring column and its adaptive budget is
+        // redistributed proportionally over the columns that remain, so the
+        // included columns keep summing to the optimizer's total instead of
+        // leaving a zero column that silently inflates the fixed agreement and
+        // pinned bonuses. Neutral keys and no absent column resolve to a budget
+        // byte-identical to `weights` (see RecallSignalBudget). A column whose
+        // signal store is EMPTY for this recall is excluded automatically
+        // (COL-1 Part C, Bob's rule): absence is read from the normalised
+        // columns, so it is shape-independent and needs no new cache protocol
+        // requirement. See `absentSignalColumns(in:hasMatrix:)`.
+        let budget = RecallSignalBudget.resolve(
+            weights: weights,
+            signalWeight: laneWeight,
+            absentColumns: absentSignalColumns(
+                in: buffer,
+                hasMatrix: matrixTiers[handle] != nil,
+                hasQueryText: sketch.queryText?.isEmpty == false))
+        if !budget.excluded.isEmpty {
+            Self.recallLog.debug(
+                "RecallDirector unionBest: excluded scoring columns \(budget.excluded.map(\.rawValue).sorted(), privacy: .public)")
+        }
+
         // Step 9 — compute final score per candidate.
         //
         // .matrixAware — the full existing weighted pipeline IS the matrixAware
-        //   path. Active weights: locus, bm25, vector (Hamming AND dense, sharing
-        //   the vector budget), fieldFit, graph, preference, matrix (coOccurrence
-        //   + temporal combined). agreementBonus = 0.05 × popcount(sourceMask) / 5
+        //   path. Active weights (read from the resolved `budget`, which equals
+        //   `weights` unless a column is excluded): locus, bm25, vector (Hamming
+        //   AND dense, sharing the vector budget), fieldFit, graph, preference,
+        //   matrix (coOccurrence + temporal combined).
+        //   agreementBonus = budget.agreement × 0.05 × popcount(sourceMask) / 5
         //   (normalised to max 0.05 over 5 lane source bits: locus, locusGraph,
         //   bm25, vectorHamming, vectorDense).
         //   RecallWeights has no dedicated preference field; preference is scored
@@ -2503,13 +2541,13 @@ public extension GeniusLocusKit {
                     // Pre-steer combined matrix signal — both signals share the matrix
                     // budget slice at equal weight without over-weighting matrix overall.
                     let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
-                    matrixTerm = weights.matrix * matrixSignal
+                    matrixTerm = budget.matrix * matrixSignal
                 } else {
                     // Steered: each matrix signal carries HALF the matrix budget and is
                     // scaled independently by its own RecallShape key.
                     matrixTerm =
-                        shapeCoOccurrence * weights.matrix * 0.5 * buffer.coOccurrence[i] +
-                        shapeTemporal     * weights.matrix * 0.5 * buffer.temporal[i]
+                        shapeCoOccurrence * budget.matrix * 0.5 * buffer.coOccurrence[i] +
+                        shapeTemporal     * budget.matrix * 0.5 * buffer.temporal[i]
                 }
                 // Budget split: the structural fingerprint (Lane B,
                 // "distillation-features-v1", buffer.vector) and the dense float
@@ -2540,17 +2578,19 @@ public extension GeniusLocusKit {
                     drawerIndex[buffer.ids[i]]?.hasFeatureFlag(.isPinned) == true
                         ? agreementBonus : 0
                 scores[i] =
-                    shapeLocus      * weights.locus          * buffer.locus[i] +
-                    shapeBM25       * weights.bm25           * buffer.bm25[i] +
-                    shapeHamming    * weights.vector * 0.5   * buffer.vector[i] +
-                    denseDiscriminationFactor * shapeDense * weights.vector * 0.5 * buffer.dense[i] +
-                    shapeFieldFit   * weights.fieldFit       * buffer.fieldFit[i] +
+                    shapeLocus      * budget.locus           * buffer.locus[i] +
+                    shapeBM25       * budget.bm25            * buffer.bm25[i] +
+                    shapeHamming    * budget.vector * 0.5    * buffer.vector[i] +
+                    denseDiscriminationFactor * shapeDense * budget.vector * 0.5 * buffer.dense[i] +
+                    shapeFieldFit   * budget.fieldFit        * buffer.fieldFit[i] +
                     matrixTerm +
-                    shapeGraph      * weights.graph          * buffer.graph[i] +
-                    shapePreference * weights.graph          * buffer.preference[i] +
+                    shapeGraph      * budget.graph           * buffer.graph[i] +
+                    shapePreference * budget.preference      * buffer.preference[i] +
                     // Denominator 5.0: five primary candidate-supply bits
                     // (locus, locusGraph, bm25, vectorHamming, vectorDense).
-                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 5.0 +
+                    // budget.agreement is 1.0 unless `signal:agreement` excludes
+                    // or scales the bonus.
+                    budget.agreement * agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 5.0 +
                     pinnedBonus
             }
         case .discriminative:
@@ -2664,6 +2704,20 @@ public extension GeniusLocusKit {
         // and any already-selected candidate. Updated incrementally after each
         // selection to avoid O(n²·k) full recomputation.
         let lambda: Float = min(0.9, max(0.5, 0.7 - (weights.diversity - 0.1) * 0.5))
+        // The similarity term is kept on the relevance term's scale. Step 8.5
+        // multiplies every included column's budget by ρ = total / includedTotal
+        // (1.0 when nothing is excluded), so a `.matrixAware` score is ρ× the
+        // score the same columns produced before exclusion, while maxSim is a
+        // Jaccard in [0, 1] whatever the budget did. Left unscaled, the penalty
+        // shrinks by ρ relative to relevance and the MMR drifts toward relevance
+        // exactly when columns drop out (COL-2: with the locus, fieldFit,
+        // matrix, graph and preference columns excluded on the MMR-2 fixture,
+        // ρ = 2.67 let two near-duplicates of the query into a 3-hit result).
+        // Scaling maxSim by ρ makes the admission decision invariant under
+        // column exclusion: the working view is the one the MMR selected on the
+        // pre-exclusion score scale. `.raw`/`.rrf`/`.discriminative` score from
+        // `buffer.final`, which no budget touches, so their scale is 1.0.
+        let similarityScale: Float = request.scoring == .matrixAware ? budget.redistribution : 1.0
         var maxSim = [Float](repeating: 0, count: buffer.count)
         var selected: [Int] = []
         // Admit only frame-admissible candidates into the MMR loop. drawerIndex is the
@@ -2694,7 +2748,7 @@ public extension GeniusLocusKit {
         // no state reset.
         let workLimit2N = min(request.limit * 2, buffer.count)
         while selected.count < workLimit2N, !unselected.isEmpty {
-            // Pick argmax of λ·relevance − (1−λ)·maxSimilarityToSelected.
+            // Pick argmax of λ·relevance − (1−λ)·ρ·maxSimilarityToSelected.
             //
             // DETERMINISM: `unselected` is a Set<Int>, whose iteration order is
             // randomized per process by Swift's hash seed. A plain `>` argmax
@@ -2710,7 +2764,7 @@ public extension GeniusLocusKit {
             var bestIdx = -1
             var bestMMR = -Float.greatestFiniteMagnitude
             for i in unselected {
-                let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
+                let mmrScore = lambda * scores[i] - (1 - lambda) * similarityScale * maxSim[i]
                 if bestIdx == -1
                     || mmrScore > bestMMR
                     || (mmrScore == bestMMR
@@ -2769,7 +2823,7 @@ public extension GeniusLocusKit {
                 var bestIdx4 = -1
                 var bestMMR4 = -Float.greatestFiniteMagnitude
                 for i in unselected {
-                    let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
+                    let mmrScore = lambda * scores[i] - (1 - lambda) * similarityScale * maxSim[i]
                     if bestIdx4 == -1
                         || mmrScore > bestMMR4
                         || (mmrScore == bestMMR4
@@ -2961,8 +3015,15 @@ public extension GeniusLocusKit {
             // initialised empty; the real explanation is set below).
             let bareHit = RecallHit(id: id, drawer: drawer, sources: sources,
                                     score: sv, explanation: [])
+            // The agreement bonus this hit earned: only the matrixAware weighted
+            // score adds it; the other scoring paths read buffer.final and add
+            // nothing, so they report 0 rather than a bonus they never applied.
+            let agreementEarned: Float = request.scoring == .matrixAware
+                ? budget.agreement * agreementBonus * Float(buffer.sourceMask[idx].nonzeroBitCount) / 5.0
+                : 0
             var explanationLines = explainer.explain(hit: bareHit, sketch: sketch,
-                                                     plan: plan, scoring: request.scoring)
+                                                     plan: plan, scoring: request.scoring,
+                                                     agreement: agreementEarned)
             // PER-SIGNAL DENSE PROVENANCE (6b-core): when this hit was surfaced by
             // the dense lane, append the modelIDs of the signals that voted, in
             // slot order. The line is honest — it names exactly the signals whose
@@ -2984,6 +3045,56 @@ public extension GeniusLocusKit {
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
                                denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
+    }
+
+    // MARK: - Empty-store column detection
+
+    /// Name the scoring columns whose signal store is EMPTY for this recall
+    /// (COL-1 automatic rule): such a column is excluded from the weighted
+    /// score and its budget redistributed (`RecallSignalBudget`), instead of
+    /// standing as a zero column that silently shifts weight onto the fixed
+    /// agreement and pinned bonuses.
+    ///
+    /// Absence is read from the populated buffer AFTER `normalizeFinals`, so
+    /// it needs no new protocol requirement on `GraphCache` / `PreferenceStore`:
+    /// `normalizeFinals` leaves an all-zero column at 0.0 and lifts a non-zero
+    /// uniform column to 0.5, so "every slot reads 0" is exactly "no
+    /// measurement was taken".
+    ///   - `.fieldFit` and `.matrix` are absent when no MatrixTier is
+    ///     registered, or when the tier produced no measurement for any
+    ///     candidate (no matrix rows behind the query coords).
+    ///   - `.graph` is absent when no cache is registered or no candidate has a
+    ///     graph score (no tunnels behind the frontier).
+    ///   - `.preference` is absent when no store is registered or no candidate
+    ///     carries a preference mark.
+    ///   - `.locus` is absent when the request carries query text. The locus
+    ///     column is the candidate's RANK in the frame's `filedAt DESC` slice,
+    ///     and the pool is frame-filtered at step 5.5, so every surviving
+    ///     candidate already satisfies the bitmap predicates: for a text query
+    ///     the column measures recency, not relevance (COL-1: on a 13,817-drawer
+    ///     import the newest 64-256 drawers took up to `weights.locus` of the
+    ///     score for being new). Without query text the recency rank IS the
+    ///     requested ordering (a structured browse), so the column stays.
+    /// bm25, vector and the agreement bonus are never absent by this rule:
+    /// they are supply lanes, not cold-path signal stores.
+    /// Mirrors Rust `EstateCoordinator::absent_signal_columns`.
+    private func absentSignalColumns(
+        in buffer: RecallCandidateBuffer, hasMatrix: Bool, hasQueryText: Bool
+    ) -> Set<RecallSignalBudget.Column> {
+        guard buffer.count > 0 else { return [] }
+        func allZero(_ col: [Float]) -> Bool {
+            for i in 0..<buffer.count where col[i] != 0 { return false }
+            return true
+        }
+        var absent: Set<RecallSignalBudget.Column> = []
+        if hasQueryText { absent.insert(.locus) }
+        if !hasMatrix || allZero(buffer.fieldFit) { absent.insert(.fieldFit) }
+        if !hasMatrix || (allZero(buffer.coOccurrence) && allZero(buffer.temporal)) {
+            absent.insert(.matrix)
+        }
+        if allZero(buffer.graph) { absent.insert(.graph) }
+        if allZero(buffer.preference) { absent.insert(.preference) }
+        return absent
     }
 
     // MARK: - Matrix coord helper
