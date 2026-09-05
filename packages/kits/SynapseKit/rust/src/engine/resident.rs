@@ -58,7 +58,8 @@ pub struct ResidentVectorArray {
     /// count. After tombstoning, some slots are logically deleted but still
     /// occupy space in storage until compaction. Use `live_count()` to get
     /// the number of non-tombstoned slots; stale detection compares
-    /// live_count() against the table binary-row count (C5 fix).
+    /// live_count() against the table's serving-generation binary-row count
+    /// (C5 fix).
     pub count: usize,
     /// Raw bytes: count × stride. storage.len() == count * stride.
     pub storage: Vec<u8>,
