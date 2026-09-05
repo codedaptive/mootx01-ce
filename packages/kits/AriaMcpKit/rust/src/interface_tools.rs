@@ -470,8 +470,13 @@ fn run_file_memory(
     {
         let n = subject.chars().count();
         if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            // Use TOOL_DISPATCH_FAILURE so surface_dispatch_failure converts this
+            // to an isError:true result. MCP clients render INVALID_PARAMS as a bare
+            // "Tool execution failed" and discard the message; TOOL_DISPATCH_FAILURE
+            // reaches the model as isError text so it can compress and retry.
+            // Mirrors Swift runFileMemory returning Self.errorResult(...) (ARIA-MSG-1).
             return Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
                 format!(
                     "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
                      One telegraphic sentence in the AI-facing register — compress, \
@@ -1829,8 +1834,13 @@ fn run_update_memory(
         };
         let n = subject.chars().count();
         if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
+            // Use TOOL_DISPATCH_FAILURE so surface_dispatch_failure converts this
+            // to an isError:true result. MCP clients render INVALID_PARAMS as a bare
+            // "Tool execution failed" and discard the message; TOOL_DISPATCH_FAILURE
+            // reaches the model as isError text so it can compress and retry.
+            // Mirrors Swift runUpdateMemory returning Self.errorResult(...) (ARIA-MSG-1).
             return Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
                 format!(
                     "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}). \
                      Compress, don't truncate."
