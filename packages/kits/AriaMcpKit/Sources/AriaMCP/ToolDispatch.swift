@@ -1657,9 +1657,13 @@ extension ToolDispatcher {
         }
         let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+            // Return as an isError result rather than throwing a JSON-RPC protocol error.
+            // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
+            // and discard the message. An isError result puts the contract text in front
+            // of the model so it can compress and retry. Mirrors the Rust port's
+            // TOOL_DISPATCH_FAILURE path in run_file_memory (interface_tools.rs).
+            return Self.errorResult(
+                "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
                     + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
                     + "register — compress, don't truncate."
             )
@@ -2678,9 +2682,13 @@ extension ToolDispatcher {
             }
             let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty, trimmed.count <= DrawerStore.subjectLengthContract else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+                // Return as an isError result rather than throwing a JSON-RPC protocol error.
+                // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
+                // and discard the message. An isError result puts the contract text in front
+                // of the model so it can compress and retry. Mirrors the Rust port's
+                // TOOL_DISPATCH_FAILURE path in run_update_memory (interface_tools.rs).
+                return Self.errorResult(
+                    "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
                         + "(got \(trimmed.count)). Compress, don't truncate."
                 )
             }

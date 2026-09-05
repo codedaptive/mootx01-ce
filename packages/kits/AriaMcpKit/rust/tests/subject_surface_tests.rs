@@ -83,11 +83,15 @@ fn file_memory_without_subject_is_rejected_instructively() {
 }
 
 #[test]
-fn file_memory_oversize_subject_is_rejected() {
+fn file_memory_oversize_subject_returns_contract_error() {
+    // Subject contract violation surfaces as isError:true so the model sees
+    // the message instead of a bare "Tool execution failed" from JSON-RPC
+    // error rendering (ARIA-MSG-1 fix).
     let registry = EstateRegistry::new_inmemory();
     let oversize: String =
         "x".repeat(locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1);
-    let err = dispatch_tool(
+    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
+    let result = dispatch_tool(
         "moot_file_memory",
         &args!["content" => "some content",
                "subject" => oversize.as_str(),
@@ -95,8 +99,96 @@ fn file_memory_oversize_subject_is_rejected() {
         &registry,
         &SurfacedRecallLedger::new(),
     )
-    .expect_err("oversize subject must be rejected");
-    assert!(err.message.contains("120"), "got: {}", err.message);
+    .expect("oversize subject must return Ok(isError), not Err");
+    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
+    let text = content_text(&result);
+    assert!(
+        text.contains(&format!("subject must be 1–{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
+        "error text must contain the contract message, got: {text}"
+    );
+    assert!(
+        text.contains(&n.to_string()),
+        "error text must contain the offending length ({n}), got: {text}"
+    );
+}
+
+#[test]
+fn set_subject_oversize_returns_contract_error() {
+    // setSubject contract violation also surfaces as isError:true (ARIA-MSG-1).
+    let registry = EstateRegistry::new_inmemory();
+    let id = capture_without_subject(&registry, "needs a subject", "subject-tests");
+    let oversize: String =
+        "y".repeat(locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1);
+    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
+    let result = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => id.as_str(),
+               "mutation" => "setSubject",
+               "subject" => oversize.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("oversize setSubject must return Ok(isError), not Err");
+    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
+    let text = content_text(&result);
+    assert!(
+        text.contains(&format!("subject must be 1–{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
+        "error text must contain the contract message, got: {text}"
+    );
+    assert!(
+        text.contains(&n.to_string()),
+        "error text must contain the offending length ({n}), got: {text}"
+    );
+}
+
+/// Cross-port parity: the error message strings for file_memory and
+/// update_memory (setSubject) must be identical between Swift and Rust.
+/// This test encodes the exact strings to catch divergence if either
+/// port is edited without updating the other.
+#[test]
+fn subject_contract_message_matches_swift_port() {
+    // moot_file_memory oversize message (parity with Swift runFileMemory).
+    let registry = EstateRegistry::new_inmemory();
+    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
+    let oversize_file: String = "x".repeat(n);
+    let result_file = dispatch_tool(
+        "moot_file_memory",
+        &args!["content" => "some content",
+               "subject" => oversize_file.as_str(),
+               "location" => "subject-tests"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("must return Ok(isError)");
+    let file_text = content_text(&result_file);
+    let expected_file = format!(
+        "subject must be 1\u{2013}{} characters (got {}). One telegraphic sentence in the AI-facing register \u{2014} compress, don't truncate.",
+        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
+        n
+    );
+    assert_eq!(file_text, expected_file,
+        "file_memory message must match Swift port verbatim");
+
+    // moot_update_memory setSubject oversize message (parity with Swift runUpdateMemory).
+    let id = capture_without_subject(&registry, "needs a subject", "subject-tests");
+    let oversize_set: String = "y".repeat(n);
+    let result_set = dispatch_tool(
+        "moot_update_memory",
+        &args!["id" => id.as_str(),
+               "mutation" => "setSubject",
+               "subject" => oversize_set.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("must return Ok(isError)");
+    let set_text = content_text(&result_set);
+    let expected_set = format!(
+        "subject must be 1\u{2013}{} characters (got {}). Compress, don't truncate.",
+        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
+        n
+    );
+    assert_eq!(set_text, expected_set,
+        "setSubject message must match Swift port verbatim");
 }
 
 #[test]
