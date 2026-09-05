@@ -40,10 +40,13 @@ private let riBasisProbeTexts: [String] = ["car engine", "vehicle road", "dog an
 
 /// Build and train an RI provider on the canonical corpus.
 private func buildTrainedRIProvider() -> RandomIndexingProvider {
-    let provider = RandomIndexingProvider()
+    // The shared fixture pins the historical 1.0 provider envelope; the Rust
+    // leg constructs the same identity explicitly (with_parameters "1.0.0").
+    let provider = RandomIndexingProvider(modelVersion: "1.0.0")
     for doc in riBasisCorpus {
         provider.train(terms: doc, window: riWindow)
     }
+    provider.finalize()
     return provider
 }
 
@@ -100,7 +103,7 @@ struct RandomIndexingBasisSerializationTests {
 
     // MARK: §2 — Versioned framing + error paths
 
-    @Test("blob begins with the RIB1 magic and the v1 format byte")
+    @Test("blob begins with the RIB1 magic and the current format byte")
     func blobHeaderIsVersioned() {
         let blob = buildTrainedRIProvider().serializeBasis()
         let bytes = [UInt8](blob)

@@ -39,21 +39,23 @@ pub fn run(
     }
 
     // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs the four data-directory migration steps (kg_facts identity,
-    // adornment store migration, shared-content reclaim, distilled representation
-    // convergence) against the estate resolved via MOOTX01_DATA_DIR, then exits.
+    // estates. Runs the five data-directory migration steps (kg_facts identity,
+    // adornment store migration, shared-content reclaim, dense pooling
+    // convergence, distilled representation convergence) against the estate
+    // resolved via MOOTX01_DATA_DIR, then exits.
     // No network, no prompts; each step quiesces the daemon only when the
     // estate is the resident one. Ordering matches run_convergence:
     // correctness migration → schema + data move → VACUUM-backed reclaim →
-    // distilled representation convergence.
+    // dense pooling convergence → distilled representation convergence.
     // All steps run even when earlier steps fail (independent + retryable);
     // exits non-zero when any step reported failure.
     if backfill_only {
         let ok_kg    = run_kg_fact_identity_backfill();
         let ok_ado   = run_adornment_store_migration();
         let ok_recl  = run_shared_content_reclaim_if_pending();
+        let ok_dense = run_dense_pooling_convergence();
         let ok_dist  = run_distilled_representation_convergence();
-        if ok_kg && ok_ado && ok_recl && ok_dist {
+        if ok_kg && ok_ado && ok_recl && ok_dense && ok_dist {
             return ExitCode::from(exit::OK);
         } else {
             return ExitCode::from(exit::FAILURE);
@@ -102,6 +104,7 @@ pub fn run(
             run_kg_fact_identity_backfill();
             run_adornment_store_migration();
             run_shared_content_reclaim_if_pending();
+            run_dense_pooling_convergence();
             run_distilled_representation_convergence();
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
@@ -215,6 +218,7 @@ fn run_convergence() {
     let _ = run_kg_fact_identity_backfill();
     let _ = run_adornment_store_migration();
     let _ = run_shared_content_reclaim_if_pending();
+    let _ = run_dense_pooling_convergence();
     let _ = run_distilled_representation_convergence();
     run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
@@ -491,6 +495,149 @@ fn run_adornment_store_migration() -> bool {
 /// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
 ///
+/// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)
+/// onto the basis format this binary's codec writes. A basis row persisted
+/// under an earlier format version holds vectors pooled the old way; the
+/// corpus opens such a slot untrained and its open-time provider reconcile
+/// retrains it from the estate's content and re-embeds every row. This step
+/// runs that rebuild here, under the daemon quiesce, so it happens at upgrade
+/// time and is reported, rather than on the next serve open.
+///
+/// Eligibility is a raw read of `corpus_provider_basis`: any part-0 row whose
+/// frame version byte differs from `BASIS_FORMAT_VERSION`. An estate with no
+/// such table (it never held a trained basis) or with every row current is
+/// skipped. Idempotent: after one pass every row carries the current version
+/// and the step is a no-op. Runs BEFORE the distilled representation
+/// convergence so that step's open does not absorb the rebuild unreported.
+/// Twin of Swift `UpgradeCommand.runDensePoolingConvergence`.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Returns `true` on success or when there is nothing to converge, `false` on failure.
+fn run_dense_pooling_convergence() -> bool {
+    use corpus_kit_providers::BASIS_FORMAT_VERSION;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    if !estate.exists() {
+        return true;
+    }
+    // Eligibility: a single read of the basis frames, before any quiesce.
+    let stale = match stale_format_basis_providers(&estate) {
+        Ok(stale) => stale,
+        Err(e) => {
+            println!(
+                "  ✗ dense pooling convergence: could not read corpus_provider_basis: {e}\n    Run `mootx01 upgrade` to retry."
+            );
+            return false;
+        }
+    };
+    if stale.is_empty() {
+        println!("  ✓ dense pooling: provider bases already at basis format v{BASIS_FORMAT_VERSION}");
+        return true;
+    }
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate (the helper prints why when it is
+    // not). `None` means the daemon would not stop; the step is skipped and
+    // the next `mootx01 upgrade` retries.
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "dense pooling convergence",
+        &PlatformDaemon,
+        || {
+            let result = (|| -> Result<Vec<String>, String> {
+                // Maintenance open: skips default-wing seeding so upgrade never
+                // creates content. Opening wires the corpus, which runs the
+                // provider reconcile: every slot whose persisted basis was
+                // refused for format skew opens untrained, retrains from the
+                // estate's content, and re-covers every row under the new basis
+                // before the open returns. Dropping the registry stops and joins
+                // the drain worker.
+                let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+                    &estate.display().to_string(),
+                    "aria-mcp-default",
+                )?;
+                drop(reg);
+                stale_format_basis_providers(&estate)
+            })();
+            match result {
+                Ok(remaining) if remaining.is_empty() => {
+                    println!(
+                        "  ✓ dense pooling convergence: {} retrained to basis format v{BASIS_FORMAT_VERSION}; dense vectors re-embedded",
+                        stale.join(", ")
+                    );
+                    true
+                }
+                Ok(remaining) => {
+                    println!(
+                        "  ✗ dense pooling convergence: {} still at an earlier basis format after the rebuild.\n    Run `mootx01 upgrade` to retry.",
+                        remaining.join(", ")
+                    );
+                    false
+                }
+                Err(e) => {
+                    println!(
+                        "  ✗ dense pooling convergence failed: {e}\n    Recall keeps serving through the lexical and stateless lanes; the stale dense slots stay untrained until the rebuild completes. Run `mootx01 upgrade` to retry."
+                    );
+                    false
+                }
+            }
+        },
+    ) else {
+        return false;
+    };
+    ok
+}
+
+/// Provider keys (`model_id@model_version`) whose part-0 basis row carries a
+/// frame version other than `BASIS_FORMAT_VERSION`, sorted. Empty when the
+/// table is absent (an estate that never held a trained basis) or every row
+/// is current. Opens the estate SQLite directly (no schema ladder); the
+/// sibling `db.key` is adopted automatically for encrypted estates.
+fn stale_format_basis_providers(estate: &std::path::Path) -> Result<Vec<String>, String> {
+    use corpus_kit_providers::BASIS_FORMAT_VERSION;
+    use persistence_kit::predicate::StoragePredicate;
+    use persistence_kit::sqlite::SqliteStorage;
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+    use persistence_kit::types::{Column, TypedValue};
+    use uuid::Uuid;
+
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: estate.display().to_string(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+    let predicate = StoragePredicate::Eq(
+        Column::new("corpus_provider_basis", "part_index"),
+        TypedValue::Int(0),
+    );
+    // No basis table: the estate predates persisted bases, so there is no
+    // dense lane to converge (the same skip the counts migration makes).
+    let Ok(rows) = storage
+        .row_store()
+        .query("corpus_provider_basis", Some(&predicate), &[], None, None)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for row in &rows {
+        let (Some(TypedValue::Text(model_id)), Some(TypedValue::Text(model_version)), Some(TypedValue::Blob(basis))) =
+            (row.get("model_id"), row.get("model_version"), row.get("basis"))
+        else {
+            continue;
+        };
+        if corpus_kit::basis_blob_frame::format_version(basis) != Some(BASIS_FORMAT_VERSION) {
+            stale.push(format!("{model_id}@{model_version}"));
+        }
+    }
+    stale.sort();
+    Ok(stale)
+}
+
 /// Bring every drawer's stored distilled representation up to the active
 /// converter (`genius_locus_kit::distillation_converter_id()`). Rows the
 /// currency rule (`genius_locus_kit::distilled_representation_is_current`)

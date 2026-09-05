@@ -203,6 +203,7 @@ fn canonical_document_embeddings_match_swift() {
         let terms: Vec<&str> = doc.iter().map(String::as_str).collect();
         provider.train(&terms, RI_WINDOW);
     }
+    provider.finalize();
 
     for entry in &f.document_embeddings {
         // --- Binary Engram lane ---
@@ -279,6 +280,7 @@ fn semantic_relatedness_holds_after_training() {
     for doc in &corpus {
         provider.train(doc, RI_WINDOW);
     }
+    provider.finalize();
 
     let car = provider.embed_float("car").unwrap();
     let vehicle = provider.embed_float("vehicle").unwrap();

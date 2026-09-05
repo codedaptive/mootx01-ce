@@ -29,6 +29,10 @@
 //! - engine: Lane F, Lane D, and Lane E engine types
 //!   (inverted index, WAND/BMW, BM25 weighting, generalized RRF fusion)
 
+// The five-byte basis/counts blob frame (magic + format version) core compares
+// at open to recognise a blob written by another codec generation. Swift
+// twin: Sources/CorpusKit/BasisBlobFrame.swift.
+pub mod basis_blob_frame;
 pub mod basis_store;
 pub mod bm25_index;
 pub mod bundle_store;
@@ -59,7 +63,7 @@ pub mod schema_profile;
 pub mod sub_span_scoring;
 pub mod sync_manifest;
 pub mod tokenizer;
-// Mission 6a-ii-α: the trainable-basis type-erasure seam. Declared here in
+// The trainable-basis type-erasure seam. Declared here in
 // core so the providers crate (corpus-kit-providers) can implement it without
 // core depending on it (layering: providers → core). Swift port:
 // Sources/CorpusKit/TrainableEmbeddingBasis.swift.

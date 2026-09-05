@@ -19,6 +19,8 @@
 import AdornmentLib
 import AriaMCP
 import ArgumentParser
+import CorpusKit
+import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
 import GeniusLocusKitMigrations
@@ -46,7 +48,8 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the data-directory migration steps
-            (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence)
+            (kg_facts identity, adornment store migration, shared-content reclaim,
+            dense pooling convergence, distilled representation convergence)
             against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
             cycle — each step quiesces and restores the daemon itself when the
@@ -86,8 +89,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     var noRestart: Bool = false
 
     /// Run ONLY the data-directory migration steps: kg_facts identity,
-    /// adornment store migration, shared-content reclaim, and distilled
-    /// representation convergence. Intended for
+    /// adornment store migration, shared-content reclaim, dense pooling
+    /// convergence, and distilled representation convergence. Intended for
     /// scripted and benchmark estates where the caller owns the estate via
     /// MOOTX01_DATA_DIR. No network, no download, no plugin convergence, no
     /// encryption offer, no restartAgents cycle. Each step handles its own
@@ -98,11 +101,12 @@ struct UpgradeCommand: AsyncParsableCommand {
     ///
     /// Ordering matches `runConvergence`: kg_facts identity first (correctness
     /// migration), adornment store migration second (schema v17 + data move),
-    /// shared-content reclaim third (VACUUM-backed, most I/O), distilled
-    /// representation convergence last.
+    /// shared-content reclaim third (VACUUM-backed, most I/O), dense pooling
+    /// convergence fourth (retrains stale-format provider bases before any
+    /// other step opens the corpus), distilled representation convergence last.
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails.")
+        help: "Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, dense pooling convergence, distilled representation convergence) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -158,9 +162,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // --backfill-only: headless data-dir convergence for scripted and
-        // benchmark estates. Runs only the four data-directory migration steps
+        // benchmark estates. Runs only the five data-directory migration steps
         // (kg_facts identity, adornment store migration, shared-content reclaim,
-        // distilled representation convergence)
+        // dense pooling convergence, distilled representation convergence)
         // against the estate resolved via MOOTX01_DATA_DIR. No network,
         // no download, no plugin convergence, no encryption offer, no
         // restartAgents cycle. Each step owns its daemon quiesce+restore through
@@ -171,8 +175,9 @@ struct UpgradeCommand: AsyncParsableCommand {
             let okKG     = await runKGFactIdentityBackfill(home: home)
             let okAdo    = await runAdornmentStoreMigration(home: home)
             let okRecl   = await runSharedContentReclaimIfPending(home: home)
+            let okDense  = await runDensePoolingConvergence(home: home)
             let okDist   = await runDistilledRepresentationConvergence(home: home)
-            guard okKG && okAdo && okRecl && okDist else { throw ExitCode.failure }
+            guard okKG && okAdo && okRecl && okDense && okDist else { throw ExitCode.failure }
             return
         }
 
@@ -294,6 +299,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 await runKGFactIdentityBackfill(home: home)
                 await runAdornmentStoreMigration(home: home)
                 await runSharedContentReclaimIfPending(home: home)
+                await runDensePoolingConvergence(home: home)
                 await runDistilledRepresentationConvergence(home: home)
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
@@ -490,6 +496,147 @@ struct UpgradeCommand: AsyncParsableCommand {
         #else
         return true
         #endif
+    }
+
+    /// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)
+    /// onto the basis format this binary's codec writes. A basis row persisted
+    /// under an earlier format version holds vectors pooled the old way; the
+    /// corpus opens such a slot untrained and its open-time provider reconcile
+    /// retrains it from the estate's content and re-embeds every row. This step
+    /// runs that rebuild here, under the daemon quiesce, so it happens at
+    /// upgrade time and is reported, rather than on the next serve open.
+    ///
+    /// Eligibility is a raw read of `corpus_provider_basis`: any part-0 row
+    /// whose frame version byte differs from `basisFormatVersion`. An estate
+    /// with no such table (it never held a trained basis) or with every row
+    /// current is skipped. Idempotent: after one pass every row carries the
+    /// current version and the step is a no-op. Runs BEFORE the distilled
+    /// representation convergence so that step's open does not absorb the
+    /// rebuild unreported.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` on success or when there is nothing to converge, `false` on failure.
+    @discardableResult
+    private func runDensePoolingConvergence(home: URL) async -> Bool {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ dense pooling convergence skipped — estate key unavailable: \(error)")
+            return false
+        }
+        let configuration = EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
+        )
+        // Eligibility: a single read of the basis frames, before any quiesce.
+        let stale: [String]
+        do {
+            let storage = try SQLiteStorage(configuration: configuration)
+            stale = try await Self.staleFormatBasisProviders(storage: storage)
+            await storage.close()
+        } catch {
+            print("""
+                  ✗ dense pooling convergence: could not read corpus_provider_basis: \(error)
+                    Run `mootx01 upgrade` to retry.
+                """)
+            return false
+        }
+        if stale.isEmpty {
+            print("  ✓ dense pooling: provider bases already at basis format v\(basisFormatVersion)")
+            return true
+        }
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "dense pooling convergence",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                // MOOTX01_ESTATE_LIFETIME=ephemeral is the declared throwaway
+                // posture (benchmark and scripted estates): identity keys stay
+                // in memory and the Keychain is never consulted, so a headless
+                // run cannot stall on a Keychain consent dialog. Same rule as
+                // `serve` and the shared-content reclaim step.
+                let upgradeLifetimeIsEphemeral =
+                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                        .lowercased() == "ephemeral"
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: upgradeLifetimeIsEphemeral
+                        ? InMemoryEstateIdentityKeyStore() : nil
+                )
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Wiring the corpus runs the open-time provider reconcile: every
+                // slot whose persisted basis was refused for format skew opens
+                // untrained, retrains from the estate's content, and re-covers
+                // every row under the new basis before the wire returns.
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                try await kit.close(handle)
+                let remaining = try await Self.staleFormatBasisProviders(storage: storage)
+                await storage.close()
+                guard remaining.isEmpty else {
+                    print("""
+                          ✗ dense pooling convergence: \(remaining.joined(separator: ", ")) still at an earlier basis format after the rebuild.
+                            Run `mootx01 upgrade` to retry.
+                        """)
+                    return false
+                }
+                print("  ✓ dense pooling convergence: \(stale.joined(separator: ", ")) retrained to basis format v\(basisFormatVersion); dense vectors re-embedded")
+                return true
+            } catch {
+                print("""
+                      ✗ dense pooling convergence failed: \(error)
+                        Recall keeps serving through the lexical and stateless lanes; the stale dense slots stay untrained until the rebuild completes. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Provider keys (`model_id@model_version`) whose part-0 basis row carries
+    /// a frame version other than `basisFormatVersion`, sorted. Empty when the
+    /// table is absent (an estate that never held a trained basis) or every
+    /// row is current.
+    private static func staleFormatBasisProviders(storage: any Storage) async throws -> [String] {
+        let rows: [StorageRow]
+        do {
+            rows = try await storage.rowStore.query(
+                table: "corpus_provider_basis",
+                where: .eq(Column(table: "corpus_provider_basis", name: "part_index"), .int(0)),
+                orderBy: [], limit: nil, offset: nil)
+        } catch {
+            // No basis table: the estate predates persisted bases, so there is
+            // no dense lane to converge (the same skip the counts migration makes).
+            return []
+        }
+        var stale: [String] = []
+        for row in rows {
+            guard case let .text(modelID)? = row["model_id"],
+                  case let .text(modelVersion)? = row["model_version"],
+                  case let .blob(basis)? = row["basis"] else { continue }
+            if BasisBlobFrame.formatVersion(of: basis) != basisFormatVersion {
+                stale.append("\(modelID)@\(modelVersion)")
+            }
+        }
+        return stale.sorted()
     }
 
     /// Bring every drawer's stored distilled representation up to the active
@@ -1048,6 +1195,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         await runKGFactIdentityBackfill(home: home)
         await runAdornmentStoreMigration(home: home)
         await runSharedContentReclaimIfPending(home: home)
+        await runDensePoolingConvergence(home: home)
         await runDistilledRepresentationConvergence(home: home)
         convergeDaemonBundle(home: home)
         restartAgents(home: home)

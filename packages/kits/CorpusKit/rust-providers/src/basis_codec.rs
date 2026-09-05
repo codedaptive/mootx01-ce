@@ -1,5 +1,5 @@
 //! Shared little-endian binary codec for distributional-provider basis
-//! serialization (mission 6a-i). Rust mirror of Swift's `BasisCodec.swift`.
+//! serialization. Rust mirror of Swift's `BasisCodec.swift`.
 //! One definition, used by all four stateful providers (RandomIndexing,
 //! PPMI, LSA, NMF). This is PROVIDER-FORMAT code, not a math primitive —
 //! it lives in `corpus-kit-providers`, never in the substrate.
@@ -21,7 +21,8 @@
 //!   - String:   u32 LE byte-length prefix, then that many UTF-8 bytes.
 //!   - `Vec<f32>`: u32 LE element count, then count × (f32 = 4 bytes).
 //!   - `Vec<Vec<f32>>` (matrix): u32 LE row count, then each row as a vec.
-//!   - Map<String,*>: u32 LE entry count, then entries emitted in
+//!   - Map<String,*> (values: `Vec<f32>`, u32, or f32): u32 LE entry count,
+//!     then entries emitted in
 //!     LEXICOGRAPHICALLY ASCENDING order of the key's UTF-8 bytes. Rust's
 //!     `Ord for str` compares by bytes; the Swift port sorts by the same
 //!     UTF-8 byte order, so both ports emit identical bytes for a given map.
@@ -29,22 +30,39 @@
 //! Each provider blob is framed as:
 //!   MAGIC (4 ASCII bytes, provider-specific) | FORMAT_VERSION (1 byte) | payload
 //!
-//! The magic + version live at the FRONT so mission 6a-ii can detect and
+//! The magic + version live at the FRONT so a reader can detect and
 //! version a persisted basis without parsing the payload. An unknown
 //! version or a truncated blob is rejected with a structured
 //! `BasisCodecError` — never a panic or out-of-bounds unwrap.
 
 use std::collections::HashMap;
 
-/// Current basis-blob format version. Bumped only when the byte layout of
-/// any provider's payload changes incompatibly. Mission 6a-i ships v1.
-pub const BASIS_FORMAT_VERSION: u8 = 1;
+/// Current basis-blob format version, shared by every provider's basis AND
+/// counts frame. Bumped only when the byte layout of any provider's payload
+/// changes incompatibly.
+///
+/// History:
+///   1 — original layout: identity, seed, and the raw vector tables.
+///   2 — the distributional pooling fit travels in the blob: RI and PPMI
+///       bases carry an IDF table (String→f32 map) and a corpus-mean
+///       direction (f32 array); the NMF basis carries reduced-column IDF
+///       weights and a corpus-mean direction; RI and PPMI counts carry the
+///       document count and per-term document frequencies the fit is
+///       derived from. LSA's payload is unchanged; it shares the version
+///       byte because the constant is one per codec.
+///
+/// A reader that meets any other version returns
+/// `BasisCodecError::UnsupportedVersion` naming both versions. The open
+/// path (`Corpus::build_slot`) compares the persisted frame against the
+/// frame the current provider writes and treats a mismatch as "no basis"
+/// so the estate retrains instead of serving vectors pooled the old way.
+pub const BASIS_FORMAT_VERSION: u8 = 2;
 
 // MARK: - Error
 
 /// Structured errors for basis (de)serialization. Returned instead of a
 /// panic so a truncated, mistyped, or future-versioned blob fails loud and
-/// recoverably (mission 6a-ii surfaces this to the caller).
+/// recoverably (the open path surfaces this to the caller).
 #[derive(Debug, PartialEq, Eq)]
 pub enum BasisCodecError {
     /// The blob ended before a required field could be fully read.
@@ -181,6 +199,19 @@ impl BasisWriter {
             self.write_u32(map[key] as u32);
         }
     }
+
+    /// Append a `HashMap<String, f32>` (term → scalar weight, e.g. an IDF
+    /// table), sorted by the key's UTF-8 bytes — the same ordering rule as
+    /// the other map writers, so both ports emit identical bytes.
+    pub fn write_string_f32_map(&mut self, map: &HashMap<String, f32>) {
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        self.write_u32(keys.len() as u32);
+        for key in keys {
+            self.write_string(key);
+            self.write_f32(map[key]);
+        }
+    }
 }
 
 // MARK: - Reader
@@ -237,7 +268,7 @@ impl<'a> BasisReader<'a> {
 
     /// Read the format-version byte and verify it is `expected`. An unknown
     /// version is rejected so a future on-disk format is never silently
-    /// misread (mission 6a-ii relies on this gate).
+    /// misread (the open-path gate relies on this).
     pub fn expect_version(&mut self, expected: u8) -> Result<(), BasisCodecError> {
         let v = self.read_byte()?;
         if v != expected {
@@ -338,6 +369,18 @@ impl<'a> BasisReader<'a> {
             let key = self.read_string()?;
             let idx = self.read_u32()? as usize;
             out.insert(key, idx);
+        }
+        Ok(out)
+    }
+
+    /// Read a `HashMap<String, f32>` (term → scalar weight).
+    pub fn read_string_f32_map(&mut self) -> Result<HashMap<String, f32>, BasisCodecError> {
+        let count = self.read_u32()? as usize;
+        let mut out = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let key = self.read_string()?;
+            let value = self.read_f32()?;
+            out.insert(key, value);
         }
         Ok(out)
     }
