@@ -7,10 +7,12 @@
 //!
 //! ## Algorithm
 //!
-//!   1. Build a TF-weighted term-document matrix V (vocabSize × numDocs):
-//!        tf(t, d) = ln(1 + raw_count(t, d))   — log-smoothed, always >= 0
-//!      NMF requires V >= 0; TF satisfies this.
-//!      IDF is NOT applied: NMF is most stable without it on small corpora.
+//!   1. Build a TF-IDF term-document matrix V (vocabSize × numDocs):
+//!        tf(t, d) = ln(1 + raw_count(t, d))              — log-smoothed, >= 0
+//!        idf(t)   = max(0, ln((N + 1) / (df(t) + 1)))     — the one shared IDF
+//!        V[t][d]  = tf(t, d) * idf(t)                     — >= 0 as NMF requires
+//!      A term in every document has idf 0 and stays out of the factorization,
+//!      so the latent factors describe what distinguishes documents.
 //!      CANONICAL tokenizer: corpus_kit::default_keyword_tokens.
 //!
 //!   2. Factorize V ≈ W · H via substrate_ml NMFAlternatingLeastSquares
@@ -20,15 +22,24 @@
 //!        H ∈ R+^{k×n}  (document factor loadings)
 //!      Fixed iteration count (tolerance=0) → deterministic output.
 //!
-//!   3. Document embedding: column d of H = H[r][d] for r in 0..<k,
-//!      L2-normalised via substrate_kernel::float_vec_ops::l2_normalize.
+//!   3. Training-document factor loading: column d of H = H[r][d] for r in
+//!      0..<k, L2-normalised via substrate_kernel::float_vec_ops::l2_normalize
+//!      (`document_embedding`, a raw-factor read for conformance; the product
+//!      embeds every text through step 4).
 //!
-//!   4. Query embedding (fold-in formula):
+//!   4. Text embedding (documents at index time AND queries at recall time —
+//!      one function): TF-IDF vector q with the fitted IDF weights, fold-in
 //!        queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
-//!      where q is the TF query vector. L2-normalised. OOV terms → 0.
+//!      L2-normalise, remove the component along the unit corpus-mean
+//!      direction m̂ (`u − (u·m̂) m̂`), L2-normalise again. OOV terms → 0.
 //!
 //!   5. Project to Engram via substrate_ml::float_simhash::project with
 //!      NMF_PROJECTION_SEED.
+//!
+//!   The corpus-mean direction is fitted at finalize: every training
+//!   document's TF-IDF column is folded in through step 4's projection and
+//!   normalised, the mean of those unit vectors is taken, and m̂ is that mean
+//!   normalised.
 //!
 //! ## NMF kernel reuse
 //!
@@ -155,6 +166,15 @@ pub struct NmfProvider {
     /// Effective NMF rank after finalize().
     effective_rank: usize,
 
+    /// Smoothed IDF per REDUCED vocabulary column, fitted at `finalize()`.
+    /// Weights both the factorized matrix V and every folded-in text.
+    idf_weights: Vec<f32>,
+
+    /// Unit corpus-mean direction in the k-dim fold-in space, fitted at
+    /// `finalize()` from the training documents, or empty when no document
+    /// folded in. Removed from every embedded text.
+    mean_direction: Vec<f32>,
+
     /// Reduced-vocabulary cap K for the dense factorization.
     reduced_vocab_cap: usize,
 
@@ -198,6 +218,8 @@ impl NmfProvider {
             h: Vec::new(),
             doc_embeddings: Vec::new(),
             effective_rank: 0,
+            idf_weights: Vec::new(),
+            mean_direction: Vec::new(),
             reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
             basis_vocab: HashMap::new(),
         }
@@ -230,9 +252,9 @@ impl NmfProvider {
     ///
     /// Must be called after all `train` calls and before `embed`/`embed_float`.
     ///
-    /// ## TF weighting (identical to Swift port)
+    /// ## TF-IDF weighting (identical to Swift port)
     ///
-    ///   tf(t, d) = ln(1 + raw_count(t, d))   [f32::ln]
+    ///   V[t][d] = ln(1 + raw_count(t, d)) * idf(t)   [f32::ln]
     ///
     /// ## Fixed iteration count
     ///
@@ -278,19 +300,30 @@ impl NmfProvider {
             self.h = Vec::new();
             self.doc_embeddings = Vec::new();
             self.effective_rank = 0;
+            self.idf_weights = Vec::new();
+            self.mean_direction = Vec::new();
             self.basis_vocab = HashMap::new();
             return;
         }
 
-        // V is K × numDocs: V[reducedRow][doc] = ln(1 + tf[doc][term]). Map each
-        // doc's TF entries whose term is in the reduced vocab to its reduced row;
-        // full-vocab terms outside the reduced set are dropped.
+        // IDF over REDUCED rows, using the full-corpus df (informativeness is
+        // corpus-wide) through the one shared smoothed IDF.
+        self.idf_weights = vec![0.0_f32; vocab_size];
+        for (&full_idx, &row) in &reduced.full_index_to_column {
+            let df = *self.counts.df_counts.get(&full_idx).unwrap_or(&0);
+            self.idf_weights[row] =
+                crate::term_document_counts::smoothed_inverse_document_frequency(df, num_docs);
+        }
+
+        // V is K × numDocs: V[reducedRow][doc] = ln(1 + tf[doc][term]) * idf.
+        // Map each doc's TF entries whose term is in the reduced vocab to its
+        // reduced row; full-vocab terms outside the reduced set are dropped.
         let mut v: Vec<Vec<f32>> = vec![vec![0.0_f32; num_docs]; vocab_size];
         for (doc_idx, doc_tf) in self.counts.tf_counts.iter().enumerate() {
             for (&full_idx, &count) in doc_tf {
                 if let Some(&row) = reduced.full_index_to_column.get(&full_idx) {
                     // f32::ln matches Swift's log() on f32 — both are logf.
-                    v[row][doc_idx] = (1.0 + count as f32).ln();
+                    v[row][doc_idx] = (1.0 + count as f32).ln() * self.idf_weights[row];
                 }
             }
         }
@@ -321,8 +354,8 @@ impl NmfProvider {
         // identically to the Swift port (which keeps the full NMFFactorization).
         self.h = result.h;
 
-        // Pre-compute document embeddings: column d of H = H[r][d] for r in 0..<k.
-        // L2-normalise via the substrate's conformance-gated primitive.
+        // Pre-compute document factor loadings: column d of H = H[r][d] for r
+        // in 0..<k. L2-normalise via the substrate's conformance-gated primitive.
         self.doc_embeddings = (0..num_docs)
             .map(|d| {
                 let col: Vec<f32> = (0..effective_rank).map(|r| self.h[r][d]).collect();
@@ -330,6 +363,29 @@ impl NmfProvider {
                 float_vec_ops::l2_normalize(col)
             })
             .collect();
+
+        // Corpus-mean direction: fold every training document's TF-IDF column
+        // through the SAME projection texts use, average the unit vectors,
+        // normalise. Documents that fold to nothing (all-zero column) are skipped.
+        let k = effective_rank;
+        let mut mean_sum = vec![0.0_f32; k];
+        let mut folded = 0usize;
+        for d in 0..num_docs {
+            let column: Vec<f32> = (0..vocab_size).map(|i| v[i][d]).collect();
+            let Some(unit) = self.fold_in_unit(&column) else { continue };
+            for r in 0..k {
+                mean_sum[r] += unit[r];
+            }
+            folded += 1;
+        }
+        if folded > 0 {
+            let divisor = folded as f32;
+            let mean: Vec<f32> = mean_sum.iter().map(|&x| x / divisor).collect();
+            let unit = float_vec_ops::l2_normalize(mean);
+            self.mean_direction = if unit.iter().any(|&x| x != 0.0) { unit } else { Vec::new() };
+        } else {
+            self.mean_direction = Vec::new();
+        }
     }
 
     // MARK: Public accessors
@@ -354,16 +410,17 @@ impl NmfProvider {
         self.effective_rank
     }
 
-    // MARK: Basis serialization (mission 6a-i)
+    /// The fitted unit corpus-mean direction in the fold-in space (k long),
+    /// or empty when the basis is not finalized or no document folded in.
+    /// Conformance accessor.
+    pub fn corpus_mean_direction(&self) -> &[f32] {
+        &self.mean_direction
+    }
+
+    // MARK: Basis serialization
 
     /// Serialize the finalized NMF basis to a versioned, little-endian blob.
     ///
-    /// Emits configuration (`rank`, `max_iterations`, `seed`,
-    /// `projection_seed`), the term-document support (vocab + document count),
-    /// and the raw factors W (vocabSize × k) and H (k × numDocs) plus
-    /// `effective_rank`. The factors are PORT-NEUTRAL, so the same trained
-    /// state yields a byte-identical blob on both ports. Byte layout mirrors
-    /// Swift's `serializeBasis()` exactly.
     /// Serialize the maintained trigger anchors (vocabulary + document count).
     /// Byte-identical to the Swift `NmfProvider.serializeCounts`. The W/H factors
     /// and per-document TF rows are not persisted — the TF matrix is re-tokenized
@@ -400,6 +457,15 @@ impl NmfProvider {
         Ok(())
     }
 
+    /// Serialize the finalized NMF basis to a versioned, little-endian blob.
+    ///
+    /// Emits configuration (`rank`, `max_iterations`, `seed`,
+    /// `projection_seed`), the term-document support (vocab + document count),
+    /// the raw factors W (vocabSize × k) and H (k × numDocs) plus
+    /// `effective_rank`, and the pooling fit (`idf_weights` per reduced column,
+    /// `mean_direction` k long). The factors are PORT-NEUTRAL, so the same
+    /// trained state yields a byte-identical blob on both ports. Byte layout
+    /// mirrors Swift's `serializeBasis()` exactly.
     pub fn serialize_basis(&self) -> Vec<u8> {
         let mut w = BasisWriter::new();
         w.write_magic(NMF_BASIS_MAGIC);
@@ -417,6 +483,8 @@ impl NmfProvider {
         w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_matrix(&self.w);
         w.write_f32_matrix(&self.h);
+        w.write_f32_array(&self.idf_weights);
+        w.write_f32_array(&self.mean_direction);
         w.into_bytes()
     }
 
@@ -441,8 +509,10 @@ impl NmfProvider {
         let vocab = r.read_string_u32_map()?;
         let w_factor = r.read_f32_matrix()?;
         let h_factor = r.read_f32_matrix()?;
+        let idf_weights = r.read_f32_array()?;
+        let mean_direction = r.read_f32_array()?;
 
-        // Re-derive per-document embeddings exactly as finalize() does:
+        // Re-derive per-document factor loadings exactly as finalize() does:
         // L2-normalised column d of H. An empty factor section (never-
         // finalized source) yields empty doc_embeddings and an empty `w`,
         // so `is_finalized()` stays false.
@@ -465,19 +535,20 @@ impl NmfProvider {
             h: h_factor,
             doc_embeddings,
             effective_rank,
+            idf_weights,
+            mean_direction,
             reduced_vocab_cap: DEFAULT_REDUCED_VOCAB_CAP,
             basis_vocab: vocab,
         })
     }
 
-    /// Return the k-dim NMF embedding for `text` via the fold-in formula.
-    /// Returns `None` if finalize() not called, text is empty, or all OOV.
-    ///
-    /// ## Fold-in formula
-    ///
-    ///   queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
-    ///
-    /// where q is the TF-weighted query vector (sparse, vocabSize entries).
+    /// Return the k-dim NMF embedding for `text` — the one function for
+    /// documents and queries. Builds the TF-IDF vector of the text over the
+    /// reduced vocabulary (`ln(1 + count) * idf`, the training matrix's
+    /// weighting), folds it in through `fold_in_unit`, removes the component
+    /// along the fitted corpus-mean direction, and L2-normalises.
+    /// Returns `None` if finalize() not called, text is empty, all OOV, or the
+    /// projection / centred vector collapses to zero.
     pub fn embed_float_nmf(&self, text: &str) -> Option<Vec<f32>> {
         if !self.is_finalized() || text.is_empty() {
             return None;
@@ -490,10 +561,8 @@ impl NmfProvider {
         // Projection keys on the REDUCED basis vocab; OOV terms
         // outside top-K contribute nothing (covered by RI).
         let vocab_size = self.basis_vocab.len();
-        let k = self.effective_rank;
-        let eps: f32 = 1e-9;
 
-        // Build sparse TF query vector.
+        // Build the sparse TF query vector.
         let mut raw_counts: HashMap<usize, usize> = HashMap::new();
         let mut has_in_vocab = false;
         for term in &terms {
@@ -505,13 +574,35 @@ impl NmfProvider {
         if !has_in_vocab {
             return None;
         }
-        // TF weights: ln(1 + count), same as the training matrix.
+        // TF-IDF weights: ln(1 + count) * idf, same as the training matrix.
         let mut q = vec![0.0_f32; vocab_size];
         for (&term_idx, &count) in &raw_counts {
-            q[term_idx] = (1.0 + count as f32).ln();
+            let idf = self.idf_weights.get(term_idx).copied().unwrap_or(0.0);
+            q[term_idx] = (1.0 + count as f32).ln() * idf;
         }
 
-        // Fold-in: queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
+        let unit = self.fold_in_unit(&q)?;
+        let centred =
+            crate::distributional_pooling::remove_mean_direction(&unit, &self.mean_direction);
+        let normalised = float_vec_ops::l2_normalize(centred);
+        if normalised.iter().all(|&v| v == 0.0) {
+            return None;
+        }
+        Some(normalised)
+    }
+
+    /// Fold a TF-IDF vector `q` (length vocabSize) into the NMF space and
+    /// L2-normalise:
+    ///   queryVec[r] = dot(W[:, r], q) / (||W[:, r]||^2 + eps)
+    ///
+    /// The pseudo-inverse projection of q onto each latent factor column of W,
+    /// analogous to LSA fold-in (Σ^{-1} Vᵀ q). Shared by the text path and the
+    /// corpus-mean fit so both see the same projection. Returns `None` when the
+    /// projection is all-zero.
+    fn fold_in_unit(&self, q: &[f32]) -> Option<Vec<f32>> {
+        let k = self.effective_rank;
+        let vocab_size = q.len();
+        let eps: f32 = 1e-9;
         // W is vocabSize × k: self.w[i][r] is the (i, r) entry.
         // Column r of W: self.w[0][r], self.w[1][r], ..., self.w[vocabSize-1][r].
         let mut query_vec = vec![0.0_f32; k];
@@ -550,7 +641,9 @@ impl NmfProvider {
         }
     }
 
-    /// Return the pre-computed document embedding at `doc_idx`.
+    /// Return the pre-computed factor loading (L2-normalised H column) of
+    /// training document `doc_idx` — a raw-factor read for conformance; the
+    /// product embeds every text through `embed_float`/`embed_pair`.
     /// Returns `None` if out of range or not finalized.
     pub fn document_embedding(&self, doc_idx: usize) -> Option<Vec<f32>> {
         if !self.is_finalized() || doc_idx >= self.counts.document_count() {
@@ -629,7 +722,7 @@ impl EmbeddingProvider for NmfProvider {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 impl TrainableEmbeddingBasis for NmfProvider {
     /// Train the NMF basis on a corpus of raw document texts.
@@ -641,7 +734,7 @@ impl TrainableEmbeddingBasis for NmfProvider {
     /// and runs the SubstrateML NMF factorization (tolerance=0, fixed iterations,
     /// deterministic). This reproduces the exact trained+finalized state of
     /// per-document `train` + `finalize`, so a basis serialized after
-    /// `train_on_corpus` is byte-identical to the 6a-i fixture trained on the
+    /// `train_on_corpus` is byte-identical to the shared fixture trained on the
     /// same texts.
     fn train_on_corpus(&mut self, texts: &[&str]) {
         for text in texts {
@@ -662,13 +755,13 @@ impl TrainableEmbeddingBasis for NmfProvider {
         self.finalize();
     }
 
-    /// Serialize the finalized NMF basis (6a-i codec), surfaced through the seam.
+    /// Serialize the finalized NMF basis (basis codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         NmfProvider::serialize_basis(self)
     }
 
     /// Reconstruct a fresh `NmfProvider` from a basis blob, boxed. Delegates to
-    /// `from_serialized_basis` (6a-i); a codec error maps to
+    /// `from_serialized_basis`; a codec error maps to
     /// `CorpusKitError::DecodingFailure`.
     fn reconstruct_basis(
         &self,
@@ -683,6 +776,8 @@ impl TrainableEmbeddingBasis for NmfProvider {
         self.w = Vec::new();
         self.h = Vec::new();
         self.doc_embeddings = Vec::new();
+        self.idf_weights = Vec::new();
+        self.mean_direction = Vec::new();
     }
 
     /// Reconstruct a fresh NMF provider from a basis blob, boxed as TRAINABLE so
@@ -706,7 +801,7 @@ impl TrainableEmbeddingBasis for NmfProvider {
         self.counts.add_document_for_counts_anchor(text);
     }
 
-    /// Serialize the maintained counts (6a-i counts codec), surfaced through the
+    /// Serialize the maintained counts (counts codec), surfaced through the
     /// seam.
     fn serialize_counts(&self) -> Vec<u8> {
         NmfProvider::serialize_counts(self)
@@ -1028,31 +1123,31 @@ mod tests {
         assert!((norm2.sqrt() - 1.0).abs() < 1e-5);
 
         // Cross-port bit-identity pins (confirmed against Swift emit output):
-        //   embed_float[0] = 0.84187937 (bits: 0x3F578568)
-        //   embed_float[1] = 0.53966576 (bits: 0x3F0A2789)
-        //   embed_float[2] = 0          (bits: 0x00000000)
+        //   embed_float[0] =  0.5184791 (bits: 0x3F04BB0C)
+        //   embed_float[1] = -0.6073682 (bits: 0xBF1B7C7B)
+        //   embed_float[2] = -0.6018996 (bits: 0xBF1A1618)
         assert_eq!(v1.len(), 3, "rank-3 NMF must return 3-dim vector");
-        assert_eq!(v1[0].to_bits(), 0x3F578568, "embed_float[0] bit-identity with Swift");
-        assert_eq!(v1[1].to_bits(), 0x3F0A2789, "embed_float[1] bit-identity with Swift");
-        assert_eq!(v1[2].to_bits(), 0x00000000, "embed_float[2] bit-identity with Swift");
+        assert_eq!(v1[0].to_bits(), 0x3F04BB0C, "embed_float[0] bit-identity with Swift");
+        assert_eq!(v1[1].to_bits(), 0xBF1B7C7B, "embed_float[1] bit-identity with Swift");
+        assert_eq!(v1[2].to_bits(), 0xBF1A1618, "embed_float[2] bit-identity with Swift");
 
         // Engram bit-identity pins:
-        // block0=0xB7AB5528EF12D061 block1=0xC452A7DEFE999697
-        // block2=0x325CFC0C6D14A93F block3=0xA1591A2717EBC02B
+        // block0=0x47B1D448F653A0E1 block1=0x84C8AB96FA01369F
+        // block2=0x39DCF5AFED957063 block3=0xA11538649FBBE00B
         let eng = p.nmf_engram("car engine");
-        assert_eq!(eng.block0, 0xB7AB5528EF12D061, "Engram block0 bit-identity with Swift");
-        assert_eq!(eng.block1, 0xC452A7DEFE999697, "Engram block1 bit-identity with Swift");
-        assert_eq!(eng.block2, 0x325CFC0C6D14A93F, "Engram block2 bit-identity with Swift");
-        assert_eq!(eng.block3, 0xA1591A2717EBC02B, "Engram block3 bit-identity with Swift");
+        assert_eq!(eng.block0, 0x47B1D448F653A0E1, "Engram block0 bit-identity with Swift");
+        assert_eq!(eng.block1, 0x84C8AB96FA01369F, "Engram block1 bit-identity with Swift");
+        assert_eq!(eng.block2, 0x39DCF5AFED957063, "Engram block2 bit-identity with Swift");
+        assert_eq!(eng.block3, 0xA11538649FBBE00B, "Engram block3 bit-identity with Swift");
 
         // Document embedding bit-identity pins for doc 0:
-        // doc[0][0] = 0.015156989 (bits: 0x3C785505)
-        // doc[0][1] = 0.9998851   (bits: 0x3F7FF878)
-        // doc[0][2] = 0           (bits: 0x00000000)
+        // doc[0][0] = 1.0 (bits: 0x3F800000)
+        // doc[0][1] = 0.0 (bits: 0x00000000)
+        // doc[0][2] = 0.0 (bits: 0x00000000)
         let d0 = p.document_embedding(0).expect("doc 0 must have an embedding");
         assert_eq!(d0.len(), 3, "rank-3 NMF must produce 3-dim document embedding");
-        assert_eq!(d0[0].to_bits(), 0x3C785505, "doc[0][0] bit-identity with Swift");
-        assert_eq!(d0[1].to_bits(), 0x3F7FF878, "doc[0][1] bit-identity with Swift");
+        assert_eq!(d0[0].to_bits(), 0x3F800000, "doc[0][0] bit-identity with Swift");
+        assert_eq!(d0[1].to_bits(), 0x00000000, "doc[0][1] bit-identity with Swift");
         assert_eq!(d0[2].to_bits(), 0x00000000, "doc[0][2] bit-identity with Swift");
     }
 }

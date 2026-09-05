@@ -544,6 +544,23 @@ impl CorpusProviderCountsStore {
         if is_invalidated_counts(&persisted.counts) {
             return Ok(false);
         }
+        // Format-version gate: a counts blob written by another codec generation
+        // for this provider (same magic, other version byte) cannot be restored —
+        // its layout is not the one `provider` reads. Treat it exactly like the
+        // sentinel: "no usable counts, rebuild from the corpus". The caller's
+        // corpus-path retrain then re-persists counts in the current format.
+        // `provider` is a freshly constructed instance by contract (every caller
+        // reconstructs one from the empty factory blob before restoring into it),
+        // so its `serialize_counts()` is the small header-only frame to compare.
+        let current_frame = provider.serialize_counts();
+        if crate::basis_blob_frame::is_stale_version(&persisted.counts, &current_frame) {
+            eprintln!(
+                "[corpus] counts for {model_id}@{model_version} are format v{}; this build writes v{}. Treating as no counts; the corpus-path retrain rebuilds them.",
+                crate::basis_blob_frame::format_version(&persisted.counts).unwrap_or(0),
+                crate::basis_blob_frame::format_version(&current_frame).unwrap_or(0)
+            );
+            return Ok(false);
+        }
         // Preference order: v4 integer-keyed pair → v3 term rows → legacy
         // blob. Empty at each layer means "not written in that layout",
         // never "empty vocabulary". Mirrors the Swift chain.
