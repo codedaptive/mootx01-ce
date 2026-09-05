@@ -43,7 +43,7 @@
 // .matrixAware) changes the final score math, producing ranked ≠ substring results.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 // ConvergenceKit: sync-backend abstraction. `SyncEngine` trait + `SyncState` enum
@@ -85,7 +85,7 @@ use locus_kit::error::LocusKitError;
 use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
-use locus_kit::filter::RecallFrame;
+use locus_kit::filter::{HydrationLevel, RecallFrame};
 use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, LearnFrame as LocusLearnFrame, MutationKind, ProposeFrame as LocusProposeFrame};
 // GLK-level LearnFrame — the public verb boundary type that callers supply.
 // Mapped to LocusLearnFrame at the dispatch boundary (same pattern as
@@ -10657,6 +10657,230 @@ impl EstateCoordinator {
         coords
     }
 
+    // MARK: - UnionBest step 10 — greedy MMR with windowed tie resolution
+
+    /// Adaptive MMR λ from the step 8 adaptive weights. Swift
+    /// `RecallDirector.recallUnionBest` step 10 twin:
+    /// λ = clamp(0.7 − (weights.diversity − 0.1) × 0.5, 0.5, 0.9).
+    ///
+    /// `diversity` is 0.1 at base (λ = 0.7) and rises to 0.25 when the union
+    /// profile reports redundancy > 0.5 (λ = 0.625), so a candidate buffer
+    /// dominated by near-duplicates pushes the selection toward diversity.
+    /// The clamp keeps relevance the majority term (λ ≥ 0.5) and never
+    /// disables the diversity term (λ ≤ 0.9). `RecallTuningManifest.mmr_lambda`
+    /// is not consulted: neither port reads it in step 10.
+    fn union_best_mmr_lambda(diversity: f32) -> f32 {
+        (0.7 - (diversity - 0.1) * 0.5).max(0.5).min(0.9)
+    }
+
+    /// Jaccard similarity between two source-lane bitsets — Swift
+    /// `glkSourceMaskJaccard` twin.
+    ///
+    /// The MMR similarity proxy for a pair where either candidate has no
+    /// shingle set (a `Structured` / `BitmapOnly` recall, an empty body, or a
+    /// candidate outside the frame-admissible pool): candidates sourced from
+    /// the same lanes carry correlated signal, so penalising them raises
+    /// topical diversity. Bit ordinals are the five candidate-supply lanes
+    /// (see `source_masks` in `recall_scored_multi_lane`). Returns 0 when both
+    /// masks are zero (no shared lane evidence — fully dissimilar).
+    fn source_mask_jaccard(a: u16, b: u16) -> f32 {
+        let or_bits = a | b;
+        if or_bits == 0 {
+            return 0.0;
+        }
+        (a & b).count_ones() as f32 / or_bits.count_ones() as f32
+    }
+
+    /// Step 9.5 twin: the MMR body view of the candidate slots, parallel to
+    /// `ids`. Returns `(content_key, shingles)`.
+    ///
+    /// Swift hydrates the bodies of the frame-admissible pool (`drawerIndex`
+    /// keys) for a `.full` recall only. In Rust the frame-admissible pool
+    /// (`drawer_index`) is loaded through `get_drawers_matching_frame`, which
+    /// returns full rows for `Structured` and `Full` (LocusKit strips the body
+    /// for `BitmapOnly` only), so the bodies are already in hand and no second
+    /// by-id read is made. The view is still gated on `Full` so the selection
+    /// matches Swift level for level:
+    /// - `Full`: the content key is the body (possibly empty) for an admissible
+    ///   candidate and the id otherwise (Swift `mmrContentByID[id] ?? id`); a
+    ///   non-empty body is shingled ONCE into a character-3-gram set
+    ///   (SubstrateML `shingle_similarity::shingles`, the conformance-gated
+    ///   twin of Swift `ShingleSimilarity.shingles`) and reused across both
+    ///   MMR phases.
+    /// - `Structured` / `BitmapOnly`: the key is the id and no set is built, so
+    ///   every pair falls back to the sourceMask proxy exactly as Swift.
+    fn union_best_mmr_bodies<'a>(
+        ids: &[&'a str],
+        drawer_index: &'a HashMap<String, Drawer>,
+        level: HydrationLevel,
+    ) -> (Vec<&'a str>, Vec<Option<BTreeSet<String>>>) {
+        let full = level == HydrationLevel::Full;
+        let mut keys: Vec<&'a str> = Vec::with_capacity(ids.len());
+        let mut sets: Vec<Option<BTreeSet<String>>> = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let body: Option<&'a str> = if full {
+                drawer_index.get(id).map(|d| d.content.as_str())
+            } else {
+                None
+            };
+            keys.push(body.unwrap_or(id));
+            sets.push(match body {
+                Some(b) if !b.is_empty() => Some(substrate_ml::shingle_similarity::shingles(b)),
+                _ => None,
+            });
+        }
+        (keys, sets)
+    }
+
+    /// Greedy MMR selection with windowed tie resolution — the Rust twin of
+    /// Swift `RecallDirector.recallUnionBest` step 10. Shared by every UnionBest
+    /// scoring strategy (matrixAware, raw, rrf, discriminative).
+    ///
+    /// Inputs are parallel per-slot columns:
+    /// - `scores`: the step 9 relevance score in [0, 1].
+    /// - `source_masks`: the five-lane u16 bitset per slot.
+    /// - `admissible`: whether the slot is in the frame-admissible pool
+    ///   (`drawer_index`). Only admissible slots enter the loop (RD-01 §F1): a
+    ///   frame-excluded candidate must not update `max_sim` for the admissible
+    ///   ones. Swift admits every slot when its pool load degraded; the Rust
+    ///   pool load never leaves a partially built index (a failed supplemental
+    ///   load surfaces as `locus.poolHydrate` and its ids are dropped from the
+    ///   hits), so admissible is always the `drawer_index` membership.
+    /// - `content_key` / `shingles`: from `union_best_mmr_bodies`.
+    /// - `subjects`: the presentation-sort secondary key (nil subject as "").
+    ///
+    /// Selection: each pick is the argmax of λ·score − (1−λ)·maxSim, where
+    /// maxSim is the highest similarity to any already-selected slot (updated
+    /// incrementally after each pick, O(n·k) not O(n²·k)). The argmax is a
+    /// TOTAL order — higher MMR score wins; on an exact tie the lower content
+    /// key wins (content is stable for a seed, ids are minted per estate) —
+    /// so two identical recalls select identically. Similarity is the shingle
+    /// Jaccard (`similarity_sets`, the same |∩|/|∪| as the Swift set overload)
+    /// when both slots carry a set, else the sourceMask Jaccard.
+    ///
+    /// Windowed tie resolution (DECISION_SCORE_TRANSPARENT_ORDERING 2026-08-24,
+    /// ruling 1): phase 1 fills the 2N working view; the view is sorted into
+    /// presentation order (score DESC, subject ASC; exact equals unspecified by
+    /// design, ruling 3) and cut at N. When the slot at N−1 shares its score
+    /// with the slot at N, phase 2 continues the SAME loop (`unselected` and
+    /// `max_sim` carried over, no restart) to 4N and returns the whole tie
+    /// group when its break lies within 4N, the whole 4N view when the pool is
+    /// exhausted, or only the determinate prefix above the tie group with
+    /// `tie.nonDeterminate` recorded. `plan.frontier_k = min(max(limit*4, 64),
+    /// 256)` already over-fetches the 4N window for limit ≤ 64.
+    ///
+    /// Returns the selected slot indices in presentation order.
+    #[allow(clippy::too_many_arguments)]
+    fn union_best_mmr_select(
+        scores: &[f32],
+        source_masks: &[u16],
+        admissible: &[bool],
+        content_key: &[&str],
+        shingles: &[Option<BTreeSet<String>>],
+        subjects: &[&str],
+        lambda: f32,
+        limit: usize,
+        degraded_stages: &mut Vec<String>,
+    ) -> Vec<usize> {
+        let count = scores.len();
+        let mut max_sim = vec![0.0_f32; count];
+        let mut selected: Vec<usize> = Vec::new();
+        // Ascending slot order: the only remaining tie (equal MMR score AND
+        // equal content key, i.e. identical bodies) resolves to the lower slot.
+        let mut unselected: Vec<usize> = (0..count).filter(|&i| admissible[i]).collect();
+
+        // One greedy pick, shared by both phases: argmax, move the winner to
+        // `selected`, then raise `max_sim` over the remaining slots.
+        let pick = |unselected: &mut Vec<usize>, selected: &mut Vec<usize>, max_sim: &mut Vec<f32>| {
+            let mut best: Option<(usize, usize)> = None; // (position in unselected, slot)
+            let mut best_mmr = -f32::MAX;
+            for (pos, &i) in unselected.iter().enumerate() {
+                let mmr = lambda * scores[i] - (1.0 - lambda) * max_sim[i];
+                let better = match best {
+                    None => true,
+                    Some((_, b)) => mmr > best_mmr
+                        || (mmr == best_mmr && content_key[i] < content_key[b]),
+                };
+                if better {
+                    best_mmr = mmr;
+                    best = Some((pos, i));
+                }
+            }
+            let (pos, best_idx) = best.expect("pick runs only while unselected is non-empty");
+            unselected.remove(pos);
+            selected.push(best_idx);
+            for &i in unselected.iter() {
+                let sim = match (&shingles[best_idx], &shingles[i]) {
+                    (Some(a), Some(b)) => substrate_ml::shingle_similarity::similarity_sets(a, b),
+                    _ => Self::source_mask_jaccard(source_masks[best_idx], source_masks[i]),
+                };
+                if sim > max_sim[i] {
+                    max_sim[i] = sim;
+                }
+            }
+        };
+
+        // Presentation comparator: score DESC, then subject ASC. A NaN score
+        // compares as neither greater nor smaller (Swift `si > sj` is false
+        // both ways), which `partial_cmp` → Equal reproduces.
+        let presentation = |a: &usize, b: &usize| -> std::cmp::Ordering {
+            let (sa, sb) = (scores[*a], scores[*b]);
+            if sa != sb {
+                return sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal);
+            }
+            subjects[*a].cmp(subjects[*b])
+        };
+
+        // Phase 1 — fill the 2N working view.
+        let work_limit_2n = (limit * 2).min(count);
+        while selected.len() < work_limit_2n && !unselected.is_empty() {
+            pick(&mut unselected, &mut selected, &mut max_sim);
+        }
+        let mut sorted_2n = selected.clone();
+        sorted_2n.sort_by(|a, b| presentation(a, b));
+
+        // Tie check at the presentation boundary. `sorted_2n.len() > limit`
+        // implies limit ≥ 1 here (the view holds at most 2·limit slots).
+        let presentation_cut = limit.min(sorted_2n.len());
+        let tie_at_cut = sorted_2n.len() > limit
+            && presentation_cut > 0
+            && scores[sorted_2n[presentation_cut - 1]] == scores[sorted_2n[presentation_cut]];
+        if !tie_at_cut {
+            sorted_2n.truncate(presentation_cut);
+            return sorted_2n;
+        }
+
+        // Phase 2 — continue MMR to 4N from exactly where phase 1 stopped.
+        let work_limit_4n = (limit * 4).min(count);
+        while selected.len() < work_limit_4n && !unselected.is_empty() {
+            pick(&mut unselected, &mut selected, &mut max_sim);
+        }
+        let mut sorted_4n = selected;
+        sorted_4n.sort_by(|a, b| presentation(a, b));
+        let tied_score = scores[sorted_2n[presentation_cut - 1]];
+        if let Some(break_at) = sorted_4n.iter().position(|&i| scores[i] < tied_score) {
+            // Break found within 4N: return the WHOLE tie group (honest
+            // expansion past the requested limit — the scores decide).
+            sorted_4n.truncate(break_at);
+            sorted_4n
+        } else if unselected.is_empty() {
+            // Pool exhausted before the 4N cap: nothing else exists; every
+            // slot of the 4N view is equally valid, any subset would be
+            // arbitrary.
+            sorted_4n
+        } else {
+            // The tie group extends past the 4N window: return only the
+            // determinate prefix above it and tell the caller.
+            let tie_group_start = sorted_4n
+                .iter()
+                .position(|&i| scores[i] == tied_score)
+                .unwrap_or(0);
+            sorted_4n.truncate(tie_group_start);
+            degraded_stages.push("tie.nonDeterminate".to_string());
+            sorted_4n
+        }
+    }
+
     /// Min-max normalise a mutable Vec column to [0, 1] over its first `count` elements.
     ///
     /// Mirrors Swift `RecallCandidateBuffer.normalizedCopy(of:)`:
@@ -11634,12 +11858,19 @@ impl EstateCoordinator {
         //   (5) Compute adaptive weights from sketch signals + profile.
         //   (6) Weighted score: Σ weight * column + agreement_bonus.
         //
+        //   (7) Steps 9.5 and 10 — post-hydration shingle MMR with windowed tie
+        //       resolution (`union_best_mmr_select`), λ from the step 8 weights.
+        //
         // All other mode+scoring combinations (Hybrid/CorpusOnly regardless of
-        // scoring, and UnionBest with Raw/Rrf):
+        // scoring, and UnionBest with Raw/Rrf/Discriminative):
         //   Swift also falls back to RRF for Hybrid and CorpusOnly with MatrixAware;
         //   for UnionBest + Raw/Rrf Swift uses buffer.final (same as RRF here).
         //   For simplicity, all non-(UnionBest+MatrixAware) paths use the RRF/raw
         //   formula below, matching Swift's documented fallback behaviour.
+        //   Every UnionBest scoring then runs the SAME step 10 MMR stage as the
+        //   matrixAware branch (Swift computes the union profile and the adaptive
+        //   weights for every scoring strategy and takes λ from them); Hybrid and
+        //   CorpusOnly keep the plain presentation sort, as in Swift.
         //
         // UnionBest + Discriminative is handled in the else-branch below: the
         // dense_discrimination_factor is computed for ALL UnionBest calls (the
@@ -12008,59 +12239,30 @@ impl EstateCoordinator {
                    + agreement_bonus * source_masks[i].count_ones() as f32 / 5.0;
             }
 
-            // Presentation sort: (score DESC, subject ASC). subject is content-derived
-            // and deterministic per seed; nil subject (Option<String>::None) sorts as "".
-            // Among exact (score, subject) equals the mutual order is unspecified by design
-            // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 3 — do NOT add a third key).
-            let mut indexed: Vec<(usize, f32)> = (0..count).map(|i| (i, col_final[i])).collect();
-            indexed.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let sub_a = drawer_index.get(&ordered_ids[a.0])
-                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
-                        let sub_b = drawer_index.get(&ordered_ids[b.0])
-                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
-                        sub_a.cmp(sub_b)
-                    })
-            });
-            // WINDOWED TIE RESOLUTION (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1):
-            // plan.frontier_k = min(max(limit*4, 64), 256) already provides the 4N pool
-            // for limit ≤ 64. When limit > 64, frontier_k = 256 < 4*limit; the
-            // determinate-prefix branch fires if the 4N pool is exhausted.
-            let presentation_cut = request.limit.min(indexed.len());
-            if indexed.len() > request.limit {
-                let score_at_cut = indexed[presentation_cut - 1].1;
-                if score_at_cut == indexed[presentation_cut].1 {
-                    // Tie straddles the cut — hunt the group's break in the 4N pool.
-                    let pool_4n = (request.limit * 4).min(indexed.len());
-                    let tied_score = score_at_cut;
-                    if let Some(break_at) = indexed[..pool_4n].iter().position(|(_, s)| *s < tied_score) {
-                        // Break found: return the whole tie group (honest expansion).
-                        indexed.truncate(break_at);
-                    } else if pool_4n == indexed.len() {
-                        // Pool fully exhausted — indexed contains ALL candidates.
-                        // No break exists in the entire estate; return the whole
-                        // pool (honest expansion, pool is the tie group).
-                        // No truncation: already at full pool size.
-                    } else {
-                        // No break within 4N AND more items exist beyond the cap.
-                        // Return only the determinate prefix above the tie group.
-                        let tie_start = indexed[..pool_4n].iter()
-                            .position(|(_, s)| *s == tied_score).unwrap_or(0);
-                        indexed.truncate(tie_start);
-                        degraded_stages.push("tie.nonDeterminate".to_string());
-                    }
-                } else {
-                    // No tie at cut: trim to limit.
-                    indexed.truncate(presentation_cut);
-                }
-            } // else: fewer candidates than limit — keep all.
+            // Steps 9.5 and 10 — post-hydration shingle MMR and windowed tie
+            // resolution, the Swift `recallUnionBest` twin. λ comes from the
+            // adaptive weights computed at step 8 (`weights.diversity`); the
+            // body view is read from the frame-admissible pool
+            // (`union_best_mmr_bodies`); `union_best_mmr_select` returns the
+            // selected slots in presentation order (score DESC, subject ASC)
+            // after the 2N / 4N tie rules.
+            let lambda = Self::union_best_mmr_lambda(weights.diversity);
+            let id_refs: Vec<&str> = ordered_ids.iter().map(String::as_str).collect();
+            let (content_key, shingles) = Self::union_best_mmr_bodies(
+                &id_refs, &drawer_index, request.frame.hydration_level);
+            let admissible: Vec<bool> =
+                id_refs.iter().map(|id| drawer_index.contains_key(*id)).collect();
+            let subjects: Vec<&str> = id_refs.iter().map(|id| {
+                drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
+            }).collect();
+            let selected = Self::union_best_mmr_select(
+                &col_final, &source_masks, &admissible, &content_key, &shingles,
+                &subjects, lambda, request.limit, &mut degraded_stages);
 
-            fused_scored = indexed.into_iter().map(|(i, final_s)| {
+            fused_scored = selected.into_iter().map(|i| {
                 let id = ordered_ids[i].clone();
                 (id,
-                 final_s,
+                 col_final[i],
                  col_locus[i],
                  col_bm25[i],
                  col_vector[i],
@@ -12256,44 +12458,126 @@ impl EstateCoordinator {
                 })
                 .collect();
 
-            // Presentation sort: (score DESC, subject ASC). subject is content-derived
-            // and deterministic per seed; None subject sorts as "".
-            // Among exact (score, subject) equals the order is unspecified by design
-            // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 3).
-            scored.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let sub_a = drawer_index.get(&a.0)
-                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
-                        let sub_b = drawer_index.get(&b.0)
-                            .and_then(|d| d.subject.as_deref()).unwrap_or("");
-                        sub_a.cmp(sub_b)
-                    })
-            });
-            // WINDOWED TIE RESOLUTION (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1):
-            // plan.frontier_k provides the 4N pool for limit ≤ 64.
-            let presentation_cut = request.limit.min(scored.len());
-            if scored.len() > request.limit {
-                let score_at_cut = scored[presentation_cut - 1].1;
-                if score_at_cut == scored[presentation_cut].1 {
-                    let pool_4n = (request.limit * 4).min(scored.len());
-                    let tied_score = score_at_cut;
-                    if let Some(break_at) = scored[..pool_4n].iter().position(|(_, s, ..)| *s < tied_score) {
-                        scored.truncate(break_at);
-                    } else if pool_4n == scored.len() {
-                        // Pool fully exhausted: return the whole pool.
+            if request.mode == GLKRecallMode::UnionBest {
+                // UnionBest + Raw / Rrf / Discriminative: the same step 10 MMR
+                // stage as the matrixAware branch. Swift computes the union
+                // profile (step 7) and the adaptive weights (step 8) for EVERY
+                // scoring strategy and step 10 takes λ from `weights.diversity`
+                // regardless of scoring, over the step 6 normalised `final`
+                // column. Rust builds the same profile here from the lane
+                // columns of the scored candidates (min-max normalised as in
+                // step 6) so λ has the same source, and feeds the normalised
+                // fused score to MMR as the relevance term so λ·score and
+                // (1−λ)·maxSim share the [0, 1] scale exactly as in Swift; the
+                // hit's reported `final_score` stays the fused value computed
+                // above. The returned `union_profile` stays
+                // `RecallUnionProfile::ZERO` for these scorings (below).
+                //
+                // Candidates are ordered by id first: `all_ids` is a HashSet,
+                // and the MMR argmax only breaks an exact (MMR score, content
+                // key) tie by slot order, so a canonical order keeps two
+                // identical recalls identical.
+                scored.sort_by(|a, b| a.0.cmp(&b.0));
+                let count = scored.len();
+                let id_refs: Vec<&str> = scored.iter().map(|t| t.0.as_str()).collect();
+                // Same five bit ordinals as the matrixAware branch (Swift
+                // RecallCandidateBuffer): locus, locusGraph, bm25, hamming, dense.
+                let source_masks: Vec<u16> = id_refs.iter().map(|id| {
+                    let mut mask: u16 = 0;
+                    if locus_score_map.contains_key(*id)  { mask |= 1 << 0; }
+                    if graph_score_map.contains_key(*id)  { mask |= 1 << 1; }
+                    if bm25_score_map.contains_key(*id)   { mask |= 1 << 2; }
+                    if vector_score_map.contains_key(*id) { mask |= 1 << 3; }
+                    if dense_score_map.contains_key(*id)  { mask |= 1 << 4; }
+                    mask
+                }).collect();
+                let mut col_locus:  Vec<f32> = scored.iter().map(|t| t.2).collect();
+                let mut col_bm25:   Vec<f32> = scored.iter().map(|t| t.3).collect();
+                let mut col_vector: Vec<f32> = scored.iter().map(|t| t.4).collect();
+                // No matrix pass on this branch (Swift step 5.6 is matrixAware-
+                // only), so the co-occurrence column the profile reads is zero.
+                let col_co_occur: Vec<f32> = vec![0.0; count];
+                let mut col_final_norm: Vec<f32> = scored.iter().map(|t| t.1).collect();
+                Self::normalize_column(&mut col_locus, count);
+                Self::normalize_column(&mut col_bm25, count);
+                Self::normalize_column(&mut col_vector, count);
+                Self::normalize_column(&mut col_final_norm, count);
+                let primary_source_count = {
+                    let mut n = 0usize;
+                    if locus_contributed  { n += 1; }
+                    if graph_contributed  { n += 1; }
+                    if bm25_contributed   { n += 1; }
+                    if vector_contributed { n += 1; }
+                    if dense_contributed  { n += 1; }
+                    n.max(1)
+                };
+                let profile = RecallUnionProfile::compute(
+                    &col_locus,
+                    &col_bm25,
+                    &col_vector,
+                    &col_co_occur,
+                    &source_masks,
+                    &col_final_norm,
+                    count,
+                    primary_source_count,
+                );
+                let has_bitmap_predicates = !request.frame.filter_chain.is_empty();
+                let has_query_text =
+                    request.query_text.as_deref().map_or(false, |t| !t.is_empty());
+                let weights =
+                    RecallWeights::adaptive(has_bitmap_predicates, has_query_text, &profile);
+                let lambda = Self::union_best_mmr_lambda(weights.diversity);
+                let (content_key, shingles) = Self::union_best_mmr_bodies(
+                    &id_refs, &drawer_index, request.frame.hydration_level);
+                let admissible: Vec<bool> =
+                    id_refs.iter().map(|id| drawer_index.contains_key(*id)).collect();
+                let subjects: Vec<&str> = id_refs.iter().map(|id| {
+                    drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
+                }).collect();
+                let selected = Self::union_best_mmr_select(
+                    &col_final_norm, &source_masks, &admissible, &content_key, &shingles,
+                    &subjects, lambda, request.limit, &mut degraded_stages);
+                fused_scored = selected.into_iter().map(|i| scored[i].clone()).collect();
+            } else {
+                // Presentation sort: (score DESC, subject ASC). subject is content-derived
+                // and deterministic per seed; None subject sorts as "".
+                // Among exact (score, subject) equals the order is unspecified by design
+                // (DECISION_SCORE_TRANSPARENT_ORDERING ruling 3).
+                scored.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            let sub_a = drawer_index.get(&a.0)
+                                .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                            let sub_b = drawer_index.get(&b.0)
+                                .and_then(|d| d.subject.as_deref()).unwrap_or("");
+                            sub_a.cmp(sub_b)
+                        })
+                });
+                // WINDOWED TIE RESOLUTION (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1):
+                // plan.frontier_k provides the 4N pool for limit ≤ 64.
+                let presentation_cut = request.limit.min(scored.len());
+                if scored.len() > request.limit {
+                    let score_at_cut = scored[presentation_cut - 1].1;
+                    if score_at_cut == scored[presentation_cut].1 {
+                        let pool_4n = (request.limit * 4).min(scored.len());
+                        let tied_score = score_at_cut;
+                        if let Some(break_at) = scored[..pool_4n].iter().position(|(_, s, ..)| *s < tied_score) {
+                            scored.truncate(break_at);
+                        } else if pool_4n == scored.len() {
+                            // Pool fully exhausted: return the whole pool.
+                        } else {
+                            let tie_start = scored[..pool_4n].iter()
+                                .position(|(_, s, ..)| *s == tied_score).unwrap_or(0);
+                            scored.truncate(tie_start);
+                            degraded_stages.push("tie.nonDeterminate".to_string());
+                        }
                     } else {
-                        let tie_start = scored[..pool_4n].iter()
-                            .position(|(_, s, ..)| *s == tied_score).unwrap_or(0);
-                        scored.truncate(tie_start);
-                        degraded_stages.push("tie.nonDeterminate".to_string());
+                        scored.truncate(presentation_cut);
                     }
-                } else {
-                    scored.truncate(presentation_cut);
-                }
-            } // else: fewer candidates than limit — keep all.
-            fused_scored = scored;
+                } // else: fewer candidates than limit — keep all.
+                fused_scored = scored;
+            }
 
             union_profile = match request.mode {
                 // UnionBest with non-matrixAware scoring returns a minimal zero profile.
