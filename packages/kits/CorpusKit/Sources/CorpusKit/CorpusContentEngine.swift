@@ -456,14 +456,14 @@ public actor CorpusContentEngine {
                 basisStore: basisStore,
                 countsStore: countsStore)
             // Basis-generation digest: stateless slots derive it from the
-            // model version; trainable slots from the PERSISTED basis blob
-            // (empty until trained — coverage is never written untrained).
+            // model version; trainable slots from the PERSISTED basis blob the
+            // slot was reconstructed from (empty until trained, and empty when
+            // the persisted blob was refused for format-version skew — coverage
+            // is never written untrained, so the retrain re-covers every row).
             let digest: String
             if model.isTrainable {
-                if let persisted = try await basisStore.load(
-                    modelID: resolved.provider.modelID,
-                    modelVersion: resolved.provider.modelVersion) {
-                    digest = CorpusContentDigest.digest(persisted.basis)
+                if let served = resolved.servedBasis {
+                    digest = CorpusContentDigest.digest(served)
                 } else {
                     digest = Self.untrainedDigest
                 }
@@ -2621,12 +2621,13 @@ public actor CorpusContentEngine {
                 continue
             }
 
-            // firstTrain: no persisted basis row exists for this provider key — this
-            // is a genuine first training, forced or not. An untrained slot on a
-            // non-force call also takes this path since no counts snapshot to restore
-            // from exists. force==true with a basisRow falls through to the counts-path
+            // firstTrain: no persisted basis row exists for this provider key, OR
+            // the slot opened untrained because the persisted row was refused for
+            // format-version skew — either way there is no current basis to
+            // restore around, so this is a from-scratch training, forced or not.
+            // force==true with a served basis falls through to the counts-path
             // guard chain below.
-            guard basisRow != nil else {
+            guard basisRow != nil, slots[job.slotIndex].basisDigest != Self.untrainedDigest else {
                 _trainingPathDecisions[job.modelID] = .corpus(.firstTrain)
                 remainingJobs.append(job)
                 continue
