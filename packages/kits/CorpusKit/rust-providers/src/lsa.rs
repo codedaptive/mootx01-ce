@@ -231,13 +231,14 @@ impl LsaProvider {
             return;
         }
 
-        // IDF over REDUCED columns, using the full-corpus df. f32::ln — same
-        // transcendental as Swift's `log()` on f32.
+        // IDF over REDUCED columns, using the full-corpus df, through the one
+        // smoothed IDF every distributional provider shares (f32::ln — same
+        // transcendental as Swift's `log()` on f32).
         self.idf_weights = vec![0.0_f32; vocab_size];
         for (&full_idx, &col) in &reduced.full_index_to_column {
             let df = *self.counts.df_counts.get(&full_idx).unwrap_or(&0);
-            let idf = ((n + 1) as f32 / (df + 1) as f32).ln();
-            self.idf_weights[col] = idf.max(0.0);
+            self.idf_weights[col] =
+                crate::term_document_counts::smoothed_inverse_document_frequency(df, n);
         }
 
         // TF-IDF matrix M (numDocs × K, row-major). Map each doc's TF entries
@@ -330,7 +331,7 @@ impl LsaProvider {
         self.effective_rank
     }
 
-    // MARK: Basis serialization (mission 6a-i)
+    // MARK: Basis serialization
 
     /// Serialize the maintained trigger anchors (vocabulary + document count) to
     /// a versioned blob. Byte-identical to the Swift `LsaProvider.serializeCounts`
@@ -601,7 +602,7 @@ impl EmbeddingProvider for LsaProvider {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 impl TrainableEmbeddingBasis for LsaProvider {
     /// Train the LSA basis on a corpus of raw document texts.
@@ -612,7 +613,7 @@ impl TrainableEmbeddingBasis for LsaProvider {
     /// document column per text. The `finalize` pass then computes the TF-IDF
     /// matrix and runs the deterministic Jacobi SVD. This reproduces the exact
     /// trained+finalized state of per-document `train` + `finalize`, so a basis
-    /// serialized after `train_on_corpus` is byte-identical to the 6a-i fixture
+    /// serialized after `train_on_corpus` is byte-identical to the shared fixture
     /// trained on the same texts.
     fn train_on_corpus(&mut self, texts: &[&str]) {
         for text in texts {
@@ -633,13 +634,13 @@ impl TrainableEmbeddingBasis for LsaProvider {
         self.finalize();
     }
 
-    /// Serialize the finalized LSA basis (6a-i codec), surfaced through the seam.
+    /// Serialize the finalized LSA basis (basis codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         LsaProvider::serialize_basis(self)
     }
 
     /// Reconstruct a fresh `LsaProvider` from a basis blob, boxed. Delegates to
-    /// `from_serialized_basis` (6a-i); a codec error maps to
+    /// `from_serialized_basis`; a codec error maps to
     /// `CorpusKitError::DecodingFailure`.
     fn reconstruct_basis(
         &self,
@@ -679,7 +680,7 @@ impl TrainableEmbeddingBasis for LsaProvider {
         self.counts.add_document_for_counts_anchor(text);
     }
 
-    /// Serialize the maintained counts (6a-i counts codec), surfaced through the
+    /// Serialize the maintained counts (counts codec), surfaced through the
     /// seam.
     fn serialize_counts(&self) -> Vec<u8> {
         LsaProvider::serialize_counts(self)
