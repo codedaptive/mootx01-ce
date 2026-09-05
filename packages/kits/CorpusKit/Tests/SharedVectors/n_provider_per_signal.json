@@ -6,11 +6,11 @@
       "kind" : "hits",
       "modelID" : "random-indexing-v1",
       "rankedItemIDs" : [
-        "doc-2",
         "doc-0",
         "doc-1",
-        "doc-3",
-        "doc-4"
+        "doc-2",
+        "doc-4",
+        "doc-3"
       ]
     },
     {

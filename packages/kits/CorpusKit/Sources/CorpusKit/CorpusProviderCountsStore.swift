@@ -47,8 +47,14 @@
 // bytes are opaque here; only the provider interprets them.
 
 import Foundation
+import OSLog
 import PersistenceKit
 import SubstrateTypes
+
+/// Store-level log: the format-version gate in `restoreCounts(into:)` reports
+/// a refused counts blob here so an operator can see why a provider retrained
+/// from the corpus instead of restoring its counts.
+private let countsLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -570,6 +576,19 @@ public actor CorpusProviderCountsStore {
         // throws "truncated blob reading magic". Returning false here lets the
         // caller route to a full corpus retrain as the migration intended.
         if Self.isInvalidatedCounts(persisted.counts) {
+            return false
+        }
+        // Format-version gate: a counts blob written by another codec generation
+        // for this provider (same magic, other version byte) cannot be restored —
+        // its layout is not the one `provider` reads. Treat it exactly like the
+        // sentinel: "no usable counts, rebuild from the corpus". The caller's
+        // corpus-path retrain then re-persists counts in the current format.
+        // `provider` is a freshly constructed instance by contract (every caller
+        // reconstructs one from the empty factory blob before restoring into it),
+        // so its `serializeCounts()` is the small header-only frame to compare.
+        if BasisBlobFrame.isStaleVersion(persisted: persisted.counts, current: provider.serializeCounts()) {
+            countsLog.error(
+                "counts for \(modelID, privacy: .public)@\(modelVersion, privacy: .public) are format v\(BasisBlobFrame.formatVersion(of: persisted.counts) ?? 0, privacy: .public); this build writes v\(BasisBlobFrame.formatVersion(of: provider.serializeCounts()) ?? 0, privacy: .public). Treating as no counts; the corpus-path retrain rebuilds them.")
             return false
         }
         // Preference order: v4 integer-keyed pair → v3 term rows → legacy

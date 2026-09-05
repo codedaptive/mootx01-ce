@@ -49,6 +49,7 @@ fn trained_from_fixture(f: &RIBasisFixture) -> RandomIndexingProvider {
         let terms: Vec<&str> = doc.iter().map(String::as_str).collect();
         p.train(&terms, RI_WINDOW);
     }
+    p.finalize();
     p
 }
 

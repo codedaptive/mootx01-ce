@@ -24,7 +24,9 @@ private let lsaBasisProbeTexts: [String] = ["car engine", "vehicle road", "dog a
 
 /// Rank 3 (matches the established LSA conformance suite's small-corpus rank).
 private func buildTrainedLsaProvider() -> LsaProvider {
-    let provider = LsaProvider(rank: 3, svdSweeps: 30)
+    // The shared fixture pins the historical 1.0 provider envelope; the Rust
+    // leg constructs the same identity explicitly (with_parameters "1.0.0").
+    let provider = LsaProvider(modelVersion: "1.0.0", rank: 3, svdSweeps: 30)
     for doc in lsaBasisCorpus { provider.train(document: doc) }
     provider.finalize()
     return provider
@@ -54,7 +56,7 @@ struct LsaBasisSerializationTests {
         #expect(restored.documentCount == original.documentCount)
     }
 
-    @Test("counts blob begins with the LSAC magic and the v1 format byte")
+    @Test("counts blob begins with the LSAC magic and the current format byte")
     func countsBlobHeaderIsVersioned() {
         let bytes = [UInt8](buildTrainedLsaProvider().serializeCounts())
         #expect(bytes.count >= 5)
@@ -108,7 +110,7 @@ struct LsaBasisSerializationTests {
         #expect(restored.documentCount == original.documentCount)
     }
 
-    @Test("blob begins with the LSB1 magic and the v1 format byte")
+    @Test("blob begins with the LSB1 magic and the current format byte")
     func blobHeaderIsVersioned() {
         let bytes = [UInt8](buildTrainedLsaProvider().serializeBasis())
         #expect(bytes.count >= 5)

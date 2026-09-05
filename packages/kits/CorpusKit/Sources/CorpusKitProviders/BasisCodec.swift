@@ -1,7 +1,7 @@
 // BasisCodec.swift
 //
 // Shared little-endian binary codec for distributional-provider basis
-// serialization (mission 6a-i). One definition, used by all four
+// serialization. One definition, used by all four
 // stateful providers (RandomIndexing, PPMI, LSA, NMF). This is
 // PROVIDER-FORMAT code, not a math primitive — it lives in
 // CorpusKitProviders, never in the substrate.
@@ -24,7 +24,8 @@
 //   - String:   UInt32 LE byte-length prefix, then that many UTF-8 bytes.
 //   - [Float]:  UInt32 LE element count, then count × (Float32 = 4 bytes).
 //   - [[Float]] (matrix): UInt32 LE row count, then each row as a [Float].
-//   - Map<String,*>: UInt32 LE entry count, then entries emitted in
+//   - Map<String,*> (values: [Float], UInt32, or Float32): UInt32 LE entry
+//     count, then entries emitted in
 //     LEXICOGRAPHICALLY ASCENDING order of the key's UTF-8 bytes. Sorting
 //     is what makes Swift and Rust emit identical bytes for the same map
 //     (HashMap/Dictionary iteration order is unspecified on both ports).
@@ -32,7 +33,7 @@
 // Each provider blob is framed as:
 //   MAGIC (4 ASCII bytes, provider-specific) | FORMAT_VERSION (1 byte) | payload
 //
-// The magic + version live at the FRONT so mission 6a-ii can detect and
+// The magic + version live at the FRONT so a reader can detect and
 // version a persisted basis without parsing the payload. An unknown
 // version or a truncated blob is rejected with a structured
 // CorpusKitError.decodingFailure — never a force-unwrap crash.
@@ -42,9 +43,26 @@ import CorpusKit
 
 // MARK: - Format version
 
-/// Current basis-blob format version. Bumped only when the byte layout
-/// of any provider's payload changes incompatibly. Mission 6a-i ships v1.
-public let basisFormatVersion: UInt8 = 1
+/// Current basis-blob format version, shared by every provider's basis AND
+/// counts frame. Bumped only when the byte layout of any provider's payload
+/// changes incompatibly.
+///
+/// History:
+///   1 — original layout: identity, seed, and the raw vector tables.
+///   2 — the distributional pooling fit travels in the blob: RI and PPMI
+///       bases carry an IDF table (String→Float32 map) and a corpus-mean
+///       direction ([Float]); the NMF basis carries reduced-column IDF
+///       weights and a corpus-mean direction; RI and PPMI counts carry the
+///       document count and per-term document frequencies the fit is
+///       derived from. LSA's payload is unchanged; it shares the version
+///       byte because the constant is one per codec.
+///
+/// A reader that meets any other version throws
+/// `CorpusKitError.decodingFailure` naming both versions. The open path
+/// (`Corpus.resolveProvider`) compares the persisted frame against the
+/// frame the current provider writes and treats a mismatch as "no basis"
+/// so the estate retrains instead of serving vectors pooled the old way.
+public let basisFormatVersion: UInt8 = 2
 
 // MARK: - Writer
 
@@ -147,6 +165,18 @@ public struct BasisWriter {
         }
     }
 
+    /// Append a String→Float32 map (term → scalar weight, e.g. an IDF
+    /// table), sorted by the key's UTF-8 bytes — the same ordering rule as
+    /// the other map writers, so both ports emit identical bytes.
+    public mutating func writeStringF32Map(_ map: [String: Float]) {
+        let sortedKeys = map.keys.sorted { lhsLess($0, $1) }
+        writeU32(UInt32(sortedKeys.count))
+        for key in sortedKeys {
+            writeString(key)
+            writeF32(map[key]!)
+        }
+    }
+
     /// Lexicographic comparison of two strings by their raw UTF-8 bytes.
     /// This matches Rust's `Ord for str` (which compares by bytes), so the
     /// two ports emit map entries in the identical order.
@@ -208,7 +238,7 @@ public struct BasisReader {
 
     /// Read the format-version byte and verify it is `expected`. An unknown
     /// version is rejected so a future on-disk format is never silently
-    /// misread (mission 6a-ii relies on this gate).
+    /// misread (the open-path gate relies on this).
     public mutating func expectVersion(_ expected: UInt8) throws {
         let v = try readByte()
         guard v == expected else {
@@ -301,6 +331,18 @@ public struct BasisReader {
             let key = try readString()
             let idx = Int(try readU32())
             out[key] = idx
+        }
+        return out
+    }
+
+    /// Read a String→Float32 map (term → scalar weight).
+    public mutating func readStringF32Map() throws -> [String: Float] {
+        let count = Int(try readU32())
+        var out = [String: Float](minimumCapacity: count)
+        for _ in 0..<count {
+            let key = try readString()
+            let value = try readF32()
+            out[key] = value
         }
         return out
     }

@@ -20,8 +20,10 @@
 //      vectors.  (Contrast RI: RI adds the full index vector for every
 //      co-occurrence; PPMI scales each addition by the informative
 //      weight, so stopword-like co-occurrences shrink toward zero.)
-//   5. A document/query embedding = the L2-normalised sum of its terms'
-//      PPMI context vectors.
+//   5. A document/query embedding = the pooled PPMI context vectors of its
+//      distinct terms: IDF-weighted sum, L2-normalised, corpus-mean
+//      direction removed, L2-normalised (DistributionalPooling.swift — the
+//      same function for documents and queries).
 //
 // The PPMI weighting is the whole point.  A term pair that co-occurs
 // frequently but whose members also co-occur widely with everything else
@@ -58,10 +60,12 @@
 //
 // Training is a two-phase process:
 //   Phase 1 — sliding window pass: count(t,c) and count(t) from the
-//              corpus.
+//              corpus, plus the per-term document frequency (one
+//              `train` call = one document).
 //   Phase 2 — PPMI pass: for each (t,c) pair, compute the PPMI weight
 //              and accumulate weight * indexVector(c) into the context
-//              sum for t.
+//              sum for t; then fit the pooling state (IDF table and
+//              corpus-mean direction) from the document frequencies.
 //
 // The PPMI kernel (log ratio) is new code; everything else (index
 // vectors, L2 normalisation, FloatSimHash projection) is substrate
@@ -189,6 +193,19 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// weighted sums.
     private var ppmiVectors: [String: [Float]]
 
+    /// Document frequency and document count accumulated by `train`, one
+    /// document per call. Training-phase state: persisted in the counts blob
+    /// (it feeds `finalize()`), never in the basis blob.
+    private var counts: TermDocumentCounts
+
+    /// Smoothed IDF per term that has a PPMI vector, fitted at `finalize()`.
+    /// Applied to documents and queries alike by `DistributionalPooling.pool`.
+    private var idfTable: [String: Float]
+
+    /// Unit corpus-mean direction fitted at `finalize()` (D long), or empty
+    /// when no term contributed. Removed from every pooled vector.
+    private var meanDirection: [Float]
+
     // MARK: Initialiser
 
     public init(
@@ -204,6 +221,9 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         self.totalPairs = 0
         self.totalTerms = 0
         self.ppmiVectors = [:]
+        self.counts = TermDocumentCounts()
+        self.idfTable = [:]
+        self.meanDirection = []
     }
 
     // MARK: Training — Phase 1 (count accumulation)
@@ -212,7 +232,9 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// For each target term t at position i, every term c in
     /// [i−window, i+window] (excluding i) is a context term.
-    /// Increments coCount[t][c] and termCount[t] accordingly.
+    /// Increments coCount[t][c] and termCount[t] accordingly. The call is
+    /// one document: every distinct term counts once toward its document
+    /// frequency (an empty call is not a document).
     ///
     /// Training is additive across multiple calls: each call extends
     /// the count tables without resetting them.  After training all
@@ -224,6 +246,9 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// - Note: Does NOT call Date() — determinism invariant.
     public func train(terms: [String], window: Int = ppmiWindow) {
+        guard !terms.isEmpty else { return }
+        // Document frequency: one document per call, each distinct term once.
+        counts.addDocumentTerms(terms)
         for (i, target) in terms.enumerated() {
             let lo = max(0, i - window)
             let hi = min(terms.count - 1, i + window)
@@ -279,6 +304,15 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// term's index vector is added with weight = ppmi(t,c).  Context
     /// terms with weight 0 (below-chance or zero-count pairs) contribute
     /// nothing.  Normalisation happens at embed time.
+    ///
+    /// ## Pooling fit
+    ///
+    /// After the vector table is built, the smoothed IDF of every term that
+    /// has a vector and the unit corpus-mean direction
+    /// `l2Normalize(Σ_t df(t)·idf(t)·ppmiVec(t))` are fitted from the
+    /// document frequencies `train` accumulated. Both are pure functions of
+    /// the count tables, so the counts path (restore counts → finalize)
+    /// fits the same bytes as the corpus path.
     public func finalize() {
         // Clear unconditionally BEFORE the emptiness guard. If the counts table
         // is empty (zero totalPairs/totalTerms) — which is the state after all
@@ -291,6 +325,8 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         // of the count maps — two finalizations on identical counts produce
         // identical vectors.
         ppmiVectors = [:]
+        idfTable = [:]
+        meanDirection = []
         guard totalPairs > 0, totalTerms > 0 else { return }
 
         let fTotalPairs = Float(totalPairs)
@@ -349,15 +385,28 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
                 ppmiVectors[target] = vec
             }
         }
+
+        // Pooling fit over the terms that have a vector.
+        var idf: [String: Float] = [:]
+        idf.reserveCapacity(ppmiVectors.count)
+        for term in ppmiVectors.keys {
+            idf[term] = counts.inverseDocumentFrequency(of: term)
+        }
+        idfTable = idf
+        meanDirection = DistributionalPooling.meanDirection(
+            vectors: ppmiVectors,
+            idf: idfTable,
+            documentFrequency: { counts.documentFrequency(of: $0) },
+            dimension: ppmiDimension)
     }
 
     // MARK: EmbeddingProvider
 
     /// Produce the PPMI distributional embedding for `text`.
     ///
-    /// Splits text into keyword tokens, looks up each term's PPMI
-    /// context vector (if any), sums them, L2-normalises the result,
-    /// and projects through FloatSimHash to produce the 256-bit Engram.
+    /// Splits text into keyword tokens, pools their PPMI context vectors
+    /// through the fitted basis (`DistributionalPooling.pool`), and projects
+    /// the pooled unit vector through FloatSimHash to produce the 256-bit Engram.
     ///
     /// Empty input or all-OOV input returns Engram.zero (EmbeddingProvider
     /// contract).
@@ -367,12 +416,13 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         return FloatSimHash.project(vector: v, seed: projectionSeed)
     }
 
-    /// Return the D-dimensional L2-normalised PPMI context vector for `text`.
+    /// Return the D-dimensional pooled PPMI unit vector for `text`.
     ///
     /// This is the honest semantic vector: a point in the PPMI-weighted
     /// index space where terms that genuinely associate dominate.
     /// Stopword-like co-occurrences shrink toward zero because their
-    /// PMI is near zero or negative.
+    /// PMI is near zero or negative, and stopword-like TERMS weigh nothing
+    /// in the pooled sum because their IDF is near zero.
     ///
     /// Returns `[]` when the provider has no trained basis (ppmiVectors empty).
     ///
@@ -386,15 +436,19 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         guard !text.isEmpty else { return [] }
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }
+        let pooled = DistributionalPooling.pool(
+            terms: terms, vectors: ppmiVectors, idf: idfTable,
+            meanDirection: meanDirection, dimension: ppmiDimension)
         // OOV check: throw embedFloatVocabMiss when the basis is trained but
         // none of the query tokens appear in the PPMI vector table.
-        let hasInVocab = terms.contains { ppmiVectors[$0.lowercased()] != nil }
-        guard hasInVocab else {
+        guard pooled.hits > 0 else {
             throw SynapseKitError.embedFloatVocabMiss(
                 "ppmi: vocab size \(ppmiVectors.count), but 0 of \(terms.count) query token(s) matched"
             )
         }
-        return await ppmiContextVector(for: text)
+        // Terms matched but the pooled vector collapsed to zero: honest
+        // no-signal, reported as an opt-out rather than a vocabulary miss.
+        return pooled.vector ?? []
     }
 
     /// Produce the engram AND the normalised PPMI context vector from a SINGLE
@@ -420,8 +474,9 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
     // MARK: Private helpers
 
-    /// Compute the L2-normalised PPMI context vector for `text`.
-    /// Returns `[]` for empty text or when all terms are OOV.
+    /// Compute the pooled PPMI unit vector for `text` as a pure function of
+    /// the finalized basis. Returns `[]` for empty text, all-OOV text, or a
+    /// pooled vector that collapsed to zero.
     private func ppmiContextVector(for text: String) async -> [Float] {
         guard !text.isEmpty else { return [] }
         // The single canonical CorpusKit tokenizer — shared by BM25 and every
@@ -429,22 +484,9 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         // corpus_kit::default_keyword_tokens.
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }
-
-        var sum = [Float](repeating: 0, count: ppmiDimension)
-        var hitCount = 0
-        for term in terms {
-            if let cv = ppmiVectors[term] {
-                for d in 0..<ppmiDimension {
-                    sum[d] += cv[d]
-                }
-                hitCount += 1
-            }
-        }
-        guard hitCount > 0 else { return [] }
-        // Delegate to the substrate's canonical scalar implementation.
-        // FloatVecOps.l2Normalize is conformance-gated against the Rust
-        // port; using it here guarantees bit-identical output.
-        return FloatVecOps.l2Normalize(sum)
+        return DistributionalPooling.pool(
+            terms: terms, vectors: ppmiVectors, idf: idfTable,
+            meanDirection: meanDirection, dimension: ppmiDimension).vector ?? []
     }
 
     // MARK: Vocabulary access (for conformance tests)
@@ -456,6 +498,20 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         ppmiVectors[term.lowercased()]
     }
 
+    /// The fitted smoothed IDF weight of a term with a PPMI vector, or nil
+    /// when the term has no vector or the basis is not finalized.
+    /// Conformance-test accessor.
+    public func inverseDocumentFrequency(forTerm term: String) -> Float? {
+        idfTable[term.lowercased()]
+    }
+
+    /// The fitted unit corpus-mean direction (D long), or empty when the
+    /// basis is not finalized or no term contributed. Conformance-test accessor.
+    public var corpusMeanDirection: [Float] { meanDirection }
+
+    /// Number of documents folded by `train` (the IDF corpus size N).
+    public var documentCount: Int { counts.documentCount }
+
     /// The current trained vocabulary size (terms with a PPMI vector).
     public var vocabularySize: Int { ppmiVectors.count }
 
@@ -463,7 +519,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// PPMI filtering).  Useful for tests: `vocabularySize <= trainingVocabSize`.
     public var trainingVocabSize: Int { coCount.count }
 
-    // MARK: Basis serialization (mission 6a-i)
+    // MARK: Basis serialization
 
     /// 4-byte magic identifying a PPMI basis blob ("PPB1").
     static let basisMagic: [UInt8] = Array("PPB1".utf8)
@@ -471,15 +527,17 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     /// Serialize the finalized PPMI basis to a versioned, little-endian blob.
     ///
     /// PPMI's `embed`/`embedFloat` output is fully determined by the
-    /// finalized `ppmiVectors` map plus the projection seed. The raw
-    /// co-occurrence count tables (`coCount`, `termCount`, totals) are
-    /// training-phase scratch and are NOT part of the embed-relevant basis,
-    /// so they are intentionally excluded — the round-trip law concerns
-    /// embedding identity, which depends only on `ppmiVectors`.
+    /// finalized `ppmiVectors` map, the pooling fit (IDF table and
+    /// corpus-mean direction), and the projection seed. The raw
+    /// co-occurrence count tables (`coCount`, `termCount`, totals, document
+    /// frequencies) are training-phase scratch and are NOT part of the
+    /// embed-relevant basis, so they are intentionally excluded — the
+    /// round-trip law concerns embedding identity.
     ///
     /// Blob layout (after MAGIC + version):
     ///   modelID (string) | modelVersion (string) | projectionSeed (u64)
     ///   | ppmiVectors (String→[Float] map, sorted keys)
+    ///   | idf (String→Float32 map, sorted keys) | meanDirection ([Float])
     public func serializeBasis() -> Data {
         var w = BasisWriter()
         w.writeMagic(PpmiProvider.basisMagic)
@@ -488,6 +546,8 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeString(modelVersion)
         w.writeU64(projectionSeed)
         w.writeStringFloatVectorMap(ppmiVectors)
+        w.writeStringF32Map(idfTable)
+        w.writeFloatArray(meanDirection)
         return w.data
     }
 
@@ -507,8 +567,12 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         let modelVersion = try r.readString()
         let projectionSeed = try r.readU64()
         let ppmiVectors = try r.readStringFloatVectorMap()
+        let idf = try r.readStringF32Map()
+        let mean = try r.readFloatArray()
         self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
         self.ppmiVectors = ppmiVectors
+        self.idfTable = idf
+        self.meanDirection = mean
     }
 
     // MARK: Counts serialization (incremental-counts change set)
@@ -533,6 +597,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     ///   | termCount (String→u32 map, byte-sorted keys)
     ///   | coCount: u32 outer-count, then per byte-sorted outer key:
     ///       outer key (string) | inner (String→u32 map, byte-sorted keys)
+    ///   | documentCount (u32) | documentFrequencies (String→u32 map, byte-sorted keys)
     ///
     /// Byte-identical to the Rust `serialize_counts` (cross-port gate): the map
     /// writers sort keys by raw UTF-8 bytes (matching Rust `Ord for str`), and
@@ -556,6 +621,8 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
             w.writeString(key)
             w.writeStringU32Map(coCount[key]!)
         }
+        w.writeU32(UInt32(counts.documentCount))
+        w.writeStringU32Map(counts.documentFrequencies)
         return w.data
     }
 
@@ -581,15 +648,19 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
             let key = try r.readString()
             coCount[key] = try r.readStringU32Map()
         }
+        let documentCount = Int(try r.readU32())
+        let documentFrequencies = try r.readStringU32Map()
         self.init(modelID: modelID, modelVersion: modelVersion, projectionSeed: projectionSeed)
         self.coCount = coCount
         self.termCount = termCount
         self.totalPairs = totalPairs
         self.totalTerms = totalTerms
+        self.counts = TermDocumentCounts(
+            restoredDocumentFrequencies: documentFrequencies, documentCount: documentCount)
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 extension PpmiProvider: TrainableEmbeddingBasis {
 
@@ -602,7 +673,7 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     /// PPMI-weighted context vectors; this method runs it once after all
     /// documents are counted. This reproduces the exact trained+finalized state
     /// of `train(terms:)` + `finalize()` driven directly from token arrays, so
-    /// a basis serialized after `trainOnCorpus` is byte-identical to the 6a-i
+    /// a basis serialized after `trainOnCorpus` is byte-identical to the shared
     /// fixture whose corpus is the same texts tokenized.
     public func trainOnCorpus(texts: [String]) {
         for text in texts {
@@ -624,15 +695,18 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     }
 
     /// Reconstruct a fresh `PpmiProvider` from a serialized basis, type-erased.
-    /// Delegates to `init(deserializing:)` (6a-i).
+    /// Delegates to `init(deserializing:)`.
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try PpmiProvider(deserializing: basis)
     }
 
-    /// release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
-    /// The next embed call must go through reconstructBasis from BasisStore.
+    /// Release the in-memory ppmiVectors dictionary (~1GB on a 50K estate) and
+    /// the pooling fit. The next embed call must go through reconstructBasis
+    /// from BasisStore.
     public func releaseBasis() {
         ppmiVectors.removeAll(keepingCapacity: false)
+        idfTable.removeAll(keepingCapacity: false)
+        meanDirection.removeAll(keepingCapacity: false)
     }
 
     // MARK: Maintained counts (incremental-counts change set, P3)
@@ -645,10 +719,11 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         train(terms: defaultKeywordTokens(text), window: ppmiWindow)
     }
 
-    /// Restore the accumulated co-occurrence counts in place from a counts blob,
-    /// so incremental maintenance resumes after a restart. Sets `coCount`,
-    /// `termCount`, and the running totals WITHOUT clearing the derived
-    /// `ppmiVectors` (the serving basis is restored separately from the basis
+    /// Restore the accumulated co-occurrence counts and document frequencies in
+    /// place from a counts blob, so incremental maintenance resumes after a
+    /// restart. Sets `coCount`, `termCount`, the running totals, and the
+    /// document-frequency table WITHOUT clearing the derived `ppmiVectors` and
+    /// pooling fit (the serving basis is restored separately from the basis
     /// blob). Throws `CorpusKitError.decodingFailure` on a bad blob — never
     /// crashes. Mirrors `init(deserializingCounts:)`, but mutates self.
     public func restoreCounts(from data: Data) throws {
@@ -668,15 +743,19 @@ extension PpmiProvider: TrainableEmbeddingBasis {
             let key = try r.readString()
             coCount[key] = try r.readStringU32Map()
         }
+        let documentCount = Int(try r.readU32())
+        let documentFrequencies = try r.readStringU32Map()
         self.coCount = coCount
         self.termCount = termCount
         self.totalPairs = totalPairs
         self.totalTerms = totalTerms
+        self.counts = TermDocumentCounts(
+            restoredDocumentFrequencies: documentFrequencies, documentCount: documentCount)
     }
 
     /// PPMI's `finalize()` is a pure function of the restored co-occurrence state
-    /// (coCount, termCount, totalPairs, totalTerms) — exactly the four fields the
-    /// PPMC counts blob holds. Running `finalize()` after `restoreCounts` derives
+    /// (coCount, termCount, totalPairs, totalTerms, document frequencies,
+    /// document count) — exactly the fields the PPMC counts blob holds. Running `finalize()` after `restoreCounts` derives
     /// `ppmiVectors` byte-identically to a from-scratch `trainOnCorpus` over the
     /// same accumulated corpus. That byte-identity through the digest gate is the
     /// acceptance contract.
@@ -690,9 +769,9 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     }
 
     /// PPMI's accumulation is over integer maps (coCount, termCount, totalPairs,
-    /// totalTerms). Integer addition is commutative and associative: the four
-    /// count maps are identical regardless of the order in which documents are
-    /// folded. `finalize()` is a pure function of those maps, so a delta fold
+    /// totalTerms, document frequencies, document count). Integer addition is
+    /// commutative and associative: the count maps are identical regardless of
+    /// the order in which documents are folded. `finalize()` is a pure function of those maps, so a delta fold
     /// after restore in any order yields byte-identical ppmiVectors to a
     /// from-scratch fold in canonical document order.
     public var countsDeltaFoldSafe: Bool { true }

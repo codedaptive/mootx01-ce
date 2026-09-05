@@ -276,12 +276,12 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         guard vocabSize > 0 else { svd = nil; idfWeights = []; return }
 
         // IDF over REDUCED columns, using the full-corpus df (informativeness is
-        // corpus-wide). idfWeights[col] = log((N+1)/(df+1)); natural log with
-        // add-1 smoothing — matches Rust's f32::ln().
+        // corpus-wide), through the one smoothed IDF every distributional
+        // provider shares: idfWeights[col] = max(0, ln((N+1)/(df+1))).
         idfWeights = [Float](repeating: 0, count: vocabSize)
         for (fullIdx, col) in reduced.fullIndexToColumn {
-            let df = counts.dfCounts[fullIdx] ?? 0
-            idfWeights[col] = max(0, log(Float(N + 1) / Float(df + 1)))
+            idfWeights[col] = smoothedInverseDocumentFrequency(
+                documentFrequency: counts.dfCounts[fullIdx] ?? 0, documentCount: N)
         }
 
         // Build the TF-IDF matrix M (numDocs × K, row-major). Map each doc's TF
@@ -512,7 +512,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// the corpus has fewer documents or terms than requested).
     public var effectiveRank: Int { svd?.rank ?? 0 }
 
-    // MARK: Basis serialization (mission 6a-i)
+    // MARK: Basis serialization
 
     /// 4-byte magic identifying an LSA basis blob ("LSB1").
     static let basisMagic: [UInt8] = Array("LSB1".utf8)
@@ -660,7 +660,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 extension LsaProvider: TrainableEmbeddingBasis {
 
@@ -672,7 +672,7 @@ extension LsaProvider: TrainableEmbeddingBasis {
     /// one document column per text. The `finalize()` pass then computes the
     /// TF-IDF matrix and runs the deterministic Jacobi SVD. This reproduces the
     /// exact trained+finalized state of per-document `train` + `finalize`, so a
-    /// basis serialized after `trainOnCorpus` is byte-identical to the 6a-i
+    /// basis serialized after `trainOnCorpus` is byte-identical to the shared
     /// fixture trained on the same texts.
     public func trainOnCorpus(texts: [String]) {
         for text in texts {
@@ -694,7 +694,7 @@ extension LsaProvider: TrainableEmbeddingBasis {
     }
 
     /// Reconstruct a fresh `LsaProvider` from a serialized basis, type-erased.
-    /// Delegates to `init(deserializing:)` (6a-i).
+    /// Delegates to `init(deserializing:)`.
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try LsaProvider(deserializing: basis)
     }

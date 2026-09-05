@@ -292,7 +292,7 @@ pub enum EmbeddingModelConfig {
     /// See honest semantic fusion for the rationale and `RandomIndexingProvider`
     /// in `corpus-kit-providers` for the full training API.
     ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α) rather
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>` rather
     /// than a bare `Box<dyn EmbeddingProvider>`: a trained distributional
     /// provider IS an embedding provider (supertrait) and additionally exposes
     /// the trainable-basis seam, so `reconstruct` can route a basis blob back
@@ -312,7 +312,7 @@ pub enum EmbeddingModelConfig {
     ///
     /// See honest semantic fusion and `PpmiProvider` in `corpus-kit-providers`.
     ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
     Ppmi { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// LSA (Latent Semantic Analysis) distributional-semantics provider.
@@ -322,7 +322,7 @@ pub enum EmbeddingModelConfig {
     ///
     /// See honest semantic fusion and `LsaProvider` in `corpus-kit-providers`.
     ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
     Lsa { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
@@ -334,7 +334,7 @@ pub enum EmbeddingModelConfig {
     ///
     /// See honest semantic fusion and `NmfProvider` in `corpus-kit-providers`.
     ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
     Nmf { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// FDC (Frame Decimal Classification) co-classification provider.
@@ -419,7 +419,7 @@ impl EmbeddingModelConfig {
     /// Dispatched by the enum case. The distributional cases carry a
     /// `Box<dyn TrainableEmbeddingBasis>`, so reconstruction routes through that
     /// trait object's `reconstruct_basis` — which delegates to the right concrete
-    /// type's `from_serialized_basis` (mission 6a-i) without core naming it.
+    /// type's `from_serialized_basis` without core naming it.
     ///
     /// The deterministic and named-model cases, and the stateless FDC case, have
     /// no trained basis to restore and return `CorpusKitError::NotTrainable`
@@ -564,8 +564,7 @@ impl ProviderHandle {
 
 /// One held embedding provider plus its fresh-basis blob and cached modelID.
 ///
-/// The per-provider unit the N-provider corpus fans operations over (mission
-/// 6a-iii-core). Rust mirror of Swift's `Corpus.ProviderSlot`. `handle` is
+/// The per-provider unit the N-provider corpus fans operations over. Rust mirror of Swift's `Corpus.ProviderSlot`. `handle` is
 /// behind its OWN `Mutex` so a slot's `reindex`/first-ingest can swap in a
 /// freshly-trained provider through a shared `&self` without locking the other
 /// slots (same actor-serialization mirror the single-provider corpus used).
@@ -574,7 +573,7 @@ impl ProviderHandle {
 /// `ProviderSlot.fresh_basis_blob` doc). `model_id` is cached so `model_id()`
 /// can return `&str` for the DEFAULT slot without locking. For N=1 the corpus
 /// holds exactly one slot and every fan-out loop runs once — byte-identical to
-/// the pre-6a-iii single-provider path.
+/// the single-provider path.
 pub(crate) struct ProviderSlot {
     /// The serving provider, behind a `Mutex` so a per-slot retrain can swap in
     /// a freshly-trained provider through `&self`. A `ProviderHandle`, not a
@@ -694,11 +693,11 @@ pub struct Corpus {
     /// so they cannot resurface. Re-ingest clears the row (reactivation).
     removed_source_store: RemovedSourceStore,
     /// The ordered per-provider slots, one per held `EmbeddingModelConfig`, in
-    /// construction order (mission 6a-iii-core). `slots[0]` is the DEFAULT signal
+    /// construction order. `slots[0]` is the DEFAULT signal
     /// that the single-signal entry points (`recall`, `float_nearest`, `embed`,
     /// `embed_float`, `model_id`, `supports_float`) delegate to. Never empty:
     /// every constructor builds at least one slot. For N=1 this holds exactly one
-    /// slot and every fan-out loop runs once — byte-identical to the pre-6a-iii
+    /// slot and every fan-out loop runs once — byte-identical to the
     /// single-provider corpus. Each slot owns its handle Mutex, fresh-basis blob,
     /// and cached modelID; the VectorStore/BasisStore — already keyed by
     /// (model_id, model_version) — hold the N providers' rows side by side with
@@ -801,9 +800,9 @@ impl Corpus {
     /// This is the N=1 entry point: it delegates to `open_many` with a
     /// one-element vec, so a single-provider corpus is the degenerate case of
     /// the N-provider corpus — ONE code path, not two — and behaves
-    /// byte-identically to the pre-6a-iii single-provider corpus. The signature
+    /// byte-identically to the single-provider corpus. The signature
     /// is PRESERVED so every existing `Corpus::open` call site compiles
-    /// unchanged (mission 6a-iii-core back-compat mandate).
+    /// unchanged (the N-provider back-compat mandate).
     pub fn open(storage: Arc<dyn Storage>, model: EmbeddingModelConfig) -> CorpusKitResult<Self> {
         Self::open_many(storage, vec![model])
     }
@@ -843,7 +842,7 @@ impl Corpus {
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-        // Additive basis-persistence table (mission 6a-ii-β). Applied via
+        // Additive basis-persistence table. Applied via
         // migrate so the table is created regardless of the other schemas'
         // version gates, exactly like the BundleStore/VectorStore pair above.
         storage
@@ -923,7 +922,7 @@ impl Corpus {
 
     /// Build one `ProviderSlot` from a model config, resolving load-on-open and
     /// capturing the fresh-basis blob. Shared by `open_many` per element; the
-    /// per-slot logic is exactly the pre-6a-iii single-provider construction.
+    /// per-slot logic is exactly the single-provider construction.
     pub(crate) fn build_slot(
         model: EmbeddingModelConfig,
         basis_store: &BasisStore,
@@ -940,7 +939,7 @@ impl Corpus {
             }
             // RandomIndexing: the caller built and trained the provider externally.
             // Retain the trainable box (the distributional cases carry a
-            // Box<dyn TrainableEmbeddingBasis>, mission 6a-ii-α) so the trainable
+            // Box<dyn TrainableEmbeddingBasis>) so the trainable
             // capability survives for reindex/first-ingest retrain.
             EmbeddingModelConfig::RandomIndexing { provider } => {
                 ProviderHandle::Trainable(provider)
@@ -1044,23 +1043,52 @@ impl Corpus {
             });
         }
 
-        // Load-on-open: if the provider is trainable AND a basis was previously
+        // Load-on-open: if the provider is trainable AND a CURRENT basis is
         // persisted for its (model_id, model_version), reconstruct the trained
-        // provider from that blob so the dense lane is trained-ready immediately
-        // after restart, without re-running training on every open. A
-        // non-trainable provider, or a trainable provider with no persisted
-        // basis, keeps the freshly-built handle. Mirrors Swift's
-        // `loadTrainedProviderIfAvailable`.
-        let handle = Self::load_trained_provider_if_available(handle, basis_store)?;
+        // provider from that blob so the dense lane is trained-ready
+        // immediately after restart, without re-running training on every
+        // open. A non-trainable provider, or a trainable provider with
+        // no persisted basis, keeps the freshly-built handle.
+        //
+        // Format-version skew is recognised BEFORE decoding: a persisted blob
+        // carrying this provider's magic under another format version was
+        // written by an earlier codec. It is neither decoded nor served — the
+        // slot opens UNTRAINED (empty digest; the log names both versions) so
+        // the open-time reconcile / `mootx01 upgrade` retrain publishes a
+        // current basis over it. Mirrors Swift `Corpus.resolveProvider`.
+        let served_basis: Option<PersistedBasis> = match (&fresh_basis_blob, handle.as_trainable()) {
+            (Some(factory), Some(trainable)) => {
+                match basis_store.load(trainable.model_id(), trainable.model_version())? {
+                    Some(persisted)
+                        if crate::basis_blob_frame::is_stale_version(&persisted.basis, factory) =>
+                    {
+                        eprintln!(
+                            "[corpus] basis for {}@{} is format v{}; this build writes v{}. Serving the slot untrained until a retrain publishes a current basis.",
+                            trainable.model_id(),
+                            trainable.model_version(),
+                            crate::basis_blob_frame::format_version(&persisted.basis).unwrap_or(0),
+                            crate::basis_blob_frame::format_version(factory).unwrap_or(0)
+                        );
+                        None
+                    }
+                    other => other,
+                }
+            }
+            _ => None,
+        };
+        let handle = Self::load_trained_provider(handle, served_basis.as_ref())?;
 
         // Cache the (stable) provider modelID for `model_id()` without locking.
         let model_id = handle.provider().model_id().to_string();
 
         // Basis-generation digest (corrective pass): stateless slots use a
         // version-derived constant; trainable slots the digest of the
-        // PERSISTED basis blob (empty string until trained).
+        // PERSISTED basis blob the slot was reconstructed from (empty string
+        // until trained, and empty when the persisted blob was refused for
+        // format-version skew — coverage is never written untrained, so the
+        // retrain re-covers every row).
         let basis_digest = if fresh_basis_blob.is_some() {
-            match basis_store.load(&model_id, handle.provider().model_version())? {
+            match &served_basis {
                 Some(persisted) => crate::content::content_digest_bytes(&persisted.basis),
                 None => String::new(),
             }
@@ -1077,37 +1105,30 @@ impl Corpus {
         })
     }
 
-    /// Reconstruct a trained provider from a persisted basis on open, or return
-    /// the handle unchanged. Used by both constructors.
+    /// Reconstruct a trained provider from the persisted basis the caller
+    /// resolved for this slot, or return the handle unchanged when there is
+    /// none (untrained, or refused for format-version skew) or the handle is
+    /// not trainable.
     ///
-    /// The basis is loaded only when the handle is trainable AND a row exists
-    /// for its provider's (model_id, model_version). Reconstruction routes
-    /// through the `TrainableEmbeddingBasis::reconstruct_basis` witness on the
-    /// trainable box — core never names the concrete provider type, so layering
-    /// (providers → core) is preserved. The reconstructed provider is a plain
-    /// `Box<dyn EmbeddingProvider>` (a trait object cannot return `Self`), so it
-    /// is held as `Plain`: it is fully trained and serves the dense lane, but a
-    /// subsequent `reindex` will rebuild from a freshly-constructed trainable
-    /// provider rather than mutating this restored one. (A restored-from-blob
-    /// provider that needs retraining is reconstructed fresh by the caller; the
-    /// β scope retrain triggers are first-ingest — which only fires when NO
-    /// basis exists — and explicit `reindex`, which trains whatever trainable
-    /// handle is present at open. See the reindex note for the follow-up knob.)
-    fn load_trained_provider_if_available(
+    /// Reconstruction routes through the `TrainableEmbeddingBasis::reconstruct_basis`
+    /// witness on the trainable box — core never names the concrete provider
+    /// type, so layering (providers → core) is preserved. The reconstructed
+    /// provider is a plain `Box<dyn EmbeddingProvider>` (a trait object cannot
+    /// return `Self`), so it is held as `Plain`: it is fully trained and serves
+    /// the dense lane, but a subsequent `reindex` rebuilds from a
+    /// freshly-constructed trainable provider (the empty factory blob) rather
+    /// than mutating this restored one. A corrupt blob errors here; propagate
+    /// rather than silently serving an untrained provider.
+    fn load_trained_provider(
         handle: ProviderHandle,
-        basis_store: &BasisStore,
+        persisted: Option<&PersistedBasis>,
     ) -> CorpusKitResult<ProviderHandle> {
         let trainable = match &handle {
             ProviderHandle::Trainable(b) => b,
             ProviderHandle::Plain(_) => return Ok(handle),
         };
-        let model_id = trainable.model_id().to_string();
-        let model_version = trainable.model_version().to_string();
-        match basis_store.load(&model_id, &model_version)? {
+        match persisted {
             Some(persisted) => {
-                // A basis exists — reconstruct it through the seam witness.
-                // reconstruct_basis errors on a corrupt/version-mismatched blob;
-                // propagate rather than silently serving an untrained provider.
                 let restored = trainable.reconstruct_basis(&persisted.basis)?;
                 Ok(ProviderHandle::Plain(restored))
             }
@@ -1269,7 +1290,7 @@ impl Corpus {
 
         // Fan out the embedding work across every held provider slot. For N=1
         // this loop runs once over the default slot — byte-identical to the
-        // pre-6a-iii single-provider ingest. Each slot embeds independently under
+        // single-provider ingest. Each slot embeds independently under
         // its own model_id; the VectorStore/BasisStore keys keep the N providers'
         // rows apart. `all_chunks` is loaded lazily and shared across slots that
         // take the first-ingest or growth-retrain path (the corpus snapshot is
@@ -2951,7 +2972,7 @@ impl Corpus {
 
     /// The DEFAULT signal's slot — `slots[0]`. The single-signal entry points
     /// read through this so existing callers see exactly the first held
-    /// provider, identical to the pre-6a-iii single-provider behaviour. `slots`
+    /// provider, identical to the single-provider behaviour. `slots`
     /// is never empty (every constructor builds at least one slot), so the index
     /// cannot panic. Mirrors Swift's `Corpus.defaultProvider`.
     fn default_slot(&self) -> &ProviderSlot {
@@ -3774,7 +3795,7 @@ impl Corpus {
             }
         }
 
-        // Step 4: Wipe the persisted trained basis (mission 6a-ii-β). A
+        // Step 4: Wipe the persisted trained basis. A
         // destroyed corpus must leave no orphaned basis row: the next open would
         // otherwise reconstruct a trained provider whose basis no longer matches
         // any stored vectors. The basis table is not append-only, so deletion is

@@ -1,24 +1,28 @@
-//! Shared term-document count builder used by distributional-semantics
-//! providers (LSA, NMF) in corpus-kit-providers.
+//! Shared term-document count builder used by every distributional-semantics
+//! provider in corpus-kit-providers (LSA, NMF, Random Indexing, PPMI).
 //!
 //! ## What this module owns
 //!
-//!   - Tokenization via the canonical `corpus_kit::default_keyword_tokens`.
+//!   - Tokenization via the canonical `corpus_kit::default_keyword_tokens`
+//!     (for the text-consuming providers) or acceptance of an already-
+//!     tokenized term sequence (for the term-consuming providers, RI and PPMI).
 //!   - Vocabulary construction in ENCOUNTER ORDER: terms are assigned
 //!     integer indices as they are first seen across the training sequence.
 //!     Deterministic for a fixed document sequence. This is a correctness
 //!     invariant — the downstream SVD and NMF factorizations depend on
 //!     stable column indices.
-//!   - Raw per-document term-frequency counts: tf_counts[docIdx][termIdx].
+//!   - Raw per-document term-frequency counts: tf_counts[docIdx][termIdx]
+//!     (LSA and NMF only).
 //!   - Per-term document-frequency counts: df_counts[termIdx] = number of
-//!     documents that contain the term at least once. Used by LSA for IDF
-//!     weighting; NMF ignores it.
+//!     documents that contain the term at least once. Every distributional
+//!     provider derives its IDF weights from these through the ONE smoothed
+//!     IDF function below.
 //!
 //! ## What this module does NOT own
 //!
-//!   - Weighting (TF-IDF vs. raw TF vs. PPMI).
 //!   - Matrix orientation (documents×terms for LSA, terms×documents for NMF).
 //!   - Factorization (SVD for LSA, NMF-ALS for NMF).
+//!   - Pooling (see distributional_pooling.rs).
 //!
 //! ## Swift port
 //!
@@ -28,6 +32,24 @@
 
 use corpus_kit::default_keyword_tokens;
 use std::collections::HashMap;
+
+// MARK: - Smoothed inverse document frequency
+
+/// The one IDF weighting shared by every distributional provider:
+///
+/// ```text
+/// idf(t) = max(0, ln((N + 1) / (df(t) + 1)))
+/// ```
+///
+/// Add-1 smoothing on both sides keeps the ratio finite for df = 0 (an
+/// unseen term is informative, not undefined) and drives a term that
+/// appears in every document to exactly 0. Natural log on f32, so
+/// `f32::ln` and Swift's `log` (logf) produce identical bits — the LSA
+/// canonical vectors pin this. Twin of Swift
+/// `smoothedInverseDocumentFrequency(documentFrequency:documentCount:)`.
+pub fn smoothed_inverse_document_frequency(df: usize, n: usize) -> f32 {
+    (((n + 1) as f32) / ((df + 1) as f32)).ln().max(0.0)
+}
 
 // MARK: - TermDocumentCounts
 
@@ -77,7 +99,7 @@ impl TermDocumentCounts {
     }
 
     /// Reconstruct a count builder from a known vocabulary and document
-    /// count, WITHOUT re-tokenizing any text (mission 6a-i deserialization).
+    /// count, WITHOUT re-tokenizing any text (the deserialization path).
     ///
     /// LSA and NMF read only `vocab` (term → index, for query fold-in) and
     /// `document_count()` (for the `document_embedding(doc_idx)` range check)
@@ -94,6 +116,33 @@ impl TermDocumentCounts {
             // One empty TF row per document preserves `document_count()`.
             tf_counts: vec![HashMap::new(); document_count],
             df_counts: HashMap::new(),
+        }
+    }
+
+    /// Reconstruct the document-frequency table of a term-consuming provider
+    /// (RI, PPMI) from persisted counts: term → df, plus the document count.
+    ///
+    /// Terms receive indices in ascending UTF-8 byte order of the term — the
+    /// order the counts codec writes them in — so the restored table is a
+    /// deterministic function of the persisted map on both ports. The TF rows
+    /// are placeholders (the providers never kept them). Twin of Swift
+    /// `TermDocumentCounts.init(restoredDocumentFrequencies:documentCount:)`.
+    pub fn from_restored_document_frequencies(
+        document_frequencies: HashMap<String, usize>,
+        document_count: usize,
+    ) -> Self {
+        let mut ordered: Vec<(String, usize)> = document_frequencies.into_iter().collect();
+        ordered.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut vocab = HashMap::with_capacity(ordered.len());
+        let mut df_counts = HashMap::with_capacity(ordered.len());
+        for (index, (term, df)) in ordered.into_iter().enumerate() {
+            vocab.insert(term, index);
+            df_counts.insert(index, df);
+        }
+        TermDocumentCounts {
+            vocab,
+            tf_counts: vec![HashMap::new(); document_count],
+            df_counts,
         }
     }
 
@@ -166,9 +215,64 @@ impl TermDocumentCounts {
         self.tf_counts.push(HashMap::new());
     }
 
+    /// Fold one ALREADY-TOKENIZED document into the vocabulary and the
+    /// document-frequency table, without retaining a TF row.
+    ///
+    /// Entry point for the term-consuming providers (RI, PPMI), whose `train`
+    /// receives one document's term sequence per call. Each distinct term
+    /// counts once toward `df_counts` no matter how often it repeats; a
+    /// document with no terms is not recorded (same rule as `add_document`).
+    /// Vocabulary indices follow the same encounter order as `add_document`.
+    /// Twin of Swift `addDocumentTerms(_:)`.
+    ///
+    /// - Note: Does not call `SystemTime::now()` — determinism invariant.
+    pub fn add_document_terms(&mut self, terms: &[&str]) {
+        if terms.is_empty() {
+            return;
+        }
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for term in terms {
+            let idx = if let Some(&existing) = self.vocab.get(*term) {
+                existing
+            } else {
+                let idx = self.vocab.len();
+                self.vocab.insert((*term).to_string(), idx);
+                idx
+            };
+            if seen.insert(idx) {
+                *self.df_counts.entry(idx).or_insert(0) += 1;
+            }
+        }
+        self.tf_counts.push(HashMap::new());
+    }
+
     /// Number of documents added so far.
     pub fn document_count(&self) -> usize {
         self.tf_counts.len()
+    }
+
+    /// Number of documents that contain `term` at least once; 0 for a term
+    /// the corpus never produced.
+    pub fn document_frequency(&self, term: &str) -> usize {
+        match self.vocab.get(term) {
+            Some(idx) => *self.df_counts.get(idx).unwrap_or(&0),
+            None => 0,
+        }
+    }
+
+    /// The smoothed IDF weight of `term` over this corpus — see
+    /// `smoothed_inverse_document_frequency`.
+    pub fn inverse_document_frequency(&self, term: &str) -> f32 {
+        smoothed_inverse_document_frequency(self.document_frequency(term), self.document_count())
+    }
+
+    /// term → document frequency for every term in the vocabulary — the
+    /// shape the counts codec persists (`write_string_u32_map`).
+    pub fn document_frequencies(&self) -> HashMap<String, usize> {
+        self.vocab
+            .iter()
+            .map(|(term, idx)| (term.clone(), *self.df_counts.get(idx).unwrap_or(&0)))
+            .collect()
     }
 
     /// Vocabulary cardinality.

@@ -336,7 +336,7 @@ public enum EmbeddingModel: Sendable {
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 
-    // MARK: - Trainable-basis seam (mission 6a-ii-α)
+    // MARK: - Trainable-basis seam
 
     /// The provider this model carries, if the case carries one.
     ///
@@ -437,12 +437,12 @@ public enum EmbeddingModel: Sendable {
 /// `remove(sourceID:)` clears the recall index (BM25 + vectors) without
 /// deleting content rows. `expunge(sourceID:)` additionally zeroes chunk text.
 ///
-/// ## N-provider capability (mission 6a-iii-core)
+/// ## N-provider capability
 ///
 /// Corpus holds an ORDERED collection of provider slots, one per held
 /// `EmbeddingModel`, each keyed by its `modelID`. The single-provider
 /// `init(storage:model:)` is the N=1 special case: it builds a one-slot
-/// corpus that behaves byte-identically to the pre-6a-iii single-provider
+/// corpus that behaves byte-identically to the single-provider
 /// implementation. Multi-provider `init(storage:models:)` fans every
 /// operation (ingest embed, reindex train, remove, destroy) across all slots,
 /// each under its own `modelID`, so the VectorStore/BasisStore — already keyed
@@ -557,7 +557,7 @@ public actor Corpus {
     /// the EMPTY (untrained) serialized basis captured ONLY for a fresh
     /// trainable provider with no persisted basis (see the field doc below).
     /// For N=1 the corpus holds exactly one slot, and every fan-out loop runs
-    /// once — byte-identical to the pre-6a-iii single-provider path.
+    /// once — byte-identical to the single-provider path.
     private struct ProviderSlot {
         /// The serving provider for this signal. `var` because the load-on-open
         /// path and each training pass install a replacement. Never exposed on
@@ -757,10 +757,10 @@ public actor Corpus {
     /// This is the N=1 entry point. It delegates to `init(storage:models:)`
     /// with a one-element model set, so a single-provider corpus is just the
     /// degenerate case of the N-provider corpus — ONE code path, not two — and
-    /// behaves byte-identically to the pre-6a-iii single-provider
+    /// behaves byte-identically to the single-provider
     /// implementation. The production default remains a single provider; this
     /// init's signature is PRESERVED so every existing call site compiles
-    /// unchanged (mission 6a-iii-core back-compat mandate).
+    /// unchanged (the N-provider back-compat mandate).
     ///
     /// - Parameters:
     ///   - storage: A PersistenceKit Storage instance. Both the
@@ -810,7 +810,7 @@ public actor Corpus {
         // schema was applied first.
         try await storage.migrate(to: BundleStore.schemaDeclaration)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
-        // Additive basis-persistence table (mission 6a-ii-β). A separate
+        // Additive basis-persistence table. A separate
         // schema declaration applied via migrate(to:) so the table is created
         // regardless of the other schemas' version gates, exactly like the
         // BundleStore/VectorStore pair above.
@@ -926,7 +926,7 @@ public actor Corpus {
     ///
     /// The single-signal entry points read through this accessor so existing
     /// callers see exactly the first held provider, identical to the
-    /// pre-6a-iii single-provider behaviour. `slots` is never empty (every init
+    /// single-provider behaviour. `slots` is never empty (every init
     /// builds at least one slot), so the force-unwrap of `first` cannot trap.
     private var defaultProvider: any EmbeddingProvider {
         // swiftlint:disable:next force_unwrapping — slots is never empty (init invariant)
@@ -953,8 +953,21 @@ public actor Corpus {
     /// Reconstruction routes through the carried provider's
     /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness — CorpusKit core
     /// never names the concrete provider type, so layering (providers → core) is
-    /// preserved. A corrupt/version-mismatched blob throws `decodingFailure`
-    /// rather than silently serving an untrained provider.
+    /// preserved. A corrupt blob throws `decodingFailure` rather than silently
+    /// serving an untrained provider.
+    ///
+    /// Format-version skew is the one exception, handled BEFORE decoding: when
+    /// the persisted blob carries this provider's magic under another format
+    /// version (`BasisBlobFrame.isStaleVersion`), the estate was written by an
+    /// earlier codec. That basis is neither decoded nor served — the slot opens
+    /// UNTRAINED (`servedBasis == nil`, an error-level log names both versions)
+    /// so the ordinary open-time reconcile and `mootx01 upgrade` retrain publish
+    /// a current basis over it. The stale-basis vectors are never matched
+    /// against queries pooled the new way.
+    ///
+    /// Returns, besides the slot fields, `servedBasis`: the persisted blob the
+    /// serving provider was reconstructed from (nil when untrained), so the
+    /// caller can derive the basis-generation digest without a second load.
     // Internal — not private — so the shared-content `CorpusContentEngine`
     // resolves providers through the SAME open-time logic (one engine, not
     // a fork; GLK shared-content 1.1 P2).
@@ -967,10 +980,11 @@ public actor Corpus {
         provider: any EmbeddingProvider,
         freshBasisBlob: Data?,
         countsAccumulator: (any TrainableEmbeddingBasis)?,
-        countsDocumentCount: Int
+        countsDocumentCount: Int,
+        servedBasis: Data?
     ) {
         guard isTrainable, let trainable = freshProvider as? any TrainableEmbeddingBasis else {
-            return (freshProvider, nil, nil, 0)
+            return (freshProvider, nil, nil, 0, nil)
         }
         // The empty-basis factory: the untrained fresh provider's serialized
         // basis, captured for every trainable slot so reindex can always train
@@ -1002,16 +1016,23 @@ public actor Corpus {
             accumulatorDocCount = counts.documentCount
         }
 
-        // Serving provider: the trained provider when a basis is persisted, else
-        // the untrained fresh provider.
+        // Serving provider: the trained provider when a CURRENT basis is
+        // persisted, else the untrained fresh provider.
         if let persisted = try await basisStore.load(
             modelID: freshProvider.modelID,
             modelVersion: freshProvider.modelVersion
         ) {
+            if BasisBlobFrame.isStaleVersion(persisted: persisted.basis, current: factoryBlob) {
+                let persistedVersion = BasisBlobFrame.formatVersion(of: persisted.basis) ?? 0
+                let currentVersion = BasisBlobFrame.formatVersion(of: factoryBlob) ?? 0
+                corpusLog.error(
+                    "basis for \(freshProvider.modelID, privacy: .public)@\(freshProvider.modelVersion, privacy: .public) is format v\(persistedVersion, privacy: .public); this build writes v\(currentVersion, privacy: .public). Serving the slot untrained until a retrain publishes a current basis.")
+                return (freshProvider, factoryBlob, accumulator, accumulatorDocCount, nil)
+            }
             let restored = try trainable.reconstructBasis(from: persisted.basis)
-            return (restored, factoryBlob, accumulator, accumulatorDocCount)
+            return (restored, factoryBlob, accumulator, accumulatorDocCount, persisted.basis)
         }
-        return (freshProvider, factoryBlob, accumulator, accumulatorDocCount)
+        return (freshProvider, factoryBlob, accumulator, accumulatorDocCount, nil)
     }
 
     // MARK: - Test seams (internal — not part of the public surface)
@@ -2467,7 +2488,7 @@ public actor Corpus {
             }
         }
 
-        // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
+        // 3. Wipe the persisted trained basis. A destroyed
         //    corpus must leave no orphaned basis row FOR ANY held modelID: the
         //    next open would otherwise reconstruct a trained provider whose
         //    basis no longer matches any stored vectors. basisStore.deleteAll()
