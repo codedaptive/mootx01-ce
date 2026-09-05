@@ -2639,6 +2639,22 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Shingle each hydrated body ONCE. Step 10 compares every selected
+        // candidate against every remaining candidate (about 2N·|pool| pairs
+        // per query, more when Phase 2 widens); rebuilding both character-
+        // 3-gram sets per pair measured 35–40 s of a 36–46 s search over a
+        // 13,817-drawer wing. The sets are built here, after step 9.5 fills
+        // mmrContentByID, and reused across both MMR phases through the
+        // SubstrateML set overload — the same |∩|/|∪| the string overload
+        // computes, so the selection is byte-identical. An empty body builds
+        // no set; the MMR loop reads a missing set as "content unavailable →
+        // sourceMask Jaccard", the same rule the empty-content check applied.
+        var mmrShinglesByID: [String: Set<String>] = [:]
+        mmrShinglesByID.reserveCapacity(mmrContentByID.count)
+        for (id, content) in mmrContentByID where !content.isEmpty {
+            mmrShinglesByID[id] = ShingleSimilarity.shingles(content)
+        }
+
         // Step 10 — greedy MMR with adaptive λ.
         // λ is derived from weights.diversity: higher diversity weight (triggered
         // by high-redundancy corpus) reduces λ, pushing MMR toward diversity.
@@ -2707,17 +2723,17 @@ public extension GeniusLocusKit {
             selected.append(bestIdx)
             unselected.remove(bestIdx)
 
-            // Update maxSim for remaining candidates using late-hydrated
-            // shingle similarity when a body is available (a `.full` caller —
-            // `mmrContentByID` populated in step 9.5). Falls back to sourceMask
-            // Jaccard for the body-free tiers (`.structured`/`.bitmapOnly`,
-            // empty content map) or candidates absent from the pool.
-            let contentBest = mmrContentByID[buffer.ids[bestIdx]] ?? ""
+            // Update maxSim for remaining candidates using the shingle sets
+            // built once after step 9.5 when both sides carry one (a `.full`
+            // caller with a non-empty body). Falls back to sourceMask Jaccard
+            // when either side has no set: the body-free tiers
+            // (`.structured`/`.bitmapOnly`, empty content map), an empty body,
+            // or a candidate absent from the pool.
+            let shinglesBest = mmrShinglesByID[buffer.ids[bestIdx]]
             for i in unselected {
                 let sim: Float
-                let contentI = mmrContentByID[buffer.ids[i]] ?? ""
-                if !contentBest.isEmpty, !contentI.isEmpty {
-                    sim = glkShingleSimilarity(contentBest, contentI)
+                if let shinglesBest, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
+                    sim = ShingleSimilarity.similarity(shinglesBest, shinglesI)
                 } else {
                     sim = glkSourceMaskJaccard(
                         buffer.sourceMask[bestIdx], buffer.sourceMask[i])
@@ -2765,12 +2781,12 @@ public extension GeniusLocusKit {
                 }
                 selected.append(bestIdx4)
                 unselected.remove(bestIdx4)
-                let contentBest4 = mmrContentByID[buffer.ids[bestIdx4]] ?? ""
+                // Same precomputed-set term and same fallback rule as Phase 1.
+                let shinglesBest4 = mmrShinglesByID[buffer.ids[bestIdx4]]
                 for i in unselected {
                     let sim: Float
-                    let contentI = mmrContentByID[buffer.ids[i]] ?? ""
-                    if !contentBest4.isEmpty, !contentI.isEmpty {
-                        sim = glkShingleSimilarity(contentBest4, contentI)
+                    if let shinglesBest4, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
+                        sim = ShingleSimilarity.similarity(shinglesBest4, shinglesI)
                     } else {
                         sim = glkSourceMaskJaccard(
                             buffer.sourceMask[bestIdx4], buffer.sourceMask[i])
@@ -3007,10 +3023,13 @@ public extension GeniusLocusKit {
 
     /// Jaccard similarity between two source-lane bitsets.
     ///
-    /// MMR similarity proxy for bitmapOnly hydration or drawers without
-    /// content: candidates sourced from the same lanes carry correlated
+    /// MMR similarity proxy for pairs where either candidate has no hydrated
+    /// body (bitmapOnly or structured hydration, an empty body, a degraded
+    /// step 9.5): candidates sourced from the same lanes carry correlated
     /// signal. Penalising them in the MMR pass raises topical diversity.
-    /// When content is available, `glkShingleSimilarity` is preferred.
+    /// When both candidates carry a body, step 10 uses the SubstrateML
+    /// `ShingleSimilarity` set overload over the sets built once after
+    /// step 9.5 (`mmrShinglesByID`) instead of this proxy.
     ///
     /// Returns 0 when both masks are zero (no shared lane evidence — treat
     /// as fully dissimilar).
@@ -3019,22 +3038,6 @@ public extension GeniusLocusKit {
         let orBits  = a | b
         guard orBits != 0 else { return 0 }
         return Float(andBits.nonzeroBitCount) / Float(orBits.nonzeroBitCount)
-    }
-
-    /// Shingle-overlap (Jaccard) similarity between two content strings.
-    ///
-    /// Delegates to `SubstrateML.ShingleSimilarity.similarity` — the
-    /// substrate-owned character-shingle Jaccard kernel (I-25). SubstrateML sits
-    /// below both GLK and NeuronKit in the kit graph, and both kits already
-    /// declare a SubstrateML dependency, so the kernel has a single owner with no
-    /// manifest change and no GLK→NeuronKit cross-kit layering dependency — GLK
-    /// reaches the shared kernel downward through the substrate, not sideways.
-    ///
-    /// The substrate kernel preserves the canonical NeuronKit edge-case contract:
-    /// 3-gram windows; 1–2 char strings collapse to a single whole-string shingle;
-    /// both-empty → 0.0; |∩|/|∪| otherwise.
-    private func glkShingleSimilarity(_ a: String, _ b: String) -> Float {
-        ShingleSimilarity.similarity(a, b)
     }
 
     // MARK: - Hydration helper (corpusOnly lane)
