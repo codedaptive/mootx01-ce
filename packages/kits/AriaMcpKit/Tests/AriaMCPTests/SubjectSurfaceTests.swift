@@ -97,25 +97,72 @@ struct SubjectSurfaceTests {
         }
     }
 
-    @Test func fileMemoryOversizeSubjectIsRejected() async throws {
+    @Test func fileMemoryOversizeSubjectReturnsContractError() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-oversize"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         let oversize = String(repeating: "x", count: DrawerStore.subjectLengthContract + 1)
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory",
-                arguments: .object([
-                    "content": .string("some content"),
-                    "subject": .string(oversize),
-                    "location": .string("subject-tests"),
-                ]))
-            Issue.record("oversize subject must be rejected")
-        } catch let error as JSONRPCError {
-            #expect(error.message.contains("\(DrawerStore.subjectLengthContract)"))
+        // Subject contract violation surfaces as isError:true so the model sees
+        // the message instead of a bare "Tool execution failed" from JSON-RPC
+        // error rendering (ARIA-MSG-1 fix).
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("some content"),
+                "subject": .string(oversize),
+                "location": .string("subject-tests"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize subject must return isError:true result, got: \(result)")
+            return
         }
+        #expect(
+            errorText.contains("subject must be 1–\(DrawerStore.subjectLengthContract) characters"),
+            "error text must contain the contract message, got: \(errorText)")
+        #expect(
+            errorText.contains("\(DrawerStore.subjectLengthContract + 1)"),
+            "error text must contain the offending length, got: \(errorText)")
+    }
+
+    @Test func setSubjectOversizeReturnsContractError() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-setsubject-oversize"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let id = try await captureWithoutSubject(
+            kit: kit, handle: handle, content: "needs a subject", room: "subject-tests")
+        let oversize = String(repeating: "y", count: DrawerStore.subjectLengthContract + 1)
+        // setSubject contract violation also surfaces as isError:true (ARIA-MSG-1).
+        let result = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "id": .string(id),
+                "mutation": .string("setSubject"),
+                "subject": .string(oversize),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize setSubject must return isError:true result, got: \(result)")
+            return
+        }
+        #expect(
+            errorText.contains("subject must be 1–\(DrawerStore.subjectLengthContract) characters"),
+            "error text must contain the contract message, got: \(errorText)")
+        #expect(
+            errorText.contains("\(DrawerStore.subjectLengthContract + 1)"),
+            "error text must contain the offending length, got: \(errorText)")
     }
 
     @Test func fileMemoryWithSubjectSucceeds() async throws {
