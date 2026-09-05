@@ -130,9 +130,9 @@ public struct ResidentVectorArray: Sendable {
     ///
     /// Computed from the tombstone bitmap; O(count/64) to walk the words.
     /// Used by VectorStore stale detection (`_ensureIndexBuilt`) to compare
-    /// the sidecar live count against the table binary-row count — both
-    /// represent the number of live records, so a match means the sidecar
-    /// is up-to-date.
+    /// the sidecar live count against the table's serving-generation
+    /// binary-row count — both represent the number of live serving records,
+    /// so a match means the sidecar is up-to-date.
     ///
     /// Recomputed from the tombstone bitmap on each call (an O(count) walk).
     /// The Rust port additionally persists this value in its sidecar header

@@ -860,9 +860,12 @@ impl Corpus {
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
-        // No sidecar path for the CorpusKit Rust path — memory-only resident array.
-        // The SQLite table remains the durable source of truth; the resident array
-        // is rebuilt from the table on first find_nearest call.
+        // The binary resident array persists in the conventional `.vectors.vec`
+        // sidecar beside the SQLite file (`default_sidecar_path`; None for
+        // non-file backends, which then hold the array in memory only). The
+        // SQLite table remains the durable source of truth: on open the sidecar
+        // is loaded when its live_count matches the serving-generation binary
+        // row count, otherwise rebuilt from the table on the first find_nearest.
         let vector_store = Arc::new(VectorStore::new(
             Arc::clone(&storage),
             VectorStore::default_sidecar_path(&storage),
