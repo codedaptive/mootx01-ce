@@ -236,6 +236,19 @@ pub const GRAPH_CENTRALITY_SCAN_NODE_CAP: usize = 10_000;
 /// AutonomicGovernor.swift.
 pub const POOL_REDUCE_FILE_CAP: usize = 500;
 
+/// Maximum recall traces consumed per preference cadence tick. Bounded to
+/// prevent full-history loads on large estates. The most-recent
+/// `PREFERENCE_TRACES_WINDOW_LIMIT` traces (by ascending `recalled_at`)
+/// represent the strongest signal for Bradley-Terry fitting; older traces
+/// have decayed relevance and are excluded on each cadence tick.
+///
+/// A full refit over all traces is triggered only on an explicit `reindex`
+/// or `dream` call — not on the governor cadence. The maintenance prune
+/// cycle bounds total trace retention independently.
+///
+/// Parity: mirrors `preferenceTracesWindowLimit` in AutonomicGovernor.swift.
+pub const PREFERENCE_TRACES_WINDOW_LIMIT: usize = 1_000;
+
 // ── ISO8601 helpers ───────────────────────────────────────────────────────────
 
 /// Format epoch seconds as an ISO8601 UTC string (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -1997,10 +2010,14 @@ fn graph_centrality_duty(
 /// duty only shapes the outcomes and caches the strengths. A faithful cadence
 /// wrapper of a direct `learned_preference` call on the same records.
 ///
-/// Window: all retained recall traces up to `now` (`since` = the epoch-floor
-/// ISO8601 string, mirroring Swift `Date.distantPast`). Retention is bounded by
-/// the maintenance prune cycle. `now_i64` is the injected tick clock — no clock
-/// read here. Deterministic: a pure function of the recorded rows and `now`.
+/// Window: the most-recent `PREFERENCE_TRACES_WINDOW_LIMIT` (1,000) recall
+/// traces by ascending `recalled_at`, fetched since the epoch floor and
+/// suffix-capped before fitting. Bounded to prevent full-history loads on
+/// large estates; the most-recent traces carry the strongest Bradley-Terry
+/// signal, older traces have decayed relevance and are excluded on each
+/// cadence tick. Parity: mirrors `AutonomicGovernor.preferenceTracesWindowLimit`
+/// in Swift. `now_i64` is the injected tick clock — no clock read here.
+/// Deterministic: a pure function of the recorded rows and `now`.
 ///
 /// The only side effect is the store registration (idempotent re-registration
 /// replaces the prior snapshot). An estate with no traces yields no records ⇒
@@ -2031,11 +2048,16 @@ fn preference_duty(
 
     // Reads through the coordinator verb surface (B-1) — the same recall-trace
     // window read the dreaming reader uses.
-    let traces = coord
+    let all_traces = coord
         .recent_recall_traces(handle, since, &now_str)
         .map_err(|e| format!("recent_recall_traces failed: {e:?}"))?;
 
-    let records = preference_outcomes(&traces);
+    // Cap to the most-recent `PREFERENCE_TRACES_WINDOW_LIMIT` traces (suffix of
+    // the ascending-recalled_at result). Mirrors Swift `.suffix(preferenceTracesWindowLimit)`.
+    let start = all_traces.len().saturating_sub(PREFERENCE_TRACES_WINDOW_LIMIT);
+    let traces = &all_traces[start..];
+
+    let records = preference_outcomes(traces);
     let scores =
         compute_preference_scores(&records).map_err(|e| format!("learned_preference failed: {e:?}"))?;
 
