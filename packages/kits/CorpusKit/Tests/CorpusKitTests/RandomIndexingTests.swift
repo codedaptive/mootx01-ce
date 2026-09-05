@@ -251,6 +251,8 @@ struct RandomIndexingTests {
     func embedFloatReturnsUnitVector() async throws {
         let provider = RandomIndexingProvider()
         provider.train(terms: ["car", "engine", "drive"], window: 4)
+        provider.train(terms: ["dog", "bark", "run"], window: 4)
+        provider.finalize()
         let v = try await provider.embedFloat("car engine")
         guard !v.isEmpty else {
             Issue.record("embedFloat must be non-empty after training")
@@ -261,10 +263,50 @@ struct RandomIndexingTests {
         #expect(abs(norm - 1.0) < 1e-5, "embedFloat must return a unit vector; got norm=\(norm)")
     }
 
+    @Test("trained but unfinalized provider returns the no-basis signal")
+    func unfinalizedProviderReturnsEmpty() async throws {
+        let provider = RandomIndexingProvider()
+        provider.train(terms: ["car", "engine", "drive"], window: 4)
+        let v = try await provider.embedFloat("car engine")
+        #expect(v.isEmpty, "embedFloat must return empty before finalize() is called")
+        let e = try await provider.embed("car engine")
+        #expect(e == Engram.zero, "embed must return Engram.zero before finalize() is called")
+    }
+
+    @Test("a one-document corpus pools to no signal: every term has IDF 0")
+    func singleDocumentCorpusHasNoSignal() async throws {
+        // With N = 1 every term appears in every document, so idf = ln(2/2) = 0
+        // for all of them: nothing distinguishes the document from the corpus.
+        // The pooled vector collapses to zero — an honest opt-out (empty), not
+        // a vocabulary miss (the terms ARE in the vocabulary).
+        let provider = RandomIndexingProvider()
+        provider.train(terms: ["car", "engine", "drive"], window: 4)
+        provider.finalize()
+        #expect(provider.inverseDocumentFrequency(forTerm: "car") == 0)
+        let v = try await provider.embedFloat("car engine")
+        #expect(v.isEmpty, "a 1-document basis carries no discriminative signal")
+    }
+
+    @Test("finalize fits the smoothed IDF and a unit corpus-mean direction")
+    func finalizeFitsIDFAndMean() {
+        let provider = RandomIndexingProvider()
+        for doc in riCorpus { provider.train(terms: doc, window: riW) }
+        provider.finalize()
+        #expect(provider.documentCount == riCorpus.count)
+        // "car" is in 3 of 5 documents: idf = ln(6/4). "cat" is in 1: idf = ln(6/2).
+        #expect(provider.inverseDocumentFrequency(forTerm: "car") == log(Float(6) / Float(4)))
+        #expect(provider.inverseDocumentFrequency(forTerm: "cat") == log(Float(6) / Float(2)))
+        let mean = provider.corpusMeanDirection
+        #expect(mean.count == riD, "the mean direction lives in the D-dimensional space")
+        let norm = mean.reduce(Float(0)) { $0 + $1 * $1 }.squareRoot()
+        #expect(abs(norm - 1.0) < 1e-5, "the corpus-mean direction is a unit vector; got \(norm)")
+    }
+
     @Test("same text on same provider returns identical embedding")
     func embedDeterminism() async throws {
         let provider = RandomIndexingProvider()
-        provider.train(terms: riCorpus.flatMap { $0 }, window: riW)
+        for doc in riCorpus { provider.train(terms: doc, window: riW) }
+        provider.finalize()
         let e1 = try await provider.embed("car engine road")
         let e2 = try await provider.embed("car engine road")
         #expect(e1 == e2, "same text must produce same embedding")
@@ -279,6 +321,7 @@ struct RandomIndexingTests {
         for doc in riCorpus {
             provider.train(terms: doc, window: riW)
         }
+        provider.finalize()
         let carVec    = try await provider.embedFloat("car")
         let vehicleVec = try await provider.embedFloat("vehicle")
         let dogVec    = try await provider.embedFloat("dog")
@@ -330,6 +373,7 @@ struct RandomIndexingTests {
         for doc in riCorpus {
             provider.train(terms: doc, window: riW)
         }
+        provider.finalize()
         // Verify the embed pipeline runs without error and returns a
         // non-zero engram for an in-vocabulary text.
         let engram = try await provider.embed("car engine")
@@ -353,6 +397,7 @@ struct RandomIndexingTests {
         for doc in riCorpus {
             provider.train(terms: doc, window: riW)
         }
+        provider.finalize()
 
         // Canonical index vectors for the probe terms.
         struct IndexVectorEntry: Codable {
