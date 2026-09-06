@@ -783,10 +783,13 @@ struct UpgradeCommand: AsyncParsableCommand {
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                // Closing the estate closes its storage connection with it, so
+                // the backfill opens its own connection over the migrated file.
                 try await kit.close(handle)
+                let backfillStorage = try SQLiteStorage(configuration: configuration)
                 let report = try await SpanEncodeBackfill.run(
-                    storage: storage, dataDirectory: dataDir, now: Date())
-                await storage.close()
+                    storage: backfillStorage, dataDirectory: dataDir, now: Date())
+                await backfillStorage.close()
                 switch report {
                 case .noActiveModel:
                     print("  ✓ span encode: no active encoder model registered; recall stays lexical-only")
@@ -947,15 +950,18 @@ struct UpgradeCommand: AsyncParsableCommand {
                         ? InMemoryEstateIdentityKeyStore() : nil
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Closing the estate closes its storage connection with it, so
+                // the reclaim opens its own connection over the migrated file.
                 try await kit.close(handle)
-                let vectors = VectorStore(storage: storage)
+                let reclaimStorage = try SQLiteStorage(configuration: configuration)
+                let vectors = VectorStore(storage: reclaimStorage)
                 let counts = try await vectors.reclaimRetiredVectorRows(
                     retiredModelIDs: Self.retiredDenseFamilyModelIDs)
                 var reclaimedBytes: Int64 = 0
                 if counts.retiredModelRows + counts.nonServingRows > 0 {
-                    reclaimedBytes = try await storage.performMaintenance().reclaimedBytes
+                    reclaimedBytes = try await reclaimStorage.performMaintenance().reclaimedBytes
                 }
-                await storage.close()
+                await reclaimStorage.close()
                 if counts.retiredModelRows + counts.nonServingRows == 0 {
                     print("  ✓ vector reclaim: nothing to reclaim")
                 } else {
