@@ -62,14 +62,15 @@
 
 #[cfg(feature = "candle")]
 mod inner {
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::VarBuilder;
     use candle_transformers::models::bert::{BertModel, Config, DTYPE};
+    use corpus_kit::encoder::Pooling;
     use engram_lib::Engram;
     use std::path::Path;
     use substrate_ml::float_simhash;
-    use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
     use synapsekit::{EmbeddingProvider, SynapseKitError};
+    use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
     // SynapseKitError is used in forward_batch, embed, embed_float, embed_pair,
     // embed_batch return types. EmbeddingProvider is implemented for CandleNLProvider.
 
@@ -126,6 +127,7 @@ mod inner {
         tokenizer: Tokenizer,
         device: Device,
         projection_seed: u64,
+        pooling: Pooling,
     }
 
     impl CandleNLProvider {
@@ -150,7 +152,7 @@ mod inner {
         /// production callers use [`CandleNLProvider::load`] to keep the
         /// seed byte-identical to the constant.
         pub fn load_with_seed(model_dir: &Path, projection_seed: u64) -> Result<Self, String> {
-            Self::load_inner(model_dir, projection_seed, MAX_TOKENS)
+            Self::load_inner(model_dir, projection_seed, MAX_TOKENS, Pooling::Mean)
         }
 
         /// Load for a span-encoder registry row: same assets and seed as
@@ -159,10 +161,32 @@ mod inner {
         /// longer than the model card's limit are cut where the card says,
         /// not at 512. Values outside `1..=MAX_TOKENS` are clamped.
         pub fn load_with_max_tokens(model_dir: &Path, max_tokens: usize) -> Result<Self, String> {
-            Self::load_inner(model_dir, CANDLE_NL_PROJECTION_SEED, max_tokens.clamp(1, MAX_TOKENS))
+            Self::load_with_max_tokens_and_pooling(model_dir, max_tokens, Pooling::Mean)
         }
 
-        fn load_inner(model_dir: &Path, projection_seed: u64, max_tokens: usize) -> Result<Self, String> {
+        /// Registry-driven span-encoder load. Existing provider entry points
+        /// remain mean-pooled; the span factory uses this entry point so a
+        /// `.cls` registry row receives the first token rather than a silent
+        /// masked mean.
+        pub fn load_with_max_tokens_and_pooling(
+            model_dir: &Path,
+            max_tokens: usize,
+            pooling: Pooling,
+        ) -> Result<Self, String> {
+            Self::load_inner(
+                model_dir,
+                CANDLE_NL_PROJECTION_SEED,
+                max_tokens.clamp(1, MAX_TOKENS),
+                pooling,
+            )
+        }
+
+        fn load_inner(
+            model_dir: &Path,
+            projection_seed: u64,
+            max_tokens: usize,
+            pooling: Pooling,
+        ) -> Result<Self, String> {
             let device = Device::Cpu;
 
             let config_path = model_dir.join("config.json");
@@ -214,6 +238,7 @@ mod inner {
                 tokenizer,
                 device,
                 projection_seed,
+                pooling,
             })
         }
 
@@ -266,24 +291,30 @@ mod inner {
                 .forward(&input_ids, &token_type_ids, Some(&attention_mask))
                 .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 384)
 
-            // Attention-masked mean pooling: PAD positions contribute nothing
-            // to the sum; the divisor is the real token count per sequence.
-            // This ensures a padded batch pools identically to an unpadded
-            // single encode (the result does NOT depend on padding length).
-            let mask_f = attention_mask
-                .to_dtype(DType::F32)
-                .and_then(|t| t.unsqueeze(2))
-                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 1)
-            let summed = hidden
-                .broadcast_mul(&mask_f)
-                .and_then(|t| t.sum(1))
-                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 384)
-            let counts = mask_f
-                .sum(1)
-                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 1)
-            let pooled = summed
-                .broadcast_div(&counts)
-                .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?;
+            let pooled = match self.pooling {
+                Pooling::Cls => hidden
+                    .i((.., 0, ..))
+                    .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?,
+                Pooling::Mean => {
+                    // Preserve the existing attention-masked mean path exactly:
+                    // PAD positions contribute nothing and batch padding cannot
+                    // alter the vector.
+                    let mask_f = attention_mask
+                        .to_dtype(DType::F32)
+                        .and_then(|t| t.unsqueeze(2))
+                        .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, s, 1)
+                    let summed = hidden
+                        .broadcast_mul(&mask_f)
+                        .and_then(|t| t.sum(1))
+                        .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 384)
+                    let counts = mask_f
+                        .sum(1)
+                        .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?; // (b, 1)
+                    summed
+                        .broadcast_div(&counts)
+                        .map_err(|e| SynapseKitError::EmbeddingFailed(e.to_string()))?
+                }
+            };
 
             let vecs = pooled
                 .to_vec2::<f32>()
