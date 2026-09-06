@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // FdcProviderTests.swift
 //
 // Correctness and cross-port conformance tests for FDCProvider.
@@ -445,3 +448,5 @@ struct FdcConformanceTests {
         #expect(FDC.encode(text) == "700")
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

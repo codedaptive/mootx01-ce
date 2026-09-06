@@ -203,11 +203,10 @@ mod tests {
         let state: BitmapState = estate.bitmap_state(&id, cap_hlc).unwrap();
         let live = estate.store.get_drawer(&id).unwrap().unwrap();
         assert_eq!(state.adjective_bitmap, live.adjective_bitmap);
-        // Bits 27-30 are FREE (ADORN-STORE-02 schema v17 retired
-        // adornment_required + adornment_bitmask from the vocabulary; adornment
-        // state lives in the normalized adornment tables, never in drawer
-        // bits). Audit-log fold reconstruction matches live storage
-        // exactly — no masking required.
+        // Every operational bit an audited write sets travels in the audit
+        // event's after-bitmaps (bit 27 is a derived-signal write with no
+        // audit event, and no audited path sets it), so the audit-log fold
+        // reconstruction matches live storage exactly — no masking required.
         assert_eq!(state.operational_bitmap, live.operational_bitmap);
     }
 

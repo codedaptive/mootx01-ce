@@ -2,33 +2,21 @@
 // (PERF_W1_DRAIN_RIDER_2026-07-28): the T5 detached-drainer exit check must
 // key on the ENCODE drain only.
 //
-// The "distillation" drain entry counts rows by the eligibility predicate;
-// rows that never transit the encode queue (a bare capture on a corpus-less
-// estate, or an estate-wide pipeline-version bump) can only be distilled by
-// a `moot_distill` sweep or the hourly standing signal, so the entry can be
-// non-idle with no encode work outstanding. A finisher polling until ALL
-// drains idle could then hold the encode DrainLease to its full max wait,
-// wedging the next serve session's encode queue — so the T5 gate keys on
-// the encode drain alone. (The wing-seed hints themselves ride the encode
+// The subject-backfill and span-encode drain entries count rows by an
+// eligibility predicate; rows that never transit the encode queue (a bare
+// capture on a corpus-less estate, or an estate-wide activation of a new
+// encoder model) leave those entries non-idle with no encode work
+// outstanding. A finisher polling until ALL drains idle could then hold the
+// encode DrainLease to its full max wait, wedging the next serve session's
+// encode queue — so the T5 gate keys on the encode drain alone. (The
+// wing-seed hints themselves ride the encode
 // stream since DISTILL_SEED_STALL and settle under a normal drain.)
 //
 // Gate under test: `DrainStatus::encode_settled` — true iff the
 // "corpus_encode" drain is idle or absent, regardless of every other drain.
-// Swift twin: DistillationDrainStageTests "Finding 3 regression" section
-// (DrainStatus.encodeSettled).
+// Swift twin: `DrainStatus.encodeSettled` (GeniusLocusKit/DrainStatus.swift).
 
-use std::sync::Arc;
-
-use genius_locus_kit::{DrainStatus, EstateCoordinator};
-use locus_kit::drawer_operational::CaptureChannel;
-use locus_kit::drawer_store::DrawerStore;
-use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
-use locus_kit::frames::CaptureFrame;
-use persistence_kit::inmemory::InMemoryStorage;
-use uuid::Uuid;
-
-const NOW: i64 = 1_700_000_000;
+use genius_locus_kit::DrainStatus;
 
 fn status(name: &str, pending: usize, in_flight: usize) -> DrainStatus {
     DrainStatus {
@@ -74,43 +62,3 @@ fn absent_encode_drain_reads_settled() {
     assert!(DrainStatus::encode_settled(&[status("distillation", 7, 0)]));
 }
 
-/// Live estate: captured-but-undistilled rows make the distillation drain
-/// non-idle while no encode work exists — `drain_statuses` output must open
-/// the T5 gate on exactly this estate.
-#[test]
-fn live_estate_with_undistilled_rows_opens_t5_gate() {
-    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-    let store: Arc<dyn DrawerStore> =
-        Arc::new(InMemoryDrawerStore::with_storage(storage, NOW, None).unwrap());
-    let mut coord = EstateCoordinator::new();
-    let handle = coord
-        .open(store, OwnerCredentials::new("owner-t5-gate-tests"), 0, 100)
-        .expect("open estate");
-
-    // A bare capture on a corpus-less estate is the Finding 3 shape: the row
-    // exists but never transits the encode queue, so only a sweep can distill
-    // it and the distillation entry stays non-idle.
-    let frame = CaptureFrame::new(
-        "This fact stands alone and remains undistilled.",
-        CaptureChannel::Typed,
-        "notes",
-        LatticeAnchor::udc("004"),
-        "test-actor",
-        "minilm-v6",
-    );
-    coord.capture(&handle, frame, NOW).expect("capture drawer");
-
-    let statuses = coord.drain_statuses(&handle).expect("drain_statuses");
-    let distill = statuses
-        .iter()
-        .find(|s| s.name == "distillation")
-        .expect("the distillation drain must be reported on every estate");
-    assert!(
-        distill.is_draining(),
-        "precondition: the Finding 3 shape is present"
-    );
-    assert!(
-        DrainStatus::encode_settled(&statuses),
-        "the T5 finisher must exit (releasing the encode lease) on this estate"
-    );
-}

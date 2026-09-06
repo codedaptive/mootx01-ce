@@ -478,9 +478,9 @@ struct ExpungeVectorOrphanTests {
         // three sentences so the default extractor forms a non-zero fingerprint.
         let content = "Alloys with Tantalum resist heat. Tests on Tantalum ran well. Labs shipped Tantalum today."
         let drawer = try await kit.capture(handle, captureFrame(content: content), mode: .impatient)
-        try await kit.distillItem(
+        try await kit.writeStructuralFingerprint(
             handle: handle, drawerID: drawer.id, content: content,
-            distillFn: GeniusLocusKit.defaultDistillFn, now: Date(timeIntervalSince1970: 1_750_000_000))
+            now: Date(timeIntervalSince1970: 1_750_000_000))
 
         let vectorStore = try #require(await kit.vectorStores[handle])
         let probe = DistillationPipeline.queryFingerprint(
@@ -499,20 +499,20 @@ struct ExpungeVectorOrphanTests {
                 "the distillation-features-v1 entry must be deleted on expunge")
     }
 
-    // MARK: - E9: expunging an undistilled drawer is unaffected by the lane scrub
+    // MARK: - E9: expunging a drawer with no lane entry is unaffected by the lane scrub
 
     /// The lane delete is unconditional but a row with no lane entry must
     /// expunge cleanly — deleteAllVectors on an absent key is a no-op.
     @Test
-    func expungeOfUndistilledDrawerSucceeds() async throws {
+    func expungeOfUnfingerprintedDrawerSucceeds() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         defer { Task { try? await kit.close(handle) } }
 
         let drawer = try await kit.capture(
-            handle, captureFrame(content: "plain undistilled polonium note"), mode: .impatient)
+            handle, captureFrame(content: "plain unfingerprinted polonium note"), mode: .impatient)
 
         _ = try await kit.expunge(handle, ExpungeFrame(
-            rowID: drawer.id, reason: "undistilled lane no-op test", confirmation: true))
+            rowID: drawer.id, reason: "no-lane-entry no-op test", confirmation: true))
 
         let estate = try await kit.estate(for: handle)
         let row = try await estate.allDrawers().first { $0.id == drawer.id }
@@ -538,9 +538,8 @@ struct ExpungeVectorOrphanTests {
         let v2 = try await kit.capture(handle, v2Frame, mode: .impatient)
 
         for d in [v1, v2] {
-            try await kit.distillItem(
-                handle: handle, drawerID: d.id, content: d.content,
-                distillFn: GeniusLocusKit.defaultDistillFn, now: t0)
+            try await kit.writeStructuralFingerprint(
+                handle: handle, drawerID: d.id, content: d.content, now: t0)
         }
         let vectorStore = try #require(await kit.vectorStores[handle])
         let probe = DistillationPipeline.queryFingerprint(

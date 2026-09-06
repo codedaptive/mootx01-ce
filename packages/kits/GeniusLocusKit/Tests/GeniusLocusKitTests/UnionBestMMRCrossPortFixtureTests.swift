@@ -9,7 +9,9 @@
 // exceeds the 2N working view (6), so the greedy MMR with the shingle term
 // decides which candidates enter the view. Both ports must return the
 // fixture's `expected_content_order` verbatim for a `.full` unionBest
-// `.matrixAware` recall.
+// `.matrixAware` recall under the default lane budget (the whole-record
+// vector column out of the fused score; the fixture description records the
+// pin history and the mutation controls).
 
 import Testing
 import Foundation

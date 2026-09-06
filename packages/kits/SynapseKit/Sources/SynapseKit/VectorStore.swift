@@ -307,7 +307,7 @@ public actor VectorStore {
     ///
     /// Built lazily per modelID on the first `findNearestFloat` for that model;
     /// the entry's presence in the map is the "built" flag (no separate bool).
-    private var floatIndices: [String: FloatBruteForceIndex] = [:]
+    var floatIndices: [String: FloatBruteForceIndex] = [:]
 
     /// HNSW approximate nearest-neighbour index per modelID (Lane D, float lane).
     ///
@@ -344,7 +344,7 @@ public actor VectorStore {
     /// on an already-built partition. Used by `_findNearestFloatCached` to
     /// decide when to activate the HNSW index. An actor-local transient count
     /// (not persisted; rebuilt from the table count at first-access time).
-    private var liveFloatCounts: [String: UInt32] = [:]
+    var liveFloatCounts: [String: UInt32] = [:]
 
     // MARK: - Shadow-swap generation state
 
@@ -1018,7 +1018,7 @@ public actor VectorStore {
     /// The dirty flag IS dropped so a later `flush()` does not see a dirty
     /// partition with no in-memory graph and persist-delete those
     /// still-serviceable rows.
-    private func _invalidateHNSWLane(for modelID: String) {
+    func _invalidateHNSWLane(for modelID: String) {
         hnswIndices.removeValue(forKey: modelID)
         liveFloatCounts.removeValue(forKey: modelID)
         hnswGraphDirty.remove(modelID)
@@ -1379,10 +1379,11 @@ public actor VectorStore {
         )
     }
 
-    /// Upsert a typed payload (binary or float32).
+    /// Upsert a typed payload (binary, float32, or int8).
     ///
     /// This is the general write path. `addVector` is a convenience
-    /// wrapper for the binary/Engram case.
+    /// wrapper for the binary/Engram case; `writeSpanVectors` is the
+    /// atomic per-item path for encoder span rows (int8).
     ///
     /// For binary payloads: writes the row to the `vectors` table AND
     /// mirrors the vector into the resident array AND updates the active
@@ -1399,11 +1400,9 @@ public actor VectorStore {
     /// open. For importing many vectors at once, prefer `addPayloads(_:)`,
     /// which bounds both sidecar writes and index builds to O(batches).
     ///
-    /// - Throws: `SynapseKitError.int8QuantizationPolicyUndefined` when the
-    ///   payload kind is `.int8`. Int8 writes are rejected fail-closed because
-    ///   the quantization policy (symmetric vs asymmetric, per-vector vs
-    ///   per-dim scale) has not been ratified. Use `.float` (float32 lane) or
-    ///   the binary Engram lane instead. See SYNAPSEKIT_SPEC §I-4a.
+    /// Int8 payloads (the ratified symmetric per-vector quantisation,
+    /// SYNAPSEKIT_SPEC §I-4a) are table-only like float32: they never enter
+    /// the resident Hamming array or a float index.
     ///
     /// Telemetry: emits `synapsekit.index.insert_latency_ms` when enabled.
     public func addPayload(
@@ -1414,18 +1413,6 @@ public actor VectorStore {
         modelVersion: String,
         filedAt: Date
     ) async throws {
-        // PRECONDITION GUARD: int8 writes are rejected fail-closed.
-        // The quantization policy (symmetric vs asymmetric, per-vector vs
-        // per-dim scale) has not been ratified. Persisting an int8 payload now
-        // would lock in undefined dequantization semantics. Use .float or the
-        // binary Engram lane. See SYNAPSEKIT_SPEC §I-4a and arch spec §10.3.
-        if payload.kind == .int8 {
-            throw SynapseKitError.int8QuantizationPolicyUndefined(
-                "int8 writes are rejected: quantization policy is unspecified. " +
-                "Use .float or the binary Engram lane. See SYNAPSEKIT_SPEC §I-4a."
-            )
-        }
-
         let startTime = Date().timeIntervalSince1970
 
         // Determine write generation. If the model has an active shadow ('building'),
@@ -1641,18 +1628,6 @@ public actor VectorStore {
     /// - Parameter batch: the payloads to upsert. Empty is a no-op.
     public func addPayloads(_ batch: [VectorPayloadInput]) async throws {
         guard !batch.isEmpty else { return }
-
-        // PRECONDITION GUARD: reject any int8 payload in the batch fail-closed.
-        // The quantization policy has not been ratified; a batch containing even
-        // one int8 payload must be rejected entirely — no partial writes. The
-        // first offending item is reported. See SYNAPSEKIT_SPEC §I-4a.
-        if let bad = batch.first(where: { $0.payload.kind == .int8 }) {
-            throw SynapseKitError.int8QuantizationPolicyUndefined(
-                "int8 writes are rejected: quantization policy is unspecified. " +
-                "Offending item: \(bad.itemID). " +
-                "Use .float or the binary Engram lane. See SYNAPSEKIT_SPEC §I-4a."
-            )
-        }
 
         let startTime = Date().timeIntervalSince1970
 
@@ -3317,14 +3292,6 @@ public actor VectorStore {
     /// fsync, no per-row existence SELECT) and rebuilds the resident binary index
     /// ONCE from the table (O(n)). Mirrors Rust `VectorStore::replace_model_vectors`.
     public func replaceModelVectors(modelID: String, _ batch: [VectorPayloadInput]) async throws {
-        // PRECONDITION GUARD: reject any int8 payload in the batch fail-closed (#6).
-        // Matches the guard in addPayload and addPayloads — the quantization policy
-        // (scale, per-dim scale) has not been ratified.
-        if let bad = batch.first(where: { $0.payload.kind == .int8 }) {
-            throw SynapseKitError.int8QuantizationPolicyUndefined(
-                "int8 writes are rejected: quantization policy is unspecified. " +
-                "replaceModelVectors received an int8 payload for item \(bad.itemID)")
-        }
         // Flush any in-flight deferred burst so the table is the single source of
         // truth before the resident index is rebuilt from it below.
         if deferredIndexDirty { try await publishResidentIndex() }
@@ -3402,7 +3369,7 @@ public actor VectorStore {
     /// Unlike `_ensureIndexBuilt` it does NOT trust the sidecar live-count (a
     /// re-embed replaces every vector with the SAME row count, so a count check
     /// would wrongly keep the stale sidecar) — it always reads the table.
-    private func _rebuildBinaryIndexFromTable() async throws {
+    func _rebuildBinaryIndexFromTable() async throws {
         let records = try await _fetchAllBinaryRecords()
         let arr: ResidentVectorArray
         if let store = arrayStore {
@@ -3510,19 +3477,13 @@ public actor VectorStore {
     /// removing only the keys no lane claims.
     ///
     /// - Returns: the count of rows deleted (stale keys) and upserted.
-    /// - Throws: `SynapseKitError.int8QuantizationPolicyUndefined` for any int8
-    ///   payload; `SynapseKitError.storeError` when an input's modelID differs
-    ///   from `modelID` (a cross-partition write is a caller bug).
+    /// - Throws: `SynapseKitError.invalidPayload` when an input's modelID
+    ///   differs from `modelID` (a cross-partition write is a caller bug).
     @discardableResult
     public func reconcileModelVectors(
         modelID: String,
         expected: [VectorPayloadInput]
     ) async throws -> (removed: Int, upserted: Int) {
-        if let bad = expected.first(where: { $0.payload.kind == .int8 }) {
-            throw SynapseKitError.int8QuantizationPolicyUndefined(
-                "int8 writes are rejected: quantization policy is unspecified. " +
-                "reconcileModelVectors received an int8 payload for item \(bad.itemID)")
-        }
         if let stray = expected.first(where: { $0.modelID != modelID }) {
             throw SynapseKitError.invalidPayload(
                 "reconcileModelVectors(modelID: \(modelID)) received an input for "
@@ -4165,16 +4126,11 @@ public actor VectorStore {
 
     /// Decode a VectorPayload from a storage row.
     ///
-    /// Returns nil when a required column is missing or malformed.
-    ///
-    /// Int8 payloads return nil: the quantization policy has not been ratified
-    /// so a decoded int8 payload cannot be safely used by any consumer.
-    /// Callers that need to detect an int8 row explicitly should read the
-    /// `kind` column directly. This is a symmetric fail-closed guard: since
-    /// writes are rejected (VectorStore.addPayload throws
-    /// int8QuantizationPolicyUndefined), no int8 rows should be present in
-    /// production. The guard defends against hand-crafted rows.
-    /// See SYNAPSEKIT_SPEC §I-4a.
+    /// Returns nil when a required column is missing or malformed. An int8
+    /// row (SYNAPSEKIT_SPEC §I-4a) is malformed when its `scale` is NULL or
+    /// its byte count differs from `dim`: the ratified policy stores exactly
+    /// `dim` bytes and a per-vector scale, and a row without them cannot be
+    /// dequantised, so it is skipped like any other undecodable row.
     static func decodePayload(from row: StorageRow) -> VectorPayload? {
         guard case let .int(kindRaw) = row["kind"] ?? .null,
               // Guard the narrowing conversion UInt8(kindRaw): SQLite columns are
@@ -4190,17 +4146,14 @@ public actor VectorStore {
               case let .blob(bytes) = row["payload"] ?? .null else {
             return nil
         }
-        // Symmetric read-side guard: int8 payloads cannot be decoded until
-        // the quantization policy is ratified. A nil return here causes the
-        // calling read path (getPayload, vectors(forItemID:)) to surface nil
-        // or skip the row — the same safe outcome as a missing row. This
-        // prevents silent consumption of hand-crafted int8 rows.
-        if kind == .int8 { return nil }
         let scale: Float?
         switch row["scale"] ?? .null {
         case .float(let d): scale = Float(d)
         default:            scale = nil
         }
+        // Int8 rows carry exactly `dim` bytes and a non-null scale (§I-4a);
+        // anything else cannot be dequantised and is skipped like a missing row.
+        if kind == .int8, scale == nil || bytes.count != Int(dim) { return nil }
         return VectorPayload(
             kind: kind,
             dim: UInt32(dim),
@@ -4253,7 +4206,7 @@ public actor VectorStore {
     /// Return the serving generation for `modelID`, loading from the
     /// vector_generations table if not cached. Returns 0 for models that
     /// have no registry row (never swapped — all rows are serving gen 0).
-    private func _servingGeneration(for modelID: String) async throws -> Int64 {
+    func _servingGeneration(for modelID: String) async throws -> Int64 {
         if let cached = servingGenerations[modelID] { return cached }
         let rows = try await storage.rowStore.query(
             table: "vector_generations",

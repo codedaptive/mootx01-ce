@@ -99,61 +99,6 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
         std::env::set_var(EstatePosture::ENVIRONMENT_KEY, "1");
     }
 
-    // Gold miner (ADORNMENTLIB_SPEC 0.5.0): install the resident in-process
-    // engine at startup — resident always, never load-on-demand. The engine
-    // files are configuration, not code: <data>/goldminer/{model.gguf,
-    // tokenizer.json} (any Qwen2-family GGUF plugs in). Absent files mean
-    // no local engine; mints then fall back to the MOOT_MINT_CMD harness
-    // seam or stay in debt. Load failure is LOUD but non-fatal — a serve
-    // that cannot mint must still serve.
-    // Residency note: the hosting launch configuration must set
-    // MallocLargeCache=0 on macOS (see QuantizedLlmEngine::load) so the
-    // allocator's large cache does not double the engine's footprint.
-    {
-        let (gguf, tok) = adornment_lib::gold_miner::default_engine_paths(&data);
-        // Model selection (D4 swappability, 2026-08-31): MOOT_MINT_MODEL
-        // names a registry token; unset = the default recipe. An unknown
-        // token installs NO engine — loud config error, never a silent
-        // fallback to a different model, because the minter identity row
-        // must record exactly what the operator selected. Pairing the
-        // GGUF at the fixed path with the selected recipe is the
-        // operator's contract.
-        match (adornment_lib::selected_recipe(), gguf.is_file() && tok.is_file()) {
-            (Err(e), _) => {
-                // Unknown token: NO engine, loud config error. Never a
-                // silent fallback to a different model.
-                eprintln!(
-                    "mootx01 serve: {e} — no gold miner engine installed; \
-                     adornment pass will use the mechanical fallback"
-                );
-            }
-            (Ok(recipe), true) => {
-                match adornment_lib::gold_miner::QuantizedLlmEngine::load_with_recipe(
-                    &gguf, &tok, recipe,
-                ) {
-                    Ok(engine) => {
-                        let id = adornment_lib::gold_miner::GoldMinerEngine::identity(&engine);
-                        adornment_lib::gold_miner::install_engine(Box::new(engine));
-                        eprintln!("mootx01 serve: gold miner resident — {id}");
-                    }
-                    Err(e) => eprintln!("mootx01 serve: gold miner unavailable — {e}"),
-                }
-            }
-            (Ok(_), false) => {
-                // Loud skip (Smythe DEFAULT-MINT-01): with no engine the
-                // adornment pass falls back to the deterministic mechanical
-                // adornment for every pair — coverage holds, model quality
-                // does not. The operator should know which mode this serve
-                // is in.
-                eprintln!(
-                    "mootx01 serve: gold miner model not found at {} — adornment \
-                     pass will use the mechanical fallback",
-                    gguf.display()
-                );
-            }
-        }
-    }
-
     // Estate selection. Explicit backend env vars win over --db; otherwise
     // resolve the named (or active) estate to a SQLite path.
     let postgres_set = env_nonempty("ARIA_MCP_POSTGRES_URL");

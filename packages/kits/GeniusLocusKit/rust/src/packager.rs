@@ -597,6 +597,7 @@ mod tests {
                         ..RecallScoreVector::ZERO
                     },
                     explanation: vec![],
+                    span_hit: None,
                 }
             })
             .collect();

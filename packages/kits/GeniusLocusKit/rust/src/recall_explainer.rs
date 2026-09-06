@@ -9,9 +9,14 @@
 //! the two ports must render them byte-identically (the ARIA `explain`
 //! argument surfaces them verbatim under each candidate row):
 //!   "sources: corpusBM25, locusBitmap"
-//!   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412"
+//!   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412 span:1:0.744"
 //!   "mode: unionBest | scoring: matrixAware"
 //!   "why: content query; BM25 and vector weighted high; MatrixO cluster preserved"
+//!
+//! A hit the span rerank stage scored carries one more token on the score line,
+//! `span:<best_span_index>:<cosine to 3 dp>` (contract sheet §8); a hit without
+//! a span hit carries no `span:` token, so its absence means "no span row under
+//! the active encoder", not a zero cosine.
 
 use crate::recall::{GLKRecallScoring, RecallHit, RecallPlan};
 
@@ -51,11 +56,18 @@ pub fn explain(
     // `String(format: "%.2f", Float)` both round the exact binary value to
     // nearest-even, so the rendered digits agree.
     let sv = &hit.score;
-    lines.push(format!(
+    let mut score_line = format!(
         "score: locus={:.2} bm25={:.2} vector={:.2} dense={:.2} fieldFit={:.2} coOccurrence={:.2} temporal={:.2} graph={:.2} preference={:.2} agreement={:.2} final={:.3}",
         sv.locus, sv.bm25, sv.vector, sv.dense, sv.field_fit, sv.co_occurrence,
         sv.temporal, sv.graph, sv.preference, agreement, sv.final_score
-    ));
+    );
+    // Span rerank evidence (sheet §8): index of the best span and its cosine to
+    // 3 dp, only for hits the stage scored. Swift renders the same
+    // `span:%u:%.3f` token.
+    if let Some(span) = &hit.span_hit {
+        score_line.push_str(&format!(" span:{}:{:.3}", span.best_span_index, span.cosine));
+    }
+    lines.push(score_line);
 
     // Line 3 — mode and scoring strategy.
     lines.push(format!(

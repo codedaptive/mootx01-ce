@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // LsaProviderTests.swift
 //
 // Conformance and correctness tests for LsaProvider.
@@ -224,3 +227,5 @@ struct LsaProviderTests {
                 "LSA and PPMI projection seeds must differ for bucket isolation")
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

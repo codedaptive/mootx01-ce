@@ -252,6 +252,21 @@ struct AriaMCPMain {
             wireSemanticRecall = true
         }
 
+        // Production model-directory resolver, installed before the estate is
+        // opened and wired: the semantic-recall wiring acts on the manifest's
+        // `embedding_provider = "encoder"` by building the span encoder from
+        // the active registry row, and it can only find the bundled model
+        // through this resolver (the kit's default answers nil for every id,
+        // which leaves recall lexical-only). The resolver's first search slot
+        // is the 1.2 download directory, taken here as the estate file's own
+        // directory (the in-memory estate has none, so the home directory
+        // stands in); the bundled model is the slot 1.1 serves from.
+        let modelDataDirectory = rawSQLitePath.isEmpty
+            ? FileManager.default.homeDirectoryForCurrentUser
+            : URL(fileURLWithPath: rawSQLitePath).deletingLastPathComponent()
+        await kit.setModelDirectoryResolver(
+            BundledModelDirectoryResolver(dataDirectory: modelDataDirectory))
+
         let handle: EstateHandle
         do {
             // Estate.create opens the schema idempotently (DrawerStore uses
@@ -279,16 +294,6 @@ struct AriaMCPMain {
                 : String(describing: error).replacingOccurrences(of: rawPostgresURL, with: "[REDACTED]")
             Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(safeDescription)")
             exit(1)
-        }
-
-        // Platform-default adornment minter (Bob ruling 2026-08-28): register
-        // apple-fm active so the adornment pass mints inline. Idempotent
-        // upsert; never retoggles an operator's deactivation. Best-effort —
-        // the server must never fail to start over minter registration.
-        do {
-            try await kit.ensureDefaultAdornmentMinter(in: handle)
-        } catch {
-            Logging.stderr.log("default adornment minter registration failed (pass will no-op): \(error)")
         }
 
         // Semantic recall wiring (all backends: in-memory, SQLite, PostgreSQL).

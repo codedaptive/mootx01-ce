@@ -30,16 +30,6 @@ public enum SynapseKitError: Error, Sendable, Equatable {
     /// that prevents decode. Associated value describes the malformation.
     case decodingFailure(String)
 
-    /// An `.int8` VectorPayload was submitted for persistence, but the
-    /// int8 quantization policy (symmetric vs asymmetric, per-vector vs
-    /// per-dim scale) has not been ratified. Writing an int8 payload now
-    /// would lock in undefined dequantization semantics. Use `.float`
-    /// (float32 lane) or `.binaryDense` (.binary lane / Engram) instead.
-    /// See SYNAPSEKIT_SPEC §I-4a and arch spec §10.3. When a quantization
-    /// policy is ratified, remove this error case and the guards that
-    /// throw it.
-    case int8QuantizationPolicyUndefined(String)
-
     /// A trained distributional provider's `embedFloat` returned no vector
     /// because all query tokens are out-of-vocabulary (OOV) — the provider
     /// HAS a trained basis but the query's vocabulary does not intersect it.

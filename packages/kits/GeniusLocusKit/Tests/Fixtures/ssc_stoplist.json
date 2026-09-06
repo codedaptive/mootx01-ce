@@ -1,0 +1,20 @@
+{
+  "version": "1",
+  "description": "Pinned stop list for EnrichmentStage SSC fact extraction. Both ports (Swift, Rust) must carry exactly these tokens. Extending the list bumps the pipeline version.",
+  "categories": {
+    "function_words": [
+      "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their",
+      "his", "her", "its", "they", "them", "this", "that", "these", "those",
+      "was", "were", "are", "been", "being", "have", "has", "had", "with",
+      "from", "into", "about", "some", "any", "all", "each", "what", "which",
+      "who", "how", "when", "where", "why"
+    ],
+    "conversational_fillers": [
+      "yeah", "yes", "okay", "hey", "wow", "guess"
+    ],
+    "evaluative_adjectives": {
+      "note": "Schema 19 addition. Measured: entity:good appeared 1077 times as the most common wing fact. These generic words anchor to junk FDC roots and provide no retrieval value.",
+      "tokens": ["good", "great", "nice", "sounds", "plan", "time", "new"]
+    }
+  }
+}

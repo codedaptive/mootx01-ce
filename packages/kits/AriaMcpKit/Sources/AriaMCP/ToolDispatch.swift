@@ -2,6 +2,7 @@ import AriaMCPWire
 
 import Foundation
 import CognitionKit
+import ContextDistillLib
 import EideticLib
 import GeniusLocusKit
 import GeniusLocusKitMigrations
@@ -111,12 +112,6 @@ public struct ToolDispatcher: Sendable {
     /// `MonitoringControl` requires `Sendable`.
     let monitoringControl: (any MonitoringControl)?
 
-    /// Host-owned projection of adornment-miner state. Nil means this host did
-    /// not compose an operational status source; it does not mean disabled.
-    /// Product hosts inject a typed snapshot without making AriaMCP depend on
-    /// AdornmentLib or a specific model runtime.
-    let adornmentStatusProvider: AdornmentOperationalStatusProvider?
-
     /// The build serial for this running executable, surfaced by
     /// `moot_estate_ping` so drivers can confirm they are talking to the
     /// most recently compiled build.
@@ -218,7 +213,6 @@ public struct ToolDispatcher: Sendable {
                 versionSkewAdvisory: String? = nil,
                 updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
                 monitoringControl: (any MonitoringControl)? = nil,
-                adornmentStatusProvider: AdornmentOperationalStatusProvider? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 modeSessionState: ModeSessionState = ModeSessionState(),
                 posture: EstatePosture? = nil) {
@@ -233,7 +227,6 @@ public struct ToolDispatcher: Sendable {
         self.versionSkewAdvisory = versionSkewAdvisory
         self.updateAdvisoryProvider = updateAdvisoryProvider
         self.monitoringControl = monitoringControl
-        self.adornmentStatusProvider = adornmentStatusProvider
         self.environment = environment
         // Bench clock reads MOOT_BENCH_EPOCH_NOW from the injected environment dict.
         // In production this is ProcessInfo.processInfo.environment; tests inject
@@ -260,7 +253,6 @@ public struct ToolDispatcher: Sendable {
                               jobRegistry: jobRegistry, recallLedger: recallLedger,
                               sensitivityUnlockLedger: sensitivityUnlockLedger,
                               monitoringControl: monitoringControl,
-                              adornmentStatusProvider: adornmentStatusProvider,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory,
                               updateAdvisoryProvider: updateAdvisoryProvider,
@@ -280,7 +272,6 @@ public struct ToolDispatcher: Sendable {
                        jobRegistry: jobRegistry, recallLedger: recallLedger,
                        sensitivityUnlockLedger: sensitivityUnlockLedger,
                        monitoringControl: control,
-                       adornmentStatusProvider: adornmentStatusProvider,
                        buildSerial: buildSerial, serverIdentity: serverIdentity,
                        versionSkewAdvisory: versionSkewAdvisory,
                        updateAdvisoryProvider: updateAdvisoryProvider,
@@ -302,7 +293,6 @@ public struct ToolDispatcher: Sendable {
         recallLedger: SurfacedRecallLedger,
         sensitivityUnlockLedger: SensitivityGrantLedger,
         monitoringControl: (any MonitoringControl)?,
-        adornmentStatusProvider: AdornmentOperationalStatusProvider?,
         buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?,
         updateAdvisoryProvider: (@Sendable () async -> String?)?,
         environment: [String: String],
@@ -317,7 +307,6 @@ public struct ToolDispatcher: Sendable {
         self.recallLedger = recallLedger
         self.sensitivityUnlockLedger = sensitivityUnlockLedger
         self.monitoringControl = monitoringControl
-        self.adornmentStatusProvider = adornmentStatusProvider
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
@@ -893,9 +882,9 @@ public struct ToolDispatcher: Sendable {
 
     /// Maps one federated drawer to its S2 candidate row, applying
     /// provenance redaction to BOTH content-derived columns. A subject-only
-    /// gate leaked a body-derived firstSentence preview for restricted and
+    /// gate leaked a body-derived bestSpan preview for restricted and
     /// secret rows while the subject claimed the row was redacted (codex
-    /// finding 2026-08-26); the Rust twin already nils first_sentence for
+    /// finding 2026-08-26); the Rust twin already nils best_span for
     /// these sensitivities — this is its exact mirror. Internal (not
     /// private) so the redaction mapping is pinned by a direct test.
     internal static func federatedCandidateRow(
@@ -903,23 +892,22 @@ public struct ToolDispatcher: Sendable {
         subject: String?, content: String, eventTime: String
     ) -> CandidateRowData {
         let rowSubject: String?
-        let rowFirstSentence: String?
+        let rowBestSpan: String?
         switch sensitivity {
         case .restricted:
             rowSubject = ResultComposer.restrictedMarker
-            rowFirstSentence = nil
+            rowBestSpan = nil
         case .secret:
             rowSubject = ResultComposer.secretMarker
-            rowFirstSentence = nil
+            rowBestSpan = nil
         case .normal, .elevated:
             rowSubject = subject
-            rowFirstSentence = content.isEmpty ? nil : content
+            rowBestSpan = content.isEmpty ? nil : content
         }
         return CandidateRowData(
             id: id,
             subject: rowSubject,
-            firstSentence: rowFirstSentence,
-            activeAdornments: [],
+            bestSpan: rowBestSpan,
             eventTime: eventTime)
     }
 
@@ -2154,42 +2142,32 @@ extension ToolDispatcher {
         let searchEstate = try await kit.estate(for: handle)
         let searchNodeNames = try await searchEstate.resolveNodeNames(
             parentNodeIds: shownHits.compactMap { $0.drawer?.parentNodeId })
-        // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2):
-        // issued once per call over all shown drawer IDs before the render loop.
-        // Zero active minters → empty map → no adornment column in the row.
-        let adornmentMap = try await kit.activeAdornments(
-            in: handle, drawerIDs: shownHits.compactMap { $0.drawer?.id })
-
         // Map hits → CandidateRowData typed intermediates for the composer.
         var candidateRows: [CandidateRowData] = []
         for hit in shownHits {
             if let drawer = hit.drawer {
-                // Provenance-sensitivity redaction: subject/firstSentence are
+                // Provenance-sensitivity redaction: subject/bestSpan are
                 // content-derived; restricted/secret rows replace them with the
                 // redaction marker so the body's access control cannot be
                 // bypassed through the summary.
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch drawer.sensitivity {
                 case .restricted:
-                    (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
+                    (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
                 case .secret:
-                    (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                    (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = drawer.subject
                     // Pass full content; composer truncates to 120 chars and
                     // deduplicates against subject (§11.1 rules 2–3).
-                    firstSentence = drawer.content.isEmpty ? nil : drawer.content
+                    bestSpan = drawer.content.isEmpty ? nil : drawer.content
                 }
-                // Adornments: ascending minter-ID order (caller's responsibility
-                // per composer contract; the composer never re-sorts).
-                let entries = (adornmentMap[drawer.id] ?? []).sorted { $0.minterID < $1.minterID }
-                let adornments = entries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
                 candidateRows.append(CandidateRowData(
                     id: drawer.id,
                     subject: subject,
-                    firstSentence: firstSentence,
-                    semanticSearchCandle: nil,   // SSC not yet surfaced by GLK in this build; renders '-'
-                    activeAdornments: adornments,
+                    bestSpan: bestSpan,
+                    // sscFacts: stubbed nil until W1 schema-19 Drawer.sscFacts lands
+                    sscFacts: nil,
                     eventTime: ResultComposer.iso8601(drawer.eventTime),
                     score: Double(hit.score.final),
                     room: searchNodeNames[drawer.parentNodeId]?.room))
@@ -2352,8 +2330,8 @@ extension ToolDispatcher {
         // Hydration depth (PR-03): one verb, three tiers.
         //   subject   — dense row only (travel tier)
         //   distilled — dense row + distilled rendering (confirm tier;
-        //               falls back to verbatim content with an explicit
-        //               "source: content (not yet distilled)" marker)
+        //               inline rendering via ContextDistillLib — every row
+        //               renders without a sweep dependency)
         //   full      — the complete record incl. verbatim content
         //               (terminal tier; the DEFAULT, preserving the
         //               pre-PR-03 single-id reply byte-for-byte-ish shape)
@@ -2444,10 +2422,6 @@ extension ToolDispatcher {
         // depth:full (batch) → S3 full record per drawer via renderS3Record
         // depth:full (single) → S3 full record via renderS3Record (falls through)
         if !singleIDMode || depthName != "full" {
-            // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2):
-            // issued once per call over admissible drawer IDs before the render loop.
-            let adornmentMap = try await kit.activeAdornments(
-                in: handle, drawerIDs: rowIDs.compactMap { admissibleByID[$0]?.id })
             // One batched node-name read for room over the admissible rows.
             let getNodeNames = try await estate.resolveNodeNames(
                 parentNodeIds: rowIDs.compactMap { admissibleByID[$0]?.parentNodeId })
@@ -2468,12 +2442,9 @@ extension ToolDispatcher {
                         case .normal, .elevated: break
                         }
                     }
-                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
-                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
                     entries.append(.found(CandidateRowData(
                         id: d.id,
                         subject: d.subject,
-                        activeAdornments: adornments,
                         eventTime: ResultComposer.iso8601(d.eventTime),
                         room: getNodeNames[d.parentNodeId]?.room)))
                 }
@@ -2500,26 +2471,23 @@ extension ToolDispatcher {
                     }
                 }
                 if depthName == "distilled" {
-                    // S2 row header (no score column) + distilled continuation.
-                    // Deviation marker rendered only on fallback hits per deviation-only contract.
-                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
-                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
+                    // S2 row header (no score column) + inline-distilled continuation.
+                    // Distillation is computed at read time via ContextDistiller —
+                    // the stored distilled column is removed in schema 19 (W1).
                     let row = CandidateRowData(
                         id: d.id,
                         subject: d.subject,
-                        firstSentence: d.content.isEmpty ? nil : d.content,
-                        activeAdornments: adornments,
+                        bestSpan: d.content.isEmpty ? nil : d.content,
+                        // sscFacts: stubbed nil until W1 schema-19 Drawer.sscFacts lands
+                        sscFacts: nil,
                         eventTime: ResultComposer.iso8601(d.eventTime),
                         room: getNodeNames[d.parentNodeId]?.room)
                     lines.append(ResultComposer.renderS2Row(row))
-                    if let distilled = d.distilled, !distilled.isEmpty {
-                        lines.append("    \(distilled)")
-                    } else {
-                        // Deviation marker: tells the AI this row still owes
-                        // a distillate; body is verbatim content.
-                        lines.append("    source: content (not yet distilled)")
-                        lines.append("    \(d.content)")
-                    }
+                    // Inline distillation: compute at read time, 17 ms per 4.9k-char record.
+                    let distilledText = ContextDistiller().distill(
+                        DistillationInput(original: d.content),
+                        converter: .intentSpanV23Attributed).aiText
+                    lines.append("    \(distilledText)")
                 } else {
                     // depth:full in batch mode — S3 full record per drawer.
                     let names = getNodeNames[d.parentNodeId] ?? (wing: "", room: "")
@@ -2528,8 +2496,6 @@ extension ToolDispatcher {
                         ($0.sourceDrawerId == d.id || $0.targetDrawerId == d.id)
                             && $0.tombstonedAt == nil && $0.lifecycle == .active
                     }
-                    let adornEntries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
-                    let adornments = adornEntries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
                     let tunnels = linked.prefix(50).map { tunnel -> FullRecordTunnel in
                         let outgoing = tunnel.sourceDrawerId == d.id
                         let other = outgoing
@@ -2541,7 +2507,6 @@ extension ToolDispatcher {
                         id: d.id,
                         room: names.room, wing: names.wing,
                         subject: d.subject,
-                        activeAdornments: adornments,
                         filedAt: ResultComposer.iso8601(d.filedAt),
                         eventTime: ResultComposer.iso8601(d.eventTime),
                         state: String(describing: d.state),
@@ -2584,7 +2549,7 @@ extension ToolDispatcher {
             }
         }
 
-        // Resolve node names, active tunnels, and adornments for the S3 record.
+        // Resolve node names and active tunnels for the S3 record.
         // sensitivity_advisory removed from payload (moved to tool description text).
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
         let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
@@ -2593,14 +2558,6 @@ extension ToolDispatcher {
             ($0.sourceDrawerId == drawer.id || $0.targetDrawerId == drawer.id)
                 && $0.tombstonedAt == nil && $0.lifecycle == .active
         }
-        // Two-step fetch prevents sorted-overload ambiguity (SortComparator vs Bool-closure)
-        // introduced in Swift 5.9+ when the element type is inferred across a multi-line
-        // subscript + nil-coalesce expression. Splitting into two let-bindings gives the
-        // compiler a clear [StoredAdornment] concrete type before the sorted call.
-        let adornmentByDrawer = try await kit.activeAdornments(in: handle, drawerIDs: [drawer.id])
-        let adornEntries = adornmentByDrawer[drawer.id] ?? []
-        let adornments = adornEntries.sorted(by: { $0.minterID < $1.minterID })
-            .map { AdornmentEntry(minterID: $0.minterID, text: $0.text) }
         let tunnels = linked.prefix(50).map { tunnel -> FullRecordTunnel in
             let outgoing = tunnel.sourceDrawerId == drawer.id
             let other = outgoing
@@ -2612,7 +2569,6 @@ extension ToolDispatcher {
             id: drawer.id,
             room: names.room, wing: names.wing,
             subject: drawer.subject,
-            activeAdornments: adornments,
             filedAt: ResultComposer.iso8601(drawer.filedAt),
             eventTime: ResultComposer.iso8601(drawer.eventTime),
             state: String(describing: drawer.state),
@@ -3071,7 +3027,7 @@ extension ToolDispatcher {
             if let tid = t.targetDrawerId, let d = drawers[tid] {
                 far = CandidateRowData(
                     id: d.id, subject: d.subject,
-                    firstSentence: d.content.isEmpty ? nil : d.content,
+                    bestSpan: d.content.isEmpty ? nil : d.content,
                     eventTime: ResultComposer.iso8601(d.eventTime))
             } else if let tid = t.targetDrawerId {
                 // Drawer ID referenced but not admissible (gated or missing).
@@ -3111,7 +3067,7 @@ extension ToolDispatcher {
             if let sid = t.sourceDrawerId, let d = drawers[sid] {
                 far = CandidateRowData(
                     id: d.id, subject: d.subject,
-                    firstSentence: d.content.isEmpty ? nil : d.content,
+                    bestSpan: d.content.isEmpty ? nil : d.content,
                     eventTime: ResultComposer.iso8601(d.eventTime))
             } else if let sid = t.sourceDrawerId {
                 far = CandidateRowData(id: sid, eventTime: "-")
@@ -3588,38 +3544,6 @@ extension ToolDispatcher {
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
         ]
-        if let adornmentStatusProvider {
-            let status = await adornmentStatusProvider()
-            let identity = status.identity.map(Self.singleLineStatusValue) ?? "none"
-            var line = "adornment_miner: \(status.state.rawValue), identity: \(identity)"
-            if let pending = status.pendingPairs {
-                line += ", pending_pairs: \(pending)"
-            }
-            if let detail = status.detail {
-                line += ", detail: \(Self.singleLineStatusValue(detail))"
-            }
-            stats.append(line)
-
-            let lifecycle: [(String, String?)] = [
-                ("logical_requests", status.logicalRequests.map(String.init)),
-                ("request_attempts", status.requestAttempts.map(String.init)),
-                ("process_starts", status.processStarts.map(String.init)),
-                ("launch_failures", status.launchFailures.map(String.init)),
-                ("bounded_recycles", status.boundedRecycles.map(String.init)),
-                ("idle_reaps", status.idleReaps.map(String.init)),
-                ("unexpected_exits", status.unexpectedExits.map(String.init)),
-                ("crash_retries", status.crashRetries.map(String.init)),
-                ("per_prompt_failures", status.perPromptFailures.map(String.init)),
-                ("active_children", status.activeChildren.map(String.init)),
-                ("requests_in_active_children", status.requestsInActiveChildren.map(String.init)),
-            ]
-            let rendered = lifecycle.compactMap { key, value in
-                value.map { "\(key): \($0)" }
-            }
-            if !rendered.isEmpty {
-                stats.append("adornment_miner_lifecycle: " + rendered.joined(separator: ", "))
-            }
-        }
         // Shared-content migration/reclaim status (shared-content 1.1 P5):
         // appended only when a migration record exists — fresh estates that
         // never ran detection leave the response shape unchanged. Best-effort:
@@ -3789,7 +3713,7 @@ extension ToolDispatcher {
             return Self.textResult(lines.joined(separator: "\n"))
         }
         // Normal listing: migrate to ResultComposer.renderS2Listing (COMPOSER-02B).
-        // One S2 row per drawer: uuid · subject · firstSentence · SSC · adornment · eventTime.
+        // One S2 row per drawer: uuid · subject · bestSpan · sscFacts · eventTime.
         // Adornments not batch-read here (listing is a structural scan, not a
         // recall surface; adornments are surfaced in search/get per spec §11.5).
         let roomLabel = room ?? "(all)"
@@ -3797,7 +3721,7 @@ extension ToolDispatcher {
             CandidateRowData(
                 id: m.drawer.id,
                 subject: m.drawer.subject,
-                firstSentence: m.drawer.content.isEmpty ? nil : m.drawer.content,
+                bestSpan: m.drawer.content.isEmpty ? nil : m.drawer.content,
                 eventTime: ResultComposer.iso8601(m.drawer.eventTime))
         }
         var composed = ResultComposer.renderS2Listing(wing: wing, room: roomLabel, rows: candidateRows)

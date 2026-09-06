@@ -296,6 +296,7 @@ fn a9_glk_recall_result_drawers_filters_none() {
             sources: vec![],
             score: RecallScoreVector::ZERO,
             explanation: vec![],
+            span_hit: None,
         },
         RecallHit {
             id: "b".to_string(),
@@ -303,6 +304,7 @@ fn a9_glk_recall_result_drawers_filters_none() {
             sources: vec![],
             score: RecallScoreVector::ZERO,
             explanation: vec![],
+            span_hit: None,
         },
     ];
     let result = genius_locus_kit::recall::GLKRecallResult {

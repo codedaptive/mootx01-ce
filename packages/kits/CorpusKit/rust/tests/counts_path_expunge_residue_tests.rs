@@ -38,6 +38,10 @@
 //! T-1 uses InMemoryStorage (no reopen needed).
 //! T-2 uses SqliteStorage (reopen requires on-disk persistence).
 
+// Every case opens a PPMI corpus — a dark dense family (contract sheet §13) —
+// so this file compiles only under the dense-families feature.
+#![cfg(feature = "dense-families")]
+
 use corpus_kit::{Corpus, CorpusPathReason, EmbeddingModelConfig, TrainingPathDecision};
 use corpus_kit_providers::PpmiProvider;
 use intellectus_lib::Intellectus;

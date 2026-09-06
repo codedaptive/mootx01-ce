@@ -1,3 +1,6 @@
+#![cfg(feature = "dense-families")]
+// Dense-family test — compiled only when --features dense-families.
+// Off by default (plan 70BC55F3, 2026-09-05). See Cargo.toml.
 //! Cross-port conformance for the distributional pooling contract of the
 //! three families whose vectors used to collapse onto the corpus mean:
 //! random-indexing-v1, ppmi-v1, nmf-v1.

@@ -91,7 +91,6 @@ dependencies = [
 name = "aria-mcp"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "cognition-kit",
  "corpus-kit",
  "corpus-kit-providers",
@@ -542,14 +541,20 @@ dependencies = [
 name = "corpus-kit-providers"
 version = "0.1.0"
 dependencies = [
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
  "corpus-kit",
  "eidetic-lib",
  "engram-lib",
  "lattice-lib",
+ "serde_json",
+ "sha2 0.10.9",
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",
  "synapsekit",
+ "tokenizers",
 ]
 
 [[package]]
@@ -1346,6 +1351,7 @@ dependencies = [
  "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
  "intellectus-lib",
@@ -1709,7 +1715,6 @@ dependencies = [
 name = "locus-kit"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "base64 0.22.1",
  "ed25519-dalek",
  "intellectus-lib",
@@ -1868,6 +1873,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "substrate-kernel",
+ "synapsekit",
  "tempfile",
  "trash",
  "unicode-normalization",

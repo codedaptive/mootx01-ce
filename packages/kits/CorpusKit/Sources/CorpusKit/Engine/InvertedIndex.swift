@@ -332,14 +332,37 @@ public struct InvertedIndex: Sendable {
                 break
             }
 
-            // 3. Block-max refinement: compute tighter per-block UB at pivot_id.
-            let blockUB = computeBlockUB(cursors: cursors, pivotIdx: pivotIdx, pivotID: pivotID)
+            // 3. Block-max refinement over the EXTENDED pivot prefix: every list
+            // after the pivot that already sits on the pivot document contributes
+            // to that document, so it belongs inside the block bound; the first
+            // list after the extended prefix is then strictly past the pivot,
+            // which keeps the skip target below strictly ahead of the pivot
+            // (termination).
+            var prefixEnd = pivotIdx
+            while prefixEnd + 1 < cursors.count, cursors[prefixEnd + 1].currentID == pivotID {
+                prefixEnd += 1
+            }
+            let blockUB = computeBlockUB(cursors: cursors, pivotIdx: prefixEnd, pivotID: pivotID)
             if blockUB <= threshold {
-                // Block cannot beat threshold: skip past the min block_last_id.
-                // Advance the list with the smallest term_id among involved lists (PIN: §2.7).
-                let nextTarget = nextBlockTarget(cursors: cursors, pivotIdx: pivotIdx, pivotID: pivotID)
-                let pickIdx = choosAdvanceIndex(cursors: cursors, pivotIdx: pivotIdx, pivotID: pivotID)
-                cursors[pickIdx].seek(to: nextTarget)
+                // No document in [pivot, min block boundary] can beat the threshold
+                // from the prefix lists alone. The skip target is the smaller of
+                // (min block boundary + 1) and the current document of the first
+                // list past the prefix: documents from that position on may draw
+                // on that list, so the prefix lists must not jump over it (a list
+                // carried past a live candidate scores it later WITHOUT its
+                // contribution, or misses it outright). Every prefix list moves to
+                // the target; a list left behind would re-derive the same bound on
+                // the next iteration.
+                var nextTarget = nextBlockTarget(cursors: cursors, pivotIdx: prefixEnd, pivotID: pivotID)
+                if prefixEnd + 1 < cursors.count, let after = cursors[prefixEnd + 1].currentID,
+                   after < nextTarget {
+                    nextTarget = after
+                }
+                for i in 0...prefixEnd {
+                    if let cid = cursors[i].currentID, cid < nextTarget {
+                        cursors[i].seek(to: nextTarget)
+                    }
+                }
                 continue
             }
 

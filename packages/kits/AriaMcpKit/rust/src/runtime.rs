@@ -291,18 +291,30 @@ pub fn run(
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
-            // Adornment cycle (SPEC_ADORNMENT §4): no-op (None) in the Rust
-            // resident — the Rust resident does not run AdornmentPass
-            // directly (the pass calls the Swift LocusKit estate actor). The
-            // signal is still registered so the count stays at 13 on both
-            // ports; a real Rust adornment pass would be wired here when the
-            // Rust resident is extended with a DrawerStore handle.
+            // Live span-encode cycle (Encoder Rerank contract sheet §10):
+            // mirrors the Swift resident's `spanEncodeCycle: { now in
+            // kit.runSpanEncodeBatch(handle:now:) }`. Encodes drawers whose
+            // bit 27 is clear under the registered encoder; 0 when no encoder
+            // is active for the estate.
+            let span_coord = Arc::clone(&coord_for_hnsw);
+            let span_handle = handle_for_hnsw;
+            let span_encode_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
+                Arc::new(move || {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    match span_coord.lock() {
+                        Ok(coord) => coord.run_span_encode_batch(&span_handle, now_ms),
+                        Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                    }
+                });
             match governor.register_default_standing_signals(
                 "minilm-v6",
                 SystemTime::now(),
                 Some(hunt_cycle),
                 Some(anomaly_cycle),
-                None, // adornment_cycle: no live Rust pass in this resident
+                Some(span_encode_cycle),
             ) {
                 Ok(registered) => {
                     eprintln!(

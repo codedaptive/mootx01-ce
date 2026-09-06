@@ -1,21 +1,3 @@
-table=adornment_minters
-  col=id type=text null=0 default=- role=-
-  col=name type=text null=0 default=- role=-
-  col=family type=text null=0 default=- role=-
-  col=model_id type=text null=0 default=- role=-
-  col=model_version type=text null=0 default=- role=-
-  col=prompt_digest type=text null=0 default=- role=-
-  col=parameters type=text null=0 default=- role=-
-  col=is_active type=int null=0 default=int role=-
-  col=ext type=json null=1 default=- role=-
-  pk=id
-  appendOnly=0 hashable=0
-table=adornments
-  col=drawer_id type=text null=0 default=- role=-
-  col=minter_id type=text null=0 default=- role=-
-  col=text type=text null=0 default=- role=-
-  pk=drawer_id,minter_id
-  appendOnly=0 hashable=0
 table=associations
   col=id type=text null=0 default=- role=-
   col=sourceWing type=text null=0 default=- role=-
@@ -170,21 +152,32 @@ table=drawers
   col=keyID type=text null=1 default=- role=-
   col=content_hash type=blob null=1 default=- role=-
   col=content_fingerprint type=blob null=1 default=- role=-
-  col=distilled type=text null=1 default=- role=-
-  col=distilled_pipeline_version type=text null=1 default=- role=-
-  col=distilled_token_count type=int null=1 default=- role=-
-  col=distilled_at type=timestamp null=1 default=- role=-
+  col=ssc_facts type=text null=1 default=- role=-
   col=subject type=text null=1 default=- role=-
   col=subject_pipeline_version type=text null=1 default=- role=-
   col=subject_at type=timestamp null=1 default=- role=-
-  col=adornment type=text null=1 default=- role=-
-  col=distilled_source_digest type=text null=1 default=- role=-
   gen=g_state_cluster type=int
   gen=g_provenance_source type=int
   gen=g_provenance_confirmation type=int
   gen=g_operational_channel type=int
   pk=id
   appendOnly=0 hashable=1
+table=encoder_models
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=dim type=int null=0 default=- role=-
+  col=query_prefix type=text null=0 default=- role=-
+  col=doc_prefix type=text null=0 default=- role=-
+  col=pooling type=text null=0 default=- role=-
+  col=tokenizer_hash type=text null=0 default=- role=-
+  col=window_words type=int null=0 default=- role=-
+  col=overlap_divisor type=int null=0 default=- role=-
+  col=max_spans type=int null=0 default=- role=-
+  col=max_sequence type=int null=0 default=- role=-
+  col=is_active type=int null=0 default=int role=-
+  col=ext type=json null=1 default=- role=-
+  pk=model_id
+  appendOnly=0 hashable=0
 table=erasure_ledger
   col=drawer_id type=text null=0 default=- role=-
   col=erased_hlc type=hlc null=0 default=- role=-
@@ -426,8 +419,6 @@ table=vectors
   pk=id
   unique=item_id,vector_index,model_id,generation
   appendOnly=0 hashable=0
-index=idx_adornment_minters_active table=adornment_minters cols=is_active unique=0
-index=idx_adornments_minter_id table=adornments cols=minter_id unique=0
 index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
 index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
 index=idx_associations_udcCode table=associations cols=udcCode unique=0

@@ -1,6 +1,7 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
 // of the twelve standing signals (GLK-05 + brain-layer governor ownership
-// + consolidation-sweep signal 11 + anomaly-flag sweep signal 12).
+// + consolidation-sweep signal 11 + anomaly-flag sweep signal 12
+// + span-encode drain signal 13).
 //
 // Mirrors `StandingSignalsTests.swift`. The gate asserts:
 //
@@ -18,13 +19,16 @@
 // 7. AnomalySweepSignal (signal 12, P3a): hourly cadence, default_spec
 //    emits "anomaly-flag-sweep.fired", live spec surfaces changed-drawer
 //    count in "anomaly-flag-sweep.complete".
+// 8. SpanEncodeSignal (signal 13, ENCODER_RERANK_CONTRACT §10): REM-ALPHA
+//    (30 s) cadence, default_spec emits "span-encode.fired", live spec
+//    surfaces encoded-drawer count in "span-encode.complete".
 
 use std::sync::Arc;
 
-use genius_locus_kit::brain::signals::{AdornmentPassSignal, AnomalySweepSignal, ContradictionScoutSignal};
+use genius_locus_kit::brain::signals::{AnomalySweepSignal, ContradictionScoutSignal, SpanEncodeSignal};
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
-    ConsolidationSignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
+    ConsolidationSignal, DecaySweepSignal, DreamingSignal,
     EndOfDayTournamentSignal, MaintenanceSignal, SchedulerNoopDispatcher,
     SchedulerSignalRouteOutcome as SignalRouteOutcome, SchedulerSignalTrigger as SignalTrigger,
     SerialLaneScheduler, TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
@@ -113,15 +117,10 @@ fn default_signal_names_and_cadences_match_swift_reference() {
     assert_eq!(TemporalCausalitySignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "temporal-causality-fold runs hourly per design-council 2026-06-04 decision");
 
-    // Signal 8 — added 2026-06-20.
-    assert_eq!(DistillationSignal::SIGNAL_NAME, "distillation-sweep");
-    assert_eq!(DistillationSignal::DEFAULT_CADENCE_SECONDS, 3_600,
-        "distillation sweep runs hourly per architecture spec §11.2");
-
     // Signal 9 — wired (training daemon was an orphan before).
     assert_eq!(TrainingSignal::SIGNAL_NAME, "training-daemon");
     assert_eq!(TrainingSignal::DEFAULT_CADENCE_SECONDS, 3_600,
-        "training-daemon runs hourly matching distillation and temporal-causality rhythm");
+        "training-daemon runs hourly matching the temporal-causality rhythm");
 
     // Signal 11 — Wave-2 consolidation sweep (daily, D9 cadence class).
     assert_eq!(ConsolidationSignal::SIGNAL_NAME, "consolidation-sweep");
@@ -137,6 +136,13 @@ fn default_signal_names_and_cadences_match_swift_reference() {
         AnomalySweepSignal::DEFAULT_CADENCE_SECONDS, 3_600,
         "anomaly-flag-sweep runs hourly per architecture spec §11.18"
     );
+
+    // Signal 13 — span-encode drain (REM-ALPHA 30 s; replaces hourly adornment pass).
+    assert_eq!(SpanEncodeSignal::SIGNAL_NAME, "span-encode");
+    assert_eq!(
+        SpanEncodeSignal::DEFAULT_CADENCE_SECONDS, 30,
+        "span-encode drain runs every 30 s (REM-ALPHA cadence, ENCODER_RERANK_CONTRACT §10)"
+    );
 }
 
 #[test]
@@ -144,7 +150,8 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
     // Keep this compile-time roster synchronized with the production helper.
     // Signal 11 (consolidation-sweep) appended after training-daemon.
     // Signal 12 (anomaly-flag-sweep, P3a) appended after consolidation-sweep.
-    // Signal 13 (adornment-pass, GENIUSLOCUSKIT_SPEC 2.0.0 § 16) appended after anomaly-flag-sweep.
+    // Signal 13 (span-encode, ENCODER_RERANK_CONTRACT §10) replaces the former
+    // adornment-pass. REM-ALPHA (30 s) cadence; appended after anomaly-flag-sweep.
     let names = default_standing_signal_names();
     assert_eq!(
         names,
@@ -157,23 +164,23 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
             "by-reference-validity",
             "end-of-day-tournament",
             "temporal-causality-fold",
-            "distillation-sweep",
             "training-daemon",
             "consolidation-sweep",
             "anomaly-flag-sweep",
-            "adornment-pass",
+            "span-encode",
         ]
     );
 }
 
 #[test]
-fn default_standing_signal_specs_returns_thirteen_specs_with_interval_triggers() {
-    // Signal count updated to thirteen with the addition of signal 13
-    // (AdornmentPassSignal, SPEC_ADORNMENT §4, hourly dream-time minting pass).
-    // hunt_cycle, anomaly_cycle, and adornment_cycle are None → no-op defaults.
+fn default_standing_signal_specs_returns_twelve_specs_with_interval_triggers() {
+    // Twelve specs: signal 13 is SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10,
+    // REM-ALPHA 30 s drain; replaces the former AdornmentPassSignal); signal 8's
+    // slot is empty (the distilled rendering is computed inline at read time).
+    // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(store, "test-model", None, None, None, None);
-    assert_eq!(specs.len(), 13);
+    assert_eq!(specs.len(), 12);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
@@ -457,18 +464,18 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 }
 
 #[test]
-fn registering_all_thirteen_default_specs_produces_thirteen_reports() {
-    // Updated to thirteen specs with the addition of signal 13
-    // (AdornmentPassSignal, GENIUSLOCUSKIT_SPEC 2.0.0 § 16). The adornment-pass
-    // name must appear in the report and its trigger must be interval-driven (hourly cadence).
+fn registering_all_twelve_default_specs_produces_twelve_reports() {
+    // Twelve specs including signal 13 (SpanEncodeSignal, REM-ALPHA 30 s,
+    // ENCODER_RERANK_CONTRACT §10; replaces the former AdornmentPassSignal).
+    // The "span-encode" name must appear in the report.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
-    // hunt_cycle, anomaly_cycle, and adornment_cycle are None → no-op defaults.
+    // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
     for spec in default_standing_signal_specs(store, "test-model", None, None, None, None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 13);
+    assert_eq!(reports.len(), 12);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -946,56 +953,56 @@ fn live_anomaly_closure_emits_complete_diagnostic_not_noop_fired() {
     );
 }
 
-/// Parity gate: injecting a live adornment closure selects AdornmentPassSignal::spec
+/// Parity gate: injecting a live span-encode closure selects SpanEncodeSignal::spec
 /// instead of default_spec, so the diagnostic title is
-/// "adornment-pass.complete" (live) not "adornment-pass.fired" (no-op).
-/// Golden pin matches the AdornmentPassSignal.spec live-path title.
+/// "span-encode.complete" (live) not "span-encode.fired" (no-op).
+/// Golden pin matches the SpanEncodeSignal.spec live-path title.
 #[test]
-fn live_adornment_closure_emits_complete_diagnostic_not_noop_fired() {
+fn live_span_encode_closure_emits_complete_diagnostic_not_noop_fired() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let adornment_called = Arc::new(AtomicBool::new(false));
-    let adornment_called_c = adornment_called.clone();
+    let span_encode_called = Arc::new(AtomicBool::new(false));
+    let span_encode_called_c = span_encode_called.clone();
 
-    // Live adornment cycle: returns 0 adorned pairs — no debt pairs.
+    // Live span-encode cycle: returns 0 encoded drawers — no pending work.
     // The closure being called (not default_spec) is what this test gates.
-    let adornment_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
+    let span_encode_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
         Arc::new(move || {
-            adornment_called_c.store(true, Ordering::SeqCst);
+            span_encode_called_c.store(true, Ordering::SeqCst);
             Ok(0)
         });
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, None, None, Some(adornment_cycle),
+        store, "test-model", None, None, None, Some(span_encode_cycle),
     );
 
-    let adornment_spec = specs
+    let span_encode_spec = specs
         .into_iter()
-        .find(|s| s.name == AdornmentPassSignal::SIGNAL_NAME)
-        .expect("adornment-pass must be in the default spec set");
-    let report = fire(adornment_spec);
+        .find(|s| s.name == SpanEncodeSignal::SIGNAL_NAME)
+        .expect("span-encode must be in the default spec set");
+    let report = fire(span_encode_spec);
 
     // The live closure was used — not the no-op default_spec.
     assert!(
-        adornment_called.load(Ordering::SeqCst),
-        "live adornment closure must be called when Some(adornment_cycle) is injected"
+        span_encode_called.load(Ordering::SeqCst),
+        "live span-encode closure must be called when Some(span_encode_cycle) is injected"
     );
-    assert_eq!(report.name, "adornment-pass");
+    assert_eq!(report.name, "span-encode");
     assert_eq!(report.emission_count, 1, "live spec emits one diagnostic per tick");
     assert_eq!(report.recent_diagnostics.len(), 1);
-    // Golden pin (cross-port): Swift's live adornmentCycle produces
-    // "adornment-pass.complete"; Rust must match.
+    // Golden pin (cross-port): Swift's live spanEncodeCycle produces
+    // "span-encode.complete"; Rust must match.
     assert_eq!(
         report.recent_diagnostics[0].title,
-        "adornment-pass.complete",
-        "live adornment closure must emit .complete, not .fired (no-op title)"
+        "span-encode.complete",
+        "live span-encode closure must emit .complete, not .fired (no-op title)"
     );
-    // Golden pin: detail format "adorned N drawer(s)" matches the Swift spec
+    // Golden pin: detail format "encoded N drawer(s)" matches the Swift spec
     // factory's format string.
     let detail = &report.recent_diagnostics[0].detail;
     assert!(
-        detail.contains("adorned 0 drawer(s)"),
-        "detail must contain adorned-drawer count; got: {detail}"
+        detail.contains("encoded 0 drawer(s)"),
+        "detail must contain encoded-drawer count; got: {detail}"
     );
 }

@@ -182,17 +182,14 @@ fn hydrate(d: &Drawer, level: HydrationLevel) -> Drawer {
     match level {
         HydrationLevel::BitmapOnly => {
             // BitmapOnly = no text: clear content AND the content-derived
-            // text fields (distilled quad, subject trio). The Swift twin
-            // REBUILDS the drawer without these fields, so a clone that
-            // cleared only `content` silently leaked distilled/subject text
-            // through a tier the caller chose for disclosure minimisation
-            // (surfaced by the PR-03 dense row on federated bitmapOnly).
+            // text fields (ssc_facts, subject trio). The Swift twin REBUILDS
+            // the drawer without these fields, so a clone that cleared only
+            // `content` silently leaked derived text through a tier the
+            // caller chose for disclosure minimisation (surfaced by the
+            // PR-03 dense row on federated bitmapOnly).
             let mut d2 = d.clone();
             d2.content = String::new();
-            d2.distilled = None;
-            d2.distilled_pipeline_version = None;
-            d2.distilled_token_count = None;
-            d2.distilled_at = None;
+            d2.ssc_facts = None;
             d2.subject = None;
             d2.subject_pipeline_version = None;
             d2.subject_at = None;

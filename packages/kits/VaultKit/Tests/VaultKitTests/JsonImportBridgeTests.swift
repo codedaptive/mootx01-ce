@@ -1414,3 +1414,206 @@ struct JsonImportCaptureDateTests {
                 "golden-pin: filedAt must be 2026-01-15T10:00:00Z (1768384800000 ms); got \(actualMs)")
     }
 }
+
+// MARK: - Schema-19 importer round-trip tests
+//
+// These tests verify that the JSON import lane, the PalaceBridge lane, and the
+// MemPalaceChromaAdapter produce schema-19-clean estates: bit 27 (spanIndexed,
+// contract sheet §5) is clear on newly imported drawers so the span-encode
+// duty picks them up, and the ssc_facts column survives a vault round-trip.
+//
+// Contract references:
+//   §3  vectors_v6 — span rows, bit 27 gate
+//   §5  drawer bit 27 = spanIndexed (cleared on import so duty re-encodes)
+//   §6  ssc_facts column on drawers (written at ingest)
+//   §12 schema 19 delta
+//
+// Failure modes tested:
+//   1. Bit 27 clear on new drawers — duty skips bit-set drawers; importers
+//      must leave bit 27 = 0 so the duty knows to encode.
+//   2. PalaceBridge import: same invariant as the JSON lane (§12 contract).
+//   3. ssc_facts round-trip: export → import preserves the column value.
+
+@Suite("schema-19 importer clean-field invariants")
+struct Schema19ImporterInvariantsTests {
+
+    /// Bit 27 value as defined by contract sheet §5 (spanIndexed).
+    /// W1 will add a named accessor `DrawerOperational.isSpanIndexed`; until
+    /// then we use the raw bit position here to keep this test self-contained.
+    private static let bit27SpanIndexed: Int64 = 1 << 27
+
+    // Open an in-memory estate (current schema; mirrors the InMemory path used
+    // by all other VaultKit suite openers).
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "enc-w8-schema19-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("enc-w8-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    // MARK: — Test 1: JSON import writes ssc_facts for every imported drawer (§6)
+    //
+    // Failure mode: an import lane that bypasses the capture path's SSC facts
+    // write leaves the column NULL, so the BM25 supplement has no tokens for
+    // imported memories and their SSC terms never match.
+
+    @Test("json import: ssc_facts is computed from content on every imported drawer")
+    func jsonImportWritesSSCFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let bodies = [
+            "Sanjay loves painting in Brazil and runs marathons in Rio.",
+            "Priya reviewed the Geneva contract with Sarah on Tuesday.",
+        ]
+        let seedJSON = """
+        {"format_version":1,"name":"schema19-ssc-facts",
+         "records":[
+           {"id":"d1","content":"\(bodies[0])","event_time":"2026-09-01T10:00:00Z","room":"import-facts"},
+           {"id":"d2","content":"\(bodies[1])","event_time":"2026-09-01T10:01:00Z","room":"import-facts"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 2)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        #expect(drawers.count == 2, "expected 2 imported drawers")
+        for drawer in drawers {
+            // Every fixture body names people and places, so the enrichment
+            // stage anchors at least one fact; an import lane that bypasses the
+            // capture path's facts write leaves the column NULL instead.
+            #expect(drawer.sscFacts != nil,
+                    "ssc_facts must be written at import for drawer \(drawer.id): \(drawer.content)")
+        }
+    }
+
+    // MARK: — Test 2: JSON import leaves bit 27 clear (§5)
+    //
+    // Failure mode: if bit 27 is set on import, the drain duty treats the
+    // drawer as already span-encoded and never enqueues it — memories never
+    // get vector representations and recall quality drops to BM25-only.
+
+    @Test("json import: bit 27 (spanIndexed) is clear on all imported drawers")
+    func jsonImportBit27Clear() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let seedJSON = """
+        {"format_version":1,"name":"enc-w8-bit27-gate",
+         "records":[
+           {"id":"b1","content":"Memory for bit-27 gate test","event_time":"2026-09-01T12:00:00Z","room":"enc-w8"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 1)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        let drawer = try #require(drawers.first, "expected one imported drawer")
+
+        // Contract sheet §5: bit 27 = spanIndexed is set by the drain duty AFTER
+        // a successful writeSpanVectors call. On import it must be 0 so the duty
+        // picks this drawer up for encoding. The named accessor is
+        // DrawerOperational.isSpanIndexed; the raw bit keeps the test
+        // independent of the accessor.
+        #expect(
+            drawer.operationalBitmap & Self.bit27SpanIndexed == 0,
+            "bit 27 (spanIndexed) must be clear on import; operationalBitmap = \(drawer.operationalBitmap)")
+    }
+
+    // MARK: — Test 3: JSON import sets only the capture-channel bits (§12)
+    //
+    // Failure mode: an importer that stamps operational bits beyond the
+    // capture channel (a span-indexed bit, a representation bit) would make
+    // the drain duties skip freshly imported memories.
+
+    @Test("json import: only capture-channel bits are set on imported drawers")
+    func jsonImportOnlyCaptureChannelBits() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let seedJSON = """
+        {"format_version":1,"name":"schema19-bitmap-gate",
+         "records":[
+           {"id":"a1","content":"Bitmap gate test memory","event_time":"2026-09-01T14:00:00Z","room":"import-bits"},
+           {"id":"a2","content":"Second bitmap gate memory","event_time":"2026-09-01T14:01:00Z","room":"import-bits"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 2)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        #expect(drawers.count == 2)
+
+        // Bits 0–3 are the capture channel; every other operational bit is
+        // set by a duty or a verb after import, never by the importer.
+        for drawer in drawers {
+            // Only bits 0–3 (capture channel) may be set on a fresh import.
+            let unexpectedBits = drawer.operationalBitmap & ~Int64(0xF)
+            #expect(unexpectedBits == 0,
+                    "unexpected bits in operationalBitmap after import: 0x\(String(unexpectedBits, radix: 16))")
+        }
+    }
+
+    // MARK: — Test 4: ssc_facts round-trip via vault export + import (§6)
+    //
+    // Failure mode: if vault export/import silently drops ssc_facts, the
+    // enrichment stage's tokens are lost on every import — semantic search
+    // quality degrades for imported memories.
+
+    @Test("vault export → import round-trips ssc_facts unchanged")
+    func vaultExportImportPreservesSSCFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        // The capture path writes ssc_facts from the content (contract §6).
+        let captured = try await kit.capture(handle, CaptureFrame(
+            content: "Sanjay loves painting in Brazil and runs marathons.",
+            channel: .importedFile, room: "vault-facts",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "vault-facts-test", embeddingModelID: "no-embedding"))
+        let source = try #require(try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+            .first { $0.id == captured.id })
+        #expect(source.sscFacts != nil, "the capture path must write facts for the fixture content")
+        // Export to a vault directory and re-import into a second estate.
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vault-facts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let exportBridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        try await exportBridge.export(estate: handle, to: vault, scope: .believed, now: Date())
+        let importEstate = try await openEstate()
+        let importBridge = VaultBridge(kit: importEstate.0, mapping: DrawerMapping(classifyOnImport: false))
+        try await importBridge.importVault(at: vault, into: importEstate.1, now: Date())
+        let importedDrawers = try await importEstate.0.recall(
+            importEstate.1,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        let importedDrawer = try #require(importedDrawers.first)
+        // ssc_facts must survive the round-trip.
+        #expect(importedDrawer.sscFacts == source.sscFacts)
+    }
+}

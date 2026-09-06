@@ -19,8 +19,8 @@
 //   E7 — validation failure: no mutation, no audit (validation-first preserved).
 //   E8 — double-failure: step-2 fails AND orphan-seal fails; returned error carries
 //        both failure reasons; the coordinator does NOT swallow the seal error.
-//   E9 — undistilled drawer expunge is a no-op for the distillation lane
-//        (parity with Swift E9: expungeOfUndistilledDrawerSucceeds).
+//   E9 — a drawer with no lane entry expunges as a no-op for the lane
+//        (parity with Swift E9: expungeOfUnfingerprintedDrawerSucceeds).
 //   E10 — lineage cascade scrubs every member's lane entry (parity with Swift E10:
 //         expungeScrubsLaneEntriesAcrossLineage).
 
@@ -572,19 +572,19 @@ fn e8_double_failure_seal_error_folded_into_returned_error() {
 }
 
 // ---------------------------------------------------------------------------
-// E9: undistilled drawer expunge is a no-op for the lane (parity with Swift E9)
+// E9: a drawer with no lane entry expunges as a no-op for the lane (parity with Swift E9)
 // ---------------------------------------------------------------------------
 
-/// `delete_all_vectors` on an absent key is a no-op. An undistilled drawer
-/// has no distillation-features-v1 lane entry; expunge must complete cleanly.
-/// Parity of Swift `expungeOfUndistilledDrawerSucceeds`.
+/// `delete_all_vectors` on an absent key is a no-op. A drawer that was never
+/// fingerprinted has no distillation-features-v1 lane entry; expunge must
+/// complete cleanly. Parity of Swift `expungeOfUnfingerprintedDrawerSucceeds`.
 #[test]
-fn e9_expunge_of_undistilled_drawer_is_no_op_for_lane() {
+fn e9_expunge_of_unfingerprinted_drawer_is_no_op_for_lane() {
     let (mut coord, h) = open_one();
 
-    // Capture a drawer without running the distillation sweep — no lane entry.
+    // Capture a drawer without writing its fingerprint — no lane entry.
     let drawer = coord
-        .capture(&h, cap_frame("plain undistilled polonium note"), NOW)
+        .capture(&h, cap_frame("plain unfingerprinted polonium note"), NOW)
         .expect("capture");
 
     // Wire corpus + VectorStore so the full cross-kit step executes.
@@ -662,18 +662,17 @@ fn e10_expunge_scrubs_lane_entries_across_lineage() {
     coord.register_corpus(&h, corpus);
     coord.register_vector_store(&h, vs);
 
-    // Distill both v1 (Superseded) and v2 (Active) via the sweep. The sweep
-    // processes all non-tombstoned drawers, so Superseded v1 is included.
-    let distilled = coord
-        .distill_items_sweep(&h, NOW + 200, None)
-        .expect("distill_items_sweep");
-    assert!(
-        distilled >= 2,
-        "sweep must produce at least 2 distilled items (v1 and v2); got {distilled}"
-    );
+    // Fingerprint both v1 (Superseded) and v2 (Active): the lane is keyed by
+    // drawer id regardless of lineage state.
+    for d in [&v1, &v2] {
+        let written = coord
+            .write_structural_fingerprint(&h, &d.id, &d.content, NOW + 200)
+            .expect("write_structural_fingerprint");
+        assert!(written, "lane entry must be written for {}", d.id);
+    }
 
     // Confirm both lane entries exist before expunge.
-    let distill_lane = genius_locus_kit::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+    let distill_lane = genius_locus_kit::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID;
     let probe =
         DistillationPipeline::query_fingerprint(&v1.content, DistillationPipeline::default_extractor);
     let before = vs_ref

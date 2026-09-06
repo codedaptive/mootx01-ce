@@ -82,12 +82,23 @@ fn fixture_cases_render_verbatim() {
             final_score: f(s, "final"),
             dense: f(s, "dense"),
         };
+        // Present only for a hit the span rerank stage scored.
+        let span_hit = case.get("spanHit").filter(|v| !v.is_null()).map(|sh| {
+            genius_locus_kit::span_rerank::SpanRerankHit {
+                item_id: "fixture".to_string(),
+                best_span_index: sh["bestSpanIndex"].as_u64().expect("bestSpanIndex") as u32,
+                best_span_start: sh["bestSpanStart"].as_u64().expect("bestSpanStart") as usize,
+                best_span_end: sh["bestSpanEnd"].as_u64().expect("bestSpanEnd") as usize,
+                cosine: f(sh, "cosine"),
+            }
+        });
         let hit = RecallHit {
             id: "fixture".to_string(),
             drawer: None,
             sources,
             score,
             explanation: vec![],
+            span_hit,
         };
         let plan = RecallPlan {
             effective_mode: mode(case["mode"].as_str().expect("mode")),

@@ -8,7 +8,7 @@
 // candidate set via the `representedByVague` tier filter (§4.2, LocusKit
 // fourth insertDefaults axis).
 //
-// Division of labor (mirrors DistillationCycle):
+// Division of labor:
 //   - LocusKit `consolidateTransactionally` owns the ATOMIC ACT (§3.2
 //     steps 2–4: vague capture + tunnels + constituent bits, one commit).
 //   - This file owns everything the store cannot: the candidate pool
@@ -228,9 +228,9 @@ extension GeniusLocusKit {
         guard !pool.isEmpty else { return ConsolidationSweepReport(newVagueItems: 0, foldIns: 0, foldInRejections: 0, repairedItems: repairedItems) }
 
         // Fingerprints for the pool from the distillation-features-v1 lane.
-        // Items without a lane entry (never distilled / zero-feature short
-        // items) cannot cluster this cycle — they re-enter the pool after
-        // the next distillation sweep gives them a fingerprint.
+        // Items without a lane entry (not yet encoded, or zero-feature short
+        // items) cannot cluster this cycle — they re-enter the pool once the
+        // encode rider has written their fingerprint.
         var engrams: [String: Engram] = [:]
         for drawer in pool {
             let stored = try await vectorStore.vectors(forItemID: drawer.id)
@@ -266,7 +266,6 @@ extension GeniusLocusKit {
         // ── §3.1 steps 2–3: near-pair sweep → connected components ─────
         // Bounded probes into the Hamming index; union-find over edges with
         // distance ≤ ceiling where BOTH endpoints are in the pool.
-        let poolIDs = Set(clusterable.map(\.id))
         var parent: [String: String] = [:]
         func find(_ x: String) -> String {
             var root = x
@@ -626,7 +625,10 @@ extension GeniusLocusKit {
         let separator: String
         if constituents.count > config.largeClusterFallback {
             separator = "\n"
-            pieces = constituents.map { ($0.distilled ?? $0.content, $0.eventTime) }
+            // Large clusters merge the inline distilled renderings instead of
+            // the full bodies, so the cross-item matrix never runs over a
+            // huge combined text.
+            pieces = constituents.map { (Self.distilledRendering(of: $0.content), $0.eventTime) }
         } else {
             separator = "\n\n"
             pieces = constituents.map { ($0.content, $0.eventTime) }

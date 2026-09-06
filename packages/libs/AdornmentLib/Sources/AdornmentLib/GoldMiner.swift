@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // GoldMiner.swift
 //
 // The resident gold-miner seam (ADORNMENTLIB_SPEC 0.5.0 § Gold miner).
@@ -660,3 +661,4 @@ public final class CommandEngine: GoldMinerEngine {
     }
 }
 #endif
+#endif // MOOTX01_MINERS

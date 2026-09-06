@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family provider — compiled only when the DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See CorpusKit/Package.swift.
 // NmfProvider.swift
 //
 // NMF (Non-Negative Matrix Factorization) distributional-semantics
@@ -777,3 +780,5 @@ extension NmfProvider: TrainableEmbeddingBasis {
         counts.vocab[term] != nil
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

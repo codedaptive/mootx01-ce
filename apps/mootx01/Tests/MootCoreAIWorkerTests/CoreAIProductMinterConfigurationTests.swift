@@ -1,4 +1,4 @@
-#if os(macOS) && canImport(CoreAI)
+#if MOOTX01_MINERS && os(macOS) && canImport(CoreAI)
 import Foundation
 import Testing
 @testable import MootCoreAIWorker

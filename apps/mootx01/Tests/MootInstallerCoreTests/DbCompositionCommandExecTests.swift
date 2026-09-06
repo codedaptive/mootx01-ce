@@ -74,13 +74,11 @@ struct DbCompositionCommandExecTests {
         #expect(set.stdout.contains("rows reindexed: "))
         #expect(set.stdout.contains("elapsed: "))
 
-        // The next show reports the stored id, and a serving open (which
-        // `redistill --dry-run` performs) succeeds under it.
+        // The next show reports the stored id: a second open under the new
+        // policy succeeds and reads the setting back.
         let shownAgain = try exec(["db", "composition", "--db", "bench"], dataDir: dataDir)
         #expect(shownAgain.status == 0, "second show failed: \(shownAgain.stderr)")
         #expect(shownAgain.stdout.contains("index_composition_policy: \(newID)"))
-        let served = try exec(["redistill", "--db", "bench", "--dry-run"], dataDir: dataDir)
-        #expect(served.status == 0, "a serving open under the new policy failed: \(served.stderr)")
     }
 
     @Test("an invalid policy id is refused before anything is written")

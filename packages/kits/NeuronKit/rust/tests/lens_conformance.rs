@@ -1177,9 +1177,7 @@ fn lenses_reproduce_shared_vectors() {
             page_index: 0,
             is_last: true,
         };
-        // active_adornments: empty map — conformance vectors use no adornments.
-        // Active adornment projection is tested separately via ContextSynthesizer unit tests.
-        let doc = synthesize(&page, &meta, &std::collections::BTreeMap::new(), 3);
+        let doc = synthesize(&page, &meta, 3);
         assert_eq!(doc.summary, c.summary, "ctx summary");
         assert_eq!(doc.patterns, c.patterns, "ctx patterns");
         assert_eq!(doc.key_insights, c.key_insights, "ctx key_insights");

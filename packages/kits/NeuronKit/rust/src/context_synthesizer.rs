@@ -61,24 +61,19 @@ impl Default for DrawerRowMeta {
 /// per-row metadata vector. The metadata vector may be empty, in
 /// which case every row is treated with `DrawerRowMeta::default()`.
 ///
-/// `active_adornments` is the call-scoped active projection from
-/// `Estate.active_adornments(drawer_ids)`, composed to a single
-/// `String` per drawer ID by the caller (multiple minter texts joined
-/// with `" || "` in ascending minter-ID order; absent = not in map).
-/// The engine looks up by `row.id` inside `make_key_insights` without
-/// any estate call (C-9 invariant). Pass `&BTreeMap::new()` when no
-/// active adornments are available (the historical content-only path).
-///
 /// `max_key_insights` bounds the excerpted rows. The historical digest
 /// bound is 3. A cue-grounded caller passes its post-rank cap so every
 /// ranked survivor is VISIBLE in the document — trial 3 measured 30/35
 /// misses with the answer drawer ranked into the capped set but invisible
 /// behind the 3-row excerpt. Twin of Swift
-/// `ContextSynthesisEngine.synthesize(page:activeAdornments:maxKeyInsights:)`.
+/// `ContextSynthesisEngine.synthesize(page:maxKeyInsights:)`.
+///
+/// Adornment augmentation was removed in the Encoder Rerank Program
+/// (2026-09-05): key insights are the first-line excerpt of each row,
+/// with no additional text from an adornment store.
 pub fn synthesize(
     page: &RecallPage,
     meta: &[DrawerRowMeta],
-    active_adornments: &BTreeMap<String, String>,
     max_key_insights: usize,
 ) -> ContextDocument {
     let rows = &page.rows;
@@ -98,7 +93,7 @@ pub fn synthesize(
     let success_rate = currently_believed_rate(rows, meta);
     let average_reward: f32 = 0.0; // No reward field on DrawerRow at v0.1 — see spec note.
     let recommendations = make_recommendations(&patterns);
-    let key_insights = make_key_insights(rows, active_adornments, max_key_insights.max(1));
+    let key_insights = make_key_insights(rows, max_key_insights.max(1));
 
     ContextDocument {
         summary,
@@ -231,42 +226,19 @@ pub fn make_recommendations(patterns: &[String]) -> Vec<String> {
 
 /// First-line excerpts from up to `max_count` rows.
 ///
-/// ADORN-STORE-02 v17 (GENIUSLOCUSKIT_SPEC 2.0.0 § 16.2, Bob ruling 2026-08-25):
-/// the adornment AUGMENTS the excerpt — it never replaces it. When
-/// `active_adornments` contains an entry for the row's ID, the insight is
-/// the first-line excerpt followed by the adornment text as an UNLABELED
-/// indented sub-line (no "adornment:" label — scaffold vocabulary taints
-/// the calling AI's context; the text is simply present). When no active
-/// adornment is available for a row, the first line of `content` is used
-/// alone.
+/// Returns the first line of `content` for each row. Adornment augmentation
+/// was removed in the Encoder Rerank Program (2026-09-05): adornments did
+/// not earn their cost and are now dark under the `miners` feature.
 ///
-/// `active_adornments` is the call-scoped projection from
-/// `Estate.active_adornments(drawer_ids)`, with multiple minter texts
-/// composed into one String by the caller (" || " join, ascending minter-ID
-/// order). The engine looks up by `row.id` without any estate call (C-9).
-///
-/// Twin of `makeKeyInsights(rows:activeAdornments:maxCount:)` in
-/// ContextSynthesizer.swift — byte-identical output for the same rows and map.
-pub fn make_key_insights(
-    rows: &[DrawerRow],
-    active_adornments: &BTreeMap<String, String>,
-    max_count: usize,
-) -> Vec<String> {
+/// Twin of `makeKeyInsights(rows:maxCount:)` in ContextSynthesizer.swift.
+pub fn make_key_insights(rows: &[DrawerRow], max_count: usize) -> Vec<String> {
     rows.iter()
         .take(max_count)
         .map(|row| {
-            // First line of content is the base excerpt.
-            let excerpt = match row.content.find('\n') {
-                Some(idx) => &row.content[..idx],
-                None => row.content.as_str(),
-            };
-            // Active adornment augments, never replaces (Bob ruling 2026-08-25).
-            // Looked up by drawer ID from the call-scoped active projection;
-            // never cached across composition calls (SPEC § 16.2).
-            if let Some(adornment) = active_adornments.get(&row.id) {
-                format!("{excerpt}\n    {adornment}")
-            } else {
-                excerpt.to_string()
+            // First line of content is the excerpt.
+            match row.content.find('\n') {
+                Some(idx) => row.content[..idx].to_string(),
+                None => row.content.clone(),
             }
         })
         .collect()
@@ -319,22 +291,10 @@ mod tests {
     use super::*;
 
     fn row(content: &str) -> DrawerRow {
-        // `adornment` was a DrawerRow field in the pre-v17 schema.
-        // ADORN-STORE-02 v17 removed it: adornments are now fetched via
-        // `Estate.active_adornments` and passed in as `active_adornments`
-        // to `synthesize`. Use `row_adorned_map` for tests that exercise
-        // the adornment augmentation path.
         DrawerRow {
             id: format!("id-{}", content.len()),
             content: content.to_string(),
         }
-    }
-
-    /// Build an active_adornments map for the given (row_id, adornment) pairs.
-    /// Tests that exercise the adornment augmentation path (ADORN-STORE-02 v17)
-    /// construct the map inline and pass it to `synthesize` as `active_adornments`.
-    fn adornment_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(id, text)| (id.to_string(), text.to_string())).collect()
     }
 
     fn meta(wing: &str, room: &str, believed: bool) -> DrawerRowMeta {
@@ -360,7 +320,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.summary, "");
         assert!(doc.patterns.is_empty());
         assert_eq!(doc.success_rate, 0.0);
@@ -382,7 +342,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &m, &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &m, 3);
         assert_eq!(doc.summary, "3 drawers; dominant node node-x.");
     }
 
@@ -398,7 +358,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(
             doc.patterns,
             vec!["carbon", "organic", "compounds", "chemistry", "physics"]
@@ -413,7 +373,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.recommendations.len(), doc.patterns.len());
     }
 
@@ -425,7 +385,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert!(doc.patterns.is_empty());
         assert_eq!(doc.recommendations.len(), 1);
         assert!(doc.recommendations[0].contains("broadening the recall frame"));
@@ -444,7 +404,7 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(doc.key_insights, vec!["line one", "single line", "three"]);
     }
 
@@ -461,53 +421,14 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &m, &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &m, 3);
         assert!((doc.success_rate - (2.0 / 3.0)).abs() < 1e-6);
     }
 
-    // ADORN-STORE-02 v17 — active-adornment augment path (GENIUSLOCUSKIT_SPEC 2.0.0 § 16.2)
-    //
-    // `DrawerRow` no longer carries an `adornment` field. Active adornments are
-    // fetched separately via `Estate.active_adornments(drawer_ids)` and passed
-    // into synthesis as a `BTreeMap<String, String>` keyed by drawer ID, composed
-    // with " || " for multi-minter results (ascending minter-id order). The engine
-    // looks up by `row.id` without any estate call (C-9 invariant).
-
     #[test]
-    fn key_insights_augment_excerpt_with_active_adornment() {
-        // The adorned row keeps its first-line excerpt and gains the
-        // adornment as an UNLABELED indented sub-line — the adornment
-        // AUGMENTS, never replaces (Bob ruling 2026-08-25; no label word,
-        // scaffold vocabulary taints the calling AI's context).
-        //
-        // `active_adornments` simulates the result of `Estate.active_adornments`
-        // composed to a single String per drawer by the caller.
-        // Row ids follow the "id-N" pattern from the `row()` helper (N = content length).
-        let adorned_row = row("long content body\nmore body");   // id = "id-21"
-        let bare_row = row("no adornment here\nsecond line");    // id = "id-25"
-        let active_adornments = adornment_map(&[
-            (&adorned_row.id, "adornment short form"),
-        ]);
-        let rows = vec![adorned_row, bare_row];
-        let page = RecallPage {
-            rows,
-            page_index: 0,
-            is_last: true,
-        };
-        let doc = synthesize(&page, &[], &active_adornments, 3);
-        assert_eq!(
-            doc.key_insights,
-            vec![
-                "long content body\n    adornment short form",
-                "no adornment here"
-            ],
-            "adornment augments the excerpt as an unlabeled indented sub-line; bare row is the first content line alone"
-        );
-    }
-
-    #[test]
-    fn key_insights_fallback_to_content_when_adornment_absent() {
-        // No active adornments supplied — original first-line content behaviour.
+    fn key_insights_fallback_to_content_for_all_rows() {
+        // Adornment augmentation removed in Encoder Rerank Program (2026-09-05).
+        // The synthesizer always returns the first line of content per row.
         let rows = vec![
             row("first line\nbody"),
             row("single line"),
@@ -517,11 +438,11 @@ mod tests {
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], &BTreeMap::new(), 3);
+        let doc = synthesize(&page, &[], 3);
         assert_eq!(
             doc.key_insights,
             vec!["first line", "single line"],
-            "bare rows fall back to first-line content extraction"
+            "rows always use first-line content extraction"
         );
     }
 }

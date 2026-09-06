@@ -8,10 +8,6 @@
 @_exported import GLKMigrationV1_1ToV1_2
 #endif
 
-#if GLK_MIGRATION_V1_2_TO_V1_3
-@_exported import GLKMigrationV1_2ToV1_3
-#endif
-
 #if GLK_MIGRATION_V1_3_TO_V1_4
 @_exported import GLKMigrationV1_3ToV1_4
 #endif
@@ -60,17 +56,17 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
+        // Floor covers the 1.0→1.1, 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_1_TO_V1_2
-        // Floor covers the 1.1→1.2, 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
+        // Floor covers the 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
         .v1_1
-        #elseif GLK_MIGRATION_V1_2_TO_V1_3
-        // Floor covers the 1.2→1.3, 1.3→1.4, and 1.4→1.5 capsules.
-        .v1_2
         #elseif GLK_MIGRATION_V1_3_TO_V1_4
-        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules.
-        .v1_3
+        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules. It also serves a
+        // 1.2-stamped estate: the 1.2→1.3 step added a LocusKit column that
+        // schema v19 removed, so nothing separates 1.2 from 1.3 any more and
+        // the 1.3→1.4 capsule runs directly on either stamp.
+        .v1_2
         #elseif GLK_MIGRATION_V1_4_TO_V1_5
         // Floor covers the 1.4→1.5 capsule only.
         .v1_4
@@ -133,10 +129,11 @@ public enum GLKMigrationCatalog {
     }
 
     /// Run the compiled capsules from `found` to the current format as one
-    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, 1.2 -> 1.3,
-    /// 1.3 -> 1.4, then 1.4 -> 1.5; found == v1_1 starts at 1.1 -> 1.2;
-    /// found == v1_2 starts at 1.2 -> 1.3; found == v1_3 starts at 1.3 -> 1.4;
-    /// found == v1_4 runs 1.4 -> 1.5 only. The 1.4 -> 1.5 ledger rewrite runs
+    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, 1.3 -> 1.4,
+    /// then 1.4 -> 1.5; found == v1_1 starts at 1.1 -> 1.2; found == v1_2 or
+    /// v1_3 starts at 1.3 -> 1.4 (the 1.2 -> 1.3 step added a LocusKit column
+    /// that schema v19 removed, so it no longer exists); found == v1_4 runs
+    /// 1.4 -> 1.5 only. The 1.4 -> 1.5 ledger rewrite runs
     /// before every older capsule (the 1.0 -> 1.1 capsule opens the vector
     /// store, whose ladder must find its row under the new id) and its stamp
     /// is written last. A build that compiles no chain reaching the current
@@ -157,12 +154,11 @@ public enum GLKMigrationCatalog {
         _ = try await kit.rewriteStorageLedgerKitIDs(handle: handle)
         #if GLK_MIGRATION_V1_0_TO_V1_1
         if found < .v1_1 {
-            // Distillation storage migration (SPEC_DISTILLATION_STORAGE Appendix A.1)
-            // must run before SharedContentMigration because SharedContentMigration
-            // stamps the estate at v1_1 at the end of its chain. If the stamp were
-            // written first, a resume after a crash during the distillation migration
-            // would see v1_1 and return early without completing A.1.
-            try await kit.runDistillationStorageMigration(handle: handle, now: now)
+            // The shared-content migration moves the legacy `chunks` copy lane
+            // onto the shared-content layout and stamps v1_1 at the end of its
+            // chain. The retired distilled-view rows of a 1.0 estate are
+            // ordinary drawer rows to it; schema v19 carries no distilled
+            // columns, so nothing rewrites them here.
             let report = try await kit.runSharedContentMigration(handle: handle, now: now)
             migrated = report.legacyChunkCount > 0
             migrationState = report.state.rawValue
@@ -177,19 +173,11 @@ public enum GLKMigrationCatalog {
             try await kit.runIndexCompositionColumnMigration(handle: handle, now: now)
         }
         #endif
-        #if GLK_MIGRATION_V1_2_TO_V1_3
-        if found < .v1_3 {
-            // Adds distilled_source_digest to drawers through LocusKit's own
-            // ladder (idempotent addColumn) and stamps v1_3; the chain
-            // continues to 1.4.
-            try await kit.runDistilledSourceDigestColumnMigration(handle: handle, now: now)
-        }
-        #endif
         #if GLK_MIGRATION_V1_3_TO_V1_4
         if found < .v1_4 {
             // Stores the index composition setting when the estate carries
             // none (the creation-time seed) and stamps v1_4; the chain
-            // continues to 1.5.
+            // continues to 1.5. Runs on 1.2- and 1.3-stamped estates alike.
             try await kit.runIndexCompositionSettingMigration(handle: handle, now: now)
         }
         #endif

@@ -1,10 +1,11 @@
 //! The ONE definition of the default recall ensemble (Rust port).
 //!
-//! Mission 6a-iii-wire: flip the production default from a single deterministic
-//! provider to the canonical five honest signals. `default_ensemble()` is the
-//! single source of truth for the default recall ensemble — every
-//! production provision / open site threads THIS list, so the five honest
-//! signals (RI / PPMI / LSA / NMF / FDC) are the live default everywhere.
+//! Measurement (plan 70BC55F3, 2026-09-05): a retrieval-trained sentence encoder
+//! reranking BM25's head beat BM25 on two corpora; the four float families
+//! (LSA/NMF/PPMI/FDC) did not earn their cost. The default ensemble is now RI
+//! only; the dense families compile only when the `dense-families` Cargo feature
+//! is enabled. RI stays always-on: its binary fingerprint feeds dreaming,
+//! contradiction, and consolidation.
 //!
 //! ## Why this lives in corpus-kit-providers, not corpus-kit core
 //!
@@ -26,49 +27,53 @@
 
 use corpus_kit::EmbeddingModelConfig;
 
-use crate::{
-    FDCProvider, LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider,
-};
+use crate::RandomIndexingProvider;
+#[cfg(feature = "dense-families")]
+use crate::{FDCProvider, LsaProvider, NmfProvider, PpmiProvider};
 
-/// The canonical FIVE-signal default recall ensemble (untrained).
+/// The default recall ensemble (untrained), gated by the `dense-families` feature.
 ///
-/// Returns, in this fixed order:
-///   1. `RandomIndexing` — Random Indexing distributional semantics.
-///   2. `Ppmi`           — PPMI-weighted distributional semantics.
-///   3. `Lsa`            — Latent Semantic Analysis (truncated SVD).
-///   4. `Nmf`            — Non-negative matrix factorization latent factors.
-///   5. `Fdc`            — Frame Decimal Classification co-classification.
+/// With `dense-families` OFF (default): one provider — `RandomIndexing`.
+/// With `dense-families` ON (`--features dense-families`): five providers —
+/// RI, PPMI, LSA, NMF, FDC — in that fixed canonical order.
 ///
-/// The four distributional / matrix providers (RI/PPMI/LSA/NMF) are trainable:
-/// the Corpus lifecycle trains and persists them on first ingest / reindex under
-/// their own model_ids. FDC is stateless — ready immediately, no training. The
-/// providers are returned UNTRAINED; the Corpus owns the train+persist lifecycle.
+/// `models[0]` (`RandomIndexing`) leads in both cases: it is the DEFAULT signal
+/// that the Corpus's single-signal entry points delegate to.
 ///
-/// `models[0]` (`RandomIndexing`) is the DEFAULT signal that the Corpus's
-/// single-signal entry points delegate to, so it leads the order.
-///
-/// LSA/NMF use their canonical default constructors (same rank / sweeps /
-/// iterations / seeds as the Swift parameterless inits) so the trained bases —
-/// and therefore the per-signal rankings — match Swift bit-for-bit. The order
-/// and provider set are byte-identical to `CorpusEnsemble.defaultEnsemble()`.
+/// The dense families are OFF by default (plan 70BC55F3, 2026-09-05):
+/// LSA/NMF/PPMI/FDC did not beat BM25+RI on two measured corpora. RI stays
+/// because its binary fingerprint feeds dreaming, contradiction, and consolidation.
 ///
 /// Constructed FRESH each call — `EmbeddingModelConfig` is not `Clone`.
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig> {
-    vec![
-        EmbeddingModelConfig::RandomIndexing {
+    #[cfg(not(feature = "dense-families"))]
+    {
+        // Dense families are OFF (default, plan 70BC55F3, 2026-09-05).
+        // RI only: binary fingerprint feeds dreaming and contradiction.
+        vec![EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
-        },
-        EmbeddingModelConfig::Ppmi {
-            provider: Box::new(PpmiProvider::new()),
-        },
-        EmbeddingModelConfig::Lsa {
-            provider: Box::new(LsaProvider::default_new()),
-        },
-        EmbeddingModelConfig::Nmf {
-            provider: Box::new(NmfProvider::default_new()),
-        },
-        EmbeddingModelConfig::Fdc {
-            provider: Box::new(FDCProvider::default_provider()),
-        },
-    ]
+        }]
+    }
+    #[cfg(feature = "dense-families")]
+    {
+        // Dense families are ON: return all five honest signals.
+        // Activated via --features dense-families.
+        vec![
+            EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(RandomIndexingProvider::new()),
+            },
+            EmbeddingModelConfig::Ppmi {
+                provider: Box::new(PpmiProvider::new()),
+            },
+            EmbeddingModelConfig::Lsa {
+                provider: Box::new(LsaProvider::default_new()),
+            },
+            EmbeddingModelConfig::Nmf {
+                provider: Box::new(NmfProvider::default_new()),
+            },
+            EmbeddingModelConfig::Fdc {
+                provider: Box::new(FDCProvider::default_provider()),
+            },
+        ]
+    }
 }

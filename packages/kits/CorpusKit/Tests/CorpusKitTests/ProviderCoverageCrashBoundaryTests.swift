@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // ProviderCoverageCrashBoundaryTests.swift
 //
 // Crash-boundary coverage for the corrective pass's provider machinery:
@@ -307,3 +310,5 @@ struct ProviderCoverageCrashBoundaryTests {
         return out
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

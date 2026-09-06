@@ -176,46 +176,17 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// internal whitespace (e.g., `Q41487,Q170978`).
     public let wikidataQidsSecondary: String?
 
-    /// The distilled representation of this drawer's content — a dense
-    /// parallel rendering (token-economical prose) of the same content
-    /// per SPEC_DISTILLATION_STORAGE §4/§5. A representation is a VIEW
-    /// of this one item: no independent identity, lifecycle, or
-    /// provenance. NULL means "no representation exists yet" and is the
-    /// sweep-eligibility predicate — there is no separate staleness flag
-    /// and no Bool accessor; callers test `distilled != nil`. The five
-    /// `distilled*` fields are NULL together or populated together (one
-    /// atomic column write, `DrawerStore.setDistilledRepresentation`),
-    /// and every write that touches `content` NULLs all five in the
-    /// same statement (the §7.3 regeneration trigger and the erasure
-    /// scrub — derived text must not outlive erased content).
-    public let distilled: String?
-
-    /// The converter ID that produced `distilled` — the ContextDistillLib
-    /// converter identity of the form `<candidate>@<ruleset-version>`
-    /// (see `GeniusLocusKit.distillationConverterID`). Together with
-    /// `distilledSourceDigest` it decides currency: a row is current iff
-    /// this equals the active converter ID AND the digest equals the
-    /// digest of `content`. Nil iff `distilled` is nil.
-    public let distilledPipelineVersion: String?
-
-    /// The SHA-256 hex digest (ContextDistillLib `sourceDigest`) of the
-    /// complete original `content` that `distilled` was rendered from.
-    /// The second half of the currency rule: a representation whose
-    /// digest differs from the digest of the row's current content, or
-    /// whose digest is nil (written before the column existed), is stale
-    /// and regenerates on the next sweep. Nil iff `distilled` is nil.
-    public let distilledSourceDigest: String?
-
-    /// Approximate token count of `distilled` (SPEC §6): deterministic,
-    /// vendor-neutral estimate so AI clients can budget context before
-    /// hydrating. Advisory only — never load-bearing (no truncation or
-    /// gating decisions hang on it). Nil iff `distilled` is nil.
-    public let distilledTokenCount: Int64?
-
-    /// When the representation was generated. Audit and sweep-
-    /// observability only; carries no behavioral weight. Stored as TEXT
-    /// ISO8601 per the fleet date rule. Nil iff `distilled` is nil.
-    public let distilledAt: Date?
+    /// The SSC facts of this drawer's content (Encoder Rerank Program §6):
+    /// the grammar-v1 fact anchors as inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated, e.g. `kind: hobby, entity:
+    /// painting, place: brazil`. NULL when the content has no fact anchors
+    /// and NULL after every content write (the same statement that bumps
+    /// `content_hash` clears it), which is the enrichment stage's "needs
+    /// facts" predicate. Written by `DrawerStore.setSSCFacts(_:for:)`; the
+    /// BM25 document takes its tokens (SSCFacts.lexicalSupplement) and the
+    /// candidate row renders it. Rides the structured hydration tier so a
+    /// candidate row never needs `content` to show it.
+    public let sscFacts: String?
 
     /// The one-sentence AI-FACING subject line for this drawer's content
     /// (progressive recall PR-01): telegraphic register, entities and
@@ -269,11 +240,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
         udcFacets: String? = nil,
         wikidataQID: String? = nil,
         wikidataQidsSecondary: String? = nil,
-        distilled: String? = nil,
-        distilledPipelineVersion: String? = nil,
-        distilledTokenCount: Int64? = nil,
-        distilledAt: Date? = nil,
-        distilledSourceDigest: String? = nil,
+        sscFacts: String? = nil,
         subject: String? = nil,
         subjectPipelineVersion: String? = nil,
         subjectAt: Date? = nil
@@ -297,11 +264,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
         self.udcFacets = udcFacets
         self.wikidataQID = wikidataQID
         self.wikidataQidsSecondary = wikidataQidsSecondary
-        self.distilled = distilled
-        self.distilledPipelineVersion = distilledPipelineVersion
-        self.distilledTokenCount = distilledTokenCount
-        self.distilledAt = distilledAt
-        self.distilledSourceDigest = distilledSourceDigest
+        self.sscFacts = sscFacts
         self.subject = subject
         self.subjectPipelineVersion = subjectPipelineVersion
         self.subjectAt = subjectAt
@@ -319,15 +282,12 @@ extension Drawer: Codable {
         case embeddingModelID, tombstonedAt, removedByBatch
         case provenance, adjectiveBitmap, operationalBitmap
         case udcCode, udcFacets, wikidataQID, wikidataQidsSecondary
-        case distilled, distilledPipelineVersion, distilledTokenCount, distilledAt
-        case distilledSourceDigest
+        case sscFacts
         case subject, subjectPipelineVersion, subjectAt
-        // Note: the `adornment` CodingKey is intentionally absent. The drawers
-        // table column is retained physically (dead column, see LocusKitSchema
-        // v17 comment), but the Drawer struct no longer carries the field.
-        // Payloads encoded before ADORN-STORE-02 that include an "adornment"
-        // key will have it silently ignored by the decoder (decodeIfPresent
-        // not called = key not consumed = tolerated per Swift Codable rules).
+        // Keys of retired fields (`adornment`, the five `distilled*` keys)
+        // are absent on purpose: a payload encoded before schema 19 that
+        // still carries them decodes with those keys ignored (no
+        // decodeIfPresent call = key not consumed, tolerated by Codable).
     }
 
     public init(from decoder: Decoder) throws {
@@ -351,21 +311,14 @@ extension Drawer: Codable {
         udcFacets = try c.decodeIfPresent(String.self, forKey: .udcFacets)
         wikidataQID = try c.decodeIfPresent(String.self, forKey: .wikidataQID)
         wikidataQidsSecondary = try c.decodeIfPresent(String.self, forKey: .wikidataQidsSecondary)
-        distilled = try c.decodeIfPresent(String.self, forKey: .distilled)
-        distilledPipelineVersion = try c.decodeIfPresent(String.self, forKey: .distilledPipelineVersion)
-        distilledTokenCount = try c.decodeIfPresent(Int64.self, forKey: .distilledTokenCount)
-        distilledAt = try c.decodeIfPresent(Date.self, forKey: .distilledAt)
-        // decodeIfPresent: payloads encoded before the digest column existed
-        // decode with a nil digest, which the currency rule reads as stale.
-        distilledSourceDigest = try c.decodeIfPresent(String.self, forKey: .distilledSourceDigest)
+        // decodeIfPresent: payloads encoded before ssc_facts existed decode
+        // with nil facts, which reads as "needs facts".
+        sscFacts = try c.decodeIfPresent(String.self, forKey: .sscFacts)
         // Subject trio (PR-01): decodeIfPresent so payloads encoded before
         // the trio existed decode with nil subjects (missing = truthful).
         subject = try c.decodeIfPresent(String.self, forKey: .subject)
         subjectPipelineVersion = try c.decodeIfPresent(String.self, forKey: .subjectPipelineVersion)
         subjectAt = try c.decodeIfPresent(Date.self, forKey: .subjectAt)
-        // Note: adornment is no longer a Drawer field (ADORN-STORE-02 v17).
-        // The "adornment" key, if present in legacy payloads, is silently
-        // ignored because decodeIfPresent is not called for it.
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -389,16 +342,9 @@ extension Drawer: Codable {
         try c.encodeIfPresent(udcFacets, forKey: .udcFacets)
         try c.encodeIfPresent(wikidataQID, forKey: .wikidataQID)
         try c.encodeIfPresent(wikidataQidsSecondary, forKey: .wikidataQidsSecondary)
-        try c.encodeIfPresent(distilled, forKey: .distilled)
-        try c.encodeIfPresent(distilledPipelineVersion, forKey: .distilledPipelineVersion)
-        try c.encodeIfPresent(distilledTokenCount, forKey: .distilledTokenCount)
-        try c.encodeIfPresent(distilledAt, forKey: .distilledAt)
-        try c.encodeIfPresent(distilledSourceDigest, forKey: .distilledSourceDigest)
+        try c.encodeIfPresent(sscFacts, forKey: .sscFacts)
         try c.encodeIfPresent(subject, forKey: .subject)
         try c.encodeIfPresent(subjectPipelineVersion, forKey: .subjectPipelineVersion)
         try c.encodeIfPresent(subjectAt, forKey: .subjectAt)
-        // Note: adornment is no longer a Drawer field (ADORN-STORE-02 v17).
-        // Adornment text lives in the adornments table keyed by
-        // (drawer_id, minter_id); read via DrawerStore.activeAdornments(drawerIDs:).
     }
 }

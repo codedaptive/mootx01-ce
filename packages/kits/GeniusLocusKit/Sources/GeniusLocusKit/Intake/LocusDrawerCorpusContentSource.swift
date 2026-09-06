@@ -23,25 +23,18 @@
 // surface returns empty; rebuilds stream `activeContentIDs()` +
 // `record(for:)` in deterministic ID order instead.
 //
-// INDEX COMPOSITION POLICY (CDL-03):
-// `record(for:)` composes the lexical and dense texts according to the
-// `compositionPolicy` supplied at adapter construction time. The default
-// policy — `.current` — preserves the established dense-over-distillate
-// behaviour (Stream F / MISSION_11X_RECALL_GAP_01):
-//   • lexical text = verbatim `drawer.content` (BM25)
-//   • dense text   = `drawer.distilled` (nil → fallback to verbatim via
-//                    `CorpusContentRecord.effectiveDenseText`)
-//
-// When the policy includes adornments (`lexicalNeedsAdornments` or
-// `denseNeedsAdornments`), active adornment texts are fetched from the
-// estate in ascending minter-ID order and appended to the base text on
-// separate lines ("\n"). The digest always keys on the verbatim `text`
-// (content did not change when only the distillate or adornments changed),
-// so the BM25 idempotence anchor is unaffected by policy.
+// INDEX COMPOSITION (schema 19): both lanes index the verbatim `content`.
+// The lexical lane's BM25 document is `content` plus the SSC facts
+// supplement the engine derives from `drawers.ssc_facts`
+// (`SSCFacts.lexicalSupplement`); the dense lane reads the same verbatim
+// text through `CorpusContentRecord.effectiveDenseText`. The
+// `compositionPolicy` the adapter is built with is the estate's stored
+// `index_composition_policy` setting; every policy id resolves to this one
+// composition, and the id is retained only so estates provisioned under an
+// earlier id keep opening (the engine compares the recorded id at open).
 //
 // Rust twin: `rust/src/intake.rs` (`LocusDrawerContentSource`).
 
-import AdornmentLib
 import CorpusKit
 import Foundation
 import LocusKit
@@ -50,10 +43,10 @@ import LocusKit
 public struct LocusDrawerCorpusContentSource: CorpusContentSource {
 
     private let estate: Estate
-    /// The named index composition policy that controls which texts each lane
-    /// receives (CDL-03). Defaults to `.current` — preserves the established
-    /// dense-over-distillate behaviour before CDL-03.
-    private let compositionPolicy: IndexCompositionPolicy
+    /// The estate's stored index composition policy. Retained for the
+    /// engine's open-time policy-id comparison; the record composition below
+    /// is the same for every policy (see the file header).
+    public let compositionPolicy: IndexCompositionPolicy
 
     public init(estate: Estate, compositionPolicy: IndexCompositionPolicy = .current) {
         self.estate = estate
@@ -65,11 +58,10 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
     /// clears derived state for a previously-indexed ID that stops
     /// resolving).
     ///
-    /// Composes lexical and dense texts according to `compositionPolicy`.
-    /// For the `.current` policy (cell A), this is identical to the
-    /// established dense-over-distillate behaviour: BM25 indexes verbatim
-    /// `text`, the dense lane gets `distilled` (nil → `effectiveDenseText`
-    /// fallback to verbatim). The digest always keys on the verbatim `text`.
+    /// The record carries the verbatim `content` as `text`, no separate
+    /// dense composition (the dense lane falls back to `text` through
+    /// `effectiveDenseText`), and the drawer's `ssc_facts` column value for
+    /// the engine's BM25 supplement. The digest keys on the verbatim text.
     public func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
         guard let drawer = try await estate.getDrawers(ids: [id]).first,
               !drawer.content.isEmpty,
@@ -77,80 +69,16 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
               drawer.embeddingModelID != datasetHandleEmbeddingModelID else {
             return nil
         }
-
-        // Fetch adornments only when the policy requires them — avoids the
-        // store read on the common `.current` path.
-        var adornmentTexts: [String] = []
-        if compositionPolicy.needsAdornments {
-            let adornmentMap = try await estate.activeAdornments(drawerIDs: [drawer.id])
-            // Ascending minter-ID order for deterministic composition across
-            // runs with the same corpus and adornment set.
-            adornmentTexts = (adornmentMap[drawer.id] ?? [])
-                .sorted { $0.minterID < $1.minterID }
-                .map(\.text)
-        }
-
-        // Compose the lexical text per policy.
-        let lexicalText = composedText(
-            base: lexicalBase(drawer: drawer),
-            adornments: compositionPolicy.lexicalNeedsAdornments ? adornmentTexts : [])
-
-        // Compose the dense text per policy.
-        // Nil propagates to `effectiveDenseText` fallback in CorpusContentRecord.
-        let denseText: String?
-        let denseBase = denseBase(drawer: drawer)
-        if compositionPolicy.denseNeedsAdornments && !adornmentTexts.isEmpty {
-            denseText = composedText(base: denseBase ?? drawer.content,
-                                     adornments: adornmentTexts)
-        } else {
-            denseText = denseBase
-        }
-
         return CorpusContentRecord(
             id: drawer.id,
             revision: 1,
-            // The digest keys on verbatim content — unchanged when only the
-            // distillate or adornments change, so BM25 idempotence is preserved
-            // (SPEC_DISTILLATION_STORAGE §9).
             digest: CorpusContentDigest.digest(drawer.content),
-            text: lexicalText,
-            denseCompositionText: denseText)
-    }
-
-    // MARK: - Composition helpers
-
-    /// The base text for the lexical lane under the configured policy.
-    private func lexicalBase(drawer: Drawer) -> String {
-        switch compositionPolicy.lexicalSource {
-        case .original, .originalPlusAdornments:
-            // Verbatim content — the BM25 token source.
-            return drawer.content
-        case .distilled, .distilledPlusAdornments:
-            // Distillate as lexical base; fall back to verbatim when nil.
-            return drawer.distilled ?? drawer.content
-        }
-    }
-
-    /// The base text for the dense lane under the configured policy. Returns
-    /// nil when the policy requests `.distilled` and the distillate is absent
-    /// (nil propagates to `effectiveDenseText` fallback in the record).
-    private func denseBase(drawer: Drawer) -> String? {
-        switch compositionPolicy.denseSource {
-        case .distilled, .distilledPlusAdornments:
-            // Distillate-over-verbatim (Stream F): nil when not yet distilled.
-            return drawer.distilled
-        case .original:
-            // Lexical-only ablation (cell E): dense = verbatim.
-            return drawer.content
-        }
-    }
-
-    /// Append adornment texts to a base string. Each adornment is on its own
-    /// line preceded by "\n". When `adornments` is empty, returns `base` unchanged.
-    private func composedText(base: String, adornments: [String]) -> String {
-        guard !adornments.isEmpty else { return base }
-        // "\n" separator between base and each adornment — identical in both ports.
-        return ([base] + adornments).joined(separator: "\n")
+            text: drawer.content,
+            denseCompositionText: nil,
+            // The engine appends `SSCFacts.lexicalSupplement(sscFacts)` to the
+            // BM25 document; the column is written by the enrichment stage
+            // before the drawer is indexed (contract sheet §6).
+            sscFacts: drawer.sscFacts)
     }
 
     /// The estate verbs are the change stream — the polling feed is empty.
@@ -169,10 +97,9 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
     /// produces a non-deterministic encounter order for `TermDocumentCounts`,
     /// which assigns vocabulary indices as terms are first seen across the
     /// training sequence. Non-deterministic vocabulary indices produce different
-    /// model weights (RI random projections, PPMI PMI scores, LSA/NMF factor
-    /// matrices) across runs from the same corpus, causing recall scores to
-    /// drift between replay runs even when the corpus and capture timestamps
-    /// are bit-identical.
+    /// model weights (RI random projections) across runs from the same corpus,
+    /// causing recall scores to drift between replay runs even when the corpus
+    /// and capture timestamps are bit-identical.
     ///
     /// `filedAt` is seed-derived when `MOOT_BENCH_EPOCH_NOW` is active (set to
     /// `captureDate` from the seed file), making it stable across replay runs.

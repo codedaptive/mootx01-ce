@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family provider — compiled only when the DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See CorpusKit/Package.swift.
 // FdcProvider.swift
 //
 // FDC (Frame Decimal Classification) relatedness embedding provider.
@@ -314,3 +317,5 @@ public final class FDCProvider: EmbeddingProvider, @unchecked Sendable {
         return (FloatSimHash.project(vector: v, seed: projectionSeed), v)
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

@@ -20,7 +20,7 @@ use genius_locus_kit_migrations::{
 };
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 use genius_locus_kit_migrations::{
-    compiled_floor, DistilledSourceDigestColumnMigrationExt, IndexCompositionSettingMigrationExt,
+    compiled_floor, IndexCompositionSettingMigrationExt,
 };
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -244,16 +244,9 @@ fn v1_0_estate_runs_full_chain_to_v1_3() {
         .expect("version set");
     assert_eq!(after_icm, EstateFormatVersion::V1_2, "the 1.1→1.2 capsule stamps V1_2, not current");
 
-    // Run the v1_2 → v1_3 capsule, then the v1_3 → v1_4 capsule: the chain
-    // ends at the current format.
-    coord
-        .run_distilled_source_digest_column_migration(&handle, NOW)
-        .expect("distilled source digest column migration must succeed");
-    let after_dsd = EstateFormatStore::new(Arc::clone(&storage))
-        .read_if_present()
-        .expect("read format")
-        .expect("version set");
-    assert_eq!(after_dsd, EstateFormatVersion::V1_3, "the 1.2→1.3 capsule stamps V1_3, not current");
+    // Run the v1_3 → v1_4 capsule directly on the V1_2 stamp: the 1.2 → 1.3
+    // step added a LocusKit column that schema v19 removed, so nothing
+    // separates 1.2 from 1.3 and the chain continues from here.
     coord
         .run_index_composition_setting_migration(&handle, NOW)
         .expect("index composition setting migration must succeed");

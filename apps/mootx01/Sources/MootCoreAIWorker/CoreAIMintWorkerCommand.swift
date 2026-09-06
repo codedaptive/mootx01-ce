@@ -6,8 +6,11 @@
 // ResidentMintSession. Closing stdin releases the engine by ending the
 // process; the parent can therefore recycle before runtime memory pressure or
 // idle-reap without placing Core AI state inside the long-lived moot server.
+//
+// Gated behind MOOTX01_MINERS: adornments are dark (Encoder Rerank Program,
+// 2026-09-05). Build with that define to compile the Core AI mint worker.
 
-#if os(macOS) && canImport(CoreAI)
+#if MOOTX01_MINERS && os(macOS) && canImport(CoreAI)
 import AdornmentLib
 import ArgumentParser
 import Foundation
@@ -236,7 +239,7 @@ struct NULFrameDecoder: Sendable {
         return frames
     }
 }
-#elseif os(macOS)
+#elseif MOOTX01_MINERS && os(macOS)
 import ArgumentParser
 
 /// SDK fallback keeps the unified CLI buildable when Core AI is absent.
@@ -255,3 +258,5 @@ public struct CoreAIMintWorkerCommand: AsyncParsableCommand {
     }
 }
 #endif
+// MOOTX01_MINERS off: CoreAIMintWorkerCommand is not compiled. MootMain.swift
+// excludes it from the subcommand list when MOOTX01_MINERS is absent.

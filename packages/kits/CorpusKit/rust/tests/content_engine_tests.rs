@@ -600,6 +600,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -643,6 +644,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         digest: content_digest(late_text),
         text: late_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     source.add(late.clone());
     let admission_engine = Arc::clone(&engine);
@@ -691,6 +693,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -732,6 +735,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         digest: content_digest(pending_text),
         text: pending_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     source.add(pending.clone());
 
@@ -812,6 +816,7 @@ fn provider_publication_marker_survives_reopen_before_admission() {
         digest: content_digest(text),
         text: text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![pending.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -1182,6 +1187,7 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
                 digest: content_digest(text_a),
                 text: text_a.into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
@@ -1189,6 +1195,7 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
                 digest: content_digest(text_b),
                 text: text_b.into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         ],
     });
@@ -1234,6 +1241,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 digest: content_digest("alpha provider coverage"),
                 text: "alpha provider coverage".into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
@@ -1241,6 +1249,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 digest: content_digest("beta provider coverage"),
                 text: "beta provider coverage".into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         ],
     });
@@ -1445,6 +1454,7 @@ impl MutableSource {
                 digest: content_digest(text),
                 text: text.to_string(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         );
     }
@@ -1500,6 +1510,7 @@ impl CorpusContentSource for NilSource {
     }
 }
 
+#[cfg(feature = "dense-families")]
 fn ppmi_config() -> EmbeddingModelConfig {
     use corpus_kit_providers::PpmiProvider;
     EmbeddingModelConfig::Ppmi { provider: Box::new(PpmiProvider::new()) }
@@ -1532,6 +1543,9 @@ fn open_attached_engine(
 /// second `train_trainable_slots` call (with force=true, as the drift gate
 /// does) must take the counts path (CountsDeltaFold { folded: 1 }), without
 /// re-training from corpus text.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5a_ppmi_counts_path_delta_fold_positive() {
     let storage = in_memory_storage();
@@ -1661,6 +1675,9 @@ fn g5a_ri_counts_path_delta_not_fold_safe() {
 /// triggers a retrain (force=true), the counts path guard detects
 /// basisRow.trainedChunkCount + pending.len() ≠ all_ids.len() and records
 /// PopulationMismatch, falling through to corpus path.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5b_population_mismatch_drives_corpus_path() {
     let storage = in_memory_storage();
@@ -1699,6 +1716,9 @@ fn g5b_population_mismatch_drives_corpus_path() {
 /// whose basis digest is not empty (already trained) must NOT touch the counts
 /// path or the corpus path — the decision seam must be empty (absent) for that
 /// model. The drift gate owns WHEN a retrain happens.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5c_non_force_trained_slot_skip_records_nothing() {
     let storage = in_memory_storage();
@@ -1730,6 +1750,9 @@ fn g5c_non_force_trained_slot_skip_records_nothing() {
 /// already trained with no pending delta refs, the counts path runs its full
 /// publication (restore both instances, fold nothing, finalize, publish), bumps
 /// the generation counter, and records CountsRestore. Zero text paging.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5d_force_trained_slot_no_pending_records_counts_restore() {
     let storage = in_memory_storage();
@@ -1775,6 +1798,9 @@ fn g5d_force_trained_slot_no_pending_records_counts_restore() {
 /// the corpus path must upsert a non-subsumed sentinel row
 /// (revision=0, digest="") after delete-all-references. This test confirms
 /// the sentinel row exists in the store after training completes.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g6a_skipped_id_sentinel_is_durable_after_training() {
     let storage = in_memory_storage();
@@ -1854,6 +1880,9 @@ fn g6f_sentinel_fields_cannot_satisfy_admission_digest_equality() {
 /// `train_trainable_slots(force: true)`. This test drives the production entry
 /// (reindex) rather than train_trainable_slots directly, verifying the recorded
 /// decision is CountsDeltaFold(n) when a pending ref exists.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5a_entry_attached_reindex_records_counts_delta_fold() {
     let storage = in_memory_storage();
@@ -1953,6 +1982,9 @@ fn g5a_entry_attached_reindex_records_counts_delta_fold() {
 /// new reference row (simulating a post-publication admission), and assert that
 /// row EXISTS and is non-subsumed (pending, not folded by the just-completed
 /// publication). We then assert a subsequent force retrain delta-folds it.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn f10_counts_path_publication_preserves_post_publication_admission() {
     let storage = in_memory_storage();
@@ -2076,6 +2108,9 @@ fn f10_counts_path_publication_preserves_post_publication_admission() {
 ///        a regression introduced by the counts path). Optimizing the no-op
 ///        reindex to skip re-embed when the side-table coverage is complete is
 ///        a named follow-up for Bob; it is out of this mission's scope.
+// PPMI is a dark dense family (contract sheet §13); the trainable-slot
+// path it exercises runs only under the dense-families feature.
+#[cfg(feature = "dense-families")]
 #[test]
 fn g5d_counts_restore_coverage_survives_in_side_table() {
     use persistence_kit::{TypedValue, Column, StoragePredicate};

@@ -22,7 +22,6 @@
 //! `Confidence.raw_value()` / 56 maps the 5-point ordinal to [0, 1] (matches
 //! Swift `Float($0.confidence.rawValue) / 56.0`; max raw = 56).
 
-use std::collections::BTreeMap;
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::{EstateCoordinator, MatrixCalibrationCurve};
@@ -111,11 +110,8 @@ pub fn run_trust_grounded_synthesis(
         .count();
     let ranked_ids: Vec<String> = drawers.iter().map(|d| d.id.clone()).collect();
 
-    // ADORN-STORE-02 v17: `DrawerRow` no longer carries `adornment`.
-    // Active adornments are fetched separately via `Estate.active_adornments`
-    // and passed into synthesis as a BTreeMap keyed by drawer ID. The fetch-
-    // and-compose step is owned by the Swift GeniusLocusKit boundary; the
-    // active_adornments map is empty in this pure-Rust recipe path.
+    // Adornments are dark (Encoder Rerank Program, 2026-09-05). DrawerRow
+    // carries only id + content; synthesis uses first-line content excerpts.
     let rows: Vec<DrawerRow> = drawers
         .iter()
         .map(|d| DrawerRow {
@@ -144,9 +140,7 @@ pub fn run_trust_grounded_synthesis(
         page_index: 0,
         is_last: true,
     };
-    // active_adornments: empty map — adornment fetch requires an estate handle
-    // not available inside this pure-Rust recipe (ADORN-STORE-02 v17).
-    let context = synthesize(&page, &meta, &BTreeMap::new(), 3);
+    let context = synthesize(&page, &meta, 3);
 
     // v1.1.0: if a calibration curve was supplied, map each drawer's
     // confidence ordinal to [0, 1] (raw_value max = 56) and calibrate.

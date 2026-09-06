@@ -1,9 +1,11 @@
 // EnrichmentStageTests.swift
 //
-// Pipeline-p2 categorizer pins (DECISION_DENSE_LANE_ENRICHMENT Wave 2).
-// The trailer is deterministic (HMM word-class baseline + bundled FDC
-// canon), so these literals are CROSS-PORT golden pins — the Rust twin
-// asserts the same strings in brain/enrichment_stage.rs tests.
+// Pipeline-p2 categorizer pins (schema 19).
+// `trailer(forContent:)` stays for ContextDistillLib (inline distillation).
+// `facts(forContent:)` is the new schema-19 API that writes `ssc_facts`.
+// The HMM path is deterministic (word-class baseline + bundled FDC canon),
+// so these literals are CROSS-PORT golden pins — the Rust twin asserts
+// the same strings in brain/enrichment_stage.rs tests.
 
 import Testing
 import EideticLib
@@ -13,26 +15,49 @@ import CorpusKit
 
 struct EnrichmentStageTests {
 
-    @Test("no anchoring noun → empty trailer")
+    @Test("no anchoring noun → empty trailer and nil facts")
     func emptyWhenNothingAnchors() {
         #expect(EnrichmentStage.trailer(forContent: "") == "")
         #expect(EnrichmentStage.trailer(forContent: "ok so um yeah") == "")
+        #expect(EnrichmentStage.facts(forContent: "") == nil)
+        #expect(EnrichmentStage.facts(forContent: "ok so um yeah") == nil)
     }
 
-    @Test("trailer is grammar-v1 shaped and scanner-parseable")
+    @Test("trailer is grammar-v1 shaped with (*[ … ]*) delimiters")
     func trailerShape() {
         let t = EnrichmentStage.trailer(
             forContent: "I finally finished my first full screenplay and printed it last Friday.")
         if !t.isEmpty {
             #expect(t.hasPrefix(" (*[ "))
             #expect(t.hasSuffix(" ]*)"))
-            // CorpusKit's scanner must accept every trailer we emit.
-            #expect(CorpusKit.TrailerGrammar.lexicalSupplement(
-                fromDenseText: "body." + t) != "")
         }
         // Determinism: same input, same output.
         #expect(t == EnrichmentStage.trailer(
             forContent: "I finally finished my first full screenplay and printed it last Friday."))
+    }
+
+    @Test("facts(forContent:) returns bare pair list — no delimiters")
+    func factsNoBareDelimiters() {
+        let f = EnrichmentStage.facts(forContent: "We visited the Louvre in Paris last Tuesday.")
+        if let f {
+            // No grammar-v1 delimiters in the bare pair list.
+            #expect(!f.contains("(*["))
+            #expect(!f.contains("]*)"))
+            // Must contain at least one pair.
+            #expect(f.contains(":"))
+        }
+    }
+
+    @Test("evaluative adjectives do not appear in facts — stop list applied")
+    func evaluativeAdjectivesBlocked() {
+        // Failure mode: stop list missing "good" → "entity: good" appears.
+        let content = "We met Sarah at the Louvre on Tuesday, it was good"
+        let f = EnrichmentStage.facts(forContent: content)
+        if let f {
+            #expect(!f.contains("entity: good"), "evaluative adjective leaked into facts")
+        }
+        // Sarah and louvre should appear (NER or HMM)
+        // (HMM may or may not anchor proper names — exact assertion is NER-path only)
     }
 
     @Test("function words never become facts")

@@ -10,7 +10,7 @@ import PersistenceKitInMemory
 ///
 /// Verifies cadence, concurrency policy, and diagnostic emission for both
 /// the `defaultSpec()` no-op variant and the `spec(anomalyCycle:)` live-closure
-/// variant. Mirrors `DistillationSignalTests.swift` exactly in structure.
+/// variant. Mirrors the TemporalCausalitySignal cases in `StandingSignalsTests.swift`.
 ///
 /// Cross-port golden pin: the live-spec test asserts `Ok(1)` from the closure
 /// surfaces `"updated 1 drawer(s)"` in the diagnostic detail — the same

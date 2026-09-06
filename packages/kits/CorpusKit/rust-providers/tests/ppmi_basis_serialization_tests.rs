@@ -1,3 +1,6 @@
+#![cfg(feature = "dense-families")]
+// Dense-family test — compiled only when --features dense-families.
+// Off by default (plan 70BC55F3, 2026-09-05). See Cargo.toml.
 //! Cross-port basis-serialization conformance gate for `PpmiProvider`
 //! (mission 6a-i). Mirrors the RI suite: byte-identical serialize + embed
 //! reproduction from the Swift-emitted canonical fixture.

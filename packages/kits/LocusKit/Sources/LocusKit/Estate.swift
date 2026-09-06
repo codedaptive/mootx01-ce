@@ -1,7 +1,6 @@
 import Foundation
 import CryptoKit
 import PersistenceKit
-import AdornmentLib
 
 /// Top-level handle to a single GeniusLocus estate.
 ///
@@ -481,86 +480,45 @@ public actor Estate {
         // storage reference owns teardown.
     }
 
-    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+    // MARK: - Content-derived columns and the span index bit (Encoder Rerank Program)
 
-    /// Write the distilled representation of one drawer — all four
-    /// representation columns in one atomic UPDATE. Delegates to
-    /// `DrawerStore.setDistilledRepresentation`; see that method for the
-    /// full contract (direct column write, no audit event, no index-feed
-    /// involvement). This is the seam GLK's distillation paths (drain-stage
-    /// and `moot_distill` sweep) write through.
-    ///
-    /// After a successful write, OR bit 19 (`hasCurrentRepresentation`)
-    /// into the room/wing container-fingerprint aggregate so that any
-    /// subsequent recall filter on `.hasFeatureFlag(.hasCurrentRepresentation)`
-    /// does not falsely exclude this container mid-session without requiring
-    /// an estate reopen. The OR aggregate is monotone — ORing a set bit is
-    /// always safe. Clear paths need no rollup change: stale set bits are a
-    /// harmless over-approximation (spec § 11.5); `rebuildAll` at estate open
-    /// tightens. Mirrors the `addDrawerCovered` pattern.
+    /// Write (or clear) one drawer's SSC facts. Estate-level pass-through
+    /// over `DrawerStore.setSSCFacts(_:for:)` — the seam the enrichment
+    /// stage writes through after the drawer write. No container-fingerprint
+    /// rollup: nothing filters on fact presence. Mirrors Rust
+    /// `Estate::set_ssc_facts`.
     ///
     /// - Returns: Count of rows updated (0 = drawer not found).
     @discardableResult
-    public func setDistilledRepresentation(
-        drawerId: String,
-        distilled: String,
-        pipelineVersion: String,
-        sourceDigest: String,
-        tokenCount: Int64,
-        at generatedAt: Date
-    ) async throws -> Int {
-        let count = try await store.setDistilledRepresentation(
-            drawerId: drawerId,
-            distilled: distilled,
-            pipelineVersion: pipelineVersion,
-            sourceDigest: sourceDigest,
-            tokenCount: tokenCount,
-            at: generatedAt)
-        if count == 1, let drawer = try await store.getDrawer(id: drawerId) {
-            let names = try await store.resolveNodeNames(
-                parentNodeIds: [drawer.parentNodeId])
-            let resolved = names[drawer.parentNodeId] ?? (wing: "", room: "")
-            try await containerFP.orIn(
-                wing: resolved.wing, room: resolved.room,
-                adjective: drawer.adjectiveBitmap,
-                operational: drawer.operationalBitmap,
-                provenance: drawer.provenance,
-                now: generatedAt)
-        }
-        return count
+    public func setSSCFacts(_ facts: String?, for drawerId: String) async throws -> Int {
+        try await store.setSSCFacts(facts, for: drawerId)
     }
 
-    /// Count of active drawers still awaiting distillation (the §7.1
-    /// eligibility predicate as an aggregate). Estate-level pass-through
-    /// over `DrawerStore.countUndistilled` — the distillation
-    /// drain-accounting observable GLK's `drainStatuses` reports.
-    public func countUndistilled(pipelineVersion: String) async throws -> Int {
-        try await store.countUndistilled(pipelineVersion: pipelineVersion)
+    /// Set bit 27 (`spanIndexed`) on one drawer after the span-encode duty
+    /// wrote its span rows. Estate-level pass-through over
+    /// `DrawerStore.setSpanIndexed(drawerId:)`. No container-fingerprint
+    /// rollup: recall does not filter on the bit; the duty reads it per row.
+    /// Mirrors Rust `Estate::set_span_indexed`.
+    ///
+    /// - Returns: Count of rows updated (0 = not found or already set).
+    @discardableResult
+    public func setSpanIndexed(drawerId: String) async throws -> Int {
+        try await store.setSpanIndexed(drawerId: drawerId)
     }
 
-    /// Rooms whose populated distilled representation is stale under the
-    /// supplied converter ID (ID differs or digest NULL). Used by the
-    /// distillation sweep to keep its room-level bitmap skip currency-aware
-    /// without loading drawer content. Mirrors Rust
-    /// `Estate::rooms_with_stale_distilled_representations`.
-    public func roomsWithStaleDistilledRepresentations(
-        pipelineVersion: String
-    ) async throws -> [(wing: String, room: String)] {
-        try await store.roomsWithStaleDistilledRepresentations(
-            pipelineVersion: pipelineVersion)
+    /// The span-encode duty's work items (active, non-empty, bit 27 clear),
+    /// oldest id first, paged by `afterDrawerID`. Pass-through over
+    /// `DrawerStore.spanIndexDebtBatch`. Mirrors Rust
+    /// `Estate::span_index_debt_batch`.
+    public func spanIndexDebtBatch(limit: Int, afterDrawerID: String? = nil) async throws -> [Drawer] {
+        try await store.spanIndexDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
     }
 
-    /// Active, non-empty drawers whose distilled representation is current
-    /// under `pipelineVersion`, returned as `(id, distilledAt)` pairs with no
-    /// content hydration. Estate-level pass-through over
-    /// `DrawerStore.drawersWithRepresentations` — the metadata projection
-    /// GeniusLocusKit uses to detect the mid-run crash scenario (sweep
-    /// committed, reindex did not). Mirrors Rust
-    /// `Estate::drawers_with_representations`.
-    public func drawersWithRepresentations(
-        pipelineVersion: String
-    ) async throws -> [(id: String, distilledAt: Date)] {
-        try await store.drawersWithRepresentations(pipelineVersion: pipelineVersion)
+    /// Count of drawers still awaiting span encoding — the span-encode
+    /// drain's `pending`. Pass-through over `DrawerStore.countSpanIndexDebt`.
+    /// Mirrors Rust `Estate::count_span_index_debt`.
+    public func countSpanIndexDebt() async throws -> Int {
+        try await store.countSpanIndexDebt()
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
@@ -648,65 +606,6 @@ public actor Estate {
         limit: Int, includingPipelines pipelines: [String]
     ) async throws -> [Drawer] {
         try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines)
-    }
-
-    // MARK: - Normalized adornment store pass-throughs (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17)
-
-    /// Return all registered adornment minters ordered by name.
-    /// Exposes `DrawerStore.listAdornmentMinters()` through the `Estate` boundary.
-    public func listAdornmentMinters() async throws -> [AdornmentMinterDescriptor] {
-        try await store.listAdornmentMinters()
-    }
-
-    /// Register or replace one adornment minter.
-    /// Exposes `DrawerStore.registerAdornmentMinter(_:)` through the `Estate` boundary.
-    public func registerAdornmentMinter(_ minter: AdornmentMinterDescriptor) async throws {
-        try await store.registerAdornmentMinter(minter)
-    }
-
-    /// Set the active flag for one minter. Returns row count (0 or 1).
-    /// Exposes `DrawerStore.setAdornmentMinterActive(id:active:)` through the `Estate` boundary.
-    @discardableResult
-    public func setAdornmentMinterActive(id: String, active: Bool) async throws -> Int {
-        try await store.setAdornmentMinterActive(id: id, active: active)
-    }
-
-    /// Atomically replace the active minter set.
-    /// Exposes `DrawerStore.setActiveAdornmentMinters(ids:)` through the `Estate` boundary.
-    @discardableResult
-    public func setActiveAdornmentMinters(ids: Set<String>) async throws -> Int {
-        try await store.setActiveAdornmentMinters(ids: ids)
-    }
-
-    /// Bounded batch of (drawer, minter) pairs without an adornment row.
-    /// Exposes `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)` through
-    /// the `Estate` boundary so `AdornmentPass` (GeniusLocusKit Brain) can fetch
-    /// the work queue without reaching the store directly.
-    public func adornmentDebtBatch(
-        limit: Int,
-        afterDrawerID: String? = nil
-    ) async throws -> [AdornmentDebt] {
-        try await store.adornmentDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
-    }
-
-    /// Write one (drawer, minter) adornment row, inserting or replacing.
-    /// Returns count of rows inserted or updated (always 1 on success).
-    /// Exposes `DrawerStore.putAdornment(_:)` through the `Estate` boundary.
-    @discardableResult
-    public func putAdornment(_ adornment: StoredAdornment) async throws -> Int {
-        try await store.putAdornment(adornment)
-    }
-
-    /// Return all adornment rows for one drawer, ordered by minter_id.
-    /// Exposes `DrawerStore.adornments(drawerID:)` through the `Estate` boundary.
-    public func adornments(drawerID: String) async throws -> [StoredAdornment] {
-        try await store.adornments(drawerID: drawerID)
-    }
-
-    /// Return the active adornments for a batch of drawers.
-    /// Exposes `DrawerStore.activeAdornments(drawerIDs:)` through the `Estate` boundary.
-    public func activeAdornments(drawerIDs: [String]) async throws -> [String: [StoredAdornment]] {
-        try await store.activeAdornments(drawerIDs: drawerIDs)
     }
 
     // MARK: - Drawer enumeration

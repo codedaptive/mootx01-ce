@@ -88,6 +88,11 @@ public struct CorpusContentRecord: Sendable, Equatable {
     /// use `text` for both BM25 and dense embedding — the default for all
     /// consumers that do not supply a separate dense representation.
     public let denseCompositionText: String?
+    /// SSC facts from `drawers.ssc_facts` (schema 19). A bare comma-separated
+    /// pair list (e.g. `"entity: louvre, place: paris"`) appended to the BM25
+    /// document via `SSCFacts.lexicalSupplement(_:)`. nil means no facts computed
+    /// yet — the BM25 supplement contributes nothing.
+    public let sscFacts: String?
 
     /// The text the engine uses when composing the dense float lane vector.
     /// Returns `denseCompositionText` when set, falls back to `text`.
@@ -95,13 +100,15 @@ public struct CorpusContentRecord: Sendable, Equatable {
 
     public init(
         id: CorpusContentID, revision: Int64, digest: String, text: String,
-        denseCompositionText: String? = nil
+        denseCompositionText: String? = nil,
+        sscFacts: String? = nil
     ) {
         self.id = id
         self.revision = revision
         self.digest = digest
         self.text = text
         self.denseCompositionText = denseCompositionText
+        self.sscFacts = sscFacts
     }
 }
 

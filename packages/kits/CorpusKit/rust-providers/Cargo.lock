@@ -412,6 +412,7 @@ dependencies = [
  "lattice-lib",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",

@@ -155,7 +155,7 @@ struct KGFactStoreTests {
         defer { cleanup(url) }
 
         // Bits 27-30 are FREE (ADORN-STORE-02 v17): new drawers start with
-        // operationalBitmap 0; adornment state lives in the adornments table.
+        // operationalBitmap 0: no write path ORs bits at insert.
         let drawer = Drawer(
             id: TestStorage.tid("drawer-1"),
             content: "hello",

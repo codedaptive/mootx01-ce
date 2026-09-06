@@ -65,10 +65,8 @@
 //     bit  21    represented_by_vague (Wave-2)          ASSIGNED
 //     bits 22-23 vague_level 2-bit sub-field (Wave-2)   ASSIGNED
 //     bits 24-26 isAnomalous etc.                       ASSIGNED
-//     bits 27-30 FREE — previously adornment-required and adornment_bitmask;
-//                 retired by ADORN-STORE-02 (2026-08-25). Minter identity and
-//                 activation now live in the adornment_minters table. These
-//                 bits MUST be zero on all live rows after the upgrade.
+//     bit  27    spanIndexed (Encoder Rerank Program)   ASSIGNED
+//     bits 28-30 FREE (3 bits headroom)
 //     bits 31-63 FREE (33 bits headroom)
 //
 //   drawers.provenance
@@ -88,73 +86,60 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v13 adds the kg_facts identity trio
-    /// (`addedBy`, `foreignSourceKey`, `foreignRecordID`, all TEXT NOT
-    /// NULL DEFAULT '') — the columns MXE-KH declared on the table but
-    /// shipped without a ladder entry, so populated v12 estates never
-    /// gained them on open. The `mootx01 upgrade` backfill
-    /// (KGFactIdentityBackfill) moves misfiled pre-existing
-    /// `sourceDrawerID` values into them after this migration runs.
-    /// v12 adds the subject trio to `drawers`
-    /// (`subject`, `subject_pipeline_version`, `subject_at`, all
-    /// nullable) — the one-sentence AI-facing summary that progressive
-    /// recall returns in the dense row. Nullable columns with no
-    /// backfill: NULL `subject` IS the backfill-eligibility predicate,
-    /// so existing rows are simply "subject debt" until a producer
-    /// fills them. v11 adds `operationalAND INT64 NOT NULL
-    /// DEFAULT -1` to `container_fingerprints`. The AND aggregate is the
-    /// per-container AND (not OR) of every active drawer's
-    /// `operationalBitmap`; its AND-identity default (-1, all bits set)
-    /// means an empty container does not falsely satisfy any AND-check.
-    /// The distillation sweep checks `(operationalAND & (1<<19)) != 0`
-    /// to skip rooms whose every drawer carries bit 19
-    /// (`hasCurrentRepresentation`). The column is an UNDER-approximation
-    /// by design: a false-absent bit is safe (room scanned unnecessarily),
-    /// while a false-present bit is UNSAFE (room skipped with eligible
-    /// work). `rebuildAll` at estate open recomputes the column from
-    /// scratch for accuracy. v10 adds a UNIQUE constraint on the
-    /// associations table natural key — FINDING-3 duplicate-edge fix.
-    /// v9 added content_fingerprint BLOB nullable to drawers. v8 changes
-    /// nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added
-    /// content_hash BLOB nullable to drawers (NT-L3). v6 added order_key
-    /// REAL nullable to tunnels (NT-L5). v5 added erasure_ledger (NT-L4).
-    /// v4 replaced wing/room with parent_node_id (NT-L2). v3 added nodes
-    /// (NT-L1). v2 added keys.ext. Populated estates exist; every
-    /// schema change from v13 on ships a ladder entry.
-    /// v14 added idx_drawers_filedAt (ORDER BY filedAt DESC LIMIT 256 on
-    /// the Director recall path ran a full-table sort without this index).
-    /// v15 adds the recall_trace lane-attribution trio (`door`,
-    /// `composition`, `laneRanks`, all TEXT nullable) — W2.5 Track R(a).
-    /// NULL on pre-v15 rows and on rows written without door identity;
-    /// no query text is stored (privacy ruling 2026-08-20).
-    /// v16 added `adornment` TEXT nullable to `drawers`. That column is
-    /// retained physically in the drawers table for zero-downtime migration
-    /// safety (SQLite cannot DROP COLUMN in a single ALTER TABLE without
-    /// full table rebuild), but no LocusKit code reads or writes it — it
-    /// is a dead column from v17 onward. External callers (GeniusLocusKit,
-    /// AriaMcpKit) that previously read `Drawer.adornment` are updated in
-    /// Parts B/C of ADORN-STORE-02.
-    /// v17 (ADORN-STORE-02, 2026-08-25): normalised adornment storage.
-    /// Adds `adornment_minters` (id TEXT PK, name, family, model_id,
-    /// model_version, prompt_digest, parameters JSON, is_active INTEGER,
-    /// ext JSON NULL) and `adornments` (drawer_id, minter_id, text,
-    /// PRIMARY KEY (drawer_id, minter_id)). The upgrade step registers
-    /// legacy minter rows for each legacy family/generation bitmask code
-    /// that has stored text, moves legacy adornment text into adornments
-    /// rows, and clears bits 27-30 on all live drawers. Idempotent on
-    /// fresh AND already-migrated estates in both ports (the CREATE TABLE
-    /// IF NOT EXISTS DDL is used via custom migration).
-    /// v18 (2026-09-03): adds `distilled_source_digest` TEXT nullable to
-    /// `drawers` — the SHA-256 hex digest of the complete original content
-    /// the stored distilled representation was rendered from. The fifth
-    /// member of the representation column set (NULL together, populated
-    /// together with the distilled quad). A representation is current only
-    /// when its pipeline version matches the active converter AND its digest
-    /// equals the digest of the row's content; a NULL digest (any row
-    /// written before v18) is stale by definition and regenerates on the
-    /// next sweep. Ships as a ladder entry (idempotent addColumn) and reaches
-    /// populated estates through GeniusLocusKit's estate-format 1.3 capsule.
-    public static let version = 18
+    /// Current schema version.
+    ///
+    /// v19 (Encoder Rerank Program, 2026-09-05). Delta from v18:
+    /// `+ encoder_models` (the span-encoder registry, one row per shipped
+    /// model, exactly one `is_active = 1`), `+ drawers.ssc_facts` (the
+    /// grammar-v1 fact anchors as a text column, NULL until the enrichment
+    /// stage writes it), `+ operationalBitmap bit 27 = spanIndexed`;
+    /// `− adornments`, `− adornment_minters`, `− drawers.adornment`,
+    /// `− drawers.distilled`, `− distilled_pipeline_version`,
+    /// `− distilled_token_count`, `− distilled_at`,
+    /// `− distilled_source_digest`. `subject`, `subject_pipeline_version`
+    /// and `subject_at` stay.
+    ///
+    /// Migration policy: ONE ladder entry, v10 → v19. CE 1.0.35 and 1.0.37
+    /// ship schema 10; EE estates written at 11–18 never shipped and are
+    /// brought to 19 by the SQL surgery script, never by this ladder. The
+    /// hop applies only the deltas that survive at 19 (operationalAND, the
+    /// subject trio, the kg_facts identity trio, idx_drawers_filedAt, the
+    /// recall_trace attribution trio, encoder_models, ssc_facts) and never
+    /// creates the v16–v18 adornment or distilled objects. `mootx01 upgrade`
+    /// decides with `upgradePath(storedVersion:)` BEFORE opening the schema,
+    /// because PersistenceKit's runner stamps the declared version whenever
+    /// no ladder entry matches, which would silently mark an unsupported
+    /// estate current.
+    ///
+    /// Version history (versions before the ladder live in the base CREATE):
+    /// v2 keys.ext; v3 nodes; v4 parent_node_id replaces wing/room; v5
+    /// erasure_ledger; v6 tunnels.order_key; v7 drawers.content_hash and the
+    /// snapshot tables; v8 nodes.merkle_root BLOB; v9
+    /// drawers.content_fingerprint; v10 associations natural-key UNIQUE
+    /// (dedup then index); v11 container_fingerprints.operationalAND (AND
+    /// identity default -1, recomputed at open); v12 subject trio; v13
+    /// kg_facts identity trio; v14 idx_drawers_filedAt; v15 recall_trace
+    /// door/composition/laneRanks; v16–v18 adornment and distilled storage,
+    /// retired at v19.
+    public static let version = 19
+
+    /// The lowest stored schema version `mootx01 upgrade` brings to
+    /// `version` in one hop: the version CE 1.0.35 and 1.0.37 shipped.
+    public static let supportedUpgradeFloor = 10
+
+    /// What an upgrade does with an estate whose LocusKit ledger row carries
+    /// `storedVersion`. Read the ledger raw and call this BEFORE
+    /// `Storage.open(schema:)`: the runner stamps `version` whenever no
+    /// ladder entry matches, so an unsupported estate opened blind would be
+    /// marked current with none of the v19 objects in place.
+    public static func upgradePath(storedVersion: Int) -> SchemaUpgradePath {
+        switch storedVersion {
+        case 0: return .fresh
+        case supportedUpgradeFloor: return .upgrade(from: storedVersion)
+        case version: return .current
+        default: return .unsupported(found: storedVersion)
+        }
+    }
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -183,214 +168,67 @@ public enum LocusKitSchema {
                 ErasureLedgerSchema.ledgerTable,
                 SnapshotSchema.registryTable,
                 SnapshotSchema.attestationsTable,
-                // Normalised adornment storage (ADORN-STORE-02, v17).
-                // adornment_minters: the minter master table.
-                // adornments: per-(drawer, minter) generated text.
-                adornmentMintersTable,
-                adornmentsTable,
+                // The span-encoder registry (Encoder Rerank Program, v19).
+                encoderModelsTable,
             ],
             indices: indices,
             migrations: [
-                // v8 → v9: add content_fingerprint BLOB nullable to drawers.
-                // Without this, an estate created at v8 hits "no such column"
-                // on every write after the daemon binary is upgraded to v9.
-                Migration(fromVersion: 8, toVersion: 9, operations: [
-                    .addColumn(table: "drawers", column: .blob("content_fingerprint", nullable: true))
-                ]),
-                // v9 → v10: add unique index on the associations natural key
-                // (FINDING-3 duplicate-edge fix). Order is mandatory:
-                // de-duplicate first, then create the unique index — a
-                // CREATE UNIQUE INDEX fails if duplicate rows already exist.
-                // The custom SQL removes all but the earliest (MIN rowid)
-                // duplicate for each (sourceWing, sourceRoom, sourceDrawerId,
-                // targetWing, targetRoom, targetDrawerId, label) group.
-                // SQLite's GROUP BY treats NULL values as equal, so
-                // wing/room-level associations (NULL drawer IDs) are also
-                // deduplicated correctly. After dedup, the unique index is
-                // equivalent to the table-level uniqueConstraints declared
-                // on `associationsTable` for fresh installs.
-                Migration(fromVersion: 9, toVersion: 10, operations: [
-                    .custom(
-                        sqlite: """
-                        DELETE FROM "associations" WHERE rowid NOT IN (
-                            SELECT MIN(rowid) FROM "associations"
-                            GROUP BY "sourceWing", "sourceRoom", "sourceDrawerId",
-                                     "targetWing", "targetRoom", "targetDrawerId", "label"
-                        )
-                        """,
-                        postgresql: nil
-                    ),
-                    .addIndex(IndexDeclaration(
-                        name: "idx_associations_natural_key",
-                        table: "associations",
-                        columns: ["sourceWing", "sourceRoom", "sourceDrawerId",
-                                  "targetWing", "targetRoom", "targetDrawerId", "label"],
-                        unique: true
-                    )),
-                ]),
-                // v10 → v11: add AND-aggregate column to container_fingerprints.
-                // Default -1 (AND-identity, all bits set) so existing rows do not
-                // falsely satisfy any AND-check before the first rebuildAll. The
-                // table is derived and always recomputed at estate open, so the
-                // default value is corrected on the next open without a backfill
-                // migration.
-                Migration(fromVersion: 10, toVersion: 11, operations: [
+                // ONE hop, v10 → v19: every delta that survives at v19 and
+                // nothing that was retired on the way (no adornment tables or
+                // column, no distilled columns). Every operation is idempotent
+                // — addColumn skips a present column, the DDL is CREATE ... IF
+                // NOT EXISTS, addIndex is IF NOT EXISTS — so a fresh estate,
+                // which the runner creates at the v19 layout before replaying
+                // the ladder, is unchanged by it. Populated estates exist at
+                // 10 (CE 1.0.35/1.0.37) and at 19; nothing in between is
+                // supported here (see `upgradePath(storedVersion:)`).
+                Migration(fromVersion: 10, toVersion: 19, operations: [
+                    // v11: AND-aggregate on container_fingerprints. Default -1
+                    // (AND identity, all bits set) so an empty container never
+                    // falsely satisfies an AND-check before the first
+                    // rebuildAll; the table is derived and recomputed at open.
                     .addColumn(table: "container_fingerprints",
-                               column: .bitmap("operationalAND", default: Int64(-1)))
-                ]),
-                // v11 → v12: add the subject trio to drawers (progressive
-                // recall dense row). All three nullable, no backfill —
-                // NULL `subject` is the backfill-eligibility predicate,
-                // so pre-v12 rows surface as subject debt via
-                // `countMissingSubject` rather than requiring a data
-                // migration. Without the addColumns, a pre-v12 estate
-                // hits "no such column" on every drawer read after the
-                // daemon binary upgrades (same failure mode the v8 → v9
-                // migration exists to prevent).
-                Migration(fromVersion: 11, toVersion: 12, operations: [
+                               column: .bitmap("operationalAND", default: Int64(-1))),
+                    // v12: the subject trio. All nullable, no backfill — NULL
+                    // `subject` is the backfill-eligibility predicate, so
+                    // pre-v12 rows are subject debt, not a data migration.
                     .addColumn(table: "drawers", column: .text("subject", nullable: true)),
                     .addColumn(table: "drawers", column: .text("subject_pipeline_version", nullable: true)),
                     .addColumn(table: "drawers", column: .timestamp("subject_at", nullable: true)),
-                ]),
-                // v12 → v13: add the kg_facts identity trio (MXE-KH declared
-                // these on `kgFactsTable` but shipped no ladder entry, so a
-                // populated v12 estate never gained them and every write to
-                // them — including the `mootx01 upgrade` backfill — would
-                // fail with "no such column"). NOT NULL DEFAULT '' matches
-                // the declaration contract: a locally-filed, unanchored fact
-                // writes the same shape it always did. The DATA move (pre-KH
-                // sourceDrawerID values into their correct columns) is
-                // deliberately NOT a schema operation — it needs the
-                // drawers/lineage evidence and per-class counting that live
-                // in KGFactIdentityBackfill, run only by `mootx01 upgrade`.
-                Migration(fromVersion: 12, toVersion: 13, operations: [
+                    // v13: the kg_facts identity trio, NOT NULL DEFAULT '' so a
+                    // locally-filed, unanchored fact writes the shape it always
+                    // did. The DATA move (pre-KH sourceDrawerID values into
+                    // these columns) is KGFactIdentityBackfill, run only by
+                    // `mootx01 upgrade`, never a schema operation.
                     .addColumn(table: "kg_facts", column: ColumnDeclaration(
                         name: "addedBy", type: .text, nullable: false, defaultValue: .text(""))),
                     .addColumn(table: "kg_facts", column: ColumnDeclaration(
                         name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text(""))),
                     .addColumn(table: "kg_facts", column: ColumnDeclaration(
                         name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text(""))),
-                ]),
-                // v14: idx_drawers_filedAt — the Director recall path sorts by
-                // `filedAt DESC LIMIT 256` without an index, forcing SQLite to
-                // sort all ~53,000 rows before truncating. One index turns the
-                // sort into a 256-entry index walk.
-                Migration(fromVersion: 13, toVersion: 14, operations: [
+                    // v14: idx_drawers_filedAt — the Director recall path sorts
+                    // by `filedAt DESC LIMIT 256`; without the index SQLite
+                    // sorts every row before truncating.
                     .addIndex(IndexDeclaration(
                         name: "idx_drawers_filedAt",
                         table: "drawers",
                         columns: ["filedAt"])),
-                ]),
-                // v14 → v15: recall_trace lane-attribution trio (W2.5 Track
-                // R(a)). All three nullable TEXT, no backfill — NULL IS the
-                // honest value for rows written before attribution existed,
-                // and the optimizer's trace aggregation skips NULL-attribution
-                // rows. Without the addColumns, a pre-v15 estate hits
-                // "no such column" on the first attributed trace write after
-                // the daemon binary upgrades (same failure mode as v8 → v9).
-                Migration(fromVersion: 14, toVersion: 15, operations: [
+                    // v15: recall_trace lane-attribution trio. Nullable TEXT,
+                    // no backfill — NULL is the honest value for rows written
+                    // before attribution existed; no query text is stored
+                    // (privacy ruling 2026-08-20).
                     .addColumn(table: "recall_trace", column: .text("door", nullable: true)),
                     .addColumn(table: "recall_trace", column: .text("composition", nullable: true)),
                     .addColumn(table: "recall_trace", column: .text("laneRanks", nullable: true)),
-                ]),
-                // v15 → v16: add adornment TEXT nullable to drawers.
-                // That column is retained physically in the drawers table from
-                // v17 onward — it is a dead column (no LocusKit code reads or
-                // writes it after ADORN-STORE-02). SQLite cannot DROP COLUMN
-                // without a full table rebuild, so the column is preserved and
-                // left NULL. Populated estates that had adornment text in this
-                // column have it migrated into the adornments table by the
-                // `mootx01 upgrade` step (the sole migration vehicle).
-                // PersistenceKit replay discipline: addColumn is idempotent —
-                // re-opening a pre-v16 estate replays this migration safely.
-                // Rust port: never replays addColumn by convention; the schema
-                // CREATE TABLE gains the column instead.
-                Migration(fromVersion: 15, toVersion: 16, operations: [
-                    .addColumn(table: "drawers", column: .text("adornment", nullable: true)),
-                ]),
-                // v16 → v17 (ADORN-STORE-02, 2026-08-25): create the normalised
-                // adornment tables.
-                //
-                // Implementation: CREATE TABLE IF NOT EXISTS via .custom SQL
-                // because PersistenceKit's SchemaDeclaration CREATE TABLE path
-                // is not idempotent for tables that did not exist at schema open
-                // time on an already-opened v16 estate. The IF NOT EXISTS guard
-                // is the idempotence contract — re-running on an already-migrated
-                // estate is a safe no-op.
-                //
-                // Rust port: schema.rs gains the CREATE TABLE directly in the
-                // fresh-estate path; the migration step uses the same IF NOT
-                // EXISTS guard so fresh estates and upgraded estates both end up
-                // with the tables present.
-                //
-                // INTENTIONALLY no FK enforcement at the SQL level: SQLite FK
-                // enforcement requires PRAGMA foreign_keys = ON per connection;
-                // the FK semantics are enforced at the LocusKit layer (expunge
-                // deletes adornment rows in the same transaction per the spec).
-                Migration(fromVersion: 16, toVersion: 17, operations: [
-                    .custom(
-                        sqlite: """
-                        CREATE TABLE IF NOT EXISTS "adornment_minters" (
-                            "id" TEXT NOT NULL,
-                            "name" TEXT NOT NULL,
-                            "family" TEXT NOT NULL,
-                            "model_id" TEXT NOT NULL,
-                            "model_version" TEXT NOT NULL,
-                            "prompt_digest" TEXT NOT NULL,
-                            "parameters" TEXT NOT NULL,
-                            "is_active" INTEGER NOT NULL,
-                            "ext" TEXT NULL,
-                            PRIMARY KEY ("id")
-                        )
-                        """,
-                        postgresql: """
-                        CREATE TABLE IF NOT EXISTS "adornment_minters" (
-                            "id" TEXT NOT NULL,
-                            "name" TEXT NOT NULL,
-                            "family" TEXT NOT NULL,
-                            "model_id" TEXT NOT NULL,
-                            "model_version" TEXT NOT NULL,
-                            "prompt_digest" TEXT NOT NULL,
-                            "parameters" TEXT NOT NULL,
-                            "is_active" INTEGER NOT NULL,
-                            "ext" TEXT NULL,
-                            PRIMARY KEY ("id")
-                        )
-                        """
-                    ),
-                    .custom(
-                        sqlite: """
-                        CREATE TABLE IF NOT EXISTS "adornments" (
-                            "drawer_id" TEXT NOT NULL,
-                            "minter_id" TEXT NOT NULL,
-                            "text" TEXT NOT NULL,
-                            PRIMARY KEY ("drawer_id", "minter_id")
-                        )
-                        """,
-                        postgresql: """
-                        CREATE TABLE IF NOT EXISTS "adornments" (
-                            "drawer_id" TEXT NOT NULL,
-                            "minter_id" TEXT NOT NULL,
-                            "text" TEXT NOT NULL,
-                            PRIMARY KEY ("drawer_id", "minter_id")
-                        )
-                        """
-                    ),
-                ]),
-                // v17 → v18 (2026-09-03): add distilled_source_digest TEXT
-                // nullable to drawers — the SHA-256 of the complete original
-                // content the stored representation was rendered from. NULL on
-                // every pre-v18 row, which is exactly the "stale by definition"
-                // signal the representation-currency rule keys on; the next
-                // sweep regenerates those rows and populates the digest. No
-                // backfill here: the digest is only meaningful alongside a
-                // representation rendered from the same content.
-                // PersistenceKit replay discipline: addColumn is idempotent in
-                // both ports — re-opening a v17 estate replays this safely, and
-                // GeniusLocusKit's estate-format 1.3 capsule replays this same
-                // ladder before stamping populated estates.
-                Migration(fromVersion: 17, toVersion: 18, operations: [
-                    .addColumn(table: "drawers", column: .text("distilled_source_digest", nullable: true)),
+                    // v19: the span-encoder registry. CREATE TABLE IF NOT EXISTS
+                    // through .custom (the same idiom the v17 tables used) so
+                    // the hop is a no-op when the declared-table pass has
+                    // already created it; sqlite and postgresql strings are
+                    // identical. Mirrors `encoderModelsTable`.
+                    .custom(sqlite: encoderModelsDDL, postgresql: encoderModelsDDL),
+                    // v19: ssc_facts — NULL on every existing row, which is the
+                    // enrichment stage's "needs facts" predicate; no backfill.
+                    .addColumn(table: "drawers", column: .text("ssc_facts", nullable: true)),
                 ]),
             ]
         )
@@ -474,30 +312,20 @@ public enum LocusKitSchema {
             // it and treats a NULL/malformed value at read time as a
             // fail-loud LocusKitError, not a silent fallback.
             .blob("content_fingerprint", nullable: true),
-            // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
-            // A dense parallel rendering of `content` — a VIEW of this
-            // row, not an item — plus its converter ID, approximate token
-            // count, generation instant, and (declared last, below) the
-            // source digest. The five columns are NULL together or populated
-            // together (one atomic UPDATE via
-            // DrawerStore.setDistilledRepresentation); every write that
-            // touches `content` NULLs all five in the same statement (§7.3
-            // regeneration trigger + erasure scrub).
-            // NULL `distilled` is the sweep-eligibility predicate.
-            // Landed in the v1 declaration with no migration ladder per
-            // this file's design note — the 1.1.x schema is fluid (no
-            // estate data has shipped); the frozen-1.0.x migration is a
-            // separate later mission (SPEC Appendix A). Excluded from the
-            // content digest/revision that feed the index pipeline (§9).
-            .text("distilled", nullable: true),
-            .text("distilled_pipeline_version", nullable: true),
-            .int("distilled_token_count", nullable: true),
-            // TEXT ISO8601 per the fleet date rule (timestamp column type).
-            .timestamp("distilled_at", nullable: true),
+            // SSC facts (Encoder Rerank Program §6): the grammar-v1 fact
+            // anchors of `content` as inner text without the `(*[` `]*)`
+            // delimiters, pairs comma-separated (`kind: hobby, entity:
+            // painting, place: brazil`). NULL when the content has no fact
+            // anchors, and NULL after every content write — the statement
+            // that bumps content_hash clears it — which is the enrichment
+            // stage's "needs facts" predicate. Written by
+            // `DrawerStore.setSSCFacts(_:for:)`; read into the BM25 document
+            // (SSCFacts.lexicalSupplement) and the candidate row. A plain
+            // `drawers` column, so it rides the sync manifest unchanged.
+            .text("ssc_facts", nullable: true),
             // Subject trio (progressive recall PR-01): the one-sentence
-            // AI-facing summary of this drawer's content. Same lifecycle
-            // contract as the distilled quad above — the three columns are
-            // NULL together or populated together (one atomic UPDATE via
+            // AI-facing summary of this drawer's content. The three columns
+            // are NULL together or populated together (one atomic UPDATE via
             // DrawerStore.setSubjectRepresentation); every write that
             // touches `content` NULLs all three in the same statement
             // (regeneration trigger + erasure scrub). NULL `subject` is
@@ -512,31 +340,6 @@ public enum LocusKitSchema {
             .text("subject", nullable: true),
             .text("subject_pipeline_version", nullable: true),
             .timestamp("subject_at", nullable: true),
-            // DEAD COLUMN (ADORN-STORE-02, v17): `adornment` is retained
-            // physically for zero-downtime migration safety. SQLite requires
-            // a full table rebuild to drop a column; the migration cost is
-            // not justified here because:
-            //   (a) The column is always NULL from v17 onward — no LocusKit
-            //       code reads or writes it.
-            //   (b) Legacy adornment text has been moved into the `adornments`
-            //       table by `mootx01 upgrade` before the v17 migration runs.
-            //   (c) Leaving it present costs ~0 bytes per row (NULL storage).
-            // External callers that previously read Drawer.adornment are
-            // updated in Parts B/C of ADORN-STORE-02. Bits 27-30 of
-            // operationalBitmap are likewise returned to the free pool.
-            .text("adornment", nullable: true),
-            // Distilled-source digest (v18): the SHA-256 hex of the complete
-            // original content the stored representation was rendered from
-            // — the fifth representation column, NULL together with the
-            // distilled quad. Written only by `setDistilledRepresentation`
-            // (the library digest of the content it distilled) and cleared
-            // by every content-touching write. Currency rule: a row is
-            // current iff `distilled_pipeline_version` equals the active
-            // converter id AND this digest equals the digest of `content`;
-            // NULL means stale by definition. Declared last so a populated
-            // estate's ALTER TABLE order matches a fresh CREATE TABLE.
-            // Mirrors the Rust drawers_table declaration.
-            .text("distilled_source_digest", nullable: true),
         ],
         primaryKey: ["id"],
         generatedColumns: [
@@ -1123,87 +926,85 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_nodes_parent_id", table: "nodes", columns: ["parent_id"]),
         IndexDeclaration(name: "idx_nodes_parent_lookup", table: "nodes", columns: ["parent_id", "lookup_name"]),
         IndexDeclaration(name: "idx_nodes_depth_lookup", table: "nodes", columns: ["depth", "lookup_name"]),
-        // adornments — query paths (ADORN-STORE-02):
-        //   by minter_id: active-adornment projection (join active minters),
-        //   by drawer_id: per-drawer adornment reads.
-        // The primary key (drawer_id, minter_id) already covers the
-        // (drawer_id, minter_id) lookup path; the minter_id index accelerates
-        // the "give me all adornments from minter X" scan used by the composer.
-        IndexDeclaration(name: "idx_adornments_minter_id", table: "adornments", columns: ["minter_id"]),
-        // adornment_minters — query path: active minters (is_active = 1).
-        // The full-table scan is fine for small minter tables (≤ 16 rows in
-        // practice), but the index keeps explain-plan output predictable.
-        IndexDeclaration(name: "idx_adornment_minters_active", table: "adornment_minters", columns: ["is_active"])
     ]
 
-    // MARK: - adornment_minters (ADORN-STORE-02)
+    // MARK: - encoder_models (Encoder Rerank Program §2)
 
-    /// Minter master table (LOCUSKIT_SPEC § ADORNMENT_STORE).
+    /// The span-encoder registry: one row per shipped encoder per device,
+    /// exactly one row with `is_active = 1` at a time. The active row is what
+    /// the recall stage and the span-encode duty read; `EncoderModelStore` is
+    /// the only writer (`upsert`, `activate`).
     ///
-    /// One row per registered adornment minter. The `id` is the opaque
-    /// stable identifier assigned by the caller at registration time.
-    /// `parameters` is a canonical JSON object with keys in lexical order
-    /// (serialized by the write path; read back and deserialized as-is).
-    /// `is_active` is the only mutable field — 1 = active, 0 = inactive.
-    /// `ext` is a forward-compat nullable JSON slot (fleet convention).
-    ///
-    /// A configuration change creates a NEW row; the existing row is never
-    /// overwritten (only `is_active` may be toggled). Zero, one, or many
-    /// rows MAY be active at runtime — the schema names no family seat count.
-    static let adornmentMintersTable = TableDeclaration(
-        name: "adornment_minters",
+    /// Column notes. `model_id` is `<model>-w<window_words>`: the span
+    /// window is part of the identity, so a different window is a different
+    /// index and is never compared. `model_version` is the weights revision;
+    /// a weights change is a new version and a re-index. `query_prefix` /
+    /// `doc_prefix` are "" when the model card has none. `pooling` is "mean"
+    /// or "cls". `tokenizer_hash` is the sha256 hex of the vendored vocab
+    /// file, checked at load. `overlap_divisor` 2 = half overlap (step =
+    /// window / 2). `max_spans` caps the spans per drawer (32). `max_sequence`
+    /// is the model's token limit. `is_active` is INTEGER per house style
+    /// (no Bool stored properties). `ext` is the fleet forward-compat slot.
+    static let encoderModelsTable = TableDeclaration(
+        name: "encoder_models",
         columns: [
-            .text("id"),
-            .text("name"),
-            .text("family"),
             .text("model_id"),
             .text("model_version"),
-            .text("prompt_digest"),
-            // Canonical JSON with keys in lexical order. TEXT type because
-            // SQLite's JSON1 extension is not universally present; the write
-            // path serializes and the read path deserializes as a plain string.
-            .text("parameters"),
-            // is_active: 1 = active, 0 = inactive. INTEGER per house-style
-            // (no Bool stored properties); decoded by computed accessors.
+            .int("dim"),
+            .text("query_prefix"),
+            .text("doc_prefix"),
+            .text("pooling"),
+            .text("tokenizer_hash"),
+            .int("window_words"),
+            .int("overlap_divisor"),
+            .int("max_spans"),
+            .int("max_sequence"),
+            // is_active: 1 = the configured model on this device, 0 = shipped
+            // but idle. INTEGER per house style; decoded by a computed Bool.
             ColumnDeclaration(name: "is_active", type: .int, nullable: false,
                               defaultValue: .int(0)),
-            // Forward-compat JSON slot (fleet convention).
             .json("ext", nullable: true),
         ],
-        primaryKey: ["id"]
+        primaryKey: ["model_id"]
     )
 
-    // MARK: - adornments (ADORN-STORE-02)
+    /// The `encoder_models` DDL the v10 → v19 hop issues (sqlite and
+    /// postgresql identical). Column for column the same shape as
+    /// `encoderModelsTable`; kept as text so the migration is a plain
+    /// CREATE TABLE IF NOT EXISTS, idempotent against the declared-table
+    /// pass that runs before the ladder.
+    static let encoderModelsDDL = """
+        CREATE TABLE IF NOT EXISTS "encoder_models" (
+            "model_id"        TEXT NOT NULL,
+            "model_version"   TEXT NOT NULL,
+            "dim"             INTEGER NOT NULL,
+            "query_prefix"    TEXT NOT NULL,
+            "doc_prefix"      TEXT NOT NULL,
+            "pooling"         TEXT NOT NULL,
+            "tokenizer_hash"  TEXT NOT NULL,
+            "window_words"    INTEGER NOT NULL,
+            "overlap_divisor" INTEGER NOT NULL,
+            "max_spans"       INTEGER NOT NULL,
+            "max_sequence"    INTEGER NOT NULL,
+            "is_active"       INTEGER NOT NULL DEFAULT 0,
+            "ext"             TEXT NULL,
+            PRIMARY KEY ("model_id")
+        )
+        """
+}
 
-    /// Per-(drawer, minter) adornment text table (LOCUSKIT_SPEC § ADORNMENT_STORE).
-    ///
-    /// Composite primary key `(drawer_id, minter_id)` permits at most one
-    /// adornment per (Drawer, minter) pair and many minters per Drawer.
-    /// Only the two compact references and the generated text are stored;
-    /// Drawer content, subject, and minter metadata live in their owning
-    /// rows.
-    ///
-    /// Physical deletion policy (LOCUSKIT_SPEC § ADORNMENT_STORE active set
-    /// and debt):
-    ///   - Expunging a drawer deletes ALL its adornment rows in the same
-    ///     transaction (LocusKit layer enforcement; no DB-level cascade).
-    ///   - Deactivating a minter does NOT delete adornment rows — they remain
-    ///     readable via `adornments(drawerID:)` but excluded from the active
-    ///     projection `activeAdornments(drawerIDs:)`.
-    ///   - Superseding a drawer starts bare: the predecessor's adornment rows
-    ///     are deleted in the same transaction as the supersession capture.
-    static let adornmentsTable = TableDeclaration(
-        name: "adornments",
-        columns: [
-            // drawer_id is TEXT, not UUID, matching drawers.id which is
-            // stored as a UUID string (TEXT column per drawers table).
-            .text("drawer_id"),
-            // minter_id is TEXT, the opaque id from adornment_minters.id.
-            .text("minter_id"),
-            // The generated adornment text. Length-bounded by
-            // ADORNMENT_MAX_LENGTH at mint time; stored verbatim here.
-            .text("text"),
-        ],
-        primaryKey: ["drawer_id", "minter_id"]
-    )
+/// What `mootx01 upgrade` does with an estate whose LocusKit ledger row
+/// carries a given stored version (`LocusKitSchema.upgradePath(storedVersion:)`).
+/// Mirrors Rust `schema::SchemaUpgradePath`.
+public enum SchemaUpgradePath: Equatable, Sendable {
+    /// No ledger row (0): a fresh estate; opening creates the v19 layout.
+    case fresh
+    /// The supported floor (10): opening applies the single v10 → v19 hop.
+    case upgrade(from: Int)
+    /// Already at the current version: nothing to apply.
+    case current
+    /// Any other version. Newer than this build, or an EE development
+    /// version (11–18) that only the surgery script moves. Refuse before the
+    /// schema is opened, naming the version found.
+    case unsupported(found: Int)
 }

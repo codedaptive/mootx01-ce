@@ -82,7 +82,7 @@ struct ConsolidationCycleTests {
         "The telescope needs a new focuser knob. Jupiter rises after midnight this week. Collimation drifts in cold air.",
     ]
 
-    /// Full pipeline to a consolidated estate: capture → distill (fingerprints)
+    /// Full pipeline to a consolidated estate: capture → fingerprint lane
     /// → consolidation sweep 91 days later. Returns (kit, handle, aged now).
     private func consolidatedEstate() async throws
         -> (GeniusLocusKit, EstateHandle, [String], Date, Int)
@@ -96,8 +96,7 @@ struct ConsolidationCycleTests {
             _ = try await captureItem(body: body, kit: kit, handle: handle)
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -148,8 +147,7 @@ struct ConsolidationCycleTests {
             _ = try await captureItem(body: body, kit: kit, handle: handle)
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let produced = try await kit.consolidationSweep(
             handle: handle,
             distillFn: GeniusLocusKit.defaultDistillFn,
@@ -165,8 +163,7 @@ struct ConsolidationCycleTests {
             ids.append(try await captureItem(body: body, kit: kit, handle: handle))
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         // Trace one cluster member as recalled INSIDE the quiet window: the
         // cluster drops below D5 and nothing consolidates.
@@ -233,9 +230,7 @@ struct ConsolidationCycleTests {
         let fifthID = try await captureItem(
             body: "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria still owns the Falcon rollout checklist.",
             kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
-            now: aged.addingTimeInterval(3_600), limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: aged.addingTimeInterval(3_600))
 
         // …and ages past the gate before the next maintenance window.
         let aged2 = aged.addingTimeInterval(92 * 86_400)

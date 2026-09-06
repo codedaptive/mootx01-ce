@@ -1,3 +1,6 @@
+#if APPLE_ENCODERS
+// Apple encoder provider — compiled only when the AppleEncoders trait is on.
+// Off by default; held for v1.2 iOS and Apple cloud compute. See Package.swift.
 // NLContextualEmbeddingProvider.swift
 //
 // Apple NaturalLanguage contextual (transformer) embedding provider.
@@ -271,3 +274,5 @@ public struct NLContextualEmbeddingProvider: EmbeddingProvider, Sendable {
     }
 }
 #endif // canImport(NaturalLanguage)
+
+#endif // APPLE_ENCODERS

@@ -13,7 +13,6 @@ pub mod db;
 pub mod codex_memory;
 pub mod drain;
 pub mod dream;
-pub mod redistill;
 /// `enable`/`disable` feature toggles and `hook-capture` entry point.
 pub mod enable;
 /// Harness Memory Mode — routes Claude Code project-memory writes into the
@@ -27,6 +26,8 @@ pub mod serve;
 pub mod status;
 pub mod uninstall;
 pub mod upgrade;
+/// The span-encode batch function `upgrade` runs until the NeuronKit duty lands.
+pub mod span_encode_backfill;
 /// out-of-band sensitivity grants unlock/lock commands (password-based, Rust/Linux/Windows path).
 pub mod unlock;
 
@@ -49,7 +50,6 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
         Command::Drain { db } => drain::run(db),
         Command::Dream { db } => dream::run(db),
-        Command::Redistill { db, dry_run } => redistill::run(db, dry_run),
         Command::Upgrade { from, check, yes, no_restart, converge_only, backfill_only } => {
             upgrade::run(from, check, yes, no_restart, converge_only, backfill_only)
         }

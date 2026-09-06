@@ -1,3 +1,6 @@
+#![cfg(feature = "dense-families")]
+// Dense-family test — compiled only when --features dense-families.
+// Off by default (plan 70BC55F3, 2026-09-05). See Cargo.toml.
 //! Regression tests for the stale-vectors defect (finding D).
 //!
 //! The invariant: after `finalize()` the ppmi_vectors map must exactly

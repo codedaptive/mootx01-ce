@@ -64,6 +64,9 @@ use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
 use corpus_kit::index_composition_policy::IndexCompositionPolicy;
+use corpus_kit::encoder::{EncoderModelSpec, SpanEncoder};
+use corpus_kit_providers::SpanEncoderFactory;
+use crate::encoder_activation::{ModelDirectoryResolving, NilModelDirectoryResolver};
 use corpus_kit::{
     CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
@@ -1164,6 +1167,22 @@ pub struct EstateCoordinator {
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
     /// accessor that would expose the type externally.
     pub(crate) vector_stores: HashMap<EstateHandle, Arc<VectorStore>>,
+    /// Per-estate span encoder for the recall rerank stage and the `spanEncode`
+    /// duty. Populated by `activate_span_encoder` when the estate's
+    /// `embedding_provider` is `"encoder"` and the model loads; absent
+    /// otherwise (lexical-only recall). Removed on close. Mirrors Swift
+    /// `GeniusLocusKit.spanEncoders`.
+    pub(crate) span_encoders: HashMap<EstateHandle, Arc<dyn SpanEncoder>>,
+    /// Where encoder model directories live on this device. The bundling
+    /// unit installs the production resolver via `set_model_directory_resolver`;
+    /// the default answers `None` for every model id. Mirrors Swift
+    /// `GeniusLocusKit.modelDirectoryResolver`.
+    model_directory_resolver: Box<dyn ModelDirectoryResolving>,
+    /// Per-estate span rerank seams (encoder + span rows + head), registered by
+    /// `register_span_rerank`. Absent ⇒ the UnionBest lane skips the span
+    /// rerank stage (lexical-only, contract sheet §7). Mirrors Swift
+    /// `spanRerankSources`.
+    span_rerank_sources: HashMap<EstateHandle, Arc<crate::span_rerank::SpanRerankSource>>,
     /// Per-estate mount state. Set to `Mounted` on open, updated by quiesce/drain,
     /// removed on close. Mirrors Swift actor's `mountStates: [EstateHandle: EstateMountState]`.
     mount_states: HashMap<EstateHandle, EstateMountState>,
@@ -1331,11 +1350,13 @@ impl Default for EstateCoordinator {
 
 /// A read-only status snapshot of one long-running background drain.
 ///
-/// The substrate reports TWO drains: `"corpus_encode"` (the
-/// `corpus_ingest_queue` worker, which encodes captured/imported text into the
-/// BM25 + vector lanes asynchronously) and `"distillation"` (the
-/// SPEC_DISTILLATION_STORAGE §7.1 accounting surface — `pending` is the
-/// row-level eligibility-predicate count, `in_flight` always 0).
+/// The substrate reports `"corpus_encode"` (the `corpus_ingest_queue`
+/// worker, which encodes captured/imported text into the BM25 + vector lanes
+/// asynchronously and runs the encode rider before each job replies),
+/// `"dreaming"` (the persistent dreaming queue's depth), and the rider-gated
+/// row-eligibility lanes `"subject_backfill"` and `"span_encode"`. There is
+/// no distillation drain: the distilled rendering is computed inline at read
+/// time, so no row ever owes one.
 /// `EstateCoordinator::drain_statuses` returns a `Vec<DrainStatus>` so that
 /// when additional drains are added later, each appends its own entry and the
 /// report surfaces all of them with no wire reshape. The list is built from
@@ -1428,12 +1449,10 @@ impl DrainStatus {
     /// Deliberately ignores every drain except "corpus_encode" — the T5
     /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
     /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
-    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
-    /// stream, the "distillation" entry also settles under a normal drain
-    /// (every enqueued drawer distills via the drain-stage rider before its
-    /// job replies); the gate stays encode-only anyway so the finisher's
-    /// lease tenure is bounded by its own queue, not by any other lane's
-    /// accounting. Mirrors Swift `DrainStatus.encodeSettled`.
+    /// The gate stays encode-only so the finisher's lease tenure is bounded
+    /// by its own queue, not by any other lane's accounting (the subject and
+    /// span-encode lanes are row-eligibility counts that can be non-zero
+    /// without anything enqueued). Mirrors Swift `DrainStatus.encodeSettled`.
     pub fn encode_settled(statuses: &[DrainStatus]) -> bool {
         !statuses
             .iter()
@@ -1454,6 +1473,9 @@ impl EstateCoordinator {
             derived_rebuild_depth: std::collections::HashMap::new(),
             subject_producers: HashMap::new(),
             vector_stores: HashMap::new(),
+            span_encoders: HashMap::new(),
+            model_directory_resolver: Box::new(NilModelDirectoryResolver),
+            span_rerank_sources: HashMap::new(),
             mount_states: HashMap::new(),
             audit_logs: HashMap::new(),
             matrix_tiers: HashMap::new(),
@@ -1917,6 +1939,8 @@ impl EstateCoordinator {
         }
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        self.span_encoders.remove(handle);
+        self.span_rerank_sources.remove(handle);
         // Derived-rebuild span depth (moot_rebuild_status): plain counter,
         // no worker to tear down — remove so a reopened same-estate handle
         // never inherits a stale span.
@@ -2036,21 +2060,67 @@ impl EstateCoordinator {
         self.vector_stores.insert(*handle, store);
     }
 
-    /// Install the registered Corpus's `on_encoded` drain-stage rider for
-    /// `handle`: (1) room rollup, (2) drain-stage distillation of each
-    /// newly-encoded eligible drawer (SPEC_DISTILLATION_STORAGE §7.1 —
-    /// "a fully drained estate is a fully distilled estate"), (3) dense
-    /// recompose over the fresh distillate (Stream F), and (4) the A2
-    /// encode-completion audit marker. Mirrors Swift
-    /// `wireCorpusRoomRollup` (EncodeIntake.swift), which Swift installs on
-    /// BOTH the provision path and the serve-open path (`wireGLKSubstores`).
+    /// Register a `SpanEncoder` for `handle` so the recall rerank stage and
+    /// the `spanEncode` duty read the same instance. Re-registering replaces
+    /// the entry; `close` drops it. Mirrors Swift
+    /// `GeniusLocusKit.registerSpanEncoder(_:for:)`.
+    pub fn register_span_encoder(&mut self, handle: &EstateHandle, encoder: Arc<dyn SpanEncoder>) {
+        self.span_encoders.insert(*handle, encoder);
+    }
+
+    /// The `SpanEncoder` registered for `handle`, or `None` when the estate
+    /// was not provisioned with `"encoder"` or activation failed (see
+    /// `activate_span_encoder`). Mirrors Swift
+    /// `GeniusLocusKit.registeredSpanEncoder(for:)`.
+    pub fn registered_span_encoder(&self, handle: &EstateHandle) -> Option<Arc<dyn SpanEncoder>> {
+        self.span_encoders.get(handle).cloned()
+    }
+
+    /// Install the model-directory resolver used by every later activation.
+    /// The bundling unit calls this once at daemon start; tests inject a
+    /// scratch-directory resolver. Mirrors Swift
+    /// `GeniusLocusKit.setModelDirectoryResolver(_:)`.
+    pub fn set_model_directory_resolver(&mut self, resolver: Box<dyn ModelDirectoryResolving>) {
+        self.model_directory_resolver = resolver;
+    }
+
+    /// Register the span rerank seams for `handle` (Encoder Rerank Program,
+    /// contract sheet §7/§8): the query-side encoder built from the active
+    /// `encoder_models` row, the span-row reader (the estate's SynapseKit
+    /// store), and the head size (`encoder_head`, default
+    /// `span_rerank::DEFAULT_ENCODER_HEAD`). The UnionBest lane runs the span
+    /// rerank stage only while a source is registered; the lifecycle registers
+    /// one when the manifest key `embedding_provider` is `"encoder"` and the
+    /// model loaded, and registers nothing when the model is unavailable, so an
+    /// estate without an encoder recalls lexical-only with no error.
+    /// Re-registering replaces the existing entry; `close` drops it. Mirrors
+    /// Swift `GeniusLocusKit.registerSpanRerank(_:spanVectors:head:for:)`.
+    pub fn register_span_rerank(
+        &mut self,
+        handle: &EstateHandle,
+        encoder: Arc<dyn crate::span_rerank::SpanRerankEncoding>,
+        span_vectors: Arc<dyn crate::span_rerank::SpanVectorReading>,
+        head: usize,
+    ) {
+        self.span_rerank_sources.insert(
+            *handle,
+            Arc::new(crate::span_rerank::SpanRerankSource { encoder, store: span_vectors, head: head.max(1) }),
+        );
+    }
+
+    /// Install the registered Corpus's `on_encoded` encode rider for
+    /// `handle`: (1) room rollup, (2) the structural fingerprint lane entry
+    /// for each encoded drawer (`brain::fingerprint_lane`), and (3) the A2
+    /// encode-completion audit marker. Mirrors Swift `wireCorpusRoomRollup`
+    /// (EncodeIntake.swift), which Swift installs on BOTH the provision path
+    /// and the serve-open path (`wireGLKSubstores`). Every step is
+    /// best-effort: the drawer rows and the corpus index are durable, and a
+    /// failed rider step is repeated on the drawer's next encode.
     ///
     /// Call AFTER `register_corpus` / `register_vector_store` and BEFORE any
     /// eager `mount_ingest_queue` that could resume a persisted encode
     /// backlog — the resumed batches must find the rider already installed
-    /// or they encode without distilling (the serve-parity defect this seam
-    /// closes: a served Rust estate held `distillation: pending N` forever
-    /// while the Swift serve converged to idle unattended).
+    /// or they encode without the rider's work.
     ///
     /// No-op when no Corpus or no estate is registered for the handle
     /// (LocusOnly estates run no encode drain). Idempotent: `set_on_encoded`
@@ -2063,25 +2133,20 @@ impl EstateCoordinator {
             return;
         };
         // Capture cheap clones (Arc-backed, Send+Sync) so the Corpus drain
-        // worker's callback can distill and recompose without re-entering
-        // the coordinator (the worker thread must never take the
-        // coordinator lock — the drain can run while a tool call holds it).
-        // Weak: the callback is stored ON the engine, so a strong clone here
-        // would make the engine own itself and outlive every host reference,
-        // its drain worker with it. The callback runs inside the engine's own
-        // drain pass, so the upgrade below succeeds whenever it matters.
-        let corpus_for_callback = Arc::downgrade(&corpus);
-        // VectorStore for the fingerprint lane (§8); may be absent — the
-        // representation columns are still written (lane dark, matching the
-        // estate's semantic-tier wiring).
+        // worker's callback can write the lane without re-entering the
+        // coordinator (the worker thread must never take the coordinator
+        // lock — the drain can run while a tool call holds it). The callback
+        // is stored ON the engine, so it holds no engine reference of its own.
+        // VectorStore for the fingerprint lane; may be absent (lane dark,
+        // matching the estate's semantic-tier wiring).
         let vector_store_for_callback = self.vector_stores.get(handle).cloned();
         corpus.set_on_encoded(move |drawer_ids, unit_session_id| {
             // Marker timestamp is captured at CALLBACK ENTRY — the
             // moment the drain unit's encode work completed — never
-            // after rollup or distillation, so the A2 marker anchors
-            // on encode-end in BOTH ports (the C3 INGEST derivation
-            // depends on this alignment; Swift twin captures its
-            // encodeCompletedAt at the same boundary).
+            // after the rollup or the fingerprint writes, so the A2
+            // marker anchors on encode-end in BOTH ports (the C3 INGEST
+            // derivation depends on this alignment; Swift twin captures
+            // its encodeCompletedAt at the same boundary).
             let encode_completed_at_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -2090,19 +2155,13 @@ impl EstateCoordinator {
             // (1) Room-rollup — always best-effort.
             let _ = estate.rollup_rooms_for_drawers(drawer_ids);
 
-            // (2) Drain-stage distillation + (3) dense recompose.
-            // The wall clock at drain time is the process boundary
-            // where `now` legitimately enters; `distilled_at` is
-            // audit-only (§4), so the epoch-millis timestamp here
-            // carries no behavioral weight. Mirrors Swift's use of
-            // `Date()` at the head of the on_encoded loop.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-
+            // (2) Structural fingerprint lane: one `distillation-features-v1`
+            // entry per encoded drawer, so the drawer is reachable by the
+            // fingerprint recall lane and by consolidation's cluster
+            // detection from the moment it is searchable in the corpus.
+            // Stamped with the encode-completion instant, the same clock
+            // the marker below carries. Swift parity: wireCorpusRoomRollup.
             for drawer_id in drawer_ids {
-                // Fetch the current drawer row.
                 let drawer = match estate.drawer_by_id(drawer_id) {
                     Ok(Some(d)) => d,
                     _ => continue,
@@ -2110,38 +2169,15 @@ impl EstateCoordinator {
                 if drawer.content.is_empty() {
                     continue;
                 }
-                // Eligibility: the one currency rule — a freshly encoded
-                // drawer normally carries no representation; one that does
-                // is regenerated only when its converter ID or source
-                // digest is stale.
-                if crate::distilled_representation_is_current(&drawer) {
-                    continue;
-                }
-
-                // Distillation through the shared seam — the
-                // same call tree `distill_items_sweep` and the
-                // seeding path take.
-                if EstateCoordinator::distill_item(
-                    &estate,
+                crate::brain::fingerprint_lane::write_structural_fingerprint(
                     vector_store_for_callback.as_ref(),
                     &drawer.id,
                     &drawer.content,
-                    now_ms,
-                ) {
-                    // (3) Dense-over-distillate (Stream F): recompose
-                    // the dense float vector from the new distillate.
-                    // The idempotence gate keys on content digest (not
-                    // on dense_composition_text), so a normal index
-                    // call would be skipped — recompose_dense_vector
-                    // passes force=true to bypass it.
-                    // Swift parity: on_encoded in wireCorpusRoomRollup.
-                    if let Some(corpus) = corpus_for_callback.upgrade() {
-                        let _ = corpus.recompose_dense_vector(&drawer.id, now_ms);
-                    }
-                }
+                    encode_completed_at_ms,
+                );
             }
 
-            // (4) A2 encode-completion audit marker: exactly one
+            // (3) A2 encode-completion audit marker: exactly one
             // per drain unit, anchored on the unit's first drawer,
             // carrying the queue session id and row count in the
             // reason column. Flag-gated ON by default
@@ -2410,27 +2446,10 @@ impl EstateCoordinator {
             });
         }
 
-        // Drain 2 of N: distillation accounting (SPEC_DISTILLATION_STORAGE
-        // §7.1). Present on every estate — distillation is a row-level
-        // obligation, not a corpus feature. `pending` is the §7.1
-        // eligibility-predicate count measured off the rows themselves
-        // (stronger than a queue-depth proxy; also covers lazy
-        // regeneration after a pipeline-version bump). "Fully drained"
-        // therefore cannot read true while any row still owes a
-        // representation (FINDING_11X_MAINTENANCE_WALK constraint 6).
+        // No distillation lane: the distilled rendering is computed inline at
+        // read time (Encoder Rerank contract sheet §9), so no row owes one.
         // Mirrors the Swift drainStatuses entry.
         let estate = self.estate_for(handle)?;
-        let undistilled = estate
-            .count_undistilled(crate::distillation_converter_id())
-            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                reason: format!("count_undistilled: {e:?}"),
-            })?;
-        statuses.push(DrainStatus {
-            name: "distillation".to_string(),
-            pending: undistilled,
-            in_flight: 0,
-            detail: Some(format!("converter: {}", crate::distillation_converter_id())),
-        });
 
         // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
         // the queue is MOUNTED (absent ≠ 0 — same honesty rule as the corpus
@@ -2583,7 +2602,7 @@ impl EstateCoordinator {
     // handle that slipped through) is treated as Mounted so existing callers are
     // not broken by a missing-map entry. The not-open check runs after the quiesce
     // gate so a quiesced estate produces EstateQuiesced, not EstateNotOpen.
-    fn estate_for_verb(&self, handle: &EstateHandle) -> Result<&Estate, VerbDispatchError> {
+    pub(crate) fn estate_for_verb(&self, handle: &EstateHandle) -> Result<&Estate, VerbDispatchError> {
         match self.mount_states.get(handle) {
             Some(EstateMountState::Quiesced) | Some(EstateMountState::Draining) => {
                 return Err(VerbDispatchError::EstateQuiesced {
@@ -2683,9 +2702,16 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<Drawer, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate
+        let drawer = estate
             .capture(frame, now)
-            .map_err(|e| remap("capture", &uuid_to_str(&handle.estate_uuid), e).into())
+            .map_err(|e| remap("capture", &uuid_to_str(&handle.estate_uuid), e))?;
+        // SSC facts (contract sheet §6) ride every content write: written
+        // right after the row lands and before any encode reads the column,
+        // because the corpus adapter composes the BM25 document from it.
+        // Every capture path (mode-aware, importers, seeding) funnels through
+        // this verb, so this is the one door for the facts write.
+        crate::intake::write_ssc_facts(estate, &drawer);
+        Ok(drawer)
     }
 
     // MARK: - capture_batch
@@ -2835,6 +2861,35 @@ impl EstateCoordinator {
         let result = estate.capture_batch(classified, now);
         match result {
             Ok(drawers) => {
+                // SSC facts (contract sheet §6) for every imported drawer,
+                // inside the same transaction and before the caller's
+                // `moot_reindex` builds the BM25 documents from the column.
+                // The facts are a pure function of content, so they are
+                // computed with the same fan-out as the classify pass above.
+                let facts: Vec<Option<String>> = if drawers.len() <= cap {
+                    drawers.iter().map(|d| crate::brain::enrichment_stage::facts(&d.content)).collect()
+                } else {
+                    let mut out: Vec<Option<String>> = Vec::with_capacity(drawers.len());
+                    for chunk in drawers.chunks(cap) {
+                        let chunk_out: Vec<Option<String>> = std::thread::scope(|scope| {
+                            let handles: Vec<_> = chunk
+                                .iter()
+                                .map(|d| scope.spawn(|| crate::brain::enrichment_stage::facts(&d.content)))
+                                .collect();
+                            handles.into_iter().map(|h| h.join().expect("facts worker")).collect()
+                        });
+                        out.extend(chunk_out);
+                    }
+                    out
+                };
+                for (drawer, value) in drawers.iter().zip(facts.iter()) {
+                    if drawer.content.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = estate.set_ssc_facts(&drawer.id, value.as_deref()) {
+                        eprintln!("[glk] ssc_facts write failed for imported drawer {}: {e:?}", drawer.id);
+                    }
+                }
                 row_store.commit_transaction()
                     .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
                         verb: "captureBatch".to_string(),
@@ -3023,6 +3078,181 @@ impl EstateCoordinator {
                 reason: format!("provisioned_embedding_provider meta failed: {e:?}"),
             }))?;
         Ok(value)
+    }
+
+    // MARK: - Span encoder activation (embedding_provider = "encoder")
+
+    /// `embedding_provider` value that activates the span encoder. Mirrors
+    /// Swift `GeniusLocusKit.encoderProviderID`.
+    pub const ENCODER_PROVIDER_ID: &str = "encoder";
+
+    /// Manifest key: BM25 head size the rerank stage encodes (positive
+    /// integer as text). Mirrors Swift `GeniusLocusKit.encoderHeadMetaKey`.
+    pub const ENCODER_HEAD_META_KEY: &str = "encoder_head";
+
+    /// Manifest key: spans per inference batch in the duty (positive integer
+    /// as text). Mirrors Swift `GeniusLocusKit.encoderBatchMetaKey`.
+    pub const ENCODER_BATCH_META_KEY: &str = "encoder_batch";
+
+    /// Default `encoder_head` when the manifest carries none.
+    pub const DEFAULT_ENCODER_HEAD: usize = 30;
+
+    /// Default `encoder_batch` when the manifest carries none. The Rust port
+    /// never runs on iOS, so this is the desktop value (Swift uses 16 on iOS).
+    pub const DEFAULT_ENCODER_BATCH: usize = 64;
+
+    /// Store `encoder_head` on the estate manifest. Mirrors Swift
+    /// `GeniusLocusKit.provisionEncoderHead(_:for:)`.
+    pub fn provision_encoder_head(
+        &self,
+        handle: &EstateHandle,
+        head: usize,
+    ) -> Result<(), VerbDispatchError> {
+        self.set_positive_int_meta(handle, Self::ENCODER_HEAD_META_KEY, head, "provisionEncoderHead")
+    }
+
+    /// `encoder_head` from the manifest, or `DEFAULT_ENCODER_HEAD` when the
+    /// handle is stale, the key is absent, or the value is not a positive
+    /// integer. Mirrors Swift `GeniusLocusKit.provisionedEncoderHead(for:)`.
+    pub fn provisioned_encoder_head(&self, handle: &EstateHandle) -> usize {
+        self.positive_int_meta(handle, Self::ENCODER_HEAD_META_KEY)
+            .unwrap_or(Self::DEFAULT_ENCODER_HEAD)
+    }
+
+    /// Store `encoder_batch` on the estate manifest. Mirrors Swift
+    /// `GeniusLocusKit.provisionEncoderBatch(_:for:)`.
+    pub fn provision_encoder_batch(
+        &self,
+        handle: &EstateHandle,
+        batch: usize,
+    ) -> Result<(), VerbDispatchError> {
+        self.set_positive_int_meta(handle, Self::ENCODER_BATCH_META_KEY, batch, "provisionEncoderBatch")
+    }
+
+    /// `encoder_batch` from the manifest, or `DEFAULT_ENCODER_BATCH` when the
+    /// handle is stale, the key is absent, or the value is not a positive
+    /// integer. Mirrors Swift `GeniusLocusKit.provisionedEncoderBatch(for:)`.
+    pub fn provisioned_encoder_batch(&self, handle: &EstateHandle) -> usize {
+        self.positive_int_meta(handle, Self::ENCODER_BATCH_META_KEY)
+            .unwrap_or(Self::DEFAULT_ENCODER_BATCH)
+    }
+
+    /// Plain-text integer manifest write shared by the two encoder keys.
+    fn set_positive_int_meta(
+        &self,
+        handle: &EstateHandle,
+        key: &str,
+        value: usize,
+        verb: &str,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.set_meta(key, &value.to_string()).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: verb.to_string(),
+                reason: format!("{verb} set_meta failed: {e:?}"),
+            })
+        })
+    }
+
+    /// Fail-quiet positive-integer manifest read: a stale handle, an absent
+    /// key or a malformed value all yield `None` so a bad provision never
+    /// breaks an open.
+    fn positive_int_meta(&self, handle: &EstateHandle, key: &str) -> Option<usize> {
+        let estate = self.estate_for(handle).ok()?;
+        let raw = estate.meta(key).ok()??;
+        raw.trim().parse::<usize>().ok().filter(|v| *v > 0)
+    }
+
+    /// The active `encoder_models` row for `handle` as a CorpusKit spec; the
+    /// floor model when the registry holds no active row or the estate's
+    /// storage is not open (a stale handle never breaks an open). Mirrors
+    /// Swift `GeniusLocusKit.activeEncoderModelSpec(for:)`.
+    pub fn active_encoder_model_spec(&self, handle: &EstateHandle) -> EncoderModelSpec {
+        let Some(storage) = self.storages.get(handle) else {
+            return EncoderModelSpec::floor();
+        };
+        match locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage)).active() {
+            Ok(Some(row)) => crate::span_rerank::encoder_spec_from_row(&row),
+            _ => EncoderModelSpec::floor(),
+        }
+    }
+
+    /// Build and register the span encoder for `handle` from the active
+    /// registry row, applying the failure contract: a missing model directory,
+    /// a vocabulary hash mismatch or a load failure leaves the estate with NO
+    /// encoder, writes ONE stderr line, and returns nothing to the caller.
+    /// Recall then runs lexical-only. Mirrors Swift
+    /// `GeniusLocusKit.activateSpanEncoder(for:)`.
+    pub fn activate_span_encoder(&mut self, handle: &EstateHandle) {
+        let spec = self.active_encoder_model_spec(handle);
+        let Some(dir) = self.model_directory_resolver.model_dir_for(&spec.model_id) else {
+            eprintln!(
+                "mootx01 encoder: estate {} no model directory for {}; recall runs lexical-only",
+                uuid_to_str(&handle.estate_uuid),
+                spec.model_id
+            );
+            return;
+        };
+        let batch = self.provisioned_encoder_batch(handle);
+        match SpanEncoderFactory::make_with_batch(&spec, &dir, batch) {
+            Ok(encoder) => {
+                let encoder: Arc<dyn SpanEncoder> = Arc::from(encoder);
+                self.span_encoders.insert(*handle, Arc::clone(&encoder));
+                // The recall stage reads spans from the estate's VectorStore
+                // under the encoder's model id; without a registered store
+                // there is nothing to rerank against, so only the duty-side
+                // encoder stays. Mirrors Swift `activateSpanEncoder(for:)`.
+                if let Some(store) = self.vector_stores.get(handle).cloned() {
+                    let head = self.provisioned_encoder_head(handle);
+                    self.register_span_rerank(
+                        handle,
+                        Arc::new(crate::span_rerank::SpanEncoderQuerySeam(encoder)),
+                        Arc::new(crate::span_rerank::SynapseSpanVectorReader(store)),
+                        head,
+                    );
+                } else {
+                    eprintln!(
+                        "mootx01 encoder: estate {} no vector store registered; span rerank stage not registered",
+                        uuid_to_str(&handle.estate_uuid)
+                    );
+                }
+                eprintln!(
+                    "mootx01 encoder: estate {} activated {} from {}",
+                    uuid_to_str(&handle.estate_uuid),
+                    spec.model_id,
+                    dir.display()
+                );
+            }
+            Err(e) => eprintln!(
+                "mootx01 encoder: estate {} {} unavailable ({e}); recall runs lexical-only",
+                uuid_to_str(&handle.estate_uuid),
+                spec.model_id
+            ),
+        }
+    }
+
+    /// One `spanEncode` cycle for `handle` (contract sheet §10): the
+    /// registered encoder, the estate's VectorStore and the provisioned
+    /// `encoder_batch`, resolved here so the resident supplies only the
+    /// handle and the clock (`now_millis`, stamped on every span row). No
+    /// VectorStore registered → nothing to write → 0. Returns the number of
+    /// drawers encoded. Mirrors Swift `runSpanEncodeBatch(handle:now:)`.
+    pub fn run_span_encode_batch(&self, handle: &EstateHandle, now_millis: i64) -> Result<i64, String> {
+        let estate = self.estate_for(handle).map_err(|e| format!("{e:?}"))?;
+        let Some(store) = self.vector_stores.get(handle).cloned() else {
+            return Ok(0);
+        };
+        let encoder = self.span_encoders.get(handle).cloned();
+        let limit = self.provisioned_encoder_batch(handle);
+        let context = crate::brain::span_encode_duty::EstateSpanContext { estate };
+        let writer = crate::brain::span_encode_duty::VectorStoreSpanWriter { store, filed_at: now_millis };
+        let result = crate::brain::span_encode_duty::encode_batch_with(
+            &context,
+            encoder.as_deref(),
+            &writer,
+            limit,
+        )?;
+        Ok(result.encoded as i64)
     }
 
     // MARK: - Index composition policy (stored estate setting)
@@ -3249,55 +3479,40 @@ impl EstateCoordinator {
         Ok(counts)
     }
 
-    /// Read the provisioned `embedding_provider` manifest key and emit a
-    /// provenance line on stderr. Selection is intentionally omitted.
+    /// Read the provisioned `embedding_provider` manifest key and act on it.
     ///
-    /// ## Why Rust records provenance but selects nothing
+    /// `"encoder"` → `activate_span_encoder`: build the span encoder from the
+    /// active registry row and register it for the recall rerank stage and
+    /// the `spanEncode` duty (both ports; the Corpus ensemble is untouched).
     ///
-    /// ML embedding providers in this codebase are all Apple-platform-specific:
-    /// `NLEmbedding` (used by `AppleNLProvider`) is part of Apple's
-    /// `NaturalLanguage` framework, which is unavailable on Linux/Windows — the
-    /// Rust port's target platforms. The engine-neutral Rust backend for
-    /// `neural-embed-v1` exists as the standalone `tools/neural-embed` crate,
-    /// reached as an external subprocess seam, but it is not linked into any
-    /// product crate — kits remain zero-dependency.
+    /// Any other non-empty value → one provenance line on stderr and no
+    /// selection. Those ids name Apple-platform providers (`NaturalLanguage`),
+    /// unavailable on Linux/Windows; the parity ruling
+    /// (GENIUSLOCUSKIT_INTERFACE.md §1.53) keeps the key readable on both ports
+    /// so log correlation works and a silently-ignored selection can never
+    /// mislabel a benchmark arm.
     ///
-    /// The parity ruling (GENIUSLOCUSKIT_INTERFACE.md §1.53, EMBED-PROV-E2)
-    /// formalises this: Rust reads the key for manifest consistency and
-    /// provenance recording so log correlation across ports is possible, but
-    /// never instantiates a provider. The Rust ensemble is always the
-    /// configured `embedding_models` argument to `provision`.
-    ///
-    /// **Provenance contract:** when the key is present and non-empty, one
-    /// line is emitted to stderr per estate open: the model_id and the
-    /// estate UUID. This makes it impossible for a silently-ignored selection
-    /// to mislabel benchmark arms — the presence of the key is always visible
-    /// in logs regardless of whether the Rust port can honour it.
-    ///
-    /// Mirrors Swift `EstateLifecycle.applyProvisionedEmbeddingProvider` (provenance
-    /// path only — no return value because Rust never modifies the ensemble here).
-    pub fn apply_provisioned_embedding_provider(&self, handle: &EstateHandle) {
+    /// Mirrors Swift `EstateLifecycle.applyProvisionedEmbeddingProvider`.
+    pub fn apply_provisioned_embedding_provider(&mut self, handle: &EstateHandle) {
         // Fail-quiet: estate lookup errors here are non-fatal — the Corpus
         // construction that follows will also fail on a stale handle.
-        let Ok(estate) = self.estate_for(&handle) else { return };
-        // Read the key. Absent key (None) and empty string both mean
-        // "no provider provisioned" — emit nothing, just use the configured ensemble.
+        let Ok(estate) = self.estate_for(handle) else { return };
+        // Absent key (None) and empty string both mean "no provider
+        // provisioned" — emit nothing, just use the configured ensemble.
         let Ok(Some(model_id)) = estate.meta(Self::EMBEDDING_PROVIDER_META_KEY) else {
             return;
         };
         if model_id.is_empty() {
             return;
         }
-        // Emit provenance: one line per estate open when a provider ID is set.
-        // Rust selects no ML provider in-process (no NaturalLanguage framework on
-        // Linux/Windows; the neural-embed backend is a standalone tool crate, not
-        // linked into product crates). The Swift port resolves "apple-nl-v1" →
-        // AppleNLProvider and "neural-embed-v1" → NeuralEmbedProvider; the
-        // Rust port leaves the ensemble unchanged and records why here.
+        if model_id == Self::ENCODER_PROVIDER_ID {
+            self.activate_span_encoder(handle);
+            return;
+        }
         eprintln!(
             "mootx01 embed-prov: estate {} provisioned embedding_provider '{}' — \
-             Rust port records provenance but selects nothing (no in-process ML provider; \
-             see PART_E_RUST_SEAM_DESIGN.md and the standalone tools/neural-embed backend)",
+             Rust port records provenance but selects nothing for this id (Apple-platform \
+             provider; see PART_E_RUST_SEAM_DESIGN.md and the standalone tools/neural-embed backend)",
             uuid_to_str(&handle.estate_uuid),
             model_id
         );
@@ -3882,297 +4097,34 @@ impl EstateCoordinator {
             })
     }
 
-    // MARK: - distill_items_sweep
+    // MARK: - write_structural_fingerprint
 
-    /// Per-item distillation sweep — SPEC_DISTILLATION_STORAGE §7.1
-    /// (the `moot_distill` tool path).
-    ///
-    /// Rust parity of Swift `GeniusLocusKit.distillItemsSweep`.
-    ///
-    /// For each active drawer with non-empty content whose representation
-    /// is NULL or was produced under a different pipeline contract, this
-    /// method performs exactly the two §7.2 writes:
-    ///   1. The five representation columns on the SOURCE drawer row,
-    ///      atomically (`set_distilled_representation`).
-    ///   2. One `distillation-features-v1` lane entry keyed by the SOURCE
-    ///      drawer id (§8) — upsert-replace, only when the structural
-    ///      fingerprint is non-zero (columns and lane independently valid).
-    ///
-    /// Rendering paths (p1 contract — `DistillationPipeline::default_extractor`
-    /// on BOTH legs, so renderings are byte-identical Swift/Rust):
-    ///   • ≥3 sentences: intra-item matrix pipeline; Stage 5 renders
-    ///     core-first compacted prose (§7.4).
-    ///   • <3 sentences: the §7.6 token-compaction transform over the
-    ///     content; fingerprint via the query_fingerprint construction
-    ///     (§7.5).
-    ///
-    /// It captures no drawer, writes no tunnel, and touches no lifecycle
-    /// or lineage field (§11). Idempotent by the NULL predicate — no
-    /// provenance scan.
-    ///
-    /// `now` is epoch milliseconds — deterministic clock, mirrors Swift's
-    /// `Date` parameter (`distilled_at` is audit-only, §4). `limit` caps
-    /// items distilled this sweep (`None` = all eligible).
-    ///
-    /// # Errors
-    ///
-    /// Returns `VerbDispatchError` for stale handles. Individual item
-    /// failures (row vanished mid-sweep) are skipped; VectorStore absence
-    /// is non-fatal (the lane is simply dark).
-    /// Distill a SINGLE item into its on-row representation (§7.2) — the
-    /// one write seam every distillation caller shares.
-    ///
-    /// Writes the five representation columns on the source drawer row in
-    /// one atomic UPDATE, then replaces the item's
-    /// `distillation-features-v1` lane entry when a non-zero structural
-    /// fingerprint was computed. VectorStore absence is non-fatal: the
-    /// columns are still written (the lane is simply dark, matching the
-    /// estate's semantic-tier wiring).
-    ///
-    /// A FREE function, not a method: the drain-stage `on_encoded` callback
-    /// is a `'static` closure that cannot borrow the coordinator, so every
-    /// dependency is passed explicitly. That is what lets the rider, the
-    /// seeding path (`seed_default_wings`), and `distill_items_sweep` all
-    /// traverse this same call tree instead of keeping private copies of
-    /// the transform.
-    ///
-    /// Callers own the dense-over-distillate recompose (Stream F) that
-    /// follows a successful write — it needs the Corpus, which not every
-    /// caller has.
-    ///
-    /// `now` is passed in, never read here. Returns true when the columns
-    /// were written (false when the content is empty or the row vanished).
-    ///
-    /// Mirrors Swift `GeniusLocusKit.distillItem(handle:drawerID:content:distillFn:now:)`.
-    pub(crate) fn distill_item(
-        estate: &Estate,
-        vector_store: Option<&std::sync::Arc<VectorStore>>,
+    /// Compute one drawer's structural fingerprint and replace its
+    /// `distillation-features-v1` lane entry. The encode rider and the
+    /// hint-seeding path call the free function in `brain::fingerprint_lane`
+    /// with the estate's VectorStore directly; this is the handle-addressed
+    /// form for the impatient capture path and for callers outside the
+    /// crate. Returns true when a lane entry was written (false for empty
+    /// content, a zero fingerprint, or an estate with no VectorStore).
+    /// Twin of Swift `GeniusLocusKit.writeStructuralFingerprint`.
+    pub fn write_structural_fingerprint(
+        &self,
+        handle: &EstateHandle,
         drawer_id: &str,
         content: &str,
         now: i64,
-    ) -> bool {
-        use crate::brain::distillation_cycle::{
-            distilled_token_count, render_distillation, DISTILLATION_LANE_MODEL_ID,
-        };
-
-        if content.is_empty() {
-            return false;
-        }
-        let (rendering, fingerprint) = render_distillation(drawer_id, content);
-
-        // Write 1 of 2 (§7.2): the five representation columns, atomically.
-        // The digest is computed over the complete content the converter
-        // received, so `distilled_representation_is_current` can later prove
-        // the stored text still describes the row.
-        let token_count = distilled_token_count(&rendering);
-        match estate.set_distilled_representation(
+    ) -> Result<bool, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Ok(crate::brain::fingerprint_lane::write_structural_fingerprint(
+            self.vector_store_for(handle).as_ref(),
             drawer_id,
-            &rendering,
-            crate::distillation_converter_id(),
-            &context_distill_lib::digest::source_digest(content),
-            token_count,
+            content,
             now,
-        ) {
-            Ok(1) => {}
-            // Row vanished mid-flight or the write failed: no columns, no
-            // lane entry — the next sweep recovers it.
-            _ => return false,
-        }
-
-        // Write 2 of 2 (§7.2/§8): the lane entry, keyed by the SOURCE drawer
-        // id. add_vector upserts on (itemID, modelID) — the §8
-        // replace-on-regeneration semantic. A zero fingerprint (no extracted
-        // features) writes no entry; columns and lane are independently
-        // valid (§7.5). add_vector failure is non-fatal — only the Hamming
-        // NN lane is affected.
-        if fingerprint != substrate_types::fingerprint256::Fingerprint256::ZERO {
-            if let Some(vs) = vector_store {
-                let _ = vs.add_vector(drawer_id, &fingerprint, DISTILLATION_LANE_MODEL_ID, "1", now);
-            }
-        }
-        true
-    }
-
-    pub fn distill_items_sweep(
-        &self,
-        handle: &EstateHandle,
-        now: i64,
-        limit: Option<usize>,
-    ) -> Result<usize, VerbDispatchError> {
-        let estate = self.estate_for_verb(handle)?;
-
-        // Optional VectorStore for fingerprint storage. Absence is non-fatal.
-        let vector_store_opt = self.vector_store_for(handle);
-
-        let mut produced: usize = 0;
-
-        // Rooms-first sweep: enumerate room-level fingerprint entries, skip
-        // rooms whose operationalAND proves every active drawer already carries
-        // bit 19 (HAS_CURRENT_REPRESENTATION), and load the remaining rooms
-        // via drawers_in_wing_room.
-        //
-        // Safety invariant — AND is an under-approximation:
-        //   Falsely-ABSENT bit 19 in operational_and → room scanned
-        //   unnecessarily (harmless over-work).  Falsely-PRESENT bit 19
-        //   would skip a room with eligible work (UNSAFE); rebuildAll at
-        //   estate open prevents this by recomputing the AND from scratch.
-        //   Mid-session, the AND can only worsen in the safe direction
-        //   (capture lowers AND; only rebuildAll raises it).
-        let skip_bit =
-            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
-        let rooms = estate
-            .room_level_fingerprints()
-            .map_err(|e| remap("distill_items_sweep", "", e))?;
-        // Bit 19 means the representation columns are populated; it does not
-        // encode which converter produced them or whether a digest is stored.
-        // Read the stale-room set once through a metadata-only projection so
-        // a fully represented room is skipped only when every representation
-        // carries the active converter ID and a digest. Current rooms retain
-        // the fast path: no drawer content is hydrated. Mirrors Swift
-        // distillItemsSweep.
-        let stale_rooms: std::collections::HashSet<(String, String)> = estate
-            .rooms_with_stale_distilled_representations(crate::distillation_converter_id())
-            .map_err(|e| remap("distill_items_sweep", "", e))?
-            .into_iter()
-            .collect();
-
-        'rooms: for entry in &rooms {
-            // Skip this room when the AND proves every active drawer already
-            // has bit 19 set AND the metadata projection found no stale
-            // converter ID or missing digest. The AND is an under-approximation
-            // so if it shows 1 for bit 19 the true AND is also 1; the
-            // projection closes the separate stale-representation path.
-            if (entry.fingerprint.operational_and & skip_bit) == skip_bit
-                && !stale_rooms.contains(&(entry.wing.clone(), entry.room.clone()))
-            {
-                continue;
-            }
-
-            // Session order for the coref window (W2.2 A1): sorted by
-            // (event_time, filed_at, id) — deterministic, conversation-
-            // shaped. Mirrors Swift distillItemsSweep.
-            let mut room_drawers = estate
-                .drawers_in_wing_room(&entry.wing, &entry.room)
-                .map_err(|e| remap("distill_items_sweep", &entry.room, e))?;
-            room_drawers.sort_by(|a, b| {
-                a.event_time
-                    .cmp(&b.event_time)
-                    .then(a.filed_at.cmp(&b.filed_at))
-                    .then(a.id.cmp(&b.id))
-            });
-
-            for drawer in room_drawers.iter() {
-            if let Some(cap) = limit {
-                if produced >= cap {
-                        break 'rooms;
-                }
-            }
-            if drawer.content.is_empty() {
-                continue;
-            }
-            // Eligibility (§7.1): the one currency rule. Bit 19 clear means
-            // no representation yet; a converter ID other than the active
-            // one, or a digest that is None or differs from the digest of
-            // this content, means a stale one. The content is hydrated here
-            // (drawers_in_wing_room returns full rows), so the digest half
-            // of the rule is evaluated exactly.
-            if crate::distilled_representation_is_current(drawer) {
-                continue;
-            }
-
-            // Render + both writes through the shared seam (§7.2/§7.4/§7.5)
-            // — the same call tree the drain-stage rider and the seeding
-            // path take. A false return means the row vanished mid-sweep or
-            // the write failed: skip it.
-            if !Self::distill_item(
-                estate,
-                vector_store_opt.as_ref(),
-                &drawer.id,
-                &drawer.content,
-                now,
-            ) {
-                continue;
-            }
-
-            produced += 1;
-            // Dense-over-distillate (Stream F): recompose the dense float
-            // vector from the newly-written distillate. The idempotence gate
-            // keys on content digest (not on dense_composition_text), so a
-            // normal index call would be silently skipped —
-            // recompose_dense_vector passes force=true to bypass the gate.
-            // Best-effort: non-fatal when corpus is absent (LocusOnly estate)
-            // or when the record resolves None (expunged mid-sweep).
-            // Swift parity: DistillationCycle.distillItemsSweep.
-            if let Some(corpus) = self.corpus_kits.get(handle) {
-                let _ = corpus.recompose_dense_vector(&drawer.id, now);
-            }
-            } // end for drawer in &room_drawers
-        } // end 'rooms: for entry in &rooms
-
-        Ok(produced)
-    }
-
-    /// Force-redistill EVERY active non-empty item in the estate — the
-    /// `moot_redistill` verb (CDL-02). Twin of Swift
-    /// `GeniusLocusKit.redistillItemsSweep(handle:distillFn:now:limit:)`.
-    ///
-    /// Unlike `distill_items_sweep` this pass ignores bit 19 and the stored
-    /// converter ID, skips the room-level AND short-circuit, and does NOT
-    /// recompose dense vectors per item: the caller runs `reindex_corpus`
-    /// (all derived lanes) once after it returns, which re-embeds every
-    /// dense vector and rebuilds the BM25 posting lists from the new
-    /// distillates, trailer tokens included.
-    pub fn redistill_items_sweep(
-        &self,
-        handle: &EstateHandle,
-        now: i64,
-        limit: Option<usize>,
-    ) -> Result<usize, VerbDispatchError> {
-        let estate = self.estate_for_verb(handle)?;
-        let vector_store_opt = self.vector_store_for(handle);
-        let mut produced: usize = 0;
-        let rooms = estate
-            .room_level_fingerprints()
-            .map_err(|e| remap("redistill_items_sweep", "", e))?;
-        'rooms: for entry in &rooms {
-            // Deterministic conversation order (event_time, filed_at, id) so
-            // a capped pass reaches the same rows on both ports.
-            let mut room_drawers = estate
-                .drawers_in_wing_room(&entry.wing, &entry.room)
-                .map_err(|e| remap("redistill_items_sweep", &entry.room, e))?;
-            room_drawers.sort_by(|a, b| {
-                a.event_time
-                    .cmp(&b.event_time)
-                    .then(a.filed_at.cmp(&b.filed_at))
-                    .then(a.id.cmp(&b.id))
-            });
-            for drawer in room_drawers.iter() {
-                if let Some(cap) = limit {
-                    if produced >= cap {
-                        break 'rooms;
-                    }
-                }
-                // Empty content is the only skip; tombstoned rows are
-                // excluded by drawers_in_wing_room at the storage tier.
-                if drawer.content.is_empty() {
-                    continue;
-                }
-                if Self::distill_item(
-                    estate,
-                    vector_store_opt.as_ref(),
-                    &drawer.id,
-                    &drawer.content,
-                    now,
-                ) {
-                    produced += 1;
-                }
-            }
-        }
-        Ok(produced)
+        ))
     }
 
     /// Rebuild every derived lane of the estate's corpus (BM25 and dense)
-    /// from the current content and distillates. Twin of Swift
+    /// from the current content. Twin of Swift
     /// `GeniusLocusKit.reindexCorpus(handle:now:)`. A no-op when no corpus
     /// is registered for the estate (locus-only estate).
     pub fn reindex_corpus(&self, handle: &EstateHandle, now: i64) -> Result<(), VerbDispatchError> {
@@ -4188,79 +4140,6 @@ impl EstateCoordinator {
     }
 
     // MARK: - mid-run crash recovery probe
-
-    /// Count of active, represented drawers whose corpus index row is missing
-    /// or was last updated strictly before the drawer's `distilled_at` timestamp.
-    ///
-    /// The distillation convergence step runs a sweep then a reindex. If the
-    /// process dies after the sweep commits but before the reindex runs, every
-    /// drawer reads as "current converter" — so a second run would skip the
-    /// reindex entirely, leaving the derived lanes built from the old text. This
-    /// count detects that gap by cross-referencing two independently-updated
-    /// timestamps.
-    ///
-    /// Eligibility predicate — a drawer counts when ALL of:
-    ///   1. Active (not tombstoned), non-empty content.
-    ///   2. Carries a representation that is current under the active
-    ///      converter (bit 19 set, converter ID equal, source digest stored).
-    ///   3. The corpus has no index row for that drawer, OR the index row's
-    ///      `updated_at_millis` is strictly earlier than the drawer's
-    ///      `distilled_at` millis. Equal millis mean indexed (sweep and reindex
-    ///      ran under the same `now`).
-    ///
-    /// Returns 0 immediately when no corpus is registered for the estate
-    /// (LocusOnly estate — no index to check). Mirrors Swift
-    /// `GeniusLocusKit.distilledRepresentationsAwaitingReindex`.
-    pub fn distilled_representations_awaiting_reindex(
-        &self,
-        handle: &EstateHandle,
-    ) -> Result<usize, VerbDispatchError> {
-        // An unopened handle is an error before anything else, as in the
-        // Swift port; a LocusOnly estate (open, no corpus) reports zero.
-        let Some(estate) = self.registry.get(handle) else {
-            return Err(VerbDispatchError::EstateNotOpen {
-                estate_uuid: handle.estate_uuid,
-            });
-        };
-        let Some(corpus) = self.corpus_kits.get(handle) else {
-            return Ok(0);
-        };
-        // Fetch the two independent timestamp sets without hydrating content.
-        // Only rows current under the active converter can be waiting on
-        // their reindex; stale rows are the sweep's to regenerate first.
-        let drawers = estate
-            .drawers_with_representations(crate::distillation_converter_id())
-            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
-                verb: "distilled_representations_awaiting_reindex".to_string(),
-                reason: format!("{e:?}"),
-            }))?;
-        let index_states = corpus
-            .all_index_states()
-            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
-                verb: "distilled_representations_awaiting_reindex".to_string(),
-                reason: format!("{e:?}"),
-            }))?;
-        // Build a lookup from contentID (== drawerID) to the index row's updated_at.
-        let indexed_at: std::collections::HashMap<&str, i64> = index_states
-            .iter()
-            .map(|s| (s.content_id.as_str(), s.updated_at_millis))
-            .collect();
-        // Count drawers with no index row OR whose index row is older than the
-        // representation. Strict `<`: equal millis mean sweep and reindex ran
-        // together under the same `now` — the drawer is fully indexed.
-        let count = drawers
-            .iter()
-            .filter(|(id, distilled_at)| {
-                match indexed_at.get(id.as_str()) {
-                    None => true,                    // no index row — awaiting
-                    Some(&idx_at) => idx_at < *distilled_at,
-                }
-            })
-            .count();
-        Ok(count)
-    }
-
-    // MARK: - anomaly_flag_sweep
 
     /// Compute room-cohesion z-scores and set/clear bit 26 (`is_anomalous()`)
     /// on every active drawer in the estate. Rust parity of Swift
@@ -4487,7 +4366,7 @@ impl EstateCoordinator {
     ) -> Result<crate::brain::consolidation_cycle::ConsolidationSweepReport, VerbDispatchError>
     {
         use crate::brain::consolidation_cycle::ConsolidationSweepReport;
-        use crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+        use crate::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID;
         use locus_kit::adjectives::State;
         use locus_kit::drawer_operational::DrawerFeatureFlags;
         use std::collections::{BTreeMap, BTreeSet};
@@ -4634,7 +4513,7 @@ impl EstateCoordinator {
         }
 
         // Fingerprints from the distillation-features-v1 lane; items without
-        // one re-enter the pool after the next distillation sweep.
+        // one re-enter the pool once the encode rider has written theirs.
         let mut engrams: BTreeMap<String, substrate_types::Fingerprint256> = BTreeMap::new();
         for drawer in &pool {
             let stored = vector_store
@@ -5092,7 +4971,7 @@ impl EstateCoordinator {
         constituents: &[locus_kit::drawer::Drawer],
         config: &crate::brain::consolidation_cycle::ConsolidationConfig,
     ) -> Option<(String, substrate_types::Fingerprint256)> {
-        use crate::brain::distillation_cycle::{compaction_rendering, item_is_distillable};
+        use crate::brain::fingerprint_lane::{compaction_rendering, takes_matrix_path};
         use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 
         // Each piece keeps its constituent's event time so sentences can be
@@ -5106,8 +4985,11 @@ impl EstateCoordinator {
                 (
                     constituents
                         .iter()
+                        // Large clusters merge the inline distilled renderings
+                        // instead of the full bodies, so the cross-item matrix
+                        // never runs over a huge combined text.
                         .map(|c| (
-                            c.distilled.clone().unwrap_or_else(|| c.content.clone()),
+                            crate::hydration_representation::distilled_rendering(&c.content),
                             c.event_time as f64 / 1000.0,
                         ))
                         .collect(),
@@ -5133,7 +5015,7 @@ impl EstateCoordinator {
         // each sentence takes the timestamp of the piece its start falls in.
         let sentence_timestamps =
             Self::sentence_timestamps(&sentences, &pieces, separator, &combined);
-        let (rendering, fingerprint) = if item_is_distillable(sentences.len()) {
+        let (rendering, fingerprint) = if takes_matrix_path(sentences.len()) {
             let input = DistillationInput::new(
                 sentences,
                 sentence_timestamps,
@@ -5175,7 +5057,7 @@ impl EstateCoordinator {
         total_constituents: usize,
     ) -> Result<crate::brain::consolidation_cycle::VagueRecallResult, VerbDispatchError> {
         use crate::brain::consolidation_cycle::VagueRecallResult;
-        use crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+        use crate::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID;
         use locus_kit::adjectives::State;
         use locus_kit::drawer_operational::DrawerFeatureFlags;
         use substrate_ml::distillation_pipeline::DistillationPipeline;
@@ -6770,7 +6652,7 @@ impl EstateCoordinator {
                         // the Swift VerbSurface.expunge ordering.
                         vs.delete_all_vectors(
                             delete_id,
-                            crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                            crate::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID,
                         )
                         .map_err(|e| {
                             VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
@@ -7041,7 +6923,7 @@ impl EstateCoordinator {
                     // fail the semantic-lane delete.
                     vs.delete_all_vectors(
                         row_id,
-                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        crate::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID,
                     )
                     .map_err(|e| {
                         format!(
@@ -9559,15 +9441,15 @@ impl EstateCoordinator {
     ///
     /// Mirrors Swift `GeniusLocusKit.seedDefaultWings(for:now:)`.
     ///
-    /// **Encode routing (DISTILL_SEED_STALL):** when a Corpus is registered,
-    /// hint drawers are enqueued onto the Corpus encode stream — the same
-    /// change-reference path a `Regular` capture rides — so the drain-stage
-    /// distillation fires for them and the "distillation" drain lane can reach
-    /// zero. The enqueue predicate is representation-eligibility (bit 19
-    /// `has_current_representation` clear, or a stale pipeline version) over
-    /// the `AI_Charter_Hint` room only: an already-encoded-and-distilled hint
-    /// is never re-enqueued, so re-opening an estate stays a no-op — no
-    /// spurious encode work per open. (Deliberately does NOT key on
+    /// **Encode routing:** when a Corpus is registered, hint drawers are
+    /// indexed INLINE through the encode path — the same facts/index/
+    /// fingerprint transform a queued drawer receives at drain — so seeding
+    /// returns with the estate settled. Every hint in the `AI_Charter_Hint`
+    /// room goes through the transform on every open: the engine's
+    /// idempotence gate (content digest) turns a re-index of an unchanged
+    /// hint into one digest compare, and the facts and fingerprint writes are
+    /// upserts, so re-opening an estate does no queue work. (Deliberately
+    /// does NOT key on
     /// `hint_added_by`, which is provenance-only.)
     ///
     /// - `handle`: An open estate handle in the coordinator's registry.
@@ -9652,21 +9534,21 @@ impl EstateCoordinator {
             seeded_count += 1;
         }
 
-        // Encode routing (DISTILL_SEED_STALL): index + distill hint drawers
-        // that still owe a representation, INLINE through the encode path —
-        // the same index/distill/recompose transform a queued drawer receives
+        // Encode routing: index hint drawers INLINE through the encode path —
+        // the same facts/index/fingerprint transform a queued drawer receives
         // at drain, without touching the queue. Inline (not enqueued) on
         // purpose: seeding returns with the estate SETTLED — hints
-        // BM25/vector indexed, distilled (bit 19 set), and the young fallback
-        // basis converged via the post-ingest settle — so nothing races the
-        // first user capture and no drain worker or lease is required at
-        // open. Runs AFTER the seeding loop so it covers both the hints
-        // seeded just now and hints seeded by an earlier open that predates
-        // this routing (their bit 19 is clear — the one-time backfill).
-        // Skipped entirely when no Corpus is registered (LocusOnly / bare
-        // open before wiring): a corpus-less estate has no semantic lane;
-        // those hints are picked up by reindex/sweep once a corpus exists.
-        // Twin of the Swift block in `seedDefaultWings`.
+        // BM25/vector indexed, fingerprinted, and the young fallback basis
+        // converged via the post-ingest settle — so nothing races the first
+        // user capture and no drain worker or lease is required at open.
+        // Runs AFTER the seeding loop so it covers both the hints seeded just
+        // now and hints seeded by an earlier open; every step is idempotent
+        // (the engine's digest gate, upserting facts and lane writes), so the
+        // re-open cost is a handful of digest compares. Skipped entirely when
+        // no Corpus is registered (LocusOnly / bare open before wiring): a
+        // corpus-less estate has no semantic lane; those hints are picked up
+        // by reindex once a corpus exists. Twin of the Swift block in
+        // `seedDefaultWings`.
         let mut settled_hints = 0usize;
         if let Some(corpus) = self.corpus_for(handle) {
             // Re-scan when the loop seeded new hints (they are not in the
@@ -9687,8 +9569,10 @@ impl EstateCoordinator {
                     .map(|(_, room)| room == locus_kit::default_wings::HINT_ROOM)
                     .unwrap_or(false)
                     && !d.content.is_empty()
-                    && !crate::distilled_representation_is_current(d)
             }) {
+                // SSC facts BEFORE the index: the corpus adapter reads the
+                // column when it composes the BM25 document (contract §6).
+                crate::intake::write_ssc_facts(estate, hint);
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside index_content keeps the
                 // young basis covering the growing corpus.
@@ -9700,18 +9584,14 @@ impl EstateCoordinator {
                             hint.id
                         ),
                     })?;
-                // Drain-stage transform, inline: the same shared seam the
-                // queue's on_encoded rider calls, with the seeding `now`
-                // threaded for determinism.
-                if Self::distill_item(
-                    estate,
+                // The encode rider's lane write, inline, with the seeding
+                // `now` threaded for determinism.
+                crate::brain::fingerprint_lane::write_structural_fingerprint(
                     self.vector_stores.get(handle),
                     &hint.id,
                     &hint.content,
                     now,
-                ) {
-                    let _ = corpus.recompose_dense_vector(&hint.id, now);
-                }
+                );
                 settled_hints += 1;
             }
         }
@@ -9811,16 +9691,23 @@ impl EstateCoordinator {
                     reason: format!("GLK composite schema open failed: {e:?}"),
                 })?;
         }
-        // CorpusKit owns the encode pipeline: install the on_encoded
-        // drain-stage rider (rollup + distillation + dense recompose + A2
-        // marker), then mount the Corpus's own ingest queue + drain worker
-        // pool. Rider BEFORE mount: the mount opens the persisted queue and
-        // starts the drain worker at once, so a backlog resumed at serve open
-        // must find the rider already installed or it encodes without
-        // distilling (SPEC_DISTILLATION_STORAGE §7.1). A provisioned estate
-        // mounts an empty queue, so the ordering is equally correct there.
+        // CorpusKit owns the encode pipeline: install the on_encoded encode
+        // rider (rollup + structural fingerprint lane entry + A2 marker),
+        // then mount the Corpus's own ingest queue + drain worker pool. Rider
+        // BEFORE mount: the mount opens the persisted queue and starts the
+        // drain worker at once, so a backlog resumed at serve open must find
+        // the rider already installed or it encodes without the rider's
+        // work. A provisioned estate mounts an empty queue, so the ordering
+        // is equally correct there.
         // GLK only coordinates the two kits — it never performs the encode.
         self.wire_corpus_on_encoded(handle);
+        // Act on the estate's `embedding_provider` manifest key here, inside
+        // the wire step, so every path that wires a Corpus (provision, the
+        // db-composition rebuild, a host open) sees the same activation —
+        // the same place Swift `wireSubstores` calls
+        // `applyProvisionedEmbeddingProvider`. "encoder" registers the span
+        // encoder; the Corpus ensemble is never modified by this call.
+        self.apply_provisioned_embedding_provider(handle);
         corpus
             .mount_ingest_queue()
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -10043,22 +9930,15 @@ impl EstateCoordinator {
             return Err(e);
         }
 
-        // Step 2b-prov: Record embedding-provider provenance.
-        // Reads the "embedding_provider" manifest key and emits one line to stderr
-        // when a provider ID is set. The Rust port never modifies the ensemble
-        // (no ML providers available on Linux/Windows); the Swift port resolves
-        // the ID to a concrete provider (AppleNLProvider / NeuralEmbedProvider).
-        // See apply_provisioned_embedding_provider for the full rationale and
-        // PART_E_RUST_SEAM_DESIGN.md for the external-process seam the
-        // standalone tools/neural-embed backend implements.
-        self.apply_provisioned_embedding_provider(&handle);
+        // The "embedding_provider" manifest key is acted on inside
+        // wire_substores (Step 2b above), the same place Swift applies it.
 
         // Step 2c: Seed the seven default wings (the default-wing policy) — AFTER wiring,
         // so each hint drawer is stamped with the corpus's normal model id rather
         // than the "estate-provision" sentinel (matches the serve open path and the
-        // Swift provision order), and `seed_default_wings` enqueues each hint onto
-        // the Corpus encode stream so the drain-stage distillation fires for hints
-        // exactly as for user content (DISTILL_SEED_STALL). Seeding failure closes
+        // Swift provision order), and `seed_default_wings` indexes each hint inline
+        // through the encode path so hints are searchable and fingerprinted exactly
+        // as user content is at drain. Seeding failure closes
         // the estate (no half-provisioned zombie). Provision-time wall clock (epoch
         // MILLISECONDS) at the app boundary — the engine interior never reads the
         // clock. Milliseconds is what the store and HLC boundary consume; seconds
@@ -10379,9 +10259,12 @@ impl EstateCoordinator {
                 // as Swift when `graphCaches[handle]` / `preferenceStores[handle]` is nil.
                 let graph_cache = self.graph_caches.get(handle).cloned();
                 let preference_store = self.preference_stores.get(handle).cloned();
+                // The span rerank seams (encoder + span rows), when the lifecycle
+                // registered them; None ⇒ the stage is skipped (sheet §7).
+                let span_source = self.span_rerank_sources.get(handle).cloned();
                 Self::recall_scored_multi_lane(
                     estate, request.clone(), plan, now, corpus, vector, handle,
-                    matrix_tier, graph_cache, preference_store,
+                    matrix_tier, graph_cache, preference_store, span_source,
                     forced_vector_hamming_error, forced_embed_error,
                 )
             }
@@ -10575,6 +10458,7 @@ impl EstateCoordinator {
                 sources: vec![RecallEvidencePath::LocusBitmap],
                 score: RecallScoreVector::locus(1.0),
                 explanation: vec!["locusBitmap".to_string()],
+                span_hit: None,
             })
             .collect();
 
@@ -11057,6 +10941,10 @@ impl EstateCoordinator {
         // as Swift's fallback when graphCaches[handle] / preferenceStores[handle] == nil).
         graph_cache: Option<Arc<dyn crate::recall::GraphCache>>,
         preference_store: Option<Arc<dyn crate::recall::PreferenceStore>>,
+        // Span rerank seams registered for this estate (Encoder Rerank Program,
+        // sheet §8) — Some when the lifecycle loaded an encoder. None ⇒ the
+        // UnionBest lexical list enters the pool unreranked.
+        span_source: Option<Arc<crate::span_rerank::SpanRerankSource>>,
         // Test seam values — consumed once by the caller from cfg(any(test, feature = "test-seams")) RefCells.
         // On the production path these are always None (compiler eliminates the branches).
         force_vector_hamming_error: Option<String>,
@@ -11194,8 +11082,13 @@ impl EstateCoordinator {
         // --- Lane 2: BM25 (active when corpus registered and query_text non-empty) ---
         // Returns (source_id, bm25_score) pairs. source_id == drawer_id per GLK
         // ingest convention (callers ingest with source_id = drawer_id).
-        // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
-        // at its internal K-boundary; content-sort + cap happen at the content-sort block below.
+        // The internal lexical call runs at `span_rerank::LEXICAL_DEPTH` (1000,
+        // contract sheet §8), NOT at a multiple of frontier_k: the span rerank
+        // stage cuts its head from this list and the fusion reorders it, so the
+        // list must be the true lexical order to that depth. The depth also keeps
+        // every matching item clear of CorpusContentEngine's UUID tiebreak at its
+        // internal K-boundary; content-sort, fusion and the cap to frontier_k
+        // happen at the content-sort block below.
         let query_str = request.query_text.as_deref().unwrap_or("").to_string();
 
         // M4 single-derivation: derive the §8.3 lattice anchor exactly ONCE here
@@ -11211,7 +11104,7 @@ impl EstateCoordinator {
         };
         let mut bm25_list: Vec<(String, f32)> = if let Some(ref c) = corpus {
             if !query_str.is_empty() {
-                c.bm25_top_k_by_source(&query_str, plan.frontier_k * 4)
+                c.bm25_top_k_by_source(&query_str, crate::span_rerank::LEXICAL_DEPTH)
             } else {
                 Vec::new()
             }
@@ -11310,13 +11203,14 @@ impl EstateCoordinator {
 
         // --- Lane 3b: Structural fingerprint (Lane B, "distillation-features-v1") ---
         //
-        // Queries per-drawer distillation fingerprints written by DistillationCycle.
-        // The probe is computed via DistillationPipeline::query_fingerprint with the
-        // capitalization-heuristic default_extractor — the same extractor used at
-        // distillation write time, so stored and query fingerprints are self-consistent.
+        // Queries the per-drawer structural fingerprints the encode rider writes
+        // (brain::fingerprint_lane). The probe is computed via
+        // DistillationPipeline::query_fingerprint with the capitalization-heuristic
+        // default_extractor — the same extractor used at lane write time, so stored
+        // and query fingerprints are self-consistent.
         //
         // Dark-lane safety: drawers without a Lane B entry are absent from fp_matches
-        // and contribute zero candidates — no penalty relative to distilled drawers.
+        // and contribute zero candidates — no penalty relative to fingerprinted drawers.
         // A zero query_fingerprint (query had no structural features) skips this block
         // entirely — same zero-contribution outcome.
         //
@@ -11339,7 +11233,7 @@ impl EstateCoordinator {
                     // Over-fetch 4× for the same K-boundary reason as Lanes A and BM25.
                     if let Ok(fp_matches) = vs.find_nearest_with_metric(
                         &fp,
-                        crate::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID,
+                        crate::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID,
                         plan.frontier_k * 4,
                         binary_metric_for(request.recall_shape.as_ref()),
                     ) {
@@ -11374,7 +11268,7 @@ impl EstateCoordinator {
                             })
                             .collect();
                     }
-                    // else: Lane B dark — expected for estates with no distilled entries.
+                    // else: Lane B dark — expected for estates with no fingerprint entries.
                     // No telemetry: a dark Lane B is a normal operating state.
                 }
             }
@@ -11835,7 +11729,8 @@ impl EstateCoordinator {
         }
         // Re-sort bm25_list, vector_list, and dense_list with content-keyed tiebreak before
         // building score maps, so equal-score items receive deterministic rank assignments.
-        // bm25_list and vector_list were over-fetched 4×; cap to frontier_k after sort.
+        // bm25_list was fetched at LEXICAL_DEPTH and vector_list over-fetched 4×; cap
+        // to frontier_k after sort (bm25 after the span fusion below).
         // dense_list is already bounded by dense_order; re-sort is defence-in-depth.
         // Mirrors Swift RecallDirector's unionBest content re-sort block.
         bm25_list.sort_by(|a, b| {
@@ -11846,6 +11741,60 @@ impl EstateCoordinator {
                     ka.cmp(kb)
                 })
         });
+
+        // SPAN RERANK (Encoder Rerank Program, contract sheet §8). Runs only
+        // while the lifecycle registered an encoder for this estate, the query
+        // has text, and neither `signal:encoder` nor the encoder's own
+        // `dense:<model_id>` weight is 0. The head (`encoder_head` items of the
+        // content-sorted lexical list) is reranked by best span cosine and fused
+        // back over the WHOLE lexical list with reciprocal-rank fusion; the fused
+        // list replaces the lexical lane, so its bm25 column carries the fused
+        // reciprocal-rank score (normalised like every column) and the cap below
+        // keeps the fused top-frontier_k. Items with no span rows keep their
+        // lexical rank. A stage failure (encoder or row read) leaves the lexical
+        // order standing and is surfaced on degraded_stages as `spanRerank`; the
+        // caller sees no error (sheet §7 failure contract). `span_hits` is read
+        // when the hits are built so each carries its span evidence and the
+        // explainer's `span:` token. Mirrors Swift step 3.5.
+        let mut span_hits: HashMap<String, crate::span_rerank::SpanRerankHit> = HashMap::new();
+        if let Some(source) = span_source.as_ref() {
+            if !bm25_list.is_empty()
+                && !query_str.is_empty()
+                && RecallShape::weight_or_default(&request.recall_shape, RecallShape::SIGNAL_ENCODER) != 0.0
+            {
+                let span_weight = RecallShape::weight_or_default(
+                    &request.recall_shape,
+                    &RecallShape::dense_key_for_model(source.encoder.model_id()),
+                );
+                if span_weight != 0.0 {
+                    let head: Vec<crate::span_rerank::SpanRerankInput> = bm25_list
+                        .iter()
+                        .take(source.head)
+                        .enumerate()
+                        .map(|(i, (id, _))| crate::span_rerank::SpanRerankInput {
+                            item_id: id.clone(),
+                            bm25_rank: i + 1,
+                        })
+                        .collect();
+                    match crate::span_rerank::span_rerank(
+                        &head, &query_str, source.encoder.as_ref(), source.store.as_ref(),
+                    ) {
+                        Ok(hits) => {
+                            let order: Vec<String> = bm25_list.iter().map(|(id, _)| id.clone()).collect();
+                            let fused = crate::span_rerank::fuse(&order, &hits, span_weight);
+                            bm25_list = fused.into_iter().map(|e| (e.id, e.score)).collect();
+                            for hit in hits {
+                                span_hits.insert(hit.item_id.clone(), hit);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("recall_scored: span rerank degraded (lexical order stands): {e}");
+                            degraded_stages.push("spanRerank".to_string());
+                        }
+                    }
+                }
+            }
+        }
         bm25_list.truncate(plan.frontier_k);
         vector_list.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
@@ -12269,11 +12218,11 @@ impl EstateCoordinator {
             // Bob's rule): absence is read from the normalised columns, so it
             // is shape-independent and needs no new cache protocol requirement.
             // Mirrors Swift RecallDirector step 8.5 / `absentSignalColumns`.
+            // The last resort is `RecallShape::default_weight`: 1.0 for every
+            // key except `signal:vector`, which defaults to 0 (the whole-record
+            // vector column is out of the fused score unless a shape asks).
             let shape_signal_weight = |key: &str| -> f32 {
-                match &request.recall_shape {
-                    Some(s) => s.weight(key),
-                    None => 1.0,
-                }
+                RecallShape::weight_or_default(&request.recall_shape, key)
             };
             let absent = Self::absent_signal_columns(
                 matrix_tier.is_some(),
@@ -12315,15 +12264,12 @@ impl EstateCoordinator {
             // (0.0 only when no cache is registered for the estate, same as Swift's
             // absent-cache case); each is scaled by its signed shape weight so the graph
             // and preference lanes steer cross-port identically to Swift.
-            let (sh_locus, sh_bm25, sh_hamming, sh_dense) = match &request.recall_shape {
-                Some(s) => (
-                    s.weight("locus"),
-                    s.weight("bm25"),
-                    s.weight("hamming"),
-                    s.weight("dense"),
-                ),
-                None => (1.0, 1.0, 1.0, 1.0),
-            };
+            let (sh_locus, sh_bm25, sh_hamming, sh_dense) = (
+                RecallShape::weight_or_default(&request.recall_shape, "locus"),
+                RecallShape::weight_or_default(&request.recall_shape, "bm25"),
+                RecallShape::weight_or_default(&request.recall_shape, "hamming"),
+                RecallShape::weight_or_default(&request.recall_shape, "dense"),
+            );
             let (sh_field_fit, sh_co_occur, sh_temporal, sh_graph, sh_preference) =
                 match &request.recall_shape {
                     Some(s) => (
@@ -12797,7 +12743,10 @@ impl EstateCoordinator {
                 //                Swift step 11 does before wiring the lines on.
                 //   Hybrid and CorpusOnly — the sorted source raw values, the
                 //                Swift hybrid path's `sources.map(rawValue).sorted()`.
-                let bare = RecallHit { id, drawer, sources, score, explanation: Vec::new() };
+                // The span hit rides the hit so the explainer renders its `span:`
+                // token and the caller receives the best-span bounds (sheet §8/§9).
+                let span_hit = span_hits.get(&id).cloned();
+                let bare = RecallHit { id, drawer, sources, score, explanation: Vec::new(), span_hit };
                 let mut explanation = if request.mode == GLKRecallMode::UnionBest {
                     crate::recall_explainer::explain(
                         &bare,
@@ -13071,6 +13020,7 @@ impl EstateCoordinator {
                     sources: vec![RecallEvidencePath::LocusBitmap],
                     score,
                     explanation: vec!["locusBitmap".to_string()],
+                    span_hit: None,
                 }
             })
             .collect();
@@ -15197,230 +15147,6 @@ mod tests {
             .recall_kg_fact_timeline(&h, None)
             .expect("timeline");
         assert_eq!(timeline.len(), 2, "timeline must have both facts");
-    }
-
-    // CO-DIST-SEC-1: distill_items_sweep must not distill restricted or secret
-    //                source drawers — secfix/punt-g2 sensitivity ceiling parity.
-    //
-    // Parity with Swift distillItemsSweep which filters candidates through
-    //   `getDrawers(ids:matchingFrame: RecallFrame(filterChain: []))`,
-    // which goes through insert_defaults → SensitivityAtMost(Elevated).
-    // Restricted (32) and Secret (48) exceed the Elevated (16) ceiling and must
-    // be silently skipped, producing zero factoids for their content even when
-    // the content is long enough to be distillable (≥3 sentences).
-    #[test]
-    fn co_dist_sec1_sweep_distills_all_sensitivities_on_row(){
-        use locus_kit::adjectives::AdjectiveSensitivity;
-        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-
-        let mut coord = EstateCoordinator::new();
-        let store: Arc<dyn DrawerStore> = Arc::new(
-            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap()
-        );
-        let handle = coord
-            .open(store, OwnerCredentials::new("owner"), 0, 100)
-            .expect("open");
-        coord.seed_default_wings(&handle, NOW).expect("seed");
-
-        let long_content = "Both Memory and Rust implement the same segmenter algorithm. \
-                            Memory retains context across Rust sentences. \
-                            Rust uses Memory to store recurring entities for distillation.";
-
-        // Drawers at three sensitivity tiers. The representation is a VIEW of
-        // the row and lives ON the row whose sensitivity governs it
-        // (SPEC_DISTILLATION_STORAGE §2) — there is no cross-row sensitivity
-        // floor, so restricted and secret rows distill too (§13.1).
-        let mut frame = LkCaptureFrame::new(
-            long_content,
-            CaptureChannel::Typed,
-            "study",
-            LatticeAnchor::udc("0"),
-            "tester",
-            "test-v1",
-        );
-        let normal_id = coord.capture(&handle, frame.clone(), NOW).expect("capture normal").id;
-        frame.sensitivity = AdjectiveSensitivity::Restricted;
-        let restricted_id = coord.capture(&handle, frame.clone(), NOW).expect("capture restricted").id;
-        frame.sensitivity = AdjectiveSensitivity::Secret;
-        let secret_id = coord.capture(&handle, frame.clone(), NOW).expect("capture secret").id;
-
-        let drawer_count_before = coord
-            .estate_for_verb(&handle).expect("estate")
-            .all_drawers().expect("all_drawers").len();
-
-        // No VectorStore registered: the lane is dark but the column writes
-        // still land (non-fatal absence, parity with the Swift path).
-        let produced = coord
-            .distill_items_sweep(&handle, NOW, None)
-            .expect("sweep must not error");
-        // At least the three fixture drawers distill (seeded system drawers
-        // with non-empty content distill too — §13.1 covers EVERY active item).
-        assert!(produced >= 3, "all three sensitivity tiers must distill; got {produced}");
-
-        let estate = coord.estate_for_verb(&handle).expect("estate_for_verb");
-        let all = estate.all_drawers().expect("all_drawers");
-        // §7.2/§11: no drawer was captured by the sweep — the writes are
-        // on-row column updates only.
-        assert_eq!(all.len(), drawer_count_before, "the sweep must capture no drawers");
-        assert!(all.iter().all(|d| d.added_by != "distillation-daemon"));
-        for id in [&normal_id, &restricted_id, &secret_id] {
-            let row = all.iter().find(|d| &d.id == id).expect("row");
-            assert!(row.distilled.is_some(), "row {id} must carry a representation");
-            assert_eq!(
-                row.distilled_pipeline_version.as_deref(),
-                Some(crate::distillation_converter_id())
-            );
-            assert!(row.distilled_token_count.is_some());
-            assert!(row.distilled_at.is_some());
-            assert_eq!(
-                row.distilled_source_digest.as_deref(),
-                Some(context_distill_lib::digest::source_digest(&row.content).as_str())
-            );
-        }
-    }
-
-    // CO-DIST-AND-1: UNSAFE direction — a room with 199 distilled + 1
-    // undistilled drawer must NEVER be skipped by the sweep.  The
-    // operationalAND for the room has bit 19 = 0 (captures lower it) so
-    // the sweep must enter the room and find the 1 undistilled drawer.
-    #[test]
-    fn co_dist_and1_unsafe_direction_room_with_one_undistilled_never_skipped() {
-        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-
-        let mut coord = EstateCoordinator::new();
-        let store: Arc<dyn DrawerStore> = Arc::new(
-            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap()
-        );
-        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).expect("open");
-        coord.seed_default_wings(&handle, NOW).expect("seed");
-
-        let long_content = "Each item is three sentences long for matrix path. \
-                            Second sentence provides context. \
-                            Third sentence completes the fixture.";
-
-        // Capture 200 drawers in the same room.
-        let mut ids: Vec<String> = Vec::new();
-        for i in 0..200i64 {
-            let frame = LkCaptureFrame::new(
-                long_content,
-                CaptureChannel::Typed,
-                "lab",
-                LatticeAnchor::udc("0"),
-                "tester",
-                "test-v1",
-            );
-            let drawer = coord.capture(&handle, frame, NOW + i).expect("capture");
-            ids.push(drawer.id);
-        }
-
-        // Distill the first 199 via set_distilled_representation directly
-        // so we control exactly which drawer remains undistilled.
-        let estate = coord.estate_for_verb(&handle).expect("estate");
-        for id in ids.iter().take(199) {
-            estate
-                .set_distilled_representation(
-                    id, "rendered",
-                    crate::distillation_converter_id(),
-                    &context_distill_lib::digest::source_digest(long_content),
-                    3, NOW,
-                )
-                .expect("set_distilled_representation");
-        }
-
-        // The 200th drawer (ids[199]) is still undistilled.
-        // The sweep MUST enter the room and distill it.
-        let produced = coord
-            .distill_items_sweep(&handle, NOW, None)
-            .expect("sweep");
-        assert!(
-            produced >= 1,
-            "one undistilled drawer must be found regardless of the 199 distilled ones; got {produced}"
-        );
-    }
-
-    // CO-DIST-AND-2: Win fixture — fully-distilled rooms are skipped after
-    // the estate is reopened (rebuildAll tightens the AND aggregate so
-    // operationalAND bit 19 = 1 for all-distilled rooms, causing the
-    // sweep to skip them).
-    #[test]
-    fn co_dist_and2_win_fixture_fully_distilled_rooms_skipped_after_rebuild() {
-        use locus_kit::frames::CaptureFrame as LkCaptureFrame;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-
-        // Open two coordinators backed by the SAME store (simulating close +
-        // reopen which triggers rebuildAll).
-        let storage =
-            Arc::new(locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap())
-                as Arc<dyn DrawerStore>;
-
-        let mut coord = EstateCoordinator::new();
-        let handle = coord
-            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
-            .expect("open");
-        coord.seed_default_wings(&handle, NOW).expect("seed");
-
-        let long_content = "First sentence sets context. \
-                            Second sentence adds detail. \
-                            Third sentence is the conclusion.";
-
-        let frame = LkCaptureFrame::new(
-            long_content, CaptureChannel::Typed, "lab",
-            LatticeAnchor::udc("0"), "tester", "test-v1",
-        );
-        coord.capture(&handle, frame, NOW).expect("capture");
-
-        // First sweep: distills the one item.
-        let first = coord.distill_items_sweep(&handle, NOW, None).expect("first sweep");
-        assert!(first >= 1, "item must distill on first sweep; got {first}");
-
-        // Mid-session second sweep: room is entered (operationalAND bit 19 is
-        // still 0 from the capture), but nothing to distill.
-        let mid = coord.distill_items_sweep(&handle, NOW, None).expect("mid sweep");
-        assert_eq!(mid, 0, "mid-session sweep must produce 0 (all distilled already)");
-
-        // Check that the AND is still 0 for bit 19 mid-session.
-        let skip_bit =
-            locus_kit::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
-        let estate1 = coord.estate_for_verb(&handle).expect("estate1");
-        let entries1 = estate1.room_level_fingerprints().expect("entries1");
-        let lab_entry1 = entries1.iter().find(|e| e.room == "lab");
-        if let Some(lab) = lab_entry1 {
-            assert_eq!(
-                lab.fingerprint.operational_and & skip_bit, 0,
-                "mid-session AND must have bit 19 = 0 (rebuildAll not yet called)"
-            );
-        }
-
-        // "Reopen" by opening a second coordinator on the same store.
-        // This triggers rebuild_container_fingerprints (called inside open)
-        // which recomputes the AND from all active drawers.
-        let mut coord2 = EstateCoordinator::new();
-        let handle2 = coord2
-            .open(Arc::clone(&storage), OwnerCredentials::new("owner"), 0, 100)
-            .expect("reopen");
-
-        // After rebuildAll (via reopen) the sweep must skip the
-        // fully-distilled room and produce 0.
-        let post_reopen = coord2.distill_items_sweep(&handle2, NOW, None).expect("post-reopen sweep");
-        assert_eq!(
-            post_reopen, 0,
-            "after rebuildAll (via reopen) the fully-distilled room must be skipped; got {post_reopen}"
-        );
-
-        // Fingerprint sanity: bit 19 must be 1 in operationalAND after rebuildAll.
-        let estate2 = coord2.estate_for_verb(&handle2).expect("estate2");
-        let entries2 = estate2.room_level_fingerprints().expect("entries2");
-        if let Some(lab) = entries2.iter().find(|e| e.room == "lab") {
-            assert_eq!(
-                lab.fingerprint.operational_and & skip_bit, skip_bit,
-                "operationalAND bit 19 must be 1 after rebuildAll when all drawers carry it"
-            );
-        }
     }
 
     // ── Contradiction hunt (mirrors Swift ContradictionHuntTests) ──────

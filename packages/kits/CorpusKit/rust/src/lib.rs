@@ -41,12 +41,13 @@ pub mod chunker;
 // Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
 pub mod content;
 pub mod content_engine;
-pub mod trailer_lexical_supplement;
+pub mod ssc_facts;
 pub mod content_engine_queue;
 pub mod corpus;
 pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
 pub mod document_store;
+pub mod encoder;
 pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
@@ -94,6 +95,7 @@ pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
 pub use corpus::TrainingPathDecision;
 pub use document_store::CorpusDocumentStore;
+pub use encoder::{EncoderError, EncoderModelSpec, SpanEncoder};
 pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
 pub use schema_profile::{
     attached_declaration, attached_excluded_tables, standalone_declaration,

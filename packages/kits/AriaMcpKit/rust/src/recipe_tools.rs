@@ -5,18 +5,6 @@
 //! throw `JSONRPCError`; recipe-level refusals come back as `error_result` (isError
 //! true) so the client keeps the call id.
 //!
-//! # Dark mint tools — launch-time gate
-//!
-//! `moot_register_adornment_minter` and `moot_run_adornment_pass` are the
-//! benchmark mint driver's harness-only tools: never in `tools/list`, and
-//! dispatched ONLY when the serving process was launched with
-//! `MOOTX01_MINT_TOOLS=1` (`mint_tools_enabled`, read once per process).
-//! Without the variable both names are unknown tools: `is_recipe_tool`
-//! returns false and `dispatch_with` returns the same METHOD_NOT_FOUND
-//! "Unknown tool" error as any unregistered name. `moot_run_adornment_pass`
-//! also clamps `batch_size` to `ADORNMENT_PASS_MAX_BATCH_SIZE`. Same
-//! behavior in the Swift twin.
-//!
 //! # moot_dream
 //!
 //! On-demand dream tool: runs one dreaming cycle (latent-alignment proposals +
@@ -449,12 +437,6 @@ const RECALL_VAGUE: &str = "moot_recall_vague";
 const RECALL_SHAPED: &str = "moot_recall_shaped";
 /// On-demand dream tool — mirrors Swift `RecipeTools.dreamToolName`.
 const DREAM: &str = "moot_dream";
-/// Per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3) — mirrors
-/// Swift `RecipeTools.distillToolName`.
-const DISTILL: &str = "moot_distill";
-/// Force re-distillation of every item + full derived-lane reindex (CDL-02)
-/// — mirrors Swift `RecipeTools.redistillToolName`.
-const REDISTILL: &str = "moot_redistill";
 /// Distilled-payload recall (§10.3): exact-search geometry + distilled
 /// hydration — mirrors Swift `RecipeTools.recallDistilledToolName`.
 /// ACK-GATED: requires ack: "recall_distilled/v2" (Wave 1 contract change).
@@ -471,48 +453,6 @@ const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 /// when confident (topGap ≥ 0.25); Stage 2 (hamming+text) fires only when
 /// Stage 1 is insufficient.
 const RECALL_WALK: &str = "moot_recall_walk";
-// Dark harness-only mint tools (MINTCLI-78 twins). Never listed in
-// tools/list; the benchmark mint driver calls them by name. Dispatched
-// ONLY when the serving process was launched with MOOTX01_MINT_TOOLS=1
-// (see `mint_tools_enabled`) — omission from tools/list is not
-// authorization.
-const REGISTER_ADORNMENT_MINTER: &str = "moot_register_adornment_minter";
-const RUN_ADORNMENT_PASS: &str = "moot_run_adornment_pass";
-
-/// Launch-time environment variable that enables the two dark mint tools.
-/// Byte-identical to Swift `RecipeTools.mintToolsEnvironmentVariable`.
-pub const MINT_TOOLS_ENV_VAR: &str = "MOOTX01_MINT_TOOLS";
-
-/// Gate decision from one environment lookup: exactly the literal `"1"`
-/// enables; absent, empty, `"0"`, `"true"`, or anything else leaves the
-/// dark tools off. Takes the looked-up value as a parameter so tests can
-/// pin the decision without touching the process environment. Twin of
-/// Swift `RecipeTools.mintToolsEnabled(environment:)`.
-pub fn mint_tools_enabled_from(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-/// Process-wide dark-mint-tool gate: `MOOTX01_MINT_TOOLS=1` at launch.
-///
-/// Read ONCE per process (`OnceLock`) — the gate is a launch-time
-/// decision, never a per-call environment probe, so a serve cannot be
-/// flipped open after start. The benchmark mint driver sets the variable
-/// on the serve command it launches for auditions; a product serve never
-/// sets it, so a client that knows the dark names gets the same
-/// unknown-tool error it would get for any unregistered name.
-pub fn mint_tools_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        mint_tools_enabled_from(std::env::var(MINT_TOOLS_ENV_VAR).ok().as_deref())
-    })
-}
-
-/// True when `name` is one of the two dark mint tools.
-pub fn is_dark_mint_tool(name: &str) -> bool {
-    matches!(name, REGISTER_ADORNMENT_MINTER | RUN_ADORNMENT_PASS)
-}
-
 /// Maximum probe count for `moot_dream` when `associates: "all"` is requested.
 ///
 /// "all" mode is intended for post-import full-estate coverage: the caller
@@ -548,22 +488,7 @@ const RECOLLECT_REMOVED_NOTICE: &str = concat!(
 /// True when `name` is one of the recipe tools (including dispatch-only stubs).
 /// `RECOLLECT` is in this set as a notice-only stub: it must reach dispatch so
 /// callers receive the removal notice; it is NOT listed in tools/list.
-///
-/// The two dark mint tools are in this set ONLY when the process-wide
-/// `mint_tools_enabled` gate is on; otherwise they are unknown names and
-/// `dispatch_tool` returns its standard unknown-tool error for them.
 pub fn is_recipe_tool(name: &str) -> bool {
-    is_recipe_tool_with(name, mint_tools_enabled())
-}
-
-/// `is_recipe_tool` with the dark-mint-tool gate supplied by the caller.
-/// Production routes through `is_recipe_tool` (process gate); tests pass
-/// the gate explicitly so both arms are pinned without environment
-/// mutation.
-pub fn is_recipe_tool_with(name: &str, mint_tools_enabled: bool) -> bool {
-    if is_dark_mint_tool(name) {
-        return mint_tools_enabled;
-    }
     matches!(
         name,
         LIST_LENSES
@@ -577,8 +502,6 @@ pub fn is_recipe_tool_with(name: &str, mint_tools_enabled: bool) -> bool {
             | RECALL_VAGUE
             | RECALL_SHAPED
             | DREAM
-            | DISTILL
-            | REDISTILL
             | RECALL_DISTILLED
             | RECOLLECT
             | HUNT_CONTRADICTIONS
@@ -592,31 +515,6 @@ pub fn dispatch(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_with(name, args, registry, mint_tools_enabled())
-}
-
-/// `dispatch` with the dark-mint-tool gate supplied by the caller. Production
-/// routes through `dispatch` (process gate); tests pass the gate explicitly.
-pub fn dispatch_with(
-    name: &str,
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-    mint_tools_enabled: bool,
-) -> Result<serde_json::Value, JSONRPCError> {
-    // Dark mint tools: launch-time gate (MOOTX01_MINT_TOOLS=1). Hiding a
-    // tool from tools/list is not authorization — a raw client can call
-    // any name — so the gate is enforced HERE as well as in
-    // `is_recipe_tool`, and a gated call gets the byte-identical
-    // unknown-tool error `dispatch_tool` returns for any unregistered
-    // name, so the names stay undiscoverable. The benchmark mint driver
-    // sets the variable on the serve it launches (MintCLI serve command).
-    if is_dark_mint_tool(name) && !mint_tools_enabled {
-        return Err(JSONRPCError::new(
-            JSONRPCErrorCode::METHOD_NOT_FOUND,
-            format!("Unknown tool: {name}"),
-        ));
-    }
-
     // ACK gates and notice-only stubs — fire before any registry/estate access.
     // Mirrors the guard block in Swift RecipeTools.dispatch() that precedes
     // the resolveHandle() call, ensuring zero side effects on missing/wrong ack.
@@ -639,15 +537,11 @@ pub fn dispatch_with(
         RECALL_VAGUE => run_vague_recall_tool(args, registry),
         RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
-        DISTILL => run_distill_tool(args, registry),
-        REDISTILL => run_redistill_tool(args, registry),
         // moot_recall_distilled reaches here only when ack: "recall_distilled/v2"
         // was present (ACK gate above).
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
         HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
         RECALL_WALK => run_walk_recall_tool(args, registry),
-        REGISTER_ADORNMENT_MINTER => run_register_adornment_minter_tool(args, registry),
-        RUN_ADORNMENT_PASS => run_adornment_pass_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -943,12 +837,6 @@ fn run_grounded_synthesis_tool(
             .unwrap_or_default();
         let by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
             pooled.iter().map(|d| (d.id.as_str(), d)).collect();
-        // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2).
-        let adornment_map = coord
-            .estate_for(&estate.handle)
-            .ok()
-            .and_then(|e| e.active_adornments(&id_refs).ok())
-            .unwrap_or_default();
         for id in &out.ranked_ids {
             if let Some(d) = by_id.get(id.as_str()) {
                 // Synthesis pool-removal gate: the recipe already excluded
@@ -961,18 +849,7 @@ fn run_grounded_synthesis_tool(
                     Sensitivity::Restricted | Sensitivity::Secret => continue,
                     _ => {}
                 }
-                let mut row = crate::result_composer::candidate_from_drawer(d);
-                let mut entries: Vec<crate::result_composer::AdornmentEntry> = adornment_map
-                    .get(&d.id)
-                    .map(|v| v.iter().map(|sa| crate::result_composer::AdornmentEntry {
-                        minter_id: sa.minter_id.clone(),
-                        text: sa.text.clone(),
-                    }).collect())
-                    .unwrap_or_default();
-                // Ascending minter-ID order (caller's responsibility per the
-                // composer contract; the composer never re-sorts).
-                entries.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
-                row.active_adornments = entries;
+                let row = crate::result_composer::candidate_from_drawer(d);
                 candidate_rows.push(row);
             }
         }
@@ -2517,84 +2394,6 @@ fn parse_uuid_array(
 }
 
 // ---------------------------------------------------------------------------
-// moot_distill
-// ---------------------------------------------------------------------------
-
-/// Run one per-item distillation sweep via the CognitionKit `run_distill`
-/// recipe body (SPEC_DISTILLATION_STORAGE §3/§7.1). Handles `moot_distill`.
-///
-/// Mirrors Swift `RecipeTools.runDistill`. Routes through the CognitionKit
-/// library recipe surface (`cognition_kit::run_distill`) rather than calling
-/// `EstateCoordinator::distill_items_sweep` directly — parity with the Swift
-/// handler which calls `Distill.run(input:estate:kit:)`.
-///
-/// Returns text in the same format as the Swift handler:
-///   "moot_distill: sweep complete\nitemsDistilled: N"
-fn run_distill_tool(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve_direct(args)?;
-    let now = crate::dispatch::wall_now();
-    let coord = estate.coord.lock().unwrap();
-    // Route through the CognitionKit library recipe — parity with Swift's
-    // `Distill.run(input:estate:kit:)` call chain.
-    let input = cognition_kit::DistillInput::default();
-    let out = cognition_kit::run_distill(&input, &coord, &estate.handle, now)
-        .map_err(|e| {
-            JSONRPCError::new(
-                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
-                format!(
-                    "moot_distill: sweep failed: {}",
-                    crate::interface_tools::describe_verb_dispatch_error(&e)
-                ),
-            )
-        })?;
-    Ok(text_result(&format!(
-        "moot_distill: sweep complete\nitemsDistilled: {}",
-        out.items_distilled
-    )))
-}
-
-// ---------------------------------------------------------------------------
-// moot_redistill
-// ---------------------------------------------------------------------------
-
-/// Force re-distillation of every active item followed by a full
-/// derived-lane reindex (CDL-02). Handles `moot_redistill`.
-///
-/// Mirrors Swift `RecipeTools.runRedistill`: routes through the CognitionKit
-/// `run_redistill` recipe body, which runs the coordinator's
-/// `redistill_items_sweep` to completion and then `reindex_corpus`.
-/// No arguments: this is an estate-wide operation.
-///
-/// Returns text in the same format as the Swift handler:
-///   "moot_redistill: sweep complete\nitemsRedistilled: N\nreindexed: both lanes (BM25 + dense)"
-fn run_redistill_tool(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve_direct(args)?;
-    let now = crate::dispatch::wall_now();
-    let coord = estate.coord.lock().unwrap();
-    let input = cognition_kit::RedistillInput::default();
-    let out = cognition_kit::run_redistill(&input, &coord, &estate.handle, now)
-        .map_err(|e| {
-            JSONRPCError::new(
-                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
-                format!(
-                    "moot_redistill: failed: {}",
-                    crate::interface_tools::describe_verb_dispatch_error(&e)
-                ),
-            )
-        })?;
-    Ok(text_result(&format!(
-        "moot_redistill: sweep complete\nitemsRedistilled: {}\nreindexed: both lanes (BM25 + dense)",
-        out.items_redistilled
-    )))
-}
-
-// ---------------------------------------------------------------------------
 // moot_recall_distilled
 // ---------------------------------------------------------------------------
 
@@ -2680,16 +2479,9 @@ fn run_recall_distilled_tool(
         if out.matches.len() == 1 { "found 1 candidate memory, one per line".to_string() } else { format!("found {} candidate memories, one per line", out.matches.len()) }
     };
     let mut lines = vec![header];
-    let mut any_fallback = false;
     for m in out.matches.iter().take(50) {
         lines.push(dense_by_id.get(&m.id).cloned()
             .unwrap_or_else(|| crate::result_composer::render_s2_row_unhydrated(&m.id)));
-        if m.served_from_content {
-            any_fallback = true;
-            // Fallback marker on fallback hits ONLY (§10.2): the text below
-            // is verbatim content, not a distillate.
-            lines.push("source: content (not yet distilled)".to_string());
-        }
         lines.push(m.text.clone());
     }
     // Deviation-only narration (PR-03): discrimination line only on
@@ -2706,15 +2498,6 @@ fn run_recall_distilled_tool(
         }
         cognition_kit::DistilledDiscriminationLevel::High
         | cognition_kit::DistilledDiscriminationLevel::Single => {}
-    }
-    if any_fallback {
-        // SPEC §10.3 fallback notice: results still return, served from
-        // content, with a hint to populate the representations.
-        lines.push(
-            "hint: some results are not yet distilled and were served from full \
-             content. Run moot_distill to populate distilled representations."
-                .to_string(),
-        );
     }
 
     Ok(text_result(&lines.join("\n")))
@@ -2880,143 +2663,4 @@ fn decode_precise_filter(args: &BTreeMap<String, JsonValue>) -> Result<Filter, J
 /// (RecipeRunError::Substrate, etc.) leak to the agent boundary.
 fn error_from_recipe(e: cognition_kit::RecipeRunError) -> JSONRPCError {
     JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Dark harness-only mint tools (MINTCLI-78 twins of Swift RecipeTools)
-// ---------------------------------------------------------------------------
-
-/// moot_register_adornment_minter: register one minter descriptor and
-/// atomically replace the active set with exactly this minter, so the
-/// following adornment pass sees one active minter (GENIUSLOCUSKIT_SPEC
-/// §16.1 — composition observes the complete old or new set, never a
-/// partial intermediate). Twin of the Swift dark tool: same eight fields.
-/// Reachable only behind the `MOOTX01_MINT_TOOLS=1` launch gate
-/// (`dispatch_with`): every fresh minter id re-creates debt for every live
-/// drawer, so registration is harness-only by construction.
-fn run_register_adornment_minter_tool(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    use crate::dispatch::{require_string, text_result};
-    let estate = registry.resolve_direct(args)?;
-    let id = require_string(args, "minter_id")?;
-    let name = require_string(args, "minter_name")?;
-    let family = require_string(args, "minter_family")?;
-    let model_id = require_string(args, "minter_model_id")?;
-    let model_version = require_string(args, "minter_model_version")?;
-    let prompt_digest = require_string(args, "minter_prompt_digest")?;
-    // minter_parameters: optional object whose values must all be strings
-    // (the descriptor's parameters map is string→string by contract).
-    let mut parameters = std::collections::BTreeMap::new();
-    if let Some(raw) = args.get("minter_parameters") {
-        let JsonValue::Object(map) = raw else {
-            return Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
-                "minter_parameters must be an object of string values".to_string(),
-            ));
-        };
-        for (k, v) in map {
-            let JsonValue::String(sv) = v else {
-                return Err(JSONRPCError::new(
-                    JSONRPCErrorCode::INVALID_PARAMS,
-                    format!("minter_parameters.{k} must be a string"),
-                ));
-            };
-            parameters.insert(k.clone(), sv.clone());
-        }
-    }
-    let descriptor = adornment_lib::AdornmentMinterDescriptor {
-        id: id.to_string(),
-        name: name.to_string(),
-        family: family.to_string(),
-        model_id: model_id.to_string(),
-        model_version: model_version.to_string(),
-        prompt_digest: prompt_digest.to_string(),
-        parameters,
-        is_active: true,
-    };
-    estate.store.register_adornment_minter(&descriptor).map_err(|e| {
-        JSONRPCError::new(
-            JSONRPCErrorCode::INTERNAL_ERROR,
-            format!("register_adornment_minter: {e:?}"),
-        )
-    })?;
-    let activated = estate.store.set_active_adornment_minters(&[id]).map_err(|e| {
-        JSONRPCError::new(
-            JSONRPCErrorCode::INTERNAL_ERROR,
-            format!("set_active_adornment_minters: {e:?}"),
-        )
-    })?;
-    Ok(text_result(&format!(
-        "moot_register_adornment_minter: registered '{id}' (active set replaced; {activated} row(s) updated)"
-    )))
-}
-
-/// moot_run_adornment_pass: execute one adornment pass against every
-/// registered active minter. Twin of the Swift dark tool — same four
-/// arguments and the SAME plain-text result shape (the benchmark mint
-/// driver parses the adorned/rejected/skipped counts from this text).
-/// Reachable only behind the `MOOTX01_MINT_TOOLS=1` launch gate
-/// (`dispatch_with`); `batch_size` is clamped to
-/// `ADORNMENT_PASS_MAX_BATCH_SIZE`.
-///
-/// `now` is accepted for wire parity with the Swift tool but unused: the
-/// Rust pass writes no timestamps itself (row timestamps are the store's
-/// concern at put time).
-fn run_adornment_pass_tool(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    use crate::dispatch::text_result;
-    // String-or-integer numeric args: the Swift dark tool's schema types
-    // these as STRINGS (its harness callers pass "500"), while raw JSON
-    // integers are equally valid on the wire. Accept both — the Swift
-    // twin's contract, not `optional_integer`'s integer-only rule.
-    fn count_arg(
-        args: &BTreeMap<String, JsonValue>,
-        key: &str,
-    ) -> Result<Option<i64>, JSONRPCError> {
-        match args.get(key) {
-            None => Ok(None),
-            Some(JsonValue::Integer(n)) => Ok(Some(*n)),
-            Some(JsonValue::String(raw)) => raw.parse::<i64>().map(Some).map_err(|_| {
-                JSONRPCError::new(
-                    JSONRPCErrorCode::INVALID_PARAMS,
-                    format!("{key} must be a positive count; got '{raw}'"),
-                )
-            }),
-            Some(_) => Err(JSONRPCError::new(
-                JSONRPCErrorCode::INVALID_PARAMS,
-                format!("{key} must be a string or integer count"),
-            )),
-        }
-    }
-    let estate = registry.resolve_direct(args)?;
-    let _now = args.get("now"); // wire parity only — see doc comment.
-    // batch_size is clamped to ADORNMENT_PASS_MAX_BATCH_SIZE (clamped, not
-    // rejected: the mint driver passes large counts and pages by repeated
-    // calls). The pass entry point clamps again so no other caller can
-    // exceed the ceiling; this clamp keeps the tool's own contract explicit.
-    // `try_from` guards the i64→usize narrowing on 32-bit targets.
-    let batch_size = match count_arg(args, "batch_size")? {
-        Some(n) if n > 0 => genius_locus_kit::brain::adornment_pass::clamped_batch_size(
-            usize::try_from(n).unwrap_or(usize::MAX),
-        ),
-        Some(_) | None => genius_locus_kit::brain::adornment_pass::DEFAULT_BATCH_SIZE,
-    };
-    let max_len = match count_arg(args, "adornment_max_length")? {
-        Some(n) if n > 0 => Some(n as usize),
-        _ => None,
-    };
-    let result = genius_locus_kit::brain::adornment_pass::run_adornment_pass(
-        estate.store.as_ref(),
-        batch_size,
-        max_len,
-    )
-    .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, e))?;
-    Ok(text_result(&format!(
-        "moot_run_adornment_pass: pass complete\nadorned: {}\nrejected: {}\nskipped: {}",
-        result.adorned_pairs, result.failed_pairs, result.skipped_pairs
-    )))
 }

@@ -7,6 +7,10 @@
 // addition to an already-indexed estate, and claim-aware shared-vector
 // ownership on remove/destroy.
 
+// Every case trains a PPMI slot — a dark dense family (contract sheet §13) —
+// so this file compiles only under the dense-families feature.
+#![cfg(feature = "dense-families")]
+
 use corpus_kit::content_engine::CorpusContentEngine;
 use corpus_kit::corpus::EmbeddingModelConfig;
 use corpus_kit::basis_store::BasisStore;

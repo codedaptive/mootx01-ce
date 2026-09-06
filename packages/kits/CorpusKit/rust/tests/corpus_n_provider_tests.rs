@@ -15,6 +15,10 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as corpus_basis_persistence_tests.
 
+// Every case opens the FDC, LSA, NMF or PPMI providers — dark dense families (contract sheet §13) —
+// so this file compiles only under the dense-families feature.
+#![cfg(feature = "dense-families")]
+
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
 use corpus_kit_providers::{
     FDCProvider, LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider,

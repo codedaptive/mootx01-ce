@@ -88,6 +88,13 @@ genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/ru
 # via aria-mcp; naming it directly keeps the upgrade wiring plain and
 # removable (same rationale as persistence-kit above).
 corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
+# synapsekit + substrate-kernel: the span-encode and vector-reclaim steps of
+# `mootx01 upgrade` write encoder span rows (VectorStore::write_span_vectors,
+# int8_vec::quantize) and reclaim the retired dense-family rows
+# (VectorStore::reclaim_retired_vector_rows). Both were resolving transitively
+# through genius-locus-kit; naming them keeps the upgrade wiring explicit.
+synapsekit = { path = "../../../packages/kits/SynapseKit/rust" }
+substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
 # corpus-kit-providers: `mootx01 db composition --set` wires the Corpus it
 # rebuilds with `default_ensemble()`, the same five-signal ensemble the ARIA
 # registry serves with, so the rebuilt rows are the rows serve will read.
@@ -108,6 +115,14 @@ adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }
 # precomposed form ("é") in the Rust engine, causing divergence from Swift's output.
 # Authorized by the mission orchestrator as a correctness dependency (2026-08-24).
 unicode-normalization = "0.1"
+
+[features]
+# The span-encoder runtime (candle, all-MiniLM-L6-v2) ships in the product
+# binary by default: `mootx01 serve` activates it for estates provisioned with
+# embedding_provider = "encoder" and a bundled model directory. Build with
+# `--no-default-features` for a lexical-only binary without the ML crates.
+default = ["encoder"]
+encoder = ["genius-locus-kit/encoder"]
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.

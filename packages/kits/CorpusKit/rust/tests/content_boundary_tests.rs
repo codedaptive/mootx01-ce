@@ -106,6 +106,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
                 digest: digest.clone(),
                 text: text.to_string(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             };
             state.records.insert(id.to_string(), bumped.clone());
             let seq = state.next_seq;
@@ -126,6 +127,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
             digest: digest.clone(),
             text: text.to_string(),
             dense_composition_text: None,
+            ssc_facts: None, // supplied by GLK layer (schema 19)
         };
         state.records.insert(id.to_string(), fresh.clone());
         let seq = state.next_seq;
