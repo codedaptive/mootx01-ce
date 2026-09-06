@@ -196,17 +196,17 @@ impl Estate {
                 _ => None,
             })
             .unwrap_or(0);
-        // Clear hasCurrentRepresentation (bit 19). Bits 27-30 are FREE
-        // (ADORN-STORE-02 v17 retired adornmentRequired / adornmentBitmask).
-        // Adornment debt is discovered via adornmentDebtBatch, not via bitmap.
+        // Content changed: clear the content-derived bits (19, 27) so the
+        // span rows are re-encoded, in the same UPDATE that NULLs the
+        // content-derived columns below.
         let cleared_op = current_op
-            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+            & !crate::drawer_operational::DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(content.to_string()));
         values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(cleared_op));
-        // Content changed in place → the distilled representation (a view of
-        // the OLD content) is stale. NULL-on-edit in the same statement is
-        // the SPEC §7.3 regeneration trigger. Mirrors Swift
+        // Content changed in place → the content-derived columns (ssc_facts,
+        // subject trio) describe the OLD content. NULL-on-edit in the same
+        // statement is the regeneration trigger. Mirrors Swift
         // updateDatasetContent.
         crate::drawer_store_inmemory::insert_cleared_representation(&mut values);
         let count = row_store

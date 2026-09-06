@@ -20,6 +20,10 @@ struct RecallExplainerCrossPortFixtureTests {
         let graph: Float, preference: Float, final: Float
     }
 
+    private struct FixtureSpanHit: Decodable {
+        let bestSpanIndex: UInt32, bestSpanStart: Int, bestSpanEnd: Int, cosine: Float
+    }
+
     private struct FixtureCase: Decodable {
         let name: String
         let sources: [String]
@@ -28,6 +32,8 @@ struct RecallExplainerCrossPortFixtureTests {
         let agreement: Float
         let mode: String
         let scoring: String
+        /// Present only for a hit the span rerank stage scored.
+        let spanHit: FixtureSpanHit?
         let expected: [String]
     }
 
@@ -62,7 +68,12 @@ struct RecallExplainerCrossPortFixtureTests {
                 temporal: c.score.temporal, graph: c.score.graph,
                 preference: c.score.preference, redundancyPenalty: 0,
                 final: c.score.final, dense: c.score.dense)
-            let hit = RecallHit(id: "fixture", drawer: nil, sources: sources, score: sv, explanation: [])
+            let spanHit = c.spanHit.map {
+                SpanRerankHit(itemID: "fixture", bestSpanIndex: $0.bestSpanIndex,
+                              bestSpanStart: $0.bestSpanStart, bestSpanEnd: $0.bestSpanEnd, cosine: $0.cosine)
+            }
+            let hit = RecallHit(id: "fixture", drawer: nil, sources: sources, score: sv,
+                                explanation: [], spanHit: spanHit)
             let mode = try #require(GLKRecallMode(rawValue: c.mode), "unknown mode \(c.mode)")
             let scoring = try #require(GLKRecallScoring(rawValue: c.scoring), "unknown scoring \(c.scoring)")
             let plan = RecallPlan(effectiveMode: mode, frontierK: 64, weights: .uniform)

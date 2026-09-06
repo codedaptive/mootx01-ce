@@ -139,8 +139,8 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         try validatePSQLIdentifier(table)
         for name in values.keys { try validatePSQLIdentifier(name) }
         // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text —
+        // path since ssc_facts joined the protected column set (an SSC-facts
+        // write is an UPDATE carrying "ssc_facts" text —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals non-empty
         // protected text and stamps keyID; it is a no-op for the
         // bitmap/timestamp updates and for the expunge scrub (empty text is

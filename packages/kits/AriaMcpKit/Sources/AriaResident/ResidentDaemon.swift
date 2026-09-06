@@ -472,18 +472,12 @@ public enum AriaResident {
                     anomalyCycle: { now in
                         try await kit.anomalyFlagSweep(handle: handle, now: now)
                     },
-                    // Live adornment cycle (SPEC_ADORNMENT §4 wiring): without
-                    // this closure AdornmentPassSignal registers its no-op
-                    // defaultSpec and no adornment passes fire in a resident
-                    // estate. The pass fetches (drawer, minter) pairs with
-                    // missing adornments, invokes MOOT_MINT_CMD per pair,
-                    // validates with AdornmentValidators, and writes to the
-                    // normalized `adornments` table. No-op when MOOT_MINT_CMD
-                    // is unset or no minters are active.
-                    adornmentCycle: { now in
-                        // `runAdornmentPass` returns `AdornmentPassResult`; extract
-                        // `adornedPairs` for the signal's `Int` progress counter.
-                        try await kit.runAdornmentPass(handle: handle, now: now).adornedPairs
+                    // Live span-encode cycle (Encoder Rerank contract sheet
+                    // §10): encodes drawers whose bit 27 is clear under the
+                    // registered encoder and writes their int8 span rows. A
+                    // no-op (0) when no encoder is active for the estate.
+                    spanEncodeCycle: { now in
+                        try await kit.runSpanEncodeBatch(handle: handle, now: now)
                     },
                     now: Date()
                 )

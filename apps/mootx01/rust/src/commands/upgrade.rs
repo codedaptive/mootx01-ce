@@ -39,23 +39,28 @@ pub fn run(
     }
 
     // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs the five data-directory migration steps (kg_facts identity,
-    // adornment store migration, shared-content reclaim, dense pooling
-    // convergence, distilled representation convergence) against the estate
-    // resolved via MOOTX01_DATA_DIR, then exits.
-    // No network, no prompts; each step quiesces the daemon only when the
-    // estate is the resident one. Ordering matches run_convergence:
-    // correctness migration → schema + data move → VACUUM-backed reclaim →
-    // dense pooling convergence → distilled representation convergence.
-    // All steps run even when earlier steps fail (independent + retryable);
-    // exits non-zero when any step reported failure.
+    // estates. Runs the six data-directory migration steps (schema 10 → 19,
+    // kg_facts identity, shared-content reclaim, dense pooling convergence,
+    // span encode, vector reclaim) against the estate resolved via
+    // MOOTX01_DATA_DIR, then exits. No network, no prompts; each step
+    // quiesces the daemon only when the estate is the resident one. Ordering
+    // matches run_convergence: schema gate → correctness migration →
+    // VACUUM-backed reclaim → dense pooling convergence → span encode →
+    // vector reclaim. A refused schema version stops the sequence (every later
+    // step would open the schema and stamp it); otherwise all steps run even
+    // when earlier steps fail (independent + retryable) and the exit is
+    // non-zero when any step reported failure.
     if backfill_only {
+        if !run_schema_upgrade() {
+            return ExitCode::from(exit::FAILURE);
+        }
         let ok_kg    = run_kg_fact_identity_backfill();
-        let ok_ado   = run_adornment_store_migration();
         let ok_recl  = run_shared_content_reclaim_if_pending();
+        let ok_facts = run_ssc_facts_backfill();
         let ok_dense = run_dense_pooling_convergence();
-        let ok_dist  = run_distilled_representation_convergence();
-        if ok_kg && ok_ado && ok_recl && ok_dense && ok_dist {
+        let ok_span  = run_span_encode_backfill();
+        let ok_vec   = run_vector_reclaim();
+        if ok_kg && ok_recl && ok_facts && ok_dense && ok_span && ok_vec {
             return ExitCode::from(exit::OK);
         } else {
             return ExitCode::from(exit::FAILURE);
@@ -101,11 +106,14 @@ pub fn run(
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still runs all migration steps and offers.
-            run_kg_fact_identity_backfill();
-            run_adornment_store_migration();
-            run_shared_content_reclaim_if_pending();
-            run_dense_pooling_convergence();
-            run_distilled_representation_convergence();
+            if run_schema_upgrade() {
+                run_kg_fact_identity_backfill();
+                run_shared_content_reclaim_if_pending();
+                run_ssc_facts_backfill();
+                run_dense_pooling_convergence();
+                run_span_encode_backfill();
+                run_vector_reclaim();
+            }
             offer_estate_encryption_if_needed();
             return ExitCode::from(exit::OK);
         }
@@ -215,13 +223,114 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
 fn run_convergence() {
     // Return values are intentionally ignored in the full convergence path —
     // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
-    let _ = run_kg_fact_identity_backfill();
-    let _ = run_adornment_store_migration();
-    let _ = run_shared_content_reclaim_if_pending();
-    let _ = run_dense_pooling_convergence();
-    let _ = run_distilled_representation_convergence();
+    // A refused schema version skips every data step: each of them would
+    // open the LocusKit schema and stamp the estate current.
+    if run_schema_upgrade() {
+        let _ = run_kg_fact_identity_backfill();
+        let _ = run_shared_content_reclaim_if_pending();
+        let _ = run_dense_pooling_convergence();
+        let _ = run_span_encode_backfill();
+        let _ = run_vector_reclaim();
+    }
     run_corpus_counts_migration();
     remove_redundant_codex_direct_entry();
+}
+
+/// Schema 10 → 19 (ENCODER_RERANK_CONTRACT §12): the one product schema
+/// migration. Reads the LocusKit ledger row RAW, before any schema open, and
+/// decides with `locus_kit::schema::upgrade_path`: 10 (CE 1.0.35/1.0.37) →
+/// open the LocusKit schema, which applies the single v10 → v19 hop; 19 →
+/// nothing; no row → fresh; anything else → REFUSE, naming the version
+/// found, and return false so the caller skips every later step. The refusal
+/// must come first because persistence-kit's runner stamps the declared
+/// version whenever no ladder entry matches: any later step's open would mark
+/// an estate at 11–18 as 19 with none of the v19 objects in place. EE
+/// development estates at 18 are moved by the surgery script, never by this
+/// command. Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Returns `true` when the estate is at 19 afterwards (or absent).
+fn run_schema_upgrade() -> bool {
+    use locus_kit::schema::{self, SchemaUpgradePath};
+    use persistence_kit::sqlite::SqliteStorage;
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+    use uuid::Uuid;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    // Absent estate means first run — serve creates new estates at 19.
+    if !estate.exists() {
+        return true;
+    }
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "schema upgrade",
+        &PlatformDaemon,
+        || {
+            let result = (|| -> Result<String, String> {
+                let config = EstateConfiguration::new(
+                    Uuid::new_v4(),
+                    BackendConfiguration::Sqlite {
+                        path: estate.display().to_string(),
+                        busy_timeout_secs: 5.0,
+                    },
+                );
+                let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+                // The ledger row, read before any schema open (see the doc comment).
+                let stored = storage
+                    .current_schema_version_for(schema::KIT_ID)
+                    .map_err(|e| e.to_string())?;
+                let outcome = match schema::upgrade_path(stored) {
+                    SchemaUpgradePath::Unsupported { found } => Err(format!(
+                        "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    An EE development estate at 11–18 is brought to 19 by benchmark-ee/scripts/schema18-to-19-surgery.sh; a newer estate needs a newer build.",
+                        schema::SUPPORTED_UPGRADE_FLOOR,
+                        schema::SCHEMA_VERSION
+                    )),
+                    SchemaUpgradePath::Current => Ok(format!(
+                        "already at LocusKit schema {}",
+                        schema::SCHEMA_VERSION
+                    )),
+                    SchemaUpgradePath::Fresh => Ok(format!(
+                        "no LocusKit ledger row; schema {} is created on the first open",
+                        schema::SCHEMA_VERSION
+                    )),
+                    SchemaUpgradePath::Upgrade { from } => {
+                        storage.open(&schema::schema()).map_err(|e| e.to_string())?;
+                        let after = storage
+                            .current_schema_version_for(schema::KIT_ID)
+                            .map_err(|e| e.to_string())?;
+                        if after != schema::SCHEMA_VERSION {
+                            Err(format!(
+                                "expected LocusKit schema {} after the hop, found {after}. Run `mootx01 upgrade` to retry.",
+                                schema::SCHEMA_VERSION
+                            ))
+                        } else {
+                            Ok(format!(
+                                "LocusKit {from} → {after} (encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution)"
+                            ))
+                        }
+                    }
+                };
+                let _ = storage.close();
+                outcome
+            })();
+            match result {
+                Ok(msg) => {
+                    println!("  ✓ schema: {msg}");
+                    true
+                }
+                Err(e) => {
+                    println!("  ✗ schema upgrade {e}");
+                    false
+                }
+            }
+        },
+    ) else {
+        return false;
+    };
+    ok
 }
 
 /// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values into
@@ -322,162 +431,6 @@ fn run_kg_fact_identity_backfill() -> bool {
     true
 }
 
-/// ADORN-STORE-02 Part C: move legacy `drawers.adornment` TEXT rows into
-/// the normalized `adornments` table that landed in schema v17. Estates
-/// written before v17 carry per-drawer adornment text directly in the
-/// `drawers` table; the dream cycle reads only from `adornments` and never
-/// touches `drawers.adornment` on a v17+ estate. This migration closes the
-/// gap so existing adorned drawers remain visible after the upgrade.
-///
-/// Strategy:
-///   1. Open via `SqliteDrawerStore::from_path` — `DrawerStoreCore::new`
-///      calls `storage.open(schema())` which applies the v17 migration
-///      (creates `adornment_minters` + `adornments` tables) before any data
-///      is touched. Idempotent: a second run on a v17+ estate finds zero
-///      non-empty legacy rows and changes nothing.
-///   2. Access the underlying storage via `store.storage()` to scan the
-///      `drawers` table for rows where `adornment` TEXT is non-empty.
-///   3. Register a single "legacy-v16-adornment" minter (idempotent upsert)
-///      so that migrated adornment rows have a valid FK into
-///      `adornment_minters` and are returned by `active_adornments`.
-///   4. Write one `StoredAdornment` per legacy row via `put_adornment`
-///      (INSERT OR REPLACE on (drawer_id, minter_id) — idempotent).
-///
-/// Failure posture: each INSERT OR REPLACE is one row, so a crash mid-run
-/// leaves the estate in a valid partial state; the next `mootx01 upgrade`
-/// completes the rest.
-///
-/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
-/// Mirrors Swift `runAdornmentStoreMigration(home:)`.
-/// Returns `true` on success or when there is nothing to do, `false` on failure.
-fn run_adornment_store_migration() -> bool {
-    use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
-    use locus_kit::drawer_store::DrawerStore;
-    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
-    use persistence_kit::types::TypedValue;
-    use std::collections::BTreeMap;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
-    // Absent estate means first run — new estates start on v17 and have
-    // no legacy adornment text; nothing to migrate.
-    if !estate.exists() {
-        return true;
-    }
-
-    // Single-writer discipline: the resident daemon is stopped around the
-    // work only when this is its estate (the helper prints why when it is
-    // not). `None` means the daemon would not stop; the step is skipped
-    // and the next `mootx01 upgrade` retries.
-    let Some(result) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
-        "adornment store migration",
-        &PlatformDaemon,
-        || {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-
-        (|| -> Result<usize, String> {
-            // SqliteDrawerStore::from_path calls DrawerStoreCore::new → schema.open(),
-            // which applies the v17 migration (creates adornment_minters + adornments
-            // tables) before any row is read or written. SqliteStorage::new adopts the
-            // sibling db.key on its own, so keyed and plaintext estates both open
-            // correctly.
-            let store = SqliteDrawerStore::from_path(
-                &estate.display().to_string(),
-                now_ms,
-                None,
-                5.0,
-            )
-            .map_err(|e| e.to_string())?;
-
-            // Access the underlying storage to read the legacy drawers.adornment
-            // column. The column is physically retained post-v17 but the dream cycle
-            // never writes to it; values present here pre-date schema v17.
-            let storage_arc = store
-                .storage()
-                .ok_or_else(|| "adornment store migration: storage handle unavailable".to_string())?;
-            let rows = storage_arc
-                .row_store()
-                .query("drawers", None, &[], None, None)
-                .map_err(|e| e.to_string())?;
-
-            let legacy_rows: Vec<(String, String)> = rows
-                .iter()
-                .filter_map(|row| {
-                    // Only migrate rows with a non-empty adornment TEXT value.
-                    let id = match row.get("id") {
-                        Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
-                        _ => return None,
-                    };
-                    let text = match row.get("adornment") {
-                        Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
-                        _ => return None,
-                    };
-                    Some((id, text))
-                })
-                .collect();
-
-            if legacy_rows.is_empty() {
-                return Ok(0);
-            }
-
-            // Register the single synthetic minter that owns all legacy text.
-            // register_adornment_minter is an upsert — running twice is idempotent.
-            // is_active = true so active_adornments() returns the migrated rows.
-            let legacy_minter = AdornmentMinterDescriptor::new(
-                "legacy-v16-adornment",
-                "Legacy v16 Adornment",
-                "legacy",
-                "unknown-v16",
-                "2026",
-                "legacy-pre-adornment-store",
-                BTreeMap::new(),
-                true,
-            );
-            store
-                .register_adornment_minter(&legacy_minter)
-                .map_err(|e| e.to_string())?;
-
-            // Move each legacy row. put_adornment is INSERT OR REPLACE on
-            // (drawer_id, minter_id), so a second run produces zero net writes.
-            let mut moved: usize = 0;
-            for (drawer_id, text) in &legacy_rows {
-                let adornment = StoredAdornment::new(
-                    drawer_id.as_str(),
-                    legacy_minter.id.as_str(),
-                    text.as_str(),
-                );
-                store.put_adornment(&adornment).map_err(|e| e.to_string())?;
-                moved += 1;
-            }
-            Ok(moved)
-        })()
-        },
-    ) else {
-        return false;
-    };
-
-    match result {
-        Ok(0) => println!("  ✓ adornment store migration: no legacy adornments to migrate"),
-        Ok(n) => println!(
-            "  ✓ adornment store migration: {n} legacy adornment(s) moved to normalized store"
-        ),
-        Err(e) => {
-            println!(
-                "  ✗ adornment store migration failed: {e}\n    Legacy adornments remain readable via drawers.adornment until resolved. Run `mootx01 upgrade` to retry."
-            );
-            return false;
-        }
-    }
-    true
-}
-
 /// P5 of the shared-content 1.0→1.1 migration: WAL checkpoint + VACUUM for
 /// any estate stranded in the `reclaimPending` state — typically because a
 /// previous `mootx01 upgrade` was interrupted before physical reclamation
@@ -507,8 +460,8 @@ fn run_adornment_store_migration() -> bool {
 /// frame version byte differs from `BASIS_FORMAT_VERSION`. An estate with no
 /// such table (it never held a trained basis) or with every row current is
 /// skipped. Idempotent: after one pass every row carries the current version
-/// and the step is a no-op. Runs BEFORE the distilled representation
-/// convergence so that step's open does not absorb the rebuild unreported.
+/// and the step is a no-op. Runs BEFORE the span-encode step so that
+/// step's open does not absorb the rebuild unreported.
 /// Twin of Swift `UpgradeCommand.runDensePoolingConvergence`.
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
@@ -638,107 +591,216 @@ fn stale_format_basis_providers(estate: &std::path::Path) -> Result<Vec<String>,
     Ok(stale)
 }
 
-/// Bring every drawer's stored distilled representation up to the active
-/// converter (`genius_locus_kit::distillation_converter_id()`). Rows the
-/// currency rule (`genius_locus_kit::distilled_representation_is_current`)
-/// calls stale — a converter ID other than the active one, or a source digest
-/// that is missing or differs from the digest of the row's content — are
-/// regenerated through the standard eligibility sweep, then every derived
-/// corpus lane (BM25 and dense) is rebuilt once, because the lexical lane
-/// admits trailer tokens scanned from the distilled text and the dense lane
-/// embeds it. Nothing is re-ingested, re-mined, or re-dreamed. The digest
-/// column itself reaches the estate through the migration chain the registry
-/// runs at open (estate format 1.3); this step adds nothing to it.
+/// Span encode (ENCODER_RERANK_CONTRACT §10, §12): encode spans for every
+/// drawer whose bit 27 is clear under the ACTIVE registry row, so a freshly
+/// upgraded estate reranks from its first query instead of waiting for the
+/// REM-ALPHA duty. The estate is opened through the registry's maintenance
+/// path first, which runs the migration chain (it moves the vector tier's
+/// ledger rows to their SynapseKit ids before any store opens under the new
+/// id) and wires the corpus; the batch work then runs through
+/// `span_encode_backfill::run`, which is the duty's batch function until the
+/// NeuronKit duty lands. No active model, or a model whose directory or vocab
+/// check fails, is a clean skip: recall stays lexical-only and the next
+/// upgrade retries. Twin of Swift `UpgradeCommand.runSpanEncodeBackfill`.
 ///
-/// Two-key eligibility: reindex runs when EITHER the sweep regenerated at least
-/// one row, OR at least one drawer's `distilled_at` millis is strictly newer
-/// than its corpus index row's `updated_at_millis`. The second key detects the
-/// mid-run crash scenario — sweep committed, reindex did not — which would
-/// otherwise leave the derived lanes built from the old text. Equal timestamps
-/// (sweep and reindex ran under the same `now`) count as zero — fully indexed.
-///
-/// Idempotent: a fully converged estate regenerates zero rows, has no
-/// index-timestamp gap, and skips the reindex. Twin of Swift
-/// `UpgradeCommand.runDistilledRepresentationConvergence`.
-/// Returns `true` on success or when there is nothing to converge, `false` on failure.
-fn run_distilled_representation_convergence() -> bool {
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Upgrade never creates content: spans are derived rows, not drawers.
+/// Returns `true` on success or when there is nothing to encode.
+fn run_span_encode_backfill() -> bool {
+    use super::span_encode_backfill::{self, SpanEncodeReport};
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+
     let data = crate::core::paths::data_dir();
     let name = crate::core::paths::active_estate(&data);
     let estate = crate::core::paths::estate_sqlite_path(&data, &name);
     if !estate.exists() {
         return true;
     }
-    // Single-writer discipline: the resident daemon is stopped around the
-    // work only when this is its estate (the helper prints why when it is
-    // not). `None` means the daemon would not stop; the step is skipped
-    // and the next `mootx01 upgrade` retries.
     let Some(ok) = with_resident_daemon_quiesced(
         &data,
         &crate::core::paths::resident_data_dir(),
-        "distilled representation convergence",
+        "span encode",
         &PlatformDaemon,
         || {
-        let result = (|| -> Result<(usize, usize), String> {
-            // Maintenance open: skips default-wing seeding so upgrade never
-            // creates content. Mirrors Swift's bare `GeniusLocusKit.open(storage:owner:)`
-            // which does not call `seedDefaultWings`.
-            let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
-                &estate.display().to_string(),
-                "aria-mcp-default",
-            )?;
-            let handle = reg.default.handle.clone();
-            let coord = reg
-                .coord
-                .lock()
-                .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let regenerated = coord
-                .distill_items_sweep(&handle, now_ms, None)
-                .map_err(|e| format!("{e:?}"))?;
-            // Second eligibility key: drawers whose representation postdates their
-            // corpus index row. A non-zero count signals the mid-run crash scenario
-            // (sweep committed, reindex did not). Equal timestamps (sweep and
-            // reindex ran under the same `now`) evaluate to zero — fully indexed.
-            let awaiting = coord
-                .distilled_representations_awaiting_reindex(&handle)
-                .map_err(|e| format!("{e:?}"))?;
-            if regenerated > 0 || awaiting > 0 {
-                coord.reindex_corpus(&handle, now_ms).map_err(|e| format!("{e:?}"))?;
+            let now = wall_now_millis();
+            let result = (|| -> Result<SpanEncodeReport, String> {
+                // Maintenance open: runs the migration chain and wires the
+                // corpus without seeding content (upgrade never creates content).
+                let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+                    &estate.display().to_string(),
+                    "aria-mcp-default",
+                )?;
+                drop(reg);
+                let store = SqliteDrawerStore::from_path(&estate.display().to_string(), now, None, 5.0)
+                    .map_err(|e| e.to_string())?;
+                let storage = store.storage().ok_or("drawer store exposes no storage")?;
+                span_encode_backfill::run(storage, &store, &data, now)
+            })();
+            match result {
+                Ok(SpanEncodeReport::NoActiveModel) => {
+                    println!("  ✓ span encode: no active encoder model registered; recall stays lexical-only");
+                    true
+                }
+                Ok(SpanEncodeReport::ModelUnavailable(reason)) => {
+                    println!("  ✓ span encode: encoder unavailable ({reason}); recall stays lexical-only until the model ships");
+                    true
+                }
+                Ok(SpanEncodeReport::Encoded { drawers: 0, remaining: 0, .. }) => {
+                    println!("  ✓ span encode: every drawer is indexed under the active model");
+                    true
+                }
+                Ok(SpanEncodeReport::Encoded { drawers, spans, remaining }) => {
+                    println!("  ✓ span encode: {drawers} drawer(s), {spans} span(s) written; {remaining} drawer(s) still owed");
+                    true
+                }
+                Err(e) => {
+                    println!(
+                        "  ✗ span encode failed: {e}\n    Recall keeps serving lexical-only; the duty encodes the remaining drawers. Run `mootx01 upgrade` to retry."
+                    );
+                    false
+                }
             }
-            Ok((regenerated, awaiting))
-        })();
-        let ok = match result {
-            Ok((0, 0)) => {
-                println!(
-                    "  ✓ distilled representations: already at converter {}",
-                    genius_locus_kit::distillation_converter_id()
-                );
-                true
+        },
+    ) else {
+        return false;
+    };
+    ok
+}
+
+/// Models whose vector rows `mootx01 upgrade` reclaims: the dense
+/// distributional families the Encoder Rerank Program took dark
+/// (`dense-families` feature off). Their rows serve nothing at 19.
+const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 4] = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"];
+
+/// Reclaim the vector rows nothing serves at schema 19 (ENCODER_RERANK
+/// CONTRACT §12): every row of the retired dense families and every row at a
+/// non-serving generation, then a VACUUM when anything was deleted. Opened
+/// through the registry's maintenance path first for the same ledger-id
+/// reason as the span-encode step. Idempotent: a reclaimed estate deletes
+/// nothing and skips the VACUUM. Twin of Swift `UpgradeCommand.runVectorReclaim`.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Returns `true` on success or when there is nothing to reclaim.
+fn run_vector_reclaim() -> bool {
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+    use synapsekit::VectorStore;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    if !estate.exists() {
+        return true;
+    }
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "vector reclaim",
+        &PlatformDaemon,
+        || {
+            let now = wall_now_millis();
+            let result = (|| -> Result<(usize, usize, i64), String> {
+                let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+                    &estate.display().to_string(),
+                    "aria-mcp-default",
+                )?;
+                drop(reg);
+                let store = SqliteDrawerStore::from_path(&estate.display().to_string(), now, None, 5.0)
+                    .map_err(|e| e.to_string())?;
+                let storage = store.storage().ok_or("drawer store exposes no storage")?;
+                let vectors = VectorStore::new(std::sync::Arc::clone(&storage), None);
+                let (retired, non_serving) = vectors
+                    .reclaim_retired_vector_rows(&RETIRED_DENSE_FAMILY_MODEL_IDS)
+                    .map_err(|e| format!("{e:?}"))?;
+                let mut reclaimed_bytes = 0i64;
+                if retired + non_serving > 0 {
+                    reclaimed_bytes = storage
+                        .perform_maintenance(None, None)
+                        .map_err(|e| format!("{e:?}"))?
+                        .reclaimed_bytes;
+                }
+                Ok((retired, non_serving, reclaimed_bytes))
+            })();
+            match result {
+                Ok((0, 0, _)) => {
+                    println!("  ✓ vector reclaim: nothing to reclaim");
+                    true
+                }
+                Ok((retired, non_serving, bytes)) => {
+                    println!("  ✓ vector reclaim: {retired} retired-family row(s), {non_serving} non-serving row(s) deleted; {bytes} bytes returned to filesystem");
+                    true
+                }
+                Err(e) => {
+                    println!("  ✗ vector reclaim failed: {e}\n    Every serving row is untouched. Run `mootx01 upgrade` to retry.");
+                    false
+                }
             }
-            Ok((0, awaiting)) => {
-                println!(
-                    "  ✓ distilled representation convergence: index gap detected ({awaiting} row(s) awaiting reindex); derived lanes reindexed (BM25 + dense)"
-                );
-                true
+        },
+    ) else {
+        return false;
+    };
+    ok
+}
+
+/// Write SSC facts for every drawer that owes them and rebuild the BM25
+/// documents when any were written (Encoder Rerank contract sheet §6).
+///
+/// A live estate never accrues facts debt: the capture path writes a
+/// drawer's facts before the drawer is encoded. An estate migrated from an
+/// earlier schema arrives with every `ssc_facts` NULL and with BM25
+/// documents composed under the earlier scheme, so this step pays the debt
+/// once (`EstateCoordinator::backfill_ssc_facts`) and, when it wrote
+/// anything, rebuilds every derived lane (`reindex_corpus`) so the
+/// supplement reaches the posting lists. A converged estate writes nothing
+/// and skips the rebuild. Runs after the schema upgrade and the
+/// shared-content reclaim, before the dense pooling convergence, so the
+/// rebuild happens once under the final schema. Twin of Swift
+/// `UpgradeCommand.runSSCFactsBackfill`.
+///
+/// Returns `true` on success or when there is nothing to write.
+fn run_ssc_facts_backfill() -> bool {
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    if !estate.exists() {
+        return true;
+    }
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "ssc facts backfill",
+        &PlatformDaemon,
+        || {
+            let now = wall_now_millis();
+            let result = (|| -> Result<usize, String> {
+                // Maintenance open: runs the migration chain and wires the
+                // corpus without seeding content (upgrade never creates content).
+                let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+                    &estate.display().to_string(),
+                    "aria-mcp-default",
+                )?;
+                let guard = reg.coord.lock().map_err(|e| e.to_string())?;
+                let written = guard.backfill_ssc_facts(&reg.default.handle).map_err(|e| format!("{e:?}"))?;
+                if written > 0 {
+                    guard.reindex_corpus(&reg.default.handle, now).map_err(|e| format!("{e:?}"))?;
+                }
+                Ok(written)
+            })();
+            match result {
+                Ok(0) => {
+                    println!("  ✓ ssc facts: every drawer already carries its facts");
+                    true
+                }
+                Ok(written) => {
+                    println!("  ✓ ssc facts: {written} drawer(s) written; BM25 and dense lanes rebuilt");
+                    true
+                }
+                Err(e) => {
+                    println!("  ✗ ssc facts backfill failed: {e}\n    Rows already written keep their facts. Run `mootx01 upgrade` to retry.");
+                    false
+                }
             }
-            Ok((n, _)) => {
-                println!(
-                    "  ✓ distilled representation convergence: {n} row(s) regenerated at converter {}; derived lanes reindexed (BM25 + dense)",
-                    genius_locus_kit::distillation_converter_id()
-                );
-                true
-            }
-            Err(e) => {
-                println!(
-                    "  ✗ distilled representation convergence failed: {e}\n    Rows keep their previous representation and remain findable. Run `mootx01 upgrade` to retry."
-                );
-                false
-            }
-        };
-        ok
         },
     ) else {
         return false;
@@ -2325,287 +2387,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// REAL-PATH gate for --backfill-only (adornment store migration leg):
-    /// drives the core of `run_adornment_store_migration` against a real
-    /// SQLite estate seeded with legacy adornment text in `drawers.adornment`.
-    ///
-    /// Asserts:
-    ///  - one `StoredAdornment` row appears in the normalized store after migration
-    ///  - the migrated text matches the legacy value
-    ///  - a second `put_adornment` call on the same (drawer_id, minter_id) is
-    ///    idempotent — INSERT OR REPLACE keeps exactly one row
-    ///  - `active_adornments` returns the migrated row (is_active = true)
-    ///  - the daemon-quiesce/restart wrapper is deliberately excluded — a test
-    ///    must never stop the machine-global daemon; the wrapper is covered by
-    ///    the upgrade command itself
-    ///
-    /// Uses a real SQLite estate (tempfile) to exercise the legacy-column read
-    /// path. Mirrors Swift `adornmentStoreMigrationMovesLegacyText` in
-    /// UpgradeCommandTests.swift.
-    #[test]
-    fn backfill_only_migrates_legacy_adornment_to_store() {
-        use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
-        use locus_kit::drawer::Drawer;
-        use locus_kit::drawer_store::DrawerStore;
-        use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
-        use persistence_kit::types::TypedValue;
-        use std::collections::BTreeMap;
-        use uuid::Uuid;
-
-        const NOW: i64 = 1_700_000_000_000; // ms
-        const TEST_PARENT: &str = "00000000-0000-4000-8000-000000000001";
-        const LEGACY_TEXT: &str = "A legacy adornment minted before schema v17.";
-
-        // Temporary SQLite file — deleted when the TempDir drops.
-        let tmpdir = tempfile::tempdir().expect("tempdir");
-        let db_path = tmpdir.path().join("estate.sqlite").display().to_string();
-
-        // Open via SqliteDrawerStore so the schema ladder runs (adds v17 tables).
-        let store =
-            SqliteDrawerStore::from_path(&db_path, NOW, None, 5.0).expect("store init");
-
-        // Seed one drawer and then write the legacy adornment column directly
-        // via the underlying storage — the pre-v17 shape the real upgrade reads.
-        let id = Uuid::new_v4().to_string();
-        let drawer = Drawer::new(
-            &id,
-            "Content for the adornment store migration test.",
-            TEST_PARENT,
-            "bilby",
-            NOW,
-            "minilm-v6",
-        );
-        store.add_drawer(&drawer, NOW).expect("seed drawer");
-
-        // Write legacy adornment text directly into drawers.adornment via
-        // storage.row_store().update() — the column is physically retained
-        // post-v17 exactly so this migration can read it.
-        {
-            use persistence_kit::predicate::StoragePredicate;
-            use persistence_kit::types::Column;
-            use std::collections::BTreeMap as SBTreeMap;
-            let storage_arc = store.storage().expect("storage arc for seed");
-            let mut values: SBTreeMap<String, TypedValue> = SBTreeMap::new();
-            values.insert("adornment".to_string(), TypedValue::Text(LEGACY_TEXT.to_string()));
-            storage_arc
-                .row_store()
-                .update(
-                    "drawers",
-                    values,
-                    &StoragePredicate::Eq(
-                        Column::new("drawers", "id"),
-                        TypedValue::Text(id.clone()),
-                    ),
-                )
-                .expect("seed legacy adornment column");
-        }
-
-        // Confirm pre-state: normalized adornments table is empty.
-        let pre_adornments = store.adornments(&id).expect("pre-state adornments");
-        assert!(
-            pre_adornments.is_empty(),
-            "adornments table must be empty before migration"
-        );
-
-        // Run the migration core — the same operations run_adornment_store_migration
-        // executes (minus the daemon quiesce/restore and path resolution):
-        // 1. Read legacy column  2. register minter  3. put_adornment
-        let storage_arc = store.storage().expect("storage arc for read");
-        let rows = storage_arc
-            .row_store()
-            .query("drawers", None, &[], None, None)
-            .expect("legacy read query");
-        let legacy_rows: Vec<(String, String)> = rows
-            .iter()
-            .filter_map(|row| {
-                let row_id = match row.get("id") {
-                    Some(TypedValue::Text(s)) if !s.is_empty() => s.clone(),
-                    _ => return None,
-                };
-                let text = match row.get("adornment") {
-                    Some(TypedValue::Text(t)) if !t.is_empty() => t.clone(),
-                    _ => return None,
-                };
-                Some((row_id, text))
-            })
-            .collect();
-        assert_eq!(legacy_rows.len(), 1, "one legacy adornment row must be found");
-        assert_eq!(legacy_rows[0].0, id);
-        assert_eq!(legacy_rows[0].1, LEGACY_TEXT);
-
-        let legacy_minter = AdornmentMinterDescriptor::new(
-            "legacy-v16-adornment",
-            "Legacy v16 Adornment",
-            "legacy",
-            "unknown-v16",
-            "2026",
-            "legacy-pre-adornment-store",
-            BTreeMap::new(),
-            true,
-        );
-        store
-            .register_adornment_minter(&legacy_minter)
-            .expect("register legacy minter");
-
-        let adornment = StoredAdornment::new(&id, &legacy_minter.id, LEGACY_TEXT);
-        let rows_written = store.put_adornment(&adornment).expect("put_adornment");
-        assert_eq!(rows_written, 1, "put_adornment must write exactly one row");
-
-        // Verify post-state: normalized store has the migrated adornment.
-        let post_adornments = store.adornments(&id).expect("post-state adornments");
-        assert_eq!(
-            post_adornments.len(),
-            1,
-            "one adornment must be in the normalized store"
-        );
-        assert_eq!(post_adornments[0].text, LEGACY_TEXT, "text must match the legacy value");
-        assert_eq!(post_adornments[0].minter_id, "legacy-v16-adornment");
-
-        // Second put_adornment: idempotent — INSERT OR REPLACE on (drawer_id, minter_id)
-        // keeps exactly one row.
-        let _ = store.put_adornment(&adornment).expect("second put_adornment");
-        let idempotent = store.adornments(&id).expect("idempotent check");
-        assert_eq!(
-            idempotent.len(),
-            1,
-            "a second put_adornment must not duplicate the row"
-        );
-        assert_eq!(idempotent[0].text, LEGACY_TEXT, "text must be unchanged after second run");
-
-        // active_adornments returns the migrated row because is_active = true.
-        let active = store
-            .active_adornments(&[id.as_str()])
-            .expect("active_adornments");
-        assert!(
-            active.contains_key(&id),
-            "active_adornments must include the migrated drawer"
-        );
-        assert_eq!(active[&id].len(), 1, "exactly one active adornment must be returned");
-        assert_eq!(active[&id][0].text, LEGACY_TEXT);
-    }
-
-    /// The convergence core on a small SQLite estate whose rows were written
-    /// under the v22 converter: the same operations
-    /// `run_distilled_representation_convergence` executes (registry open,
-    /// sweep, awaiting-reindex probe, reindex) minus the daemon quiesce and
-    /// path resolution. Every row comes back stamped with the active converter
-    /// and the digest of its content, and the printed converter is the kit
-    /// constant.
-    #[test]
-    fn distilled_representation_convergence_regenerates_every_v22_row() {
-        use context_distill_lib::digest::source_digest;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-        use locus_kit::frames::CaptureFrame;
-
-        const V22_CONVERTER_ID: &str = "intent-span@intent-span-v22-authority-closure";
-        // Wall-clock instants match what the command uses: the awaiting-reindex
-        // probe compares index rows against `distilled_at` instants. A fixed past
-        // clock would leave every row awaiting forever.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let tmpdir = tempfile::tempdir().expect("tempdir");
-        let estate_path = tmpdir.path().join("estate.sqlite").display().to_string();
-        // Use the maintenance open — same path as the production upgrade command.
-        // This avoids seeding default wings before the test captures the drawer count.
-        let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(&estate_path, "aria-mcp-default")
-            .expect("registry open");
-        let handle = reg.default.handle.clone();
-        let coord = reg.coord.lock().expect("coordinator lock");
-
-        // File three rows and settle the estate under the active converter.
-        let contents = [
-            "The upgrade convergence step regenerates rows the currency rule calls stale.",
-            "A row written under the v22 converter carries a different converter id.",
-            "After the sweep every row carries the active converter id and its digest.",
-        ];
-        let ids: Vec<String> = contents
-            .iter()
-            .map(|body| {
-                let frame = CaptureFrame::new(
-                    *body,
-                    CaptureChannel::Typed,
-                    "upgrade-convergence",
-                    LatticeAnchor::udc("000"),
-                    "upgrade-tests",
-                    "test-model-v1",
-                );
-                coord.capture(&handle, frame, now_ms).expect("capture").id
-            })
-            .collect();
-        coord.distill_items_sweep(&handle, now_ms, None).expect("settle sweep");
-        coord.reindex_corpus(&handle, now_ms).expect("settle reindex");
-
-        // Rewind the filed rows to the v22 converter.
-        let estate = coord.estate_for(&handle).expect("estate");
-        for (id, body) in ids.iter().zip(contents.iter()) {
-            let written = estate
-                .set_distilled_representation(
-                    id,
-                    "v22 rendering",
-                    V22_CONVERTER_ID,
-                    &source_digest(body),
-                    3,
-                    now_ms,
-                )
-                .expect("stamp v22");
-            assert_eq!(written, 1);
-        }
-        assert_eq!(
-            estate
-                .count_undistilled(genius_locus_kit::distillation_converter_id())
-                .expect("count"),
-            contents.len()
-        );
-
-        // The convergence core.
-        let later = now_ms + 1_000;
-        let regenerated = coord.distill_items_sweep(&handle, later, None).expect("sweep");
-        let awaiting = coord
-            .distilled_representations_awaiting_reindex(&handle)
-            .expect("awaiting");
-        if regenerated > 0 || awaiting > 0 {
-            coord.reindex_corpus(&handle, later).expect("reindex");
-        }
-        assert_eq!(regenerated, contents.len(), "every v22 row must regenerate");
-        assert!(awaiting >= contents.len());
-        assert_eq!(
-            coord
-                .distilled_representations_awaiting_reindex(&handle)
-                .expect("awaiting after reindex"),
-            0
-        );
-        assert_eq!(
-            estate
-                .count_undistilled(genius_locus_kit::distillation_converter_id())
-                .expect("count after"),
-            0
-        );
-        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        let rows = coord.get_drawers(&handle, &refs).expect("get_drawers");
-        assert_eq!(rows.len(), contents.len());
-        for row in &rows {
-            assert_eq!(
-                row.distilled_pipeline_version.as_deref(),
-                Some(genius_locus_kit::distillation_converter_id())
-            );
-            assert_eq!(
-                row.distilled_source_digest.as_deref(),
-                Some(source_digest(&row.content).as_str())
-            );
-            assert!(genius_locus_kit::distilled_representation_is_current(row));
-        }
-
-        // The printed line is the kit constant: intent-span v23.2.
-        let printed = format!(
-            "  ✓ distilled representations: already at converter {}",
-            genius_locus_kit::distillation_converter_id()
-        );
-        assert!(printed.ends_with("intent-span-v23-attributed@intent-span-v23.2-attributed-prose"));
-    }
-
     fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let resident = tmp.path().join("resident");
@@ -2644,7 +2425,7 @@ mod tests {
         let out = super::with_resident_daemon_quiesced(
             &resident,
             &resident,
-            "adornment store migration",
+            "schema upgrade",
             &daemon,
             || true,
         );
@@ -2674,7 +2455,7 @@ mod tests {
         let out = super::with_resident_daemon_quiesced(
             &resident,
             &resident,
-            "distilled representation convergence",
+            "span encode",
             &daemon,
             || true,
         );
@@ -2733,7 +2514,7 @@ mod tests {
     /// default wings must NOT be seeded at open. Upgrade is a migration vehicle;
     /// it converges existing content and creates none.
     ///
-    /// Mirrors the Swift invariant: `UpgradeCommand.runDistilledRepresentationConvergence`
+    /// Mirrors the Swift invariant: `UpgradeCommand.runSpanEncodeBackfill`
     /// opens through the bare `GeniusLocusKit.open(storage:owner:)` path, which
     /// does not call `seedDefaultWings`.
     #[test]

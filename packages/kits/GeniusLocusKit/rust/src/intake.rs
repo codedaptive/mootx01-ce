@@ -34,9 +34,7 @@ use corpus_kit::content::{
 };
 use corpus_kit::{content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
 use corpus_kit::error::CorpusKitError;
-use corpus_kit::index_composition_policy::{
-    DenseIndexSource, IndexCompositionPolicy, LexicalIndexSource,
-};
+use corpus_kit::index_composition_policy::IndexCompositionPolicy;
 use locus_kit::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID;
 use locus_kit::drawer_operational::ContentKind;
 use locus_kit::estate::Estate;
@@ -50,26 +48,27 @@ use locus_kit::estate::Estate;
 /// every live drawer reports revision 1 with digest = sha256(content).
 /// The estate verbs ARE the change stream — the polling feed is empty.
 ///
-/// INDEX COMPOSITION POLICY: `composition_policy` controls which text each
-/// index lane consumes. The default (`.current()`) is original text for BM25,
-/// distillate for dense. Gauntlet cells B-E substitute adornment-appended
-/// text or the original text in one or both lanes. The policy an estate runs
-/// under is its stored setting (manifest key `index_composition_policy`),
-/// read by the coordinator at every open and threaded to this source.
-///
-/// The digest always keys on `drawer.content` so the idempotence anchor is
-/// unaffected by policy, adornment, or distillation changes.
+/// INDEX COMPOSITION (schema 19): both lanes index the verbatim `content`.
+/// The lexical lane's BM25 document is `content` plus the SSC facts
+/// supplement the engine derives from `drawers.ssc_facts`
+/// (`ssc_facts::lexical_supplement`); the dense lane reads the same verbatim
+/// text. The `composition_policy` the adapter is built with is the estate's
+/// stored `index_composition_policy` setting; every policy id resolves to
+/// this one composition, and the id is retained only so estates provisioned
+/// under an earlier id keep opening (the engine compares the recorded id at
+/// open). The digest keys on `drawer.content`.
 pub struct LocusDrawerContentSource {
     estate: Estate,
-    /// Index composition policy in effect for this estate open: the
-    /// estate's stored setting. Selects what text feeds each index lane.
+    /// The estate's stored index composition policy. Retained for the
+    /// engine's open-time policy-id comparison; the record composition is
+    /// the same for every policy (see the struct doc).
     composition_policy: IndexCompositionPolicy,
 }
 
 impl LocusDrawerContentSource {
-    /// Construct with the `.current()` policy — original text for BM25,
-    /// distillate for dense. For tooling over a scratch estate; every estate
-    /// open goes through `new_with_policy` with the stored setting.
+    /// Construct with the `.current()` policy. For tooling over a scratch
+    /// estate; every estate open goes through `new_with_policy` with the
+    /// stored setting.
     pub fn new(estate: Estate) -> Self {
         LocusDrawerContentSource {
             estate,
@@ -83,41 +82,9 @@ impl LocusDrawerContentSource {
         LocusDrawerContentSource { estate, composition_policy }
     }
 
-    // MARK: - Text composition helpers
-
-    /// Base text for the lexical lane under the configured policy.
-    fn lexical_base(&self, content: &str, distilled: Option<&str>) -> String {
-        match self.composition_policy.lexical_source {
-            LexicalIndexSource::Original | LexicalIndexSource::OriginalPlusAdornments => {
-                content.to_string()
-            }
-            LexicalIndexSource::Distilled | LexicalIndexSource::DistilledPlusAdornments => {
-                distilled.map(str::to_string).unwrap_or_else(|| content.to_string())
-            }
-        }
-    }
-
-    /// Base text for the dense lane under the configured policy. Returns None
-    /// when the base is the same as the lexical base (engine uses `text` then).
-    fn dense_base(&self, content: &str, distilled: Option<&str>) -> Option<String> {
-        match self.composition_policy.dense_source {
-            DenseIndexSource::Original => None, // identical to lexical base for cell E
-            DenseIndexSource::Distilled | DenseIndexSource::DistilledPlusAdornments => {
-                Some(distilled.map(str::to_string).unwrap_or_else(|| content.to_string()))
-            }
-        }
-    }
-
-    /// Append active adornment texts to a base string, one per line.
-    fn composed_text(base: &str, adornments: &[adornment_lib::StoredAdornment]) -> String {
-        if adornments.is_empty() {
-            return base.to_string();
-        }
-        let mut parts = vec![base.to_string()];
-        for a in adornments {
-            parts.push(a.text.clone());
-        }
-        parts.join("\n")
+    /// The stored index composition policy this source was built with.
+    pub fn composition_policy(&self) -> &IndexCompositionPolicy {
+        &self.composition_policy
     }
 }
 
@@ -137,48 +104,19 @@ impl CorpusContentSource for LocusDrawerContentSource {
             return Ok(None);
         }
 
-        // CDL-03: fetch adornments when the policy needs them (cells B, C, D).
-        // Fetch once per record() call; adornments are returned sorted by minter_id
-        // ascending (matching Swift's ascending minterID order).
-        let adornments: Vec<adornment_lib::StoredAdornment> =
-            if self.composition_policy.needs_adornments() {
-                self.estate
-                    .active_adornments(&[&drawer.id])
-                    .unwrap_or_default()
-                    .remove(&drawer.id)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-        // Lexical lane text: base + optional adornments.
-        let lex_base = self.lexical_base(&drawer.content, drawer.distilled.as_deref());
-        let lexical_adornments: &[adornment_lib::StoredAdornment] =
-            if self.composition_policy.lexical_needs_adornments() { &adornments } else { &[] };
-        let text = Self::composed_text(&lex_base, lexical_adornments);
-
-        // Dense lane text: None means the engine re-uses `text`; Some is the
-        // dense-specific composition.
-        let dense_base_opt = self.dense_base(&drawer.content, drawer.distilled.as_deref());
-        let dense_adornments: &[adornment_lib::StoredAdornment] =
-            if self.composition_policy.dense_needs_adornments() { &adornments } else { &[] };
-        let dense_composition_text = dense_base_opt.map(|base| {
-            if dense_adornments.is_empty() {
-                base
-            } else {
-                Self::composed_text(&base, dense_adornments)
-            }
-        });
-
-        // Digest keys on verbatim content only — the idempotence anchor is
-        // unaffected by policy, adornment, or distillation changes.
-        // Swift parity: LocusDrawerCorpusContentSource.record(for:) (CDL-03).
+        // Both lanes index the verbatim content: `text` is the BM25 base and
+        // `dense_composition_text: None` makes the engine reuse it for the
+        // dense lane. The engine appends `ssc_facts::lexical_supplement` to
+        // the BM25 document from the column the enrichment stage wrote before
+        // the drawer was indexed (contract sheet §6). The digest keys on the
+        // verbatim content. Swift parity: LocusDrawerCorpusContentSource.record(for:).
         Ok(Some(CorpusContentRecord {
             id: drawer.id.clone(),
             revision: 1,
             digest: content_digest(&drawer.content),
-            text,
-            dense_composition_text,
+            text: drawer.content.clone(),
+            dense_composition_text: None,
+            ssc_facts: drawer.ssc_facts.clone(),
         }))
     }
 
@@ -353,7 +291,9 @@ impl EstateCoordinator {
             frame // Explicit non-sentinel anchor: preserve as-is
         };
 
-        // 1. Store the drawer row (identical to the row-only capture verb).
+        // 1. Store the drawer row through the row-only capture verb, which
+        //    also writes the drawer's SSC facts (contract sheet §6) before any
+        //    encode reads the column.
         let drawer = self.capture(handle, classified_frame, now)?;
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
@@ -371,12 +311,20 @@ impl EstateCoordinator {
                 // durably stored, so an ingest failure surfaces to the caller
                 // without losing content.
                 self.ingest_drawer_into_corpus(handle, &drawer)?;
-                // NT-L3: Impatient skips the encode queue, so it also rolls up
-                // the drawer's room inline (one capture → one room, O(room) once)
-                // rather than via the Corpus drain worker's on_encoded callback.
+                // NT-L3: Impatient skips the encode queue, so it also performs
+                // the encode rider's work inline: the room rollup (one capture →
+                // one room, O(room) once) and the structural fingerprint lane
+                // entry, rather than via the Corpus drain worker's on_encoded
+                // callback.
                 if let Ok(estate) = self.estate_for(handle) {
                     let _ = estate.rollup_rooms_for_drawers(&[drawer.id.clone()]);
                 }
+                crate::brain::fingerprint_lane::write_structural_fingerprint(
+                    self.vector_store_for(handle).as_ref(),
+                    &drawer.id,
+                    &drawer.content,
+                    drawer.filed_at,
+                );
             }
             WriteMode::Regular => {
                 // P3: enqueue the drawer onto the Corpus's own ingest queue; the
@@ -744,3 +692,78 @@ impl EstateCoordinator {
 /// carrying any other code (e.g. explicit vault frontmatter `udc`) is
 /// preserved as-is — the seam does not override explicit anchors.
 pub(crate) const UNCLASSIFIED_SENTINEL: &str = "000";
+
+impl EstateCoordinator {
+    /// Write SSC facts for every active drawer whose `ssc_facts` column is
+    /// NULL and whose content anchors at least one fact — the one-time
+    /// backfill `mootx01 upgrade` runs on an estate whose drawers predate the
+    /// column (contract sheet §6). The capture path writes a drawer's facts
+    /// before the drawer is encoded, so a live estate never accrues facts
+    /// debt; a migrated estate arrives with every row NULL.
+    ///
+    /// Rows whose content yields no facts stay NULL and are not counted, so a
+    /// second pass over the same estate writes nothing: the returned count is
+    /// exactly the number of rows whose BM25 document changed, which is the
+    /// caller's signal to rebuild the index (`reindex_corpus`). The facts are
+    /// a pure function of content and are computed with a bounded fan-out per
+    /// page; the writes are per-row updates. Twin of Swift
+    /// `GeniusLocusKit.backfillSSCFacts(handle:)`.
+    pub fn backfill_ssc_facts(&self, handle: &EstateHandle) -> Result<usize, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let cap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let page_size = 2_000usize;
+        let mut written = 0usize;
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = estate
+                .active_drawers_after(cursor.as_deref(), page_size)
+                .map_err(|e| verb_fail(format!("backfill_ssc_facts: active_drawers_after failed: {e:?}")))?;
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|d| d.id.clone());
+            let owing: Vec<&locus_kit::drawer::Drawer> = page
+                .iter()
+                .filter(|d| d.ssc_facts.is_none() && !d.content.is_empty())
+                .collect();
+            for chunk in owing.chunks(cap) {
+                let facts: Vec<Option<String>> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|d| scope.spawn(|| crate::brain::enrichment_stage::facts(&d.content)))
+                        .collect();
+                    handles.into_iter().map(|h| h.join().expect("facts worker")).collect()
+                });
+                for (drawer, value) in chunk.iter().zip(facts.iter()) {
+                    let Some(value) = value.as_deref() else { continue };
+                    estate
+                        .set_ssc_facts(&drawer.id, Some(value))
+                        .map_err(|e| verb_fail(format!("backfill_ssc_facts: set_ssc_facts failed for {}: {e:?}", drawer.id)))?;
+                    written += 1;
+                }
+            }
+            if page.len() < page_size {
+                break;
+            }
+        }
+        Ok(written)
+    }
+}
+
+/// Compute and store one drawer's SSC facts — `enrichment_stage::facts`, the
+/// bare grammar-v1 pair list (e.g. "entity: louvre, place: paris") that
+/// `ssc_facts::lexical_supplement` tokenises into the BM25 document
+/// (contract sheet §6). Runs after every content write and before that
+/// content is indexed; `None` when no noun anchors. Empty content writes
+/// nothing. Best-effort: the drawer row is already durable, so a failed
+/// facts write is reported on stderr rather than failing the capture. Twin
+/// of Swift `GeniusLocusKit.writeSSCFacts(handle:drawer:)`.
+pub(crate) fn write_ssc_facts(estate: &Estate, drawer: &locus_kit::drawer::Drawer) {
+    if drawer.content.is_empty() {
+        return;
+    }
+    let facts = crate::brain::enrichment_stage::facts(&drawer.content);
+    if let Err(e) = estate.set_ssc_facts(&drawer.id, facts.as_deref()) {
+        eprintln!("[glk] ssc_facts write failed for drawer {}: {e:?}", drawer.id);
+    }
+}

@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // PpmiFinalizeStaleVectorTests.swift
 //
 // Finding D — D-CT-01: PpmiProvider.finalize() must clear ppmiVectors
@@ -114,3 +117,5 @@ struct PpmiFinalizeStaleVectorTests {
                 "ppmiVector must be bit-identical across two finalizations on the same counts")
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

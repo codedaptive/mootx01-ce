@@ -1,5 +1,5 @@
 {
-  "description": "Shared cross-port vector for the RecallExplainer lines that moot_memory_search explain:true renders under each candidate row. Each case gives a hit's sources and score columns (f32), the agreement bonus the hit earned, whether the request carried query text, the plan's effective mode and the request scoring, and the exact lines both ports must produce. The score: line renders every column (zero or not) in step-9 order, then agreement= and final= (3 dp); expected lines were re-pinned from the Swift output after COL-1 changed the format (COL-2). Asserted by RecallExplainerCrossPortFixtureTests.swift and rust/tests/recall_explainer_parity.rs.",
+  "description": "Shared cross-port vector for the RecallExplainer lines that moot_memory_search explain:true renders under each candidate row. Each case gives a hit's sources and score columns (f32), the agreement bonus the hit earned, whether the request carried query text, the plan's effective mode and the request scoring, and the exact lines both ports must produce. The score: line renders every column (zero or not) in step-9 order, then agreement= and final= (3 dp); expected lines were re-pinned from the Swift output after COL-1 changed the format (COL-2). A case may carry `spanHit` {bestSpanIndex, bestSpanStart, bestSpanEnd, cosine}: the span rerank stage's evidence (Encoder Rerank Program, contract sheet \u00a78), rendered as one trailing `span:<bestSpanIndex>:<cosine 3 dp>` token on the score: line; a case without it renders no span token. Asserted by RecallExplainerCrossPortFixtureTests.swift and rust/tests/recall_explainer_parity.rs.",
   "cases": [
     {
       "name": "bm25 and locus with a dense vote, matrixAware",
@@ -84,6 +84,40 @@
         "score: locus=0.50 bm25=0.00 vector=0.25 dense=0.00 fieldFit=0.44 coOccurrence=0.30 temporal=0.20 graph=0.10 preference=0.05 agreement=0.00 final=0.400",
         "mode: unionBest | scoring: raw",
         "why: content query; BM25 and vector weighted high; MatrixO cluster preserved; temporal pattern matched; graph coherence signal active"
+      ]
+    },
+    {
+      "name": "span rerank hit on a bm25 hit, matrixAware",
+      "sources": [
+        "corpusBM25"
+      ],
+      "score": {
+        "locus": 0,
+        "bm25": 1.0,
+        "vector": 0,
+        "dense": 0,
+        "fieldFit": 0,
+        "coOccurrence": 0,
+        "temporal": 0,
+        "graph": 0,
+        "preference": 0,
+        "final": 0.61
+      },
+      "agreement": 0.01,
+      "hasQueryText": true,
+      "mode": "unionBest",
+      "scoring": "matrixAware",
+      "spanHit": {
+        "bestSpanIndex": 1,
+        "bestSpanStart": 30,
+        "bestSpanEnd": 90,
+        "cosine": 0.7444
+      },
+      "expected": [
+        "sources: corpusBM25",
+        "score: locus=0.00 bm25=1.00 vector=0.00 dense=0.00 fieldFit=0.00 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.01 final=0.610 span:1:0.744",
+        "mode: unionBest | scoring: matrixAware",
+        "why: content query; BM25 and vector weighted high"
       ]
     }
   ]

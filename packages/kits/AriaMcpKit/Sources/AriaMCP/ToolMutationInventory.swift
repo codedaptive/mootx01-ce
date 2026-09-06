@@ -44,11 +44,7 @@ public enum ToolMutationInventory {
     public static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill",
-        // Force-redistill all active items + full laneScope .all reindex (CDL-02):
-        // overwrites every active non-empty drawer's representation unconditionally
-        // and rebuilds BM25 + dense indexes. Ask posture: same as moot_distill.
-        "moot_redistill",
+        "moot_reindex", "moot_reclassify_fdc", "moot_dream",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Seed-file JSON import (MXE-JI-1): reads a seed file from the
         // filesystem and bulk-writes the estate — same Ask posture as
@@ -70,22 +66,11 @@ public enum ToolMutationInventory {
     /// Destructive, irreversible: hard-deletes content from the estate.
     public static let destructiveTools: Set<String> = ["moot_erase_memory"]
 
-    /// Mutating tools that are dispatched by name only when the serving
-    /// process was launched with `MOOTX01_MINT_TOOLS=1` and are never
-    /// advertised by tools/list (`RecipeTools.isDarkMintTool`). Both write
-    /// adornment state: minter registration replaces the active minter set,
-    /// and the adornment pass mints adornments onto drawers. They sit outside
-    /// the installer's tier tables because the installer writes rules only
-    /// for advertised names; a frozen dispatcher refuses them with the rest.
-    public static let darkMutationTools: Set<String> = [
-        "moot_register_adornment_minter", "moot_run_adornment_pass",
-    ]
-
     /// Every tool a frozen dispatcher refuses by name: anything that writes,
     /// mutates, or deletes. Erasure is refused with the rest — a snapshot
     /// that could be erased through is not a snapshot.
     public static var frozenRefusedTools: Set<String> {
-        additiveWriteTools.union(mutationTools).union(destructiveTools).union(darkMutationTools)
+        additiveWriteTools.union(mutationTools).union(destructiveTools)
     }
 
     /// Tools whose frozen decision is made per call from their `command`

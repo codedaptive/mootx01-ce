@@ -2,7 +2,7 @@
 //
 // Architecture spec §11.18, signal 12. Fires the room-cohesion
 // anomaly-flag sweep on each hourly tick and surfaces the changed-drawer
-// count as a diagnostic. Mirrors DistillationSignal exactly in structure:
+// count as a diagnostic. Mirrors TemporalCausalitySignal in structure:
 // hourly cadence, .single concurrency, diagnostic-only emission, injected
 // closure for the live cycle.
 //

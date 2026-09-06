@@ -1,3 +1,6 @@
+#![cfg(feature = "dense-families")]
+// Dense-family test — compiled only when --features dense-families.
+// Off by default (plan 70BC55F3, 2026-09-05). See Cargo.toml.
 //! Cross-language bit-identity gate for `PpmiProvider` (honest semantic fusion, signal #3).
 //!
 //! Reads the canonical fixture emitted by the Swift leg:

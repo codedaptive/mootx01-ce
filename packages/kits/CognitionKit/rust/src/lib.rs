@@ -27,9 +27,7 @@
 //!    paired with a Swift version in `Sources/CognitionKit/` (SPEC C-7
 //!    satisfied) and registered in both versions' catalogs with byte-identical
 //!    descriptors.
-//!    All 30 catalog entries are present in both versions; the 3 distillation-
-//!    family entries carry descriptor metadata in Rust but no full Rust recipe
-//!    body in this directory.
+//!    All 29 catalog entries are present in both versions.
 //!
 //! Determinism: the sequencing logic in `migration_orchestration` is a pure
 //! function of its inputs when tested via the `RecipeSubstrate` trait; the
@@ -41,17 +39,10 @@
 //! fixtures as the Swift `*Tests` and asserts identical results.
 
 pub mod anticipate_recipe;
-// distill.rs — DistillInput/Output data types AND run_distill recipe body
-// for the per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3/§7).
-// Rust parity with CognitionKit/Distill.swift. run_distill delegates to
-// EstateCoordinator::distill_items_sweep (parity with Swift's kit.distillItemsSweep).
-pub mod distill;
-// redistill.rs — force re-distillation + full derived-lane reindex (CDL-02).
-// Rust parity with CognitionKit/Redistill.swift.
-pub mod redistill;
 // distilled_recall.rs — DistilledRecallInput/Output/DistilledMatch types AND
 // run_distilled_recall recipe body. Rust parity with CognitionKit/DistilledRecall.swift.
-// Exact-search geometry over originals + distilled hydration (§10.3).
+// Exact-search geometry over originals with the hydration selector pinned to
+// `distilled`; every row renders inline via ContextDistillLib at read time.
 pub mod distilled_recall;
 pub mod association_rules_recipe;
 pub mod exploratory_recall_recipe;
@@ -92,8 +83,6 @@ pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
-pub use distill::{run_distill, DistillInput, DistillOutput};
-pub use redistill::{run_redistill, RedistillInput, RedistillOutput};
 pub use distilled_recall::{
     classify_distilled_discrimination, run_distilled_recall, DistilledDiscriminationLevel,
     DistilledMatch, DistilledRecallInput, DistilledRecallOutput,

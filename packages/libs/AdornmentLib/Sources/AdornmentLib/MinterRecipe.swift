@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // MinterRecipe.swift
 //
 // Compile-time minter recipes and the generic mint-output normalizer
@@ -393,3 +394,4 @@ private func canonicalNumber(_ n: NSNumber) -> String {
     }
     return "\(d)"
 }
+#endif // MOOTX01_MINERS
