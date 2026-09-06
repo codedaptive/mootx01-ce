@@ -36,15 +36,50 @@ struct RecallShapePresetTests {
             }
         }
         // 22 original + 3 anti_redundant_* + 2 multi-column + 2 float-metric
-        // + 6 column-exclusion ablation presets (COL-1) + 2 bm25/vector ablation presets = 37 presets.
-        #expect(RecallShape.presetNames.count == 37)
+        // + 6 column-exclusion ablation presets (COL-1) + 2 bm25/vector ablation
+        // presets + no_encoder = 38 presets with the dense families compiled in;
+        // ppmi/lsa/nmf_forward and anti_redundant_lsa/nmf are dark otherwise (33).
+#if MOOTX01_DENSE_FAMILIES
+        #expect(RecallShape.presetNames.count == 38)
+#else
+        #expect(RecallShape.presetNames.count == 33)
+        for dark in ["ppmi_forward", "lsa_forward", "nmf_forward", "anti_redundant_lsa", "anti_redundant_nmf"] {
+            #expect(!RecallShape.presetNames.contains(dark), "\(dark) is dark without the DenseFamilies trait")
+            #expect(RecallShape.preset(dark) == nil)
+        }
+#endif
+        // `cross_encoder` is reserved (sheet §8), not implemented: absent from
+        // the roster and unresolvable, so the tool rejects it as unknown.
+        #expect(!RecallShape.presetNames.contains("cross_encoder"))
+        #expect(RecallShape.preset("cross_encoder") == nil)
+    }
+
+    @Test("signal:vector defaults to 0; every other key defaults to 1.0")
+    func defaultWeights() {
+        #expect(RecallShape.defaultWeight(for: RecallShape.SignalKey.vector) == 0)
+        #expect(RecallShape.defaultWeight(for: "bm25") == 1.0)
+        #expect(RecallShape.defaultWeight(for: RecallShape.SignalKey.encoder) == 1.0)
+        let empty = RecallShape()
+        #expect(empty.weight(for: RecallShape.SignalKey.vector) == 0)
+        #expect(empty.weight(for: RecallShape.DenseSignal.encoder) == 1.0)
+        #expect(RecallShape.DenseSignal.key(forModelID: "minilm-l6-v2-w60") == RecallShape.DenseSignal.encoder)
+    }
+
+    @Test("no_encoder skips the stage through signal:encoder only")
+    func noEncoder() throws {
+        let s = try #require(RecallShape.preset("no_encoder"))
+        #expect(s.laneWeights == [RecallShape.SignalKey.encoder: 0])
+        #expect(s.weight(for: RecallShape.SignalKey.vector) == 0, "the vector column stays at its default")
+        #expect(!RecallShape.presetDescription("no_encoder").isEmpty)
     }
 
     @Test("precise amplifies lexical + field and narrows the frontier")
     func precise() throws {
         let s = try #require(RecallShape.preset("precise"))
         #expect(s.weight(for: "bm25") > 1.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 1.0)
+#endif
         #expect(s.weight(for: "dense") > 1.0)
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
     }
@@ -53,9 +88,11 @@ struct RecallShapePresetTests {
     func conceptual() throws {
         let s = try #require(RecallShape.preset("conceptual"))
         #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.ppmi) > 1.0)
         #expect(s.weight(for: RecallShape.DenseSignal.lsa) > 1.0)
         #expect(s.weight(for: RecallShape.DenseSignal.nmf) > 1.0)
+#endif
         let bm25 = s.weight(for: "bm25")
         #expect(bm25 < 1.0 && bm25 > 0.0)
     }
@@ -74,7 +111,9 @@ struct RecallShapePresetTests {
     func lexical() throws {
         let s = try #require(RecallShape.preset("lexical"))
         #expect(s.weight(for: "bm25") > 1.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 1.0)
+#endif
         #expect(s.weight(for: "dense") == 0.0)
         #expect(s.weight(for: "hamming") == 0.0)
     }
@@ -83,7 +122,9 @@ struct RecallShapePresetTests {
     func notLexical() throws {
         let s = try #require(RecallShape.preset("not_lexical"))
         #expect(s.weight(for: "bm25") == 0.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 0.0)
+#endif
         #expect(s.weight(for: "locus") == 1.0)
     }
 
@@ -91,7 +132,9 @@ struct RecallShapePresetTests {
     func associative() throws {
         let s = try #require(RecallShape.preset("associative"))
         #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.nmf) > 1.0)
+#endif
         #expect(s.effectiveFrontierK(engineDefault: 64) == RecallShape.frontierKCeiling)
     }
 
@@ -101,7 +144,9 @@ struct RecallShapePresetTests {
         for key in RecallShape.DenseSignal.all {
             #expect(s.weight(for: key) > 0.0)
         }
+#if MOOTX01_DENSE_FAMILIES
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 0.0)
+#endif
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
     }
 
@@ -109,6 +154,7 @@ struct RecallShapePresetTests {
     func forwardPresets() throws {
         let ri = try #require(RecallShape.preset("ri_forward"))
         #expect(ri.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
+#if MOOTX01_DENSE_FAMILIES
         #expect(ri.weight(for: RecallShape.DenseSignal.ppmi) == 0.0)
         #expect(ri.weight(for: RecallShape.DenseSignal.lsa) == 0.0)
         #expect(ri.weight(for: RecallShape.DenseSignal.nmf) == 0.0)
@@ -116,6 +162,10 @@ struct RecallShapePresetTests {
         let lsa = try #require(RecallShape.preset("lsa_forward"))
         #expect(lsa.weight(for: RecallShape.DenseSignal.lsa) > 1.0)
         #expect(lsa.weight(for: RecallShape.DenseSignal.randomIndexing) == 0.0)
+#else
+        // RI is the only live family: nothing to exclude.
+        #expect(ri.laneWeights == [RecallShape.DenseSignal.randomIndexing: 1.5])
+#endif
     }
 
     @Test("fast keeps the hamming lane only")
@@ -137,11 +187,16 @@ struct RecallShapePresetTests {
     @Test("anti_redundant inverts FDC and suppresses BM25/Hamming lexical duplicates")
     func antiRedundant() throws {
         let s = try #require(RecallShape.preset("anti_redundant"))
+#if MOOTX01_DENSE_FAMILIES
         // FDC lane is anti-similar (farthest-neighbour direction).
         #expect(s.isAntiSimilar(RecallShape.DenseSignal.fdc))
         #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
         // FDC lane weight stays at 1.0 — the anti-similar flag flips direction, not magnitude.
         #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 1.0)
+#else
+        // FDC is dark: nothing is inverted, the suppression and narrow frontier remain.
+        #expect(s.antiSimilarLanes.isEmpty)
+#endif
         // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
         #expect(s.weight(for: "bm25") < 0)
         #expect(s.weight(for: "hamming") < 0)
@@ -169,23 +224,28 @@ struct RecallShapePresetTests {
     func leaveOneOut() throws {
         let base = try #require(RecallShape.preset("consensus"))
         var weights = base.laneWeights
+#if MOOTX01_DENSE_FAMILIES
         weights[RecallShape.DenseSignal.lsa] = 0
         let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
         #expect(ablated.weight(for: RecallShape.DenseSignal.lsa) == 0.0)
         #expect(ablated.weight(for: RecallShape.DenseSignal.ppmi) > 0.0)
+#else
+        weights[RecallShape.DenseSignal.randomIndexing] = 0
+        let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
+        #expect(ablated.weight(for: RecallShape.DenseSignal.randomIndexing) == 0.0)
+        #expect(ablated.weight(for: "dense") == 1.0)
+#endif
     }
 
-    // MARK: - Per-signal anti-similarity presets (W3)
+    // MARK: - Per-signal anti-similarity presets
 
     @Test("anti_redundant_ri inverts RI to farthest and suppresses BM25/Hamming")
     func antiRedundantRI() throws {
         let s = try #require(RecallShape.preset("anti_redundant_ri"))
         // RI lane inverted to farthest (anti-similar).
         #expect(s.isAntiSimilar(RecallShape.DenseSignal.randomIndexing))
-        // Only RI is anti-similar — LSA, NMF, FDC stay nearest.
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.nmf))
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
+        // Only RI is anti-similar.
+        #expect(s.antiSimilarLanes == [RecallShape.DenseSignal.randomIndexing])
         // Anti-similar flag flips direction, not magnitude — RI weight stays at 1.0.
         #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) == 1.0)
         // BM25 and Hamming suppressed to prevent lexical near-duplicates dominating.
@@ -197,6 +257,7 @@ struct RecallShapePresetTests {
         #expect(!RecallShape.presetDescription("anti_redundant_ri").isEmpty)
     }
 
+#if MOOTX01_DENSE_FAMILIES
     @Test("anti_redundant_lsa inverts LSA to farthest and suppresses BM25/Hamming")
     func antiRedundantLSA() throws {
         let s = try #require(RecallShape.preset("anti_redundant_lsa"))
@@ -222,8 +283,9 @@ struct RecallShapePresetTests {
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
         #expect(!RecallShape.presetDescription("anti_redundant_nmf").isEmpty)
     }
+#endif
 
-    // MARK: - Multi-column matrix presets (W3)
+    // MARK: - Multi-column matrix presets
 
     @Test("temporal_connection amplifies temporal + coOccurrence for matrixAware scoring")
     func temporalConnection() throws {

@@ -7,14 +7,15 @@
 //!   of the first block, matching the Engram encoding documented in the
 //!   retrieval algorithms reference §0.
 //! - Float32 (1): `dim` × f32 LE, 4 bytes per element.
-//! - Int8 (2): `dim` × i8, one byte per element, scaled by `scale`.
-//!   The quantization policy (symmetric vs asymmetric, per-vector vs
-//!   per-dim scale) has NOT been ratified. `VectorStore::add_payload` and
-//!   `add_payloads` REJECT Int8 writes fail-closed with
-//!   `SynapseKitError::Int8QuantizationPolicyUndefined` until a policy is
-//!   ratified. The variant is preserved so the API does not change when
-//!   the policy is eventually ratified. See SYNAPSEKIT_SPEC §I-4a and arch
-//!   spec §10.3.
+//! - Int8 (2): `dim` × i8, one byte per element, scaled by `scale`. The
+//!   symmetric per-vector quantisation policy ratified by the Encoder
+//!   Rerank Program (substrate-kernel `int8_vec`: scale = max|v|/127,
+//!   q = round-half-away(v/scale) clamped to ±127, similarity =
+//!   Σ u·q × scale). Int8 rows are written by
+//!   `VectorStore::write_span_vectors` (one row per encoder span,
+//!   `vector_index` = span index) and read back by `span_vectors`; they
+//!   never enter the resident Hamming array or a float index. See
+//!   SYNAPSEKIT_SPEC §I-4a and arch spec §10.3.
 //!
 //! The binary payload is exactly the Engram wire form so that
 //! `VectorPayload { kind: VectorKind::Binary, .. }` is zero-meaning-loss
@@ -33,10 +34,10 @@ pub enum VectorKind {
     Binary = 0,
     /// `dim` × f32 LE.
     Float32 = 1,
-    /// `dim` × i8, scaled by an optional scale factor. The quantization
-    /// policy has not been ratified; `VectorStore` rejects Int8 writes
-    /// fail-closed. The variant is preserved for a future policy
-    /// ratification. See SYNAPSEKIT_SPEC §I-4a and arch spec §10.3.
+    /// `dim` × i8 plus a per-vector `scale` (symmetric quantisation per
+    /// the ratified policy, SYNAPSEKIT_SPEC §I-4a). Written as encoder span
+    /// rows by `VectorStore::write_span_vectors`; `decode_payload` treats an
+    /// Int8 row without a scale as malformed. See arch spec §10.3.
     Int8 = 2,
 }
 

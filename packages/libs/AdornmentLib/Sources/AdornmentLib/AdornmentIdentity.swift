@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // AdornmentIdentity.swift
 //
 // Pure value types for one registered minter and one stored adornment
@@ -139,3 +140,4 @@ public struct StoredAdornment: Sendable, Equatable {
         self.text = text
     }
 }
+#endif // MOOTX01_MINERS

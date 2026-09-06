@@ -200,15 +200,10 @@ fn sample_drawer(label: &str) -> Drawer {
         udc_facets: None,
         wikidata_qid: None,
         wikidata_qids_secondary: None,
-        distilled: None,
-        distilled_pipeline_version: None,
-        distilled_token_count: None,
-        distilled_at: None,
-        distilled_source_digest: None,
+        ssc_facts: None,
         subject: None,
         subject_pipeline_version: None,
         subject_at: None,
-        // Adornment rows live in the separate `adornments` table (ADORN-STORE-02 v17).
     }
 }
 

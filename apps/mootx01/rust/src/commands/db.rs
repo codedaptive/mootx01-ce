@@ -230,7 +230,7 @@ fn delete(data: &std::path::Path, name: &str, force: bool) -> ExitCode {
 fn composition(data: &Path, db: Option<String>, set: Option<String>) -> ExitCode {
     let name = db.unwrap_or_else(|| paths::active_estate(data));
     // Estate path: an explicit ARIA_MCP_SQLITE_PATH override wins; else the
-    // named/active estate (mirrors redistill.rs).
+    // named/active estate (mirrors serve.rs).
     let estate = match std::env::var("ARIA_MCP_SQLITE_PATH") {
         Ok(p) if !p.is_empty() => p,
         _ => paths::estate_sqlite_path(data, &name).to_string_lossy().into_owned(),

@@ -77,6 +77,9 @@ const READ_TOOLS: &[&str] = &[
     // C3/A6: audit-derived timing metrics — pure audit-log read.
     "moot_timing_report",
     "moot_list_lenses", "moot_list_recipes",
+    // Grounded synthesis reads candidates and generates text; it writes no
+    // drawer, packet, journal, meta, trace or reward (FRZ-3 read set).
+    "moot_synthesize",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",
     "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped", "moot_recall_distilled",

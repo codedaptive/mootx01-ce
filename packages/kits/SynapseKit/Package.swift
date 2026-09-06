@@ -34,6 +34,12 @@ let package = Package(
         // one Atomic<Bool> load + branch (~1 ns). No lock on the off-path.
         // Repository-owned dependencies use local package paths.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
+        // SubstrateKernel: test-only. Int8VecConformanceTests asserts the
+        // shared int8 quantisation fixture Tests/Fixtures/encoder/int8_vectors.json
+        // against SubstrateKernel.Int8Vec, the producer of the int8 span rows
+        // this kit stores. The library target reaches the kernel through
+        // SubstrateML and does not depend on it directly.
+        .package(path: "../../libs/SubstrateKernel"),
     ],
     targets: [
         .target(
@@ -57,6 +63,7 @@ let package = Package(
                 // not. Mirrors CorpusKitTests' SQLite dependency.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 "IntellectusLib",
+                "SubstrateKernel",
             ]
         ),
     ]

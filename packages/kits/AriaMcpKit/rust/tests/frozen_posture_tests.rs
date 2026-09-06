@@ -13,7 +13,6 @@
 //!      the same delete lands live (the adapter is posture-blind). The
 //!      "not recorded in session state" half lives in-crate, beside the
 //!      private field it observes (`dispatcher::frozen_command_tests`).
-//!   4. The two dark mint tools are refused by name when frozen.
 //!
 //! The posture is injected with `with_posture`, never through the process
 //! environment: std::env is process-global and the test runner is parallel.
@@ -381,20 +380,3 @@ fn frozen_synthesize_proceeds_and_estate_is_unchanged() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The two mint tools are never advertised and dispatch only behind the
-/// `MOOTX01_MINT_TOOLS=1` launch gate; frozen, they are refused by name before
-/// the gate is consulted, so a harness serve that is both frozen and
-/// mint-enabled cannot mint through the snapshot.
-#[test]
-fn frozen_refuses_dark_mint_tools() {
-    let path = temp_sqlite_path("mint");
-    let frozen = make_dispatcher(EstateRegistry::new_sqlite(&path, "frozen-tests").expect("open"), EstatePosture::Frozen);
-    let before = estate_bytes(&path);
-    for tool in aria_mcp::tool_mutation_inventory::DARK_MUTATION_TOOLS {
-        let response = tools_call(&frozen, tool, serde_json::json!({"batch_size": 1}));
-        assert!(is_error(&response), "{tool} must be refused when frozen; got: {response}");
-        assert_eq!(first_text(&response), EstatePosture::refusal_message(tool));
-    }
-    assert_eq!(estate_bytes(&path), before, "refused mint tools must leave the estate byte-identical on disk");
-    let _ = std::fs::remove_file(&path);
-}

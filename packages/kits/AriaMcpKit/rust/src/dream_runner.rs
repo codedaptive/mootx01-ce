@@ -197,26 +197,6 @@ pub fn run_one_dreaming_cycle(
     // "new" here means the REM-ALPHA cycle below will re-process them.
     coord.reclaim_stale_dreaming_jobs(&handle);
 
-    // Dream-time adornment pass (DEFAULT-MINT-01, GENIUSLOCUSKIT_SPEC §16.1):
-    // one bounded batch per dreaming cycle, mirroring the Swift resident's
-    // hourly AdornmentPassSignal (one DEFAULT_BATCH_SIZE batch per fire).
-    // The store-level pass mints through the resident gold miner when an
-    // engine is installed and the deterministic mechanical fallback
-    // otherwise, so a non-blank drawer always mints. Errors are non-fatal —
-    // an adornment failure must never interrupt dreaming.
-    match genius_locus_kit::brain::adornment_pass::run_adornment_pass(
-        store.as_ref(),
-        genius_locus_kit::brain::adornment_pass::DEFAULT_BATCH_SIZE,
-        None,
-    ) {
-        Ok(r) if r.adorned_pairs + r.failed_pairs + r.skipped_pairs > 0 => eprintln!(
-            "dream: adornment pass adorned={} failed={} skipped={}",
-            r.adorned_pairs, r.failed_pairs, r.skipped_pairs
-        ),
-        Ok(_) => {}
-        Err(e) => eprintln!("dream: adornment pass error (non-fatal): {e}"),
-    }
-
     // §12.2 REM-ALPHA gate: probe the dreaming queue depth.
     // None  → queue could not be mounted — ALPHA skipped; THETA/BETA/OMEGA may still run.
     // Some(0) → queue empty — ALPHA skipped; THETA/BETA/OMEGA may still run.

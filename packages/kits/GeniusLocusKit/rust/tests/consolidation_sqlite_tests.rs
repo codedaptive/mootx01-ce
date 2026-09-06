@@ -115,7 +115,22 @@ fn capture_at(
     coord.capture(handle, frame, at).expect("capture").id
 }
 
-/// Capture the fixture corpus on a SQLite estate, distill, sweep 91 days
+
+/// Write the structural fingerprint lane entry for every active drawer —
+/// the encode rider's per-drawer work, applied estate-wide so tests that
+/// capture without draining a corpus queue reach the same populated lane.
+fn fingerprint_all(coord: &EstateCoordinator, handle: &genius_locus_kit::EstateHandle, now: i64) {
+    let estate = coord.estate_for(handle).expect("estate");
+    for d in estate.all_drawers().expect("all_drawers") {
+        if !d.content.is_empty() {
+            coord
+                .write_structural_fingerprint(handle, &d.id, &d.content, now)
+                .expect("write_structural_fingerprint");
+        }
+    }
+}
+
+/// Capture the fixture corpus on a SQLite estate, fingerprint it, sweep 91 days
 /// later, and return the estate handle + cluster IDs + aged timestamp +
 /// produced count for reuse across tests.
 fn consolidated_sqlite_estate() -> (
@@ -134,9 +149,7 @@ fn consolidated_sqlite_estate() -> (
     for (i, body) in DISTINCT_BODIES.iter().enumerate() {
         let _ = capture_at(&coord, &handle, body, NOW + 100 + i as i64);
     }
-    coord
-        .distill_items_sweep(&handle, NOW, None)
-        .expect("distill sweep");
+    fingerprint_all(&coord, &handle, NOW);
     let aged = NOW + 91 * DAY;
     let produced = coord
         .consolidation_sweep(&handle, aged, &ConsolidationConfig::default(), None)
@@ -192,9 +205,7 @@ fn t_sq2_fold_in_enlarges_vague_lineage_on_sqlite_estate() {
         "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria still owns the Falcon rollout checklist.",
         NOW + 200,
     );
-    coord
-        .distill_items_sweep(&handle, aged + 3_600, None)
-        .expect("distill fifth on SQLite");
+    fingerprint_all(&coord, &handle, aged + 3_600);
 
     // Explicit D4 ceiling — matches the in-memory twin in consolidation_cycle_tests.
     let mut config = ConsolidationConfig::default();
