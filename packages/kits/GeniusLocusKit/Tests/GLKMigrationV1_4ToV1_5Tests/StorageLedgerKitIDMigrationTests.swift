@@ -5,23 +5,23 @@
 // Verifies that GLKMigrationCatalog.prepare runs the 1.4→1.5 capsule, which
 // moves the vector tier's schema-version ledger rows from their VectorKit ids
 // to their SynapseKit ids (same version, nothing else touched) and stamps the
-// estate format v1_5.
+// estate format v1_5; the chain then continues to the current format.
 //
 // Tests:
 //   1. v1_4-stamped estate carrying the two old rows: after prepare the rows
 //      carry the new ids at the same versions, the old ids have no row, a
-//      bystander row is untouched, and the estate is stamped v1_5.
+//      bystander row is untouched, and the estate is stamped current.
 //   2. Idempotence: a second prepare is a no-op; running the capsule directly
-//      again reports `.noRow` for both pairs and leaves the stamp at v1_5.
+//      again reports `.noRow` for both pairs and writes its own v1_5 stamp.
 //   3. An estate with no vector rows: the capsule reports `.noRow` for both
 //      pairs, creates nothing, and stamps v1_5.
 //   4. Rows under both ids: both are left as they are and reported as
 //      `.conflict`; the stamp still advances.
-//   5. Fresh estate (nil stamp): prepare stamps v1_5 without running any
+//   5. Fresh estate (nil stamp): prepare stamps current without running any
 //      capsule and without creating a row under either id.
 //   6. v1_0-stamped estate carrying the old rows: the full chain ends at
-//      v1_5 (the rewrite runs before the 1.0→1.1 capsule, which opens the
-//      vector store).
+//      the current format (the rewrite runs before the 1.0→1.1 capsule,
+//      which opens the vector store).
 //   7. The capsule's pairs are the frozen literals, and the new ids are what
 //      the vector tier's stores declare, so a migrated ledger is the ledger
 //      those stores look their version up in.
@@ -99,10 +99,10 @@ struct StorageLedgerKitIDMigrationTests {
         #expect(try await version(storage, pairs.vectorStore.to) == 0)
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_5)
+        // The chain continues past this capsule to the current format.
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
 
         #expect(try await version(storage, pairs.vectorStore.to) == 6)
         #expect(try await version(storage, pairs.representationClaims.to) == 1)
@@ -118,11 +118,13 @@ struct StorageLedgerKitIDMigrationTests {
     func prepareTwiceIsNoOpAndDirectRerunReportsNoRow() async throws {
         let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_4)
         let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(first.format == .v1_5)
+        #expect(first.format == .current)
         let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(second.format == .v1_5)
+        #expect(second.format == .current)
         #expect(second.migrated == false)
 
+        // The capsule on its own: no rows to move, and its own stamp (v1_5)
+        // is what it writes, whatever the chain wrote after it.
         let report = try await kit.runStorageLedgerKitIDMigration(handle: handle, now: testNow)
         #expect(report == StorageLedgerKitIDMigrationReport(vectorStore: .noRow, representationClaims: .noRow))
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
@@ -169,23 +171,22 @@ struct StorageLedgerKitIDMigrationTests {
         let (kit, handle, storage) = try await makeEstate(stampedAt: nil, withOldRows: false)
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
         #expect(prep.format == .current)
-        #expect(prep.format == .v1_5)
         #expect(prep.migrated == false)
         #expect(prep.migrationState == nil)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await version(storage, pairs.vectorStore.to) == 0)
         #expect(try await version(storage, pairs.vectorStore.from) == 0)
     }
 
-    // MARK: §6 Full chain from v1_0 ends at v1_5
+    // MARK: §6 Full chain from v1_0 ends at the current format
 
     #if GLK_MIGRATION_V1_0_TO_V1_1
     @Test
     func v1_0EstateRunsFullChainToCurrent() async throws {
         let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_0)
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_5)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_5)
+        #expect(prep.format == .current)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await version(storage, pairs.vectorStore.to) >= 6)
         #expect(try await version(storage, pairs.representationClaims.to) >= 1)
     }

@@ -612,26 +612,49 @@ fn answer_never_with_no_mode_is_unchanged() {
 /// NO mode/answer arg; the sticky auto path must reach the packager and emit
 /// the `signals:` line (which the never fast path never produces).
 ///
-/// Discrimination: one memory is seeded before the mode declaration so the estate
-/// is non-empty. With 1 hit: m1=1.0, m3=1.0 → confidence >= INTERMEDIATE →
-/// answer_block is Some → `signals:` line is emitted. The never fast path skips
-/// gate computation entirely — no `signals:`. Removing the seed (empty estate)
-/// would produce 0 hits regardless of path, making the assertion vacuous.
+/// Fixture: the twin of Swift `ModesDispatchTests.makeDispatcher` — a BARE
+/// estate (`new_inmemory_bare`: no charter hints, no Corpus, no VectorStore),
+/// one memory filed with the required `location` argument. With 1 hit:
+/// m1=1.0, m3=1.0 → confidence >= INTERMEDIATE → answer_block is Some →
+/// `signals:` line is emitted. The never fast path skips gate computation
+/// entirely — no `signals:`.
+///
+/// Discrimination: the seed reply is asserted (`filed memory`), so a seed that
+/// does not land (a missing `location` returns a JSON-RPC error and an empty
+/// estate, which yields 0 hits and no `signals:` on every path) fails here
+/// and not as a vacuous packager verdict. The served-style registry
+/// (`new_inmemory`) is not used on purpose: its seven charter hints join the
+/// result at a flat score with the dense lane dark, and the gate reads WEAK
+/// in both ports on that shape (m3 = 0).
 ///
 /// Mirrors Swift test D2 `recallAutoE2eDispatcherPath`.
 #[test]
 fn sticky_recall_auto_e2e_dispatcher() {
-    let dispatcher = make_dispatcher();
+    let dispatcher = Dispatcher::new(
+        EstateRegistry::new_inmemory_bare(),
+        "ARIA_MCP_Rust",
+        "test",
+        "test-serial",
+        "",
+        None,
+    );
 
-    // Seed one memory so the estate is non-empty — required for the packager
-    // to compute confidence and emit the signals: line on the auto path.
-    let _seed = tools_call_response(
+    // Seed one memory so the estate is non-empty — the same three arguments
+    // the Swift twin passes. Required for the packager to compute confidence
+    // and emit the signals: line on the auto path.
+    let seed = tools_call_response(
         &dispatcher,
         "moot_file_memory",
         serde_json::json!({
             "content": "sticky recall auto test memory — alpha bravo charlie",
-            "subject": "sticky e2e seed"
+            "subject": "sticky e2e seed",
+            "location": "default"
         }),
+    );
+    let seed_text = response_text(&seed);
+    assert!(
+        seed_text.contains("filed memory"),
+        "the seed must land before the search is meaningful; got: {seed:?}"
     );
 
     // Call 1: declare Recall=Auto via moot_estate_status (side-effect free).
@@ -648,13 +671,14 @@ fn sticky_recall_auto_e2e_dispatcher() {
         "Recall=Auto on call 1 must set sticky answer mode to 'auto'"
     );
 
-    // Call 2: moot_memory_search with NO mode/answer arg.
-    // The dispatcher injects answer:"auto" from sticky state before dispatching;
-    // the packager's gate fires on the 1-hit result and appends a signals: line.
+    // Call 2: moot_memory_search with NO mode/answer arg, the Swift twin's
+    // query. The dispatcher injects answer:"auto" from sticky state before
+    // dispatching; the packager's gate fires on the 1-hit result and appends
+    // a signals: line.
     let response2 = tools_call_response(
         &dispatcher,
         "moot_memory_search",
-        serde_json::json!({ "query": "sticky e2e test" }),
+        serde_json::json!({ "query": "sticky e2e dispatch test" }),
     );
     let text2 = response_text(&response2);
     // The signals: line is produced by the auto/always gate path only.
@@ -664,6 +688,18 @@ fn sticky_recall_auto_e2e_dispatcher() {
         "moot_memory_search with sticky Recall=Auto must emit signals: \
          (packager gate path — fails if sticky injection is reverted or \
          the seed memory is removed); got: {text2}"
+    );
+    // The line shape is Swift `runMemorySearch`'s, byte for byte on this
+    // fixture: one hit gives margin 1.0, lane agreement from the union
+    // profile, dense spread 1.0 (single-hit rule) and containment false
+    // (the Rust port composes no answer text).
+    assert!(
+        text2.contains("signals: margin=1.0 lane_agreement=") && text2.contains(" dense_spread=1.0 containment=false"),
+        "signals line must carry the Swift field names and shortest-form doubles; got: {text2}"
+    );
+    assert!(
+        text2.contains("confidence: intermediate"),
+        "confidence line must carry the level name (Swift rawValue); got: {text2}"
     );
 }
 
