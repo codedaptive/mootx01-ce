@@ -40,15 +40,15 @@ public enum ModelDirectoryResolver {
     /// both platforms use the same source vocab file.
     private static let knownTokenizerHashes: [String: String] = [
         // all-MiniLM-L6-v2 at revision 1110a243fdf4706b3f48f1d95db1a4f5529b4d41.
-        // Update when swapping to a new model winner from the audition.
         "minilm-l6-v2-w60": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
-    ]
+    ].merging([EncoderModelSeed.modelID: EncoderModelSeed.tokenizerHash]) { _, seeded in seeded }
 
     /// Files that must be present in the model directory on Apple platforms.
     /// The .mlmodelc is a compiled CoreML bundle (directory); vocab.txt is
     /// the WordPiece vocabulary used for tokenisation.
     private static let requiredFiles: [String: [String]] = [
         "minilm-l6-v2-w60": ["MiniLM-L6-v2.mlmodelc", "vocab.txt"],
+        "arctic-embed-s-w60": ["ArcticEmbedS.mlmodelc", "vocab.txt"],
     ]
 
     // MARK: - Public API
