@@ -329,16 +329,13 @@ mod tests {
         // to `verified` with a test-only model ID.
         //
         // Because we cannot change the hardcoded known hash inside the test,
-        // we instead use the REAL vocab file from the HF cache if present,
-        // falling back to skipping the test when the cache is absent.
-        let hf_vocab = PathBuf::from(
-            "/Users/bob/.cache/huggingface/hub/\
-             models--sentence-transformers--all-MiniLM-L6-v2/snapshots/\
-             1110a243fdf4706b3f48f1d95db1a4f5529b4d41/vocab.txt",
-        );
+        // we instead use the REAL vocab file from the kit's test fixture
+        // (the same bytes the bundled model ships), skipping when absent.
+        let hf_vocab = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../Tests/Fixtures/encoder-models/minilm-l6-v2-w60/vocab.txt");
         if !hf_vocab.exists() {
-            // HF cache absent on this runner — skip without failing.
-            eprintln!("SKIP: HF cache vocab absent; skipping resolver integration test");
+            // Fixture absent on this runner — skip without failing.
+            eprintln!("SKIP: fixture vocab absent; skipping resolver integration test");
             return;
         }
         let vocab_bytes = fs::read(&hf_vocab).unwrap();
