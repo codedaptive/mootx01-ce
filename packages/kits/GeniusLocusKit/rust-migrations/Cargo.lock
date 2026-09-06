@@ -502,6 +502,7 @@ dependencies = [
  "eidetic-lib",
  "engram-lib",
  "lattice-lib",
+ "sha2 0.10.9",
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",
@@ -1302,6 +1303,7 @@ dependencies = [
  "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
  "intellectus-lib",
@@ -1324,7 +1326,6 @@ dependencies = [
 name = "genius-locus-kit-migrations"
 version = "0.1.0"
 dependencies = [
- "context-distill-lib",
  "corpus-kit",
  "corpus-kit-providers",
  "genius-locus-kit",
@@ -1669,7 +1670,6 @@ dependencies = [
 name = "locus-kit"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "base64 0.22.1",
  "ed25519-dalek",
  "intellectus-lib",

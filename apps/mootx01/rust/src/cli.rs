@@ -103,7 +103,7 @@ pub enum Command {
         yes: bool,
         purge: bool,
     },
-    /// §4.4 db <create|list|open|delete|composition>
+    /// §4.4 db <create|list|open|delete>
     Db(DbCommand),
     /// §4.5 status
     Status,
@@ -176,10 +176,6 @@ pub enum DbCommand {
     List,
     Open { name: String },
     Delete { name: String, force: bool },
-    /// `composition [--db <name>] [--set <policy-id>]`: show the estate's
-    /// stored index composition policy, or store `set` and rebuild every
-    /// index lane under it.
-    Composition { db: Option<String>, set: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,7 +546,7 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
     let sub = match it.next() {
         None => {
             return Err(UsageError(
-                "Error: 'db' requires a subcommand: create, list, open, delete, composition.".into(),
+                "Error: 'db' requires a subcommand: create, list, open, delete.".into(),
             ))
         }
         Some(s) => s.as_str(),
@@ -583,18 +579,6 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
                 return Ok(h);
             }
             Ok(Command::Db(DbCommand::Open { name }))
-        }
-        "composition" => {
-            let (mut db, mut set) = (None, None);
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--db" => db = Some(take_value(it, "--db")?),
-                    "--set" => set = Some(take_value(it, "--set")?),
-                    "--help" | "-h" => return Ok(Command::HelpFor("db")),
-                    other => return Err(unexpected(other, "db composition")),
-                }
-            }
-            Ok(Command::Db(DbCommand::Composition { db, set }))
         }
         "delete" => {
             let name = take_value(it, "db delete <name>")?;
@@ -1026,14 +1010,13 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --purge                 Also remove all estate databases and the moot-mgr history (moved to the platform trash after a typed confirmation; --yes skips the prompt). Full uninstall only.".into(),
         "db" => "Manage named estate databases.\n\
             \n\
-            USAGE: mootx01 db <create|list|open|delete|composition>\n\
+            USAGE: mootx01 db <create|list|open|delete>\n\
             \n\
             SUBCOMMANDS:\n\
             \x20 create <name> [--no-encrypt]  Create a new named estate. --no-encrypt creates it WITHOUT at-rest encryption (default is encrypted); run `mootx01 upgrade` at any time to encrypt it later.\n\
             \x20 list                    List all known estates.\n\
             \x20 open <name>             Set the active estate (used by serve and status).\n\
-            \x20 delete <name> [-f]      Delete a named estate and its database files. Cannot delete 'default' (use uninstall --purge).\n\
-            \x20 composition [--db <name>] [--set <policy-id>]  Show the estate's stored index composition policy (which text each search index lane is built from), or store <policy-id> (lex=<source>;dense=<source>) and rebuild every index lane under it. Default: active estate.".into(),
+            \x20 delete <name> [-f]      Delete a named estate and its database files. Cannot delete 'default' (use uninstall --purge).".into(),
         "status" => "Show server state, active estate, and wired clients.\n\
             \n\
             USAGE: mootx01 status".into(),
@@ -1288,23 +1271,6 @@ mod tests {
             p(&["serve", "--frozen", "--db", "clone"]).unwrap(),
             Command::Serve { db: Some("clone".into()), http: None, frozen: true }
         );
-    }
-
-    #[test]
-    fn db_composition_flags() {
-        assert_eq!(
-            p(&["db", "composition"]).unwrap(),
-            Command::Db(DbCommand::Composition { db: None, set: None })
-        );
-        assert_eq!(
-            p(&["db", "composition", "--db", "clone", "--set", "lex=original;dense=distilled"]).unwrap(),
-            Command::Db(DbCommand::Composition {
-                db: Some("clone".into()),
-                set: Some("lex=original;dense=distilled".into())
-            })
-        );
-        assert!(p(&["db", "composition", "--bogus"]).is_err());
-        assert!(p(&["db", "composition", "--set"]).is_err());
     }
 
     #[test]
