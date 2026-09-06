@@ -1,21 +1,38 @@
 import Foundation
 import CorpusKit
+#if canImport(NaturalLanguage)
+import NaturalLanguage
+#endif
 import EideticLib
 import LatticeLib
 
-/// Pipeline-p2 categorizer stage (DECISION_DENSE_LANE_ENRICHMENT, Wave 2):
-/// welds a grammar-v1 trailer of category/entity facts onto the distilled
-/// rendering so the trailer lexical supplement (CorpusKit.TrailerGrammar)
-/// can admit them to the keyword lane. Measured basis: the anarrow oracle
-/// arm (temporal MRR 0.4154 → 0.4487; 3/11 never-rescued misses recovered).
+/// Pipeline-p2 categorizer stage.
 ///
-/// Deterministic end to end: token classification uses the HMM word-class
-/// baseline (bit-identical across ports), anchoring uses the bundled FDC
-/// canon, labels come from the shipped FDCFrame. No clock, no locale, no
-/// network. The enrichment TEXT is dense-lane data (doctrine: parity covers
-/// this capability's SHAPE, not its output), but this deterministic engine
-/// happens to be twin-able and IS twinned for the benchmarkable default.
+/// Schema 19 role: computes the `ssc_facts` column value written at ingest.
+/// The value is a bare comma-separated pair list (e.g. `"entity: louvre, place: paris"`)
+/// stored in `drawers.ssc_facts`. The BM25 supplement reads from that column via
+/// `SSCFacts.lexicalSupplement(_:)` — not by scanning the distilled text.
+///
+/// Swift primary path uses NLTagger `.nameType` NER (people, places, organisations)
+/// when NaturalLanguage is available, with the HMM word-class baseline as the
+/// cross-port fallback (`#if canImport(NaturalLanguage)` guards the NLTagger path).
+/// Parity between ports covers SHAPE, not output (doctrine — the NER engines differ).
+///
+/// Deterministic end to end on the HMM path (both ports): token classification uses
+/// the HMM word-class baseline (bit-identical across ports), anchoring uses the bundled
+/// FDC canon, labels come from the shipped FDCFrame. No clock, no locale, no network
+/// on the HMM path. Measured basis: the anarrow oracle arm (temporal MRR 0.4154 →
+/// 0.4487; 3/11 never-rescued misses recovered).
+///
+/// The grammar-v1 `(*[ … ]*)` format is produced by `trailer(forContent:)` for
+/// `ContextDistillLib` (inline distillation in the depth:distilled recall path).
+/// `facts(forContent:)` returns the BARE pair list used for `ssc_facts`.
 enum EnrichmentStage {
+
+    // Grammar-v1 trailer delimiters — used by `trailer(forContent:)` only.
+    // The BM25 supplement path no longer depends on these.
+    fileprivate static let trailerOpen = "(*["
+    fileprivate static let trailerClose = "]*)"
 
     /// At most this many facts per trailer — the oracle transforms averaged
     /// 2-3; six is the grammar's stated typical ceiling. Order of appearance
@@ -26,12 +43,23 @@ enum EnrichmentStage {
     /// tokens produce junk FDC hits).
     static let minNounLength = 3
 
-    /// Function words and conversational fillers that the word-class
-    /// baseline sometimes admits as nouns ("the" was observed anchoring to
-    /// a junk category on the first native build). Pinned identically in
-    /// both ports; extending it bumps the pipeline version.
+    /// Function words, conversational fillers, and evaluative adjectives that
+    /// the word-class baseline sometimes admits as nouns. Pinned identically in
+    /// both ports (see `Tests/Fixtures/ssc_stoplist.json`); extending it bumps
+    /// the pipeline version. Evaluative adjectives added (schema 19): good, great,
+    /// nice — the measurement found `entity: good` ×1,077 as the most common
+    /// wing fact before this stoplist existed.
     static let stopwords: Set<String> = [
-        "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
+        // function words
+        "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their",
+        "his", "her", "its", "they", "them", "this", "that", "these", "those",
+        "was", "were", "are", "been", "being", "have", "has", "had", "with",
+        "from", "into", "about", "some", "any", "all", "each", "what", "which",
+        "who", "how", "when", "where", "why",
+        // conversational fillers
+        "yeah", "yes", "okay", "hey", "wow", "guess",
+        // evaluative adjectives / generic nouns (schema 19, measured corpus junk)
+        "good", "great", "nice", "sounds", "plan", "time", "new",
     ]
 
     /// Lowercases a frame label and truncates at the first comma: the
@@ -167,7 +195,93 @@ enum EnrichmentStage {
 
         guard !facts.isEmpty else { return "" }
         let body = facts.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
-        return " \(TrailerGrammar.open) \(body) \(TrailerGrammar.close)"
+        return " \(trailerOpen) \(body) \(trailerClose)"
+    }
+
+    // MARK: - Schema 19: ssc_facts column writer
+
+    /// Returns a bare comma-separated pair list suitable for the `drawers.ssc_facts`
+    /// column (schema 19), or `nil` when no facts could be derived.
+    ///
+    /// Output format: `"entity: louvre, place: paris"` — no grammar-v1 delimiters
+    /// (`(*[ ]*)` are NOT written here; those belong to `trailer(forContent:)` only).
+    ///
+    /// Swift primary path: NLTagger `.nameType` NER (people, places, organisations)
+    /// supplies entities when NaturalLanguage is available; the HMM word-class path
+    /// (cross-port compatible) is the fallback. Proper-noun preference (capital first
+    /// letter in source text) is honoured by both paths — capitalised tokens rank
+    /// before lowercase nouns of equal derivation order.
+    ///
+    /// Stop list applied: `stopwords` blocks function words and evaluative adjectives
+    /// (`good`, `great`, `nice`, `sounds`, `plan`, `time`, `new`).
+    public static func facts(forContent content: String) -> String? {
+        var pairs: [(label: String, value: String)] = []
+        var seenValues = Set<String>()
+
+        #if canImport(NaturalLanguage)
+        // NLTagger NER primary path (Swift only). Maps NL tag schemes to fact labels.
+        // This path runs on macOS 15+ / iOS 18+ where NaturalLanguage is always available.
+        let tagger = NLTagger(tagSchemes: [.nameType])
+        tagger.string = content
+        let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation, .joinNames]
+        tagger.enumerateTags(in: content.startIndex..<content.endIndex, unit: .word,
+                             scheme: .nameType, options: options) { tag, range in
+            guard let tag else { return true }
+            let token = String(content[range]).trimmingCharacters(in: .whitespaces)
+            guard token.count >= minNounLength else { return true }
+            let lower = token.lowercased()
+            guard !stopwords.contains(lower) else { return true }
+            let label: String
+            switch tag {
+            case .personalName:  label = "entity"
+            case .placeName:     label = "place"
+            case .organizationName: label = "entity"
+            default: return true
+            }
+            if seenValues.insert("\(label):\(lower)").inserted {
+                pairs.append((label: label, value: lower))
+            }
+            return pairs.count < maxFacts
+        }
+        #endif
+
+        // HMM word-class fallback (cross-port path, also fills gaps when NER found nothing).
+        // Multi-word phrase pre-pass (identical to trailer(forContent:)).
+        if pairs.isEmpty {
+            let tokens = content.split(whereSeparator: { !$0.isLetter })
+            var indexedTokens: [(lower: String, isCapital: Bool)] = tokens.map {
+                (lower: $0.lowercased(), isCapital: $0.first?.isUppercase == true)
+            }
+            // Proper-noun preference: re-order so capitalised tokens are visited first
+            // within the single-token pass below (multi-word phrases are already greedy).
+            let capitalised = indexedTokens.filter(\.isCapital)
+            let remaining = indexedTokens.filter { !$0.isCapital }
+            indexedTokens = capitalised + remaining
+
+            for indexed in indexedTokens {
+                if pairs.count >= maxFacts { break }
+                let token = indexed.lower
+                guard token.count >= minNounLength,
+                      !stopwords.contains(token),
+                      !seenValues.contains("entity:\(token)"),
+                      LatticeLib.wordClass(token, recordNovel: false) == .noun else { continue }
+                let anchor = EideticLib.lookup(token)
+                guard !anchor.code.isEmpty, anchor.code != "000" else { continue }
+                if seenValues.insert("entity:\(token)").inserted {
+                    pairs.append((label: "entity", value: token))
+                }
+                if pairs.count < maxFacts,
+                   let qid = anchor.wikidataQID, !qid.isEmpty {
+                    if let country = QIDFacts.countryLabel(for: qid).map(Self.grammarSafe),
+                       seenValues.insert("place:\(token)").inserted {
+                        pairs.append((label: "place", value: token))
+                    }
+                }
+            }
+        }
+
+        guard !pairs.isEmpty else { return nil }
+        return pairs.map { "\($0.label): \($0.value)" }.joined(separator: ", ")
     }
 }
 

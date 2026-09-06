@@ -28,7 +28,7 @@ import SubstrateLib
 /// what kind of content it is, what feature flags apply, plus the
 /// state-extension and lineage-clustering flags.
 ///
-/// Drawer operational layout (cookbook §2.4 v0.6, updated ADORN-STORE-02):
+/// Drawer operational layout (cookbook §2.4 v0.6, schema v19):
 ///
 /// ```
 /// bits 0–5    capture_channel        (contiguous, 6 cases at raw 0…5)
@@ -37,10 +37,9 @@ import SubstrateLib
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
 /// bit  26     isAnomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
-/// bits 27–30  FREE — previously adornmentRequired (27) and adornmentBitmask (28-30);
-///             retired by ADORN-STORE-02 (2026-08-25). Minter identity and
-///             activation now live in the adornment_minters table. These bits
-///             MUST be zero on all live rows after `mootx01 upgrade`.
+/// bit  27     spanIndexed — encoder span rows exist for the current content
+///             (Encoder Rerank Program, 2026-09-05)
+/// bits 28–30  FREE (3 bits headroom)
 /// bits 31–63  FREE (33 bits headroom)
 /// ```
 ///
@@ -142,25 +141,14 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// additional zone-policy check at recall time.
     public static let isLockedZone = DrawerFeatureFlags(rawValue: 1 << 18)
 
-    /// Bit 19 — drawer carries a current distilled representation per
-    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    /// Bit 19 — retained assignment with no writer at schema v19.
     ///
-    /// Set iff all five distillation columns (`distilled`,
-    /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`, `distilled_source_digest`) are populated. Clear when
-    /// those columns are NULL. Presence only: whether the representation is
-    /// CURRENT is `GeniusLocusKit.distilledRepresentationIsCurrent`, which
-    /// also compares the converter ID and the source digest.
-    ///
-    /// The §4 invariant ("NULL together or populated together") makes this
-    /// bit skew-impossible: it travels in the SAME SQL UPDATE statement as
-    /// the four columns — set by `setDistilledRepresentation`, cleared by
-    /// every `withClearedRepresentation` call site (content-edit §7.3,
-    /// expunge scrub, gate-reject scrub, dataset-content patch).
-    ///
-    /// Design tenet: open bitmap space means new features enter WITHOUT
-    /// migration overhead. 1.0.x rows migrated to 1.1.x carry the bit
-    /// clear (all-NULL columns) — no schema change, no backfill required.
+    /// It marked "a distilled representation is stored for this row" while
+    /// the distilled columns existed; schema v19 removed those columns and
+    /// distillation is rendered inline at hydration instead, so nothing
+    /// sets this bit any more and every content-clearing path still clears
+    /// it. The position stays assigned because a bit is never reused (a
+    /// populated estate may carry it set on rows written before v19).
     ///
     /// Wire value: 1 << 19 = 524288 (0x80000).
     public static let hasCurrentRepresentation = DrawerFeatureFlags(rawValue: 1 << 19)
@@ -222,6 +210,32 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// Wire value: 1 << 26 = 67108864 (0x4000000).
     public static let isAnomalous = DrawerFeatureFlags(rawValue: 1 << 26)
 
+    // ── Span index flag (Encoder Rerank Program, 2026-09-05) ─────────────
+
+    /// Bit 27 — at least one encoder span row exists in `vectors` under the
+    /// ACTIVE encoder model for this row's current `content_hash`.
+    ///
+    /// Set by the span-encode duty (`Estate.setSpanIndexed`) after a
+    /// successful `writeSpanVectors`. Cleared by every content write (the
+    /// same statement that bumps `content_hash`, through
+    /// `clearedOnContentWrite`) and by `EncoderModelStore.activate`, which
+    /// clears it estate-wide so the duty re-encodes under the new model. A
+    /// clear bit IS the duty's work-item predicate (`spanIndexDebtBatch`).
+    ///
+    /// NOTE: bit 27 is above the 12-bit feature-flags region (bits 12–23).
+    /// `hasFeatureFlag(.spanIndexed)` will always return false. Use the
+    /// `Drawer.isSpanIndexed` computed property to test this bit.
+    ///
+    /// Wire value: 1 << 27 = 134217728 (0x8000000).
+    public static let spanIndexed = DrawerFeatureFlags(rawValue: 1 << 27)
+
+    /// The bits every content write clears in the same UPDATE that changes
+    /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
+    /// rows describe the previous content). Applied as
+    /// `operationalBitmap & ~clearedOnContentWrite`.
+    public static let clearedOnContentWrite: Int64 =
+        hasCurrentRepresentation.rawValue | spanIndexed.rawValue
+
 }
 
 // MARK: - Drawer accessors
@@ -265,19 +279,9 @@ public extension Drawer {
         featureFlags.contains(flag)
     }
 
-    /// True when bit 19 of `operationalBitmap` is set, indicating that
-    /// all four distillation columns are populated (cookbook §2.4.1).
-    ///
-    /// Consumers use this instead of `distilled == nil` for eligibility
-    /// checks — it is a direct bitmap read, not a column-presence test.
-    /// `distillItemsSweep` and `wireCorpusRoomRollup` use this accessor
-    /// as the primary eligibility gate; `countUndistilled` uses the
-    /// corresponding `bitmaskNone` predicate on the database side.
-    ///
-    /// The bit and the four columns are always in agreement by
-    /// construction: they travel in the same SQL UPDATE statement
-    /// (`setDistilledRepresentation` sets both; every content-clearing
-    /// path clears both simultaneously).
+    /// True when bit 19 of `operationalBitmap` is set. No writer sets the
+    /// bit at schema v19 (see `DrawerFeatureFlags.hasCurrentRepresentation`);
+    /// rows written before v19 may still carry it.
     var hasCurrentRepresentation: Bool {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         featureFlags.contains(.hasCurrentRepresentation)
@@ -364,6 +368,14 @@ public extension Drawer {
         // Cookbook §2.4 bit 26: anomalous flag (§11.18). Reads the raw
         // bitmap directly because bit 26 is outside the featureFlags region.
         operationalBitmap & DrawerFeatureFlags.isAnomalous.rawValue != 0
+    }
+
+    /// True when bit 27 of `operationalBitmap` is set: encoder span rows
+    /// exist under the active model for this row's current content. Reads
+    /// the raw bitmap because bit 27 is outside the `featureFlags` region.
+    /// Mirrors Rust `Drawer::is_span_indexed()`.
+    var isSpanIndexed: Bool {
+        operationalBitmap & DrawerFeatureFlags.spanIndexed.rawValue != 0
     }
 
 }

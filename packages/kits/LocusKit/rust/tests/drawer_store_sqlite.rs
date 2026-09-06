@@ -584,15 +584,15 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
     let lineage = Uuid::new_v4();
 
     // D1: Trust=Canonical (bits 18-23) so S-1 allows promote to Accepted.
-    // Representation columns populated so their survival through the
+    // Content-derived columns populated so their survival through the
     // gate refusal can be verified byte-identical below.
     let mut d1 = sample_drawer("d1-gate-reject-accepted", "w", "r", "accepted-sibling-content");
     d1.lineage_id = lineage;
     d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
-    d1.distilled = Some("accepted-sibling-distilled-text".to_string());
-    d1.distilled_pipeline_version = Some("p1".to_string());
-    d1.distilled_token_count = Some(7);
-    d1.distilled_at = Some(NOW);
+    d1.ssc_facts = Some("kind: note, entity: sibling".to_string());
+    d1.subject = Some("Accepted sibling".to_string());
+    d1.subject_pipeline_version = Some("p1".to_string());
+    d1.subject_at = Some(NOW);
     store.add_drawer(&d1, NOW).unwrap();
     // Promote D1: Active → Accepted. Trust=Canonical satisfies S-1.
     store
@@ -664,27 +664,23 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
         d1_after.operational_bitmap, d1_before.operational_bitmap,
         "operational bitmap must be untouched on refusal"
     );
-    // All four representation columns intact.
+    // Content-derived columns intact.
     assert_eq!(
-        d1_after.distilled.as_deref(),
-        Some("accepted-sibling-distilled-text"),
-        "distilled must survive the refusal"
+        d1_after.ssc_facts.as_deref(),
+        Some("kind: note, entity: sibling"),
+        "ssc_facts must survive the refusal"
     );
     assert_eq!(
-        d1_after.distilled_pipeline_version.as_deref(),
+        d1_after.subject.as_deref(),
+        Some("Accepted sibling"),
+        "subject must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.subject_pipeline_version.as_deref(),
         Some("p1"),
-        "distilled_pipeline_version must survive the refusal"
+        "subject_pipeline_version must survive the refusal"
     );
-    assert_eq!(
-        d1_after.distilled_token_count,
-        Some(7),
-        "distilled_token_count must survive the refusal"
-    );
-    assert_eq!(
-        d1_after.distilled_at,
-        Some(NOW),
-        "distilled_at must survive the refusal"
-    );
+    assert_eq!(d1_after.subject_at, Some(NOW), "subject_at must survive the refusal");
     assert!(
         d1_after.tombstoned_at.is_none(),
         "refused sibling must not be tombstone-stamped"

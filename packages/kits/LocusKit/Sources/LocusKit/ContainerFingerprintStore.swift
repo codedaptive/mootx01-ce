@@ -18,13 +18,13 @@
 // bound): a false-absent bit is safe (room scanned unnecessarily), but
 // a false-present bit is UNSAFE (room skipped with eligible work). The
 // AND is initialized to -1 (AND-identity) so an empty container does
-// not falsely satisfy any AND-check. The distillation sweep checks
-// `(operationalAND & (1<<19)) != 0` to skip rooms whose every drawer
-// carries bit 19 (hasCurrentRepresentation). rebuildAll at estate open
+// not falsely satisfy any AND-check. An AND-check reads the aggregate to
+// skip rooms whose every drawer carries a bit (bit 19 was the first such
+// consumer; it has no writer at schema v19). rebuildAll at estate open
 // recomputes the AND from scratch to raise stale under-approximations.
-// Capture ORs lower the AND (always safe). Distillation set-events
-// cannot raise the AND by the invariant — only rebuildAll can raise it.
-// Bit-clear events on live drawers call andInOperational immediately.
+// Capture ORs lower the AND (always safe). Per-row set-events cannot raise
+// the AND by the invariant — only rebuildAll can raise it. Bit-clear
+// events on live drawers call andInOperational immediately.
 
 import Foundation
 import PersistenceKit
@@ -171,13 +171,13 @@ public actor ContainerFingerprintStore {
     /// OR one drawer's bitmaps into its room-level and wing-level rows,
     /// and AND the operational bitmap into the operationalAND column.
     ///
-    /// Called on every capture (new drawer, bit 19 clear) and on
-    /// `setDistilledRepresentation` (bit 19 set). The AND semantics handle
-    /// both correctly:
+    /// Called on every capture (new drawer, bit 19 clear). Bit 19 has no
+    /// writer at schema v19, so the AND aggregate only ever lowers it; the
+    /// semantics stay correct for rows written before v19:
     /// - Capture (bit 19 = 0): ANDs 0 into operationalAND → lowers bit 19
-    ///   in the AND (safe; room will not be skipped by the sweep).
-    /// - Distillation (bit 19 = 1): ANDs 1 into operationalAND → no change
-    ///   to bit 19 in the AND (deferred to rebuildAll; correct by invariant).
+    ///   in the AND (safe; the room is never skipped by an AND-check).
+    /// - A pre-v19 row with bit 19 = 1: ANDs 1 → no change to bit 19 in
+    ///   the AND (deferred to rebuildAll; correct by invariant).
     ///
     /// Clear paths on tombstoned drawers need no fingerprint update (sweep
     /// excludes tombstoned rows). Clear paths on live drawers (in-place
@@ -274,7 +274,7 @@ public actor ContainerFingerprintStore {
     /// the OR and AND aggregates cover all active rows. Called on open
     /// to make an existing estate's aggregates complete and accurate.
     /// This is the ONLY path that can raise an AND bit (correct a stale
-    /// under-approximation from a session that added new distilled rows).
+    /// under-approximation left by a session's captures).
     public func rebuildAll(
         activeDrawers: [Drawer],
         nodeNames: [String: (wing: String, room: String)],

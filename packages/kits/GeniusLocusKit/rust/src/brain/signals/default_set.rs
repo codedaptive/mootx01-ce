@@ -1,12 +1,14 @@
-// brain/signals/default_set.rs — registration helper for the thirteen
+// brain/signals/default_set.rs — registration helper for the twelve
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
 // Signal history:
 //   Signals 1–6  GLK-05: original six v1 signals.
-//   Signal 7     brain-layer governor ownership  / 2026-06-20: TemporalCausalitySignal (hourly
+//   Signal 7     brain-layer governor ownership / 2026-06-20: TemporalCausalitySignal (hourly
 //                T-population fold).
-//   Signal 8     DG2 / 2026-06-19: DistillationSignal (hourly distillation sweep).
-//   Signal 9     brain-layer governor ownership  / 2026-06-20: TrainingSignal (hourly training daemon,
+//   Signal 8     Empty slot: the distilled rendering is computed inline at
+//                read time (Encoder Rerank contract sheet §9), so no sweep
+//                signal exists for it.
+//   Signal 9     brain-layer governor ownership / 2026-06-20: TrainingSignal (hourly training daemon,
 //                previously orphaned — zero production callers before this wire).
 //   Signal 10    Contradiction hunter / 2026-07-12: ContradictionScoutSignal
 //                (hourly content-conflict pass; the hunter's background half).
@@ -16,17 +18,16 @@
 //   Signal 12    P3a / 2026-08-20: AnomalySweepSignal (hourly room-cohesion
 //                anomaly-flag sweep, sets/clears bit 26 via z-score). Rust twin
 //                of AnomalySweepSignal.swift.
-//   Signal 13    GENIUSLOCUSKIT_SPEC 2.0.0 § 16 / 2026-08-23: AdornmentPassSignal
-//                (hourly dream-time minting pass, writes StoredAdornment rows for
-//                (drawer, active-minter) pairs; pair-model — batch_size counts
-//                PAIRS, per-pair failure isolation, never disables a minter).
-//                Rust twin of AdornmentPassSignal.swift.
+//   Signal 13    ENCODER_RERANK_CONTRACT §10 / 2026-09-05: SpanEncodeSignal
+//                (REM-ALPHA 30 s span-encode drain; writes int8 vectors to
+//                vectors_v6, sets bit 27 spanIndexed). Replaces the former
+//                AdornmentPassSignal (removed). Rust twin of SpanEncodeSignal.swift.
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
-// real row embeddings on each fire). Signals 7–12 use their `default_spec()`
-// no-op variants here because the helper cannot supply estate-specific context
-// (audit log, mutable MatrixTier, daemon instance, consolidation cycle, estate
-// handle for anomaly sweep) without breaking its generic signature. Production
+// real row embeddings on each fire). Signals 7, 9 and 11 use their
+// `default_spec()` no-op variants here because the helper cannot supply
+// estate-specific context (audit log, mutable MatrixTier, daemon instance,
+// consolidation cycle) without breaking its generic signature. Production
 // callers that want live closures register the signals individually via
 // `SerialLaneScheduler::register` with the appropriate `spec(…)` factory.
 //
@@ -41,15 +42,15 @@ use synapsekit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
-    AdornmentPassSignal, AnomalySweepSignal, ByReferenceValiditySignal, ConsolidationSignal,
-    ContradictionScoutSignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
-    EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal, TrainingSignal,
-    VectorSimilaritySignal,
+    AnomalySweepSignal, ByReferenceValiditySignal, ConsolidationSignal,
+    ContradictionScoutSignal, DecaySweepSignal, DreamingSignal,
+    EndOfDayTournamentSignal, MaintenanceSignal, SpanEncodeSignal, TemporalCausalitySignal,
+    TrainingSignal, VectorSimilaritySignal,
 };
 
-/// Stable names of the thirteen standing signals, in registration
+/// Stable names of the twelve standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 13] {
+pub fn default_standing_signal_names() -> [&'static str; 12] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
@@ -59,11 +60,10 @@ pub fn default_standing_signal_names() -> [&'static str; 13] {
         ByReferenceValiditySignal::SIGNAL_NAME,
         EndOfDayTournamentSignal::SIGNAL_NAME,
         TemporalCausalitySignal::SIGNAL_NAME,
-        DistillationSignal::SIGNAL_NAME,
         TrainingSignal::SIGNAL_NAME,
         ConsolidationSignal::SIGNAL_NAME,
         AnomalySweepSignal::SIGNAL_NAME,
-        AdornmentPassSignal::SIGNAL_NAME,
+        SpanEncodeSignal::SIGNAL_NAME,
     ]
 }
 
@@ -73,20 +73,20 @@ pub fn default_standing_signal_names() -> [&'static str; 13] {
 /// `VectorSimilaritySignal::spec` so the signal can query real row
 /// embeddings on each five-minute fire.
 ///
-/// `hunt_cycle`, `anomaly_cycle`, and `adornment_cycle` are optional live
+/// `hunt_cycle`, `anomaly_cycle`, and `span_encode_cycle` are optional live
 /// closures for signals 10, 12, and 13 respectively. When `Some`, the live
 /// `spec(…)` factory is used so the resident's real `EstateCoordinator`
 /// methods are called on each fire. When `None`, the diagnostic-only
 /// `default_spec()` is used (no-op, correct for test contexts and callers
 /// that have not yet wired a live estate). This matches the Swift
-/// `registerDefaultStandingSignals(huntCycle:anomalyCycle:adornmentCycle:)`
+/// `registerDefaultStandingSignals(huntCycle:anomalyCycle:spanEncodeCycle:)`
 /// parameter pattern where all three default to the no-op closure.
 ///
-/// Signals 7–9 and 11 (TemporalCausalitySignal, DistillationSignal,
-/// TrainingSignal, ConsolidationSignal) retain their `default_spec()` no-op
-/// variants in this helper — their estate-specific closures require additional
-/// context (MatrixTier, audit log, distillation engine) that this generic
-/// helper cannot supply. Production callers wire those via the individual
+/// Signals 7, 9 and 11 (TemporalCausalitySignal, TrainingSignal,
+/// ConsolidationSignal) retain their `default_spec()` no-op variants in this
+/// helper — their estate-specific closures require additional context
+/// (MatrixTier, audit log, consolidation config) that this generic helper
+/// cannot supply. Production callers wire those via the individual
 /// `spec(…)` factories if needed.
 ///
 /// Each call mints new `Arc<dyn Fn>` closures so the conformance gate
@@ -97,7 +97,7 @@ pub fn default_standing_signal_specs(
     corpus: Option<Arc<corpus_kit::CorpusContentEngine>>,
     hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
     anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
-    adornment_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+    span_encode_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
 ) -> Vec<SignalSpec> {
     // Signal 10: ContradictionScoutSignal. Use the live hunt closure when
     // provided; fall back to the diagnostic no-op. Mirrors Swift's default
@@ -106,9 +106,7 @@ pub fn default_standing_signal_specs(
     // The `dyn Fn` inside the Arc is not Sized, so we wrap it in a concrete
     // closure that calls the inner Arc — this gives spec<F> a concrete F: Sized.
     let scout_spec = match hunt_cycle {
-        Some(f) => {
-            ContradictionScoutSignal::spec(Arc::new(move || f()))
-        }
+        Some(f) => ContradictionScoutSignal::spec(Arc::new(move || f())),
         None => ContradictionScoutSignal::default_spec(),
     };
     // Signal 12: AnomalySweepSignal (P3a). Use the live anomaly closure when
@@ -117,20 +115,18 @@ pub fn default_standing_signal_specs(
     //
     // Same Sized-wrapping pattern as the hunt closure above.
     let anomaly_spec = match anomaly_cycle {
-        Some(f) => {
-            AnomalySweepSignal::spec(Arc::new(move || f()))
-        }
+        Some(f) => AnomalySweepSignal::spec(Arc::new(move || f())),
         None => AnomalySweepSignal::default_spec(),
     };
-    // Signal 13: AdornmentPassSignal (SPEC_ADORNMENT §4). Use the live
-    // adornment closure when provided; fall back to the diagnostic no-op.
-    // Mirrors Swift's default `adornmentCycle: { _ in 0 }` parameter in
-    // registerDefaultStandingSignals.
+    // Signal 13: SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10). Use the live
+    // span-encode closure when provided; fall back to the diagnostic no-op.
+    // Mirrors Swift's default `spanEncodeCycle: { _ in 0 }` parameter in
+    // registerDefaultStandingSignals. REM-ALPHA cadence (30 s).
     //
     // Same Sized-wrapping pattern as the hunt and anomaly closures above.
-    let adornment_spec = match adornment_cycle {
-        Some(f) => AdornmentPassSignal::spec(Arc::new(move || f())),
-        None => AdornmentPassSignal::default_spec(),
+    let span_encode_spec = match span_encode_cycle {
+        Some(f) => SpanEncodeSignal::spec(Arc::new(move || f())),
+        None => SpanEncodeSignal::default_spec(),
     };
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live
@@ -160,11 +156,6 @@ pub fn default_standing_signal_specs(
         // TemporalCausalitySignal::spec(fold_cycle) to run the hourly
         // T-population pass against the estate's MatrixTier and audit log.
         TemporalCausalitySignal::default_spec(),
-        // Signal 8: DistillationSignal registered with its diagnostic no-op
-        // spec. Production callers wire a live distillation_cycle closure via
-        // DistillationSignal::spec(distillation_cycle) to run the per-item
-        // distillation sweep on each hourly fire.
-        DistillationSignal::default_spec(),
         // Signal 9: TrainingSignal registered with its diagnostic no-op spec.
         // Production callers wire a live training_cycle closure
         // via TrainingSignal::spec(training_cycle) to invoke
@@ -181,10 +172,10 @@ pub fn default_standing_signal_specs(
         ConsolidationSignal::default_spec(),
         // Signal 12: AnomalySweepSignal (P3a) — live or no-op per anomaly_cycle above.
         anomaly_spec,
-        // Signal 13: AdornmentPassSignal (SPEC_ADORNMENT §4) — live or no-op per
-        // adornment_cycle above. Hourly dream-time minting pass over
-        // (drawer, active-minter) pairs: per-pair failure isolation, writes
-        // StoredAdornment rows via LocusKit; batch counts pairs.
-        adornment_spec,
+        // Signal 13: SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10) — live or no-op
+        // per span_encode_cycle above. REM-ALPHA (30 s) drain that encodes drawers
+        // with bit 27 clear into int8 span rows (vectors_v6) and sets bit 27
+        // (spanIndexed, contract §5) on success.
+        span_encode_spec,
     ]
 }

@@ -21,8 +21,9 @@
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
 //! bit  26     is_anomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
-//! bits 27–30  FREE — previously adornment_required (27) and adornment_bitmask (28-30);
-//!             retired by ADORN-STORE-02 v17 (normalized adornment store).
+//! bit  27     span_indexed — encoder span rows exist for the current content
+//!             (Encoder Rerank Program, 2026-09-05)
+//! bits 28–30  FREE (3 bits headroom)
 //! bits 31–63  reserved
 //! ```
 //!
@@ -182,20 +183,15 @@ impl DrawerFeatureFlags {
     /// Privacy-aware bucket; recall gated by zone-policy check.
     pub const IS_LOCKED_ZONE: i64 = 1 << 18;
 
-    /// Bit 19 — drawer carries a current distilled representation per
-    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    /// Bit 19 — retained assignment with no writer at schema v19.
     ///
-    /// Set iff all five distillation columns (`distilled`,
-    /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`, `distilled_source_digest`) are populated. Clear when
-    /// those columns are NULL. Presence only: whether the representation is
-    /// CURRENT is `genius_locus_kit::distilled_representation_is_current`,
-    /// which also compares the converter id and the source digest.
-    ///
-    /// The §4 invariant makes this bit skew-impossible: it travels in the
-    /// SAME UPDATE as the five columns — set by `set_distilled_representation`,
-    /// cleared by every `insert_cleared_representation` call site and by
-    /// the dataset-content patch path. Wire value: 1 << 19 = 524288 (0x80000).
+    /// It marked "a distilled representation is stored for this row" while
+    /// the distilled columns existed; schema v19 removed those columns and
+    /// distillation is rendered inline at hydration instead, so nothing
+    /// sets this bit any more and every content-clearing path still clears
+    /// it. The position stays assigned because a bit is never reused (a
+    /// populated estate may carry it set on rows written before v19).
+    /// Wire value: 1 << 19 = 524288 (0x80000).
     ///
     /// Mirrors Swift `DrawerFeatureFlags.hasCurrentRepresentation`.
     pub const HAS_CURRENT_REPRESENTATION: i64 = 1 << 19;
@@ -254,9 +250,30 @@ impl DrawerFeatureFlags {
     /// Mirrors Swift `DrawerFeatureFlags.isAnomalous`.
     pub const IS_ANOMALOUS: i64 = 1 << 26;
 
-    // Bits 27-30 are FREE as of ADORN-STORE-02 v17.
-    // Previously: ADORNMENT_REQUIRED (bit 27) and ADORNMENT_BITMASK_MASK/SHIFT (bits 28-30).
-    // Adornment state is now tracked in the normalized adornments table, not bitmap fields.
+    /// Bit 27 — at least one encoder span row exists in `vectors` under the
+    /// ACTIVE encoder model for this row's current `content_hash`.
+    ///
+    /// Set by the span-encode duty (`Estate::set_span_indexed`) after a
+    /// successful `write_span_vectors`. Cleared by every content write (the
+    /// same statement that bumps `content_hash`, through
+    /// `CLEARED_ON_CONTENT_WRITE`) and by `EncoderModelStore::activate`,
+    /// which clears it estate-wide so the duty re-encodes under the new
+    /// model. A clear bit IS the duty's work-item predicate
+    /// (`span_index_debt_batch`).
+    ///
+    /// NOTE: bit 27 is above the 12-bit feature-flags region (bits 12–23);
+    /// `feature_flags()` will not reflect it. Use `is_span_indexed()`.
+    ///
+    /// Wire value: 1 << 27 = 134217728 (0x8000000).
+    /// Mirrors Swift `DrawerFeatureFlags.spanIndexed`.
+    pub const SPAN_INDEXED: i64 = 1 << 27;
+
+    /// The bits every content write clears in the same UPDATE that changes
+    /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
+    /// rows describe the previous content). Applied as
+    /// `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`. Mirrors Swift
+    /// `DrawerFeatureFlags.clearedOnContentWrite`.
+    pub const CLEARED_ON_CONTENT_WRITE: i64 = Self::HAS_CURRENT_REPRESENTATION | Self::SPAN_INDEXED;
 }
 
 // MARK: - Drawer accessors
@@ -316,20 +333,22 @@ impl Drawer {
         (self.operational_bitmap & flag) == flag
     }
 
-    /// True when bit 19 of `operational_bitmap` is set, indicating that
-    /// all four distillation columns are populated (cookbook §2.4.1).
-    ///
-    /// Consumers use this instead of `distilled.is_some()` for eligibility
-    /// checks — it is a direct bitmap read, not a column-presence test.
-    /// `distill_items_sweep` uses this accessor as the primary eligibility
-    /// gate; `count_undistilled` uses the corresponding `BitmaskNone`
-    /// predicate on the database side.
-    ///
-    /// Mirrors Swift `Drawer.hasCurrentRepresentation`.
+    /// True when bit 19 of `operational_bitmap` is set. No writer sets the
+    /// bit at schema v19 (see `DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION`);
+    /// rows written before v19 may still carry it. Mirrors Swift
+    /// `Drawer.hasCurrentRepresentation`.
     pub fn has_current_representation(&self) -> bool {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         (self.operational_bitmap & DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION)
             == DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION
+    }
+
+    /// True when bit 27 of `operational_bitmap` is set: encoder span rows
+    /// exist under the active model for this row's current content. Direct
+    /// bitmap read because bit 27 is outside the feature-flags region.
+    /// Mirrors Swift `Drawer.isSpanIndexed`.
+    pub fn is_span_indexed(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::SPAN_INDEXED) != 0
     }
 
     // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────
@@ -397,8 +416,6 @@ impl Drawer {
         (self.operational_bitmap & DrawerFeatureFlags::IS_ANOMALOUS) != 0
     }
 
-    // Bits 27-30 accessors (adornment_required, adornment_bitmask) have been retired
-    // by ADORN-STORE-02 v17. Adornment state lives in the adornments table.
 
     // -------------------------------------------------------------------------
     // Adjective-bitmap axis accessors — mirrors the `Drawer` extension in

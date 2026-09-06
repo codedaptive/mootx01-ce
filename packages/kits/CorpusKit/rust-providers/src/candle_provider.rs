@@ -150,6 +150,19 @@ mod inner {
         /// production callers use [`CandleNLProvider::load`] to keep the
         /// seed byte-identical to the constant.
         pub fn load_with_seed(model_dir: &Path, projection_seed: u64) -> Result<Self, String> {
+            Self::load_inner(model_dir, projection_seed, MAX_TOKENS)
+        }
+
+        /// Load for a span-encoder registry row: same assets and seed as
+        /// `load`, truncation at `max_tokens` (the row's `max_sequence`, 256
+        /// for the floor model) instead of the positional ceiling, so spans
+        /// longer than the model card's limit are cut where the card says,
+        /// not at 512. Values outside `1..=MAX_TOKENS` are clamped.
+        pub fn load_with_max_tokens(model_dir: &Path, max_tokens: usize) -> Result<Self, String> {
+            Self::load_inner(model_dir, CANDLE_NL_PROJECTION_SEED, max_tokens.clamp(1, MAX_TOKENS))
+        }
+
+        fn load_inner(model_dir: &Path, projection_seed: u64, max_tokens: usize) -> Result<Self, String> {
             let device = Device::Cpu;
 
             let config_path = model_dir.join("config.json");
@@ -171,7 +184,7 @@ mod inner {
             // correct approach, and the golden-pin test guards this override.
             tokenizer
                 .with_truncation(Some(TruncationParams {
-                    max_length: MAX_TOKENS,
+                    max_length: max_tokens,
                     ..Default::default()
                 }))
                 .map_err(|e| format!("configuring truncation: {e}"))?;
@@ -300,6 +313,36 @@ mod inner {
     // across threads.
     unsafe impl Send for CandleNLProvider {}
     unsafe impl Sync for CandleNLProvider {}
+
+    /// Span-encoder seam: ONE batched forward over the non-empty texts;
+    /// empty texts map to `vec![]` (the encoder turns those into the zero
+    /// vector). Same partition-and-merge as `embed_batch`, minus the SimHash.
+    impl corpus_kit::encoder::SpanInference for CandleNLProvider {
+        fn pooled_batch(
+            &self,
+            texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, corpus_kit::encoder::EncoderError> {
+            let mut positions: Vec<usize> = Vec::new();
+            let mut nonempty: Vec<&str> = Vec::new();
+            for (i, &t) in texts.iter().enumerate() {
+                if !t.is_empty() {
+                    positions.push(i);
+                    nonempty.push(t);
+                }
+            }
+            let mut out = vec![Vec::new(); texts.len()];
+            if nonempty.is_empty() {
+                return Ok(out);
+            }
+            let pooled = self.forward_batch(&nonempty).map_err(|e| {
+                corpus_kit::encoder::EncoderError::InferenceFailed(format!("{e:?}"))
+            })?;
+            for (pos, v) in positions.into_iter().zip(pooled) {
+                out[pos] = v;
+            }
+            Ok(out)
+        }
+    }
 
     impl EmbeddingProvider for CandleNLProvider {
         fn model_id(&self) -> &str {

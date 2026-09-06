@@ -1,3 +1,6 @@
+#![cfg(feature = "dense-families")]
+// Dense-family test — compiled only when --features dense-families.
+// Off by default (plan 70BC55F3, 2026-09-05). See Cargo.toml.
 //! Cross-port basis-serialization conformance gate for `NmfProvider`
 //! (mission 6a-i). Asserts byte-identical serialize, embed reproduction, AND
 //! training-document-embedding reproduction (which exercises the H factor that

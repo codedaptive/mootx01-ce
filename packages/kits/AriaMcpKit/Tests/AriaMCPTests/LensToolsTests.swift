@@ -90,10 +90,8 @@ struct LensToolsTests {
             "recall_exploratory",
             // Distillation-family recipes: dispatched as recipe tools by
             // RecipeTools, not as lens tools by LensTools.
-            "distill", "distilled_recall",
-            // CDL-02 redistill: force-redistill all items + full reindex.
-            // Dispatched as moot_redistill by RecipeTools, not a lens tool.
-            "redistill",
+            // ENC-W6B: "distill" and "redistill" retired from catalog; "distilled_recall" remains.
+            "distilled_recall",
             // D10 walk-recall escalation ladder: dispatched by RecipeTools as
             // moot_recall_walk, not a lens tool.
             "walk_recall",
