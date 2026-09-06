@@ -27,17 +27,6 @@ pub enum CorpusKitError {
     /// canonical record — the job is stale and is rejected WITHOUT
     /// advancing the index checkpoint (GLK shared-content 1.1).
     StaleRevision(String),
-    /// The composition policy recorded on the estate's active
-    /// `corpus_index_state` rows differs from the configured
-    /// `IndexCompositionPolicy`: those indexes were built from other text and
-    /// cannot serve the configured policy. Raised by
-    /// `CorpusContentEngine::open` unless the caller commits to a full
-    /// rebuild before serving (`reindex_pending`). Recover by reindexing
-    /// under the configured policy.
-    ///
-    /// Detail string: `recorded=<id>;configured=<id>`, byte-identical to the
-    /// Swift `compositionPolicyMismatch` associated value.
-    CompositionPolicyMismatch(String),
 }
 
 impl std::fmt::Display for CorpusKitError {
@@ -57,9 +46,6 @@ impl std::fmt::Display for CorpusKitError {
                 write!(f, "invalid configuration: {}", s)
             }
             CorpusKitError::StaleRevision(s) => write!(f, "stale revision: {}", s),
-            CorpusKitError::CompositionPolicyMismatch(s) => {
-                write!(f, "composition policy mismatch: {}", s)
-            }
         }
     }
 }
