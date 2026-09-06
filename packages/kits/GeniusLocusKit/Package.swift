@@ -70,36 +70,33 @@ let package = Package(
             description: "Compile the historical GLK 1.0 to 1.1 shared-content migration capsule."
         ),
         .trait(
-            name: "MigrationV1_1ToV1_2",
-            description: "Compile the GLK 1.1 to 1.2 index-composition-column migration capsule."
-        ),
-        .trait(
-            name: "MigrationV1_3ToV1_4",
-            description: "Compile the GLK 1.3 to 1.4 index-composition-setting migration capsule."
-        ),
-        .trait(
             name: "MigrationV1_4ToV1_5",
             description: "Compile the GLK 1.4 to 1.5 storage-ledger kit-id migration capsule (SynapseKit ledger rows become SynapseKit rows)."
         ),
+        // Floors 1.1 through 1.4 compile the same single capsule: the 1.1->1.2
+        // column is added by CorpusKit's own ladder at open, the 1.2->1.3 column
+        // was removed by schema v19, and the 1.3->1.4 setting retired with the
+        // index composition policy, so the 1.4->1.5 capsule runs directly on
+        // any of those stamps.
         .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_1",
-            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule).",
-            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.3->1.4 and 1.4->1.5 capsules; the 1.2->1.3 step added a LocusKit column that schema v19 removed, so 1.3->1.4 runs directly on a 1.2 stamp).",
-            enabledTraits: ["MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_3",
-            description: "Support estates as old as GLK format 1.3 (compiles the 1.3->1.4 and 1.4->1.5 capsules).",
-            enabledTraits: ["MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_4",
@@ -208,47 +205,10 @@ let package = Package(
             ],
             path: "Sources/GLKMigrationV1_0ToV1_1"
         ),
-        // GLK 1.1 -> 1.2 capsule: applies corpus_index_state composition_policy
-        // column to populated estates that were written before corpus_index_state reached schema version 3.
-        // Mirrors the GLKMigrationV1_0ToV1_1 target structure.
-        .target(
-            name: "GLKMigrationV1_1ToV1_2",
-            dependencies: [
-                "GeniusLocusKit",
-                .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-            ],
-            path: "Sources/GLKMigrationV1_1ToV1_2",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_1_TO_V1_2",
-                    .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-            ]
-        ),
-        // GLK 1.3 -> 1.4 capsule: stores the index composition setting
-        // (manifest key index_composition_policy) on populated estates that
-        // were written before the setting existed. Mirrors the
-        // GLKMigrationV1_1ToV1_2 target; CorpusKit supplies the policy type.
-        .target(
-            name: "GLKMigrationV1_3ToV1_4",
-            dependencies: [
-                "GeniusLocusKit",
-                .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-            ],
-            path: "Sources/GLKMigrationV1_3ToV1_4",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_3_TO_V1_4",
-                    .when(traits: ["MigrationV1_3ToV1_4"])
-                ),
-            ]
-        ),
         // GLK 1.4 -> 1.5 capsule: moves the vector tier's schema-version
         // ledger rows from their SynapseKit ids to their SynapseKit ids on
         // populated estates, through PersistenceKit's renameSchemaKit.
-        // Mirrors the GLKMigrationV1_3ToV1_4 target.
+        // Mirrors the GLKMigrationV1_0ToV1_1 target structure.
         .target(
             name: "GLKMigrationV1_4ToV1_5",
             dependencies: [
@@ -278,14 +238,6 @@ let package = Package(
                     condition: .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
                 .target(
-                    name: "GLKMigrationV1_1ToV1_2",
-                    condition: .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .target(
-                    name: "GLKMigrationV1_3ToV1_4",
-                    condition: .when(traits: ["MigrationV1_3ToV1_4"])
-                ),
-                .target(
                     name: "GLKMigrationV1_4ToV1_5",
                     condition: .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
@@ -295,14 +247,6 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
-                ),
-                .define(
-                    "GLK_MIGRATION_V1_1_TO_V1_2",
-                    .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .define(
-                    "GLK_MIGRATION_V1_3_TO_V1_4",
-                    .when(traits: ["MigrationV1_3ToV1_4"])
                 ),
                 .define(
                     "GLK_MIGRATION_V1_4_TO_V1_5",
@@ -453,69 +397,6 @@ let package = Package(
             ],
             path: "Tests/GLKMigrationV1_0ToV1_1Tests",
             swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_0_TO_V1_1",
-                    .when(traits: ["MigrationV1_0ToV1_1"])
-                ),
-            ]
-        ),
-        // Tests for the GLK 1.1 -> 1.2 index-composition-column migration capsule.
-        // Verifies that corpus_index_state gains composition_policy on v1_1-stamped
-        // estates, and that the catalog chain (v1_0 -> v1_1 -> v1_2) ends at v1_2.
-        .testTarget(
-            name: "GLKMigrationV1_1ToV1_2Tests",
-            dependencies: [
-                "GeniusLocusKit",
-                "GeniusLocusKitMigrations",
-                .target(
-                    name: "GLKMigrationV1_1ToV1_2",
-                    condition: .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .target(
-                    name: "GLKMigrationV1_0ToV1_1",
-                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
-                ),
-                .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-            ],
-            path: "Tests/GLKMigrationV1_1ToV1_2Tests",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_1_TO_V1_2",
-                    .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .define(
-                    "GLK_MIGRATION_V1_0_TO_V1_1",
-                    .when(traits: ["MigrationV1_0ToV1_1"])
-                ),
-            ]
-        ),
-        // Tests for the GLK 1.3 -> 1.4 index-composition-setting capsule.
-        // Verifies that a v1_3-stamped estate without the setting gains it
-        // (the creation-time seed) and stamps v1_4, that a second run is a
-        // no-op, and that the catalog chain from v1_0 ends at v1_4.
-        .testTarget(
-            name: "GLKMigrationV1_3ToV1_4Tests",
-            dependencies: [
-                "GeniusLocusKit",
-                "GeniusLocusKitMigrations",
-                .target(
-                    name: "GLKMigrationV1_3ToV1_4",
-                    condition: .when(traits: ["MigrationV1_3ToV1_4"])
-                ),
-                .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-            ],
-            path: "Tests/GLKMigrationV1_3ToV1_4Tests",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_3_TO_V1_4",
-                    .when(traits: ["MigrationV1_3ToV1_4"])
-                ),
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])

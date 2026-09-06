@@ -55,16 +55,6 @@ public enum ManifestKey: String, Sendable, CaseIterable {
     /// carry the value but it is never used by any kit path for signing.
     case ed25519PrivateKeyWrapped    = "ed25519_private_key_wrapped"
 
-    /// The estate's index composition policy id: which text each search
-    /// index lane is built from, in CorpusKit's `IndexCompositionPolicy.id`
-    /// form (`lex=<source>;dense=<source>`). Written once, when the estate is
-    /// created or when the estate-format 1.3 to 1.4 capsule seeds it; read
-    /// by GeniusLocusKit at every open; changed only by
-    /// `mootx01 db composition --set`, which rebuilds every index lane in
-    /// the same command so the stored id and the index rows never disagree.
-    /// LocusKit stores the string and never interprets it.
-    case indexCompositionPolicy      = "index_composition_policy"
-
     /// The 18 required keys that every conforming estate must populate.
     public static let required: [ManifestKey] = [
         .manifestVersion, .schemaVersion, .estateUUID, .estateName,
@@ -75,12 +65,13 @@ public enum ManifestKey: String, Sendable, CaseIterable {
         .bitmapLayoutVersion, .provenanceBitmapVersion
     ]
 
-    /// The 8 optional keys. Absent means "not configured".
+    /// The 7 optional keys. Absent means "not configured". A manifest row
+    /// under the retired key `index_composition_policy` (GeniusLocusKit
+    /// 2.15.0 to 2.22.0) is not a key: it is left in place and ignored.
     public static let optional: [ManifestKey] = [
         .federationGroupID, .miningPatternsHash, .tinyModelID,
         .tinyModelTrainingCorpusSize, .operationalBitmapLayouts,
-        .ed25519PublicKey, .ed25519PrivateKeyWrapped,
-        .indexCompositionPolicy
+        .ed25519PublicKey, .ed25519PrivateKeyWrapped
     ]
 }
 
