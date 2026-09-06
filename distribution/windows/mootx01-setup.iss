@@ -58,6 +58,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#BinDir}\mootx01.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Encoder model: packed alongside the binaries in the release zip at
+; share\mootx01\models\arctic-embed-s-w60\. Installed one level above {app}
+; so the Rust resolver's <exe>/../share/mootx01/models/<id>/ slot finds it.
+; {app} = {%USERPROFILE}\.mootx01\bin, so model lands at
+; {%USERPROFILE}\.mootx01\share\mootx01\models\arctic-embed-s-w60\.
+; NOT skipifsourcedoesntexist — a missing model dir is a packaging error.
+Source: "{#BinDir}\share\mootx01\models\arctic-embed-s-w60\*"; \
+  DestDir: "{app}\..\share\mootx01\models\arctic-embed-s-w60"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; Migrate pre-1.0.6 beta installs that landed in Roaming AppData: remove
