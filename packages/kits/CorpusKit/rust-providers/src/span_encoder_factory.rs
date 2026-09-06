@@ -67,36 +67,37 @@ impl SpanEncoderFactory {
         sha256::hash(bytes).iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Candle runtime: mean-pooled all-MiniLM-L6-v2 over
-    /// `config.json` + `tokenizer.json` + `model.safetensors`, truncated at
-    /// `spec.max_sequence`.
+    /// Candle runtime: a BERT-family encoder loaded from the
+    /// `config.json` + `tokenizer.json` + `model.safetensors` triple, pooled
+    /// per `spec.pooling` (CLS for Arctic embed, mean for MiniLM) and
+    /// truncated at `spec.max_sequence`.
     #[cfg(feature = "candle")]
     fn load_runtime(
         spec: &EncoderModelSpec,
         model_dir: &Path,
         batch_size: usize,
     ) -> Result<Box<dyn SpanEncoder>, EncoderError> {
-        use corpus_kit::encoder::{Pooling, ProviderSpanEncoder};
+        use corpus_kit::encoder::ProviderSpanEncoder;
 
         use crate::candle_provider::{CandleNLProvider, CANDLE_NL_DIMENSION};
 
-        // The candle provider pools by attention-masked mean; a CLS-pooled
-        // row cannot be served by it and must not be silently mean-pooled.
-        if spec.pooling != Pooling::Mean {
-            return Err(EncoderError::LoadFailed(format!(
-                "{}: candle runtime pools by mean, spec asks for {:?}",
-                spec.model_id, spec.pooling
-            )));
-        }
         if spec.dim != CANDLE_NL_DIMENSION {
             return Err(EncoderError::LoadFailed(format!(
                 "{}: candle runtime produces dim {CANDLE_NL_DIMENSION}, spec dim {}",
                 spec.model_id, spec.dim
             )));
         }
-        let provider = CandleNLProvider::load_with_max_tokens(model_dir, spec.max_sequence)
-            .map_err(EncoderError::LoadFailed)?;
-        Ok(Box::new(ProviderSpanEncoder::new(spec.clone(), Box::new(provider), batch_size)))
+        let provider = CandleNLProvider::load_with_max_tokens_and_pooling(
+            model_dir,
+            spec.max_sequence,
+            spec.pooling,
+        )
+        .map_err(EncoderError::LoadFailed)?;
+        Ok(Box::new(ProviderSpanEncoder::new(
+            spec.clone(),
+            Box::new(provider),
+            batch_size,
+        )))
     }
 
     /// No inference runtime in this build: the hash check above still ran,
