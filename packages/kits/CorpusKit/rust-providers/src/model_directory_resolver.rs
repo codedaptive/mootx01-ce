@@ -29,6 +29,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::EncoderModelSeed;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Known tokenizer hashes.
 // sha256(vocab.txt) for each shipped model ID, sourced from
@@ -46,6 +48,7 @@ fn known_tokenizer_hashes() -> HashMap<&'static str, &'static str> {
         "minilm-l6-v2-w60",
         "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
     );
+    m.insert(EncoderModelSeed::MODEL_ID, EncoderModelSeed::TOKENIZER_HASH);
     m
 }
 
@@ -55,7 +58,21 @@ fn required_files() -> HashMap<&'static str, &'static [&'static str]> {
     let mut m: HashMap<&'static str, &'static [&'static str]> = HashMap::new();
     m.insert(
         "minilm-l6-v2-w60",
-        &["config.json", "tokenizer.json", "model.safetensors", "vocab.txt"],
+        &[
+            "config.json",
+            "tokenizer.json",
+            "model.safetensors",
+            "vocab.txt",
+        ],
+    );
+    m.insert(
+        "arctic-embed-s-w60",
+        &[
+            "config.json",
+            "tokenizer.json",
+            "model.safetensors",
+            "vocab.txt",
+        ],
     );
     m
 }
@@ -74,16 +91,25 @@ fn required_files() -> HashMap<&'static str, &'static [&'static str]> {
 /// silent (normal operating condition in 1.1); sha256 mismatch logs one line
 /// to stderr.
 pub fn model_dir_for(model_id: &str, data_dir: &Path) -> Option<PathBuf> {
+    let exe_dir = exe_directory();
+    model_dir_for_with_exe_dir(model_id, data_dir, exe_dir.as_deref())
+}
+
+/// Resolver implementation with an injectable executable directory so tests
+/// can exercise the installed `../share/mootx01/models` layout.
+fn model_dir_for_with_exe_dir(
+    model_id: &str,
+    data_dir: &Path,
+    exe_dir: Option<&Path>,
+) -> Option<PathBuf> {
     // Slot 1: user download directory (1.2 feature, empty today).
-    let download_slot = data_dir
-        .join("models")
-        .join(model_id);
+    let download_slot = data_dir.join("models").join(model_id);
     if let Some(dir) = verified(&download_slot, model_id, "download") {
         return Some(dir);
     }
 
     // Slot 2: installer package path beside the binary.
-    if let Some(exe_dir) = exe_directory() {
+    if let Some(exe_dir) = exe_dir {
         let share_slot = exe_dir
             .join("..")
             .join("share")
@@ -118,9 +144,7 @@ fn verified(dir: &Path, model_id: &str, source: &str) -> Option<PathBuf> {
     let hashes = known_tokenizer_hashes();
     let files = required_files();
     let Some(required) = files.get(model_id) else {
-        eprintln!(
-            "[ModelDirectoryResolver] unknown model ID {model_id} — no required-file list"
-        );
+        eprintln!("[ModelDirectoryResolver] unknown model ID {model_id} — no required-file list");
         return None;
     };
     for file in *required {
@@ -132,9 +156,7 @@ fn verified(dir: &Path, model_id: &str, source: &str) -> Option<PathBuf> {
 
     // Verify vocab.txt sha256 as the integrity sentinel.
     let Some(&expected) = hashes.get(model_id) else {
-        eprintln!(
-            "[ModelDirectoryResolver] no known tokenizer_hash for {model_id}"
-        );
+        eprintln!("[ModelDirectoryResolver] no known tokenizer_hash for {model_id}");
         return None;
     };
     let vocab_path = dir.join("vocab.txt");
@@ -189,6 +211,106 @@ fn exe_directory() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    const VENDORED_VOCAB: &[u8] =
+        include_bytes!("../../Tests/Fixtures/encoder-models/minilm-l6-v2-w60/vocab.txt");
+
+    fn write_model_directory(model_dir: &Path, model_id: &str) {
+        fs::create_dir_all(model_dir).unwrap();
+        fs::write(model_dir.join("vocab.txt"), VENDORED_VOCAB).unwrap();
+        for file in required_files().get(model_id).unwrap().iter().copied() {
+            if file != "vocab.txt" {
+                fs::write(model_dir.join(file), b"placeholder").unwrap();
+            }
+        }
+    }
+
+    /// The active seed is discoverable from the 1.2 download slot without a
+    /// second tokenizer-hash constant. Arctic and MiniLM share this vocabulary;
+    /// the filename map remains model-specific.
+    #[test]
+    fn seeded_arctic_download_slot_resolves() {
+        assert_eq!(EncoderModelSeed::MODEL_ID, "arctic-embed-s-w60");
+        let tmp = tempdir();
+        let model_dir = tmp.join("models").join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&model_dir, EncoderModelSeed::MODEL_ID);
+
+        assert_eq!(
+            model_dir_for(EncoderModelSeed::MODEL_ID, &tmp),
+            Some(model_dir)
+        );
+    }
+
+    /// The normal packaged share slot discovers the seeded Arctic model.
+    #[test]
+    fn seeded_arctic_installed_share_slot_resolves() {
+        let tmp = tempdir();
+        let exe_dir = tmp.join("bin");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let model_dir = tmp
+            .join("share")
+            .join("mootx01")
+            .join("models")
+            .join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&model_dir, EncoderModelSeed::MODEL_ID);
+
+        assert_eq!(
+            model_dir_for_with_exe_dir(
+                EncoderModelSeed::MODEL_ID,
+                &tmp.join("empty-data"),
+                Some(&exe_dir),
+            ),
+            Some(model_dir.canonicalize().unwrap())
+        );
+    }
+
+    /// A valid download shadows a valid installed share, preserving slot order.
+    #[test]
+    fn seeded_arctic_download_precedes_installed_share() {
+        let tmp = tempdir();
+        let data_dir = tmp.join("data");
+        let download = data_dir.join("models").join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&download, EncoderModelSeed::MODEL_ID);
+        let exe_dir = tmp.join("bin");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let installed = tmp
+            .join("share")
+            .join("mootx01")
+            .join("models")
+            .join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&installed, EncoderModelSeed::MODEL_ID);
+
+        assert_eq!(
+            model_dir_for_with_exe_dir(EncoderModelSeed::MODEL_ID, &data_dir, Some(&exe_dir),),
+            Some(download)
+        );
+    }
+
+    #[test]
+    fn seeded_arctic_missing_required_file_returns_none() {
+        let tmp = tempdir();
+        let model_dir = tmp.join("models").join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&model_dir, EncoderModelSeed::MODEL_ID);
+        fs::remove_file(model_dir.join("model.safetensors")).unwrap();
+
+        assert_eq!(
+            model_dir_for_with_exe_dir(EncoderModelSeed::MODEL_ID, &tmp, None),
+            None
+        );
+    }
+
+    #[test]
+    fn seeded_arctic_vocab_mismatch_returns_none() {
+        let tmp = tempdir();
+        let model_dir = tmp.join("models").join(EncoderModelSeed::MODEL_ID);
+        write_model_directory(&model_dir, EncoderModelSeed::MODEL_ID);
+        fs::write(model_dir.join("vocab.txt"), b"wrong-vocab").unwrap();
+
+        assert_eq!(
+            model_dir_for_with_exe_dir(EncoderModelSeed::MODEL_ID, &tmp, None),
+            None
+        );
+    }
 
     /// Build a scratch model directory with valid files and verify the
     /// resolver returns it.
@@ -277,10 +399,7 @@ mod tests {
     fn tempdir() -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "moot-resolver-test-{}-{n}",
-            std::process::id()
-        ));
+        let p = std::env::temp_dir().join(format!("moot-resolver-test-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p

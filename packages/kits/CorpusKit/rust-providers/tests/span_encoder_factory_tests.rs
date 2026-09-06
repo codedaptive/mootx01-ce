@@ -67,7 +67,7 @@ fn matching_hash_without_weights_does_not_load() {
 }
 
 #[test]
-fn cls_pooling_is_refused_by_candle_runtime_or_unavailable() {
+fn cls_pooling_reaches_model_load_or_runtime_unavailable() {
     let dir = scratch_dir("cls");
     std::fs::write(dir.join("vocab.txt"), VOCAB).unwrap();
     let spec = EncoderModelSpec {
@@ -77,7 +77,21 @@ fn cls_pooling_is_refused_by_candle_runtime_or_unavailable() {
     };
     let result = SpanEncoderFactory::make(&spec, &dir);
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(result.is_err());
+    match result {
+        // With Candle enabled this scratch directory reaches the ordinary
+        // asset load and fails on its absent config. The former factory-level
+        // "pools by mean" refusal must never return.
+        Err(EncoderError::LoadFailed(message)) => {
+            assert!(
+                !message.contains("pools by mean"),
+                "stale CLS refusal: {message}"
+            );
+        }
+        // A build without Candle still reports the feature as unavailable.
+        Err(EncoderError::ModelUnavailable(_)) => {}
+        Ok(_) => panic!("factory must not load without model assets"),
+        Err(other) => panic!("unexpected error class {other:?}"),
+    }
 }
 
 #[test]
