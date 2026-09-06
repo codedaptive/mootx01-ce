@@ -188,6 +188,19 @@ public extension GeniusLocusKit {
             : nil // nil → defaultIdentityKeyStore(for:storage) in LocusKit.Estate.open
         let handle = try await open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
 
+        // Step 2a: a fresh estate is born with the span encoder as its default
+        // recall stage. Written BEFORE wiring so this same open activates it
+        // (wireSubstores reads the key). LocusOnly estates have no Corpus, so
+        // there is nothing to activate.
+        if params.kind != .locusOnly {
+            do {
+                try await provisionDefaultEncoderIfAbsent(for: handle)
+            } catch {
+                try? await close(handle)
+                throw error
+            }
+        }
+
         // Step 2b: Wire sub-stores based on kind — BEFORE seeding the wings.
         // Wiring registers the Corpus (and mounts the encode queue), so the wing
         // hints seeded in step 2c are stamped with the corpus's real model id, not
@@ -492,6 +505,14 @@ public extension GeniusLocusKit {
             // public accessor (no reaching around the kit).
             let vectorStore = await corpus.sharedVectorStore
             registerVectorStore(vectorStore, for: handle)
+            // Span encoder activation runs AFTER the VectorStore is registered:
+            // `activateSpanEncoder` registers the rerank stage only when it can
+            // find the estate's store (the span rows live there), so activating
+            // inside `applyProvisionedEmbeddingProvider` above would register the
+            // duty-side encoder and silently skip the rerank stage. Rust twin:
+            // estate_registry.rs calls apply_provisioned_embedding_provider after
+            // register_vector_store in every wire_* fn.
+            await activateSpanEncoderIfProvisioned(for: handle)
             // CorpusKit owns the encode pipeline: mount the Corpus's own ingest
             // queue + drain worker pool, and wire its onEncoded callback to roll
             // up the touched LocusKit rooms for each encoded batch. GLK's only
@@ -534,6 +555,9 @@ public extension GeniusLocusKit {
                 models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
+            // No VectorStore on a CorpusOnly estate: activation registers the
+            // duty-side encoder only and logs that the rerank stage is absent.
+            await activateSpanEncoderIfProvisioned(for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: wire the
             // room rollup and mount the Corpus-owned ingest queue + drain
             // worker. Rider BEFORE mount, same ordering rule as the .glk case
@@ -880,6 +904,19 @@ public extension GeniusLocusKit {
     ///   - baseModels: The caller-supplied ensemble (default: five-signal default).
     ///   - handle: The open estate handle; used to read the manifest.
     /// - Returns: The (possibly augmented) ensemble to pass to `CorpusContentEngine`.
+    /// Activate the span encoder when the manifest's `embedding_provider` is
+    /// `"encoder"`. Called from `wireSubstores` after the Corpus (and, on a
+    /// GLK estate, the VectorStore) is registered, so `activateSpanEncoder`
+    /// can attach the rerank stage to the store. Absent or other keys do
+    /// nothing; the failure contract of `activateSpanEncoder` applies.
+    private func activateSpanEncoderIfProvisioned(for handle: EstateHandle) async {
+        guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
+              provisionedID == Self.encoderProviderID else {
+            return
+        }
+        await activateSpanEncoder(for: handle)
+    }
+
     private func applyProvisionedEmbeddingProvider(
         baseModels: [EmbeddingModel],
         for handle: EstateHandle
@@ -897,9 +934,9 @@ public extension GeniusLocusKit {
         if provisionedID == Self.encoderProviderID {
             // The span encoder is a rerank stage over the BM25 head, not an
             // ensemble member: the lexical document and the dense families stay
-            // exactly as configured. Activation registers the encoder on the
-            // estate (failure contract: no encoder + one log line, no throw).
-            await activateSpanEncoder(for: handle)
+            // exactly as configured. Activation itself happens in
+            // `wireSubstores` through `activateSpanEncoderIfProvisioned` once the
+            // estate's VectorStore is registered (the rerank stage needs it).
             return baseModels
         }
 
