@@ -91,6 +91,64 @@ struct ArcticModelDirectoryResolverTests {
         #expect(resolved == download)
     }
 
+    // MARK: - Installer share slot (§7.5 slot 3)
+
+    /// Produces a fake "binary directory" at <root>/bin and populates the share
+    /// slot at <root>/share/mootx01/models/<modelID>. Returns the bin-dir URL
+    /// so it can be passed as `executableURL` to the resolver.
+    private func makeShareLayout(in root: URL) throws -> URL {
+        let binDir = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        // Create a placeholder "binary" so the URL resolves to an actual file.
+        let exeURL = binDir.appendingPathComponent("mootx01")
+        FileManager.default.createFile(atPath: exeURL.path, contents: Data("placeholder".utf8))
+        let modelDir = root
+            .appendingPathComponent("share", isDirectory: true)
+            .appendingPathComponent("mootx01", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(EncoderModelSeed.modelID, isDirectory: true)
+        try writeArcticModelDirectory(modelDir)
+        return exeURL
+    }
+
+    @Test("active Arctic seed resolves from the installer share slot")
+    func seededArcticInstalledShareSlotResolves() throws {
+        let root = try temporaryDirectory("arctic-share-slot")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let exeURL = try makeShareLayout(in: root)
+
+        let resolved = ModelDirectoryResolver.encoderModelDirectory(
+            for: EncoderModelSeed.modelID,
+            dataDirectory: root.appendingPathComponent("empty-data", isDirectory: true),
+            bundle: Bundle(url: root)!,  // empty bundle — no bundle slot hit
+            executableURL: exeURL)
+        // Resolve symlinks so the comparison is canonical on the test runner.
+        let expected = root
+            .appendingPathComponent("share/mootx01/models")
+            .appendingPathComponent(EncoderModelSeed.modelID)
+            .resolvingSymlinksInPath()
+        #expect(resolved?.resolvingSymlinksInPath() == expected)
+    }
+
+    @Test("download slot takes precedence over the installer share slot")
+    func seededArcticDownloadPrecedesShareSlot() throws {
+        let root = try temporaryDirectory("arctic-download-vs-share")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let exeURL = try makeShareLayout(in: root)
+        let dataDirectory = root.appendingPathComponent("data", isDirectory: true)
+        let download = dataDirectory
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(EncoderModelSeed.modelID, isDirectory: true)
+        try writeArcticModelDirectory(download)
+
+        let resolved = ModelDirectoryResolver.encoderModelDirectory(
+            for: EncoderModelSeed.modelID,
+            dataDirectory: dataDirectory,
+            bundle: Bundle(url: root)!,  // no bundle slot hit
+            executableURL: exeURL)
+        #expect(resolved == download)
+    }
+
     @Test("active Arctic seed rejects a missing compiled model")
     func seededArcticMissingFileReturnsNil() throws {
         let dataDirectory = try temporaryDirectory("arctic-missing-file")
