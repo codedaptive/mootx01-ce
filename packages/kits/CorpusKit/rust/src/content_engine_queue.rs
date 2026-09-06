@@ -735,7 +735,6 @@ mod tests {
             .expect("configuration"),
             Arc::clone(&source) as Arc<dyn crate::CorpusContentSource>,
             vec![EmbeddingModelConfig::Deterministic],
-            false,
         )
         .expect("engine");
 
@@ -821,7 +820,6 @@ mod tests {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RetryCountsProvider::default()),
             }],
-            false,
         )
         .expect("engine");
         engine
@@ -894,7 +892,6 @@ mod tests {
             vec![EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RetryCountsProvider::default()),
             }],
-            false,
         )
         .expect("reopen engine");
         assert_eq!(

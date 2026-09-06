@@ -21,18 +21,6 @@ installs. One tool, three roles:
   lanes, from the terminal without a server; the same operation as the
   `moot_redistill` MCP tool. `--dry-run` reports how many rows are stale under
   the active converter and writes nothing.
-- **`mootx01 db composition [--db <name>] [--set <policy-id>]`** — show or change
-  the estate's stored index composition policy: which text each search index
-  lane is built from, as `lex=<source>;dense=<source>` (sources: `original`,
-  `originalPlusAdornments`, `distilled`, `distilledPlusAdornments`; the
-  default is `lex=original;dense=distilled`). The policy is written into the
-  estate when it is created and read at every open; `--set` validates the id,
-  stores it, and rebuilds every index lane under it in the same command, so
-  the stored policy and the index rows never disagree. Before the rebuild the
-  command drains the estate's encode queue to empty, and when the data
-  directory is the resident estate it stops the resident daemon around the
-  rebuild and restarts it afterwards, as `mootx01 upgrade` does; a clone is
-  rebuilt with the daemon left running.
 - **`mootx01 proxy --http <url>`** — a stdio↔HTTP bridge for clients whose config
   can't take a raw HTTP URL (Claude Desktop), so they route through the one
   resident daemon and share its single-writer guarantee and telemetry.
