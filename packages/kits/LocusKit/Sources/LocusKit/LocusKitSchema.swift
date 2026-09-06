@@ -100,7 +100,7 @@ public enum LocusKitSchema {
     /// and `subject_at` stay.
     ///
     /// Migration policy: ONE ladder entry, v10 → v19. CE 1.0.35 and 1.0.37
-    /// ship schema 10; EE estates written at 11–18 never shipped and are
+    /// ship schema 10; development estates written at 11–18 never shipped and are
     /// brought to 19 by the SQL surgery script, never by this ladder. The
     /// hop applies only the deltas that survive at 19 (operationalAND, the
     /// subject trio, the kg_facts identity trio, idx_drawers_filedAt, the
@@ -214,7 +214,7 @@ public enum LocusKitSchema {
                         table: "drawers",
                         columns: ["filedAt"])),
                     // v15: recall_trace lane-attribution trio. Nullable TEXT,
-                    // no backfill — NULL is the honest value for rows written
+                    // no backfill — NULL is the correct value for rows written
                     // before attribution existed; no query text is stored
                     // (privacy ruling 2026-08-20).
                     .addColumn(table: "recall_trace", column: .text("door", nullable: true)),
@@ -1003,7 +1003,7 @@ public enum SchemaUpgradePath: Equatable, Sendable {
     case upgrade(from: Int)
     /// Already at the current version: nothing to apply.
     case current
-    /// Any other version. Newer than this build, or an EE development
+    /// Any other version. Newer than this build, or a pre-release development
     /// version (11–18) that only the surgery script moves. Refuse before the
     /// schema is opened, naming the version found.
     case unsupported(found: Int)
