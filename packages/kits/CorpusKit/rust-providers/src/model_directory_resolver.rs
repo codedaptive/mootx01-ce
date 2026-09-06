@@ -5,13 +5,14 @@
 //! `model_dir_for` and treats `None` as model unavailable — recall then
 //! runs lexical-only with no error surfaced to the caller.
 //!
-//! # Search order (contract §7 of ENCODER_RERANK_CONTRACT.md)
+//! # Search order (CORPUSKIT_INTERFACE.md § 7.5)
 //!
 //! 1. `<data_dir>/models/<model_id>/`  — 1.2 download location (empty today)
 //! 2. `<exe_dir>/../share/mootx01/models/<model_id>/` — installer package path
 //!
-//! Slot 2 is where `fetch-rust-triple.sh` places the three Rust model files
-//! (`config.json`, `tokenizer.json`, `model.safetensors`) in the installer.
+//! Slot 2 is where the release tarball (built with `fetch-release.sh linux`)
+//! and the installers place the four model files (`config.json`,
+//! `tokenizer.json`, `model.safetensors`, `vocab.txt`).
 //! On macOS development runs the binary lives beside the repo; the
 //! `../share/mootx01/models/` path will typically not exist and the function
 //! returns None unless `MOOTX01_DATA_DIR` points at a prepared directory.
