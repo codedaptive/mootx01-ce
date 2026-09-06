@@ -283,6 +283,11 @@ struct AriaMCPMain {
             // InMemoryEstateIdentityKeyStore() for ephemeral estates so the
             // Ed25519 signing key never touches the Keychain.
             handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+            // This entry point creates on every open (Estate.create above is an
+            // idempotent re-stamp), so the create-time default belongs here too:
+            // the span encoder becomes the recall stage of an estate that names
+            // no provider; an estate that already names one is left alone.
+            try await kit.provisionDefaultEncoderIfAbsent(for: handle)
         } catch {
             // Redact the raw PostgreSQL connection string from error descriptions —
             // storage errors may propagate the full connection string (which can contain

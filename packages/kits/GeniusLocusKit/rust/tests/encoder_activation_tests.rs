@@ -106,3 +106,33 @@ fn close_drops_the_span_encoder_registration_slot() {
     coord.close(&handle).expect("close");
     assert!(coord.registered_span_encoder(&handle).is_none());
 }
+
+/// `provision_default_encoder_if_absent` writes `"encoder"` only when the
+/// estate names no provider, and never overwrites a named one. Swift twin:
+/// EncoderActivationTests.provisionDefaultEncoder.
+#[test]
+fn default_encoder_provisioning_writes_once_and_never_overwrites() {
+    let (coord, handle) = open_one();
+    assert_eq!(coord.provisioned_embedding_provider(&handle).unwrap(), None);
+    assert!(coord.provision_default_encoder_if_absent(&handle).unwrap());
+    assert_eq!(
+        coord.provisioned_embedding_provider(&handle).unwrap().as_deref(),
+        Some(EstateCoordinator::ENCODER_PROVIDER_ID)
+    );
+    // Idempotent: a second call writes nothing.
+    assert!(!coord.provision_default_encoder_if_absent(&handle).unwrap());
+    // A named provider is never overwritten.
+    coord.provision_embedding_provider(&handle, "apple-nl-v1").unwrap();
+    assert!(!coord.provision_default_encoder_if_absent(&handle).unwrap());
+    assert_eq!(
+        coord.provisioned_embedding_provider(&handle).unwrap().as_deref(),
+        Some("apple-nl-v1")
+    );
+    // A cleared key is absent again and the default returns.
+    coord.provision_embedding_provider(&handle, "").unwrap();
+    assert!(coord.provision_default_encoder_if_absent(&handle).unwrap());
+    assert_eq!(
+        coord.provisioned_embedding_provider(&handle).unwrap().as_deref(),
+        Some(EstateCoordinator::ENCODER_PROVIDER_ID)
+    );
+}
