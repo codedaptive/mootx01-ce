@@ -41,18 +41,11 @@ public struct CorpusIndexState: Sendable, Equatable {
     /// The engine is responsible for setting all bits; the store only
     /// persists and retrieves the value the engine supplies.
     public let operationalBitmap: Int64
-    /// The composition policy id (CDL-03) under which this row was last
-    /// written. Persisted in `corpus_index_state.composition_policy`.
-    /// Empty string on rows written before v3 migration — treated as
-    /// `.current` policy id by the engine for backwards compatibility.
-    /// Format: "lex=<source>;dense=<source>" matching `IndexCompositionPolicy.id`.
-    public let compositionPolicyID: String
 
     public init(
         contentID: CorpusContentID, revision: Int64, digest: String,
         indexVersion: Int64, appliedCursor: String?, updatedAt: Date,
-        operationalBitmap: Int64 = 0,
-        compositionPolicyID: String = IndexCompositionPolicy.current.id
+        operationalBitmap: Int64 = 0
     ) {
         self.contentID = contentID
         self.revision = revision
@@ -61,7 +54,6 @@ public struct CorpusIndexState: Sendable, Equatable {
         self.appliedCursor = appliedCursor
         self.updatedAt = updatedAt
         self.operationalBitmap = operationalBitmap
-        self.compositionPolicyID = compositionPolicyID
     }
 }
 
@@ -69,7 +61,7 @@ public struct CorpusIndexState: Sendable, Equatable {
 /// singleton (the global basis-generation counter for coverage invalidation).
 public actor CorpusIndexStateStore {
 
-    /// Checkpoint schema — v3 adds `composition_policy` (CDL-03).
+    /// Checkpoint schema — v3 adds `composition_policy`.
     ///
     /// Version history:
     ///   v1 — Initial layout: (content_id, revision, digest, index_version,
@@ -77,10 +69,11 @@ public actor CorpusIndexStateStore {
     ///   v2 — Bitmap adoption: adds `operational_bitmap BITMAP NOT NULL DEFAULT 0`
     ///        to corpus_index_state; creates corpus_bitmap_generation singleton
     ///        for the global basis-generation counter.
-    ///   v3 — Composition policy: adds `composition_policy TEXT NOT NULL DEFAULT ''`
-    ///        to corpus_index_state. Empty default means "row written before CDL-03;
-    ///        treat as .current policy". The engine validates the recorded policy
-    ///        matches the configured policy at open time.
+    ///   v3 — adds `composition_policy TEXT NOT NULL DEFAULT ''` to
+    ///        corpus_index_state. The column carried the index composition
+    ///        policy id, a knob that retired when every id came to compose the
+    ///        same document. It stays declared because populated estates carry
+    ///        it; nothing writes or reads it, and new rows take the default.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitIndexState",
         version: 3,
@@ -98,10 +91,8 @@ public actor CorpusIndexStateStore {
                     // CorpusIndexStateOperational.swift. Default 0 = no bits set.
                     // The engine sets bits at write time; the store stores them.
                     .bitmap("operational_bitmap", default: 0),
-                    // Composition policy id (CDL-03). The id string from
-                    // IndexCompositionPolicy.id — "lex=<src>;dense=<src>".
-                    // Default '' = row written before v3 migration; the engine
-                    // treats '' as the .current policy id for backwards compat.
+                    // Retired column: kept declared for populated estates,
+                    // never written or read; new rows take the default.
                     ColumnDeclaration(
                         name: "composition_policy",
                         type: .text, nullable: false,
@@ -146,10 +137,9 @@ public actor CorpusIndexStateStore {
                         ],
                         primaryKey: ["singleton_id"]))
             ]),
-            // v2 → v3: add composition_policy column (CDL-03).
-            // Default '' means "written before CDL-03; treat as .current policy".
-            // PersistenceKit addColumn is idempotent (Rust must also replay this
-            // migration — see the addColumn parity note in project memory).
+            // v2 → v3: add the retired composition_policy column (see the
+            // version history above); the step stays so a v2 estate still
+            // reaches v3. PersistenceKit addColumn is idempotent.
             Migration(fromVersion: 2, toVersion: 3, operations: [
                 .addColumn(
                     table: "corpus_index_state",
@@ -190,10 +180,7 @@ public actor CorpusIndexStateStore {
                 "index_version": .int(state.indexVersion),
                 "applied_cursor": state.appliedCursor.map { TypedValue.text($0) } ?? .null,
                 "updated_at": .timestamp(state.updatedAt),
-                "operational_bitmap": .bitmap(state.operationalBitmap),
-                // CDL-03: stamp the composition policy id on every checkpoint
-                // write so the engine can detect a policy mismatch at open time.
-                "composition_policy": .text(state.compositionPolicyID)
+                "operational_bitmap": .bitmap(state.operationalBitmap)
             ],
             conflictColumns: ["content_id"])
     }
@@ -263,47 +250,6 @@ public actor CorpusIndexStateStore {
     }
 
     /// Every checkpointed state row, ascending by content ID.
-    /// Return the first composition policy id that differs from the given configured
-    /// policy among active (lexically indexed, not removed) content rows.
-    ///
-    /// Rows with an empty `compositionPolicyID` (written before v3 / CDL-03) are
-    /// treated as `.current` policy — empty → accept when configured policy is
-    /// `.current`, and flag (returning the sentinel "pre-cdl03") otherwise.
-    ///
-    /// Returns nil when all active rows agree with `configuredPolicyID`. Called
-    /// from `CorpusContentEngine.init` to detect a mismatch before any indexing
-    /// work begins.
-    /// The feed-cursor sentinel row ID — matches `CorpusContentEngine.feedCursorRowID`.
-    /// Duplicated here so the store can filter it without importing CorpusContentEngine.
-    static let feedCursorSentinel = "\u{1F}feed"
-
-    public func mismatchedCompositionPolicy(
-        configuredPolicyID: String
-    ) async throws -> String? {
-        let rows = try await storage.rowStore.query(
-            table: "corpus_index_state", where: nil, orderBy: [], limit: 1, offset: nil)
-        // Fast path: no rows at all (fresh estate) → no mismatch possible.
-        guard !rows.isEmpty else { return nil }
-
-        // Query all rows and find the first active content row that disagrees.
-        let allRows = try await storage.rowStore.query(
-            table: "corpus_index_state", where: nil, orderBy: [], limit: nil, offset: nil)
-        for row in allRows {
-            guard case let .text(contentID)? = row["content_id"],
-                  contentID != Self.feedCursorSentinel else { continue }
-            guard let state = Self.decode(contentID: contentID, row: row),
-                  state.isLexicallyIndexed, !state.isRemoved else { continue }
-            // Empty compositionPolicyID = pre-CDL-03 row; effective policy is .current.
-            let effectiveID = state.compositionPolicyID.isEmpty
-                ? IndexCompositionPolicy.current.id
-                : state.compositionPolicyID
-            if effectiveID != configuredPolicyID {
-                return effectiveID
-            }
-        }
-        return nil
-    }
-
     /// The reconciliation set migration verification compares against the canonical ID set.
     public func allStates() async throws -> [CorpusIndexState] {
         let rows = try await storage.rowStore.query(
@@ -429,21 +375,10 @@ public actor CorpusIndexStateStore {
         default:
             operationalBitmap = 0
         }
-        // composition_policy (CDL-03): decode the policy id; tolerate absence
-        // for rows written before v3 migration (DEFAULT '' means .current policy).
-        let compositionPolicyID: String
-        switch row["composition_policy"] {
-        case let .text(id)?:
-            compositionPolicyID = id
-        default:
-            // Missing column (pre-v3) or unexpected type → treat as .current.
-            compositionPolicyID = ""
-        }
         return CorpusIndexState(
             contentID: contentID, revision: revision, digest: digest,
             indexVersion: indexVersion, appliedCursor: appliedCursor, updatedAt: updatedAt,
-            operationalBitmap: operationalBitmap,
-            compositionPolicyID: compositionPolicyID)
+            operationalBitmap: operationalBitmap)
     }
 
     /// Decode a TIMESTAMP column tolerant of `.timestamp` (InMemory) and
