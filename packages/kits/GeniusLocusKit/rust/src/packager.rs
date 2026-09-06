@@ -138,11 +138,11 @@ pub struct GLKAnswerBlock {
     /// The composed answer text. Source: GroundedSynthesis output injected by the
     /// AriaMcpKit layer; GLKResultsPackager never calls GroundedSynthesis directly.
     pub answer: String,
-    /// Human-readable confidence label for the `confidence:` line.
-    pub confidence_label: String,
-    /// Stable confidence enum value for downstream routing.
+    /// The gate verdict (`Confident` or `Intermediate`; WEAK carries no
+    /// block). The ARIA boundary renders `confidence:` from this value.
     pub confidence_level: PackagerConfidenceLevel,
-    /// Drawer IDs of the top citations that back the answer.
+    /// Drawer IDs of the top citations that back the answer: the first
+    /// five hydrated hits, in rank order (Swift `citationIDs`).
     pub citation_ids: Vec<String>,
     /// The four computed gate signals.
     pub signals: GLKConfidenceSignals,
@@ -304,23 +304,18 @@ impl GLKResultsPackager {
         // Build the answer block only when confidence is not WEAK (spec §5).
         // WEAK responses carry no answer block — suppressed unconditionally.
         let answer_block = if confidence != PackagerConfidenceLevel::Weak {
-            // Citation IDs come from the top hits before cliff cutoff.
+            // Citation IDs: the first five HYDRATED hits before cliff cutoff,
+            // exactly Swift `result.hits.prefix(5).compactMap { $0.drawer?.id }`.
+            // An unhydrated hit (tombstoned row) is skipped, not counted.
             let citation_ids: Vec<String> = result
                 .hits
                 .iter()
-                .take(thresholds.k_min.max(1))
-                .map(|h| h.id.clone())
+                .take(5)
+                .filter_map(|h| h.drawer.as_ref().map(|d| d.id.clone()))
                 .collect();
-
-            let confidence_label = match confidence {
-                PackagerConfidenceLevel::Confident => "high".to_string(),
-                PackagerConfidenceLevel::Intermediate => "medium".to_string(),
-                PackagerConfidenceLevel::Weak => unreachable!("WEAK filtered above"),
-            };
 
             Some(GLKAnswerBlock {
                 answer: composed_answer.unwrap_or("").to_string(),
-                confidence_label,
                 confidence_level: confidence,
                 citation_ids,
                 signals,
@@ -399,15 +394,23 @@ impl GLKResultsPackager {
 
         // m4: word-boundary containment.
         // ≥60% of the distinctive words in `composed_answer` must appear in the
-        // top citation's drawer content.
-        let m4 = if let Some(top_hit) = hits.first() {
-            if let Some(drawer) = top_hit.drawer.as_ref() {
-                self.word_boundary_containment(composed_answer, &drawer.content, 0.60)
-            } else {
-                false
-            }
-        } else {
+        // top citation's drawer content. With no answer text or no top content
+        // the signal is undefined and reads false, exactly Swift's
+        // `if let text = composedAnswer, !text.isEmpty, let topContent = …,
+        // !topContent.isEmpty` guard: an empty answer must never count as
+        // contained (the containment helper's own empty-answer rule is only
+        // reached with a non-empty answer whose words are all short or
+        // stopwords). The Rust product path passes no answer, so without this
+        // guard it could reach CONFIDENT where Swift cannot.
+        let top_content = hits
+            .first()
+            .and_then(|h| h.drawer.as_ref())
+            .map(|d| d.content.as_str())
+            .unwrap_or("");
+        let m4 = if composed_answer.is_empty() || top_content.is_empty() {
             false
+        } else {
+            self.word_boundary_containment(composed_answer, top_content, 0.60)
         };
 
         // Use t3_prime from thresholds — passed in but also available in the outer

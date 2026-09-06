@@ -275,3 +275,71 @@ fn packager_golden_pins_match_swift_twin() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Citation ids and the empty-answer containment rule (Swift twin:
+// `GLKResultsPackagerTests.citationsAreTheFirstFiveHydratedHits` and
+// `autoWithNoAnswerTextNeverReachesConfident`)
+// ---------------------------------------------------------------------------
+
+/// Seven hits, two of them unhydrated (a tombstoned row the lane still
+/// scored). The block's citation ids are the first five hits filtered to
+/// the hydrated ones, exactly Swift `hits.prefix(5).compactMap { $0.drawer?.id }`.
+#[test]
+fn citations_are_the_first_five_hydrated_hits() {
+    let content = "fruit banana mango recall content test paragraph information";
+    // Top margin (0.90 → 0.30) clears t1; the tail steps down by 0.05.
+    let fixtures: Vec<HitFixture> = (0..7)
+        .map(|i| {
+            let score = if i == 0 { 0.90 } else { 0.30 - 0.05 * (i - 1) as f32 };
+            HitFixture {
+                id: format!("h-{i}"),
+                final_score: score,
+                dense_score: score,
+                drawer_content: if i == 1 || i == 3 { None } else { Some(content.to_string()) },
+            }
+        })
+        .collect();
+    let hits: Vec<RecallHit> = fixtures.iter().map(make_hit).collect();
+    let result = make_result(hits, 0.80);
+    let packaged = GLKResultsPackager::new().package(
+        &result,
+        PackagerAnswerMode::Auto,
+        Some("fruit banana information"),
+        PackagerThresholds::default(),
+    );
+    let block = packaged.answer_block.expect("CONFIDENT fixture carries a block");
+    assert_eq!(block.confidence_level, PackagerConfidenceLevel::Confident);
+    assert_eq!(block.citation_ids, vec!["h-0", "h-2", "h-4"]);
+}
+
+/// With no composed answer the containment signal is undefined and reads
+/// false (Swift's guard), so the gate can reach INTERMEDIATE but never
+/// CONFIDENT, whatever the margins say. The Rust product path passes no
+/// answer, which is why this rule decides its ceiling.
+#[test]
+fn auto_with_no_answer_text_never_reaches_confident() {
+    let content = "fruit banana mango recall content test paragraph information";
+    let fixtures = vec![
+        HitFixture { id: "h-0".into(), final_score: 0.90, dense_score: 0.90, drawer_content: Some(content.into()) },
+        HitFixture { id: "h-1".into(), final_score: 0.30, dense_score: 0.50, drawer_content: Some(content.into()) },
+    ];
+    let hits: Vec<RecallHit> = fixtures.iter().map(make_hit).collect();
+    let result = make_result(hits, 0.80);
+    let packager = GLKResultsPackager::new();
+    let with_answer = packager.package(
+        &result,
+        PackagerAnswerMode::Auto,
+        Some("fruit banana information"),
+        PackagerThresholds::default(),
+    );
+    assert_eq!(
+        with_answer.answer_block.as_ref().map(|b| b.confidence_level),
+        Some(PackagerConfidenceLevel::Confident),
+        "control: the same hits reach CONFIDENT with a contained answer"
+    );
+    let without = packager.package(&result, PackagerAnswerMode::Auto, None, PackagerThresholds::default());
+    let block = without.answer_block.expect("INTERMEDIATE still carries the block");
+    assert!(!block.signals.m4, "m4 must read false with no answer text");
+    assert_eq!(block.confidence_level, PackagerConfidenceLevel::Intermediate);
+}

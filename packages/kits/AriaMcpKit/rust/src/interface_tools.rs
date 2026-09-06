@@ -1305,25 +1305,33 @@ fn run_memory_search(
 
     // Answer block (answer:always|auto) goes ABOVE the composed text, after the
     // composer and the explain interleave, exactly where Swift prepends it.
-    // The Rust port has no synthesis text, so the answer line is intentionally
-    // absent when empty — the confidence/citations/signals lines still prove
-    // the gate ran.
+    // Line shapes are Swift `runMemorySearch`'s: `confidence:` carries the
+    // level name, `citations:` up to five ids, `signals:` the four named
+    // values (two-decimal doubles in shortest form, `1.0` not `1`). The Rust
+    // port has no synthesis text, so the answer line is intentionally absent
+    // when empty — the confidence/citations/signals lines still prove the
+    // gate ran.
     if let Some(ref block) = packaged.answer_block {
         let mut header_lines: Vec<String> = Vec::new();
         if !block.answer.is_empty() {
             header_lines.push(format!("answer: {}", block.answer));
         }
-        header_lines.push(format!("confidence: {}", block.confidence_label));
-        let citation_line = block.citation_ids.iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !citation_line.is_empty() {
-            header_lines.push(format!("citations: {}", citation_line));
+        let confidence_name = match block.confidence_level {
+            genius_locus_kit::PackagerConfidenceLevel::Confident => "confident",
+            genius_locus_kit::PackagerConfidenceLevel::Intermediate => "intermediate",
+            genius_locus_kit::PackagerConfidenceLevel::Weak => "weak",
+        };
+        header_lines.push(format!("confidence: {confidence_name}"));
+        if !block.citation_ids.is_empty() {
+            let citation_line = block.citation_ids.iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            header_lines.push(format!("citations: {citation_line}"));
         }
         header_lines.push(format!(
-            "signals: m1={:.3} m2={:.3} m3={:.3} m4={}",
+            "signals: margin={:?} lane_agreement={:?} dense_spread={:?} containment={}",
             block.signals.m1, block.signals.m2, block.signals.m3, block.signals.m4
         ));
         final_text = format!("{}\n{}", header_lines.join("\n"), final_text);
