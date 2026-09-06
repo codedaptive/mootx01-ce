@@ -21,23 +21,6 @@ mod shared_content_migration;
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 pub use shared_content_migration::*;
 
-// GLK 1.1 → 1.2 capsule: applies composition_policy column to corpus_index_state
-// on estates created before corpus_index_state reached schema version 3 (parity with the Swift GLKMigrationV1_1ToV1_2 target).
-#[cfg(feature = "migration-v1-1-to-v1-2")]
-mod index_composition_column_migration;
-
-#[cfg(feature = "migration-v1-1-to-v1-2")]
-pub use index_composition_column_migration::*;
-
-// GLK 1.3 → 1.4 capsule: stores the index composition setting (manifest key
-// index_composition_policy) on estates written before the setting existed
-// (parity with the Swift GLKMigrationV1_3ToV1_4 target).
-#[cfg(feature = "migration-v1-3-to-v1-4")]
-mod index_composition_setting_migration;
-
-#[cfg(feature = "migration-v1-3-to-v1-4")]
-pub use index_composition_setting_migration::*;
-
 // GLK 1.4 → 1.5 capsule: moves the vector tier's schema-version ledger rows
 // from their SynapseKit ids to their SynapseKit ids on populated estates
 // (parity with the Swift GLKMigrationV1_4ToV1_5 target).
@@ -56,11 +39,12 @@ use genius_locus_kit::estate_format::EstateFormatVersion;
 /// `GLKMigrationCatalog.prepare` dispatch: the 1.4 -> 1.5 ledger rewrite
 /// first (the 1.0 -> 1.1 capsule opens the vector store, whose ladder must
 /// find its row under the new id), then 1.0 -> 1.1 (shared content, which
-/// stamps 1.1), then 1.1 -> 1.2 (index composition column, which stamps 1.2),
-/// then 1.3 -> 1.4 (index composition setting, which stamps 1.4 and runs on a
-/// 1.2 or 1.3 stamp alike: the 1.2 -> 1.3 step added a LocusKit column that
-/// schema v19 removed), then the 1.4 -> 1.5 stamp (storage ledger kit ids,
-/// which stamps 1.5 only once every older capsule has stamped its own format).
+/// stamps 1.1), then the 1.4 -> 1.5 stamp (storage ledger kit ids, which
+/// stamps 1.5 only once every older capsule has stamped its own format). No
+/// capsule separates the 1.1, 1.2, 1.3 and 1.4 stamps: the 1.1 -> 1.2 column
+/// is added by CorpusKit's own ladder at open, the 1.2 -> 1.3 column was
+/// removed by schema v19, and the 1.3 -> 1.4 setting retired with the index
+/// composition policy; the 1.4 -> 1.5 capsule runs directly on any of them.
 pub trait MigrationChainExt {
     /// Run every compiled capsule for `handle`, oldest first. `models` is the
     /// embedding ensemble the shared-content capsule rebuilds the derived
@@ -97,16 +81,6 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
         }
         #[cfg(not(feature = "migration-v1-0-to-v1-1"))]
         let _ = models;
-        #[cfg(feature = "migration-v1-1-to-v1-2")]
-        {
-            self.run_index_composition_column_migration(handle, now_millis)
-                .map_err(|error| format!("index-composition-column migration: {error:?}"))?;
-        }
-        #[cfg(feature = "migration-v1-3-to-v1-4")]
-        {
-            self.run_index_composition_setting_migration(handle, now_millis)
-                .map_err(|error| format!("index-composition-setting migration: {error:?}"))?;
-        }
         #[cfg(feature = "migration-v1-4-to-v1-5")]
         {
             // Step 2 of the 1.4 -> 1.5 capsule: the rewrite again (a no-op
@@ -125,43 +99,20 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
-        // Floor covers the 1.0→1.1, 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
+        // Floor covers the 1.0→1.1 and 1.4→1.5 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
     #[cfg(all(
-        feature = "migration-v1-1-to-v1-2",
+        feature = "migration-v1-4-to-v1-5",
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Floor covers the 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
+        // Only the 1.4→1.5 capsule is compiled. It serves every stamp from
+        // 1.1 up: nothing separates 1.1, 1.2, 1.3 and 1.4 any more.
         return Some(EstateFormatVersion::V1_1);
     }
     #[cfg(all(
-        feature = "migration-v1-3-to-v1-4",
-        not(feature = "migration-v1-1-to-v1-2"),
-        not(feature = "migration-v1-0-to-v1-1")
-    ))]
-    {
-        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules. It also serves a
-        // 1.2-stamped estate: the 1.2→1.3 step added a LocusKit column that
-        // schema v19 removed, so the 1.3→1.4 capsule runs directly on either
-        // stamp.
-        return Some(EstateFormatVersion::V1_2);
-    }
-    #[cfg(all(
-        feature = "migration-v1-4-to-v1-5",
-        not(feature = "migration-v1-3-to-v1-4"),
-        not(feature = "migration-v1-1-to-v1-2"),
-        not(feature = "migration-v1-0-to-v1-1")
-    ))]
-    {
-        // Only the 1.4→1.5 capsule is compiled.
-        return Some(EstateFormatVersion::V1_4);
-    }
-    #[cfg(all(
         not(feature = "migration-v1-0-to-v1-1"),
-        not(feature = "migration-v1-1-to-v1-2"),
-        not(feature = "migration-v1-3-to-v1-4"),
         not(feature = "migration-v1-4-to-v1-5")
     ))]
     {

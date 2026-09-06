@@ -25,9 +25,9 @@
 // The (old, new) pairs are frozen history: the capsule rewrites exactly these
 // ids whatever the store declares later. A later rename needs its own capsule.
 //
-// Enabled by the MigrationV1_4ToV1_5 / MigrationFloor1_0 / MigrationFloor1_1 /
-// MigrationFloor1_2 / MigrationFloor1_3 / MigrationFloor1_4 Swift package
-// traits and the GLK_MIGRATION_V1_4_TO_V1_5 compile-time define.
+// Enabled by the MigrationV1_4ToV1_5 trait and every MigrationFloor trait
+// (floors 1.1 through 1.4 compile this capsule alone) and the
+// GLK_MIGRATION_V1_4_TO_V1_5 compile-time define.
 //
 // Migration steps (all idempotent):
 //   1. Rewrite each ledger pair in `GeniusLocusKit.storageLedgerKitIDRenames`;

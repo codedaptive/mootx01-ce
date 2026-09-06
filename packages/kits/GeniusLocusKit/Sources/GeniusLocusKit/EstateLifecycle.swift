@@ -200,11 +200,6 @@ public extension GeniusLocusKit {
             // A fresh GLK provision is born at the current estate format. This
             // is the only non-migration path allowed to create the format stamp.
             try await EstateFormatStore(storage: formatStorage).stamp(.current, now: Date())
-            // A fresh estate is born with its index composition policy stored:
-            // the creation-time seed (MOOT_INDEX_COMPOSITION when set to a policy
-            // id, else `.current`). Every later open reads this row; nothing
-            // reads the environment again.
-            try await seedIndexCompositionPolicyIfAbsent(for: handle)
             // Wire via the shared seam (also called by the serve entry points so a
             // bare-opened served estate gets the same Corpus + VectorStore + encode
             // queue — the semantic recall lanes — without re-stamping
@@ -438,20 +433,12 @@ public extension GeniusLocusKit {
     ///     the estate's own storage for a served estate.
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
     ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
-    ///   - reindexPending: The caller commits to `reindexCorpus(handle:now:)`
-    ///     before the estate serves a query, so the Corpus opens even when its
-    ///     index rows were built under another policy (the path
-    ///     `mootx01 db composition --set` takes after it rewrites the stored
-    ///     setting). Every serving open leaves this `false`.
-    /// - Throws: A storage/schema error if a sub-store cannot be opened;
-    ///   `GeniusLocusKitError.invalidManifest` when the stored index
-    ///   composition setting is not a policy id.
+    /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireSubstores(
         for handle: EstateHandle,
         kind: EstateKind,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
-        reindexPending: Bool = false
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws {
         switch kind {
         case .glk:
@@ -484,21 +471,12 @@ public extension GeniusLocusKit {
             // configuration initializer rejects standalone or passage-enabled
             // registration structurally (shared-content 1.1 decision lock).
             let estateObj = try estate(for: handle)
-            // The index composition policy is the estate's stored setting
-            // (manifest key `index_composition_policy`), read here at every
-            // open and threaded to both the configuration (the id recorded on
-            // every index row) and the content source (which text each lane
-            // receives). See IndexCompositionSetting.swift.
-            let compositionPolicy = try await activeIndexCompositionPolicy(for: handle)
             let corpus = try await CorpusContentEngine(
                 storage: backingStorage,
                 configuration: CorpusContentConfiguration(
-                    mode: .attached, indexUnit: .wholeContent,
-                    compositionPolicy: compositionPolicy),
-                source: LocusDrawerCorpusContentSource(
-                    estate: estateObj, compositionPolicy: compositionPolicy),
-                models: resolvedModels,
-                reindexPending: reindexPending)
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
@@ -548,17 +526,12 @@ public extension GeniusLocusKit {
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
-            // Same stored-setting read as the .glk case.
-            let compositionPolicy = try await activeIndexCompositionPolicy(for: handle)
             let corpus = try await CorpusContentEngine(
                 storage: backingStorage,
                 configuration: CorpusContentConfiguration(
-                    mode: .attached, indexUnit: .wholeContent,
-                    compositionPolicy: compositionPolicy),
-                source: LocusDrawerCorpusContentSource(
-                    estate: estateObj, compositionPolicy: compositionPolicy),
-                models: resolvedModels,
-                reindexPending: reindexPending)
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: resolvedModels)
             try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: wire the
@@ -592,18 +565,15 @@ public extension GeniusLocusKit {
     ///   - backingStorage: The estate's storage (Corpus + VectorStore are built on it).
     ///   - embeddingModels: The recall ensemble. Defaults to the canonical
     ///     five-signal ensemble.
-    ///   - reindexPending: See `wireSubstores(for:kind:backingStorage:embeddingModels:reindexPending:)`.
     /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireGLKSubstores(
         for handle: EstateHandle,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
-        reindexPending: Bool = false
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws {
         try await wireSubstores(
             for: handle, kind: .glk,
-            backingStorage: backingStorage, embeddingModels: embeddingModels,
-            reindexPending: reindexPending)
+            backingStorage: backingStorage, embeddingModels: embeddingModels)
     }
 
     // MARK: - mountState(for:)
