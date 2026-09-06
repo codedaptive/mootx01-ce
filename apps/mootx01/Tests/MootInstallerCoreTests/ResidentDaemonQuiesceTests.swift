@@ -63,7 +63,7 @@ struct ResidentDaemonQuiesceTests {
         var order: [String] = []
         let result = await ResidentDaemonQuiesce.run(
             dataDirectory: resident, residentDataDirectory: resident,
-            step: "adornment store migration", daemon: daemon.control
+            step: "daemon stop restart test", daemon: daemon.control
         ) { order.append("work"); return true }
         #expect(result == true)
         #expect(order == ["work"])
