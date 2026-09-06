@@ -1456,7 +1456,7 @@ fn wall_now_millis() -> i64 {
 }
 
 /// The daemon control seam every resident-estate quiesce goes through
-/// (`mootx01 upgrade` steps and `mootx01 db composition --set`).
+/// (`mootx01 upgrade` steps).
 /// `PlatformDaemon` is the production implementation; `NoDaemon` stands in
 /// for a non-resident estate; tests inject a recorder so a step can be
 /// shown to leave the daemon alone. Twin of the Swift
@@ -1710,7 +1710,7 @@ fn restart_services() {
 }
 
 /// The recording daemon control shared by every command test that pins the
-/// resident-quiesce rule (`upgrade` steps and `db composition --set`).
+/// resident-quiesce rule (`upgrade` steps).
 #[cfg(test)]
 pub(crate) mod daemon_test_support {
     /// Records every daemon-control call in order; the recorder IS the

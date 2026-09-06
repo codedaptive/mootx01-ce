@@ -28,7 +28,6 @@ use crate::corpus_provider_counts_store::{
 use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
-use crate::index_composition_policy::IndexCompositionPolicy;
 use crate::index_state_operational::{
     coverage_mask_bit_offset, fresh_checkpoint_bitmap, setting_coverage_slot,
     INDEX_BIT_HAS_DENSE_TEXT,
@@ -265,9 +264,7 @@ pub type ContentBackfillFaultHook = Box<dyn Fn(&str, usize) -> Result<(), String
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
 
-/// Reserved checkpoint row recording the last APPLIED feed cursor. Crate-
-/// visible so `CorpusIndexStateStore` can skip the row when it scans for a
-/// composition-policy mismatch.
+/// Reserved checkpoint row recording the last APPLIED feed cursor.
 pub(crate) const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
 
 #[cfg(target_os = "macos")]
@@ -424,31 +421,14 @@ pub struct CorpusContentEngine {
 }
 
 impl CorpusContentEngine {
-    /// The composition policy the engine was configured with: the id it
-    /// records on every index row it writes. Exposed read-only so
-    /// GeniusLocusKit can surface it in `moot_estate_status` without
-    /// reaching into private internals. Twin of Swift
-    /// `CorpusContentEngine.compositionPolicy`.
-    pub fn composition_policy(&self) -> IndexCompositionPolicy {
-        self.configuration.composition_policy()
-    }
-
     /// Construct the engine over a validated configuration and content
-    /// source. In attached mode NO canonical content table is created.
-    ///
-    /// Refuses with `CorpusKitError::CompositionPolicyMismatch` when the
-    /// estate's active index rows were built under a composition policy other
-    /// than the configured one. `reindex_pending` skips that check: the
-    /// caller commits to `reindex` before the engine serves a query (the
-    /// `mootx01 db composition --set` path, whose rows still carry the id the
-    /// rebuild replaces). Every serving open passes `false`. Twin of Swift
-    /// `CorpusContentEngine.init(storage:configuration:source:models:reindexPending:)`.
+    /// source. In attached mode NO canonical content table is created. Twin
+    /// of Swift `CorpusContentEngine.init(storage:configuration:source:models:)`.
     pub fn open(
         storage: Arc<dyn Storage>,
         configuration: CorpusContentConfiguration,
         source: Arc<dyn CorpusContentSource>,
         models: Vec<EmbeddingModelConfig>,
-        reindex_pending: bool,
     ) -> CorpusKitResult<Self> {
         if models.is_empty() {
             return Err(CorpusKitError::InvalidConfiguration(
@@ -545,24 +525,6 @@ impl CorpusContentEngine {
         };
         // Rehydrate the base snapshot plus crash-durable reference deltas.
         engine.reload_counts_from_storage()?;
-        // Refuse an estate whose active index rows were built under another
-        // composition policy: those indexes hold other text and cannot serve
-        // the configured policy. One O(rows) scan, once per open. Rows written
-        // before the policy column existed count as `current()`. Skipped when
-        // the caller has committed to a full rebuild before serving
-        // (`reindex_pending`): the disagreeing rows are the ones the rebuild
-        // replaces. Same rule and same detail string as the Swift engine.
-        if !reindex_pending {
-            let configured_id = engine.configuration.composition_policy().id();
-            if let Some(recorded) = engine
-                .index_state
-                .mismatched_composition_policy(&configured_id)?
-            {
-                return Err(CorpusKitError::CompositionPolicyMismatch(format!(
-                    "recorded={recorded};configured={configured_id}"
-                )));
-            }
-        }
         Ok(engine)
     }
 
@@ -585,7 +547,6 @@ impl CorpusContentEngine {
             )?,
             store as Arc<dyn CorpusContentSource>,
             models,
-            false,
         )
     }
 
@@ -606,7 +567,6 @@ impl CorpusContentEngine {
             CorpusContentConfiguration::new(CorpusOperatingMode::Standalone, index_unit)?,
             store as Arc<dyn CorpusContentSource>,
             models,
-            false,
         )
     }
 
@@ -1619,7 +1579,6 @@ impl CorpusContentEngine {
                 index_version: CONTENT_ENGINE_INDEX_VERSION,
                 applied_cursor: None,
                 updated_at_millis: now_millis,
-                composition_policy_id: self.configuration.composition_policy().id(),
                 operational_bitmap: bitmap,
             })?;
         }
@@ -1783,7 +1742,6 @@ impl CorpusContentEngine {
                 applied_cursor: Some(cursor.clone()),
                 updated_at_millis: now_millis,
                 operational_bitmap: 0,
-                composition_policy_id: String::new(), // feed-cursor sentinel; policy inapplicable
             });
         }
         Ok((checkpoints, counts_update))
@@ -2211,7 +2169,6 @@ impl CorpusContentEngine {
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: applied_cursor.map(str::to_string),
             updated_at_millis: now_millis,
-            composition_policy_id: self.configuration.composition_policy().id(),
             operational_bitmap: bitmap,
         }))
     }
@@ -2440,7 +2397,6 @@ impl CorpusContentEngine {
             applied_cursor: Some(cursor.to_string()),
             updated_at_millis: now_millis,
             operational_bitmap: 0,
-            composition_policy_id: String::new(), // feed-cursor sentinel; policy inapplicable
         })
     }
 

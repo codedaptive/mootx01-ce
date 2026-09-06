@@ -290,7 +290,6 @@ fn qualify_large_estate_migration() {
         .expect("config"),
         Arc::new(LocusDrawerContentSource::new(estate.clone())),
         default_ensemble(),
-        false,
     )
     .expect("engine");
     let (token_digest, token_count) =

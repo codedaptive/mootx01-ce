@@ -134,13 +134,13 @@ struct ManifestTests {
         let optionalRaws = Set(ManifestKey.optional.map(\.rawValue))
 
         #expect(ManifestKey.required.count == 18)
-        #expect(ManifestKey.optional.count == 8)
+        #expect(ManifestKey.optional.count == 7)
         #expect(requiredRaws.count == 18)
-        #expect(optionalRaws.count == 8)
+        #expect(optionalRaws.count == 7)
         #expect(requiredRaws.isDisjoint(with: optionalRaws))
-        #expect(ManifestKey.allCases.count == 26)
-        #expect(ManifestKey.indexCompositionPolicy.rawValue == "index_composition_policy")
-        #expect(ManifestKey.optional.contains(.indexCompositionPolicy))
+        #expect(ManifestKey.allCases.count == 25)
+        // The retired `index_composition_policy` row is not a key.
+        #expect(ManifestKey(rawValue: "index_composition_policy") == nil)
     }
 
     // MARK: - 3f. ManifestValues round-trip

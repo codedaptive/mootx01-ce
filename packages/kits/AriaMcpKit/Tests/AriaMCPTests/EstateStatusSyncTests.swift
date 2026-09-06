@@ -270,37 +270,4 @@ struct EstateStatusSyncTests {
         #expect(body.contains("(1 total)"),
                 "Total non-erased count must be 1; got:\n\(body)")
     }
-
-    // MARK: - index_composition_policy field
-
-    /// estate_status must always include the "index_composition_policy:" field:
-    /// the estate's stored setting, read through the wired Corpus, or "none"
-    /// when no Corpus is wired.
-    @Test func indexCompositionPolicy_fieldPresent() async throws {
-        let dispatcher = try await makeDispatcher(ownerID: "icp-field-present")
-        let result = try await dispatcher.dispatch(
-            name: "moot_estate_status",
-            arguments: .object([:])
-        )
-        let body = text(of: result)
-        #expect(body.contains("index_composition_policy: "),
-                "estate_status must include the 'index_composition_policy:' field; got:\n\(body)")
-    }
-
-    /// A locusOnly estate (no CorpusKit engine wired) must report
-    /// "index_composition_policy: none". The in-memory test estate used in
-    /// this suite opens without a CorpusKit engine, so it behaves as locusOnly.
-    /// Swift: kit.indexCompositionPolicy(for:) returns nil → "none".
-    @Test func indexCompositionPolicy_locusOnlyIsNone() async throws {
-        let dispatcher = try await makeDispatcher(ownerID: "icp-none-test")
-        let result = try await dispatcher.dispatch(
-            name: "moot_estate_status",
-            arguments: .object([:])
-        )
-        let body = text(of: result)
-        // locusOnly estates (no Corpus engine) report "none" per Swift
-        // kit.indexCompositionPolicy(for:) returning nil.
-        #expect(body.contains("index_composition_policy: none"),
-                "locusOnly estate must report 'index_composition_policy: none'; got:\n\(body)")
-    }
 }

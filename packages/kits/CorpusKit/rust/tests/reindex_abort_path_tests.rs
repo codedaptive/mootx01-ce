@@ -224,7 +224,6 @@ fn make_abort_test_engine(
         vec![EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
         }],
-        false,
     )
     .expect("abort test engine open")
 }

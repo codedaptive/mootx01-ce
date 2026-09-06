@@ -13,11 +13,11 @@
 // so a budget-neutral cycle test (mint + cleanup = zero net) is used instead of
 // a before/after snapshot across the whole suite. The cycle test discriminates
 // because it will fail as soon as deleteKey stops working or provideKey starts
-// writing to a different account. For identity keys the guard is the exec tests
-// themselves: DbCompositionCommandExecTests sets
-// MOOTX01_ESTATE_LIFETIME=ephemeral, so any regression that removes the env var
-// path in the binary causes those exec tests to mint keys — Keychain pollution
-// reappears and the measurement done during KEY-1 is repeatable.
+// writing to a different account. For identity keys the guard is the serve path
+// itself: MOOTX01_ESTATE_LIFETIME=ephemeral keeps the identity key in memory, so
+// any regression that removes the env var path in the binary mints keys, so
+// Keychain pollution reappears and the measurement done during KEY-1 is
+// repeatable.
 
 #if os(macOS) && canImport(Security)
 import Foundation
