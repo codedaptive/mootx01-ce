@@ -20,15 +20,18 @@ pub struct EstateFormatVersion {
 impl EstateFormatVersion {
     pub const V1_0: Self = Self { major: 1, minor: 0 };
     pub const V1_1: Self = Self { major: 1, minor: 1 };
-    /// Format 1.2: the corpus_index_state composition_policy column reaches
-    /// populated estates through the migration catalog.
+    /// Format 1.2: the corpus_index_state composition_policy column reached
+    /// populated estates through the migration catalog. CorpusKit's own
+    /// checkpoint ladder adds that column at open, so no capsule separates
+    /// 1.1 from 1.2 any more.
     pub const V1_2: Self = Self { major: 1, minor: 2 };
     /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
     /// v18) reaches populated estates through the migration catalog.
     pub const V1_3: Self = Self { major: 1, minor: 3 };
-    /// Format 1.4: the index composition policy is a stored estate setting
+    /// Format 1.4: the index composition policy was a stored estate setting
     /// (LocusKit manifest key `index_composition_policy`), seeded on every
-    /// populated estate through the migration catalog.
+    /// populated estate through the migration catalog. The setting retired
+    /// with the policy; no capsule separates 1.3 from 1.4 any more.
     pub const V1_4: Self = Self { major: 1, minor: 4 };
     /// Format 1.5: the schema-version ledger carries the vector tier under
     /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of

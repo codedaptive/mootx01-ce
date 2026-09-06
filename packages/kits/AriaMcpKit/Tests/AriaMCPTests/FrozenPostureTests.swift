@@ -278,8 +278,8 @@ struct FrozenDispatcherTests {
         #expect(firstText(searchResult).contains(id), "frozen search must still surface the drawer")
         let frozenStatus = try await status(frozen)
         #expect(frozenStatus.contains("frozen: true"), "frozen status must report frozen: true; got: \(frozenStatus)")
-        #expect(frozenStatus.contains("index_composition_policy: "),
-                "frozen line sits beside index_composition_policy; got: \(frozenStatus)")
+        #expect(frozenStatus.contains("sync: "),
+                "frozen line sits beside sync; got: \(frozenStatus)")
 
         // teachme touches nothing and is answered even for a refused tool.
         let guide = try await frozen.dispatch(

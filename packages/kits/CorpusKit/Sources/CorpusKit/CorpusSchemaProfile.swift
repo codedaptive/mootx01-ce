@@ -54,32 +54,22 @@ public enum CorpusOperatingMode: Sendable, Equatable {
     case attached
 }
 
-/// Validated (mode, index-unit, composition-policy) configuration — the
-/// constructor-time gate that rejects invalid combinations BEFORE anything
-/// is written.
-///
-/// The `compositionPolicy` controls which texts each index lane consumes.
-/// See `IndexCompositionPolicy` for the named policies. GeniusLocusKit
-/// passes the estate's stored setting here at every open.
+/// Validated (mode, index-unit) configuration: the constructor-time gate
+/// that rejects invalid combinations BEFORE anything is written. Every
+/// engine indexes one composition: the content plus its `ssc_facts`
+/// supplement.
 public struct CorpusContentConfiguration: Sendable, Equatable {
     public let mode: CorpusOperatingMode
     public let indexUnit: CorpusIndexUnitPolicy
-    /// The named composition policy that controls which texts each index lane
-    /// consumes and the id recorded on every index row. Defaults to
-    /// `.current` (original text for BM25, distillate for dense).
-    public let compositionPolicy: IndexCompositionPolicy
 
     /// Validates the combination:
     ///   - attached + passages → `attachedModeViolation` (passage
     ///     production, passage identities, and legacy chunk APIs are dark
     ///     in attached mode);
     ///   - a non-positive token budget → `invalidConfiguration`.
-    /// The `compositionPolicy` is unconstrained — all policies are valid in
-    /// both attached and standalone modes.
     public init(
         mode: CorpusOperatingMode,
-        indexUnit: CorpusIndexUnitPolicy,
-        compositionPolicy: IndexCompositionPolicy = .current
+        indexUnit: CorpusIndexUnitPolicy
     ) throws {
 #if CORPUSKIT_STANDALONE_PASSAGES
         switch (mode, indexUnit) {
@@ -106,7 +96,6 @@ public struct CorpusContentConfiguration: Sendable, Equatable {
 #endif
         self.mode = mode
         self.indexUnit = indexUnit
-        self.compositionPolicy = compositionPolicy
     }
 
     /// Whether canonical-content mutation (put/remove) is permitted through
