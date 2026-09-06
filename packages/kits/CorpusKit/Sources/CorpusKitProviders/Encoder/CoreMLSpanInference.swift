@@ -69,13 +69,27 @@ public enum CoreMLSpanInference {
             throw EncoderError.loadFailed(
                 "\(modelURL.lastPathComponent): no '\(inputIDsName)' input (inputs: \(inputs.keys.sorted()))")
         }
-        // A static shape ([1, L]) means every call must be exactly L long;
-        // flexible (enumerated / range) shapes take the real token count.
+        // A single enumerated shape, or a range whose dimensions each admit
+        // one value, is a fixed shape. `unspecified` means unconstrained in
+        // CoreML; treating it as fixed incorrectly skips padding for traced
+        // models, whose [1, 512] constraint is represented as one enumerated
+        // shape.
         var fixedLength: Int? = nil
-        if let constraint = idsInput.multiArrayConstraint,
-           constraint.shapeConstraint.type == .unspecified,
-           let last = constraint.shape.last?.intValue, last > 1 {
-            fixedLength = last
+        if let constraint = idsInput.multiArrayConstraint {
+            switch constraint.shapeConstraint.type {
+            case .enumerated:
+                fixedLength = fixedSequenceLength(
+                    enumeratedShapes: constraint.shapeConstraint.enumeratedShapes.map {
+                        $0.map(\.intValue)
+                    })
+            case .range:
+                fixedLength = fixedSequenceLength(
+                    sizeRanges: constraint.shapeConstraint.sizeRangeForDimension.map(\.rangeValue))
+            case .unspecified:
+                break
+            @unknown default:
+                break
+            }
         }
         let box = ModelBox(model: model, inputNames: Set(inputs.keys), fixedLength: fixedLength)
         let dim = spec.dim
@@ -83,6 +97,53 @@ public enum CoreMLSpanInference {
         return { tokenIDs in
             try predict(box: box, tokenIDs: tokenIDs, padTokenID: padTokenID, dim: dim, pooling: pooling)
         }
+    }
+
+    /// The sequence length when exactly one rank-2 `[1, L]` shape is allowed.
+    /// Multiple enumerated shapes remain flexible and use the real token count.
+    static func fixedSequenceLength(enumeratedShapes: [[Int]]) -> Int? {
+        guard enumeratedShapes.count == 1,
+              let shape = enumeratedShapes.first,
+              shape.count == 2,
+              shape[0] == 1,
+              shape[1] > 0 else { return nil }
+        return shape[1]
+    }
+
+    /// The sequence length when both dimensions of a rank-2 range are fixed.
+    /// Any dimension with more than one permitted value remains flexible.
+    static func fixedSequenceLength(sizeRanges: [NSRange]) -> Int? {
+        guard sizeRanges.count == 2,
+              sizeRanges[0].location == 1,
+              sizeRanges[0].length == 1,
+              sizeRanges[1].location > 0,
+              sizeRanges[1].length == 1 else { return nil }
+        return sizeRanges[1].location
+    }
+
+    struct PreparedInputs: Equatable {
+        let ids: [Int32]
+        let attentionMask: [Int32]
+        let tokenTypeIDs: [Int32]
+    }
+
+    /// Pad or truncate ids for a fixed model input, with attention zero on
+    /// padding. Flexible models pass their real token count through unchanged;
+    /// an empty input still receives one masked padding token.
+    static func prepareInputs(
+        tokenIDs: [Int32], padTokenID: Int32, fixedLength: Int?
+    ) -> PreparedInputs {
+        let length = fixedLength ?? max(1, tokenIDs.count)
+        precondition(length > 0)
+        var ids = Array(tokenIDs.prefix(length))
+        let realCount = ids.count
+        if ids.count < length {
+            ids += [Int32](repeating: padTokenID, count: length - ids.count)
+        }
+        return PreparedInputs(
+            ids: ids,
+            attentionMask: (0..<length).map { $0 < realCount ? 1 : 0 },
+            tokenTypeIDs: [Int32](repeating: 0, count: length))
     }
 
     /// First `*.mlmodelc` in the directory; otherwise compile the first
@@ -114,10 +175,10 @@ public enum CoreMLSpanInference {
     private static func predict(
         box: ModelBox, tokenIDs: [Int32], padTokenID: Int32, dim: Int, pooling: EncoderModelSpec.Pooling
     ) throws -> [Float] {
-        let length = box.fixedLength ?? max(1, tokenIDs.count)
-        var ids = Array(tokenIDs.prefix(length))
-        let realCount = ids.count
-        if ids.count < length { ids += [Int32](repeating: padTokenID, count: length - ids.count) }
+        let prepared = prepareInputs(
+            tokenIDs: tokenIDs, padTokenID: padTokenID, fixedLength: box.fixedLength)
+        let length = prepared.ids.count
+        let realCount = Int(prepared.attentionMask.reduce(0, +))
 
         var features: [String: MLFeatureValue] = [:]
         do {
@@ -125,9 +186,9 @@ public enum CoreMLSpanInference {
             let maskArray = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
             let typesArray = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
             for i in 0..<length {
-                idsArray[i] = NSNumber(value: ids[i])
-                maskArray[i] = NSNumber(value: i < realCount ? 1 : 0)
-                typesArray[i] = 0
+                idsArray[i] = NSNumber(value: prepared.ids[i])
+                maskArray[i] = NSNumber(value: prepared.attentionMask[i])
+                typesArray[i] = NSNumber(value: prepared.tokenTypeIDs[i])
             }
             features[inputIDsName] = MLFeatureValue(multiArray: idsArray)
             if box.inputNames.contains(attentionMaskName) {
