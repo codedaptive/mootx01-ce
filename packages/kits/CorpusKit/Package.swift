@@ -6,8 +6,9 @@
 //   CorpusKit           -- canonical-content engine, BM25/vector retrieval,
 //                       optional standalone passages, tokenizer protocols,
 //                       plus the legacy standalone compatibility surface
-//   CorpusKitProviders  -- text embedding providers (MiniLM, mpnet,
-//                       EmbeddingGemma) and their tokenizers
+//   CorpusKitProviders  -- text embedding providers (MiniLM and, when opted
+//                       in, the dense families and Apple encoders) and their
+//                       tokenizers
 //
 // Providers split out so the core kit stays small. Consumers that
 // only need bundle storage and BM25 do not pull in CoreML models.
@@ -16,6 +17,24 @@
 // in-repository dependency direction (P2 self-report telemetry
 // coverage, cp-corpuskit-report). IntellectusLib is a zero-dependency
 // leaf lib; layering is not inverted.
+//
+// Compile-time switches (CorpusKitProviders target):
+//
+//   DenseFamilies  (Swift trait → MOOTX01_DENSE_FAMILIES, Rust feature dense-families)
+//       Compiles LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers.
+//       OFF by default: measurement (plan 70BC55F3, 2026-09-05) showed these
+//       four families add cost without beating BM25+RI on two corpora.
+//       RI stays always-on because its binary fingerprint feeds dreaming,
+//       contradiction, and consolidation. Enable with:
+//           swift test --traits DenseFamilies
+//           cargo test --features dense-families
+//
+//   AppleEncoders  (Swift trait → APPLE_ENCODERS; Swift-only, no Rust twin)
+//       Compiles NLContextualEmbeddingProvider, NLEmbeddingProvider,
+//       AppleNLProvider, and NeuralEmbedProvider. OFF by default.
+//       These providers measured at half the signal of a retrieval-trained
+//       model; held for iOS and Apple cloud compute (v1.2). Enable with:
+//           swift test --traits AppleEncoders
 
 import PackageDescription
 
@@ -33,6 +52,14 @@ let package = Package(
         .trait(
             name: "StandalonePassages",
             description: "Compile optional standalone token-window passage indexing. GeniusLocusKit/MOOTx01 intentionally leaves this trait disabled."
+        ),
+        .trait(
+            name: "DenseFamilies",
+            description: "Compile LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers. Off by default (plan 70BC55F3, 2026-09-05): measured cost exceeds benefit vs. BM25+RI on two corpora. Defines MOOTX01_DENSE_FAMILIES; enable with `swift test --traits DenseFamilies`."
+        ),
+        .trait(
+            name: "AppleEncoders",
+            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; held for v1.2 iOS and Apple cloud compute. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
         ),
     ],
     dependencies: [
@@ -133,7 +160,15 @@ let package = Package(
                 // Authority: honest semantic fusion (FDC co-classification signal).
                 .product(name: "LatticeLib", package: "LatticeLib"),
             ],
-            path: "Sources/CorpusKitProviders"
+            path: "Sources/CorpusKitProviders",
+            swiftSettings: [
+                // DenseFamilies trait → MOOTX01_DENSE_FAMILIES: gates LSA/NMF/PPMI/
+                // FDC/MPNet/EmbeddingGemma providers. Off by default (plan 70BC55F3).
+                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+                // AppleEncoders trait → APPLE_ENCODERS: gates Apple NL providers.
+                // Swift-only; no Rust twin. Off by default (held for v1.2).
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
+            ]
         ),
         .testTarget(
             name: "CorpusKitTests",
@@ -167,12 +202,26 @@ let package = Package(
                 // finding W1). The Rust leg reads the SAME file at
                 // rust/tests/bm25_conformance_test.rs via include_bytes! up the tree.
                 .copy("../SharedVectors"),
+                // Encoder model test fixtures: vocab.txt and a placeholder
+                // .mlmodelc directory for ModelDirectoryResolver tests.
+                // Copy the model directory directly so it lands at the
+                // bundle resource root as "minilm-l6-v2-w60/" — matching
+                // the layout the production app uses (models are copied to
+                // the app bundle root in project.yml). The resolver's
+                // bundleSlot checks <bundle.resourcePath>/minilm-l6-v2-w60/.
+                // The real 90 MB .mlmodelc is never committed; the placeholder
+                // confirms directory presence without the full binary artifact.
+                .copy("../Fixtures/encoder-models/minilm-l6-v2-w60"),
             ],
             swiftSettings: [
                 .define(
                     "CORPUSKIT_STANDALONE_PASSAGES",
                     .when(traits: ["StandalonePassages"])
                 ),
+                // Mirror the provider switches in tests so dense-family and Apple
+                // encoder test suites compile only when the matching trait is on.
+                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
             ]
         ),
     ]

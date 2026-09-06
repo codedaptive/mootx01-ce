@@ -31,7 +31,7 @@ struct DbCommand: AsyncParsableCommand {
     )
 
     /// Subcommands that open the estate through GeniusLocusKit. macOS-only
-    /// for the same reason as `redistill`: the kits are `.macOS`; the Rust
+    /// for the same reason as `serve`: the kits are `.macOS`; the Rust
     /// port carries the Linux/Windows verb.
     #if os(macOS)
     static let estateSettingSubcommands: [ParsableCommand.Type] = [DbCompositionCommand.self]
@@ -244,7 +244,7 @@ struct DbDeleteCommand: AsyncParsableCommand {
 /// Corpus under the new policy with the rebuild committed, and runs the same
 /// `reindexCorpus` the upgrade convergence step runs, so the stored policy
 /// and the index rows never disagree; it prints the rows reindexed and exits
-/// non-zero on any failure. Opens the estate the way `redistill` does.
+/// non-zero on any failure. Opens the estate the way `serve` does.
 struct DbCompositionCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "composition",
@@ -365,8 +365,8 @@ struct DbCompositionCommand: AsyncParsableCommand {
         let stale: String?
     }
 
-    /// Open the estate's SQLite under the shared at-rest posture serve, drain
-    /// and redistill use, then the kit plus the migration catalog (which
+    /// Open the estate's SQLite under the shared at-rest posture serve and
+    /// drain use, then the kit plus the migration catalog (which
     /// seeds the setting on an estate that predates it).
     private static func openEstate(
         estateURL: URL, owner: OwnerCredentials

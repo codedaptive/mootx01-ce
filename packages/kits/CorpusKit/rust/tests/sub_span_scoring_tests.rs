@@ -134,6 +134,7 @@ impl MapContentSource {
                         digest: content_digest(text),
                         text: text.to_string(),
                         dense_composition_text: None,
+                        ssc_facts: None, // supplied by GLK layer (schema 19)
                     },
                 )
             })
@@ -492,6 +493,7 @@ fn score_uses_effective_dense_text() {
         digest: content_digest("noise content"),
         text: "noise content".to_string(),
         dense_composition_text: Some("target enrichment".to_string()),
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = MapContentSource::new(vec![]).with_record(record);
     let provider = FirstTokenRoutingProvider;

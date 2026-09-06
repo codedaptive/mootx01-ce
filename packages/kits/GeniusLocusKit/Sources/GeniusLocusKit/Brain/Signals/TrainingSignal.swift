@@ -3,7 +3,7 @@ import Foundation
 /// Training-daemon standing signal — architecture spec §11.2, signal 9.
 ///
 /// Fires the training-daemon `runOnce` pass on each hourly tick and surfaces
-/// the result as a diagnostic. Mirrors DistillationSignal in structure:
+/// the result as a diagnostic. Mirrors TemporalCausalitySignal in structure:
 /// hourly cadence, .single concurrency, injected closure for the live pass,
 /// diagnostic-only emission.
 ///
@@ -15,9 +15,9 @@ import Foundation
 /// short-circuits below the threshold so the emit always returns exactly one
 /// diagnostic.
 ///
-/// Cadence: hourly (3 600 seconds), matching the distillation-sweep and
-/// temporal-causality-fold signals at §11.2 to keep the daemon in sync with
-/// the matrix-population rhythm.
+/// Cadence: hourly (3 600 seconds), matching the temporal-causality-fold
+/// signal at §11.2 to keep the daemon in sync with the matrix-population
+/// rhythm.
 ///
 /// Usage pattern:
 ///
@@ -41,8 +41,8 @@ import Foundation
 /// on each hourly tick.
 public enum TrainingSignal {
 
-    /// Hourly cadence in seconds — matches DistillationSignal and
-    /// TemporalCausalitySignal at §11.2 for matrix-population rhythm.
+    /// Hourly cadence in seconds — matches TemporalCausalitySignal at §11.2
+    /// for matrix-population rhythm.
     public static let defaultCadenceSeconds: TimeInterval = 3_600
 
     /// Stable name surfaced in `SignalReport.name` and in

@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // CoreAIEngine.swift — in-process Swift minter arm over the Core AI
 // runtime (operator mandate 2026-08-31: the Swift binary mints every
 // model under test; Rust binaries never run under the Swift product).
@@ -703,3 +704,4 @@ public final class CoreAIEngine: GoldMinerEngine, @unchecked Sendable {
     }
 }
 #endif
+#endif // MOOTX01_MINERS

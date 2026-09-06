@@ -65,7 +65,6 @@
 //! directly. When persistence-kit grows an async surface, this trait moves
 //! with it.
 
-use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
 use crate::diary_entry::DiaryEntry;
 use crate::drawer::Drawer;
 // ─────────────────────────────────────────────────────────────────
@@ -99,23 +98,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
-
-/// One (drawer, minter) pair that does not yet have an adornment row.
-///
-/// Returned by `DrawerStore::adornment_debt_batch` to describe work the
-/// AdornmentPass in GeniusLocusKit must perform. The minter holds the full
-/// descriptor so the caller can immediately invoke the minter without a
-/// separate registry lookup.
-///
-/// Per LOCUSKIT_INTERFACE 2.0.1 § normalized adornment storage (ADORN-STORE-02 v17).
-/// Mirrors Swift `AdornmentDebt`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AdornmentDebt {
-    /// The drawer that needs an adornment from `minter`.
-    pub drawer: Drawer,
-    /// The active minter that has not yet produced an adornment for `drawer`.
-    pub minter: AdornmentMinterDescriptor,
-}
 
 /// Contract every LocusKit storage backend conforms to.
 ///
@@ -705,38 +687,6 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Write the distilled representation of one drawer — all five columns
-    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
-    /// together or populated together).
-    ///
-    /// A representation is a deterministic, regenerable function of
-    /// (content, converter id) — a view, not a belief-state change —
-    /// so this is a direct column write: no audit event, no supersession
-    /// cascade, no lifecycle or lineage field touched, and no content
-    /// digest/revision bump (search isolation §9: a representation-only
-    /// write emits no index job). `source_digest` is the SHA-256 hex of
-    /// the complete content the representation was rendered from (the
-    /// caller computes it with ContextDistillLib's `source_digest`); it is
-    /// stored beside the converter id so a later reader can prove the
-    /// representation still describes the row's content. `generated_at`
-    /// is epoch millis (deterministic clock — passed in, never read here).
-    ///
-    /// Returns the count of rows updated (0 = drawer not found;
-    /// 1 = success). Mirrors Swift `DrawerStore.setDistilledRepresentation`.
-    fn set_distilled_representation(
-        &self,
-        _drawer_id: &str,
-        _distilled: &str,
-        _pipeline_version: &str,
-        _source_digest: &str,
-        _token_count: i64,
-        _generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "set_distilled_representation not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
     ///
     /// A DERIVED SIGNAL write: no audit event, no supersession cascade, no
@@ -761,157 +711,64 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
+    // ── Content-derived columns and the span index bit (Encoder Rerank Program) ──
 
-    /// Return all registered adornment minters, ordered by name ascending.
-    /// Mirrors Swift `DrawerStore.listAdornmentMinters()`.
-    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
+    /// Write (or clear, with `None`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6): the grammar-v1 inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated. A direct column write like the
+    /// subject line: no audit event, no supersession cascade, no lifecycle
+    /// or lineage field touched, no content digest bump. The enrichment
+    /// stage calls this after the drawer write; every content write NULLs
+    /// the column again. Returns the count of rows updated (0 = drawer not
+    /// found; 1 = success). Mirrors Swift `DrawerStore.setSSCFacts(_:for:)`.
+    fn set_ssc_facts(&self, _drawer_id: &str, _facts: Option<&str>) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "list_adornment_minters not implemented for this DrawerStore impl".to_string(),
+            "set_ssc_facts not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Register or replace one adornment minter (upsert on `id`).
-    /// Mirrors Swift `DrawerStore.registerAdornmentMinter(_:)`.
-    fn register_adornment_minter(
-        &self,
-        _minter: &AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write like `set_anomalous_flag`. Returns 0 when the
+    /// drawer is not found or the bit is already set; 1 on a write. Mirrors
+    /// Swift `DrawerStore.setSpanIndexed(drawerId:)`.
+    fn set_span_indexed(&self, _drawer_id: &str) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "register_adornment_minter not implemented for this DrawerStore impl".to_string(),
+            "set_span_indexed not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Set the active flag for one minter. Returns 0 (not found) or 1 (updated).
-    /// Mirrors Swift `DrawerStore.setAdornmentMinterActive(id:active:)`.
-    fn set_adornment_minter_active(
-        &self,
-        _id: &str,
-        _active: bool,
-    ) -> Result<usize, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "set_adornment_minter_active not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Atomically replace the active minter set. Fails on unknown id.
-    /// Returns total update count (deactivations + activations).
-    /// Mirrors Swift `DrawerStore.setActiveAdornmentMinters(ids:)`.
-    fn set_active_adornment_minters(
-        &self,
-        _ids: &[&str],
-    ) -> Result<usize, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "set_active_adornment_minters not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Bounded batch of (drawer, minter) pairs without an adornment row.
-    /// Mirrors Swift `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)`.
-    fn adornment_debt_batch(
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, ordered by id, at most `limit`,
+    /// resuming after `after_drawer_id` when paging. Bit 27 is cleared by
+    /// every content write and by encoder activation, so this predicate is
+    /// the whole re-encode policy. Mirrors Swift
+    /// `DrawerStore.spanIndexDebtBatch(limit:afterDrawerID:)`.
+    fn span_index_debt_batch(
         &self,
         _limit: usize,
         _after_drawer_id: Option<&str>,
-    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
+    ) -> Result<Vec<Drawer>, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "adornment_debt_batch not implemented for this DrawerStore impl".to_string(),
+            "span_index_debt_batch not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Insert or replace one (drawer, minter) adornment row.
-    /// Returns 1 on success. Mirrors Swift `DrawerStore.putAdornment(_:)`.
-    fn put_adornment(&self, _adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`. Mirrors Swift
+    /// `DrawerStore.countSpanIndexDebt()`.
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "put_adornment not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Return all adornment rows for one drawer, ordered by minter_id.
-    /// Mirrors Swift `DrawerStore.adornments(drawerID:)`.
-    fn adornments(&self, _drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "adornments not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Return active adornments for a batch of drawers.
-    /// Returns a map of drawer_id → Vec<StoredAdornment> (active minters only).
-    /// Mirrors Swift `DrawerStore.activeAdornments(drawerIDs:)`.
-    fn active_adornments(
-        &self,
-        _drawer_ids: &[&str],
-    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "active_adornments not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Count of active drawers still awaiting distillation — the §7.1
-    /// eligibility predicate as an aggregate (not tombstoned, non-empty
-    /// content, and no representation that is current under
-    /// `pipeline_version`). The storage-visible half of the currency rule:
-    /// bit 19 clear, OR `distilled_pipeline_version` differs, OR
-    /// `distilled_source_digest` IS NULL (written before the digest column
-    /// existed). The digest-equality half needs the row's content and is
-    /// applied by the sweep per drawer; under the NULL-on-content-write
-    /// invariant a populated digest always equals the digest of the
-    /// content beside it, so the two halves agree. The distillation
-    /// drain-accounting observable reported by the GLK coordinator's
-    /// `drain_statuses`. Mirrors Swift `countUndistilled`.
-    fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "count_undistilled not implemented for this DrawerStore impl".to_string(),
-        ))
-    }
-
-    /// Rooms containing at least one active, represented drawer whose stored
-    /// representation is not current under `pipeline_version`: the converter
-    /// id differs, or the source digest is NULL. The version companion to
-    /// the room-level bit-19 aggregate the sweep skips on: bit 19 proves
-    /// presence only, so a fully represented room is skipped only when this
-    /// projection finds nothing stale in it. Projects `parent_node_id` only
-    /// and resolves the distinct rooms, so a current estate pays no content
-    /// hydration. Returns `(wing, room)` pairs sorted by wing then room.
-    /// Mirrors Swift `DrawerStore.roomsWithStaleDistilledRepresentations`.
-    fn rooms_with_stale_distilled_representations(
-        &self,
-        _pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "rooms_with_stale_distilled_representations not implemented for this DrawerStore impl"
-                .to_string(),
-        ))
-    }
-
-    /// Active, non-empty drawers whose representation is current under
-    /// `pipeline_version` (bit 19 set, converter id equal, digest present),
-    /// returned as `(id, distilled_at_millis)` pairs with no content hydration.
-    ///
-    /// Used by GeniusLocusKit's `distilled_representations_awaiting_reindex` to
-    /// compare each drawer's `distilled_at` instant against the corresponding
-    /// corpus index row's `updated_at_millis`, detecting the mid-run crash
-    /// scenario where the sweep committed but the reindex did not. Stale rows
-    /// are excluded on purpose: the sweep regenerates them first, and only a
-    /// current representation can be waiting on its reindex.
-    ///
-    /// Query shape mirrors `count_undistilled` inverted. Projects only `id` and
-    /// `distilled_at` — no text column is materialized. The §4 invariant (bit and
-    /// columns always in agreement) guarantees `distilled_at` is non-null when
-    /// bit 19 is set. Mirrors Swift `DrawerStore.drawersWithRepresentations`.
-    fn drawers_with_representations(
-        &self,
-        _pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        Err(LocusKitError::DatabaseUnavailable(
-            "drawers_with_representations not implemented for this DrawerStore impl".to_string(),
+            "count_span_index_debt not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
     // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
 
     /// Write the subject line of one drawer — all three subject columns
-    /// in ONE atomic UPDATE (PR-01; same invariant family as the
-    /// distilled quad: NULL together or populated together) PLUS a sealed
+    /// in ONE atomic UPDATE (PR-01: NULL together or populated together)
+    /// PLUS a sealed
     /// `"setSubject"` custody audit event, committed together in one
     /// transaction (Codex cc90c5dcecb081918c159788e1ffb3d6): the column
     /// write and the audit append succeed or fail together. `changed_by`
@@ -2469,72 +2326,21 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     ) -> Result<ExpungeOutcome, LocusKitError> {
         self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
-    fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        source_digest: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.as_ref().set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            source_digest,
-            token_count,
-            generated_at,
-        )
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.as_ref().set_ssc_facts(drawer_id, facts)
     }
-    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
-        self.as_ref().list_adornment_minters()
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().set_span_indexed(drawer_id)
     }
-    fn register_adornment_minter(
-        &self,
-        minter: &AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
-        self.as_ref().register_adornment_minter(minter)
-    }
-    fn set_adornment_minter_active(&self, id: &str, active: bool) -> Result<usize, LocusKitError> {
-        self.as_ref().set_adornment_minter_active(id, active)
-    }
-    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
-        self.as_ref().set_active_adornment_minters(ids)
-    }
-    fn adornment_debt_batch(
+    fn span_index_debt_batch(
         &self,
         limit: usize,
         after_drawer_id: Option<&str>,
-    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
-        self.as_ref().adornment_debt_batch(limit, after_drawer_id)
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().span_index_debt_batch(limit, after_drawer_id)
     }
-    fn put_adornment(&self, adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
-        self.as_ref().put_adornment(adornment)
-    }
-    fn adornments(&self, drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
-        self.as_ref().adornments(drawer_id)
-    }
-    fn active_adornments(
-        &self,
-        drawer_ids: &[&str],
-    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
-        self.as_ref().active_adornments(drawer_ids)
-    }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.as_ref().count_undistilled(pipeline_version)
-    }
-    fn rooms_with_stale_distilled_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        self.as_ref().rooms_with_stale_distilled_representations(pipeline_version)
-    }
-    fn drawers_with_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.as_ref().drawers_with_representations(pipeline_version)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_span_index_debt()
     }
     fn set_subject_representation(
         &self,

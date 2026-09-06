@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // ProvidersTests.swift
 
 import Testing
@@ -71,3 +74,5 @@ struct ProvidersTests {
         #expect(g == Engram.zero, "Gemma: empty input must return Engram.zero")
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

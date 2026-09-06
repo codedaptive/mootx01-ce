@@ -75,8 +75,8 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_reindex") == .ask)
         #expect(PermissionsWriter.classify("moot_reclassify_fdc") == .ask)
         #expect(PermissionsWriter.classify("moot_dream") == .ask)
-        #expect(PermissionsWriter.classify("moot_distill") == .ask)
-        #expect(PermissionsWriter.classify("moot_synthesize") == .ask)
+        // moot_synthesize reads candidates and generates text; no write (FRZ-3).
+        #expect(PermissionsWriter.classify("moot_synthesize") == .allow)
         #expect(PermissionsWriter.classify("moot_palace_import") == .ask)
         #expect(PermissionsWriter.classify("moot_json_import") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_import") == .ask)
@@ -113,11 +113,11 @@ struct PermissionsWriterTests {
     /// of `readTools` (here) or `ToolMutationInventory.additiveWriteTools` /
     /// `.mutationTools` / `.destructiveTools` (AriaMcpKit) the new tool
     /// belongs in.
-    @Test("classify's tier tables are exhaustive over the real 82-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 80-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
-            "moot_connection_search", "moot_distill", "moot_drain_status", "moot_dream",
+            "moot_connection_search", "moot_drain_status", "moot_dream",
             "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
@@ -140,7 +140,7 @@ struct PermissionsWriterTests {
             "moot_review_tunnel", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
-            "moot_redistill", "moot_write_journal",
+            "moot_write_journal",
             // +3 (FRZ-2 follow-up): work-packet read tools that were in frozenReadTools
             // but absent from this pin; Allow tier.
             "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
@@ -162,15 +162,16 @@ struct PermissionsWriterTests {
         // +3 (ADORN-STORE-02 pin repair): moot_recall_connected (1.33.0),
         // moot_recall_temporal (1.39.0), moot_recall_walk (1.47.0) — real
         // shipped recall recipes the pin had missed; all Allow-tier reads.
-        // +1 (CDL-02): moot_redistill — force-redistill all active items +
-        // full laneScope .all reindex; Mutation tier.
         // +1 (frozen-posture inventory): moot_file_packet — work-packet filing,
         // an additive write (Allow tier) in ToolMutationInventory.
         // +4 (FRZ-2 follow-up): moot_packet_get, moot_packet_list,
         // moot_packet_lineage (work-packet reads), moot_rebuild_status
         // (rebuild progress read) — all Allow tier; were in frozenReadTools
         // but absent from this installer pin.
-        #expect(realTools.count == 82, "pinned tool inventory drifted from the real surface count")
+        // −2 (Encoder Rerank Program): moot_distill and moot_redistill retired
+        // (distillation is inline at read); moot_synthesize now classified as a
+        // read (it was live but unclassified).
+        #expect(realTools.count == 80, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

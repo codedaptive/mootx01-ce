@@ -62,6 +62,13 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # crate (mirrors the Swift `CorpusKitProviders` target). Dev-only so
 # the core kit stays provider-free in normal builds.
 [features]
+# dense-families: compiles the dark dense-family providers (PPMI, LSA, NMF,
+# FDC) into the test build so the trainable-slot engine tests can run against
+# them. OFF by default (contract sheet §13): Random Indexing is the only live
+# family, and the gated tests are the Rust twin of the Swift tests behind the
+# `MOOTX01_DENSE_FAMILIES` trait. Enable with
+# `cargo test --features dense-families`.
+dense-families = ["corpus-kit-providers/dense-families"]
 # Optional standalone passage indexing. GLK/MOOTx01 dependencies do not
 # enable this feature, so the segmenter, range table, and configuration
 # persistence are absent from their production build.

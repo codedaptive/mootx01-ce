@@ -46,7 +46,6 @@ use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::default_wings::{
     DEFAULT_WINGS, DEFAULT_WING_NAME, HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
 };
-use adornment_lib;
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
 use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
@@ -434,8 +433,8 @@ impl Estate {
             drawer.subject_at = Some(now);
         }
 
-        // New captures start bare — no adornment row. Adornment debt is
-        // discovered via adornmentDebtBatch (ADORN-STORE-02 v17); bits 27-30 FREE.
+        // New captures start with bit 27 clear: the span-encode duty picks
+        // them up through span_index_debt_batch.
 
         // add_drawer atomically maintains the per-container OR aggregate
         // (spec § 11.5 Option B): coverage is now structurally guaranteed
@@ -610,8 +609,8 @@ impl Estate {
                 frame.embedding_model_id,
             );
             drawer.adjective_bitmap = adj_bitmap;
-            // Superseding drawers start bare; adornment debt discovered via
-            // adornmentDebtBatch (ADORN-STORE-02 v17). Bits 27-30 FREE.
+            // Superseding drawers start with bit 27 clear; the span-encode
+            // duty picks them up through span_index_debt_batch.
             drawer.operational_bitmap = op_bitmap;
             drawer.provenance = provenance_bitmap;
             drawer.lineage_id = lineage_id;
@@ -1474,70 +1473,6 @@ impl Estate {
         self.store.all_drawers()
     }
 
-    /// Write the distilled representation of one drawer — all five
-    /// representation columns in one atomic UPDATE. Estate-level
-    /// pass-through over `DrawerStore::set_distilled_representation`; see
-    /// the trait method for the full contract (direct column write, no
-    /// audit event, no index-feed involvement —
-    /// SPEC_DISTILLATION_STORAGE §4/§7.2). `source_digest` is the SHA-256
-    /// hex of the complete content the representation was rendered from.
-    /// This is the seam GLK's distillation paths write through. Mirrors
-    /// Swift `Estate.setDistilledRepresentation`.
-    pub fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        source_digest: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.store.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            source_digest,
-            token_count,
-            generated_at,
-        )
-    }
-
-    /// Count of active drawers still awaiting distillation (§7.1
-    /// eligibility predicate as an aggregate). Estate-level pass-through
-    /// over `DrawerStore::count_undistilled` — the distillation
-    /// drain-accounting observable. Mirrors Swift `Estate.countUndistilled`.
-    pub fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.store.count_undistilled(pipeline_version)
-    }
-
-    /// Rooms whose populated distilled representation is stale under
-    /// `pipeline_version` (converter id differs or digest NULL). Used by
-    /// the distillation sweep to keep its room-level bitmap skip
-    /// currency-aware without loading drawer content. Estate-level
-    /// pass-through over
-    /// `DrawerStore::rooms_with_stale_distilled_representations`. Mirrors
-    /// Swift `Estate.roomsWithStaleDistilledRepresentations`.
-    pub fn rooms_with_stale_distilled_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        self.store.rooms_with_stale_distilled_representations(pipeline_version)
-    }
-
-    /// Active, non-empty drawers whose distilled representation is current
-    /// under `pipeline_version`, as `(id, distilled_at_millis)` pairs
-    /// without hydrating content. Estate-level pass-through over
-    /// `DrawerStore::drawers_with_representations` — the metadata
-    /// projection GeniusLocusKit uses to detect the mid-run crash scenario
-    /// (sweep committed, reindex did not). Mirrors Swift
-    /// `Estate.drawersWithRepresentations`.
-    pub fn drawers_with_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.store.drawers_with_representations(pipeline_version)
-    }
-
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's
     /// `operational_bitmap`. Estate-level pass-through over
     /// `DrawerStore::set_anomalous_flag` — the write seam for
@@ -1561,77 +1496,41 @@ impl Estate {
         self.store.set_anomalous_flag(drawer_id, anomalous)
     }
 
-    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
+    // ── Content-derived columns and the span index bit (Encoder Rerank Program) ──
 
-    /// Return all registered adornment minters, ordered by name.
-    /// Mirrors Swift `Estate.listAdornmentMinters()`.
-    pub fn list_adornment_minters(
-        &self,
-    ) -> Result<Vec<adornment_lib::AdornmentMinterDescriptor>, LocusKitError> {
-        self.store.list_adornment_minters()
+    /// Write (or clear) one drawer's SSC facts. Estate-level pass-through
+    /// over `DrawerStore::set_ssc_facts` — the seam the enrichment stage
+    /// writes through after the drawer write. Mirrors Swift
+    /// `Estate.setSSCFacts(_:for:)`.
+    pub fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.store.set_ssc_facts(drawer_id, facts)
     }
 
-    /// Register or replace one adornment minter (upsert on `id`).
-    /// Mirrors Swift `Estate.registerAdornmentMinter(_:)`.
-    pub fn register_adornment_minter(
-        &self,
-        minter: &adornment_lib::AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
-        self.store.register_adornment_minter(minter)
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after the span-encode duty
+    /// wrote its span rows. Pass-through over `DrawerStore::set_span_indexed`.
+    /// Mirrors Swift `Estate.setSpanIndexed(drawerId:)`.
+    pub fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.store.set_span_indexed(drawer_id)
     }
 
-    /// Set the active flag for one minter. Returns 0 if not found, 1 if updated.
-    /// Mirrors Swift `Estate.setAdornmentMinterActive(id:active:)`.
-    pub fn set_adornment_minter_active(
-        &self,
-        id: &str,
-        active: bool,
-    ) -> Result<usize, LocusKitError> {
-        self.store.set_adornment_minter_active(id, active)
-    }
-
-    /// Atomically replace the active minter set. Fails on unknown id.
-    /// Mirrors Swift `Estate.setActiveAdornmentMinters(ids:)`.
-    pub fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
-        self.store.set_active_adornment_minters(ids)
-    }
-
-    /// Bounded batch of (drawer, minter) pairs without an adornment row.
-    /// Mirrors Swift `Estate.adornmentDebtBatch(limit:afterDrawerID:)`.
-    pub fn adornment_debt_batch(
+    /// The span-encode duty's work items (active, non-empty, bit 27 clear),
+    /// ordered by id, paged by `after_drawer_id`. Pass-through over
+    /// `DrawerStore::span_index_debt_batch`. Mirrors Swift
+    /// `Estate.spanIndexDebtBatch(limit:afterDrawerID:)`.
+    pub fn span_index_debt_batch(
         &self,
         limit: usize,
         after_drawer_id: Option<&str>,
-    ) -> Result<Vec<crate::drawer_store::AdornmentDebt>, LocusKitError> {
-        self.store.adornment_debt_batch(limit, after_drawer_id)
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.span_index_debt_batch(limit, after_drawer_id)
     }
 
-    /// Insert or replace one (drawer, minter) adornment row.
-    /// Mirrors Swift `Estate.putAdornment(_:)`.
-    pub fn put_adornment(
-        &self,
-        adornment: &adornment_lib::StoredAdornment,
-    ) -> Result<usize, LocusKitError> {
-        self.store.put_adornment(adornment)
-    }
-
-    /// Return all adornment rows for one drawer, ordered by minter_id.
-    /// Mirrors Swift `Estate.adornments(drawerID:)`.
-    pub fn adornments(
-        &self,
-        drawer_id: &str,
-    ) -> Result<Vec<adornment_lib::StoredAdornment>, LocusKitError> {
-        self.store.adornments(drawer_id)
-    }
-
-    /// Return active adornments for a batch of drawers.
-    /// Mirrors Swift `Estate.activeAdornments(drawerIDs:)`.
-    pub fn active_adornments(
-        &self,
-        drawer_ids: &[&str],
-    ) -> Result<std::collections::BTreeMap<String, Vec<adornment_lib::StoredAdornment>>, LocusKitError>
-    {
-        self.store.active_adornments(drawer_ids)
+    /// Count of drawers still awaiting span encoding — the span-encode
+    /// drain's `pending`. Pass-through over
+    /// `DrawerStore::count_span_index_debt`. Mirrors Swift
+    /// `Estate.countSpanIndexDebt()`.
+    pub fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_span_index_debt()
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
