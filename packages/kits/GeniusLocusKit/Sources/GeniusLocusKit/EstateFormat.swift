@@ -37,7 +37,11 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
     /// every populated estate are moved there through the migration catalog.
     public static let v1_5 = EstateFormatVersion(major: 1, minor: 5)
-    public static let current = v1_5
+    /// Format 1.6: the retired `corpus_index_state.composition_policy` column
+    /// is dropped from every populated estate through the migration catalog
+    /// (CorpusKit checkpoint schema v4).
+    public static let v1_6 = EstateFormatVersion(major: 1, minor: 6)
+    public static let current = v1_6
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)

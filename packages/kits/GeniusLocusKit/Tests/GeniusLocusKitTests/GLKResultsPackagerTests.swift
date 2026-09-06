@@ -202,6 +202,51 @@ struct GLKResultsPackagerTests {
         #expect(packaged.totalCount == 2)
     }
 
+    // MARK: Citations and the empty-answer containment rule
+    // (Rust twin: packager_parity.rs `citations_are_the_first_five_hydrated_hits`
+    // and `auto_with_no_answer_text_never_reaches_confident`)
+
+    /// Seven hits, two of them unhydrated (a tombstoned row the lane still
+    /// scored). The block's citation ids are the first five hits filtered to
+    /// the hydrated ones: `hits.prefix(5).compactMap { $0.drawer?.id }`.
+    @Test("citations are the first five hydrated hits")
+    func citationsAreTheFirstFiveHydratedHits() {
+        let content = "fruit banana mango recall content test paragraph information"
+        // Top margin (0.90 → 0.30) clears t1; the tail steps down by 0.05.
+        let hits: [RecallHit] = (0..<7).map { i in
+            let score: Float = i == 0 ? 0.90 : 0.30 - 0.05 * Float(i - 1)
+            let drawer = (i == 1 || i == 3) ? nil : makeDrawer(id: "h-\(i)", content: content)
+            return makeHit(id: "h-\(i)", finalScore: score, denseScore: score, drawer: drawer)
+        }
+        let packaged = packager.package(
+            result: makeResult(hits: hits, signalAgreement: 0.80),
+            mode: .auto,
+            composedAnswer: "fruit banana information",
+            thresholds: thresholds
+        )
+        #expect(packaged.answerBlock?.confidence == .confident)
+        #expect(packaged.answerBlock?.citationIDs == ["h-0", "h-2", "h-4"])
+    }
+
+    /// With no composed answer the containment signal is undefined and reads
+    /// false, so the gate never reaches CONFIDENT and, with no text to show,
+    /// no block is emitted: auto degrades to rowsOnly whatever the margins say.
+    @Test("auto with no answer text never reaches CONFIDENT")
+    func autoWithNoAnswerTextNeverReachesConfident() {
+        let content = "fruit banana mango recall content test paragraph information"
+        let hits = [
+            makeHit(id: "h-0", finalScore: 0.90, denseScore: 0.90, drawer: makeDrawer(id: "h-0", content: content)),
+            makeHit(id: "h-1", finalScore: 0.30, denseScore: 0.50, drawer: makeDrawer(id: "h-1", content: content)),
+        ]
+        let result = makeResult(hits: hits, signalAgreement: 0.80)
+        let withAnswer = packager.package(
+            result: result, mode: .auto, composedAnswer: "fruit banana information", thresholds: thresholds)
+        #expect(withAnswer.answerBlock?.confidence == .confident, "control: the same hits reach CONFIDENT with a contained answer")
+        let without = packager.package(result: result, mode: .auto, composedAnswer: nil, thresholds: thresholds)
+        #expect(without.answerBlock == nil)
+        #expect(without.level == .rowsOnly)
+    }
+
     // MARK: C — INTERMEDIATE gate (golden pin)
 
     /// Golden pin C: INTERMEDIATE fixture.
