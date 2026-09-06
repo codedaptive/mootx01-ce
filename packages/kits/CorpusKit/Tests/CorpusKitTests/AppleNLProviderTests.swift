@@ -1,3 +1,6 @@
+#if APPLE_ENCODERS
+// Apple encoder test — compiled only when AppleEncoders trait is on.
+// Off by default; held for v1.2. See Package.swift.
 // AppleNLProviderTests.swift
 //
 // Tests for AppleNLProvider — the UNNORMALIZED Apple NL sentence embedding provider.
@@ -303,3 +306,5 @@ struct AppleNLProviderTests {
     }
 }
 #endif // canImport(NaturalLanguage)
+
+#endif // APPLE_ENCODERS

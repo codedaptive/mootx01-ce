@@ -20,12 +20,16 @@
 // estate-format 1.3 to 1.4 capsule); a running estate changes policy only
 // through `mootx01 db composition --set`, which rebuilds every index lane.
 //
-// Gauntlet cells:
-//   A — lex=original;  dense=distilled           (.current, today's production behaviour)
+// Policy ids (kept for stored-setting compatibility):
+//   A — lex=original;  dense=distilled           (.current, the production default)
 //   B — lex=originalPlusAdornments; dense=distilled
 //   C — lex=original;  dense=distilledPlusAdornments
 //   D — lex=originalPlusAdornments; dense=distilledPlusAdornments
 //   E — lex=original;  dense=original             (lexical-only baseline for ablation)
+// Since schema 19 the adornment store and the stored distilled rendering are
+// gone, so every id composes the same document as E: the content plus the
+// `ssc_facts` supplement. The ids remain readable so an estate that stored
+// one still opens; retiring the knob is an open item.
 //
 // Rust twin: CorpusKit/rust/src/index_composition_policy.rs
 

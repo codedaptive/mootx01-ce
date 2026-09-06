@@ -79,16 +79,29 @@ fn capture_with_sensitivity(
     coord.capture(handle, frame, at).expect("capture").id
 }
 
-/// Sweep: distill then consolidate at 91 days out.
+
+/// Write the structural fingerprint lane entry for every active drawer —
+/// the encode rider's per-drawer work, applied estate-wide so tests that
+/// capture without draining a corpus queue reach the same populated lane.
+fn fingerprint_all(coord: &EstateCoordinator, handle: &genius_locus_kit::EstateHandle, now: i64) {
+    let estate = coord.estate_for(handle).expect("estate");
+    for d in estate.all_drawers().expect("all_drawers") {
+        if !d.content.is_empty() {
+            coord
+                .write_structural_fingerprint(handle, &d.id, &d.content, now)
+                .expect("write_structural_fingerprint");
+        }
+    }
+}
+
+/// Sweep: fingerprint then consolidate at 91 days out.
 fn sweep(
     coord: &EstateCoordinator,
     handle: &genius_locus_kit::EstateHandle,
     aged: i64,
     config: &ConsolidationConfig,
 ) -> usize {
-    coord
-        .distill_items_sweep(handle, aged - DAY, None)
-        .expect("distill sweep");
+    fingerprint_all(coord, handle, aged - DAY);
     coord
         .consolidation_sweep(handle, aged, config, None)
         .expect("consolidation sweep")
@@ -161,9 +174,7 @@ fn fold_in_monotone_ceiling_does_not_lower_tier() {
     // A fifth NORMAL item arrives and folds in.
     let fifth = "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria confirmed the Falcon rollout checklist.";
     capture_with_sensitivity(&coord, &handle, fifth, AdjectiveSensitivity::Normal, aged + 1);
-    coord
-        .distill_items_sweep(&handle, aged + 3_600, None)
-        .expect("distill fifth");
+    fingerprint_all(&coord, &handle, aged + 3_600);
 
     let mut fold_config = ConsolidationConfig::default();
     fold_config.hamming_ceiling = Some(90);

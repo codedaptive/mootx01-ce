@@ -171,13 +171,10 @@ public enum RecipeCatalog {
         // over a wing's tunnel graph (cookbook § 19.1). Consumes
         // SubstrateML.RandomWalks.walkWithRestart.
         RecipeDescriptor(ExploratoryRecall()),
-        // Distillation-family recipes (Dc1–Dc3, CDL-02). Registered here in one step
-        // rather than one per mission to avoid concurrent stream edits to this file.
-        // redistill (CDL-02): force-redistill all active items + full laneScope .all
-        // reindex so BM25 can admit trailer tokens from the updated distillates.
-        RecipeDescriptor(Distill()),
+        // Distilled-recall recipe: exact-search geometry with inline distilled-representation
+        // hydration — the ContextDistillLib converter runs at read time, so every row
+        // renders without a sweep dependency.
         RecipeDescriptor(DistilledRecall()),
-        RecipeDescriptor(Redistill()),
         // Escalation-ladder recall recipe (D10): runs cheap-first stages and
         // stops at the first confident result. Stage 1 = session_hybrid preset,
         // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.

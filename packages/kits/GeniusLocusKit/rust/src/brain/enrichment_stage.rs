@@ -2,8 +2,15 @@
 //! `GeniusLocusKit/Brain/EnrichmentStage.swift` — see that file and
 //! DECISION_DENSE_LANE_ENRICHMENT for the design and measured rationale.
 //! Deterministic end to end (HMM word-class baseline, bundled FDC canon).
+//!
+//! Schema 19: `facts(content)` returns the bare pair list stored in the
+//! `ssc_facts` column; `enrichment_trailer` renders the same pairs in the
+//! grammar-v1 `(*[ … ]*)` trailer format.
 
-use corpus_kit::trailer_lexical_supplement::{TRAILER_CLOSE, TRAILER_OPEN};
+// Grammar-v1 trailer delimiters — used by enrichment_trailer only.
+// The BM25 supplement path reads from ssc_facts directly (no scanning).
+const TRAILER_OPEN: &str = "(*[";
+const TRAILER_CLOSE: &str = "]*)";
 
 /// At most this many facts per trailer (Swift `EnrichmentStage.maxFacts`).
 pub const ENRICHMENT_MAX_FACTS: usize = 6;
@@ -11,11 +18,23 @@ pub const ENRICHMENT_MAX_FACTS: usize = 6;
 /// Nouns shorter than this never anchor (Swift `minNounLength`).
 pub(crate) const MIN_NOUN_LENGTH: usize = 3;
 
-/// Function words and fillers the word-class baseline sometimes admits as
-/// nouns. Pinned identically to the Swift twin; extending it bumps the
-/// pipeline version.
-pub(crate) const STOPWORDS: [&str; 48] = [
-    "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their", "his", "her", "its", "they", "them", "this", "that", "these", "those", "was", "were", "are", "been", "being", "have", "has", "had", "with", "from", "into", "about", "some", "any", "all", "each", "what", "which", "who", "how", "when", "where", "why", "yeah", "yes", "okay", "hey", "wow", "guess",
+/// Function words, conversational fillers, and evaluative adjectives the
+/// word-class baseline sometimes admits as nouns. Pinned identically to the
+/// Swift twin (see `Tests/Fixtures/ssc_stoplist.json`); extending it bumps
+/// the pipeline version.
+/// Schema 19: evaluative adjectives added: good, great, nice, sounds, plan, time, new.
+/// Measurement: "entity: good" ×1,077 was the most common wing fact before this stoplist.
+pub(crate) const STOPWORDS: [&str; 55] = [
+    // function words
+    "the", "and", "but", "for", "nor", "not", "you", "your", "our", "their",
+    "his", "her", "its", "they", "them", "this", "that", "these", "those",
+    "was", "were", "are", "been", "being", "have", "has", "had", "with",
+    "from", "into", "about", "some", "any", "all", "each", "what", "which",
+    "who", "how", "when", "where", "why",
+    // conversational fillers
+    "yeah", "yes", "okay", "hey", "wow", "guess",
+    // evaluative adjectives / generic nouns (schema 19, measured corpus junk)
+    "good", "great", "nice", "sounds", "plan", "time", "new",
 ];
 
 /// Lowercases a frame label and truncates at the first comma (the trailer
@@ -192,6 +211,81 @@ pub fn enrichment_trailer(content: &str) -> String {
     format!(" {TRAILER_OPEN} {body} {TRAILER_CLOSE}")
 }
 
+/// Returns the bare comma-separated pair list for the `drawers.ssc_facts`
+/// column (schema 19), or `None` when no facts can be derived. Twin of Swift
+/// `EnrichmentStage.facts(forContent:)`.
+///
+/// Output format: `"entity: louvre, place: paris"` — no grammar-v1 delimiters.
+/// Stop list applied: STOPWORDS blocks function words and evaluative adjectives.
+/// Proper-noun preference: tokens that appear capitalised in the source text
+/// are ranked before lowercase nouns (visited before the others in the
+/// single-token pass below).
+pub fn facts(content: &str) -> Option<String> {
+    let mut pairs: Vec<(&'static str, String)> = Vec::new();
+    let mut seen_values: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Collect tokens with a flag indicating whether they were capitalised in the source.
+    let mut indexed_tokens: Vec<(String, bool)> = content
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            let is_cap = t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            (t.to_lowercase(), is_cap)
+        })
+        .collect();
+
+    // Proper-noun preference: process capitalised tokens before lowercase ones.
+    indexed_tokens.sort_by_key(|(_, is_cap)| if *is_cap { 0 } else { 1 });
+
+    for (token, _) in &indexed_tokens {
+        if pairs.len() >= ENRICHMENT_MAX_FACTS {
+            break;
+        }
+        if token.chars().count() < MIN_NOUN_LENGTH
+            || STOPWORDS.contains(&token.as_str())
+            || seen_values.contains(&format!("entity:{token}"))
+            || lattice_lib::word_class_table::word_class_no_record(token)
+                != lattice_lib::WordClass::Noun
+        {
+            continue;
+        }
+        let anchor = eidetic_lib::lookup(token);
+        if anchor.code.is_empty() || anchor.code == "000" {
+            continue;
+        }
+        if seen_values.insert(format!("entity:{token}")) {
+            pairs.push(("entity", token.clone()));
+        }
+        if pairs.len() < ENRICHMENT_MAX_FACTS {
+            if let Some(qid) = &anchor.wikidata_qid {
+                if !qid.is_empty() {
+                    if let Some(country) = lattice_lib::qid_facts::country_label(qid) {
+                        let country = grammar_safe(&country);
+                        if seen_values.insert(format!("place:{token}")) {
+                            pairs.push(("place", token.clone()));
+                        }
+                        if pairs.len() < ENRICHMENT_MAX_FACTS
+                            && seen_values.insert(format!("country:{country}"))
+                        {
+                            pairs.push(("country", country));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(
+        pairs
+            .iter()
+            .map(|(l, v)| format!("{l}: {v}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
 
 /// Query-side lattice anchoring (W2.5 Track S): derives the ONE §8.3 lattice
 /// anchor a recall query is "about", using the SAME selection rules as
@@ -255,13 +349,11 @@ mod tests {
         let content = "I finally finished my first full screenplay and printed it last Friday.";
         let t = enrichment_trailer(content);
         if !t.is_empty() {
+            // Trailer still uses grammar-v1 delimiters (ContextDistillLib path).
             assert!(t.starts_with(" (*[ "));
             assert!(t.ends_with(" ]*)"));
-            assert_ne!(
-                corpus_kit::trailer_lexical_supplement::lexical_supplement(
-                    Some(&format!("body.{t}"))),
-                "");
         }
+        // Determinism: same input, same output.
         assert_eq!(t, enrichment_trailer(content));
     }
 
@@ -355,5 +447,32 @@ mod tests {
             let set: std::collections::HashSet<&str> = pairs.iter().copied().collect();
             assert_eq!(set.len(), pairs.len());
         }
+    }
+
+    // Schema 19 tests for facts() API (ssc_facts column path)
+    #[test]
+    fn facts_evaluative_adjectives_blocked() {
+        // Failure mode: stop list missing "good" → "entity: good" appears.
+        let content = "We met Sarah at the Louvre on Tuesday, it was good";
+        let f = facts(content);
+        if let Some(f) = f {
+            assert!(!f.contains("entity: good"), "evaluative adjective leaked: {f}");
+        }
+    }
+
+    #[test]
+    fn facts_returns_bare_pairs_no_delimiters() {
+        // facts() must never include (*[ ]*) delimiters — those belong to enrichment_trailer.
+        let content = "We visited the Louvre in Paris last Tuesday.";
+        if let Some(f) = facts(content) {
+            assert!(!f.contains("(*["), "delimiter leaked into facts: {f}");
+            assert!(!f.contains("]*)"), "delimiter leaked into facts: {f}");
+        }
+    }
+
+    #[test]
+    fn facts_none_when_nothing_anchors() {
+        assert_eq!(facts(""), None);
+        assert_eq!(facts("ok so um yeah"), None);
     }
 }

@@ -194,10 +194,8 @@ public extension Estate {
             embeddingModelID: frame.embeddingModelID,
             provenance: provenanceBitmap,
             adjectiveBitmap: adjBitmap,
-            // New captures start bare: no adornment rows exist yet for this drawer.
-            // The adornment debt queue (adornmentDebtBatch) discovers missing
-            // (drawer, minter) pairs by querying the adornments table directly —
-            // no bitmap bit required (ADORN-STORE-02 v17, bits 27-30 now FREE).
+            // New captures start with bit 27 clear: the span-encode duty picks
+            // them up through spanIndexDebtBatch.
             operationalBitmap: opBitmap,
             lineageID: frame.lineageID ?? UUID(),
             udcCode: frame.latticeAnchor.udcCode,
@@ -384,9 +382,8 @@ public extension Estate {
                 embeddingModelID: frame.embeddingModelID,
                 provenance: provenanceBitmap,
                 adjectiveBitmap: adjBitmap,
-                // New (superseding) drawers start bare: no adornment rows yet.
-                // AdornmentPass discovers missing (drawer, minter) pairs via
-                // adornmentDebtBatch, not via a bitmap bit (ADORN-STORE-02 v17).
+                // Superseding drawers start with bit 27 clear; the span-encode
+                // duty picks them up through spanIndexDebtBatch.
                 operationalBitmap: opBitmap,
                 lineageID: frame.lineageID ?? UUID(),
                 udcCode: frame.latticeAnchor.udcCode,

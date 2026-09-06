@@ -460,12 +460,12 @@ public extension Estate {
         }
 
         // AND-in the cleared operational bitmap to lower the room/wing
-        // operationalAND aggregate. updateDatasetContent clears bit 19
-        // (hasCurrentRepresentation) on a live (non-tombstoned) drawer;
-        // if the room AND previously showed bit 19 = 1 (all drawers
-        // distilled), the sweep would otherwise falsely skip the room.
-        // Lowering is always safe (under-approximation). Tombstone/expunge
-        // paths need no AND-in — the sweep only visits active drawers.
+        // operationalAND aggregate. updateDatasetContent clears the
+        // content-derived bits (19, 27) on a live (non-tombstoned) drawer;
+        // a room AND that still showed those bits set would misreport the
+        // room's state to any AND-check. Lowering is always safe
+        // (under-approximation). Tombstone/expunge paths need no AND-in —
+        // AND-checks only visit active drawers.
         let nodeNames = try await store.resolveNodeNames(parentNodeIds: [refreshed.parentNodeId])
         let resolved = nodeNames[refreshed.parentNodeId] ?? (wing: "", room: "")
         try await containerFP.andInOperational(

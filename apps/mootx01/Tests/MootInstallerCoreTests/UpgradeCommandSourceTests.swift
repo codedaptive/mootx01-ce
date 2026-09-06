@@ -33,27 +33,35 @@ struct UpgradeCommandSourceTests {
         #expect(source.contains("backfillOnly"))
     }
 
-    @Test("--backfill-only branch calls only the five data-dir backfills and exits non-zero on failure")
+    @Test("--backfill-only branch calls only the six data-dir steps, gates them on the schema step, and exits non-zero on failure")
     func backfillOnlyBranchIsHeadless() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
-        // The backfillOnly branch must contain all five backfill calls in order.
+        // The backfillOnly branch must contain all six steps in order.
         let branchStart = try #require(
             source.range(of: "if backfillOnly {")?.lowerBound)
         let branchEnd = try #require(
             source.range(of: "return\n        }\n\n        // --check:", range: branchStart..<source.endIndex)?.upperBound)
         let branch = source[branchStart..<branchEnd]
-        // All five backfills must appear (runAdornmentRequiredBackfill renamed
-        // to runAdornmentStoreMigration in ADORN-STORE-02 Part C).
+        // The schema step gates the rest: a refused version must stop the
+        // sequence before any other step can open the schema and stamp it.
+        #expect(branch.contains("guard await runSchemaUpgrade(home: home) else { throw ExitCode.failure }"))
         #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
-        #expect(branch.contains("await runAdornmentStoreMigration(home: home)"))
         #expect(branch.contains("await runSharedContentReclaimIfPending(home: home)"))
         #expect(branch.contains("await runDensePoolingConvergence(home: home)"))
-        #expect(branch.contains("await runDistilledRepresentationConvergence(home: home)"))
-        // The dense pooling convergence runs BEFORE the distilled representation
-        // convergence, so the latter's estate open never absorbs the rebuild unreported.
+        #expect(branch.contains("await runSpanEncodeBackfill(home: home)"))
+        #expect(branch.contains("await runVectorReclaim(home: home)"))
+        // Retired steps must not come back.
+        #expect(!branch.contains("runAdornmentStoreMigration"))
+        #expect(!branch.contains("runDistilledRepresentationConvergence"))
+        // The dense pooling convergence runs BEFORE the span-encode step, so
+        // the latter's estate open never absorbs the rebuild unreported; the
+        // vector reclaim runs last, after the span rows exist.
+        let schemaAt = try #require(branch.range(of: "runSchemaUpgrade(home: home)")?.lowerBound)
         let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(home: home)")?.lowerBound)
-        let distilledAt = try #require(branch.range(of: "await runDistilledRepresentationConvergence(home: home)")?.lowerBound)
-        #expect(denseAt < distilledAt, "dense pooling convergence must precede the distilled representation convergence")
+        let spanAt = try #require(branch.range(of: "await runSpanEncodeBackfill(home: home)")?.lowerBound)
+        let reclaimAt = try #require(branch.range(of: "await runVectorReclaim(home: home)")?.lowerBound)
+        #expect(schemaAt < denseAt && denseAt < spanAt && spanAt < reclaimAt,
+                "schema → dense pooling → span encode → vector reclaim")
         // A failed step must surface as a non-zero exit for scripted callers.
         #expect(branch.contains("throw ExitCode.failure"))
         // launchd and network calls must NOT appear in the branch.
@@ -76,17 +84,20 @@ struct UpgradeCommandSourceTests {
         // Each step is bounded by its own declaration and the doc comment
         // of the function that follows it in the file.
         let steps: [(name: String, start: String, end: String)] = [
+            ("runSchemaUpgrade",
+             "private func runSchemaUpgrade",
+             "/// MXE-MI: move pre-MXE-KH"),
             ("runKGFactIdentityBackfill",
              "private func runKGFactIdentityBackfill",
              "/// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)"),
             ("runDensePoolingConvergence",
              "private func runDensePoolingConvergence",
              "/// Provider keys (`model_id@model_version`) whose part-0 basis row carries"),
-            ("runDistilledRepresentationConvergence",
-             "private func runDistilledRepresentationConvergence",
-             "/// ADORN-STORE-02 Part C:"),
-            ("runAdornmentStoreMigration",
-             "private func runAdornmentStoreMigration",
+            ("runSpanEncodeBackfill",
+             "private func runSpanEncodeBackfill",
+             "/// Models whose vector rows `mootx01 upgrade` reclaims"),
+            ("runVectorReclaim",
+             "private func runVectorReclaim",
              "/// P5 of the shared-content"),
             ("runSharedContentReclaimIfPending",
              "private func runSharedContentReclaimIfPending",
@@ -127,48 +138,22 @@ struct UpgradeCommandSourceTests {
         #expect(body.contains("daemon: resident ? .launchd(homeDirectory: home) : .none"))
     }
 
-    @Test("runDistilledRepresentationConvergence uses two-key eligibility gate")
-    func distilledRepresentationUseTwoKeyGate() throws {
-        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
-        // Locate the runDistilledRepresentationConvergence function body.
-        let funcStart = try #require(
-            source.range(of: "private func runDistilledRepresentationConvergence")?.lowerBound)
-        // The next private func starts the ADORN-STORE migration section; use it as the end anchor.
-        let funcEnd = try #require(
-            source.range(of: "/// ADORN-STORE-02 Part C:", range: funcStart..<source.endIndex)?.lowerBound)
-        let body = source[funcStart..<funcEnd]
-        // Both eligibility keys must appear in the function body.
-        #expect(body.contains("distilledRepresentationsAwaitingReindex(handle: handle)"),
-                "second eligibility key: awaiting-reindex count must be fetched")
-        // The gate must check both keys with a logical-or.
-        #expect(body.contains("regenerated > 0 || awaiting > 0"),
-                "gate must fire on regenerated OR awaiting")
-        // The crash-recovery branch message must be present.
-        #expect(body.contains("index gap detected"),
-                "crash-recovery message must name the detected gap")
-    }
-
-    @Test("runDistilledRepresentationConvergence prints the active converter id and runs the sweep, probe, reindex call tree")
-    func distilledRepresentationConvergencePrintsActiveConverter() throws {
+    @Test("runSchemaUpgrade reads the ledger raw, decides with upgradePath, and refuses by version before any open")
+    func schemaUpgradeRefusesBeforeOpening() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
         let funcStart = try #require(
-            source.range(of: "private func runDistilledRepresentationConvergence")?.lowerBound)
+            source.range(of: "private func runSchemaUpgrade")?.lowerBound)
         let funcEnd = try #require(
-            source.range(of: "/// ADORN-STORE-02 Part C:", range: funcStart..<source.endIndex)?.lowerBound)
+            source.range(of: "/// MXE-MI: move pre-MXE-KH", range: funcStart..<source.endIndex)?.lowerBound)
         let body = source[funcStart..<funcEnd]
-        // The printed converter is the kit constant, never a literal: the CLI
-        // reports whatever converter GeniusLocusKit activates.
-        #expect(body.contains("already at converter \\(GeniusLocusKit.distillationConverterID)"))
-        #expect(body.contains("regenerated at converter \\(GeniusLocusKit.distillationConverterID)"))
-        #expect(!body.contains("intent-span-v2"), "the command must not name a converter literally")
-        // The call tree, in order: catalog (carries the 1.3 capsule), substores,
-        // eligibility sweep, awaiting-reindex probe, reindex.
+        // The decision comes from LocusKit's gate, on the raw ledger row.
         let steps = [
-            "GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())",
-            "kit.wireGLKSubstores(for: handle, backingStorage: storage)",
-            "kit.distillItemsSweep(",
-            "kit.distilledRepresentationsAwaitingReindex(handle: handle)",
-            "kit.reindexCorpus(handle: handle, now: now)",
+            "storage.currentSchemaVersion(for: LocusKitSchema.kitID)",
+            "LocusKitSchema.upgradePath(storedVersion: stored)",
+            "case .unsupported(let found):",
+            "schema upgrade refused",
+            "case .upgrade(let from):",
+            "storage.open(schema: LocusKitSchema.schema)",
         ]
         var cursor = body.startIndex
         for step in steps {
@@ -176,10 +161,31 @@ struct UpgradeCommandSourceTests {
                                      "missing or out of order: \(step)")
             cursor = found.upperBound
         }
-        // The upgrade command adds no migration step of its own for the digest
-        // column: no capsule or ladder call outside the catalog.
-        #expect(!body.contains("runDistilledSourceDigestColumnMigration"))
-        #expect(!body.contains("LocusKitSchema.schema"))
+        // The refusal names the version found and changes nothing.
+        #expect(body.contains("nothing was changed"))
+        // No ladder walk of its own: one open of the declared schema is the hop.
+        #expect(!body.contains("Migration(fromVersion"))
+    }
+
+    @Test("runSpanEncodeBackfill and runVectorReclaim open through the migration catalog before touching the vector tier")
+    func spanEncodeAndReclaimRunTheCatalogFirst() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        for (name, end) in [
+            ("private func runSpanEncodeBackfill", "/// Models whose vector rows `mootx01 upgrade` reclaims"),
+            ("private func runVectorReclaim", "/// P5 of the shared-content"),
+        ] {
+            let funcStart = try #require(source.range(of: name)?.lowerBound)
+            let funcEnd = try #require(source.range(of: end, range: funcStart..<source.endIndex)?.lowerBound)
+            let body = source[funcStart..<funcEnd]
+            // The catalog moves the vector tier's ledger rows to their SynapseKit
+            // ids (1.4 → 1.5) before any store below opens under the new id.
+            let catalogAt = try #require(body.range(of: "GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())")?.lowerBound)
+            let vectorAt = try #require(
+                body.range(of: name.hasSuffix("Backfill") ? "SpanEncodeBackfill.run(" : "VectorStore(storage: storage)")?.lowerBound)
+            #expect(catalogAt < vectorAt, "\(name): the catalog must run before the vector tier is touched")
+        }
+        // The reclaim names the retired families once, in the shared constant.
+        #expect(source.contains("static let retiredDenseFamilyModelIDs = [\"lsa-v1\", \"nmf-v1\", \"ppmi-v1\", \"fdc-v1\"]"))
     }
 
     @Test("An already-current upgrade still runs the KG fact backfill")

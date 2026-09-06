@@ -219,8 +219,8 @@ package let rowCryptoKeyIDColumn = "keyID"
 ///    plaintext on an encrypting estate discloses the substance of a sealed
 ///    row. A column that records only *how* or *when* a value was produced is
 ///    not content-derived and stays plaintext: `subject_pipeline_version`,
-///    `subject_at`, `distilled_pipeline_version`, `distilled_at`. Nor are the
-///    `content_hash` / `content_fingerprint` digests, which are computed over
+///    `subject_at`. Nor are the `content_hash` / `content_fingerprint`
+///    digests, which are computed over
 ///    content rather than carrying it, and which index and deduplication
 ///    read directly.
 ///
@@ -271,7 +271,7 @@ package let rowCryptoKeyIDColumn = "keyID"
 /// itself rather than restate its contents — a test that restates the map
 /// cannot fail when the map gains a wrong entry.
 package let rowCryptoProtectedColumnsByTable: [String: [String]] = [
-    "drawers": ["content", "distilled", "subject"]
+    "drawers": ["content", "ssc_facts", "subject"]
 ]
 
 /// The protected columns for `table`, or an empty list when the table has
@@ -324,8 +324,8 @@ package func rowCryptoProjectionNeedsKeyID(
 /// in the schema is the expunge/zeroization scrub (`content = ""`), which
 /// must stay a plaintext-empty erasure marker — the same exemption
 /// `assertContentKeyIDInvariant` documents (#76). A representation-only
-/// UPDATE (a value map with "distilled" but no "content") is sealed and
-/// keyID-stamped exactly like a content write, so the distillation write
+/// UPDATE (a value map with "ssc_facts" but no "content") is sealed and
+/// keyID-stamped exactly like a content write, so the SSC-facts write
 /// path never persists plaintext derived text on an encrypting estate.
 package func encryptedForWrite(
     _ values: [String: TypedValue],

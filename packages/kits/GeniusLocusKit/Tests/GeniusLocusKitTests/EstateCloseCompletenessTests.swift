@@ -158,21 +158,19 @@ struct EstateCloseCompletenessTests {
         // Guard the reflection scanner itself. If the stored-property shape
         // ever drifts far enough that reflection finds nothing, the emptiness
         // assertion below would pass vacuously and the enforcement would be
-        // silently gone. 22 registries are declared as of this mission.
+        // silently gone. 21 registries are declared at schema 19.
         let declared = await kit.declaredRegistryNames()
         let driftMessage = """
             reflection found only \(declared.count) per-estate registries — the \
             audit has drifted from the declaration block: \(declared)
             """
-        #expect(declared.count >= 22, Comment(rawValue: driftMessage))
+        #expect(declared.count >= 21, Comment(rawValue: driftMessage))
 
         // Populate every registry this test can reach through public API.
         // `open` itself has already populated registry, storages, mountStates.
         try await kit.registerSubjectProducer(StubProducer(), for: handle)
         await kit.registerGraphCache(StubGraphCache(), for: handle)
         await kit.registerPreferenceStore(StubPreferenceStore(), for: handle)
-        await kit.registerDistillationFunction(
-            GeniusLocusKit.defaultDistillFn, for: handle)
         // Minting the standing-signal scheduler is what populates `schedulers`.
         _ = try await kit.registerStandingSignal(
             SignalSpec(

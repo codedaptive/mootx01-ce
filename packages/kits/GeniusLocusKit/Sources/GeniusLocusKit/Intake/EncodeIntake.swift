@@ -133,7 +133,9 @@ public extension GeniusLocusKit {
             return classified
         }()
 
-        // 1. Store the drawer row (identical to the legacy capture verb).
+        // 1. Store the drawer row through the row-only capture verb, which
+        //    also writes the drawer's SSC facts (contract sheet §6) before any
+        //    encode reads the column.
         let drawer = try await capture(handle, classifiedFrame)
 
         // 2. Encode per mode — only when a Corpus is registered for the estate.
@@ -151,11 +153,14 @@ public extension GeniusLocusKit {
             // inside the engine). The drawer row is already durably stored, so
             // an ingest failure surfaces to the caller without losing content.
             try await ingestDrawerIntoCorpus(handle: handle, drawer: drawer)
-            // NT-L3: Impatient skips the encode queue, so it also rolls up the
-            // drawer's room inline (one capture → one room, O(room) once) rather
-            // than via the Corpus drain worker's onEncoded callback.
+            // NT-L3: Impatient skips the encode queue, so it also performs the
+            // encode rider's work inline: the room rollup (one capture → one
+            // room, O(room) once) and the structural fingerprint lane entry,
+            // rather than via the Corpus drain worker's onEncoded callback.
             let estate = try estate(for: handle)
             try await estate.rollupRoomsForDrawers([drawer.id])
+            try await writeStructuralFingerprint(
+                handle: handle, drawerID: drawer.id, content: drawer.content, now: drawer.filedAt)
         case .regular:
             // Shared-content 1.1: enqueue a Drawer CHANGE REFERENCE — id,
             // revision, digest — never the text. The engine's drain worker
@@ -297,7 +302,42 @@ public extension GeniusLocusKit {
             classifiedFrames = results.map { $0! }
         }
         let estateObj = try estate(for: handle)
-        return try await estateObj.captureBatch(classifiedFrames)
+        let drawers = try await estateObj.captureBatch(classifiedFrames)
+        // SSC facts (contract sheet §6) for every imported drawer, written
+        // after the batch commit and before the caller's `moot_reindex` builds
+        // the BM25 documents from the column. The facts are a pure function
+        // of content, so they are computed with the same fan-out as the
+        // classify pass above; the writes are per-row updates like the
+        // post-insert fingerprint rollup LocusKit already performs.
+        let facts: [String?]
+        if drawers.count <= cap {
+            facts = drawers.map { EnrichmentStage.facts(forContent: $0.content) }
+        } else {
+            var results = [String??](repeating: nil, count: drawers.count)
+            var start = 0
+            while start < drawers.count {
+                let end = min(start + cap, drawers.count)
+                await withTaskGroup(of: (Int, String?).self) { group in
+                    for i in start..<end {
+                        let content = drawers[i].content
+                        group.addTask { (i, EnrichmentStage.facts(forContent: content)) }
+                    }
+                    for await (i, value) in group {
+                        results[i] = .some(value)
+                    }
+                }
+                start = end
+            }
+            facts = results.map { $0! }
+        }
+        for (drawer, value) in zip(drawers, facts) where !drawer.content.isEmpty {
+            do {
+                _ = try await estateObj.setSSCFacts(value, for: drawer.id)
+            } catch {
+                Self.intakeLog.warning("ssc_facts write failed for imported drawer \(drawer.id, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+        return drawers
     }
 
     // MARK: - awaitEncodeDrain (P5 consumer)
@@ -679,44 +719,38 @@ public extension GeniusLocusKit {
 
     // MARK: - Internals
 
-    /// Wire the engine's `onEncoded` callback to (1) roll up the touched
-    /// LocusKit rooms and (2) distill the encoded drawers — the drain-stage
-    /// distillation path (SPEC_DISTILLATION_STORAGE §7.1).
+    /// Wire the engine's `onEncoded` callback — the encode rider — to (1) roll
+    /// up the touched LocusKit rooms, (2) append the A2 encode-completion
+    /// marker, and (3) write each encoded drawer's structural fingerprint lane
+    /// entry (`writeStructuralFingerprint`).
     ///
     /// CorpusKit owns the encode pipeline and fires this callback with the
     /// encoded drawer ids while the batch's jobs are STILL IN-FLIGHT (the
-    /// engine replies after the callback returns), so both the rollup and
-    /// the distillation participate in drain-completion accounting: after
-    /// `awaitEncodeDrain` returns, every captured drawer that rode the
-    /// encode stream is BM25/vector searchable AND carries its distilled
-    /// representation — "a fully drained estate is a fully distilled
-    /// estate". GLK never performs the encode itself.
-    ///
-    /// The distillation runs the estate's registered distillFn (test
-    /// stubs) or `GeniusLocusKit.defaultDistillFn` (the p1 contract).
-    /// Only drawers still eligible (representation NULL or stale pipeline
-    /// version) are distilled, so regeneration jobs and capture jobs ride
-    /// the same path idempotently. Best-effort like the rollup: a
-    /// distillation failure is non-fatal — the drawer rows are durable and
-    /// the next `moot_distill` sweep repopulates by the NULL predicate.
+    /// engine replies after the callback returns), so the rider's work
+    /// participates in drain-completion accounting: after `awaitEncodeDrain`
+    /// returns, every captured drawer that rode the encode stream is
+    /// BM25/vector searchable, rolled up, and present in the fingerprint lane.
+    /// GLK never performs the encode itself. Every step is best-effort: the
+    /// drawer rows and the corpus index are durable, and a failed rider step
+    /// is repeated on the drawer's next encode.
     ///
     /// Called from `wireSubstores` (for `.glk`/`.corpusOnly` estates) on both
     /// the provision and serve-open paths, BEFORE `mountIngestQueue`: the mount
     /// starts the drain worker on the persisted queue, and a serve-open resumed
     /// backlog must find this rider already installed or its batches encode
-    /// without distilling (SPEC_DISTILLATION_STORAGE §7.1). The closure captures
-    /// the GLK actor AND the engine weakly: it is stored on the engine, so a
-    /// strong engine capture would make the engine own itself and outlive every
-    /// kit reference, its drain worker with it. The closure runs inside the
-    /// engine's own drain pass, so the engine resolves whenever it matters.
+    /// without the rider's work. The closure captures the GLK actor AND the
+    /// engine weakly: it is stored on the engine, so a strong engine capture
+    /// would make the engine own itself and outlive every kit reference, its
+    /// drain worker with it. The closure runs inside the engine's own drain
+    /// pass, so the engine resolves whenever it matters.
     internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
         await corpus.setOnEncoded { [weak self, weak corpus] drawerIDs, unitSessionID in
-            guard let self, let corpus else { return }
+            guard let self, corpus != nil else { return }
             // Marker timestamp is captured at CALLBACK ENTRY — the moment the
-            // drain unit's encode work completed — never after rollup or
-            // distillation, so the A2 marker anchors on encode-end in BOTH
-            // ports (the C3 INGEST derivation depends on this alignment;
-            // Rust twin captures its now_ms at the same boundary).
+            // drain unit's encode work completed — never after the rollup or
+            // the fingerprint writes, so the A2 marker anchors on encode-end
+            // in BOTH ports (the C3 INGEST derivation depends on this
+            // alignment; Rust twin captures its now_ms at the same boundary).
             let encodeCompletedAt = Date()
             guard let estate = try? await self.estate(for: handle) else { return }
             try? await estate.rollupRoomsForDrawers(drawerIDs)
@@ -740,53 +774,44 @@ public extension GeniusLocusKit {
                     Self.intakeLog.warning("encode-completion marker failed for unit \(unitSessionID, privacy: .public): \(error, privacy: .public)")
                 }
             }
-            // Drain-stage distillation (§7.1): distill each encoded drawer
-            // that is still eligible. The clock is the wall clock at drain
-            // time — `distilled_at` is audit-only and carries no behavioral
-            // weight (§4), and the drain worker is the process boundary
-            // where "now" legitimately enters (the same boundary that
-            // stamps the drain loop's lease heartbeats). Determinism of the
-            // RENDERING is unaffected: it is a function of
-            // (content, pipeline version) only.
-            let distillFn = await self.distillFunction(for: handle)
-            let now = Date()
+            // Structural fingerprint lane: one `distillation-features-v1`
+            // entry per encoded drawer, so the drawer is reachable by the
+            // fingerprint recall lane and by consolidation's cluster detection
+            // from the moment it is searchable in the corpus. The lane entry
+            // is stamped with the encode-completion instant, the same clock
+            // the marker above carries. Rust twin: wire_corpus_on_encoded.
             for drawerID in drawerIDs {
                 guard let drawer = try? await estate.getDrawers(ids: [drawerID]).first,
-                      !drawer.content.isEmpty,
-                      // The one currency rule (cookbook §2.4.1 / SPEC §7.1):
-                      // a freshly encoded drawer normally carries no
-                      // representation; one that does is regenerated only
-                      // when its converter ID or source digest is stale.
-                      !GeniusLocusKit.distilledRepresentationIsCurrent(drawer)
+                      !drawer.content.isEmpty
                 else { continue }
-                let didDistill = (try? await self.distillItem(
-                    handle: handle, drawerID: drawer.id, content: drawer.content,
-                    distillFn: distillFn, now: now)) == true
-                if didDistill {
-                    // Dense-over-distillate (Stream F): recompose the dense
-                    // float vector from the newly-written distillate. The
-                    // idempotence gate in CorpusContentEngine keys on content
-                    // digest (not on denseCompositionText), so a normal
-                    // index() call would be silently skipped — here
-                    // recomposeDenseVector passes force=true to bypass the gate.
-                    // Routes through the CCE actor (FINDING_11X_MAINTENANCE_WALK
-                    // constraint 3: recompose writes must route through CCE, not
-                    // directly to VectorStore).
-                    // Best-effort: non-fatal; drain completion accounting is
-                    // unaffected (distillation is the drain-stage obligation —
-                    // recompose is opportunistic post-distillation work).
-                    _ = try? await corpus.recomposeDenseVector(id: drawerID, now: now)
+                do {
+                    try await self.writeStructuralFingerprint(
+                        handle: handle, drawerID: drawer.id, content: drawer.content,
+                        now: encodeCompletedAt)
+                } catch {
+                    Self.intakeLog.warning("fingerprint lane write failed for drawer \(drawer.id, privacy: .public): \(error, privacy: .public)")
                 }
             }
         }
     }
 
-    /// The estate's drain-stage distillation function: the registered
-    /// override (test scaffolds) or the p1 default.
-    internal func distillFunction(
-        for handle: EstateHandle
-    ) -> @Sendable (DistillationInput) -> DistillationOutput {
-        distillFunctions[handle] ?? Self.defaultDistillFn
+    /// Compute and store one drawer's SSC facts — `EnrichmentStage.facts`,
+    /// the bare grammar-v1 pair list (e.g. "entity: louvre, place: paris")
+    /// that `SSCFacts.lexicalSupplement` tokenises into the BM25 document
+    /// (contract sheet §6). Runs after every content write and before that
+    /// content is indexed; NULL when no noun anchors. Empty content writes
+    /// nothing. Best-effort: the drawer row is already durable, so a failed
+    /// facts write is logged rather than failing the capture. Rust twin:
+    /// `write_ssc_facts`.
+    internal func writeSSCFacts(handle: EstateHandle, drawer: Drawer) async {
+        guard !drawer.content.isEmpty else { return }
+        do {
+            let estate = try estate(for: handle)
+            _ = try await estate.setSSCFacts(
+                EnrichmentStage.facts(forContent: drawer.content), for: drawer.id)
+        } catch {
+            Self.intakeLog.warning("ssc_facts write failed for drawer \(drawer.id, privacy: .public): \(error, privacy: .public)")
+        }
     }
 
     /// Ingest a single drawer into the estate's Corpus (the P6 inline path),

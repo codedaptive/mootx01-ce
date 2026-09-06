@@ -1,3 +1,6 @@
+#if APPLE_ENCODERS
+// Apple encoder test — compiled only when AppleEncoders trait is on.
+// Off by default; held for v1.2. See Package.swift.
 // NeuralEmbedProviderTests.swift
 //
 // Bare-minimum contract test for NeuralEmbedProvider — the Swift twin of
@@ -49,3 +52,5 @@ struct NeuralEmbedProviderTests {
     }
 }
 #endif // canImport(NaturalLanguage)
+
+#endif // APPLE_ENCODERS
