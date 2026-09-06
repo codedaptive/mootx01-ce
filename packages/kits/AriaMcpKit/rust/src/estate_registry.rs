@@ -169,6 +169,13 @@ impl EstateRegistry {
             .unwrap()
             .open(Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
             .expect("default estate open must succeed");
+        // A fresh in-memory estate is born with the span encoder as its default
+        // recall stage; written before wiring so this open activates it.
+        coord
+            .lock()
+            .unwrap()
+            .provision_default_encoder_if_absent(&handle)
+            .expect("default encoder provisioning must succeed on a fresh in-memory estate");
         // Wire semantic recall lanes on a second InMemoryStorage handle.
         // Panics on corpus/vector-store construction failure — this must not
         // fail in a correct build; the InMemory backend never returns I/O errors.
@@ -297,6 +304,9 @@ impl EstateRegistry {
     /// admission, semantic-recall wiring) is one implementation so the ports
     /// cannot drift between the serve and upgrade opens.
     fn open_sqlite(path: &str, owner: &str, seeding: SqliteOpenSeeding) -> Result<Self, String> {
+        // First run = no estate file before this open. Read before anything
+        // below can create the file; it gates the create-time defaults.
+        let first_run = !std::path::Path::new(path).exists();
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         // Production model-directory resolver, installed before `coord.open`
         // and the semantic-recall wiring below: the wiring acts on the
@@ -371,6 +381,17 @@ impl EstateRegistry {
         let shared_storage = store.storage().ok_or_else(|| {
             format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
         })?;
+        // A fresh SQLite estate (no file before this open) is born with the span
+        // encoder as its default recall stage; written before wiring so this
+        // open activates it. Existing estates get the key from `mootx01
+        // upgrade`, never from a serve open. Swift twin: ServeCommand isFirstRun.
+        if first_run {
+            coord
+                .lock()
+                .unwrap()
+                .provision_default_encoder_if_absent(&handle)
+                .map_err(|e| format!("aria-mcp: default encoder provisioning failed for {path:?}: {e:?}"))?;
+        }
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         match seeding {
@@ -534,6 +555,15 @@ impl EstateRegistry {
             .unwrap()
             .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("default postgres estate open must succeed");
+        // This entry point creates on every open (there is no first-run signal
+        // for a connection string), so the create-time default belongs here:
+        // the span encoder becomes the recall stage of an estate that names no
+        // provider; an estate that already names one is left alone.
+        coord
+            .lock()
+            .unwrap()
+            .provision_default_encoder_if_absent(&handle)
+            .map_err(|e| format!("aria-mcp: default encoder provisioning failed (postgres): {e:?}"))?;
         // Wire semantic recall lanes — same policy as new_sqlite.
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
