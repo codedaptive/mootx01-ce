@@ -244,7 +244,7 @@ fn run_convergence() {
 /// found, and return false so the caller skips every later step. The refusal
 /// must come first because persistence-kit's runner stamps the declared
 /// version whenever no ladder entry matches: any later step's open would mark
-/// an estate at 11–18 as 19 with none of the v19 objects in place. EE
+/// an estate at 11–18 as 19 with none of the v19 objects in place. Pre-release
 /// development estates at 18 are moved by the surgery script, never by this
 /// command. Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
 ///
@@ -284,7 +284,7 @@ fn run_schema_upgrade() -> bool {
                     .map_err(|e| e.to_string())?;
                 let outcome = match schema::upgrade_path(stored) {
                     SchemaUpgradePath::Unsupported { found } => Err(format!(
-                        "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    An EE development estate at 11–18 is brought to 19 by benchmark-ee/scripts/schema18-to-19-surgery.sh; a newer estate needs a newer build.",
+                        "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    A pre-release development estate at 11–18 is moved to 19 by the schema surgery script, not by this build; a newer estate needs a newer build.",
                         schema::SUPPORTED_UPGRADE_FLOOR,
                         schema::SCHEMA_VERSION
                     )),

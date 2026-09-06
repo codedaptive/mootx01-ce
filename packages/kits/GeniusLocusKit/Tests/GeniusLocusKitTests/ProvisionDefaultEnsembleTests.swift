@@ -101,7 +101,7 @@ struct ProvisionDefaultEnsembleTests {
 
     // Verify that the provision default wires the expected default ensemble.
     // With DenseFamilies OFF (default, plan 70BC55F3): RI only (1 signal).
-    // With DenseFamilies ON: all five honest signals.
+    // With DenseFamilies ON: all five signals.
     @Test("provision default wires the configured default ensemble")
     func provisionWiresDefaultEnsemble() async throws {
         let kit = GeniusLocusKit()
