@@ -25,7 +25,7 @@ pub struct TrainingSignal;
 
 impl TrainingSignal {
     /// Hourly cadence in seconds (3 600 = 1 hour) matching the
-    /// DistillationSignal and TemporalCausalitySignal rhythm at §11.2.
+    /// TemporalCausalitySignal rhythm at §11.2.
     /// Mirrors Swift's `TrainingSignal.defaultCadenceSeconds`.
     pub const DEFAULT_CADENCE_SECONDS: u64 = 3_600;
 

@@ -54,14 +54,15 @@ struct KGFactIdentityBackfillTests {
         key == "drawer_alpha_0001" ? palaceLineage : nullResolver(key)
     }
 
-    /// The v12 LocusKit schema shape: identical to the live declaration
-    /// except `kg_facts` lacks the identity trio and the ladder is empty
-    /// (so opening records exactly version 12, the way a pre-KH estate
-    /// on disk is recorded).
-    private func v12Schema() -> SchemaDeclaration {
+    /// The pre-KH schema shape at the supported upgrade floor (schema 10):
+    /// identical to the live declaration except `kg_facts` lacks the
+    /// identity trio and the ladder is empty (so opening records exactly
+    /// version 10, the way a CE 1.0.x estate on disk is recorded). The
+    /// single v10 → v19 hop is what adds the trio.
+    private func v10Schema() -> SchemaDeclaration {
         let live = LocusKitSchema.schema
         let identityTrio: Set<String> = ["addedBy", "foreignSourceKey", "foreignRecordID"]
-        let v12KGFacts = TableDeclaration(
+        let v10KGFacts = TableDeclaration(
             name: "kg_facts",
             columns: LocusKitSchema.kgFactsTable.columns.filter {
                 !identityTrio.contains($0.name)
@@ -71,14 +72,14 @@ struct KGFactIdentityBackfillTests {
         )
         return SchemaDeclaration(
             kitID: LocusKitSchema.kitID,
-            version: 12,
-            tables: live.tables.map { $0.name == "kg_facts" ? v12KGFacts : $0 },
+            version: LocusKitSchema.supportedUpgradeFloor,
+            tables: live.tables.map { $0.name == "kg_facts" ? v10KGFacts : $0 },
             indices: live.indices,
             migrations: []
         )
     }
 
-    /// Raw pre-KH kg_facts row: exactly the columns the v12 table has.
+    /// Raw pre-KH kg_facts row: exactly the columns the schema-10 table has.
     private func preKHRowValues(
         id: String, subject: String, predicate: String, object: String,
         sourceDrawerID: String
@@ -96,9 +97,9 @@ struct KGFactIdentityBackfillTests {
         ]
     }
 
-    // MARK: - Leg 1: the v12 → v13 column migration
+    // MARK: - Leg 1: the v10 → v19 hop adds the identity columns
 
-    @Test("a v12 estate gains the identity columns and its rows migrate")
+    @Test("a schema-10 estate gains the identity columns and its rows migrate")
     func v12EstateGainsColumnsAndMigrates() async throws {
         let url = makeTempURL()
         defer { cleanup(url) }
@@ -106,7 +107,7 @@ struct KGFactIdentityBackfillTests {
         // Build the pre-KH estate: v12 schema (no identity columns) with a
         // host-identity fact written the way pre-KH ToolDispatch wrote it.
         let v12Storage = TestStorage.sqlite(url)
-        try await v12Storage.open(schema: v12Schema())
+        try await v12Storage.open(schema: v10Schema())
         _ = try await v12Storage.rowStore.insert(
             table: "kg_facts",
             values: preKHRowValues(

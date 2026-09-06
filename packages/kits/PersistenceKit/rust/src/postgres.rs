@@ -1549,7 +1549,7 @@ impl RowStore for TxRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed
+        // path since ssc_facts joined the protected column set
         // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
         // text and stamps keyID; no-op for bitmap/timestamp updates and the
         // expunge scrub. Mirrors the SQLite update path.
@@ -2223,7 +2223,7 @@ impl RowStore for PgRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed
+        // path since ssc_facts joined the protected column set
         // (SPEC_DISTILLATION_STORAGE §2/§7.2). Seals non-empty protected
         // text and stamps keyID; no-op for bitmap/timestamp updates and the
         // expunge scrub. Mirrors the SQLite update path.

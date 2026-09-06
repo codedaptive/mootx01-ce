@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // CorpusContentEngineTests.swift
 //
 // Canonical-ID engine coverage (GLK shared-content 1.1, P2).
@@ -2330,3 +2333,5 @@ extension CorpusContentEngineTests {
         }
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

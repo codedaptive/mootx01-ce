@@ -161,47 +161,16 @@ pub struct Drawer {
     /// with no internal whitespace.
     pub wikidata_qids_secondary: Option<String>,
 
-    /// The distilled representation of this drawer's content — a dense
-    /// parallel rendering (token-economical prose) of the same content
-    /// per SPEC_DISTILLATION_STORAGE §4/§5. A representation is a VIEW
-    /// of this one item: no independent identity, lifecycle, or
-    /// provenance. None means "no representation exists yet" and is the
-    /// sweep-eligibility predicate — no staleness flag, no bool; callers
-    /// test `distilled.is_some()`. The five `distilled*` fields are None
-    /// together or populated together (one atomic column write,
-    /// `set_distilled_representation`); every write that touches
-    /// `content` NULLs all five in the same statement (§7.3 regeneration
-    /// trigger + erasure scrub). Mirrors Swift `Drawer.distilled`.
-    pub distilled: Option<String>,
-
-    /// The converter ID that produced `distilled` — the ContextDistillLib
-    /// converter identity `<candidate>@<ruleset-version>` (see
-    /// `genius_locus_kit::distillation_converter_id`). Together with
-    /// `distilled_source_digest` it decides currency: a row is current iff
-    /// this equals the active converter ID AND the digest equals the
-    /// digest of `content`. None iff `distilled` is None.
-    pub distilled_pipeline_version: Option<String>,
-
-    /// The SHA-256 hex digest (ContextDistillLib `source_digest`) of the
-    /// complete original `content` that `distilled` was rendered from.
-    /// The second half of the currency rule: a representation whose digest
-    /// differs from the digest of the row's current content, or whose
-    /// digest is None (written before the column existed), is stale and
-    /// regenerates on the next sweep. None iff `distilled` is None.
-    /// Mirrors Swift `Drawer.distilledSourceDigest`.
-    pub distilled_source_digest: Option<String>,
-
-    /// Approximate token count of `distilled` (SPEC §6): deterministic,
-    /// vendor-neutral estimate so AI clients can budget context before
-    /// hydrating. Advisory only — never load-bearing. None iff
-    /// `distilled` is None.
-    pub distilled_token_count: Option<i64>,
-
-    /// When the representation was generated (epoch millis, stored as
-    /// TEXT ISO8601 by the timestamp column type). Audit and sweep-
-    /// observability only; carries no behavioral weight. None iff
-    /// `distilled` is None.
-    pub distilled_at: Option<i64>,
+    /// The SSC facts of this drawer's content (Encoder Rerank Program §6):
+    /// the grammar-v1 fact anchors as inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated, e.g. `kind: hobby, entity:
+    /// painting, place: brazil`. None when the content has no fact anchors
+    /// and None after every content write (the same statement that bumps
+    /// `content_hash` clears it), which is the enrichment stage's "needs
+    /// facts" predicate. Written by `DrawerStore::set_ssc_facts`; the BM25
+    /// document takes its tokens and the candidate row renders it. Rides the
+    /// structured hydration tier. Mirrors Swift `Drawer.sscFacts`.
+    pub ssc_facts: Option<String>,
 
     /// The one-sentence AI-FACING subject line for this drawer's content
     /// (progressive recall PR-01): telegraphic register, entities and
@@ -230,11 +199,6 @@ pub struct Drawer {
     /// observability only. None iff `subject` is None.
     pub subject_at: Option<i64>,
 
-    // Adornment text was removed from the Drawer struct (ADORN-STORE-02 v17).
-    // Adornment rows live in the adornments table keyed by (drawer_id, minter_id).
-    // Retrieve via DrawerStore::adornments / active_adornments.
-    // The legacy drawers.adornment column remains physically in the SQLite schema
-    // (cannot DROP COLUMN without rebuild) but is no longer read or written.
 }
 
 impl Drawer {
@@ -274,16 +238,10 @@ impl Drawer {
             udc_facets: None,
             wikidata_qid: None,
             wikidata_qids_secondary: None,
-            distilled: None,
-            distilled_pipeline_version: None,
-            distilled_token_count: None,
-            distilled_at: None,
-            distilled_source_digest: None,
+            ssc_facts: None,
             subject: None,
             subject_pipeline_version: None,
             subject_at: None,
-            // Adornment text removed from Drawer (ADORN-STORE-02 v17).
-            // New drawers start bare; adornment debt discovered via adornment_debt_batch.
         }
     }
 }

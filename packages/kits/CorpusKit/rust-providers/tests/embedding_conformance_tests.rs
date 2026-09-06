@@ -1,3 +1,4 @@
+#![cfg(feature = "dense-families")]
 //! Rust leg of the cross-language bit-identity gate for the
 //! CorpusKitProviders text providers (B2-5: CorpusKit Rust embedding
 //! parity).

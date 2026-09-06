@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family provider — compiled only when the DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See CorpusKit/Package.swift.
 // LsaProvider.swift
 //
 // Latent Semantic Analysis (LSA / LSI) distributional-semantics
@@ -738,3 +741,5 @@ extension LsaProvider: TrainableEmbeddingBasis {
         counts.vocab[term] != nil
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

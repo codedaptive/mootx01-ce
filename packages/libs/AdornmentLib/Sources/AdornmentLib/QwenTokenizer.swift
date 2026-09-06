@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // QwenTokenizer.swift — byte-level BPE for the qwen2 tokenizer family
 // (Core AI minter arms, operator mandate 2026-08-31).
 //
@@ -255,3 +256,4 @@ public final class QwenTokenizer: Sendable {
         specials.first(where: { $0.token == token })?.id
     }
 }
+#endif // MOOTX01_MINERS
