@@ -56,7 +56,7 @@ pub fn default_ensemble() -> Vec<EmbeddingModelConfig> {
     }
     #[cfg(feature = "dense-families")]
     {
-        // Dense families are ON: return all five honest signals.
+        // Dense families are ON: return all five signals.
         // Activated via --features dense-families.
         vec![
             EmbeddingModelConfig::RandomIndexing {
