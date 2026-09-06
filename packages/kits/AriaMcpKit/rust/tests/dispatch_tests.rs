@@ -277,12 +277,13 @@ fn tools_list_count_is_76() {
     // moot_recall_walk (D10: escalation-ladder recall):
     //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   13  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
-    //                     confirm_migration, recall_precise, recall_shaped,
-    //                     recall_vague, dream, distill, recall_distilled,
-    //                     hunt_contradictions, recall_walk —
-    //                     moot_consolidate no longer dispatches (SPEC §3 Phase 2)
-    //                     and moot_recollect retired with the factoid tier, §3/§11)
+    //   14  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //                     confirm_migration, recall_precise, recall_connected,
+    //                     recall_shaped, recall_vague, dream, recall_temporal,
+    //                     recall_distilled, hunt_contradictions, recall_walk —
+    //                     moot_consolidate no longer dispatches (SPEC §3 Phase 2);
+    //                     moot_distill and moot_redistill retired ENC-W6B;
+    //                     moot_recollect retired with the factoid tier, §3/§11)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
@@ -350,13 +351,14 @@ fn tools_list_name_set_matches_expected_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (15) — list_lenses + list_recipes + synthesize + run_migration
+        // Recipe (14) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_connected
         //               + recall_shaped + recall_vague + dream
-        //               + distill + redistill + recall_distilled
+        //               + recall_temporal + recall_distilled
         //               + hunt_contradictions
         //               + recall_walk (D10: escalation-ladder recall)
         //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
+        //                moot_distill and moot_redistill retired ENC-W6B;
         //                moot_recollect is a notice-only stub, not listed)
         "moot_list_lenses",
         "moot_list_recipes",
@@ -6193,7 +6195,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 76, "vault-on must produce 76 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, moot_rebuild_status, and moot_redistill)");
+    assert_eq!(arr.len(), 76, "vault-on must produce 76 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, moot_rebuild_status)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
