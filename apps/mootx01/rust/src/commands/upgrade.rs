@@ -634,6 +634,24 @@ fn run_span_encode_backfill() -> bool {
                 drop(reg);
                 let store = SqliteDrawerStore::from_path(&estate.display().to_string(), now, None, 5.0)
                     .map_err(|e| e.to_string())?;
+                // Migration writes the activation key: a CE 1.0.x estate arrives
+                // at 19 with no `embedding_provider`, and only `provision` and
+                // this upgrade step ever write it (Bob's ruling, 2026-09-06).
+                // The next serve open reads it and activates the encoder.
+                // Swift twin: UpgradeCommand.runSpanEncodeBackfill →
+                // provisionDefaultEncoderIfAbsent.
+                let key = genius_locus_kit::EstateCoordinator::EMBEDDING_PROVIDER_META_KEY;
+                let absent = store
+                    .get_meta(key)
+                    .map_err(|e| e.to_string())?
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true);
+                if absent {
+                    store
+                        .set_meta(key, genius_locus_kit::EstateCoordinator::ENCODER_PROVIDER_ID)
+                        .map_err(|e| e.to_string())?;
+                    println!("  ✓ encoder: span encoder is now the default recall stage (embedding_provider = encoder)");
+                }
                 let storage = store.storage().ok_or("drawer store exposes no storage")?;
                 span_encode_backfill::run(storage, &store, &data, now)
             })();

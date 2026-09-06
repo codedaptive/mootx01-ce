@@ -782,6 +782,14 @@ struct UpgradeCommand: AsyncParsableCommand {
                         ? InMemoryEstateIdentityKeyStore() : nil
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Migration writes the activation key: a CE 1.0.x estate arrives
+                // at 19 with no `embedding_provider`, and only `provision` and
+                // this upgrade step ever write it (Bob's ruling, 2026-09-06).
+                // Written before wiring so this open already activates the
+                // encoder; the next serve open does the same.
+                if try await kit.provisionDefaultEncoderIfAbsent(for: handle) {
+                    print("  ✓ encoder: span encoder is now the default recall stage (embedding_provider = encoder)")
+                }
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
                 // Closing the estate closes its storage connection with it, so
                 // the backfill opens its own connection over the migrated file.

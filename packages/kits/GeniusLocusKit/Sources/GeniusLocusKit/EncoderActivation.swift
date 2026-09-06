@@ -160,6 +160,34 @@ public extension GeniusLocusKit {
         return value
     }
 
+    // MARK: - Default provisioning
+
+    /// Provision the span encoder as the estate's default recall stage: writes
+    /// `embedding_provider = "encoder"` when the manifest carries no
+    /// `embedding_provider` key (or an empty one) and returns `true`; an
+    /// estate that already names a provider — the encoder or any other id —
+    /// is left untouched and `false` is returned.
+    ///
+    /// Who calls it (Bob's ruling, 2026-09-06): the two paths that bring an
+    /// estate to the current format. `provision` and every product create
+    /// path call it right after the estate opens and before `wireSubstores`,
+    /// so a fresh estate activates the encoder on its first open; the
+    /// `mootx01 upgrade` span-encode step calls it so a migrated CE 1.0.x
+    /// estate activates on its next open. Serve-time opens never write it:
+    /// an operator who cleared the key keeps a lexical-only estate.
+    ///
+    /// Idempotent and cheap (one manifest read, at most one write). Twin of
+    /// Rust `EstateCoordinator::provision_default_encoder_if_absent`.
+    @discardableResult
+    func provisionDefaultEncoderIfAbsent(for handle: EstateHandle) async throws -> Bool {
+        if let existing = try await provisionedEmbeddingProvider(for: handle),
+           !existing.isEmpty {
+            return false
+        }
+        try await provisionEmbeddingProvider(Self.encoderProviderID, for: handle)
+        return true
+    }
+
     // MARK: - Activation
 
     /// The active `encoder_models` row for `handle` as a CorpusKit spec; the

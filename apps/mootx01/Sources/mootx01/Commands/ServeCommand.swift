@@ -337,6 +337,12 @@ struct ServeCommand: AsyncParsableCommand {
             // declared ephemeral lifetime, so the Ed25519 signing key never
             // touches the Keychain.
             handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+            // A fresh estate is born with the span encoder as its default recall
+            // stage; existing estates get the key from `mootx01 upgrade`, never
+            // from a serve open (an operator who cleared it stays lexical-only).
+            if isFirstRun {
+                try await kit.provisionDefaultEncoderIfAbsent(for: handle)
+            }
             _ = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
             // `open` admits a BARE estate — it does not register a Corpus or

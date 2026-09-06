@@ -167,6 +167,17 @@ struct UpgradeCommandSourceTests {
         #expect(!body.contains("Migration(fromVersion"))
     }
 
+    @Test("runSpanEncodeBackfill provisions the default encoder before wiring — migration writes the activation key")
+    func spanEncodeProvisionsTheDefaultEncoder() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        let funcStart = try #require(source.range(of: "private func runSpanEncodeBackfill")?.lowerBound)
+        let funcEnd = try #require(source.range(of: "/// Models whose vector rows `mootx01 upgrade` reclaims", range: funcStart..<source.endIndex)?.lowerBound)
+        let body = source[funcStart..<funcEnd]
+        let provisionAt = try #require(body.range(of: "kit.provisionDefaultEncoderIfAbsent(for: handle)")?.lowerBound)
+        let wireAt = try #require(body.range(of: "kit.wireGLKSubstores(for: handle, backingStorage: storage)")?.lowerBound)
+        #expect(provisionAt < wireAt, "the key is written before the wire so the same open activates the encoder")
+    }
+
     @Test("runSpanEncodeBackfill and runVectorReclaim open through the migration catalog before touching the vector tier")
     func spanEncodeAndReclaimRunTheCatalogFirst() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)

@@ -3057,6 +3057,34 @@ impl EstateCoordinator {
             }))
     }
 
+    /// Provision the span encoder as the estate's default recall stage: writes
+    /// `embedding_provider = "encoder"` when the manifest carries no
+    /// `embedding_provider` key (or an empty one) and returns `Ok(true)`; an
+    /// estate that already names a provider — the encoder or any other id —
+    /// is left untouched and `Ok(false)` is returned.
+    ///
+    /// Who calls it (Bob's ruling, 2026-09-06): the two paths that bring an
+    /// estate to the current format. `provision` and every product create
+    /// path call it right after the estate opens and before the sub-stores
+    /// are wired, so a fresh estate activates the encoder on its first open;
+    /// the `mootx01 upgrade` span-encode step writes the same key so a
+    /// migrated CE 1.0.x estate activates on its next open. Serve-time opens
+    /// of an existing estate never write it.
+    ///
+    /// Twin of Swift `GeniusLocusKit.provisionDefaultEncoderIfAbsent(for:)`.
+    pub fn provision_default_encoder_if_absent(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<bool, VerbDispatchError> {
+        if let Some(existing) = self.provisioned_embedding_provider(handle)? {
+            if !existing.is_empty() {
+                return Ok(false);
+            }
+        }
+        self.provision_embedding_provider(handle, Self::ENCODER_PROVIDER_ID)?;
+        Ok(true)
+    }
+
     /// Read back the provisioned embedding-provider model_id, or `None` when
     /// the estate carries none. `None` means "use the deterministic default
     /// ensemble." The caller maps the model_id to a concrete provider.
@@ -9646,6 +9674,19 @@ impl EstateCoordinator {
             params.zoom_window_low,
             params.zoom_window_high,
         )?;
+
+        // Step 2a: a fresh estate is born with the span encoder as its default
+        // recall stage. Written BEFORE wiring so this same open activates it
+        // (wire_substores reads the key). LocusOnly estates have no Corpus, so
+        // there is nothing to activate. Swift twin: EstateLifecycle.provision.
+        if params.kind != EstateKind::LocusOnly {
+            if let Err(e) = self.provision_default_encoder_if_absent(&handle) {
+                let _ = self.close(&handle);
+                return Err(GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("default encoder provisioning failed: {e:?}"),
+                });
+            }
+        }
 
         // Step 2: Wire sub-stores by kind through the shared seam (Swift twin:
         // EstateLifecycle.swift wireSubstores, which provision and serve open

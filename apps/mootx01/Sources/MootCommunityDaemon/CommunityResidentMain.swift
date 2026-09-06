@@ -460,6 +460,9 @@ public enum CommunityResidentMain {
             owner: glkOwner,
             identityKeyStore: identityKeyStore
         )
+        // Create-time default: the span encoder is the recall stage of an
+        // estate that names no embedding provider (see ServeCommand).
+        try await kit.provisionDefaultEncoderIfAbsent(for: handle)
 
         let obsidian = CommunityObsidianCoordinator(
             layoutURL: layoutURL,
