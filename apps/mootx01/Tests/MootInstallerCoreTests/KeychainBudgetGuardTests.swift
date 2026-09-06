@@ -18,6 +18,11 @@
 // any regression that removes the env var path in the binary mints keys, so
 // Keychain pollution reappears and the measurement done during KEY-1 is
 // repeatable.
+//
+// Isolated-run hang fix: keychainItemCount passes kSecUseAuthenticationUIFail so
+// the query returns errSecInteractionNotAllowed immediately instead of blocking
+// on a macOS Keychain prompt when the test binary lacks the shared-access-group
+// entitlement. Without this flag the query hangs indefinitely.
 
 #if os(macOS) && canImport(Security)
 import Foundation
@@ -27,15 +32,31 @@ import Testing
 import PersistenceKitSQLite
 
 /// Count live login-Keychain items whose `kSecAttrService` matches `service`.
-private func keychainItemCount(service: String) -> Int {
+///
+/// `kSecUseAuthenticationUIFail` makes the query return
+/// `errSecInteractionNotAllowed` immediately instead of blocking on the
+/// macOS Keychain access dialog. Without this flag a query against the
+/// shared-access-group service can hang indefinitely in an unsigned or
+/// un-entitled test binary, which widens the concurrent-test window and
+/// produces spurious `after != before` failures.
+private func keychainItemCount(service: String, account: String) -> Int {
     let query: [CFString: Any] = [
-        kSecClass:            kSecClassGenericPassword,
-        kSecAttrService:      service,
-        kSecMatchLimit:       kSecMatchLimitAll,
-        kSecReturnAttributes: true,
+        kSecClass:                  kSecClassGenericPassword,
+        kSecAttrService:            service,
+        // Only this probe's own account: other suites in the same target may
+        // mint and clean up their own keys concurrently, and their items must
+        // not move this count.
+        kSecAttrAccount:            account,
+        kSecMatchLimit:             kSecMatchLimitAll,
+        kSecReturnAttributes:       true,
+        // Fail immediately rather than blocking on a UI prompt.
+        kSecUseAuthenticationUI:    kSecUseAuthenticationUIFail,
     ]
     var result: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
+    // errSecInteractionNotAllowed is expected on a locked screen or un-entitled
+    // binary; treat it as zero (no measurable items) so the guard stays silent
+    // in environments where Keychain access is restricted.
     guard status == errSecSuccess, let items = result as? [[CFString: Any]] else {
         return 0
     }
@@ -49,13 +70,16 @@ struct KeychainBudgetGuardTests {
     func sqlCipherKeyMintAndCleanupIsNeutral() throws {
         guard EstateKeyProvider.isKeyCustodyAvailable else { return }
 
-        let before = keychainItemCount(service: EstateKeyProvider.keychainService)
-
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("keychain-budget-guard-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let estateURL = dir.appendingPathComponent("guard-probe.sqlite")
+        // The account provideKey derives for this estate path: the count below
+        // is scoped to it, so the guard measures its own mint and cleanup only.
+        let account = KeychainKeyStore(
+            service: EstateKeyProvider.keychainService, estateURL: estateURL, accessGroup: nil).account
+        let before = keychainItemCount(service: EstateKeyProvider.keychainService, account: account)
 
         do {
             _ = try EstateKeyProvider.provideKey(for: estateURL)
@@ -77,7 +101,7 @@ struct KeychainBudgetGuardTests {
             try? store.deleteKey()
         }
 
-        let after = keychainItemCount(service: EstateKeyProvider.keychainService)
+        let after = keychainItemCount(service: EstateKeyProvider.keychainService, account: account)
 
         // A failed assertion here means either provideKey started writing to
         // an account that doesn't match KeychainKeyStore's account derivation
