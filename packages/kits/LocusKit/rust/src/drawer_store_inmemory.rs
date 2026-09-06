@@ -1334,22 +1334,20 @@ impl DrawerStore for DrawerStoreCore {
             crate::telemetry::emit_drawer_query(&_tel_start, 0.0, 0, &self.estate_uuid, "wing");
             return Ok(Vec::new());
         }
-        let predicates: Vec<StoragePredicate> = room_ids
-            .iter()
-            .map(|id| {
-                StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "parent_node_id"),
-                    TypedValue::Text(id.clone()),
-                )
-            })
-            .collect();
+        // One `parent_node_id IN (...)` predicate, the twin of Swift
+        // `DrawerStore.drawersIn(wing:)`: a wing's room count is bounded
+        // (tens, not thousands), so the list needs no 900-id chunking.
+        let room_predicate = StoragePredicate::In(
+            Column::new(T_DRAWERS, "parent_node_id"),
+            room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+        );
         let (rows, _skipped) = self
             .storage
             .row_store()
             .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
-                    StoragePredicate::any(predicates),
+                    room_predicate,
                     StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                 ])),
                 // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
@@ -4598,20 +4596,18 @@ impl DrawerStore for DrawerStoreCore {
             let drawer_count = if room_ids.is_empty() {
                 0
             } else {
-                let predicates: Vec<StoragePredicate> = room_ids
-                    .iter()
-                    .map(|id| {
-                        StoragePredicate::Eq(
-                            Column::new(T_DRAWERS, "parent_node_id"),
-                            TypedValue::Text(id.clone()),
-                        )
-                    })
-                    .collect();
+                // `parent_node_id IN (...)` over the wing's rooms, the twin of
+                // Swift `DrawerStore.wingSummaries()`; unchunked for the same
+                // reason as `drawers_in_wing` (rooms per wing are few).
+                let room_predicate = StoragePredicate::In(
+                    Column::new(T_DRAWERS, "parent_node_id"),
+                    room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+                );
                 let drawer_rows = row_store
                     .query(
                         T_DRAWERS,
                         Some(&StoragePredicate::all(vec![
-                            StoragePredicate::any(predicates),
+                            room_predicate,
                             StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                         ])),
                         &[],
