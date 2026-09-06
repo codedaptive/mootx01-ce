@@ -388,6 +388,12 @@ actor SQLiteBackend {
             if !column.nullable { sql += " NOT NULL DEFAULT " + SQLiteSchema.literalSQL(column.defaultValue ?? .null) }
             try connection.exec(sql)
         case .dropColumn(let table, let columnName):
+            // Idempotent, the addColumn rule in reverse: a migration capsule
+            // replays a kit's ladder on estates that may already carry the
+            // drop (a fresh estate creates the latest layout, a re-run of the
+            // capsule finds the column gone). SQLite has no DROP COLUMN IF
+            // EXISTS, so probe the table's columns and skip when absent.
+            if try !columnExists(table: table, column: columnName) { break }
             try connection.exec("ALTER TABLE \"\(table)\" DROP COLUMN \"\(columnName)\"")
         case .renameColumn(let table, let from, let to):
             try connection.exec("ALTER TABLE \"\(table)\" RENAME COLUMN \"\(from)\" TO \"\(to)\"")
@@ -401,9 +407,9 @@ actor SQLiteBackend {
     }
 
     /// True when `table` already has a column named `column`.
-    /// Used to make `.addColumn` idempotent (SQLite lacks ADD COLUMN IF NOT
-    /// EXISTS). PRAGMA table_info returns one row per column; column index 1 is
-    /// the column name.
+    /// Used to make `.addColumn` and `.dropColumn` idempotent (SQLite lacks
+    /// ADD COLUMN IF NOT EXISTS and DROP COLUMN IF EXISTS). PRAGMA table_info
+    /// returns one row per column; column index 1 is the column name.
     private func columnExists(table: String, column: String) throws -> Bool {
         let stmt = try connection.prepare("PRAGMA table_info(\"\(table)\")")
         defer { stmt.finalize() }

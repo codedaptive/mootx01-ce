@@ -120,6 +120,7 @@ public struct ConformanceRunner {
         try await schemaFixtures()
         try await multiKitSchemaFixtures()
         try await freshOpenAddColumnIdempotentFixtures()
+        try await freshOpenDropColumnIdempotentFixtures()
         try await rowFixtures()
         try await predicateFixtures()
         try await blobFixtures()
@@ -242,6 +243,72 @@ public struct ConformanceRunner {
         let version = try await storage.currentSchemaVersion(for: "ConformanceFreshAddColumn")
         #expect(version == 2, "\(backendName): fresh open with addColumn migration reaches version 2")
         await storage.close()
+    }
+
+    // MARK: - Fresh-open dropColumn idempotence
+
+    /// The addColumn rule in reverse. Opening a FRESH database at a schema
+    /// whose latest table no longer carries a column that a dropColumn
+    /// migration removes must succeed on every backend: the open creates the
+    /// table at the latest layout (no such column), then replays the ladder
+    /// from version 0, so the dropColumn targets a column that is already
+    /// gone. A migration capsule that replays a kit's ladder on a populated
+    /// estate relies on the same rule for its second run. The populated path
+    /// is covered too: a store at version 1 carrying the column ends without
+    /// it and with every row intact.
+    func freshOpenDropColumnIdempotentFixtures() async throws {
+        let dropped = Migration(fromVersion: 1, toVersion: 2, operations: [
+            .dropColumn(table: "shed_items", columnName: "note")
+        ])
+        let schemaV2 = SchemaDeclaration(
+            kitID: "ConformanceFreshDropColumn",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "shed_items",
+                    // Latest layout no longer carries the column the migration drops.
+                    columns: [.uuid("id"), .text("name")],
+                    primaryKey: ["id"]
+                )
+            ],
+            migrations: [dropped]
+        )
+        // Fresh store: dropColumn replays against a table that has no `note`.
+        // Must succeed, not throw "no such column".
+        let fresh = try await factory()
+        try await fresh.open(schema: schemaV2)
+        #expect(try await fresh.currentSchemaVersion(for: "ConformanceFreshDropColumn") == 2,
+                "\(backendName): fresh open with dropColumn migration reaches version 2")
+        await fresh.close()
+
+        // Populated store: version 1 carries the column and a row; the ladder
+        // drops the column and keeps the row.
+        let populated = try await factory()
+        let schemaV1 = SchemaDeclaration(
+            kitID: "ConformanceFreshDropColumn",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "shed_items",
+                    columns: [.uuid("id"), .text("name"), .text("note", nullable: true)],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        try await populated.open(schema: schemaV1)
+        let id = UUID()
+        _ = try await populated.rowStore.insert(table: "shed_items", values: [
+            "id": .uuid(id), "name": .text("kept"), "note": .text("gone")
+        ])
+        try await populated.migrate(to: schemaV2)
+        #expect(try await populated.currentSchemaVersion(for: "ConformanceFreshDropColumn") == 2)
+        let rows = try await populated.rowStore.query(table: "shed_items")
+        #expect(rows.count == 1, "\(backendName): the row survives the drop")
+        #expect(rows.first?["name"] == .text("kept"))
+        #expect(rows.first?["note"] == nil, "\(backendName): the dropped column no longer reads back")
+        // A second replay of the same ladder is a no-op.
+        try await populated.migrate(to: schemaV2)
+        await populated.close()
     }
 
     // MARK: - Row fixtures

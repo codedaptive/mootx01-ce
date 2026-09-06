@@ -50,8 +50,8 @@ pub fn run(db: Option<String>) -> ExitCode {
     }
 
     // Opening eager-mounts the Corpus ingest queue + lease-gated drain worker
-    // (estate_registry::wire_sqlite_semantic_recall), so the backlog drains
-    // without any capture.
+    // (EstateRegistry::new_sqlite wires the estate through GLK
+    // wire_glk_substores), so the backlog drains without any capture.
     let reg = match EstateRegistry::new_sqlite(&estate, OWNER) {
         Ok(r) => r,
         Err(e) => {

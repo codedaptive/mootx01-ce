@@ -122,6 +122,7 @@ fn append_only_schema() -> SchemaDeclaration {
 pub fn run_all(backend: &str, factory: &Factory) {
     schema_fixtures(backend, factory);
     fresh_open_add_column_idempotent_fixtures(backend, factory);
+    fresh_open_drop_column_idempotent_fixtures(backend, factory);
     row_fixtures(backend, factory);
     predicate_fixtures(backend, factory);
     blob_fixtures(backend, factory);
@@ -371,6 +372,89 @@ fn fresh_open_add_column_idempotent_fixtures(backend: &str, factory: &Factory) {
         "{backend}: fresh open with addColumn migration reaches version 2"
     );
     storage.close().unwrap();
+}
+
+/// The AddColumn rule in reverse. Opening a FRESH database at a schema whose
+/// latest table no longer carries a column that a DropColumn migration
+/// removes must succeed on every backend: the open creates the table at the
+/// latest layout (no such column), then replays the ladder from version 0,
+/// so the DropColumn targets a column that is already gone. A migration
+/// capsule that replays a kit's ladder on a populated estate relies on the
+/// same rule for its second run. The populated path is covered too: a store
+/// at version 1 carrying the column ends without it and with every row
+/// intact. Mirrors Swift `freshOpenDropColumnIdempotentFixtures`.
+fn fresh_open_drop_column_idempotent_fixtures(backend: &str, factory: &Factory) {
+    let schema_v2 = SchemaDeclaration::new(
+        "ConformanceFreshDropColumn",
+        2,
+        vec![TableDeclaration::new(
+            "shed_items",
+            // Latest layout no longer carries the column the migration drops.
+            vec![ColumnDeclaration::uuid("id"), ColumnDeclaration::text("name")],
+            vec!["id".to_string()],
+        )],
+    )
+    .with_migrations(vec![Migration {
+        from_version: 1,
+        to_version: 2,
+        operations: vec![SchemaOperation::DropColumn {
+            table: "shed_items".to_string(),
+            column_name: "note".to_string(),
+        }],
+    }]);
+    // Fresh store: DropColumn replays against a table that has no `note`.
+    // Must succeed, not fail with "no such column".
+    let fresh = factory();
+    fresh
+        .open(&schema_v2)
+        .expect("fresh open with DropColumn migration must succeed");
+    assert_eq!(
+        fresh.current_schema_version_for("ConformanceFreshDropColumn").unwrap(),
+        2,
+        "{backend}: fresh open with DropColumn migration reaches version 2"
+    );
+    fresh.close().unwrap();
+
+    // Populated store: version 1 carries the column and a row; the ladder
+    // drops the column and keeps the row.
+    let populated = factory();
+    let schema_v1 = SchemaDeclaration::new(
+        "ConformanceFreshDropColumn",
+        1,
+        vec![TableDeclaration::new(
+            "shed_items",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::text("name"),
+                ColumnDeclaration::text("note").nullable(),
+            ],
+            vec!["id".to_string()],
+        )],
+    );
+    populated.open(&schema_v1).expect("open at version 1");
+    let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+    row.insert("id".into(), TypedValue::Uuid(Uuid::new_v4()));
+    row.insert("name".into(), TypedValue::Text("kept".into()));
+    row.insert("note".into(), TypedValue::Text("gone".into()));
+    populated.row_store().insert("shed_items", row).expect("insert");
+    populated.migrate(&schema_v2).expect("ladder to version 2");
+    assert_eq!(
+        populated.current_schema_version_for("ConformanceFreshDropColumn").unwrap(),
+        2
+    );
+    let rows = populated
+        .row_store()
+        .query("shed_items", None, &[], None, None)
+        .expect("query");
+    assert_eq!(rows.len(), 1, "{backend}: the row survives the drop");
+    assert_eq!(rows[0].get("name"), Some(&TypedValue::Text("kept".into())));
+    assert!(
+        rows[0].get("note").is_none(),
+        "{backend}: the dropped column no longer reads back"
+    );
+    // A second replay of the same ladder is a no-op.
+    populated.migrate(&schema_v2).expect("second replay is a no-op");
+    populated.close().unwrap();
 }
 
 fn row_fixtures(backend: &str, factory: &Factory) {

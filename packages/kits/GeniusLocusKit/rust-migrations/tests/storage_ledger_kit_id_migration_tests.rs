@@ -12,8 +12,9 @@
 //!   4. Rows under both ids: both left as they are and reported as
 //!      `Conflict`; the stamp still advances.
 //!   5. StorageUnavailable: an unregistered handle returns the error variant.
-//!   6. Full chain from V1_0 carrying the old rows ends at V1_5 (the rewrite
-//!      runs before the 1.0→1.1 capsule, which opens the vector store).
+//!   6. Full chain from V1_0 carrying the old rows ends at CURRENT (the
+//!      rewrite runs before the 1.0→1.1 capsule, which opens the vector
+//!      store, and the 1.5→1.6 capsule writes the final stamp).
 //!      (Gated on feature = "migration-v1-0-to-v1-1".)
 //!   7. The capsule's pairs are the frozen literals, and the new ids are what
 //!      the vector tier's stores declare.
@@ -119,8 +120,8 @@ fn v1_4_estate_rows_move_to_their_new_ids() {
             representation_claims: SchemaKitRenameOutcome::Renamed { version: 1 },
         }
     );
+    // The capsule's own stamp; the chain continues past it to CURRENT.
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_5);
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(version(&storage, pairs.vector_store.to), 6);
     assert_eq!(version(&storage, pairs.representation_claims.to), 1);
     assert_eq!(version(&storage, pairs.vector_store.from), 0);
@@ -241,7 +242,7 @@ fn unregistered_handle_returns_storage_unavailable() {
 
 #[cfg(feature = "migration-v1-0-to-v1-1")]
 #[test]
-fn v1_0_estate_with_old_rows_runs_full_chain_to_v1_5() {
+fn v1_0_estate_with_old_rows_runs_full_chain_to_current() {
     use corpus_kit_providers::default_ensemble;
     use genius_locus_kit_migrations::{compiled_floor, MigrationChainExt};
 
@@ -251,8 +252,11 @@ fn v1_0_estate_with_old_rows_runs_full_chain_to_v1_5() {
     coord
         .run_migration_chain(&handle, NOW, default_ensemble())
         .expect("full chain must succeed on an empty v1_0 estate");
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_5, "full chain must end at V1_5");
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
+    assert_eq!(
+        read_stamp(&storage),
+        EstateFormatVersion::CURRENT,
+        "full chain must end at the current format"
+    );
     assert!(version(&storage, pairs.vector_store.to) >= 6);
     assert!(version(&storage, pairs.representation_claims.to) >= 1);
 }
