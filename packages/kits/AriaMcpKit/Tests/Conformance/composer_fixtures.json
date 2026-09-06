@@ -266,7 +266,7 @@
       }
     },
     {
-      "name": "s1_adornment_zero",
+      "name": "s1_ssc_zero",
       "description": "S1 row: zero sscFacts → fourth column is '-'; structured row has no sscFacts/sscFacts keys",
       "shape": "s1",
       "rows": [
@@ -301,7 +301,7 @@
       }
     },
     {
-      "name": "s1_adornment_one",
+      "name": "s1_ssc_one",
       "description": "S1 row: one active sscFacts → text rendered unchanged in fourth column",
       "shape": "s1",
       "rows": [
@@ -336,7 +336,7 @@
       }
     },
     {
-      "name": "s1_adornment_many",
+      "name": "s1_ssc_many",
       "description": "S1 row: many sscFacts → joined with ' || ' in ascending minter-ID order",
       "shape": "s1",
       "rows": [
@@ -371,7 +371,7 @@
       }
     },
     {
-      "name": "s1_adornment_literal_pipe_pipe_normalized",
+      "name": "s1_ssc_literal_pipe_pipe_normalized",
       "description": "S1 row: literal ' || ' inside an sscFacts text is normalized to ' / ' before joining (§11.1 rule 3)",
       "shape": "s1",
       "rows": [
@@ -636,7 +636,7 @@
       "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: recruiting  wing: Agentic Memory\nsubject: Entelo follow-up decided at TechFest\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 2\n  → E70A5761-152D-4ABB-B16A-964B06A09404  [relates]\n  ← 931F2411-95B7-4DE9-9B96-CF96DF66175E  [precedes]\ncontent:\nuser: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
     },
     {
-      "name": "s3_no_subject_no_adornments",
+      "name": "s3_no_subject_no_ssc",
       "description": "S3 full record: subject line absent when drawer has none; sscFacts block absent when none active",
       "shape": "s3",
       "record": {
