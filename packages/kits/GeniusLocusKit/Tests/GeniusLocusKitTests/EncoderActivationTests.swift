@@ -78,6 +78,29 @@ struct EncoderActivationConstantTests {
 @Suite("Encoder activation — failure contract and manifest keys", .serialized)
 struct EncoderActivationEstateTests {
 
+    @Test("provision writes the default encoder key; an estate that names a provider keeps it")
+    func provisionDefaultEncoder() async throws {
+        let kit = GeniusLocusKit()
+        let url = scratchURL()
+        let owner = OwnerCredentials(ownerIdentifier: "encoder-act-default")
+        let params = glkParams(estateName: "EncoderDefaultEstate")
+
+        // A fresh provision is born with the encoder as its recall stage.
+        let handle = try await kit.provision(storage: try sqliteStorageAt(url), owner: owner, params: params)
+        #expect(try await kit.provisionedEmbeddingProvider(for: handle) == GeniusLocusKit.encoderProviderID)
+        // Idempotent: a second call writes nothing.
+        #expect(try await kit.provisionDefaultEncoderIfAbsent(for: handle) == false)
+        // An estate that names another provider is never overwritten.
+        try await kit.provisionEmbeddingProvider("apple-nl-v1", for: handle)
+        #expect(try await kit.provisionDefaultEncoderIfAbsent(for: handle) == false)
+        #expect(try await kit.provisionedEmbeddingProvider(for: handle) == "apple-nl-v1")
+        // A cleared key is absent again and the default returns.
+        try await kit.provisionEmbeddingProvider("", for: handle)
+        #expect(try await kit.provisionDefaultEncoderIfAbsent(for: handle) == true)
+        #expect(try await kit.provisionedEmbeddingProvider(for: handle) == GeniusLocusKit.encoderProviderID)
+        try await kit.close(handle)
+    }
+
     @Test("encoder provisioned without a model directory: no encoder, ensemble untouched, no throw")
     func noModelDirectory() async throws {
         let kit = GeniusLocusKit()
