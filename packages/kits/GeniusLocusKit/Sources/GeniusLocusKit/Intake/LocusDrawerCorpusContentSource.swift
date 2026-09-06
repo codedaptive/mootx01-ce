@@ -27,11 +27,8 @@
 // The lexical lane's BM25 document is `content` plus the SSC facts
 // supplement the engine derives from `drawers.ssc_facts`
 // (`SSCFacts.lexicalSupplement`); the dense lane reads the same verbatim
-// text through `CorpusContentRecord.effectiveDenseText`. The
-// `compositionPolicy` the adapter is built with is the estate's stored
-// `index_composition_policy` setting; every policy id resolves to this one
-// composition, and the id is retained only so estates provisioned under an
-// earlier id keep opening (the engine compares the recorded id at open).
+// text through `CorpusContentRecord.effectiveDenseText`. This is the one
+// composition every estate indexes.
 //
 // Rust twin: `rust/src/intake.rs` (`LocusDrawerContentSource`).
 
@@ -43,14 +40,9 @@ import LocusKit
 public struct LocusDrawerCorpusContentSource: CorpusContentSource {
 
     private let estate: Estate
-    /// The estate's stored index composition policy. Retained for the
-    /// engine's open-time policy-id comparison; the record composition below
-    /// is the same for every policy (see the file header).
-    public let compositionPolicy: IndexCompositionPolicy
 
-    public init(estate: Estate, compositionPolicy: IndexCompositionPolicy = .current) {
+    public init(estate: Estate) {
         self.estate = estate
-        self.compositionPolicy = compositionPolicy
     }
 
     /// Resolve the CURRENT canonical record for a Drawer ID. Empty-content

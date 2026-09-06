@@ -3532,10 +3532,6 @@ extension ToolDispatcher {
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
             "sync: \(syncToken)",
-            // CDL-03: expose the active index composition policy id so callers
-            // can verify which gauntlet cell the estate is running under.
-            // "none" for locusOnly estates (no Corpus engine wired).
-            "index_composition_policy: \(await kit.indexCompositionPolicy(for: handle)?.id ?? "none")",
             // Frozen posture of this serve (`mootx01 serve --frozen` /
             // MOOTX01_FROZEN=1): true means mutating tools are refused and the
             // read path writes nothing. A process property, not estate state.

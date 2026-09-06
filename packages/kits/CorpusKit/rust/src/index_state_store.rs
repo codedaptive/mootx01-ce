@@ -6,16 +6,13 @@
 //! basis-generation counter. See `index_state_operational.rs` for the
 //! full bit layout and registry.
 //!
-//! v3 (CDL-03 — index composition policy): adds `composition_policy TEXT NOT
-//! NULL DEFAULT ''`. The empty string means `.current` policy was in effect
-//! (implicit — estates indexed before CDL-03 carry "" and the engine treats
-//! them as `.current`). Non-empty values are the `IndexCompositionPolicy::id()`
-//! string (e.g. `"lex=original;dense=distilled"`).
+//! v3: adds `composition_policy TEXT NOT NULL DEFAULT ''`. The column carried
+//! the index composition policy id, a knob that retired when every id came to
+//! compose the same document. It stays declared because populated estates
+//! carry it; nothing writes or reads it, and new rows take the default.
 
 use crate::content::CorpusContentId;
-use crate::content_engine::FEED_CURSOR_ROW_ID;
 use crate::error::CorpusKitError;
-use crate::index_composition_policy::IndexCompositionPolicy;
 use crate::index_state_operational::{
     clearing_coverage_and_generation, is_lexically_indexed, is_removed, soft_removed_bitmap,
     INDEX_GENERATION_MODULUS,
@@ -45,11 +42,6 @@ pub struct CorpusIndexState {
     /// Per-row state cache bitmap (see `index_state_operational.rs`).
     /// Default 0 — no lifecycle bits, no coverage, no generation.
     pub operational_bitmap: i64,
-    /// The `IndexCompositionPolicy::id()` string this content row was indexed
-    /// under (CDL-03). Empty string = `.current` policy (implicit; rows written
-    /// before CDL-03 carry ""). The engine records this at index time and
-    /// compares it to the configured policy at open time.
-    pub composition_policy_id: String,
 }
 
 impl CorpusIndexState {
@@ -78,8 +70,9 @@ impl CorpusIndexStateStore {
     ///        applied_cursor, updated_at) + PK on content_id.
     ///   v2 — Bitmap adoption: adds `operational_bitmap BITMAP NOT NULL DEFAULT 0`
     ///        to corpus_index_state; creates corpus_bitmap_generation singleton.
-    ///   v3 — CDL-03: adds `composition_policy TEXT NOT NULL DEFAULT ''` to
-    ///        corpus_index_state. Empty = `.current` (implicit for pre-CDL-03 rows).
+    ///   v3 — adds `composition_policy TEXT NOT NULL DEFAULT ''` to
+    ///        corpus_index_state. Retired column (see the module doc): declared,
+    ///        never written, never read.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitIndexState",
@@ -96,7 +89,8 @@ impl CorpusIndexStateStore {
                         ColumnDeclaration::timestamp("updated_at"),
                         // Per-row state cache bitmap. Layout in index_state_operational.rs.
                         ColumnDeclaration::bitmap("operational_bitmap"),
-                        // CDL-03: index composition policy id. Empty = .current (implicit).
+                        // Retired column: kept declared for populated estates, never
+                        // written or read; new rows take the default.
                         ColumnDeclaration::text("composition_policy")
                             .with_default(TypedValue::Text(String::new())),
                     ],
@@ -139,8 +133,8 @@ impl CorpusIndexStateStore {
             to_version: 3,
             operations: vec![SchemaOperation::AddColumn {
                 table: "corpus_index_state".to_string(),
-                // Empty default: pre-CDL-03 rows carry "" and the engine treats
-                // them as the `.current` policy (lex=original;dense=distilled).
+                // Retired column (see the module doc); the ladder step stays so
+                // a v2 estate still reaches v3.
                 column: ColumnDeclaration::text("composition_policy")
                     .with_default(TypedValue::Text(String::new())),
             }],
@@ -189,13 +183,6 @@ impl CorpusIndexStateStore {
             "operational_bitmap".into(),
             TypedValue::Bitmap(state.operational_bitmap),
         );
-        // CDL-03: store the composition policy id. Empty string is the legacy /
-        // `.current` sentinel; the engine wrote "" for rows before CDL-03 and
-        // will write the policy id for rows produced under an explicit policy.
-        values.insert(
-            "composition_policy".into(),
-            TypedValue::Text(state.composition_policy_id.clone()),
-        );
         row_store
             .upsert("corpus_index_state", values, &["content_id".to_string()])
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
@@ -232,11 +219,6 @@ impl CorpusIndexStateStore {
         values.insert(
             "operational_bitmap".into(),
             TypedValue::Bitmap(soft_removed_bitmap()),
-        );
-        // Preserve the composition policy recorded when this content was indexed.
-        values.insert(
-            "composition_policy".into(),
-            TypedValue::Text(existing.composition_policy_id.clone()),
         );
         self.storage
             .row_store()
@@ -319,40 +301,6 @@ impl CorpusIndexStateStore {
             .into_iter()
             .filter(|s| s.is_lexically_indexed() && !s.is_removed())
             .collect())
-    }
-
-    /// The first composition policy id among active rows (lexically indexed,
-    /// not removed) that differs from `configured_policy_id`; `None` when
-    /// every active row agrees or the table is empty. The feed-cursor
-    /// sentinel row carries no policy and is skipped. A row whose
-    /// `composition_policy_id` is empty was written before the column
-    /// existed and counts as `IndexCompositionPolicy::current()`, the policy
-    /// it was built under. One table scan per call; `CorpusContentEngine::open`
-    /// calls it once per open. Rows are visited in ascending content-id
-    /// order, so the id reported for a mixed table is deterministic. Twin of
-    /// Swift `mismatchedCompositionPolicy(configuredPolicyID:)`.
-    pub fn mismatched_composition_policy(
-        &self,
-        configured_policy_id: &str,
-    ) -> Result<Option<String>, CorpusKitError> {
-        let current_id = IndexCompositionPolicy::current().id();
-        for state in self.all_states()? {
-            if state.content_id == FEED_CURSOR_ROW_ID {
-                continue;
-            }
-            if !state.is_lexically_indexed() || state.is_removed() {
-                continue;
-            }
-            let effective_id = if state.composition_policy_id.is_empty() {
-                current_id.as_str()
-            } else {
-                state.composition_policy_id.as_str()
-            };
-            if effective_id != configured_policy_id {
-                return Ok(Some(effective_id.to_string()));
-            }
-        }
-        Ok(None)
     }
 
     // MARK: - Deletions (hard expunge only)
@@ -484,13 +432,6 @@ impl CorpusIndexStateStore {
             Some(TypedValue::Int(bm)) => *bm,
             _ => 0,
         };
-        // CDL-03: decode composition_policy. Absent (pre-v3 row) → empty string
-        // (engine treats "" as `.current`). Tolerate both .text and .int for
-        // robustness across backends.
-        let composition_policy_id = match row.get("composition_policy") {
-            Some(TypedValue::Text(s)) => s.clone(),
-            _ => String::new(),
-        };
         Some(CorpusIndexState {
             content_id: content_id.to_string(),
             revision: *revision,
@@ -499,7 +440,6 @@ impl CorpusIndexStateStore {
             applied_cursor,
             updated_at_millis,
             operational_bitmap,
-            composition_policy_id,
         })
     }
 }

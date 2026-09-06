@@ -129,8 +129,8 @@ fn frozen_refuses_writers_and_allows_reads() {
     assert!(memories_line(&before).is_some(), "precondition; got: {before}");
     assert!(before.contains("frozen: true"), "frozen status must report frozen: true; got: {before}");
     assert!(
-        before.contains("index_composition_policy: ") && before.find("index_composition_policy: ") < before.find("frozen: "),
-        "frozen line sits after index_composition_policy; got: {before}"
+        before.contains("sync: ") && before.find("sync: ") < before.find("frozen: "),
+        "frozen line sits after sync; got: {before}"
     );
 
     // moot_file_memory refused, exact text, isError.

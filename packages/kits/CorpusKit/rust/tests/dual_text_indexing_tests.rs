@@ -45,7 +45,6 @@ fn make_standalone_with_store() -> (CorpusContentEngine, Arc<CorpusDocumentStore
         config,
         Arc::clone(&store) as Arc<dyn CorpusContentSource>,
         vec![EmbeddingModelConfig::Deterministic],
-        false,
     )
     .expect("open engine");
     (engine, store, storage)
@@ -275,7 +274,6 @@ fn source_protocol_dense_text_supplied_via_record() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         vec![EmbeddingModelConfig::Deterministic],
-        false,
     )
     .expect("open engine");
 
@@ -320,7 +318,6 @@ fn source_protocol_nil_dense_text_means_lexical_used_for_both() {
         config,
         Arc::clone(&source) as Arc<dyn CorpusContentSource>,
         vec![EmbeddingModelConfig::Deterministic],
-        false,
     )
     .expect("open engine");
 

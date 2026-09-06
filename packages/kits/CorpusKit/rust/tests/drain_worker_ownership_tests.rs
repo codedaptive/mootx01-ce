@@ -69,7 +69,6 @@ fn engine_over(storage: Arc<dyn Storage>) -> Arc<CorpusContentEngine> {
             .expect("configuration"),
             source as Arc<dyn CorpusContentSource>,
             vec![EmbeddingModelConfig::Deterministic],
-            false,
         )
         .expect("engine"),
     )

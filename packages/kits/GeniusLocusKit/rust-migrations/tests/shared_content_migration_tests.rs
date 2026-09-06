@@ -413,7 +413,6 @@ fn legacy_estate_migrates_selectively_and_verifies() {
         .unwrap(),
         Arc::new(LocusDrawerContentSource::new(estate)),
         vec![EmbeddingModelConfig::Deterministic],
-        false,
     )
     .expect("engine");
     let hits = engine.bm25_top_k("page reclamation", 5).expect("bm25");
@@ -770,7 +769,6 @@ fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
         .unwrap(),
         Arc::new(LocusDrawerContentSource::new(estate)),
         big(),
-        false,
     )
     .expect("engine");
     assert_eq!(
