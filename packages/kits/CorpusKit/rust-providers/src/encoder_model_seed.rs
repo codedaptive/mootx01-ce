@@ -1,4 +1,4 @@
-//! Hardcoded seed values for the bundled all-MiniLM-L6-v2 encoder model.
+//! Hardcoded seed values for the bundled snowflake-arctic-embed-s encoder model.
 //!
 //! `mootx01 upgrade` and estate provisioning call `EncoderModelStore::upsert`
 //! with a row constructed from these constants. The row is inserted into
@@ -17,7 +17,7 @@
 //! Schema migration and re-encode are handled by `EncoderModelStore` and
 //! the drain duty — this file is only the seed source.
 
-/// Static seed values for the bundled all-MiniLM-L6-v2 encoder model.
+/// Static seed values for the bundled snowflake-arctic-embed-s encoder model.
 ///
 /// `mootx01 upgrade` and estate provisioning insert a row into
 /// `encoder_models` from these constants when none exists.
@@ -28,25 +28,25 @@ impl EncoderModelSeed {
 
     /// The model ID, format `<model>-w<window_words>` per contract §1.
     /// Changing the window size requires a new model ID and a full re-index.
-    pub const MODEL_ID: &'static str = "minilm-l6-v2-w60";
+    pub const MODEL_ID: &'static str = "arctic-embed-s-w60";
 
-    /// Short HF commit hash (13 chars). A weights revision bump is a new
+    /// Full pinned HF commit hash. A weights revision bump is a new
     /// `model_version` and triggers a re-index via the drain duty.
-    pub const MODEL_VERSION: &'static str = "1110a243fdf47";
+    pub const MODEL_VERSION: &'static str = "e596f507467533e48a2e17c007f0e1dacc837b33";
 
-    /// Output dimension of all-MiniLM-L6-v2.
+    /// Output dimension of snowflake-arctic-embed-s.
     pub const DIM: usize = 384;
 
-    /// No query prefix — the MiniLM card specifies plain text input.
-    pub const QUERY_PREFIX: &'static str = "";
+    /// Arctic card query instruction; documents receive no prefix.
+    pub const QUERY_PREFIX: &'static str = "Represent this sentence for searching relevant passages: ";
 
     /// No document prefix.
     pub const DOC_PREFIX: &'static str = "";
 
     /// Pooling strategy stored in the registry row.
-    pub const POOLING: &'static str = "mean";
+    pub const POOLING: &'static str = "cls";
 
-    /// sha256(vocab.txt) at pinned HF revision 1110a243fdf4706b3f48f1d95db1a4f5529b4d41.
+    /// sha256(vocab.txt) at pinned HF revision e596f507467533e48a2e17c007f0e1dacc837b33.
     /// Verified by `ModelDirectoryResolver` at load time; stored in
     /// `encoder_models.tokenizer_hash`. Identical across Apple and Linux/Windows
     /// manifests because both platforms ship the same vocab file.
@@ -64,8 +64,8 @@ impl EncoderModelSeed {
     /// Hard ceiling on spans per drawer: 32 spans × 384 bytes = 12 KB.
     pub const MAX_SPANS: usize = 32;
 
-    /// Model max-sequence in tokens (all-MiniLM-L6-v2 max_position_embeddings).
-    pub const MAX_SEQUENCE: usize = 256;
+    /// Model max-sequence in tokens (snowflake-arctic-embed-s max_position_embeddings).
+    pub const MAX_SEQUENCE: usize = 512;
 }
 
 #[cfg(test)]
