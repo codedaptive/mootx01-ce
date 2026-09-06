@@ -1,10 +1,11 @@
 // DefaultEnsemble.swift — the ONE definition of the default recall ensemble.
 //
-// Mission 6a-iii-wire: flip the production default from a single deterministic
-// provider to the canonical five honest signals. This factory is the single
-// source of truth for the default recall ensemble — every production
-// provision/open site threads THIS list, so the five honest signals
-// (RI / PPMI / LSA / NMF / FDC) are the live default everywhere.
+// Measurement (plan 70BC55F3, 2026-09-05): a retrieval-trained sentence encoder
+// reranking BM25's head beat BM25 on two corpora (0.496 vs. 0.470; 0.335 vs.
+// 0.310). The four float families (LSA/NMF/PPMI/FDC) did not earn their cost.
+// The default ensemble is now RI only; the dense families compile only when the
+// DenseFamilies trait is active (MOOTX01_DENSE_FAMILIES). RI stays always-on
+// because its binary fingerprint feeds dreaming, contradiction, and consolidation.
 //
 // ## Why this lives in CorpusKitProviders, not CorpusKit core
 //
@@ -34,33 +35,33 @@ import CorpusKit
 /// Factory namespace for CorpusKit's canonical default embedding ensemble.
 ///
 /// `CorpusEnsemble.defaultEnsemble()` is the single definition of the
-/// default recall ensemble — the five honest distributional / co-classification
-/// signals every production estate is provisioned with.
+/// default recall ensemble. The active set depends on the compile-time switch:
+///
+///   - **`MOOTX01_DENSE_FAMILIES` OFF (default):** one signal — RI only.
+///     Measurement showed the dense families add cost without beating BM25+RI.
+///     RI stays because its binary fingerprint feeds dreaming, contradiction,
+///     and consolidation.
+///   - **`MOOTX01_DENSE_FAMILIES` ON (`--traits DenseFamilies`):** five signals
+///     — RI / PPMI / LSA / NMF / FDC. Used for measurement and benchmarks.
 public enum CorpusEnsemble {
 
-    /// The canonical FIVE-signal default recall ensemble (untrained).
+    /// The default recall ensemble (untrained), gated by `MOOTX01_DENSE_FAMILIES`.
     ///
-    /// Returns, in this fixed order:
-    ///   1. `.randomIndexing` — Random Indexing distributional semantics.
-    ///   2. `.ppmi`           — PPMI-weighted distributional semantics.
-    ///   3. `.lsa`            — Latent Semantic Analysis (truncated SVD).
-    ///   4. `.nmf`            — Non-negative matrix factorization latent factors.
-    ///   5. `.fdc`            — Frame Decimal Classification co-classification.
+    /// With the switch OFF (default): one provider — `.randomIndexing`.
+    /// With the switch ON:  five providers — RI, PPMI, LSA, NMF, FDC — in that
+    /// fixed canonical order.
     ///
-    /// The four distributional / matrix providers (RI/PPMI/LSA/NMF) are
-    /// trainable: the Corpus lifecycle trains and persists them on first
-    /// ingest / reindex under their own modelIDs. FDC is stateless — ready
-    /// immediately, no training required. The providers are returned UNTRAINED;
-    /// the Corpus owns the train+persist lifecycle.
-    ///
-    /// `models[0]` (`.randomIndexing`) is the DEFAULT signal that the Corpus's
-    /// single-signal entry points delegate to, so it leads the order.
+    /// `models[0]` (`.randomIndexing`) leads in both cases — it is the DEFAULT
+    /// signal that the Corpus's single-signal entry points delegate to.
     ///
     /// Constructed FRESH each call — see the file header for why a function and
     /// not a shared constant.
     ///
-    /// - Returns: the five untrained `EmbeddingModel` cases in canonical order.
+    /// - Returns: the untrained `EmbeddingModel` cases for the active switch state.
     public static func defaultEnsemble() -> [EmbeddingModel] {
+#if MOOTX01_DENSE_FAMILIES
+        // Dense families are ON: return all five honest signals.
+        // Activated via `swift test --traits DenseFamilies` / `swift build --traits DenseFamilies`.
         [
             .randomIndexing(provider: RandomIndexingProvider()),
             .ppmi(provider: PpmiProvider()),
@@ -68,5 +69,12 @@ public enum CorpusEnsemble {
             .nmf(provider: NmfProvider()),
             .fdc(provider: FDCProvider())
         ]
+#else
+        // Dense families are OFF (default, plan 70BC55F3, 2026-09-05):
+        // LSA/NMF/PPMI/FDC did not beat BM25+RI on two measured corpora.
+        // RI only — its binary fingerprint feeds dreaming, contradiction,
+        // and consolidation and must not be removed.
+        [.randomIndexing(provider: RandomIndexingProvider())]
+#endif
     }
 }

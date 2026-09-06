@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family provider — compiled only when the DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See CorpusKit/Package.swift.
 // EmbeddingGemmaProvider.swift
 //
 // EmbeddingGemma 300M provider. 768-dim pooled vector; the
@@ -92,3 +95,5 @@ public struct EmbeddingGemmaProvider: EmbeddingProvider {
         return (FloatSimHash.project(vector: pooled, seed: projectionSeed), pooled)
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

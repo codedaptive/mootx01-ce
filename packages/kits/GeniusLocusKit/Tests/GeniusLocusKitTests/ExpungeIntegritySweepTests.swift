@@ -253,7 +253,7 @@ struct ExpungeIntegritySweepTests {
 
     // MARK: - S4: sweep re-delete removes orphaned distillation-features-v1 lane entry
 
-    /// Three-sentence content is distilled (writes a distillation-features-v1
+    /// Three-sentence content is fingerprinted (writes a distillation-features-v1
     /// lane entry in the VectorStore), then the process crashes between step 1
     /// (LocusKit tombstone) and step 2 (cross-kit delete). The lane entry
     /// survives the crash window. The integrity sweep's re-delete must now
@@ -266,8 +266,8 @@ struct ExpungeIntegritySweepTests {
         defer { Task { try? await kit.close(handle) } }
 
         // Three-sentence content with repeated named entity ("Rhenium") so
-        // the matrix distillation path (≥3 sentences) produces a non-zero
-        // structural fingerprint — which causes distillItemsSweep to write a
+        // the matrix path (≥3 sentences) produces a non-zero structural
+        // fingerprint — which makes writeStructuralFingerprint write a
         // distillation-features-v1 VectorStore lane entry keyed by drawer id.
         // Same content style as Rust S4 (proven non-zero fingerprint via the
         // default extractor).
@@ -275,15 +275,10 @@ struct ExpungeIntegritySweepTests {
         let drawer = try await kit.capture(
             handle, captureFrame(content: content), mode: .impatient)
 
-        // Distill the item to write the structural fingerprint lane entry.
-        let distilled = try await kit.distillItemsSweep(
-            handle: handle,
-            distillFn: GeniusLocusKit.defaultDistillFn,
-            now: Self.now)
-        #expect(
-            distilled >= 1,
-            "distillItemsSweep must produce at least 1 item; got \(distilled)"
-        )
+        // Write the structural fingerprint lane entry.
+        let written = try await kit.writeStructuralFingerprint(
+            handle: handle, drawerID: drawer.id, content: content, now: Self.now)
+        #expect(written, "writeStructuralFingerprint must write a lane entry for the fixture")
 
         // Verify the lane entry exists before the crash window.
         let vectorStore = try #require(

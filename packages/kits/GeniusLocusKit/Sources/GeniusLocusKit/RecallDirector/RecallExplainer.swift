@@ -6,7 +6,7 @@
 ///
 /// Each explanation is a small array of strings, one per semantic line:
 ///   "sources: locusBitmap, corpusBM25"
-///   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412"
+///   "score: locus=0.82 bm25=0.71 vector=0.00 dense=0.00 fieldFit=0.44 coOccurrence=0.00 temporal=0.00 graph=0.00 preference=0.00 agreement=0.02 final=0.412 span:1:0.744"
 ///   "mode: unionBest | scoring: matrixAware"
 ///   "why: content query; BM25 and vector weighted high; MatrixO cluster preserved"
 ///
@@ -15,7 +15,11 @@
 /// which column moved a ranking, and a reader must not have to infer absence
 /// from a missing token. `agreement` is the fixed signal-agreement bonus the
 /// hit earned in the unionBest weighted score (0 under `.raw`/`.rrf`, which
-/// never add it), and `final` is the fused ranking score.
+/// never add it), and `final` is the fused ranking score. A hit the span
+/// rerank stage scored carries one more token, `span:<bestSpanIndex>:<cosine
+/// to 3 dp>` (contract sheet §8); a hit without a span hit carries no `span:`
+/// token, so its absence means "no span row under the active encoder", not a
+/// zero cosine.
 struct RecallExplainer {
 
     /// Explain one selected recall hit.
@@ -48,7 +52,7 @@ struct RecallExplainer {
         // weighted score, then the agreement bonus and the fused final (3 dp so
         // two hits that differ only in the third decimal still read as ordered).
         let sv = hit.score
-        let scoreTokens: [String] = [
+        var scoreTokens: [String] = [
             String(format: "locus=%.2f",        sv.locus),
             String(format: "bm25=%.2f",         sv.bm25),
             String(format: "vector=%.2f",       sv.vector),
@@ -61,6 +65,12 @@ struct RecallExplainer {
             String(format: "agreement=%.2f",    agreement),
             String(format: "final=%.3f",        sv.final),
         ]
+        // Span rerank evidence (sheet §8): index of the best span and its cosine
+        // to 3 dp, only for hits the stage scored. The Rust twin renders the
+        // same `span:%u:%.3f` token.
+        if let span = hit.spanHit {
+            scoreTokens.append(String(format: "span:%u:%.3f", span.bestSpanIndex, span.cosine))
+        }
         lines.append("score: \(scoreTokens.joined(separator: " "))")
 
         // Line 3 — mode and scoring strategy.

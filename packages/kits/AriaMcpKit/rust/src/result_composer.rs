@@ -37,23 +37,14 @@
 //! ## Absent-field contract (fixed columns)
 //!
 //! S1 and S2 have FIXED column counts. An absent optional renders as
-//! `-` occupying its whole column. A firstSentence byte-identical to
-//! subject (after normalization) also renders `-`. An empty activeAdornments
-//! array renders `-`. An absent SSC renders `-`.
-//!
-//! ## Adornment composition (fifth column)
-//!
-//! `CandidateRowData.active_adornments` must already be in ascending
-//! minter-ID order (caller's responsibility). The composer joins them
-//! with ` || ` for the text column; a literal ` || ` inside an adornment
-//! text is normalized to ` / ` before joining.
+//! `-` occupying its whole column. A bestSpan byte-identical to subject
+//! (after normalization) also renders `-`. An absent sscFacts renders `-`.
 //!
 //! ## Structured content parity invariant (§8.9)
 //!
 //! - One entry per rendered text row, same order, same cap.
 //! - An optional field is ABSENT from the structured row when its text
 //!   column renders the placeholder (`-`) — never null, never empty-string.
-//! - Adornment fields absent when no active stored adornment exists.
 //! - Score absent on S2 surfaces.
 //!
 //! ## Swift twin
@@ -137,8 +128,7 @@ pub fn render_s2_row_unhydrated(id: &str) -> String {
         id,
         Some(NO_SUBJECT_MARKER),
         None::<String>,
-        None,
-        vec![],
+        None::<String>,
         "-",
         None,
     );
@@ -153,9 +143,9 @@ pub fn render_s2_row_unhydrated(id: &str) -> String {
 /// renderer at all, but callers that hydrate outside that path (lens arms, etc.)
 /// still get a safe row.
 ///
-/// `first_sentence` is extracted from `drawer.content` (first 120 chars of the
-/// first sentence). SSC and active adornments are absent at structured hydration
-/// level — they render as `-`. The score field is None (S2 is unranked).
+/// `best_span` is extracted from `drawer.content` (first 60 words of content
+/// body). SSC facts are absent at structured hydration level — they render as `-`.
+/// The score field is None (S2 is unranked).
 pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRowData {
     use locus_kit::provenance::Sensitivity;
     let sens = drawer.sensitivity();
@@ -164,24 +154,18 @@ pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRow
         Sensitivity::Secret    => Some(SECRET_MARKER.to_string()),
         _ => drawer.subject.clone().or_else(|| Some(NO_SUBJECT_MARKER.to_string())),
     };
-    // Redaction boundary: firstSentence is body-derived content.
-    // Restricted/secret drawers MUST NOT leak body text through the firstSentence
+    // Redaction boundary: best_span is body-derived content.
+    // Restricted/secret drawers MUST NOT leak body text through the best_span
     // column — the same access control that gates the subject field applies here.
-    // Non-redacted drawers: extract first sentence from content, then truncate.
-    let first_sentence: Option<String> = match sens {
+    // Non-redacted drawers: use content as the best span (capped at 60 words).
+    let best_span: Option<String> = match sens {
         Sensitivity::Restricted | Sensitivity::Secret => None, // never leak body
         _ => {
             let body = drawer.content.trim();
             if body.is_empty() {
                 None
             } else {
-                let end = body.find(". ").map(|i| i + 1)
-                    .or_else(|| body.find(".\n").map(|i| i + 1))
-                    .or_else(|| body.find('\n'))
-                    .unwrap_or(body.len());
-                let raw = &body[..end];
-                let truncated = truncate_first_sentence(raw);
-                let normalized = normalize_value(truncated);
+                let normalized = normalize_value(body);
                 if normalized.is_empty() { None } else { Some(normalized) }
             }
         }
@@ -190,41 +174,11 @@ pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRow
     CandidateRowData::new(
         drawer.id.clone(),
         subject,
-        first_sentence,
-        None,   // SSC not available at structured hydration level
-        vec![], // adornments fetched separately; absent here renders "-"
+        best_span,
+        None::<String>, // sscFacts stubbed nil until W1 schema-19 Drawer.ssc_facts lands
         event_time,
-        None,   // S2 is unranked — no score
+        None,           // S2 is unranked — no score
     )
-}
-
-// ─── Semantic Search Candle data (SSC) ───────────────────────────────────────
-
-/// The Semantic Search Candle (SSC) facts attached to a memory row.
-/// Typed intermediate for the fourth column of S1/S2 rows.
-/// Mirrors Swift `SemanticSearchCandleData`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SemanticSearchCandleData {
-    /// The kind classification (e.g. "decision", "plan", "event", "note").
-    pub kind: String,
-    /// Zero or more entity names. Zero entities renders "kind: X" only.
-    /// One entity renders "kind: X, entity: Y".
-    /// Two or more render "kind: X, entities: Y1; Y2; ...".
-    pub entities: Vec<String>,
-}
-
-// ─── adornment entry ─────────────────────────────────────────────────────────
-
-/// One active stored adornment for a drawer, carrying its minter identity
-/// and the generated text. The composer always receives entries in ascending
-/// minter-ID order; it never re-sorts.
-/// Mirrors Swift `AdornmentEntry`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AdornmentEntry {
-    /// The minter's stable string ID (e.g. "apple-mint-001").
-    pub minter_id: String,
-    /// The generated adornment text (≤280 chars by mint contract).
-    pub text: String,
 }
 
 // ─── candidate row data (S1 / S2 typed intermediate) ─────────────────────────
@@ -233,12 +187,15 @@ pub struct AdornmentEntry {
 /// Tools produce these; the composer renders them. No rendered text is
 /// accepted as input; the composer is the sole rendering path.
 ///
+/// Row format (ENC-W6B): uuid · subject · bestSpan · sscFacts · eventTime · score (S1)
+///                       uuid · subject · bestSpan · sscFacts · eventTime (S2)
+///
 /// Surface extensions (connected/distilled/vague/federated/lens) are
 /// optional fields. Set only the extensions relevant to the surface.
 /// Mirrors Swift `CandidateRowData`.
 #[derive(Debug, Clone)]
 pub struct CandidateRowData {
-    // MARK: Core columns (all seven S1 / six S2 columns)
+    // MARK: Core columns (all six S1 / five S2 columns)
 
     /// The drawer UUID (column 1 of every memory row).
     pub id: String,
@@ -247,22 +204,20 @@ pub struct CandidateRowData {
     /// Absent subject renders `-`.
     pub subject: Option<String>,
 
-    /// The verbatim opening sentence of the body (column 3).
-    /// Normalized then hard-cut at 120 characters; renders `-` when
-    /// absent or when byte-identical to subject after normalization.
-    pub first_sentence: Option<String>,
+    /// Best content span: content words [bestSpanStart, bestSpanEnd) from a
+    /// SpanRerankHit, capped at 60 words; no hit → first body sentence (column 3).
+    /// Renders `-` when absent or when byte-identical to subject after normalization.
+    pub best_span: Option<String>,
 
-    /// Semantic Search Candle facts (column 4). Absent renders `-`.
-    pub semantic_search_candle: Option<SemanticSearchCandleData>,
+    /// SSC (Semantic Search Candle) facts as a raw string (column 4).
+    /// Format: "kind: hobby, entity: painting". Stubbed nil until W1 schema-19
+    /// Drawer.ssc_facts lands. Absent renders `-`.
+    pub ssc_facts: Option<String>,
 
-    /// Active adornments in ascending minter-ID order (column 5).
-    /// Empty vec renders `-`. One renders as-is. Many join with ` || `.
-    pub active_adornments: Vec<AdornmentEntry>,
-
-    /// Event time in ISO-8601 form with trailing Z (column 6).
+    /// Event time in ISO-8601 form with trailing Z (column 5).
     pub event_time: String,
 
-    /// Final relevance score to four decimal places (column 7, S1 only).
+    /// Final relevance score to four decimal places (column 6, S1 only).
     /// None on S2 surfaces.
     pub score: Option<f64>,
 
@@ -303,18 +258,16 @@ impl CandidateRowData {
     pub fn new(
         id: impl Into<String>,
         subject: Option<impl Into<String>>,
-        first_sentence: Option<impl Into<String>>,
-        semantic_search_candle: Option<SemanticSearchCandleData>,
-        active_adornments: Vec<AdornmentEntry>,
+        best_span: Option<impl Into<String>>,
+        ssc_facts: Option<impl Into<String>>,
         event_time: impl Into<String>,
         score: Option<f64>,
     ) -> Self {
         Self {
             id: id.into(),
             subject: subject.map(|s| s.into()),
-            first_sentence: first_sentence.map(|s| s.into()),
-            semantic_search_candle,
-            active_adornments,
+            best_span: best_span.map(|s| s.into()),
+            ssc_facts: ssc_facts.map(|s| s.into()),
             event_time: event_time.into(),
             score,
             room: None,
@@ -400,7 +353,6 @@ pub struct FullRecordTunnel {
 }
 
 /// Typed intermediate for the S3 full-record shape (§11.6).
-/// The adornments block is present only when active_adornments is non-empty.
 /// The subject line is present only when subject is Some.
 /// Mirrors Swift `FullRecordData`.
 pub struct FullRecordData {
@@ -408,8 +360,6 @@ pub struct FullRecordData {
     pub room: String,
     pub wing: String,
     pub subject: Option<String>,
-    /// Active adornments in ascending minter-ID order. Empty = omit block.
-    pub active_adornments: Vec<AdornmentEntry>,
     pub filed_at: String,       // ISO-8601 with Z
     pub event_time: String,     // ISO-8601 with Z
     pub state: String,
@@ -453,7 +403,7 @@ pub struct FactTimelineRow {
 
 /// One edge row for the S5 graph-edge surface (§11.8).
 /// The far endpoint renders the S2 pick fields (UUID, subject, first sentence,
-/// SSC, adornment, event time) without a score column.
+/// SSC, event time) without a score column.
 pub struct EdgeRow {
     pub tunnel_id: String,
     /// The edge kind/label. Lifecycle suffix "(lifecycle)" appended when not active.
@@ -604,54 +554,15 @@ pub fn truncate_first_sentence(raw: &str) -> &str {
     raw   // fewer than 120 chars
 }
 
-// ─── SSC text rendering (column 4 text) ──────────────────────────────────────
-
-/// Render the Semantic Search Candle facts object as the fourth-column text.
-///   kind only: "kind: X"
-///   kind + 1 entity: "kind: X, entity: Y"
-///   kind + N entities: "kind: X, entities: Y1; Y2; ..."
-pub fn render_semantic_search_candle_text(candle: &SemanticSearchCandleData) -> String {
-    let mut parts = vec![format!("kind: {}", candle.kind)];
-    match candle.entities.len() {
-        0 => {}
-        1 => parts.push(format!("entity: {}", candle.entities[0])),
-        _ => parts.push(format!("entities: {}", candle.entities.join("; "))),
-    }
-    parts.join(", ")
-}
-
-// ─── adornment composition (column 5 text) ───────────────────────────────────
-
-/// Compose the fifth-column adornment text from active adornments in
-/// ascending minter-ID order:
-///   zero → "-"
-///   one  → text unchanged
-///   many → texts joined with " || "; a literal " || " inside any text
-///          is first normalized to " / " to prevent false splits.
-pub fn compose_adornment_text(adornments: &[AdornmentEntry]) -> String {
-    match adornments.len() {
-        0 => "-".to_string(),
-        1 => adornments[0].text.clone(),
-        _ => {
-            // Normalize literal " || " inside each text to " / " before joining.
-            let normalized: Vec<String> = adornments
-                .iter()
-                .map(|a| a.text.replace(" || ", " / "))
-                .collect();
-            normalized.join(" || ")
-        }
-    }
-}
-
 // ─── single row rendering ─────────────────────────────────────────────────────
 
 fn normalized_subject(row: &CandidateRowData) -> String {
     row.subject.as_deref().map(normalize_value).unwrap_or_else(|| "-".to_string())
 }
 
-fn normalized_first_sentence(row: &CandidateRowData, subject_normalized: &str) -> String {
-    let Some(fs) = &row.first_sentence else { return "-".to_string() };
-    let truncated = truncate_first_sentence(fs);
+fn normalized_best_span(row: &CandidateRowData, subject_normalized: &str) -> String {
+    let Some(bs) = &row.best_span else { return "-".to_string() };
+    let truncated = truncate_first_sentence(bs);
     let normalized = normalize_value(truncated);
     if normalized.is_empty() || normalized == subject_normalized {
         "-".to_string()
@@ -660,32 +571,31 @@ fn normalized_first_sentence(row: &CandidateRowData, subject_normalized: &str) -
     }
 }
 
-/// Render one S1 row (seven fixed columns). The score is mandatory;
+fn ssc_text(row: &CandidateRowData) -> String {
+    row.ssc_facts.as_deref().unwrap_or("-").to_string()
+}
+
+/// Render one S1 row (six fixed columns). The score is mandatory;
 /// pass the actual score value — callers must not omit it.
 ///
-/// Column order: uuid · subject · firstSentence · SSC · adornment ·
-///               eventTime · score%.4f
+/// Column order: uuid · subject · bestSpan · sscFacts · eventTime · score%.4f
 pub fn render_s1_row(row: &CandidateRowData) -> String {
     let subject_text = normalized_subject(row);
-    let fs_text = normalized_first_sentence(row, &subject_text);
-    let candle_text = row.semantic_search_candle.as_ref()
-        .map(render_semantic_search_candle_text).unwrap_or_else(|| "-".to_string());
-    let adornment_text = compose_adornment_text(&row.active_adornments);
+    let span_text = normalized_best_span(row, &subject_text);
+    let ssc = ssc_text(row);
     let score_text = format!("{:.4}", row.score.unwrap_or(0.0));
-    [row.id.as_str(), &subject_text, &fs_text, &candle_text, &adornment_text,
+    [row.id.as_str(), &subject_text, &span_text, &ssc,
      &row.event_time, &score_text].join(SEP)
 }
 
-/// Render one S2 row (six fixed columns, no score).
+/// Render one S2 row (five fixed columns, no score).
 ///
-/// Column order: uuid · subject · firstSentence · SSC · adornment · eventTime
+/// Column order: uuid · subject · bestSpan · sscFacts · eventTime
 pub fn render_s2_row(row: &CandidateRowData) -> String {
     let subject_text = normalized_subject(row);
-    let fs_text = normalized_first_sentence(row, &subject_text);
-    let candle_text = row.semantic_search_candle.as_ref()
-        .map(render_semantic_search_candle_text).unwrap_or_else(|| "-".to_string());
-    let adornment_text = compose_adornment_text(&row.active_adornments);
-    [row.id.as_str(), &subject_text, &fs_text, &candle_text, &adornment_text,
+    let span_text = normalized_best_span(row, &subject_text);
+    let ssc = ssc_text(row);
+    [row.id.as_str(), &subject_text, &span_text, &ssc,
      &row.event_time].join(SEP)
 }
 
@@ -771,7 +681,6 @@ pub fn render_s2_batch_get(
 // ─── S3 full record (§11.6) ───────────────────────────────────────────────────
 
 /// Render the S3 full-record shape.
-/// The `adornments: N` block is omitted when no active stored adornment.
 /// The `subject:` line is omitted when the drawer carries none.
 /// Tunnels are capped at 50.
 pub fn render_s3_record(record: &FullRecordData) -> ComposedResult {
@@ -781,12 +690,6 @@ pub fn render_s3_record(record: &FullRecordData) -> ComposedResult {
     ];
     if let Some(subject) = &record.subject {
         lines.push(format!("subject: {}", subject));
-    }
-    if !record.active_adornments.is_empty() {
-        lines.push(format!("adornments: {}", record.active_adornments.len()));
-        for adornment in &record.active_adornments {
-            lines.push(format!("  {}", adornment.text));
-        }
     }
     lines.push(format!("filed_at: {}", record.filed_at));
     lines.push(format!("event_time: {}", record.event_time));
@@ -1206,38 +1109,20 @@ pub fn structured_row_object(row: &CandidateRowData) -> Value {
         obj.insert("subject".to_string(), json!(subject));
     }
 
-    // First sentence: absent when None or when byte-identical to subject
+    // Best span: absent when None or when byte-identical to subject
     // after normalization (same rule as text rendering).
     let subj_norm = row.subject.as_deref().map(normalize_value).unwrap_or_default();
-    if let Some(fs) = &row.first_sentence {
-        let truncated = truncate_first_sentence(fs);
-        let fs_norm = normalize_value(truncated);
-        if !fs_norm.is_empty() && fs_norm != subj_norm {
-            obj.insert("firstSentence".to_string(), json!(fs_norm));
+    if let Some(bs) = &row.best_span {
+        let truncated = truncate_first_sentence(bs);
+        let bs_norm = normalize_value(truncated);
+        if !bs_norm.is_empty() && bs_norm != subj_norm {
+            obj.insert("bestSpan".to_string(), json!(bs_norm));
         }
     }
 
-    // Semantic Search Candle: absent when None. The structured key stays the
-    // wire literal "ssc" — wire shapes are frozen data, not symbols.
-    if let Some(candle) = &row.semantic_search_candle {
-        let mut candle_obj = serde_json::Map::new();
-        candle_obj.insert("kind".to_string(), json!(candle.kind));
-        candle_obj.insert("entities".to_string(), Value::Array(
-            candle.entities.iter().map(|e| json!(e)).collect()
-        ));
-        obj.insert("ssc".to_string(), Value::Object(candle_obj));
-    }
-
-    // Adornment: absent when no active stored adornment.
-    if !row.active_adornments.is_empty() {
-        let composed_text = compose_adornment_text(&row.active_adornments);
-        obj.insert("adornment".to_string(), json!(composed_text));
-        obj.insert("adornments".to_string(), Value::Array(
-            row.active_adornments.iter().map(|entry| json!({
-                "minterID": entry.minter_id,
-                "text": entry.text,
-            })).collect()
-        ));
+    // SSC facts: absent when None. Raw string (e.g. "kind: hobby, entity: painting").
+    if let Some(ssc) = &row.ssc_facts {
+        obj.insert("sscFacts".to_string(), json!(ssc));
     }
 
     obj.insert("eventTime".to_string(), json!(row.event_time));

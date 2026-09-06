@@ -16,7 +16,6 @@
 //   5. `memory` is view-only when frozen: every other command is refused
 //      before the adapter runs and before session state records the call,
 //      with the estate byte-identical on disk; the same delete lands live.
-//   6. The two dark mint tools are refused by name when frozen.
 //
 // SQLite-backed where trace rows are involved: the recall_trace table only
 // exists on the SQLite backend.
@@ -68,13 +67,9 @@ struct EstatePostureResolutionTests {
 struct ToolMutationInventoryTests {
 
     /// Every tool name a serve launched with `environment` can dispatch: the
-    /// advertised projection, plus the dark mint tools when the mint gate is on.
+    /// advertised projection.
     private func reachable(_ environment: [String: String]) -> Set<String> {
-        var names = Set(ToolProjection.tools(environment: environment).map(\.name))
-        if RecipeTools.mintToolsEnabled(environment: environment) {
-            names.formUnion(ToolMutationInventory.darkMutationTools)
-        }
-        return names
+        Set(ToolProjection.tools(environment: environment).map(\.name))
     }
 
     /// Every flag combination a serve can be launched with.
@@ -82,18 +77,14 @@ struct ToolMutationInventoryTests {
         var combinations: [[String: String]] = []
         for vault in ["1", "0"] {
             for memory in ["0", "1"] {
-                for mint in ["0", "1"] {
-                    combinations.append([
-                        "MOOTX01_VAULT": vault, "MOOTX01_MEMORY_TOOL": memory, "MOOTX01_MINT_TOOLS": mint,
-                    ])
-                }
+                combinations.append(["MOOTX01_VAULT": vault, "MOOTX01_MEMORY_TOOL": memory])
             }
         }
         return combinations
     }()
 
     /// Every opt-in on: the widest surface a serve can dispatch.
-    private static let widest = ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1", "MOOTX01_MINT_TOOLS": "1"]
+    private static let widest = ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1"]
 
     /// Every name in the inventory must be a tool a serve can really
     /// dispatch; a renamed or retired tool must fail here, not silently stop
@@ -128,9 +119,8 @@ struct ToolMutationInventoryTests {
 
     @Test func writersAreRefusedAndReadersAreNot() {
         let refused = ToolMutationInventory.frozenRefusedTools
-        for tool in ["moot_file_memory", "moot_update_memory", "moot_redistill", "moot_erase_memory",
-                     "moot_dream", "moot_json_import", "moot_file_packet",
-                     "moot_register_adornment_minter", "moot_run_adornment_pass"] {
+        for tool in ["moot_file_memory", "moot_update_memory", "moot_erase_memory",
+                     "moot_dream", "moot_json_import", "moot_file_packet"] {
             #expect(refused.contains(tool), "\(tool) must be refused when frozen")
         }
         for tool in ["moot_memory_search", "moot_estate_status", "moot_memory_get", "moot_recall_precise",
@@ -139,23 +129,10 @@ struct ToolMutationInventoryTests {
             #expect(ToolMutationInventory.frozenReadTools.contains(tool),
                     "\(tool) is a read and must be in the explicit read set")
         }
-        // The four sets are disjoint: a tool has exactly one tier.
+        // The three sets are disjoint: a tool has exactly one tier.
         #expect(ToolMutationInventory.additiveWriteTools.isDisjoint(with: ToolMutationInventory.mutationTools))
         #expect(ToolMutationInventory.mutationTools.isDisjoint(with: ToolMutationInventory.destructiveTools))
         #expect(ToolMutationInventory.additiveWriteTools.isDisjoint(with: ToolMutationInventory.destructiveTools))
-        for named in [ToolMutationInventory.additiveWriteTools, ToolMutationInventory.mutationTools,
-                      ToolMutationInventory.destructiveTools] {
-            #expect(ToolMutationInventory.darkMutationTools.isDisjoint(with: named))
-        }
-    }
-
-    /// The dark set is exactly the two dark mint tools the recipe surface
-    /// gates at launch, so the two tables cannot drift apart.
-    @Test func darkMutationToolsAreTheDarkMintTools() {
-        #expect(ToolMutationInventory.darkMutationTools.count == 2)
-        for tool in ToolMutationInventory.darkMutationTools {
-            #expect(RecipeTools.isDarkMintTool(tool), "\(tool) must be a dark mint tool")
-        }
     }
 
     @Test func memoryIsCommandClassifiedWithViewAsItsOnlyRead() {
@@ -435,24 +412,4 @@ struct FrozenDispatcherTests {
                 "moot_synthesize must be in the explicit read set after FRZ-3")
     }
 
-    // MARK: - Dark mint tools are refused by name
-
-    /// The two mint tools are never advertised and dispatch only behind the
-    /// `MOOTX01_MINT_TOOLS=1` launch gate; frozen, they are refused by name
-    /// before the gate is consulted, so a harness serve that is both frozen
-    /// and mint-enabled cannot mint through the snapshot.
-    @Test func frozenRefusesDarkMintTools() async throws {
-        let url = try tempDBURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let (kit, handle) = try await openSQLiteEstate(url: url)
-        let frozen = ToolDispatcher(kit: kit, handle: handle,
-                                    environment: ["MOOTX01_MINT_TOOLS": "1"], posture: .frozen)
-        let before = try estateBytes(url)
-        for tool in ToolMutationInventory.darkMutationTools.sorted() {
-            let result = try await frozen.dispatch(name: tool, arguments: .object(["batch_size": .integer(1)]))
-            #expect(isError(result), "\(tool) must be refused when frozen; got: \(firstText(result))")
-            #expect(firstText(result) == EstatePosture.refusalMessage(tool: tool))
-        }
-        #expect(try estateBytes(url) == before, "refused mint tools must leave the estate byte-identical on disk")
-    }
 }

@@ -1,6 +1,6 @@
 // GLKRecallRequestFrontierKTests.swift
 //
-// Tests for the per-call frontierK override on GLKRecallRequest (W3).
+// Tests for the per-call frontierK override on GLKRecallRequest.
 // Verifies three-level precedence:
 //   request.frontierK > recallShape.frontierK > engine formula
 // and that the request-level override is clamped to [64, 256] exactly
@@ -15,7 +15,7 @@ import Foundation
 import LocusKit
 @testable import GeniusLocusKit
 
-@Suite("GLKRecallRequest.frontierK per-call override (W3)")
+@Suite("GLKRecallRequest.frontierK per-call override")
 struct GLKRecallRequestFrontierKTests {
 
     // A minimal RecallFrame that satisfies the GLKRecallRequest init without

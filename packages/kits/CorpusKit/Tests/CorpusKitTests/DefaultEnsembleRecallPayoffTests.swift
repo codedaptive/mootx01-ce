@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // DefaultEnsembleRecallPayoffTests.swift
 //
 // Mission 6a-iii-wire — end-to-end PAYOFF proof: the default recall ensemble
@@ -227,3 +230,5 @@ struct DefaultEnsembleRecallPayoffTests {
         }
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

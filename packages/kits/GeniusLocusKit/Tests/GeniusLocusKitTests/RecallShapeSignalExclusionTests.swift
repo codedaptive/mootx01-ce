@@ -110,17 +110,35 @@ struct RecallShapeSignalExclusionTests {
         try await kit.close(handle)
     }
 
-    @Test("(c) nil shape == all signal:* keys at 1.0 (byte-identical)")
-    func nilEqualsAllOnesSignalKeys() async throws {
+    /// The back-compat contract extends to the `signal:*` namespace through
+    /// `RecallShape.defaultWeight(for:)`: a nil shape fuses byte-identically to a
+    /// shape that spells every key's default explicitly (1.0 everywhere, 0 for
+    /// `signal:vector`), and therefore to the `no_vector` preset. Mutation
+    /// control: spelling `signal:vector` at 1.0 instead changes the finals (the
+    /// vector budget re-enters the redistribution), so the identity is not
+    /// vacuous.
+    @Test("(c) nil shape == every signal:* key at its default (byte-identical) == no_vector")
+    func nilEqualsDefaultSignalKeys() async throws {
         let (kit, handle) = try await openTwoDrawerEstate(owner: "signal-ones-owner")
         await kit.registerGraphCache(ConstantGraphCache(score: 0.8), for: handle)
 
-        let ones = Dictionary(uniqueKeysWithValues: RecallShape.SignalKey.all.map { ($0, Float(1.0)) })
+        let defaults = Dictionary(uniqueKeysWithValues: RecallShape.SignalKey.all.map {
+            ($0, RecallShape.defaultWeight(for: $0))
+        })
+        #expect(defaults[RecallShape.SignalKey.vector] == 0)
         let neutral = try await kit.recall(handle, matrixReq(shape: nil))
-        let explicit = try await kit.recall(handle, matrixReq(shape: RecallShape(laneWeights: ones)))
+        let explicit = try await kit.recall(handle, matrixReq(shape: RecallShape(laneWeights: defaults)))
+        let noVector = try await kit.recall(handle, matrixReq(shape: RecallShape.preset("no_vector")))
 
         #expect(neutral.hits.map(\.id) == explicit.hits.map(\.id))
         #expect(neutral.hits.map(\.score.final) == explicit.hits.map(\.score.final))
+        #expect(neutral.hits.map(\.score.final) == noVector.hits.map(\.score.final))
+
+        var vectorOn = defaults
+        vectorOn[RecallShape.SignalKey.vector] = 1.0
+        let withVector = try await kit.recall(handle, matrixReq(shape: RecallShape(laneWeights: vectorOn)))
+        #expect(neutral.hits.map(\.score.final) != withVector.hits.map(\.score.final),
+            "asking for the vector column must change the redistributed finals")
         try await kit.close(handle)
     }
 
@@ -221,6 +239,7 @@ struct RecallShapeSignalExclusionTests {
             ("no_agreement", RecallShape.SignalKey.agreement),
             ("no_bm25", RecallShape.SignalKey.bm25),
             ("no_vector", RecallShape.SignalKey.vector),
+            ("no_encoder", RecallShape.SignalKey.encoder),
         ]
         for (name, key) in expected {
             let s = try #require(RecallShape.preset(name), "preset \(name) must resolve")
