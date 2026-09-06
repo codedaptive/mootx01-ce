@@ -67,7 +67,7 @@ pub mod default_ensemble;
 // factorizations (bit-identical with Swift's CorpusKitProviders/ReducedVocab).
 pub mod reduced_vocab;
 #[cfg(feature = "dense-families")]
-// honest semantic fusion signal: LSA/SVD distributional-semantics provider.
+// Semantic fusion signal: LSA/SVD distributional-semantics provider.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
 pub mod lsa;
 #[cfg(feature = "dense-families")]

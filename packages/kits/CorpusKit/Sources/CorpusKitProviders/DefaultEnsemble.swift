@@ -60,7 +60,7 @@ public enum CorpusEnsemble {
     /// - Returns: the untrained `EmbeddingModel` cases for the active switch state.
     public static func defaultEnsemble() -> [EmbeddingModel] {
 #if MOOTX01_DENSE_FAMILIES
-        // Dense families are ON: return all five honest signals.
+        // Dense families are ON: return all five signals.
         // Activated via `swift test --traits DenseFamilies` / `swift build --traits DenseFamilies`.
         [
             .randomIndexing(provider: RandomIndexingProvider()),
