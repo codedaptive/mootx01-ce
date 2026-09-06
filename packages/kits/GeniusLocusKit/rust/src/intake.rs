@@ -34,7 +34,6 @@ use corpus_kit::content::{
 };
 use corpus_kit::{content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
 use corpus_kit::error::CorpusKitError;
-use corpus_kit::index_composition_policy::IndexCompositionPolicy;
 use locus_kit::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID;
 use locus_kit::drawer_operational::ContentKind;
 use locus_kit::estate::Estate;
@@ -52,39 +51,15 @@ use locus_kit::estate::Estate;
 /// The lexical lane's BM25 document is `content` plus the SSC facts
 /// supplement the engine derives from `drawers.ssc_facts`
 /// (`ssc_facts::lexical_supplement`); the dense lane reads the same verbatim
-/// text. The `composition_policy` the adapter is built with is the estate's
-/// stored `index_composition_policy` setting; every policy id resolves to
-/// this one composition, and the id is retained only so estates provisioned
-/// under an earlier id keep opening (the engine compares the recorded id at
-/// open). The digest keys on `drawer.content`.
+/// text. This is the one composition every estate indexes. The digest keys
+/// on `drawer.content`.
 pub struct LocusDrawerContentSource {
     estate: Estate,
-    /// The estate's stored index composition policy. Retained for the
-    /// engine's open-time policy-id comparison; the record composition is
-    /// the same for every policy (see the struct doc).
-    composition_policy: IndexCompositionPolicy,
 }
 
 impl LocusDrawerContentSource {
-    /// Construct with the `.current()` policy. For tooling over a scratch
-    /// estate; every estate open goes through `new_with_policy` with the
-    /// stored setting.
     pub fn new(estate: Estate) -> Self {
-        LocusDrawerContentSource {
-            estate,
-            composition_policy: IndexCompositionPolicy::current(),
-        }
-    }
-
-    /// Construct with an explicit composition policy: the estate's stored
-    /// setting at every open.
-    pub fn new_with_policy(estate: Estate, composition_policy: IndexCompositionPolicy) -> Self {
-        LocusDrawerContentSource { estate, composition_policy }
-    }
-
-    /// The stored index composition policy this source was built with.
-    pub fn composition_policy(&self) -> &IndexCompositionPolicy {
-        &self.composition_policy
+        LocusDrawerContentSource { estate }
     }
 }
 

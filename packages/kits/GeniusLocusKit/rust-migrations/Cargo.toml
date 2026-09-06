@@ -8,25 +8,21 @@ publish = false
 [features]
 default = []
 migration-v1-0-to-v1-1 = []
-# migration-v1-1-to-v1-2: applies composition_policy column to corpus_index_state
-# on estates created before corpus_index_state reached schema version 3 (estate format 1.1 → 1.2 capsule).
-migration-v1-1-to-v1-2 = []
-# migration-v1-3-to-v1-4: stores the index composition setting (manifest key
-# index_composition_policy) on populated estates written before the setting
-# existed (estate format 1.3 → 1.4 capsule).
-migration-v1-3-to-v1-4 = []
 # migration-v1-4-to-v1-5: moves the vector tier's schema-version ledger rows
 # from their SynapseKit ids to their SynapseKit ids on populated estates
 # (estate format 1.4 → 1.5 capsule).
 migration-v1-4-to-v1-5 = []
 # Floor features are the consumer-facing cumulative selections: each enables
-# every capsule in the chain from that floor up to current.
-migration-floor-1-0 = ["migration-v1-0-to-v1-1", "migration-v1-1-to-v1-2", "migration-v1-3-to-v1-4", "migration-v1-4-to-v1-5"]
-migration-floor-1-1 = ["migration-v1-1-to-v1-2", "migration-v1-3-to-v1-4", "migration-v1-4-to-v1-5"]
-# floor 1.2 compiles the same capsules as floor 1.3: the 1.2 → 1.3 step added a
-# LocusKit column that schema v19 removed, so 1.3 → 1.4 runs directly on a 1.2 stamp.
-migration-floor-1-2 = ["migration-v1-3-to-v1-4", "migration-v1-4-to-v1-5"]
-migration-floor-1-3 = ["migration-v1-3-to-v1-4", "migration-v1-4-to-v1-5"]
+# every capsule in the chain from that floor up to current. Floors 1.1 through
+# 1.4 compile the same single capsule: the 1.1 → 1.2 step added a column
+# CorpusKit's own ladder adds at open, the 1.2 → 1.3 step added a LocusKit
+# column that schema v19 removed, and the 1.3 → 1.4 step seeded the index
+# composition setting that retired with the policy, so the 1.4 → 1.5 capsule
+# runs directly on any of those stamps.
+migration-floor-1-0 = ["migration-v1-0-to-v1-1", "migration-v1-4-to-v1-5"]
+migration-floor-1-1 = ["migration-v1-4-to-v1-5"]
+migration-floor-1-2 = ["migration-v1-4-to-v1-5"]
+migration-floor-1-3 = ["migration-v1-4-to-v1-5"]
 migration-floor-1-4 = ["migration-v1-4-to-v1-5"]
 
 [dependencies]
@@ -60,14 +56,6 @@ required-features = ["migration-v1-0-to-v1-1"]
 [[test]]
 name = "scale_qualification"
 required-features = ["migration-v1-0-to-v1-1"]
-
-[[test]]
-name = "index_composition_column_migration_tests"
-required-features = ["migration-v1-1-to-v1-2"]
-
-[[test]]
-name = "index_composition_setting_migration_tests"
-required-features = ["migration-v1-3-to-v1-4"]
 
 [[test]]
 name = "storage_ledger_kit_id_migration_tests"

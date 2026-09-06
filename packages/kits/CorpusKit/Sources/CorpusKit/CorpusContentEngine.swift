@@ -326,15 +326,6 @@ public actor CorpusContentEngine {
     // CorpusContentEngineQueue.swift can reach the estate configuration.
     let storage: any Storage
     private let configuration: CorpusContentConfiguration
-
-    /// The composition policy the engine was configured with (CDL-03).
-    /// Exposed read-only so GLK can surface it in `moot_estate_status`
-    /// without reaching into private internals.
-    /// `nonisolated` — only accesses `let configuration`, which is
-    /// immutable after init and safe to read without actor isolation.
-    public nonisolated var compositionPolicy: IndexCompositionPolicy {
-        configuration.compositionPolicy
-    }
     // Internal so the queue drain worker resolves records at work time.
     let source: any CorpusContentSource
     private let invertedIndex: InvertedIndexStore
@@ -397,19 +388,11 @@ public actor CorpusContentEngine {
     /// source. Applies the mode's profile declaration plus the SynapseKit
     /// and claims schemas (all additive/idempotent). In attached mode NO
     /// canonical content table is created.
-    ///
-    /// `reindexPending`: the caller commits to rebuilding every index lane
-    /// (`reindex(now:)`) before the engine serves a query. The open-time
-    /// composition-policy check is skipped, because rows recorded under
-    /// another policy are exactly what that rebuild replaces. This is the
-    /// path `mootx01 db composition --set` takes after it rewrites the
-    /// estate's stored policy; every serving open leaves it `false`.
     public init(
         storage: any Storage,
         configuration: CorpusContentConfiguration,
         source: any CorpusContentSource,
-        models: [EmbeddingModel] = [.default],
-        reindexPending: Bool = false
+        models: [EmbeddingModel] = [.default]
     ) async throws {
         guard !models.isEmpty else {
             throw CorpusKitError.invalidConfiguration(
@@ -487,23 +470,6 @@ public actor CorpusContentEngine {
         // Load the current basis-generation counter. Default 0 on first open
         // (no retrain yet). Updated after each trainTrainableSlots call.
         self.currentBasisGeneration = try await indexState.basisGeneration()
-
-        // Validate that any existing checkpoint rows agree with the
-        // configured composition policy. An estate indexed under a different
-        // policy has stale indexes for the configured policy and must be
-        // reindexed before use. The mismatch check is O(rows) but only runs
-        // once per estate open — acceptable for the safety guarantee.
-        // Empty compositionPolicyID rows (pre-v3) are treated as .current.
-        // Skipped when the caller has committed to a full reindex before
-        // serving (`reindexPending`): the disagreeing rows are the ones that
-        // rebuild replaces.
-        if !reindexPending,
-           let recorded = try await indexState.mismatchedCompositionPolicy(
-            configuredPolicyID: configuration.compositionPolicy.id)
-        {
-            throw CorpusKitError.compositionPolicyMismatch(
-                "recorded=\(recorded);configured=\(configuration.compositionPolicy.id)")
-        }
     }
 
     // MARK: - Operational bitmap helpers
@@ -957,10 +923,7 @@ public actor CorpusContentEngine {
                 indexVersion: Self.indexVersion,
                 appliedCursor: nil,
                 updatedAt: now,
-                operationalBitmap: bitmap,
-                // CDL-03: stamp the configured composition policy so the engine
-                // can detect a mismatch at open time.
-                compositionPolicyID: configuration.compositionPolicy.id))
+                operationalBitmap: bitmap))
             if force {
                 // The former serial reindex path emitted this metric once per
                 // completed record. Preserve that observability while moving
@@ -1382,9 +1345,7 @@ public actor CorpusContentEngine {
                 contentID: item.record.id, revision: item.record.revision,
                 digest: item.record.digest, indexVersion: Self.indexVersion,
                 appliedCursor: work.cursor, updatedAt: work.workNow,
-                operationalBitmap: bitmap,
-                // CDL-03: stamp the configured composition policy.
-                compositionPolicyID: configuration.compositionPolicy.id))
+                operationalBitmap: bitmap))
             if let cursor = work.cursor {
                 result.checkpoints.append(CorpusIndexState(
                     contentID: Self.feedCursorRowID, revision: 0, digest: "",
@@ -2018,9 +1979,7 @@ public actor CorpusContentEngine {
         let checkpoint = CorpusIndexState(
             contentID: record.id, revision: record.revision, digest: record.digest,
             indexVersion: Self.indexVersion, appliedCursor: appliedCursor, updatedAt: now,
-            operationalBitmap: bitmap,
-            // CDL-03: stamp the configured composition policy.
-            compositionPolicyID: configuration.compositionPolicy.id)
+            operationalBitmap: bitmap)
         Intellectus.report(.metric(
             name: "corpus.content.indexed", value: 1.0,
             tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))

@@ -4,14 +4,6 @@
 @_exported import GLKMigrationV1_0ToV1_1
 #endif
 
-#if GLK_MIGRATION_V1_1_TO_V1_2
-@_exported import GLKMigrationV1_1ToV1_2
-#endif
-
-#if GLK_MIGRATION_V1_3_TO_V1_4
-@_exported import GLKMigrationV1_3ToV1_4
-#endif
-
 #if GLK_MIGRATION_V1_4_TO_V1_5
 @_exported import GLKMigrationV1_4ToV1_5
 #endif
@@ -56,20 +48,15 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
+        // Floor covers the 1.0→1.1 and 1.4→1.5 capsules.
         .v1_0
-        #elseif GLK_MIGRATION_V1_1_TO_V1_2
-        // Floor covers the 1.1→1.2, 1.3→1.4, and 1.4→1.5 capsules.
-        .v1_1
-        #elseif GLK_MIGRATION_V1_3_TO_V1_4
-        // Floor covers the 1.3→1.4 and 1.4→1.5 capsules. It also serves a
-        // 1.2-stamped estate: the 1.2→1.3 step added a LocusKit column that
-        // schema v19 removed, so nothing separates 1.2 from 1.3 any more and
-        // the 1.3→1.4 capsule runs directly on either stamp.
-        .v1_2
         #elseif GLK_MIGRATION_V1_4_TO_V1_5
-        // Floor covers the 1.4→1.5 capsule only.
-        .v1_4
+        // Only the 1.4→1.5 capsule is compiled. It serves every stamp from
+        // 1.1 up: the 1.1→1.2 column is added by CorpusKit's own ladder at
+        // open, the 1.2→1.3 column was removed by schema v19, and the 1.3→1.4
+        // setting retired with the index composition policy, so nothing
+        // separates 1.1, 1.2, 1.3 and 1.4 any more.
+        .v1_1
         #else
         nil
         #endif
@@ -115,11 +102,7 @@ public enum GLKMigrationCatalog {
             found = stamped
         } else {
             // Fresh estate (nil stamp): created by a bare open without
-            // `provision`. Store the index composition setting the estate is
-            // born with (the creation-time seed), then stamp current — the
-            // same order as the 1.3 → 1.4 capsule, so a stamp never precedes
-            // the setting it vouches for. No historical capsules need to run.
-            try await kit.seedIndexCompositionPolicyIfAbsent(for: handle)
+            // `provision`. Stamp current; no historical capsules need to run.
             try await formatStore.stamp(.current, now: now)
             return GLKMigrationPreparation(
                 format: .current, migrated: false, migrationState: nil)
@@ -129,15 +112,16 @@ public enum GLKMigrationCatalog {
     }
 
     /// Run the compiled capsules from `found` to the current format as one
-    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, 1.1 -> 1.2, 1.3 -> 1.4,
-    /// then 1.4 -> 1.5; found == v1_1 starts at 1.1 -> 1.2; found == v1_2 or
-    /// v1_3 starts at 1.3 -> 1.4 (the 1.2 -> 1.3 step added a LocusKit column
-    /// that schema v19 removed, so it no longer exists); found == v1_4 runs
-    /// 1.4 -> 1.5 only. The 1.4 -> 1.5 ledger rewrite runs
-    /// before every older capsule (the 1.0 -> 1.1 capsule opens the vector
-    /// store, whose ladder must find its row under the new id) and its stamp
-    /// is written last. A build that compiles no chain reaching the current
-    /// format cannot serve a historical estate at all.
+    /// contiguous chain: found == v1_0 runs 1.0 -> 1.1, then 1.4 -> 1.5;
+    /// found == v1_1, v1_2, v1_3 or v1_4 runs 1.4 -> 1.5 only, because no
+    /// capsule separates those stamps (the 1.1 -> 1.2 column is added by
+    /// CorpusKit's own ladder at open, the 1.2 -> 1.3 column was removed by
+    /// schema v19, and the 1.3 -> 1.4 setting retired with the index
+    /// composition policy). The 1.4 -> 1.5 ledger rewrite runs before every
+    /// older capsule (the 1.0 -> 1.1 capsule opens the vector store, whose
+    /// ladder must find its row under the new id) and its stamp is written
+    /// last. A build that compiles no chain reaching the current format
+    /// cannot serve a historical estate at all.
     private static func runCompiledChain(
         kit: GeniusLocusKit,
         handle: EstateHandle,
@@ -162,23 +146,7 @@ public enum GLKMigrationCatalog {
             let report = try await kit.runSharedContentMigration(handle: handle, now: now)
             migrated = report.legacyChunkCount > 0
             migrationState = report.state.rawValue
-            // SharedContentMigration stamps v1_1; the chain continues to 1.2.
-        }
-        #endif
-        #if GLK_MIGRATION_V1_1_TO_V1_2
-        if found < .v1_2 {
-            // Adds composition_policy to corpus_index_state through CorpusKit's
-            // own ladder (idempotent addColumn) and stamps v1_2; the chain
-            // continues to 1.3.
-            try await kit.runIndexCompositionColumnMigration(handle: handle, now: now)
-        }
-        #endif
-        #if GLK_MIGRATION_V1_3_TO_V1_4
-        if found < .v1_4 {
-            // Stores the index composition setting when the estate carries
-            // none (the creation-time seed) and stamps v1_4; the chain
-            // continues to 1.5. Runs on 1.2- and 1.3-stamped estates alike.
-            try await kit.runIndexCompositionSettingMigration(handle: handle, now: now)
+            // SharedContentMigration stamps v1_1; the chain continues to 1.5.
         }
         #endif
         // Step 2 of the 1.4 -> 1.5 capsule: the rewrite again (a no-op after
