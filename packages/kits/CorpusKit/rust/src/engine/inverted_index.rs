@@ -304,13 +304,41 @@ impl InvertedIndex {
 
             let Some((pivot_idx, pivot_id)) = Self::find_pivot(cursors, threshold) else { break };
 
-            // BMW block-max refinement.
-            let block_ub = Self::compute_block_ub(cursors, pivot_idx, &pivot_id);
+            // BMW block-max refinement over the EXTENDED pivot prefix: every
+            // list after the pivot that already sits on the pivot document
+            // contributes to that document, so it belongs inside the block
+            // bound; the first list after the extended prefix is then strictly
+            // past the pivot, which keeps the skip target below strictly ahead
+            // of the pivot (termination).
+            let mut prefix_end = pivot_idx;
+            while prefix_end + 1 < cursors.len()
+                && cursors[prefix_end + 1].current_id() == Some(pivot_id.as_str())
+            {
+                prefix_end += 1;
+            }
+            let block_ub = Self::compute_block_ub(cursors, prefix_end, &pivot_id);
             if block_ub <= threshold {
-                // Block cannot beat threshold: seek past min block_last_id.
-                let next_target = Self::next_block_target(cursors, pivot_idx, &pivot_id);
-                let pick = Self::choose_advance(cursors, pivot_idx, &pivot_id);
-                cursors[pick].seek(&next_target);
+                // No document in [pivot, min block boundary] can beat the
+                // threshold from the prefix lists alone. The skip target is the
+                // smaller of (min block boundary + 1) and the current document
+                // of the first list past the prefix: documents from that
+                // position on may draw on that list, so the prefix lists must
+                // not jump over it (a list carried past a live candidate scores
+                // it later WITHOUT its contribution, or misses it outright).
+                // Every prefix list moves to the target; a list left behind
+                // would re-derive the same bound on the next iteration.
+                let mut next_target = Self::next_block_target(cursors, prefix_end, &pivot_id);
+                let after: Option<String> = cursors
+                    .get(prefix_end + 1)
+                    .and_then(|c| c.current_id().map(str::to_owned));
+                if let Some(after) = after {
+                    if after.as_str() < next_target.as_str() { next_target = after; }
+                }
+                for cursor in cursors.iter_mut().take(prefix_end + 1) {
+                    if cursor.current_id().map_or(false, |cid| cid < next_target.as_str()) {
+                        cursor.seek(&next_target);
+                    }
+                }
                 continue;
             }
 

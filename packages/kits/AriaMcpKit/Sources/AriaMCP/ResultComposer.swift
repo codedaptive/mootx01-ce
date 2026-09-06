@@ -49,24 +49,18 @@
 //
 // ## Absent-field contract (fixed columns)
 //
-//   S1 and S2 have FIXED column counts. An absent optional renders as
-//   '-' occupying its whole column. A firstSentence byte-identical to
-//   subject (after normalization) also renders '-'. An empty activeAdornments
-//   array renders '-'. An absent SSC renders '-'.
-//
-// ## Adornment composition (fifth column)
-//
-//   CandidateRowData.activeAdornments must already be in ascending
-//   minter-ID order (caller's responsibility). The composer joins them
-//   with ' || ' for the text column; a literal ' || ' inside an adornment
-//   text is normalized to ' / ' before joining.
+//   S1 and S2 have FIXED column counts (ARIA_MCP_SPEC 2.4.0 §8.3):
+//     S1 six cols: uuid · subject · bestSpan · sscFacts · eventTime · score
+//     S2 five cols: uuid · subject · bestSpan · sscFacts · eventTime
+//   An absent optional renders as '-' occupying its whole column.
+//   A bestSpan byte-identical to subject (after normalization) renders '-'.
+//   An absent sscFacts renders '-'.
 //
 // ## Structured content parity invariant (§8.9)
 //
 //   - One entry per rendered text row, same order, same cap.
 //   - An optional field is ABSENT from the structured row when its text
 //     column renders the placeholder ('-') — never null, never empty-string.
-//   - Adornment fields absent when no active stored adornment exists.
 //   - Score absent on S2 surfaces.
 //
 // ## Rust twin
@@ -77,43 +71,6 @@
 
 import Foundation
 
-// MARK: - Semantic Search Candle Data (SSC)
-
-/// The Semantic Search Candle (SSC) facts attached to a memory row.
-/// Typed intermediate for the fourth column of S1/S2 rows.
-/// Mirrors Rust `SemanticSearchCandleData`.
-public struct SemanticSearchCandleData: Sendable, Equatable {
-    /// The kind classification (e.g. "decision", "plan", "event", "note").
-    public let kind: String
-    /// Zero or more entity names. Zero entities renders "kind: X" only.
-    /// One entity renders "kind: X, entity: Y".
-    /// Two or more render "kind: X, entities: Y1; Y2; ...".
-    public let entities: [String]
-
-    public init(kind: String, entities: [String]) {
-        self.kind = kind
-        self.entities = entities
-    }
-}
-
-// MARK: - Adornment Entry
-
-/// One active stored adornment for a drawer, carrying its minter identity
-/// and the generated text. The composer always receives entries in ascending
-/// minter-ID order; it never re-sorts.
-/// Mirrors Rust `AdornmentEntry`.
-public struct AdornmentEntry: Sendable, Equatable {
-    /// The minter's stable string ID (e.g. "apple-mint-001").
-    public let minterID: String
-    /// The generated adornment text (≤280 chars by mint contract).
-    public let text: String
-
-    public init(minterID: String, text: String) {
-        self.minterID = minterID
-        self.text = text
-    }
-}
-
 // MARK: - Candidate Row Data (S1 / S2 typed intermediate)
 
 /// The typed intermediate for one memory row on any S1 or S2 surface.
@@ -123,8 +80,12 @@ public struct AdornmentEntry: Sendable, Equatable {
 /// Surface extensions (connected/distilled/vague/federated/lens) are
 /// optional fields. Set only the extensions relevant to the surface.
 /// Mirrors Rust `CandidateRowData`.
+///
+/// Row format (ARIA_MCP_SPEC 2.4.0 §8.3):
+///   S1 (6 cols): uuid · subject · bestSpan · sscFacts · eventTime · score
+///   S2 (5 cols): uuid · subject · bestSpan · sscFacts · eventTime
 public struct CandidateRowData: Sendable {
-    // MARK: Core columns (all seven S1 / six S2 columns)
+    // MARK: Core columns (S1 six / S2 five columns)
 
     /// The drawer UUID (column 1 of every memory row).
     public let id: String
@@ -133,22 +94,21 @@ public struct CandidateRowData: Sendable {
     /// Absent subject renders '-'.
     public let subject: String?
 
-    /// The verbatim opening sentence of the body (column 3).
-    /// Normalized then hard-cut at 120 characters; renders '-' when
-    /// absent or when byte-identical to subject after normalization.
-    public let firstSentence: String?
+    /// Best span: content words [start, end) from the rerank hit, capped at
+    /// 60 words. When no span hit is available, falls back to the first body
+    /// sentence (same truncation and dedup logic as before). Column 3.
+    /// Absent renders '-'.
+    public let bestSpan: String?
 
-    /// Semantic Search Candle facts (column 4). Absent renders '-'.
-    public let semanticSearchCandle: SemanticSearchCandleData?
+    /// SSC facts raw string read from the ssc_facts column (W1 schema 19).
+    /// Format: "kind: X" | "kind: X, entity: Y" | "kind: X, entities: Y1; Y2".
+    /// Column 4. Absent renders '-'.
+    public let sscFacts: String?
 
-    /// Active adornments in ascending minter-ID order (column 5).
-    /// Empty array renders '-'. One renders as-is. Many join with ' || '.
-    public let activeAdornments: [AdornmentEntry]
-
-    /// Event time in ISO-8601 form with trailing Z (column 6).
+    /// Event time in ISO-8601 form with trailing Z (column 5).
     public let eventTime: String
 
-    /// Final relevance score to four decimal places (column 7, S1 only).
+    /// Final relevance score to four decimal places (column 6, S1 only).
     /// Nil on S2 surfaces.
     public let score: Double?
 
@@ -165,7 +125,7 @@ public struct CandidateRowData: Sendable {
     /// Distilled recall: the distillate text (present = distilled representation).
     public let distilled: String?
 
-    /// Distilled recall: "distilled" | "contentFallback".
+    /// Distilled recall: always "distilled" — inline rendering via ContextDistillLib.
     public let representation: String?
 
     /// Vague recall: "summary" | "original".
@@ -186,9 +146,8 @@ public struct CandidateRowData: Sendable {
     public init(
         id: String,
         subject: String? = nil,
-        firstSentence: String? = nil,
-        semanticSearchCandle: SemanticSearchCandleData? = nil,
-        activeAdornments: [AdornmentEntry] = [],
+        bestSpan: String? = nil,
+        sscFacts: String? = nil,
         eventTime: String,
         score: Double? = nil,
         room: String? = nil,
@@ -203,9 +162,8 @@ public struct CandidateRowData: Sendable {
     ) {
         self.id = id
         self.subject = subject
-        self.firstSentence = firstSentence
-        self.semanticSearchCandle = semanticSearchCandle
-        self.activeAdornments = activeAdornments
+        self.bestSpan = bestSpan
+        self.sscFacts = sscFacts
         self.eventTime = eventTime
         self.score = score
         self.room = room
@@ -324,7 +282,6 @@ public struct FullRecordTunnel: Sendable {
 }
 
 /// Typed intermediate for the S3 full-record shape (§11.6).
-/// The adornments block is present only when activeAdornments is non-empty.
 /// The subject line is present only when subject is non-nil.
 /// Mirrors Rust `FullRecordData`.
 public struct FullRecordData: Sendable {
@@ -332,8 +289,6 @@ public struct FullRecordData: Sendable {
     public let room: String
     public let wing: String
     public let subject: String?
-    /// Active adornments in ascending minter-ID order. Empty = omit block.
-    public let activeAdornments: [AdornmentEntry]
     public let filedAt: String       // ISO-8601 with Z
     public let eventTime: String     // ISO-8601 with Z
     public let state: String
@@ -348,14 +303,13 @@ public struct FullRecordData: Sendable {
 
     public init(
         id: String, room: String, wing: String, subject: String? = nil,
-        activeAdornments: [AdornmentEntry] = [],
         filedAt: String, eventTime: String,
         state: String, trust: String, sensitivity: String,
         exportability: String, confirmation: String,
         lineageID: String, tunnels: [FullRecordTunnel], content: String
     ) {
         self.id = id; self.room = room; self.wing = wing
-        self.subject = subject; self.activeAdornments = activeAdornments
+        self.subject = subject
         self.filedAt = filedAt; self.eventTime = eventTime
         self.state = state; self.trust = trust
         self.sensitivity = sensitivity; self.exportability = exportability
@@ -657,72 +611,29 @@ public enum ResultComposer {
         return String(raw.prefix(120))
     }
 
-    // MARK: - Semantic Search Candle text rendering (column 4 text)
-
-    /// Render the Semantic Search Candle facts object as the fourth-column text.
-    ///   kind only: "kind: X"
-    ///   kind + 1 entity: "kind: X, entity: Y"
-    ///   kind + N entities: "kind: X, entities: Y1; Y2; ..."
-    public static func renderSemanticSearchCandleText(_ candle: SemanticSearchCandleData) -> String {
-        var parts: [String] = ["kind: \(candle.kind)"]
-        switch candle.entities.count {
-        case 0:
-            break   // kind only
-        case 1:
-            parts.append("entity: \(candle.entities[0])")
-        default:
-            parts.append("entities: \(candle.entities.joined(separator: "; "))")
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    // MARK: - Adornment composition (column 5 text)
-
-    /// Compose the fifth-column adornment text from active adornments in
-    /// ascending minter-ID order:
-    ///   zero → "-"
-    ///   one  → text unchanged
-    ///   many → texts joined with " || "; a literal " || " inside any text
-    ///          is first normalized to " / " to prevent false splits.
-    public static func composeAdornmentText(_ adornments: [AdornmentEntry]) -> String {
-        switch adornments.count {
-        case 0:
-            return "-"
-        case 1:
-            return adornments[0].text
-        default:
-            // Normalize literal " || " inside each text to " / " before joining.
-            let normalized = adornments.map { $0.text.replacingOccurrences(of: " || ", with: " / ") }
-            return normalized.joined(separator: " || ")
-        }
-    }
-
     // MARK: - Single row rendering
 
-    /// Render one S1 row (seven fixed columns). The score is mandatory;
-    /// pass the actual score value — callers must not omit it.
+    /// Render one S1 row (six fixed columns, ARIA_MCP_SPEC 2.4.0 §8.3).
+    /// The score is mandatory; pass the actual score value.
     ///
-    /// Column order: uuid · subject · firstSentence · SSC · adornment ·
-    ///               eventTime · score%.4f
+    /// Column order: uuid · subject · bestSpan · sscFacts · eventTime · score%.4f
     public static func renderS1Row(_ row: CandidateRowData) -> String {
         let subjectText = normalizedSubject(row)
-        let fsText = normalizedFirstSentence(row, subjectNormalized: subjectText)
-        let candleText = row.semanticSearchCandle.map(renderSemanticSearchCandleText) ?? "-"
-        let adornmentText = composeAdornmentText(row.activeAdornments)
+        let spanText = normalizedBestSpan(row, subjectNormalized: subjectText)
+        let sscText = row.sscFacts ?? "-"
         let scoreText = String(format: "%.4f", row.score ?? 0.0)
-        return [row.id, subjectText, fsText, candleText, adornmentText,
+        return [row.id, subjectText, spanText, sscText,
                 row.eventTime, scoreText].joined(separator: sep)
     }
 
-    /// Render one S2 row (six fixed columns, no score).
+    /// Render one S2 row (five fixed columns, no score, ARIA_MCP_SPEC 2.4.0 §8.3).
     ///
-    /// Column order: uuid · subject · firstSentence · SSC · adornment · eventTime
+    /// Column order: uuid · subject · bestSpan · sscFacts · eventTime
     public static func renderS2Row(_ row: CandidateRowData) -> String {
         let subjectText = normalizedSubject(row)
-        let fsText = normalizedFirstSentence(row, subjectNormalized: subjectText)
-        let candleText = row.semanticSearchCandle.map(renderSemanticSearchCandleText) ?? "-"
-        let adornmentText = composeAdornmentText(row.activeAdornments)
-        return [row.id, subjectText, fsText, candleText, adornmentText,
+        let spanText = normalizedBestSpan(row, subjectNormalized: subjectText)
+        let sscText = row.sscFacts ?? "-"
+        return [row.id, subjectText, spanText, sscText,
                 row.eventTime].joined(separator: sep)
     }
 
@@ -822,7 +733,6 @@ public enum ResultComposer {
     // MARK: - S3 full record (§11.6)
 
     /// Render the S3 full-record shape.
-    /// The `adornments: N` block is omitted when no active stored adornment.
     /// The `subject:` line is omitted when the drawer carries none.
     /// Tunnels are capped at 50.
     public static func renderS3Record(_ record: FullRecordData) -> ComposedResult {
@@ -832,12 +742,6 @@ public enum ResultComposer {
         ]
         if let subject = record.subject {
             lines.append("subject: \(subject)")
-        }
-        if !record.activeAdornments.isEmpty {
-            lines.append("adornments: \(record.activeAdornments.count)")
-            for adornment in record.activeAdornments {
-                lines.append("  \(adornment.text)")
-            }
         }
         lines.append(contentsOf: [
             "filed_at: \(record.filedAt)",
@@ -1099,10 +1003,10 @@ dataset \(data.datasetID) "\(data.datasetName)": \
 
     // MARK: - Distilled recall (§11.2)
 
-    /// Render the distilled recall surface: each row followed by its
+    /// Render the distilled recall surface: each row followed by its inline
     /// distilled text as a four-space indented unlabeled continuation.
-    /// A row still owing a distillate (representation == "contentFallback")
-    /// receives the fallback marker then the verbatim content.
+    /// Every row renders — ContextDistillLib runs at read time, so there is
+    /// no fallback path and no "not yet distilled" state.
     public static func renderDistilledRecall(
         rows: [CandidateRowData],
         control: ControlSignals
@@ -1115,13 +1019,7 @@ dataset \(data.datasetID) "\(data.datasetName)": \
         for row in rows {
             lines.append(renderS1Row(row))
             if let distilledText = row.distilled {
-                if row.representation == "contentFallback" {
-                    lines.append("    source: content (not yet distilled)")
-                    lines.append("    \(distilledText)")
-                } else {
-                    // "distilled" or unknown — render as clean continuation.
-                    lines.append("    \(distilledText)")
-                }
+                lines.append("    \(distilledText)")
             }
         }
         lines.append(contentsOf: controlLines(for: control))
@@ -1225,35 +1123,20 @@ dataset \(data.datasetID) "\(data.datasetName)": \
             obj["subject"] = .string(subject)
         }
 
-        // First sentence: absent when nil or when byte-identical to subject
-        // after normalization (same rule as text rendering).
+        // Best span: absent when nil or when byte-identical to subject
+        // after normalization (same dedup rule as text rendering).
         let subjNorm = row.subject.map(normalizeValue) ?? ""
-        if let fs = row.firstSentence {
-            let truncated = truncateFirstSentence(fs)
-            let fsNorm = normalizeValue(truncated)
-            if !fsNorm.isEmpty && fsNorm != subjNorm {
-                obj["firstSentence"] = .string(fsNorm)
+        if let span = row.bestSpan {
+            let truncated = truncateFirstSentence(span)
+            let spanNorm = normalizeValue(truncated)
+            if !spanNorm.isEmpty && spanNorm != subjNorm {
+                obj["bestSpan"] = .string(spanNorm)
             }
         }
 
-        // Semantic Search Candle: absent when nil. The structured key stays
-        // the wire literal "ssc" — wire shapes are frozen data, not symbols.
-        if let candle = row.semanticSearchCandle {
-            var candleObj: [String: JSONValue] = ["kind": .string(candle.kind)]
-            candleObj["entities"] = .array(candle.entities.map { .string($0) })
-            obj["ssc"] = .object(candleObj)
-        }
-
-        // Adornment: absent when no active stored adornment.
-        if !row.activeAdornments.isEmpty {
-            let composedText = composeAdornmentText(row.activeAdornments)
-            obj["adornment"] = .string(composedText)
-            obj["adornments"] = .array(row.activeAdornments.map { entry in
-                .object([
-                    "minterID": .string(entry.minterID),
-                    "text": .string(entry.text),
-                ])
-            })
+        // SSC facts raw string: absent when nil.
+        if let sscFacts = row.sscFacts {
+            obj["sscFacts"] = .string(sscFacts)
         }
 
         obj["eventTime"] = .string(row.eventTime)
@@ -1354,16 +1237,16 @@ dataset \(data.datasetID) "\(data.datasetName)": \
         row.subject.map(normalizeValue) ?? "-"
     }
 
-    /// Resolve the first-sentence column text for S1/S2 rows.
-    /// Absent first sentence renders '-'.
-    /// A first sentence byte-identical to the subject (after normalization)
+    /// Resolve the best-span column text for S1/S2 rows.
+    /// Absent bestSpan renders '-'.
+    /// A bestSpan byte-identical to the subject (after normalization)
     /// also renders '-' — never repeated per §11.1 rule 2.
-    private static func normalizedFirstSentence(
+    private static func normalizedBestSpan(
         _ row: CandidateRowData,
         subjectNormalized: String
     ) -> String {
-        guard let fs = row.firstSentence else { return "-" }
-        let truncated = truncateFirstSentence(fs)
+        guard let span = row.bestSpan else { return "-" }
+        let truncated = truncateFirstSentence(span)
         let normalized = normalizeValue(truncated)
         if normalized.isEmpty { return "-" }
         if normalized == subjectNormalized { return "-" }

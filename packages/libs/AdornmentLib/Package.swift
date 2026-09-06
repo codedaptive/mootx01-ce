@@ -2,13 +2,13 @@
 //
 // AdornmentLib — dream-time adornment generation and certification.
 //
-// Provides:
-//   - AdornmentValidators: deterministic post-mint validators (AV-1..AV-8
-//     golden pins, both ports). The minting model proposes; the validators
-//     certify. The model NEVER certifies its own output (architecture ruling,
-//     Apple RCA DDE22E7B 2026-08-22).
-//   - AdornmentGenerator: the MOOT_MINT_CMD command seam (stdin prompt →
-//     stdout claim text) plus the length gate enforced by ADORNMENT_MAX_LENGTH.
+// Dark by default under MOOTX01_MINERS. All 13 source files compile only
+// when the switch is on. Set the environment variable MOOTX01_MINERS=1
+// at build time to enable the library: swift build -Xswiftc -DMOOTX01_MINERS.
+//
+// Ruling (Encoder Rerank Program, 2026-09-05): adornments did not earn their
+// cost at ingest. The library is retained in the tree because its minter
+// recipes hold NuExtract for v1.2 KGFact creation. Not deleted — dark.
 //
 // Design constraints:
 //   - Zero external dependencies (C-1 mandate). Pure functions only.
@@ -28,6 +28,8 @@
 // category "AdornmentLib". Per CLAUDE.md.
 
 import PackageDescription
+
+let miners = Context.environment["MOOTX01_MINERS"].map { !$0.isEmpty } ?? false
 
 let package = Package(
     name: "AdornmentLib",
@@ -49,7 +51,13 @@ let package = Package(
             // No kit or external deps — the command seam reads a process path
             // from the environment; it does not link any ML library.
             dependencies: [],
-            path: "Sources/AdornmentLib"
+            path: "Sources/AdornmentLib",
+            swiftSettings: miners
+                // MOOTX01_MINERS=1 in the environment: compile the full library.
+                ? [.define("MOOTX01_MINERS")]
+                // Off by default: the library product exists but exports no
+                // symbols. Zero warnings with the switch off.
+                : []
         ),
         .testTarget(
             name: "AdornmentLibTests",
@@ -57,7 +65,8 @@ let package = Package(
                 "AdornmentLib",
             ],
             path: "Tests/AdornmentLibTests",
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
+            swiftSettings: miners ? [.define("MOOTX01_MINERS")] : []
         ),
     ]
 )

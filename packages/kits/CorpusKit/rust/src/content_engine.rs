@@ -2239,12 +2239,11 @@ impl CorpusContentEngine {
                 // from the dense text (anarrow shape, twin of Swift): the
                 // supplement affects BM25 TOKENISATION only — the canonical
                 // record text is unmodified and remains the payload.
+                // Schema 19: supplement comes from ssc_facts column, not dense text.
                 let lexical = format!(
                     "{}{}",
                     record.text,
-                    crate::trailer_lexical_supplement::lexical_supplement(
-                        record.dense_composition_text.as_deref()
-                    )
+                    crate::ssc_facts::lexical_supplement(record.ssc_facts.as_deref())
                 );
                 vec![(record.id.clone(), lexical, record.dense_composition_text.clone())]
             }

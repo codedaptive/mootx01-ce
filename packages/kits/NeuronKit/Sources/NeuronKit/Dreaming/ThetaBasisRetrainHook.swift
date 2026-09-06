@@ -5,6 +5,14 @@
 // corpus basis retrain so distributional embedding bases do not stale without
 // a manual `moot_reindex`.
 //
+// ── Which providers are retrained ─────────────────────────────────────────
+// This hook calls `GeniusLocusKit.reindexCorpus`, which retrains whatever
+// providers are registered in the estate's Corpus. With `MOOTX01_DENSE_FAMILIES`
+// OFF (the default, plan 70BC55F3, 2026-09-05), `CorpusEnsemble.defaultEnsemble()`
+// returns RI only — so this hook retrains RI only on estates opened with the
+// default ensemble. With `MOOTX01_DENSE_FAMILIES` ON, all five providers are
+// retrained as before.
+//
 // ── Design rationale ─────────────────────────────────────────────────────
 // Distributional embedding bases (RI / PPMI / LSA / NMF) freeze their
 // vocabulary at training time. The corpus-growth probe (`CorpusGrowthProbe`)

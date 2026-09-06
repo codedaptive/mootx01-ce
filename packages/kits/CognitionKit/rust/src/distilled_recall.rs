@@ -1,20 +1,15 @@
 // distilled_recall.rs — Rust mirror of CognitionKit/DistilledRecall.swift.
 //
-// Distilled-payload recall recipe — SPEC_DISTILLATION_STORAGE §10.3.
+// Distilled-payload recall recipe.
 //
 // `moot_recall_distilled` is EXACT-SEARCH GEOMETRY over originals +
-// distilled-representation hydration of the hits: the same recall request
-// `moot_memory_search` runs (unionBest, matrixAware fusion, query text),
-// with the §10.1 hydration selector pinned to `distilled`. Ranking is
-// identical to exact search BY CONSTRUCTION; only the payloads differ
-// (smaller). Per-hit response metadata carries `distilled_token_count`
-// (§6) and the §10.2 served-from-content fallback marker.
-//
-// The previous implementation — Hamming NN over the fingerprint lane
-// returning factoid drawers, DistilledHeader post-processing,
-// confidence-based injection depth — retired with the factoid tier
-// (§11.3). The distillation-features-v1 lane remains populated (§8) but
-// is a Phase 2 consolidation substrate, not a recall route.
+// inline distilled-representation hydration of the hits: the same recall
+// request `moot_memory_search` runs (unionBest, matrixAware fusion,
+// query text), with the hydration selector pinned to `distilled`. Ranking
+// is identical to exact search BY CONSTRUCTION; only the payloads differ
+// (smaller). Per-hit response metadata carries `token_count` (context
+// budgeting). Every row renders inline via ContextDistillLib at read time
+// — there is no sweep, no "not yet distilled" state, and no fallback path.
 //
 // Origin discipline (B-10a): the recipe request stays INTERNAL — only
 // the ARIA boundary marks requests external. Mirrors the Swift
@@ -25,7 +20,7 @@
 use genius_locus_kit::coordinator::{EstateCoordinator, VerbDispatchError};
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::hydration_representation::{
-    resolve_hydration_representation, HydrationRepresentation,
+    estimated_token_count, resolve_hydration_representation, HydrationRepresentation,
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
@@ -39,7 +34,7 @@ use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 /// Mirrors `DistilledDiscriminationLevel` in the Swift port. Defined
 /// locally because AriaMcpKit is downstream of CognitionKit. Thresholds:
 /// HIGH_MARGIN = 0.25, LOW_MARGIN = 0.05, LOW_SPREAD = 0.15. Computed
-/// over the SEARCH scores (the exact-search ranking signal, §10.3).
+/// over the SEARCH scores (the exact-search ranking signal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistilledDiscriminationLevel {
     /// Fewer than two results — nothing to compare.
@@ -53,7 +48,7 @@ pub enum DistilledDiscriminationLevel {
 }
 
 /// One hit from distilled recall: an ORIGINAL drawer (exact-search
-/// geometry), hydrated with its distilled representation.
+/// geometry), hydrated with its inline distilled representation.
 ///
 /// Mirrors `DistilledMatch` in the Swift port.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,15 +56,12 @@ pub struct DistilledMatch {
     /// SOURCE drawer UUID from the estate (the item itself — there is no
     /// factoid tier; `moot_memory_get` on this id returns the full body).
     pub id: String,
-    /// The hydrated payload: the row's `distilled` rendering, or the
-    /// verbatim content when the row is not yet distilled (§10.2).
+    /// The hydrated payload: the inline distilled rendering of the row's
+    /// verbatim content, produced at read time by ContextDistillLib.
     pub text: String,
-    /// §10.2 fallback marker: true when `text` is the verbatim content
-    /// because no representation exists yet. A response field, not state.
-    pub served_from_content: bool,
-    /// `distilled_token_count` for context budgeting (§6). None on
-    /// fallback rows (no representation, no stored count).
-    pub token_count: Option<i64>,
+    /// Per-hit token estimate for context budgeting. Always present —
+    /// every row renders inline, so there is no fallback without a count.
+    pub token_count: i64,
     /// The exact-search fusion score that ranked this hit.
     pub score: f64,
     /// The room node id of the source drawer (callers resolve display
@@ -134,7 +126,7 @@ pub struct DistilledRecallOutput {
 
 // MARK: - Recipe body
 
-/// Run distilled recall: exact-search geometry, distilled hydration.
+/// Run distilled recall: exact-search geometry, inline distilled hydration.
 ///
 /// Rust parity of `DistilledRecall.run(input:estate:kit:)`.
 pub fn run_distilled_recall(
@@ -145,7 +137,7 @@ pub fn run_distilled_recall(
 ) -> Result<DistilledRecallOutput, VerbDispatchError> {
     // The exact-search request shape (`moot_memory_search`): unionBest
     // mode, matrixAware fusion, full hydration. The selector affects only
-    // payloads, never matching or ranking (§9/§10.1).
+    // payloads, never matching or ranking.
     let mut frame = RecallFrame::new(vec![input.filter.clone()]);
     frame.hydration_level = HydrationLevel::Full;
     frame.limit = Some(input.limit);
@@ -160,21 +152,18 @@ pub fn run_distilled_recall(
     .with_query_text(input.query.clone());
     let result = coord.recall_scored(handle, request, now)?;
 
-    // Hydrate each hit through the §10.1 selector pinned to Distilled.
+    // Hydrate each hit through the hydration selector pinned to Distilled.
+    // Every row renders inline via ContextDistillLib — no stored columns,
+    // no sweep dependency, no fallback path.
     let mut matches: Vec<DistilledMatch> = Vec::new();
     for hit in &result.hits {
         let Some(drawer) = &hit.drawer else { continue };
-        let hydrated =
+        let text =
             resolve_hydration_representation(HydrationRepresentation::Distilled, drawer);
-        let token_count = if hydrated.served_from_content {
-            None
-        } else {
-            drawer.distilled_token_count
-        };
+        let token_count = estimated_token_count(&text);
         matches.push(DistilledMatch {
             id: drawer.id.clone(),
-            text: hydrated.text,
-            served_from_content: hydrated.served_from_content,
+            text,
             token_count,
             score: hit.score.final_score as f64,
             parent_node_id: drawer.parent_node_id.clone(),
@@ -249,33 +238,34 @@ mod tests {
         coord.capture(h, frame, NOW).expect("capture").id
     }
 
-    // CK-DR-R1: distilled rows hydrate the rendering with token counts.
+    // CK-DR-R1: hits hydrate the inline distilled rendering with a token count.
     #[test]
     fn distilled_rows_hydrate_rendering() {
         let (coord, h) = open_estate();
         let body = "The reactor schedule moved to March. Sarah approved the reactor plan. \
                     The reactor uptime is twelve percent better.";
         let id = capture(&coord, &h, body);
-        let produced = coord.distill_items_sweep(&h, NOW, None).expect("sweep");
-        assert!(produced >= 1);
 
         let out = run_distilled_recall(
             &DistilledRecallInput::new("reactor schedule"), &coord, &h, NOW + 1)
             .expect("recall");
         let m = out.matches.iter().find(|m| m.id == id).expect("hit for the source row");
-        assert!(!m.served_from_content);
-        assert!(m.token_count.is_some(), "per-hit token count (§13.4)");
-        // The payload is the row's distilled column — exactly the converter's
-        // representation of the body. Mirrors the Swift CK-DR-1 assertion.
+        // Inline rendering: text equals the converter's output for the body.
         assert_eq!(
             m.text,
-            genius_locus_kit::brain::distillation_cycle::distilled_representation(body),
-            "payload is the converter's representation of the source body"
+            genius_locus_kit::hydration_representation::distilled_rendering(body),
+            "payload is the inline converter's rendering of the source body"
+        );
+        assert!(m.token_count > 0, "per-hit token count must be positive");
+        assert_eq!(
+            m.token_count,
+            genius_locus_kit::hydration_representation::estimated_token_count(&m.text),
+            "token_count must equal estimated_token_count for the rendered text"
         );
         assert!(!m.text.starts_with("[DIST|"));
     }
 
-    // CK-DR-R2: ranking equivalence with the exact-search request (§13.4).
+    // CK-DR-R2: ranking equivalence with the exact-search request.
     #[test]
     fn ranking_matches_exact_search() {
         let (coord, h) = open_estate();
@@ -286,7 +276,6 @@ mod tests {
         ] {
             capture(&coord, &h, body);
         }
-        coord.distill_items_sweep(&h, NOW, None).expect("sweep");
 
         for query in ["reactor schedule", "vendor Geneva", "travel policy"] {
             let mut frame = RecallFrame::new(vec![Filter::CurrentlyBelieve]);
@@ -313,24 +302,30 @@ mod tests {
                 &DistilledRecallInput::new(query), &coord, &h, NOW + 1)
                 .expect("distilled recall");
             let ids: Vec<String> = distilled.matches.iter().map(|m| m.id.clone()).collect();
-            assert_eq!(ids, exact, "§13.4: identical ranking for query {query}");
+            assert_eq!(ids, exact, "identical ranking for query {query}");
         }
     }
 
-    // CK-DR-R3: §10.2 fallback marker on undistilled rows.
+    // CK-DR-R3: every row renders inline — no sweep needed, no fallback.
     #[test]
-    fn undistilled_rows_fall_back_marked() {
+    fn every_row_renders_inline() {
         let (coord, h) = open_estate();
-        let body = "The undistilled reactor note stands alone.";
+        let body = "The inline rendering note stands alone.";
         let id = capture(&coord, &h, body);
 
         let out = run_distilled_recall(
-            &DistilledRecallInput::new("reactor note"), &coord, &h, NOW + 1)
+            &DistilledRecallInput::new("inline rendering note"), &coord, &h, NOW + 1)
             .expect("recall");
         let m = out.matches.iter().find(|m| m.id == id).expect("hit");
-        assert!(m.served_from_content, "§10.2 fallback must be marked");
-        assert_eq!(m.text, body);
-        assert!(m.token_count.is_none());
+        // Inline rendering: text is the converter output, token_count is positive.
+        assert_eq!(
+            m.text,
+            genius_locus_kit::hydration_representation::distilled_rendering(body)
+        );
+        assert_eq!(
+            m.token_count,
+            genius_locus_kit::hydration_representation::estimated_token_count(&m.text)
+        );
     }
 
     // CK-DR-R4: empty estate → no matches, Single discrimination.
