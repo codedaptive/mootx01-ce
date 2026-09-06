@@ -150,6 +150,10 @@ struct EstateKeyProviderTests {
         // the provider rather than the filesystem — the assertion is that
         // whatever happens, we either get 32 real bytes or an error.
         let hostileURL = URL(fileURLWithPath: "/dev/null/nope/estate.sqlite")
+        // provideKey can succeed even for a non-existent path because the
+        // Keychain item is keyed by the path string, not the file. Clean up
+        // so no login-Keychain item is left behind regardless of the outcome.
+        defer { deleteKeychainKey(for: hostileURL) }
 
         do {
             let key = try EstateKeyProvider.provideKey(for: hostileURL)
