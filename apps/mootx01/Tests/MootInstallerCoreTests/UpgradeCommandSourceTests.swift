@@ -181,7 +181,7 @@ struct UpgradeCommandSourceTests {
             // ids (1.4 → 1.5) before any store below opens under the new id.
             let catalogAt = try #require(body.range(of: "GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())")?.lowerBound)
             let vectorAt = try #require(
-                body.range(of: name.hasSuffix("Backfill") ? "SpanEncodeBackfill.run(" : "VectorStore(storage: storage)")?.lowerBound)
+                body.range(of: name.hasSuffix("Backfill") ? "SpanEncodeBackfill.run(" : "VectorStore(storage: reclaimStorage)")?.lowerBound)
             #expect(catalogAt < vectorAt, "\(name): the catalog must run before the vector tier is touched")
         }
         // The reclaim names the retired families once, in the shared constant.
