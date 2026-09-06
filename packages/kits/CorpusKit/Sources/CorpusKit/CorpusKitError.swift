@@ -30,12 +30,4 @@ public enum CorpusKitError: Error, Sendable, Equatable {
     /// advancing the index checkpoint (identity and indexing contract,
     /// GLK shared-content 1.1).
     case staleRevision(String)
-    /// The composition policy recorded in `corpus_index_state` rows does not
-    /// match the configured `IndexCompositionPolicy` (CDL-03). The estate was
-    /// indexed under a different policy and the indexes are invalid for the
-    /// configured policy. Recover by reindexing the estate under the recorded
-    /// policy, or by reindexing from scratch under the configured policy.
-    ///
-    /// Associated value: "recorded=<id>;configured=<id>".
-    case compositionPolicyMismatch(String)
 }
