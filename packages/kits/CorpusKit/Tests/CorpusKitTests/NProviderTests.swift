@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // NProviderTests.swift
 //
 // Mission 6a-iii-core: Corpus N-provider capability + per-signal nearest API.
@@ -264,3 +267,5 @@ private func floatOutcomeBits(_ outcome: FloatLaneOutcome) -> [String] {
     case .storeError: return ["store_error"]
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

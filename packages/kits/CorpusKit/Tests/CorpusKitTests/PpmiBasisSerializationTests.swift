@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // PpmiBasisSerializationTests.swift
 //
 // Mission 6a-i: round-trip + cross-port conformance for PPMI basis
@@ -192,3 +195,5 @@ struct PpmiBasisSerializationTests {
         }
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

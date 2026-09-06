@@ -90,6 +90,13 @@ use persistence_kit::{
 };
 use uuid::Uuid;
 
+// Encoder span rows (int8 lane): the write/read/delete/reclaim surface over
+// the same `vectors` table. A child module so it reaches this module's private
+// fields and helpers (`storage`, `state`, `serving_generation`) without
+// widening their visibility.
+mod span_vectors;
+pub use span_vectors::{SpanVectorInput, SpanVectorRow};
+
 /// One row of the `vectors` table. Parallel to the Swift `StoredVector`.
 ///
 /// `filed_at` is Unix epoch milliseconds; `vector_index` is 0 for
@@ -1002,13 +1009,9 @@ impl VectorStore {
     /// For importing many vectors at once, prefer `add_payloads`, which bounds
     /// both sidecar writes and index builds to O(batches).
     ///
-    /// # Errors
-    ///
-    /// Returns `SynapseKitError::Int8QuantizationPolicyUndefined` when the
-    /// payload kind is `Int8`. Int8 writes are rejected fail-closed because
-    /// the quantization policy (symmetric vs asymmetric, per-vector vs per-dim
-    /// scale) has not been ratified. Use `Float32` or `Binary` instead.
-    /// See SYNAPSEKIT_SPEC §I-4a.
+    /// Int8 payloads (the ratified symmetric per-vector quantisation,
+    /// SYNAPSEKIT_SPEC §I-4a) are table-only like float32: they never enter
+    /// the resident Hamming array or a float index.
     ///
     /// Telemetry: emits `synapsekit.index.insert_latency_ms` when monitoring
     /// is enabled. Emitted at the operation boundary.
@@ -1021,19 +1024,6 @@ impl VectorStore {
         model_version: &str,
         filed_at_unix_secs: i64,
     ) -> Result<(), SynapseKitError> {
-        // PRECONDITION GUARD: int8 writes are rejected fail-closed.
-        // The quantization policy (symmetric vs asymmetric, per-vector vs
-        // per-dim scale) has not been ratified. Persisting an int8 payload now
-        // would lock in undefined dequantization semantics. Use Float32 or the
-        // Binary Engram lane. See SYNAPSEKIT_SPEC §I-4a and arch spec §10.3.
-        if payload.kind == VectorKind::Int8 {
-            return Err(SynapseKitError::Int8QuantizationPolicyUndefined(
-                "int8 writes are rejected: quantization policy is unspecified. \
-                 Use Float32 or the Binary Engram lane. See SYNAPSEKIT_SPEC §I-4a."
-                    .to_string(),
-            ));
-        }
-
         let start = std::time::Instant::now();
 
         // Shadow-swap write routing: determine which generation this write belongs to
@@ -1255,19 +1245,6 @@ impl VectorStore {
     pub fn add_payloads(&self, batch: &[VectorPayloadInput]) -> Result<(), SynapseKitError> {
         if batch.is_empty() {
             return Ok(());
-        }
-
-        // PRECONDITION GUARD: reject any int8 payload in the batch fail-closed.
-        // The quantization policy has not been ratified; a batch containing even
-        // one int8 payload must be rejected entirely — no partial writes. The
-        // first offending item is reported. See SYNAPSEKIT_SPEC §I-4a.
-        if let Some(bad) = batch.iter().find(|i| i.payload.kind == VectorKind::Int8) {
-            return Err(SynapseKitError::Int8QuantizationPolicyUndefined(format!(
-                "int8 writes are rejected: quantization policy is unspecified. \
-                 Offending item: {}. \
-                 Use Float32 or the Binary Engram lane. See SYNAPSEKIT_SPEC §I-4a.",
-                bad.item_id
-            )));
         }
 
         let start = std::time::Instant::now();
@@ -2609,14 +2586,6 @@ impl VectorStore {
         model_id: &str,
         batch: &[VectorPayloadInput],
     ) -> Result<(), SynapseKitError> {
-        // Reject int8 fail-closed — same precondition as add_payloads.
-        if let Some(bad) = batch.iter().find(|i| i.payload.kind == VectorKind::Int8) {
-            return Err(SynapseKitError::Int8QuantizationPolicyUndefined(format!(
-                "int8 writes are rejected: quantization policy is unspecified. \
-                 Offending item: {}. See SYNAPSEKIT_SPEC §I-4a.",
-                bad.item_id
-            )));
-        }
         // Flush any in-flight deferred burst so the table is the single source of
         // truth before the resident index is rebuilt from it below.
         self.publish_if_deferred_dirty()?;
@@ -2863,13 +2832,6 @@ impl VectorStore {
         model_id: &str,
         expected: &[VectorPayloadInput],
     ) -> Result<(usize, usize), SynapseKitError> {
-        if let Some(bad) = expected.iter().find(|i| i.payload.kind == VectorKind::Int8) {
-            return Err(SynapseKitError::Int8QuantizationPolicyUndefined(format!(
-                "int8 writes are rejected: quantization policy is unspecified. \
-                 reconcile_model_vectors received an int8 payload for item {}",
-                bad.item_id
-            )));
-        }
         if let Some(stray) = expected.iter().find(|i| i.model_id != model_id) {
             return Err(SynapseKitError::InvalidPayload(format!(
                 "reconcile_model_vectors(model_id: {model_id}) received an input for \
@@ -5031,13 +4993,11 @@ impl VectorStore {
 ///
 /// Returns `Err(DecodingFailure)` when a required column is missing or malformed.
 ///
-/// Int8 payloads return `Err(Int8QuantizationPolicyUndefined)`: the
-/// quantization policy has not been ratified so a decoded int8 payload
-/// cannot be safely used by any consumer. This is a symmetric fail-closed
-/// guard: since writes are rejected (`add_payload` returns
-/// `Int8QuantizationPolicyUndefined`), no int8 rows should be present in
-/// production. The guard defends against hand-crafted rows.
-/// See SYNAPSEKIT_SPEC §I-4a.
+/// An Int8 row (SYNAPSEKIT_SPEC §I-4a) is malformed when its `scale` is
+/// NULL or its byte count differs from `dim`: the ratified policy stores
+/// exactly `dim` bytes and a per-vector scale, and a row without them
+/// cannot be dequantised, so it decodes as `Err(DecodingFailure)` like any
+/// other undecodable row.
 fn decode_payload(
     row: &persistence_kit::StorageRow,
 ) -> Result<VectorPayload, SynapseKitError> {
@@ -5047,17 +5007,6 @@ fn decode_payload(
     };
     let kind = VectorKind::from_raw(kind_raw)
         .ok_or_else(|| SynapseKitError::DecodingFailure(format!("unknown VectorKind {kind_raw}")))?;
-    // Symmetric read-side guard: int8 payloads cannot be decoded until the
-    // quantization policy is ratified. Propagates as an Err to callers.
-    // `vectors_for_item` skips the row; `get_payload` surfaces the error
-    // directly. Prevents silent consumption of hand-crafted int8 rows.
-    if kind == VectorKind::Int8 {
-        return Err(SynapseKitError::Int8QuantizationPolicyUndefined(
-            "int8 rows cannot be decoded: quantization policy is unspecified. \
-             See SYNAPSEKIT_SPEC §I-4a."
-                .to_string(),
-        ));
-    }
     let dim = match row.get("dim") {
         Some(TypedValue::Int(v)) => *v as u32,
         _ => return Err(SynapseKitError::DecodingFailure("missing dim column".to_string())),
@@ -5071,6 +5020,15 @@ fn decode_payload(
         Some(TypedValue::Null) | None => None,
         _ => None,
     };
+    // Int8 rows carry exactly `dim` bytes and a non-null scale (§I-4a);
+    // anything else cannot be dequantised and is rejected like a missing column.
+    if kind == VectorKind::Int8 && (scale.is_none() || bytes.len() != dim as usize) {
+        return Err(SynapseKitError::DecodingFailure(format!(
+            "int8 row must carry {dim} bytes and a scale (got {} bytes, scale {:?})",
+            bytes.len(),
+            scale
+        )));
+    }
     Ok(VectorPayload { kind, dim, bytes, scale })
 }
 
@@ -5108,7 +5066,7 @@ fn decode_stored_vector(
         _ => return Ok(None),
     };
     // Parity with Swift `storedVector(from:)` which returns nil for
-    // malformed/undecodable rows. Decode failures (int8 guard, missing
+    // malformed/undecodable rows. Decode failures (malformed int8 row, missing
     // columns) skip the row rather than propagating an error.
     let payload = match decode_payload(row) {
         Ok(p) => p,

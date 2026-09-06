@@ -97,7 +97,6 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "aria-mcp"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "cognition-kit",
  "convergence-kit",
  "corpus-kit",
@@ -554,6 +553,7 @@ dependencies = [
  "eidetic-lib",
  "engram-lib",
  "lattice-lib",
+ "sha2 0.10.9",
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",
@@ -1360,6 +1360,7 @@ dependencies = [
  "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
  "intellectus-lib",
@@ -1748,7 +1749,6 @@ dependencies = [
 name = "locus-kit"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "base64 0.22.1",
  "ed25519-dalek",
  "intellectus-lib",

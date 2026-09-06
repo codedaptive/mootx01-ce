@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // DensePoolingConformanceTests.swift
 //
 // Cross-port conformance for the distributional pooling contract of the
@@ -253,3 +256,5 @@ struct DensePoolingConformanceTests {
         }
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

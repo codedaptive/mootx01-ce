@@ -304,7 +304,7 @@ public enum ToolProjection {
                     properties: [
                         "id": stringSchema("Memory row identifier (drawer UUID). Provide id or ids."),
                         "ids": arraySchema("Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.", itemDescription: "Memory row identifier (drawer UUID)."),
-                        "depth": stringSchema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid."),
+                        "depth": stringSchema("Hydration tier: subject (dense row only — travel), distilled (dense row + inline distilled text rendered by ContextDistillLib — confirm; every row renders), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid."),
                     ],
                     required: []
                 )),

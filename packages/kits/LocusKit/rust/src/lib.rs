@@ -130,6 +130,8 @@ pub mod drawer_operational;
 pub mod drawer_state_validator;
 pub mod drawer_store;
 pub mod drawer_store_inmemory;
+// The span-encoder registry over `encoder_models` (schema v19).
+pub mod encoder_model_store;
 pub mod drawer_store_postgres;
 pub mod drawer_store_sqlite;
 pub mod error;

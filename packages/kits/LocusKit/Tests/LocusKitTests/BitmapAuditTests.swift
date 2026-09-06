@@ -212,7 +212,7 @@ struct BitmapAuditTests {
         guard let ev = events.last else { return }
         // The gate RMW applies declared slots from the new value onto the prior bitmap.
         // sampleDrawer starts at operationalBitmap = 0; 0x102 is the expected value.
-        // Bits 27-30 are FREE (ADORN-STORE-02 v17) — no adornment bits involved.
+        // No write path ORs extra bits at insert; 0x102 is the whole value.
         #expect(ev.afterBitmaps.operational == 0x102)
         #expect(ev.actor == "test")
     }

@@ -1,27 +1,27 @@
 {
-  "version": 1,
-  "description": "UnionBest step 10 MMR cross-port golden pin (MMR-2). Read by Swift UnionBestMMRCrossPortFixtureTests.swift and Rust union_best_mmr_parity.rs. A full-hydration unionBest matrixAware recall at limit 3 over four near-duplicate bodies (the query plus one trailing word each) and eight diverse bodies that carry the query terms in different phrasing. The pool (12) exceeds the 2N working view (6), so the greedy MMR decides which candidates enter the view; the shingle term penalises the second, third and fourth near-duplicates out of it. expected_content_order was produced by the Swift build after COL-2 (similarity term scaled by the step 8.5 redistribution factor; locus column out of text-query scoring since COL-1) and is asserted verbatim by both ports. The pin before COL-1 was [query body, '... outage review', 'a deploy day ...']: the third slot moved because the locus recency rank no longer scores a text query (the two newest bodies had held slots 2 and 3), not because of the MMR; the near-duplicates stay out. The integrated COL-1 tree returned [query body, '... deploy today', '... deploy again'] (two near-duplicates admitted) and is the mutation control for the similarity scale.",
-  "query": "release checklist for the payments service deploy",
-  "scoring": "matrixAware",
-  "hydration": "full",
-  "limit": 3,
-  "bodies": [
-    "release checklist for the payments service deploy",
-    "release checklist for the payments service deploy done",
-    "release checklist for the payments service deploy today",
-    "release checklist for the payments service deploy again",
-    "the payments service deploy needs a release checklist covering database migrations and rollback",
-    "deploy notes: release checklist items for the payments service, feature flags and canary percentages",
-    "checklist before any release of the payments service: deploy window, pager rotation, and status page",
-    "payments service release: the deploy checklist now includes a smoke test of the refund path",
-    "for the payments service, a release deploy checklist that tracks certificate expiry and secrets rotation",
-    "service release checklist for payments: deploy approvals, change ticket, and the go/no-go call",
-    "a deploy day release checklist for the payments service listing the dashboards to watch",
-    "release and deploy checklist for the payments service written after the outage review"
-  ],
-  "expected_content_order": [
-    "release checklist for the payments service deploy",
-    "release and deploy checklist for the payments service written after the outage review",
-    "for the payments service, a release deploy checklist that tracks certificate expiry and secrets rotation"
-  ]
+ "version": 1,
+ "description": "UnionBest step 10 MMR cross-port golden pin (MMR-2). Read by Swift UnionBestMMRCrossPortFixtureTests.swift and Rust union_best_mmr_parity.rs. A full-hydration unionBest matrixAware recall at limit 3 under the default lane budget over four near-duplicate bodies (the query plus one trailing word each) and eight diverse bodies that carry the query terms in different phrasing. The pool (12) exceeds the 2N working view (6), so the greedy MMR decides which candidates enter the view; the shingle term, scaled by the step 8.5 redistribution factor (COL-2), penalises the second, third and fourth near-duplicates out of it. expected_content_order was produced by the Swift build with the whole-record vector column out of the fused score by default (Encoder Rerank Program: RecallShape.defaultWeight gives signal:vector 0; the locus column is out of text-query scoring since COL-1) and is asserted verbatim by both ports. Pin history: before COL-1 the order was [query body, '... outage review', 'a deploy day ...']; after COL-1 and COL-2, with the vector column still in the fused score, the third slot was 'for the payments service, a release deploy checklist that tracks certificate expiry and secrets rotation' (the vector column ranked it above 'a deploy day ...'); with the vector column out the third slot is 'a deploy day ...' again on bm25 alone and the near-duplicates stay out, so the move is the fused-score composition (the vector tie-break is gone), not the MMR. Mutation controls: the integrated COL-1 tree (similarity term unscaled) returned [query body, '... deploy today', '... deploy again']; a build with the similarity term zeroed returns the query body and its three near-duplicates as one tie group.",
+ "query": "release checklist for the payments service deploy",
+ "scoring": "matrixAware",
+ "hydration": "full",
+ "limit": 3,
+ "bodies": [
+  "release checklist for the payments service deploy",
+  "release checklist for the payments service deploy done",
+  "release checklist for the payments service deploy today",
+  "release checklist for the payments service deploy again",
+  "the payments service deploy needs a release checklist covering database migrations and rollback",
+  "deploy notes: release checklist items for the payments service, feature flags and canary percentages",
+  "checklist before any release of the payments service: deploy window, pager rotation, and status page",
+  "payments service release: the deploy checklist now includes a smoke test of the refund path",
+  "for the payments service, a release deploy checklist that tracks certificate expiry and secrets rotation",
+  "service release checklist for payments: deploy approvals, change ticket, and the go/no-go call",
+  "a deploy day release checklist for the payments service listing the dashboards to watch",
+  "release and deploy checklist for the payments service written after the outage review"
+ ],
+ "expected_content_order": [
+  "release checklist for the payments service deploy",
+  "release and deploy checklist for the payments service written after the outage review",
+  "a deploy day release checklist for the payments service listing the dashboards to watch"
+ ]
 }

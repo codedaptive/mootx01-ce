@@ -209,6 +209,10 @@ impl CorpusContentSource for CorpusDocumentStore {
             digest: digest.clone(),
             text: text.clone(),
             dense_composition_text,
+            // ssc_facts is not stored in corpus_documents; it is supplied by the
+            // GLK layer (drawers.ssc_facts, schema 19) when building a record for
+            // index composition. The document store returns None here.
+            ssc_facts: None,
         }))
     }
 
@@ -267,6 +271,7 @@ impl CorpusContentSource for CorpusDocumentStore {
                     digest: digest.clone(),
                     text: text.clone(),
                     dense_composition_text,
+                    ssc_facts: None, // supplied by GLK layer (schema 19)
                 },
             );
         }
@@ -398,6 +403,7 @@ impl CorpusDocumentStore {
                 digest: digest.clone(),
                 text: text.to_string(),
                 dense_composition_text: dense_composition_text.map(|s| s.to_string()),
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             };
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
             values.insert("revision".into(), TypedValue::Int(bumped.revision));
@@ -431,6 +437,7 @@ impl CorpusDocumentStore {
             digest: digest.clone(),
             text: text.to_string(),
             dense_composition_text: dense_composition_text.map(|s| s.to_string()),
+            ssc_facts: None, // supplied by GLK layer (schema 19)
         };
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
         values.insert("content_id".into(), TypedValue::Text(id.to_string()));

@@ -58,18 +58,28 @@ const BODIES: [&str; 9] = [
 
 const QUERY: &str = "quarterly budget review meeting notes finance team";
 
-/// The order UnionBestMMRShingleOnceTests.swift pins for limit 2, `.full`,
-/// matrixAware. With the sourceMask proxy alone (every body is supplied by the
-/// same lanes, so every pair scores 1.0) the view is the top-4 by relevance and
-/// the second slot is a near-duplicate; the shingle term, scaled by the step
-/// 8.5 redistribution factor ρ (COL-2), keeps the three near-duplicates out
-/// and body 6 (the diverse body with the highest bm25 + vector relevance)
-/// holds the second slot. Before COL-1 the slot was body 8, the newest
-/// capture, paid by the locus recency rank; a build that leaves the
-/// similarity term unscaled returns body 1, the first near-duplicate.
-const PINNED_ORDER: [&str; 2] = [
+/// The order UnionBestMMRShingleOnceTests.swift pins for limit 2, `Full`,
+/// MatrixAware under the default lane budget, which since the Encoder Rerank
+/// Program leaves the whole-record vector column out of the fused score
+/// (`RecallShape::default_weight`: `signal:vector` = 0). On this fixture that
+/// budget scores every body by bm25 alone (the locus column is out of
+/// text-query scoring since COL-1; the cold columns are absent), so bodies 1
+/// and 2 (identical term frequencies and token length) tie exactly and their
+/// bm25 lead over the diverse bodies exceeds the ρ-scaled shingle penalty for
+/// the later view slots; the tie straddles the presentation cut, phase 2
+/// widens to 4N, and ruling 1 returns the tie group whole: three hits for a
+/// two-hit request. With the vector column in (`signal:vector` = 1.0) the
+/// same recall returns [body 0, body 6]; the vector tie-break is gone, which
+/// is the whole change. The pin still gates the shingle term through the
+/// order inside the tie group: the MMR picks body 2 ("... yes", fewer shared
+/// 3-grams with body 0) before body 1 ("... ok") and the stable presentation
+/// sort keeps that order; a build with the similarity term zeroed returns
+/// [body 0, body 1, body 2]. The admission gate proper is the cross-port
+/// fixture below, where the near-duplicates stay out.
+const PINNED_ORDER: [&str; 3] = [
     "quarterly budget review meeting notes finance team",
-    "quarterly finance team notes: budget review meeting covering software licences",
+    "quarterly budget review meeting notes finance team yes",
+    "quarterly budget review meeting notes finance team ok",
 ];
 
 #[derive(serde::Deserialize)]
@@ -138,6 +148,9 @@ fn open_fixture_estate(
     (coord, h)
 }
 
+/// A full-hydration unionBest MatrixAware request with no recall shape: the
+/// pins run under the default lane budget (`signal:vector` = 0 since the
+/// Encoder Rerank Program), the same budget the Swift twins use.
 fn full_union_best_request(query: &str, limit: usize) -> GLKRecallRequest {
     let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     frame.hydration_level = HydrationLevel::Full;
