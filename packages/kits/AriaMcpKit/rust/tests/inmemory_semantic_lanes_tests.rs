@@ -243,9 +243,8 @@ fn lane_d_live_under_deterministic_provider() {
 /// absent. When the env var is set, runs the full e2e capture → search against
 /// a live PG server using `new_postgres`.
 ///
-/// Even when skipped, the proof is: `new_postgres` calls
-/// `wire_postgres_semantic_recall` — the same `Corpus::open` + `VectorStore::open`
-/// + `register_corpus` + `register_vector_store` pattern as `new_sqlite` and
+/// Even when skipped, the proof is: `new_postgres` builds its `PostgresStorage`
+/// and hands it to the same GLK `wire_glk_substores` call as `new_sqlite` and
 /// `new_inmemory`. The in-memory tests (1–3) above cover the shared logic.
 #[test]
 fn postgres_wiring_shape_proof() {
