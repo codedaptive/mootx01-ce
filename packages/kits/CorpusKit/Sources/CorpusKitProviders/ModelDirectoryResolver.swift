@@ -4,9 +4,10 @@
 // `SpanEncoderFactory` calls `encoderModelDirectory(for:dataDirectory:)`
 // and treats nil as model unavailable — recall then runs lexical-only.
 //
-// Search order (contract §7 of ENCODER_RERANK_CONTRACT.md):
-//   1. <dataDirectory>/models/<modelID>/   — 1.2 download location (empty today)
-//   2. Bundle resources <modelID>/         — bundled with app / plugin
+// Search order (contract §7.5 of CORPUSKIT_INTERFACE.md):
+//   1. <dataDirectory>/models/<modelID>/          — 1.2 download location (empty today)
+//   2. Bundle resources <modelID>/                — bundled with app / plugin
+//   3. <exe>/../share/mootx01/models/<modelID>/   — installer package path (CLI)
 //
 // Integrity: for each slot found, the vocab.txt sha256 is verified against
 // the hardcoded tokenizer_hash constant for that model. A mismatch returns
@@ -56,18 +57,22 @@ public enum ModelDirectoryResolver {
     /// Locate the encoder model directory for `modelID`.
     ///
     /// - Parameters:
-    ///   - modelID: The model identifier (e.g. `"minilm-l6-v2-w60"`).
+    ///   - modelID: The model identifier (e.g. `"arctic-embed-s-w60"`).
     ///   - dataDirectory: The mootx01 data directory root (search slot 1 —
     ///     the 1.2 download location; empty in 1.1).
     ///   - bundle: The resource bundle to search for the bundled model
     ///     (search slot 2). Defaults to `.main`; pass `Bundle.module` or a
     ///     test bundle in tests.
+    ///   - executableURL: The URL of the running executable, used to derive
+    ///     the installer share slot (search slot 3). Defaults to nil which
+    ///     resolves via `Bundle.main.executableURL`; injectable for tests.
     /// - Returns: A URL pointing to the model directory if found and
     ///   vocab.txt integrity-verified; nil otherwise.
     public static func encoderModelDirectory(
         for modelID: String,
         dataDirectory: URL,
-        bundle: Bundle = .main
+        bundle: Bundle = .main,
+        executableURL: URL? = nil
     ) -> URL? {
         // Slot 1: user download directory (1.2 feature, empty today).
         let downloadSlot = dataDirectory
@@ -77,9 +82,19 @@ public enum ModelDirectoryResolver {
             return url
         }
 
-        // Slot 2: bundled resources.
+        // Slot 2: bundled resources (app bundle or test bundle).
         if let bundledURL = bundleSlot(modelID: modelID, bundle: bundle) {
             if let url = verified(directory: bundledURL, modelID: modelID, source: "bundle") {
+                return url
+            }
+        }
+
+        // Slot 3: installer package path beside the executable.
+        // Mirrors the Rust resolver's `<exe>/../share/mootx01/models/<id>/`
+        // path so the Swift CLI (`mootx01` built from apps/mootx01) finds the
+        // model installed by the release tarball at the same relative location.
+        if let shareURL = shareSlot(modelID: modelID, executableURL: executableURL) {
+            if let url = verified(directory: shareURL, modelID: modelID, source: "package") {
                 return url
             }
         }
@@ -162,6 +177,34 @@ public enum ModelDirectoryResolver {
             return url
         }
         return nil
+    }
+
+    /// Returns the model directory under the installer share path:
+    /// `<exe>/../share/mootx01/models/<modelID>/`.
+    ///
+    /// This slot mirrors the Rust resolver's search slot 2, making the Swift
+    /// CLI binary find the model when the release tarball is installed to
+    /// `<prefix>/bin/mootx01` + `<prefix>/share/mootx01/models/<id>/`.
+    /// App-bundle targets reach the model through the bundle slot (slot 2)
+    /// instead; this slot is the CLI's fallback.
+    ///
+    /// `executableURL` is injectable so tests can exercise the slot without
+    /// needing a real binary on PATH. Passing nil resolves via
+    /// `Bundle.main.executableURL`, which works for both app bundles and
+    /// command-line tools.
+    private static func shareSlot(modelID: String, executableURL: URL?) -> URL? {
+        let exeURL = executableURL ?? Bundle.main.executableURL
+        guard let exeDir = exeURL?.deletingLastPathComponent() else { return nil }
+        let candidate = exeDir
+            .appendingPathComponent("..", isDirectory: true)
+            .appendingPathComponent("share", isDirectory: true)
+            .appendingPathComponent("mootx01", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(modelID, isDirectory: true)
+        // Resolve the ".." component lexically (standardizedFileURL never fails)
+        // so the verified() check and its log line see the real path, matching
+        // the Rust resolver's canonicalize call on the same slot.
+        return candidate.standardizedFileURL
     }
 
     /// Compute sha256 of a file and return the lowercase hex digest.
