@@ -3026,17 +3026,9 @@ fn run_estate_status(
         .filter(|d| !d.content.is_empty() && d.subject.is_some())
         .count();
 
-    // The index composition policy the wired Corpus runs under: the estate's
-    // stored setting, read through the coordinator. "none" when no Corpus is
-    // wired (a locus-only estate). Mirrors Swift runEstateStatus:
-    //   kit.indexCompositionPolicy(for: handle)?.id ?? "none"
-    let composition_policy_id = coord
-        .index_composition_policy(&estate.handle)
-        .map(|policy| policy.id())
-        .unwrap_or_else(|| "none".to_string());
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / subjects / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    //   / index_composition_policy / frozen / fdc_recalculation
+    //   / frozen / fdc_recalculation
     //   / fdc_recalculation_floor / fdc_recalculation_current
     //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     // `frozen:` is the posture of this serve (`mootx01 serve --frozen` /
@@ -3044,7 +3036,7 @@ fn run_estate_status(
     // path writes nothing. A process property, not estate state.
     let frozen_value = posture.status_value();
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nindex_composition_policy: {composition_policy_id}\nfrozen: {frozen_value}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nsubjects: {}/{} ({} missing)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfrozen: {frozen_value}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         visible.len(),
         visible_total.len(),
         subject_bearing,

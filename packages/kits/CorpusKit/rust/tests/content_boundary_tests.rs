@@ -508,7 +508,6 @@ fn index_state_advance_read_clear_round_trip() {
         applied_cursor: Some("42".into()),
         updated_at_millis: NOW,
         operational_bitmap: 0,
-        composition_policy_id: String::new(),
     };
     store.advance(&state).expect("advance");
     store.advance(&state).expect("idempotent advance");
@@ -523,7 +522,6 @@ fn index_state_advance_read_clear_round_trip() {
             applied_cursor: None,
             updated_at_millis: NOW,
             operational_bitmap: 0,
-        composition_policy_id: String::new(),
         })
         .expect("advance 2");
     assert_eq!(
@@ -556,7 +554,6 @@ fn index_state_survives_reopen_on_sqlite() {
         applied_cursor: None,
         updated_at_millis: NOW,
         operational_bitmap: 0,
-        composition_policy_id: String::new(),
     };
     {
         let config = EstateConfiguration::new(
