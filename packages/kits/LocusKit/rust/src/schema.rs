@@ -67,7 +67,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// `subject`, `subject_pipeline_version` and `subject_at` stay.
 ///
 /// Migration policy: ONE ladder entry, v10 → v19. CE 1.0.35 and 1.0.37 ship
-/// schema 10; EE estates written at 11–18 never shipped and are brought to
+/// schema 10; development estates written at 11–18 never shipped and are brought to
 /// 19 by the SQL surgery script, never by this ladder. The hop applies only
 /// the deltas that survive at 19 (operationalAND, the subject trio, the
 /// kg_facts identity trio, idx_drawers_filedAt, the recall_trace attribution
@@ -104,7 +104,7 @@ pub enum SchemaUpgradePath {
     Upgrade { from: i32 },
     /// Already at the current version: nothing to apply.
     Current,
-    /// Any other version. Newer than this build, or an EE development
+    /// Any other version. Newer than this build, or a pre-release development
     /// version (11–18) that only the surgery script moves. Refuse before the
     /// schema is opened, naming the version found.
     Unsupported { found: i32 },
@@ -224,7 +224,7 @@ pub fn schema() -> SchemaDeclaration {
                         vec!["filedAt".to_string()],
                     )),
                     // v15: recall_trace lane-attribution trio. Nullable TEXT, no
-                    // backfill — NULL is the honest value for rows written
+                    // backfill — NULL is the correct value for rows written
                     // before attribution existed; no query text is stored.
                     SchemaOperation::AddColumn {
                         table: "recall_trace".to_string(),

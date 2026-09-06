@@ -427,7 +427,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// skips every later step. The refusal must come first because
     /// PersistenceKit's runner stamps the declared version whenever no
     /// ladder entry matches: any later step's open would mark an estate at
-    /// 11–18 as 19 with none of the v19 objects in place. EE development
+    /// 11–18 as 19 with none of the v19 objects in place. Pre-release development
     /// estates at 18 are moved by the surgery script, never by this command.
     ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
@@ -467,7 +467,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                     print("""
                           ✗ schema upgrade refused: this estate is at LocusKit schema \(found).
                             This build upgrades schema \(LocusKitSchema.supportedUpgradeFloor) (CE 1.0.35/1.0.37) and serves schema \(LocusKitSchema.version); nothing was changed.
-                            An EE development estate at 11–18 is brought to 19 by benchmark-ee/scripts/schema18-to-19-surgery.sh; a newer estate needs a newer build.
+                            A pre-release development estate at 11–18 is moved to 19 by the schema surgery script, not by this build; a newer estate needs a newer build.
                         """)
                     await storage.close()
                     return false
