@@ -41,14 +41,52 @@ fn preset_names_are_discoverable_and_each_resolves() {
         }
     }
     // 22 original + 3 anti_redundant_* + 2 multi-column + 2 float-metric
-    // + 6 column-exclusion ablation presets (COL-1) + 2 bm25/vector ablation presets = 37 presets.
-    assert_eq!(RecallShape::PRESET_NAMES.len(), 37);
+    // + 6 column-exclusion ablation presets (COL-1) + 2 bm25/vector ablation
+    // presets + no_encoder = 38 presets with the dense families compiled in;
+    // ppmi/lsa/nmf_forward and anti_redundant_lsa/nmf are dark otherwise (33).
+    #[cfg(feature = "dense-families")]
+    assert_eq!(RecallShape::PRESET_NAMES.len(), 38);
+    #[cfg(not(feature = "dense-families"))]
+    {
+        assert_eq!(RecallShape::PRESET_NAMES.len(), 33);
+        for dark in ["ppmi_forward", "lsa_forward", "nmf_forward", "anti_redundant_lsa", "anti_redundant_nmf"] {
+            assert!(!RecallShape::PRESET_NAMES.contains(&dark), "{dark} is dark without dense-families");
+            assert!(RecallShape::preset(dark).is_none());
+        }
+    }
+    // `cross_encoder` is reserved (sheet §8), not implemented: absent from the
+    // roster and unresolvable, so the tool rejects it as unknown.
+    assert!(!RecallShape::PRESET_NAMES.contains(&"cross_encoder"));
+    assert!(RecallShape::preset("cross_encoder").is_none());
+}
+
+#[test]
+fn signal_vector_defaults_to_zero_every_other_key_to_one() {
+    assert_eq!(RecallShape::default_weight(RecallShape::SIGNAL_VECTOR), 0.0);
+    assert_eq!(RecallShape::default_weight("bm25"), 1.0);
+    assert_eq!(RecallShape::default_weight(RecallShape::SIGNAL_ENCODER), 1.0);
+    let empty = RecallShape::new(std::collections::HashMap::new(), None);
+    assert_eq!(empty.weight(RecallShape::SIGNAL_VECTOR), 0.0);
+    assert_eq!(empty.weight(RecallShape::DENSE_ENCODER), 1.0);
+    assert_eq!(RecallShape::weight_or_default(&None, RecallShape::SIGNAL_VECTOR), 0.0);
+    assert_eq!(RecallShape::dense_key_for_model("minilm-l6-v2-w60"), RecallShape::DENSE_ENCODER);
+}
+
+#[test]
+fn no_encoder_skips_the_stage_through_signal_encoder_only() {
+    let s = RecallShape::preset("no_encoder").unwrap();
+    assert_eq!(s.lane_weights.len(), 1);
+    assert_eq!(s.weight(RecallShape::SIGNAL_ENCODER), 0.0);
+    // The vector column stays at its default.
+    assert_eq!(s.weight(RecallShape::SIGNAL_VECTOR), 0.0);
+    assert!(!RecallShape::preset_description("no_encoder").is_empty());
 }
 
 #[test]
 fn precise_amplifies_lexical_and_field_and_narrows_frontier() {
     let s = RecallShape::preset("precise").unwrap();
     assert!(s.weight("bm25") > 1.0);
+    #[cfg(feature = "dense-families")]
     assert!(s.weight(RecallShape::DENSE_FDC) > 1.0);
     assert!(s.weight("dense") > 1.0);
     // Narrow frontier = floor.
@@ -59,9 +97,12 @@ fn precise_amplifies_lexical_and_field_and_narrows_frontier() {
 fn conceptual_amplifies_distributional_and_damps_keyword() {
     let s = RecallShape::preset("conceptual").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    assert!(s.weight(RecallShape::DENSE_PPMI) > 1.0);
-    assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
-    assert!(s.weight(RecallShape::DENSE_NMF) > 1.0);
+    #[cfg(feature = "dense-families")]
+    {
+        assert!(s.weight(RecallShape::DENSE_PPMI) > 1.0);
+        assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
+        assert!(s.weight(RecallShape::DENSE_NMF) > 1.0);
+    }
     // bm25 damped below neutral but not excluded.
     assert!(s.weight("bm25") < 1.0 && s.weight("bm25") > 0.0);
 }
@@ -80,6 +121,7 @@ fn broad_forwards_all_lanes_and_widens_frontier() {
 fn lexical_zeroes_the_vector_lanes() {
     let s = RecallShape::preset("lexical").unwrap();
     assert!(s.weight("bm25") > 1.0);
+    #[cfg(feature = "dense-families")]
     assert!(s.weight(RecallShape::DENSE_FDC) > 1.0);
     // The vector lanes are EXCLUDED (==0), not merely absent.
     assert_eq!(s.weight("dense"), 0.0);
@@ -90,6 +132,7 @@ fn lexical_zeroes_the_vector_lanes() {
 fn not_lexical_zeroes_keyword_and_field() {
     let s = RecallShape::preset("not_lexical").unwrap();
     assert_eq!(s.weight("bm25"), 0.0);
+    #[cfg(feature = "dense-families")]
     assert_eq!(s.weight(RecallShape::DENSE_FDC), 0.0);
     // A lane it does not name stays neutral.
     assert_eq!(s.weight("locus"), 1.0);
@@ -99,6 +142,7 @@ fn not_lexical_zeroes_keyword_and_field() {
 fn associative_amplifies_ri_and_nmf_and_widens() {
     let s = RecallShape::preset("associative").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
+    #[cfg(feature = "dense-families")]
     assert!(s.weight(RecallShape::DENSE_NMF) > 1.0);
     assert_eq!(s.effective_frontier_k(64), RecallShape::FRONTIER_K_CEILING);
 }
@@ -109,6 +153,7 @@ fn consensus_forwards_every_dense_signal_and_narrows() {
     for key in RecallShape::DENSE_SIGNALS {
         assert!(s.weight(key) > 0.0, "{key} should be forwarded, not excluded");
     }
+    #[cfg(feature = "dense-families")]
     assert!(s.weight(RecallShape::DENSE_FDC) > 0.0);
     assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
 }
@@ -118,14 +163,20 @@ fn forward_presets_isolate_one_dense_signal() {
     // ri_forward amplifies RI and EXCLUDES the other three distributional siblings.
     let s = RecallShape::preset("ri_forward").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    assert_eq!(s.weight(RecallShape::DENSE_PPMI), 0.0);
-    assert_eq!(s.weight(RecallShape::DENSE_LSA), 0.0);
-    assert_eq!(s.weight(RecallShape::DENSE_NMF), 0.0);
+    #[cfg(feature = "dense-families")]
+    {
+        assert_eq!(s.weight(RecallShape::DENSE_PPMI), 0.0);
+        assert_eq!(s.weight(RecallShape::DENSE_LSA), 0.0);
+        assert_eq!(s.weight(RecallShape::DENSE_NMF), 0.0);
 
-    // lsa_forward isolates LSA.
-    let s = RecallShape::preset("lsa_forward").unwrap();
-    assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
-    assert_eq!(s.weight(RecallShape::DENSE_RANDOM_INDEXING), 0.0);
+        // lsa_forward isolates LSA.
+        let s = RecallShape::preset("lsa_forward").unwrap();
+        assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
+        assert_eq!(s.weight(RecallShape::DENSE_RANDOM_INDEXING), 0.0);
+    }
+    // RI is the only live family without dense-families: nothing to exclude.
+    #[cfg(not(feature = "dense-families"))]
+    assert_eq!(s.lane_weights.len(), 1);
 }
 
 #[test]
@@ -147,11 +198,17 @@ fn matrix_column_presets_amplify_their_column() {
 #[test]
 fn anti_redundant_inverts_fdc_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant").unwrap();
-    // FDC dense lane is anti-similar (farthest-neighbour direction).
-    assert!(s.is_anti_similar(RecallShape::DENSE_FDC));
-    assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
-    // FDC lane weight stays at 1.0 — anti_similar flag flips direction, not magnitude.
-    assert_eq!(s.weight(RecallShape::DENSE_FDC), 1.0);
+    #[cfg(feature = "dense-families")]
+    {
+        // FDC dense lane is anti-similar (farthest-neighbour direction).
+        assert!(s.is_anti_similar(RecallShape::DENSE_FDC));
+        assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
+        // FDC lane weight stays at 1.0 — anti_similar flag flips direction, not magnitude.
+        assert_eq!(s.weight(RecallShape::DENSE_FDC), 1.0);
+    }
+    // FDC is dark: nothing is inverted, the suppression and narrow frontier remain.
+    #[cfg(not(feature = "dense-families"))]
+    assert!(s.anti_similar_lanes.is_empty());
     // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
     assert!(s.weight("bm25") < 0.0);
     assert!(s.weight("hamming") < 0.0);
@@ -188,23 +245,31 @@ fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
     // dense lane. consensus + zero LSA ablates exactly LSA.
     let base = RecallShape::preset("consensus").unwrap();
     let mut weights = base.lane_weights.clone();
-    weights.insert(RecallShape::DENSE_LSA.to_string(), 0.0);
-    let ablated = RecallShape::new(weights, base.frontier_k);
-    assert_eq!(ablated.weight(RecallShape::DENSE_LSA), 0.0);
-    assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
+    #[cfg(feature = "dense-families")]
+    {
+        weights.insert(RecallShape::DENSE_LSA.to_string(), 0.0);
+        let ablated = RecallShape::new(weights, base.frontier_k);
+        assert_eq!(ablated.weight(RecallShape::DENSE_LSA), 0.0);
+        assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
+    }
+    #[cfg(not(feature = "dense-families"))]
+    {
+        weights.insert(RecallShape::DENSE_RANDOM_INDEXING.to_string(), 0.0);
+        let ablated = RecallShape::new(weights, base.frontier_k);
+        assert_eq!(ablated.weight(RecallShape::DENSE_RANDOM_INDEXING), 0.0);
+        assert_eq!(ablated.weight("dense"), 1.0);
+    }
 }
 
-// --- Per-signal anti-similarity presets (W3) ---
+// --- Per-signal anti-similarity presets ---
 
 #[test]
 fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_ri").unwrap();
     // RI lane is anti-similar (farthest-neighbour direction).
     assert!(s.is_anti_similar(RecallShape::DENSE_RANDOM_INDEXING));
-    // Only RI — LSA, NMF, FDC stay nearest.
-    assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
-    assert!(!s.is_anti_similar(RecallShape::DENSE_NMF));
-    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
+    // Only RI is anti-similar.
+    assert_eq!(s.anti_similar_lanes.len(), 1);
     // Anti-similar flag flips direction, not magnitude — RI weight stays at 1.0.
     assert_eq!(s.weight(RecallShape::DENSE_RANDOM_INDEXING), 1.0);
     // BM25 and Hamming suppressed.
@@ -216,6 +281,7 @@ fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
     assert!(!RecallShape::preset_description("anti_redundant_ri").is_empty());
 }
 
+#[cfg(feature = "dense-families")]
 #[test]
 fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_lsa").unwrap();
@@ -229,6 +295,7 @@ fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
     assert!(!RecallShape::preset_description("anti_redundant_lsa").is_empty());
 }
 
+#[cfg(feature = "dense-families")]
 #[test]
 fn anti_redundant_nmf_inverts_nmf_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_nmf").unwrap();
@@ -242,7 +309,7 @@ fn anti_redundant_nmf_inverts_nmf_and_suppresses_bm25_hamming() {
     assert!(!RecallShape::preset_description("anti_redundant_nmf").is_empty());
 }
 
-// --- Multi-column matrix presets (W3) ---
+// --- Multi-column matrix presets ---
 
 #[test]
 fn temporal_connection_amplifies_temporal_and_co_occurrence() {
@@ -273,7 +340,7 @@ fn field_preference_amplifies_field_fit_and_preference() {
     assert!(!RecallShape::preset_description("field_preference").is_empty());
 }
 
-// --- GLKRecallRequest.frontier_k per-call override (W3) ---
+// --- GLKRecallRequest.frontier_k per-call override ---
 
 #[test]
 fn glk_recall_request_frontier_k_defaults_to_none() {

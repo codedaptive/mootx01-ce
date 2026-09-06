@@ -1,3 +1,4 @@
+#![cfg(feature = "dense-families")]
 //! Mission 6a-ii-α: cross-port conformance for the trainable-basis seam.
 //!
 //! Asserts that driving training THROUGH the seam — `train_on_corpus` then

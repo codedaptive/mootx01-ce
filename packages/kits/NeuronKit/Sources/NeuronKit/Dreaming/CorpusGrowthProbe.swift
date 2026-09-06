@@ -5,6 +5,14 @@
 // (2) trigger a full basis retrain via `reindex(now:)` when vocabulary
 // growth crosses the configured fraction/floor threshold.
 //
+// ── Which providers are retrained ─────────────────────────────────────────
+// This probe triggers `GeniusLocusKit.reindexCorpus`, which retrains whatever
+// providers are registered in the estate's Corpus. With `MOOTX01_DENSE_FAMILIES`
+// OFF (the default, plan 70BC55F3, 2026-09-05), `CorpusEnsemble.defaultEnsemble()`
+// returns RI only — so this probe retrains RI only on estates opened with the
+// default ensemble. With `MOOTX01_DENSE_FAMILIES` ON, all five providers are
+// retrained as before.
+//
 // ── Design rationale ─────────────────────────────────────────────────────
 // Distributional embedding bases (RI / PPMI / LSA / NMF) train on the
 // vocabulary present at first ingest and never grow incrementally — their

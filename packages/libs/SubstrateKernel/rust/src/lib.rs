@@ -14,6 +14,8 @@
 //!     pending MatrixSprint perf proof; see P11-VAL-015)
 //!   - `bit_field`, `hamming_nn`, `sha256`, `hkdf`, `float_vec_ops` —
 //!     hot-path primitives relocated here from substrate-lib (2026-05-29)
+//!   - `int8_vec` — symmetric per-vector int8 quantisation for encoder
+//!     span vectors (Encoder Rerank Program)
 //!
 //! Hardware-specific kernels for NEON / BNNS / Metal live in
 //! substrate-lib's Swift port (PortableKernel-*.swift); the Rust port
@@ -49,6 +51,11 @@ pub mod hkdf;
 // Swift mirror: FloatVecOps.swift. These are the canonical IEEE-754
 // scalar implementations — higher crates call these, never reimplements inline.
 pub mod float_vec_ops;
+// Symmetric per-vector int8 quantisation (quantize, dequantize, dot_query)
+// for encoder span vectors. Swift mirror: Int8Vec.swift. `q` and `scale`
+// are bit-for-bit conformance-gated on the shared fixture
+// SynapseKit/Tests/Fixtures/encoder/int8_vectors.json.
+pub mod int8_vec;
 
 pub use kernel::*;
 

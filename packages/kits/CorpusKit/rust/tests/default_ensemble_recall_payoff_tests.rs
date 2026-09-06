@@ -22,6 +22,11 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as the other corpus integration tests.
 
+// The payoff under proof is the five-family ensemble — four of them dark dense
+// families (contract sheet §13) — so this file compiles only under the
+// dense-families feature, like its Swift twin behind MOOTX01_DENSE_FAMILIES.
+#![cfg(feature = "dense-families")]
+
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
 use corpus_kit_providers::default_ensemble;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};

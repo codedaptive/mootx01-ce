@@ -440,3 +440,65 @@ fn k_larger_than_corpus_returns_all_docs_and_algorithms_agree() {
     }
 }
 
+
+// MARK: — SPARSE-5: BMW block skip must not strand a list past a live candidate
+
+/// Deterministic multi-block corpus: every list is longer than `BLOCK_SIZE`
+/// (128) so Block-Max WAND actually skips blocks. Block 0 (d0000..d0127) is
+/// rich (large common and medium impacts) so the top-k threshold is set high
+/// early; every later block is poor, so its block-max bound falls under the
+/// threshold and BMW skips it. The rare term carries a very large impact in
+/// three documents, two of them inside poor blocks (d0400, d0690). A block
+/// skip that carries the common/medium lists past a rare-term document makes
+/// that document score WITHOUT their contribution (a partial score) or miss
+/// it outright. Both the id order AND the integer scores of BMW must equal
+/// the exhaustive oracle. Same corpus and seed as the Swift twin
+/// (`InvertedIndexBlockMaxTests`).
+fn block_skip_corpus() -> (InvertedIndex, Vec<(u32, i32)>) {
+    // 64-bit LCG (Knuth MMIX constants) so both ports draw the same impacts.
+    let mut state: u64 = 0xCAFE_BABE_DEAD_BEEF;
+    let mut next = move |lo: i32, hi: i32| -> i32 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lo + ((state >> 33) % ((hi - lo + 1) as u64)) as i32
+    };
+    let docs = 700usize;
+    let mut common: Vec<ImpactPosting> = Vec::with_capacity(docs);
+    let mut medium: Vec<ImpactPosting> = Vec::new();
+    let mut rare: Vec<ImpactPosting> = Vec::new();
+    for i in 0..docs {
+        let id = format!("d{i:04}");
+        let rich = i < 128;
+        common.push(ImpactPosting {
+            item_id: id.clone(),
+            impact: if rich { next(50, 60) } else { next(10, 40) },
+        });
+        if i % 3 == 0 {
+            medium.push(ImpactPosting {
+                item_id: id.clone(),
+                impact: if rich { next(140, 150) } else { next(100, 120) },
+            });
+        }
+        if i == 5 || i == 400 || i == 690 {
+            rare.push(ImpactPosting { item_id: id, impact: 900 });
+        }
+    }
+    let mut postings: HashMap<u32, Vec<ImpactPosting>> = HashMap::new();
+    postings.insert(0, common);
+    postings.insert(1, medium);
+    postings.insert(2, rare);
+    (InvertedIndex::new(postings, docs), bm25_query(&[0, 1, 2]))
+}
+
+#[test]
+fn sparse5_bmw_block_skip_keeps_every_contribution() {
+    let (index, query) = block_skip_corpus();
+    let k = 10;
+    let scan = index.exhaustive_scan(&query, k);
+    let bmw = index.top_k(&query, k, Algorithm::BlockMaxWand);
+    let wand = index.top_k(&query, k, Algorithm::Wand);
+    let key = |hits: &[corpus_kit::SparseHit]| -> Vec<(String, i64)> {
+        hits.iter().map(|h| (h.item_id.clone(), (h.impact * QUANT_SCALE as f32).round() as i64)).collect()
+    };
+    assert_eq!(key(&wand), key(&scan), "WAND must equal the exhaustive oracle");
+    assert_eq!(key(&bmw), key(&scan), "BMW must equal the exhaustive oracle (ids and scores)");
+}

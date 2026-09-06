@@ -11,10 +11,9 @@
 // that disagrees with the fixture. If a fixture value needs updating, update
 // the JSON — both ports change together.
 //
-// Adornment ordering: the spec requires active_adornments in CandidateRowData
-// to arrive in ascending minter-ID order (caller's responsibility). This test
-// is the caller; it sorts by minterID ascending before building CandidateRowData,
-// so the golden output reflects pre-sorted input.
+// Row format (ENC-W6B): uuid · subject · bestSpan · sscFacts · eventTime · score (S1)
+//                       uuid · subject · bestSpan · sscFacts · eventTime (S2)
+// activeAdornments, firstSentence, and ssc (object) are removed from the row schema.
 
 import Testing
 import Foundation
@@ -44,36 +43,19 @@ struct ComposerConformanceTests {
     // MARK: - Decoding helpers
 
     /// Decode one CandidateRowData from a fixture row dictionary.
-    /// activeAdornments are sorted ascending by minterID here — this is the
-    /// "caller's responsibility" step (spec: CandidateRowData.activeAdornments
-    /// must arrive in ascending minter-ID order).
+    /// Row format (ENC-W6B): uuid · subject · bestSpan · sscFacts · eventTime · score (S1).
     private func candidateRow(from json: [String: Any]) -> CandidateRowData {
         let id = json["id"] as? String ?? ""
         let subject = json["subject"] as? String
-        let firstSentence = json["firstSentence"] as? String
-        // Fixture key "ssc" is the frozen wire literal; the decoded type is
-        // the renamed SemanticSearchCandleData.
-        let candle: SemanticSearchCandleData? = (json["ssc"] as? [String: Any]).map { candleJSON in
-            SemanticSearchCandleData(
-                kind: candleJSON["kind"] as? String ?? "",
-                entities: candleJSON["entities"] as? [String] ?? []
-            )
-        }
-        // Sort ascending by minterID — caller's responsibility per the spec.
-        let adornments = (json["activeAdornments"] as? [[String: Any]] ?? [])
-            .map { AdornmentEntry(
-                minterID: $0["minterID"] as? String ?? "",
-                text: $0["text"] as? String ?? ""
-            )}
-            .sorted { $0.minterID < $1.minterID }
+        let bestSpan = json["bestSpan"] as? String
+        let sscFacts = json["sscFacts"] as? String
         let eventTime = json["eventTime"] as? String ?? ""
         let score = json["score"] as? Double
         return CandidateRowData(
             id: id,
             subject: subject,
-            firstSentence: firstSentence,
-            semanticSearchCandle: candle,
-            activeAdornments: adornments,
+            bestSpan: bestSpan,
+            sscFacts: sscFacts,
             eventTime: eventTime,
             score: score,
             retrievalSource: json["retrievalSource"] as? String,
@@ -213,16 +195,11 @@ struct ComposerConformanceTests {
                     label: t["label"] as? String ?? ""
                 )
             }
-            // Sort adornments ascending by minterID (caller's responsibility).
-            let adornments = (rec["activeAdornments"] as? [[String: Any]] ?? [])
-                .map { AdornmentEntry(minterID: $0["minterID"] as? String ?? "", text: $0["text"] as? String ?? "") }
-                .sorted { $0.minterID < $1.minterID }
             let record = FullRecordData(
                 id: rec["id"] as? String ?? "",
                 room: rec["room"] as? String ?? "",
                 wing: rec["wing"] as? String ?? "",
                 subject: rec["subject"] as? String,
-                activeAdornments: adornments,
                 filedAt: rec["filedAt"] as? String ?? "",
                 eventTime: rec["eventTime"] as? String ?? "",
                 state: rec["state"] as? String ?? "",

@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // CorpusCountsSentinelContractTests.swift
 //
 // MG-02 contract gates: Swift twin of corpus_counts_blob_sentinel_tests.rs,
@@ -501,3 +504,5 @@ struct CorpusCountsSentinelContractTests {
         await storage.close()
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

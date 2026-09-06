@@ -1,16 +1,16 @@
 // ServeOpenResumedBacklogTests.swift
 //
-// Serve-open resumed-backlog regression (SPEC_DISTILLATION_STORAGE §7.1).
+// Serve-open resumed-backlog regression.
 //
 // At serve open (`open` + `wireGLKSubstores` — no provision), the ingest-queue
 // mount opens the persisted queue.sqlite and starts the drain worker, which
 // resumes any encode backlog left by a previous process. `wireSubstores` must
-// install the onEncoded drain-stage rider (room rollup + distillation + dense
-// recompose + A2 marker) BEFORE that mount: a batch the worker drains before
-// the rider lands encodes WITHOUT distilling, violating "a fully drained
-// estate is a fully distilled estate" (§7.1) for exactly those resumed rows.
-// Rust twin: estate_registry.rs `wire_sqlite_semantic_recall` (rider installed,
-// then eager mount).
+// install the onEncoded encode rider (room rollup + structural fingerprint
+// lane entry + A2 marker) BEFORE that mount: a batch the worker drains before
+// the rider lands encodes WITHOUT the rider's work, leaving exactly those
+// resumed rows out of the fingerprint lane. The lane entry is the evidence
+// this test reads. Rust twin: estate_registry.rs `wire_sqlite_semantic_recall`
+// (rider installed, then eager mount).
 //
 // Fixture mechanics: the backlog is constructed through the public capture
 // path by holding the cross-process encode `DrainLease` from the test — the
@@ -51,10 +51,11 @@ struct ServeOpenResumedBacklogTests {
         )
     }
 
-    /// A persisted encode backlog resumed at serve open must be fully
-    /// distilled once the drain barrier returns — no drawer left undistilled.
+    /// A persisted encode backlog resumed at serve open must carry the encode
+    /// rider's fingerprint lane entry on every drawer once the drain barrier
+    /// returns — no resumed drawer left out of the lane.
     @Test
-    func resumedPersistedBacklogIsFullyDistilledAfterServeOpenDrain() async throws {
+    func resumedPersistedBacklogIsFullyFingerprintedAfterServeOpenDrain() async throws {
         // Dedicated directory: the encode drain lease is a per-directory file
         // (`encode.drain.lease`), so sharing the bare temp dir would contend
         // with unrelated durable-estate tests running in parallel.
@@ -75,10 +76,13 @@ struct ServeOpenResumedBacklogTests {
             "fresh directory — the foreign lease must acquire")
 
         // Phase 1 — build the persisted backlog through the public capture path.
+        // Every body names people or places: the structural fingerprint is
+        // built from the capitalisation-heuristic extractor, so a body with no
+        // proper noun would yield a zero fingerprint and no lane entry.
         let bodies = [
             "The reactor maintenance window opens on March 3rd at the Geneva site.",
             "Sarah approved the vendor contract for the Geneva facility yesterday.",
-            "Quarterly metrics show reactor uptime improved by twelve percent.",
+            "Quarterly metrics from Geneva show the Meyrin reactor uptime improved by twelve percent.",
         ]
         var capturedIDs: [String] = []
         do {
@@ -106,16 +110,17 @@ struct ServeOpenResumedBacklogTests {
             }
 
             // The backlog is real: jobs persisted, none drained (lease held by
-            // the "foreign" drainer), rows stored but undistilled.
+            // the "foreign" drainer), rows stored but not yet in the lane.
             let corpus = try #require(await kit.corpusKits[handle])
             let depth = try await corpus.ingestQueueDepth()
             #expect(depth.pending >= bodies.count,
                 "captures must persist as pending queue jobs while the foreign lease blocks the drain worker; got pending=\(depth.pending)")
-            let estate = try await kit.estate(for: handle)
+            let vectorStore = try #require(await kit.vectorStores[handle])
             for id in capturedIDs {
-                let row = try #require(try await estate.getDrawers(ids: [id]).first)
-                #expect(row.distilled == nil,
-                    "pre-close, lease-blocked drawer \(id) must be undistilled")
+                let lane = try await vectorStore.getVector(
+                    itemID: id, modelID: GeniusLocusKit.distillationLaneModelID)
+                #expect(lane == nil,
+                    "pre-close, lease-blocked drawer \(id) must have no fingerprint lane entry")
             }
 
             // Close with the backlog still pending — the previous process exits.
@@ -143,15 +148,15 @@ struct ServeOpenResumedBacklogTests {
         // fires before the terminal queue reply — CorpusKit ordering).
         try await kit2.awaitEncodeDrain(for: handle2, timeout: .seconds(60))
 
-        // §7.1: a fully drained estate is a fully distilled estate — every
-        // resumed drawer carries its representation.
-        let estate2 = try await kit2.estate(for: handle2)
+        // A fully drained estate is a fully fingerprinted estate — every
+        // resumed drawer carries its lane entry (the bodies name people and
+        // places, so each structural fingerprint is non-zero).
+        let vectorStore2 = try #require(await kit2.vectorStores[handle2])
         for id in capturedIDs {
-            let row = try #require(try await estate2.getDrawers(ids: [id]).first)
-            #expect(row.distilled != nil,
-                "resumed backlog drawer \(id) must be distilled after the serve-open drain (§7.1) — an undistilled row means a batch encoded before the rider was installed")
-            #expect(row.distilledPipelineVersion == GeniusLocusKit.distillationConverterID,
-                "resumed drawer \(id) must carry the current distillation pipeline version")
+            let lane = try await vectorStore2.getVector(
+                itemID: id, modelID: GeniusLocusKit.distillationLaneModelID)
+            #expect(lane != nil,
+                "resumed backlog drawer \(id) must carry a fingerprint lane entry after the serve-open drain — a missing entry means a batch encoded before the rider was installed")
         }
 
         // The queue is empty — the backlog actually drained (the assertions
