@@ -37,7 +37,11 @@ impl EstateFormatVersion {
     /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
     /// every populated estate are moved there through the migration catalog.
     pub const V1_5: Self = Self { major: 1, minor: 5 };
-    pub const CURRENT: Self = Self::V1_5;
+    /// Format 1.6: the retired `corpus_index_state.composition_policy` column
+    /// is dropped from every populated estate through the migration catalog
+    /// (CorpusKit checkpoint schema v4).
+    pub const V1_6: Self = Self { major: 1, minor: 6 };
+    pub const CURRENT: Self = Self::V1_6;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

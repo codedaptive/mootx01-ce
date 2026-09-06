@@ -73,35 +73,44 @@ let package = Package(
             name: "MigrationV1_4ToV1_5",
             description: "Compile the GLK 1.4 to 1.5 storage-ledger kit-id migration capsule (SynapseKit ledger rows become SynapseKit rows)."
         ),
-        // Floors 1.1 through 1.4 compile the same single capsule: the 1.1->1.2
+        .trait(
+            name: "MigrationV1_5ToV1_6",
+            description: "Compile the GLK 1.5 to 1.6 migration capsule (drops the retired corpus_index_state.composition_policy column)."
+        ),
+        // Floors 1.1 through 1.4 compile the same two capsules: the 1.1->1.2
         // column is added by CorpusKit's own ladder at open, the 1.2->1.3 column
         // was removed by schema v19, and the 1.3->1.4 setting retired with the
         // index composition policy, so the 1.4->1.5 capsule runs directly on
-        // any of those stamps.
+        // any of those stamps; the 1.5->1.6 capsule follows it.
         .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
         ),
         .trait(
             name: "MigrationFloor1_1",
-            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5 capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5 and 1.5->1.6 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5 capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5 and 1.5->1.6 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
         ),
         .trait(
             name: "MigrationFloor1_3",
-            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5 capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5 and 1.5->1.6 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
         ),
         .trait(
             name: "MigrationFloor1_4",
-            description: "Support estates as old as GLK format 1.4 (compiles only the 1.4->1.5 storage-ledger kit-id capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.4 (compiles the 1.4->1.5 storage-ledger kit-id capsule and the 1.5->1.6 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+        ),
+        .trait(
+            name: "MigrationFloor1_5",
+            description: "Support estates as old as GLK format 1.5 (compiles only the 1.5->1.6 column-drop capsule).",
+            enabledTraits: ["MigrationV1_5ToV1_6"]
         ),
         // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
         // Off by default (plan 70BC55F3, 2026-09-05): held for v1.2 iOS and
@@ -223,6 +232,25 @@ let package = Package(
                 ),
             ]
         ),
+        // GLK 1.5 -> 1.6 capsule: drops the retired
+        // corpus_index_state.composition_policy column from populated estates
+        // by replaying CorpusKit's checkpoint ladder (v4) on the estate
+        // storage. Mirrors the GLKMigrationV1_4ToV1_5 target structure.
+        .target(
+            name: "GLKMigrationV1_5ToV1_6",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKMigrationV1_5ToV1_6",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_5_TO_V1_6",
+                    .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKitMigrations",
             dependencies: [
@@ -241,6 +269,10 @@ let package = Package(
                     name: "GLKMigrationV1_4ToV1_5",
                     condition: .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
+                .target(
+                    name: "GLKMigrationV1_5ToV1_6",
+                    condition: .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
             ],
             path: "Sources/GeniusLocusKitMigrations",
             swiftSettings: [
@@ -251,6 +283,10 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_4_TO_V1_5",
                     .when(traits: ["MigrationV1_4ToV1_5"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_5_TO_V1_6",
+                    .when(traits: ["MigrationV1_5ToV1_6"])
                 ),
             ]
         ),
@@ -433,6 +469,39 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        // Tests for the GLK 1.5 -> 1.6 column-drop capsule. Verifies that a
+        // v1_5-stamped estate carrying corpus_index_state.composition_policy
+        // (with or without a CorpusKitIndexState ledger row) ends without the
+        // column, its checkpoint rows intact, and a v1_6 stamp; that a second
+        // run is a no-op; that a fresh estate is stamped without the capsule;
+        // and that the chain from v1_4 ends at v1_6.
+        .testTarget(
+            name: "GLKMigrationV1_5ToV1_6Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_5ToV1_6",
+                    condition: .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/GLKMigrationV1_5ToV1_6Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_5_TO_V1_6",
+                    .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_4_TO_V1_5",
+                    .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
             ]
         ),

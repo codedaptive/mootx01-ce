@@ -41,11 +41,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::content_engine::CorpusContentEngine;
-use corpus_kit::schema_profile::{
-    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
-};
-use genius_locus_kit::intake::LocusDrawerContentSource;
 // The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
@@ -773,24 +768,25 @@ fn seed_wings_non_fatal(
 }
 
 // ---------------------------------------------------------------------------
-// CorpusKit/VectorStore vector recall wiring helpers
+// Semantic recall wiring — one seam per backend, one wire body in GLK
 // ---------------------------------------------------------------------------
-// These helpers register a Corpus (BM25 + deterministic FNV-1a + FloatSimHash
-// projection provider, Lane D) and a standalone VectorStore with the coordinator so the
-// dense float vector recall lane is live from the first capture. The embedding
-// provider is EmbeddingModelConfig::Deterministic — reproducible, no CoreML
-// required. The learned distributional embedding provider is a v1.1 mission.
+// Every served estate gets its Corpus (attached-mode CorpusContentEngine over
+// the LocusKit-backed adapter), the engine's shared dense VectorStore, the
+// on_encoded encode rider, the provisioned embedding-provider activation and
+// the eagerly mounted ingest queue from ONE place:
+// `EstateCoordinator::wire_glk_substores` (GeniusLocusKit coordinator.rs), the
+// twin of Swift `GeniusLocusKit.wireGLKSubstores`, which Swift's serve, upgrade,
+// drain and dream commands all call. The helpers below own only what differs
+// per backend before that call: which `Storage` carries the sub-store tables,
+// and whether the migration chain must prepare a durable estate first.
 // ---------------------------------------------------------------------------
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for an in-memory estate.
-///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore with
-/// the coordinator so hybrid vector+BM25 recall is live from the first capture.
-/// The deterministic embedding provider (FNV-1a + FloatSimHash projection) requires no CoreML.
+/// Wire the semantic recall lanes for an in-memory estate.
 ///
 /// Called by `new_inmemory` and `register_inmemory` after `coord.open`. Creates
-/// a fresh `InMemoryStorage` handle dedicated to the Corpus + VectorStore tables
-/// and registers both with the coordinator for `handle`.
+/// a fresh `InMemoryStorage` handle dedicated to the Corpus + VectorStore
+/// tables, stamps it at the current estate format, and hands it to
+/// `wire_glk_substores`.
 ///
 /// Two `InMemoryStorage` handles: the DrawerStore already owns one (allocated
 /// inside `InMemoryDrawerStore::new`). The Corpus + VectorStore tables (chunks,
@@ -813,74 +809,26 @@ fn wire_inmemory_semantic_recall(
     EstateFormatStore::new(Arc::clone(&storage))
         .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
         .map_err(|error| format!("estate-format stamp: {error:?}"))?;
-
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(INIT_NOW)
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
-
-    // Register both with the coordinator.
-    let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    // Install the on_encoded encode rider (room rollup + structural
-    // fingerprint lane entry + A2 marker) so a drained estate is fully
-    // fingerprinted on THIS wiring path too — Swift twin: wireGLKSubstores →
-    // wireCorpusRoomRollup at serve open.
-    guard.wire_corpus_on_encoded(handle);
-    // Act on the estate's embedding_provider manifest key ("encoder" builds and
-    // registers the span encoder). Same step Swift wireSubstores performs;
-    // wire_substores does it for the provision path, this is the serve path.
-    guard.apply_provisioned_embedding_provider(handle);
-    drop(guard);
-
-    Ok(())
+    wire_glk(handle, coord, storage, INIT_NOW)
 }
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for a PostgreSQL-backed estate.
+/// Wire the semantic recall lanes for a PostgreSQL-backed estate.
 ///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore so hybrid
-/// vector+BM25 recall is live from the first capture. The deterministic embedding
-/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by `new_postgres` and
-/// `register_postgres` after `coord.open`. Builds a `PostgresStorage` handle on
-/// the same `conn_str` and pool defaults as the DrawerStore's underlying store,
-/// then registers a `Corpus` and a `VectorStore` with the coordinator for `handle`.
+/// Called by `new_postgres` and `register_postgres` after `coord.open`. Builds a
+/// `PostgresStorage` handle on the same `conn_str` and pool defaults as the
+/// DrawerStore's underlying store, runs the compiled migration chain on the
+/// estate, then hands the storage to `wire_glk_substores`.
 ///
 /// Pool defaults match the Swift ARIA_MCP leg and the DrawerStore's defaults
 /// (pool_size=10, connection_timeout=5.0s, idle_timeout=300.0s). The
 /// `PostgresStorage` handle uses a lazy pool — construction does not open a TCP
-/// connection. Schema migrations (`Corpus::open_many`, `VectorStore::open`) are
-/// idempotent: safe to call on an existing PG schema and on a fresh one.
+/// connection. Schema migrations are idempotent: safe to call on an existing PG
+/// schema and on a fresh one.
 ///
 /// # Errors
 ///
 /// Returns `Err(String)` if `PostgresStorage::new` fails (malformed connection
-/// string) or if Corpus/VectorStore construction fails.
+/// string), if the migration chain fails, or if the sub-store wiring fails.
 fn wire_postgres_semantic_recall(
     conn_str: &str,
     handle: &EstateHandle,
@@ -911,64 +859,19 @@ fn wire_postgres_semantic_recall(
     // This binary declares a 1.0 floor, so prepare the estate through the
     // separately compiled migration capsules before current-runtime wiring.
     // A crash leaves the persisted phase/cursor resumable on the next start.
+    let now = wall_now_millis();
     {
         let mut guard = coord.lock().unwrap();
         guard
-            .run_migration_chain(handle, wall_now_millis(), default_ensemble())
+            .run_migration_chain(handle, now, default_ensemble())
             .map_err(|error| format!("estate migration chain: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the
-    // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter —
-    // canonical content lives once in Drawers; the engine keys every derived
-    // row by Drawer ID and resolves content by ID at work time (mirrors the
-    // GLK coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(wall_now_millis())
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
-
-    // Register both with the coordinator.
-    let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    // Install the on_encoded drain-stage rider — same rationale as the
-    // in-memory wiring above (Swift twin: wireCorpusRoomRollup).
-    guard.wire_corpus_on_encoded(handle);
-    // Act on the estate's embedding_provider manifest key ("encoder" builds and
-    // registers the span encoder). Same step Swift wireSubstores performs;
-    // wire_substores does it for the provision path, this is the serve path.
-    guard.apply_provisioned_embedding_provider(handle);
-    drop(guard);
-
-    Ok(())
+    wire_glk(handle, coord, storage, now)
 }
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for a SQLite-backed estate.
+/// Wire the semantic recall lanes for a SQLite-backed estate.
 ///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore so hybrid
-/// vector+BM25 recall is live from the first capture. The deterministic embedding
-/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by both
-/// `new_sqlite` and `register_sqlite` after `coord.open`.
+/// Called by both `new_sqlite` and `register_sqlite` after `coord.open`.
 ///
 /// `shared_storage` is the DrawerStore's already-open, already-keyed `Storage`
 /// handle, obtained via `DrawerStore::storage()`. Sharing this connection (rather
@@ -991,83 +894,40 @@ fn wire_sqlite_semantic_recall(
     handle: &EstateHandle,
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
 ) -> Result<(), String> {
-    // Use the DrawerStore's shared storage directly — no second SqliteStorage
-    // connection. The encryption key (PRAGMA key) was already applied when the
-    // DrawerStore opened the connection; Corpus::open_many runs idempotent schema
-    // migrations (BundleStore + VectorStore tables) on the same connection.
-    let storage = shared_storage;
-
     // This binary declares a 1.0 floor, so prepare the estate through the
     // separately compiled migration capsules before current-runtime wiring.
+    let now = wall_now_millis();
     {
         let mut guard = coord.lock().unwrap();
         guard
-            .run_migration_chain(handle, wall_now_millis(), default_ensemble())
+            .run_migration_chain(handle, now, default_ensemble())
             .map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the
-    // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter —
-    // canonical content lives once in Drawers; the engine keys every derived
-    // row by Drawer ID and resolves content by ID at work time (mirrors the
-    // GLK coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(wall_now_millis())
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
+    wire_glk(handle, coord, shared_storage, now)
+}
 
-    // Register both with the coordinator so recall_scored hybrid/corpus-only/
-    // union-best modes route through the BM25 and vector lanes.
-    let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    // Install the on_encoded encode rider (room rollup + structural
-    // fingerprint lane entry + A2 marker) BEFORE the eager mount below: the
-    // mount resumes any persisted encode backlog on its own worker, and
-    // those resumed batches must find the rider already installed or they
-    // encode without the rider's work. Swift twin: wireGLKSubstores →
-    // wireCorpusRoomRollup, which installs the rider before mounting the
-    // ingest queue (EstateLifecycle.wireSubstores); both ports share the
-    // rider-before-mount order.
-    guard.wire_corpus_on_encoded(handle);
-    // Act on the estate's embedding_provider manifest key ("encoder" builds and
-    // registers the span encoder). Same step Swift wireSubstores performs;
-    // wire_substores does it for the provision path, this is the serve path.
-    guard.apply_provisioned_embedding_provider(handle);
-    drop(guard);
-
-    // EAGER mount of the Corpus ingest queue + drain worker (mirrors Swift
-    // `wireSubstores`, which mounts on wire rather than lazily on first capture).
-    // T5: this is what resumes a non-empty persisted queue the moment a restarted
-    // daemon opens the estate — the lease-gated worker drains the backlog without
-    // waiting for a fresh capture — and what lets a standalone `drain` command
-    // (which never captures) actually drain. Idempotent: a later lazy mount is a
-    // no-op. Non-fatal: a mount failure logs and continues (the lazy path on the
-    // first capture is the fallback).
-    if let Err(e) = corpus.mount_ingest_queue() {
-        eprintln!("aria-mcp: corpus ingest queue eager mount failed (will mount lazily on first capture): {e:?}");
-    }
-
-    Ok(())
+/// The one wire call every backend shares: `EstateCoordinator::wire_glk_substores`
+/// with the canonical five-signal ensemble. It opens the attached-mode
+/// CorpusContentEngine on `storage`, reconciles the configured providers,
+/// registers the Corpus and its shared VectorStore, opens the GLK composite
+/// schema, installs the on_encoded encode rider, acts on the estate's
+/// `embedding_provider` manifest key (`"encoder"` registers the span encoder),
+/// and eagerly mounts the Corpus ingest queue + drain worker — so a restarted
+/// daemon resumes a persisted encode backlog at open, and a standalone
+/// `drain` command (which never captures) drains. Rider before mount, encoder
+/// activation after the VectorStore is registered: the same order Swift
+/// `wireSubstores` keeps.
+fn wire_glk(
+    handle: &EstateHandle,
+    coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
+    storage: Arc<dyn Storage>,
+    now_millis: i64,
+) -> Result<(), String> {
+    coord
+        .lock()
+        .unwrap()
+        .wire_glk_substores(handle, storage, default_ensemble(), now_millis)
+        .map_err(|e| format!("wire_glk_substores failed: {e:?}"))
 }
 
 fn wall_now_millis() -> i64 {

@@ -13,7 +13,8 @@
 //! # Per-backend wiring policy (mirrors Swift AriaMCPMain.swift)
 //!
 //! - SQLite (ARIA_MCP_SQLITE_PATH set): semantic recall wired via the DrawerStore's
-//!   shared `Storage` connection (passed as `shared_storage` to `wire_sqlite_semantic_recall`).
+//!   shared `Storage` connection (the storage `EstateRegistry` hands to GLK
+//!   `wire_glk_substores`).
 //!   One connection for ALL sub-stores — LocusKit, Corpus, VectorStore. Matches the
 //!   Swift `wireGLKSubstores(for: handle, backingStorage: storage)` pattern exactly.
 //!   Fixes the Windows-ARM NOTADB bug where a second independent SqliteStorage handle
@@ -399,10 +400,10 @@ fn sqlite_semantic_lanes_lit_after_register_sqlite() {
 
 /// Prove that an encrypted SQLite estate (db.key sibling present) wires
 /// semantic recall — Corpus + VectorStore share the DrawerStore's already-keyed
-/// `Storage` connection via `wire_sqlite_semantic_recall`.
+/// `Storage` connection, which `EstateRegistry` hands to GLK `wire_glk_substores`.
 ///
 /// This is the regression test for the Windows-ARM NOTADB bug: before the fix,
-/// `wire_sqlite_semantic_recall` opened a SECOND `SqliteStorage` handle on the
+/// the registry's SQLite wiring opened a SECOND `SqliteStorage` handle on the
 /// encrypted file. On Windows ARM the second handle failed to apply `PRAGMA key`,
 /// returning NOTADB on the first SQL executed by `Corpus::open_many`. The fix
 /// shares the DrawerStore's storage (which already received `PRAGMA key`) with
@@ -427,8 +428,8 @@ fn sqlite_encrypted_estate_semantic_lanes_lit() {
     ensure_install_key(&dir).expect("ensure_install_key must succeed");
 
     // new_sqlite on an encrypted estate: DrawerStore opens the file with
-    // PRAGMA key (via resolve_install_encryption), then wire_sqlite_semantic_recall
-    // passes that already-keyed storage to Corpus::open_many + VectorStore.
+    // PRAGMA key (via resolve_install_encryption), then the registry passes
+    // that already-keyed storage to GLK wire_glk_substores (Corpus + VectorStore).
     let registry = EstateRegistry::new_sqlite(&path, "test-owner-enc")
         .expect("new_sqlite must succeed on an encrypted estate");
     let ledger = SurfacedRecallLedger::new();
