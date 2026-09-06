@@ -510,8 +510,9 @@ public extension GeniusLocusKit {
             // find the estate's store (the span rows live there), so activating
             // inside `applyProvisionedEmbeddingProvider` above would register the
             // duty-side encoder and silently skip the rerank stage. Rust twin:
-            // estate_registry.rs calls apply_provisioned_embedding_provider after
-            // register_vector_store in every wire_* fn.
+            // coordinator.rs wire_substores calls apply_provisioned_embedding_provider
+            // after register_vector_store, and every aria-mcp serve path reaches
+            // it through wire_glk_substores.
             await activateSpanEncoderIfProvisioned(for: handle)
             // CorpusKit owns the encode pipeline: mount the Corpus's own ingest
             // queue + drain worker pool, and wire its onEncoded callback to roll
@@ -527,7 +528,7 @@ public extension GeniusLocusKit {
             // begin draining on the worker's first pass. Those resumed batches
             // must find the rider already installed or they encode without the
             // rider's work for exactly those rows. Rust twin:
-            // estate_registry.rs wire_sqlite_semantic_recall installs the rider
+            // coordinator.rs wire_substores installs the rider
             // (wire_corpus_on_encoded) before its eager mount for the same
             // reason. Provision mounts an empty queue, so this ordering is
             // equally correct there.
