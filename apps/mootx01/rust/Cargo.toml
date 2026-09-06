@@ -95,11 +95,10 @@ corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
 # through genius-locus-kit; naming them keeps the upgrade wiring explicit.
 synapsekit = { path = "../../../packages/kits/SynapseKit/rust" }
 substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
-# corpus-kit-providers: `mootx01 db composition --set` wires the Corpus it
-# rebuilds with `default_ensemble()`, the same five-signal ensemble the ARIA
-# registry serves with, so the rebuilt rows are the rows serve will read.
-# Already in the product graph via aria-mcp; naming it directly keeps the
-# command plain and removable (same rationale as persistence-kit above).
+# corpus-kit-providers: the span-encode backfill and the upgrade steps use
+# the encoder factory and BASIS_FORMAT_VERSION directly. Already in the
+# product graph via aria-mcp; naming it directly keeps the commands plain
+# and removable (same rationale as persistence-kit above).
 corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
 # adornment-lib: AdornmentMinterDescriptor and StoredAdornment value types
 # used by run_adornment_store_migration to register legacy minter rows and
