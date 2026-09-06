@@ -178,7 +178,6 @@ impl EstateRegistry {
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "in-memory");
-        register_default_minter_non_fatal(store.as_ref(), "in-memory");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -279,12 +278,11 @@ impl EstateRegistry {
     /// already exists and must never create content. If a user deleted their default
     /// wings, a maintenance open must not silently recreate them.
     ///
-    /// Mirrors the shape of `UpgradeCommand.runDistilledRepresentationConvergence` in
-    /// Swift, which opens through the bare `GeniusLocusKit.open(storage:owner:)` path
-    /// (no `seedDefaultWings` call).
+    /// Mirrors the shape of the Swift upgrade steps, which open through the bare
+    /// `GeniusLocusKit.open(storage:owner:)` path (no `seedDefaultWings` call).
     ///
     /// Semantic recall lanes (BM25 + vector) are still wired so corpus operations
-    /// (`distill_items_sweep`, `reindex_corpus`) work correctly.
+    /// (`reindex_corpus`, the span-encode backfill) work correctly.
     ///
     /// # Errors
     ///
@@ -300,6 +298,17 @@ impl EstateRegistry {
     /// cannot drift between the serve and upgrade opens.
     fn open_sqlite(path: &str, owner: &str, seeding: SqliteOpenSeeding) -> Result<Self, String> {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        // Production model-directory resolver, installed before `coord.open`
+        // and the semantic-recall wiring below: the wiring acts on the
+        // manifest's `embedding_provider = "encoder"` by building the span
+        // encoder from the active registry row, and it can only find the
+        // bundled model through this resolver (the coordinator's default
+        // answers None for every id, which leaves recall lexical-only).
+        coord.lock().unwrap().set_model_directory_resolver(Box::new(
+            genius_locus_kit::BundledModelDirectoryResolver::new(data_dir_for_estate(
+                std::path::Path::new(path),
+            )),
+        ));
         // Geometry normalization must precede the estate connection so VACUUM and
         // all maintenance paths receive a reserve-0 file. SQLCipher's `attachFunc`
         // calls `sqlcipherCodecAttach(nKey=0)` for any keyless ATTACH when the main
@@ -370,7 +379,6 @@ impl EstateRegistry {
                 // failure logs and continues — the estate is open and functional.
                 // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
                 seed_wings_non_fatal(&coord, &handle, path);
-                register_default_minter_non_fatal(store.as_ref(), path);
             }
             SqliteOpenSeeding::None => {
                 // Maintenance callers (`mootx01 upgrade`) converge existing content
@@ -534,7 +542,6 @@ impl EstateRegistry {
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "postgres");
-        register_default_minter_non_fatal(store.as_ref(), "postgres");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
@@ -707,35 +714,6 @@ impl EstateRegistry {
 // Default wing seeding helper
 // ---------------------------------------------------------------------------
 
-/// Platform-default adornment minter (Bob ruling 2026-08-28): register the
-/// SELECTED Rust quantized recipe active so the dream-time adornment pass
-/// mints inline, on EVERY estate-open path (SQLite, in-memory, Postgres —
-/// Adams DEFAULT-MINT-01 finding #1). Selection follows the serve engine
-/// install (`MOOT_MINT_MODEL`, D4 swappability 2026-08-31): registering a
-/// DIFFERENT identity than the installed engine would stamp rows with the
-/// wrong minter, so an invalid selection registers nothing (the engine was
-/// not installed either; the pass falls back mechanically). Idempotent
-/// upsert; NEVER retoggles an operator's deactivation (LocusKit
-/// registration contract). Best-effort — an open estate must never fail
-/// over minter registration. Mirrors the Swift ServeCommand/AriaMCPMain
-/// ensureDefaultAdornmentMinter call.
-fn register_default_minter_non_fatal(store: &dyn DrawerStore, label: &str) {
-    let recipe = match adornment_lib::selected_recipe() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "aria-mcp: {e} — default adornment minter not registered for {label}"
-            );
-            return;
-        }
-    };
-    if let Err(e) = store.register_adornment_minter(&recipe.descriptor(&recipe.id(), true)) {
-        eprintln!(
-            "aria-mcp: default adornment minter registration failed for {label} (pass will no-op): {e:?}"
-        );
-    }
-}
-
 /// Idempotently seed the seven default wings for `handle`.
 ///
 /// Reads existing `AI_Charter_Hint` drawers and skips wings that are already
@@ -861,12 +839,15 @@ fn wire_inmemory_semantic_recall(
     let mut guard = coord.lock().unwrap();
     guard.register_corpus(handle, Arc::clone(&corpus));
     guard.register_vector_store(handle, vector_store);
-    // Install the on_encoded drain-stage rider (room rollup + distillation +
-    // dense recompose + A2 marker) so a drained estate is a fully distilled
-    // estate on THIS wiring path too — Swift twin: wireGLKSubstores →
-    // wireCorpusRoomRollup at serve open. Without it the distillation lane
-    // reads `pending: N` forever unless a client calls moot_distill.
+    // Install the on_encoded encode rider (room rollup + structural
+    // fingerprint lane entry + A2 marker) so a drained estate is fully
+    // fingerprinted on THIS wiring path too — Swift twin: wireGLKSubstores →
+    // wireCorpusRoomRollup at serve open.
     guard.wire_corpus_on_encoded(handle);
+    // Act on the estate's embedding_provider manifest key ("encoder" builds and
+    // registers the span encoder). Same step Swift wireSubstores performs;
+    // wire_substores does it for the provision path, this is the serve path.
+    guard.apply_provisioned_embedding_provider(handle);
     drop(guard);
 
     Ok(())
@@ -975,6 +956,10 @@ fn wire_postgres_semantic_recall(
     // Install the on_encoded drain-stage rider — same rationale as the
     // in-memory wiring above (Swift twin: wireCorpusRoomRollup).
     guard.wire_corpus_on_encoded(handle);
+    // Act on the estate's embedding_provider manifest key ("encoder" builds and
+    // registers the span encoder). Same step Swift wireSubstores performs;
+    // wire_substores does it for the provision path, this is the serve path.
+    guard.apply_provisioned_embedding_provider(handle);
     drop(guard);
 
     Ok(())
@@ -1068,17 +1053,19 @@ fn wire_sqlite_semantic_recall(
     let mut guard = coord.lock().unwrap();
     guard.register_corpus(handle, Arc::clone(&corpus));
     guard.register_vector_store(handle, vector_store);
-    // Install the on_encoded drain-stage rider (room rollup + distillation +
-    // dense recompose + A2 marker) BEFORE the eager mount below: the mount
-    // resumes any persisted encode backlog on its own worker, and those
-    // resumed batches must find the rider already installed or they encode
-    // without distilling — exactly the serve-parity defect this call closes
-    // (a served Rust estate held `distillation: pending N` indefinitely
-    // while the Swift serve converged to idle unattended). Swift twin:
-    // wireGLKSubstores → wireCorpusRoomRollup, which installs the rider
-    // before mounting the ingest queue (EstateLifecycle.wireSubstores);
-    // both ports share the rider-before-mount order.
+    // Install the on_encoded encode rider (room rollup + structural
+    // fingerprint lane entry + A2 marker) BEFORE the eager mount below: the
+    // mount resumes any persisted encode backlog on its own worker, and
+    // those resumed batches must find the rider already installed or they
+    // encode without the rider's work. Swift twin: wireGLKSubstores →
+    // wireCorpusRoomRollup, which installs the rider before mounting the
+    // ingest queue (EstateLifecycle.wireSubstores); both ports share the
+    // rider-before-mount order.
     guard.wire_corpus_on_encoded(handle);
+    // Act on the estate's embedding_provider manifest key ("encoder" builds and
+    // registers the span encoder). Same step Swift wireSubstores performs;
+    // wire_substores does it for the provision path, this is the serve path.
+    guard.apply_provisioned_embedding_provider(handle);
     drop(guard);
 
     // EAGER mount of the Corpus ingest queue + drain worker (mirrors Swift
@@ -1103,4 +1090,29 @@ fn wall_now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+/// The mootx01 data directory an estate file belongs to — search slot 1 of
+/// the model-directory resolver (the 1.2 download location, empty in 1.1).
+/// `MOOTX01_DATA_DIR` wins when set (the same override the CLI honours);
+/// otherwise the product layout `<data>/databases/<name>/estate.sqlite` is
+/// walked up from `path`, and an estate that lives elsewhere (a benchmark
+/// clone, a test fixture) uses its own directory.
+fn data_dir_for_estate(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(v) = std::env::var("MOOTX01_DATA_DIR") {
+        if !v.is_empty() {
+            return std::path::PathBuf::from(v);
+        }
+    }
+    let estate_dir = path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let in_product_layout = estate_dir
+        .parent()
+        .and_then(|databases| databases.file_name())
+        .map(|name| name == "databases")
+        .unwrap_or(false);
+    if in_product_layout {
+        estate_dir.parent().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).unwrap_or(estate_dir)
+    } else {
+        estate_dir
+    }
 }

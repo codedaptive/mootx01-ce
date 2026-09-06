@@ -40,9 +40,9 @@ public enum LocusKitVocabulary {
         FieldSlot(column: .operational, shift: 24, width: 1,  label: "state_extension"),     // flag
         FieldSlot(column: .operational, shift: 25, width: 1,  label: "lineage_clustering"),  // flag
         // Bits 27-30 of the operational bitmap are FREE as of ADORN-STORE-02 v17.
-        // The former adornment_required (bit 27) and adornment_bitmask (bits 28-30)
-        // vocabulary entries have been retired; adornment state is now tracked
-        // in the normalized adornments table, not in bitmap fields.
+        // Bits 26 (isAnomalous) and 27 (spanIndexed) are derived-signal
+        // bits their maintenance paths write through direct bitmap updates,
+        // outside the write gate; they carry no vocabulary slot.
         // provenance bitmap (Provenance, cookbook §2.5)
         FieldSlot(column: .provenance, shift: 0,  width: 6, label: "source_type",
                   legalValues: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),

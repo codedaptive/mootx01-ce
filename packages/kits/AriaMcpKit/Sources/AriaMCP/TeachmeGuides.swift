@@ -158,9 +158,9 @@ enum TeachmeGuides {
 
         One hydration verb, three tiers (depth argument):
           subject   — dense row only (travel tier; cheapest)
-          distilled — dense row + distilled text (confirm tier; rows still
-                      owing a distillate fall back to verbatim content
-                      behind a "source: content (not yet distilled)" marker)
+          distilled — dense row + inline distilled text (confirm tier;
+                      ContextDistillLib renders every row at read time —
+                      no sweep dependency, every row renders)
           full      — the complete record (terminal tier; the default)
         Batch with ids:[…] to winnow a shortlist in ONE call — judge at
         depth:subject/distilled, then fetch the winner at depth:full.

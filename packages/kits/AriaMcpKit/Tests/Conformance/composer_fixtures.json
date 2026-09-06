@@ -1,8 +1,7 @@
 {
   "version": "1.0",
-  "description": "Central conformance fixtures for ResultComposer — ARIA_MCP_INTERFACE §11 grammar, byte-exact for both Swift and Rust ports. Date: 2026-08-25.",
+  "description": "Central conformance fixtures for ResultComposer — ARIA_MCP_SPEC 2.4.0 §8.3 / ARIA_MCP_INTERFACE §11 grammar, byte-exact for both Swift and Rust ports. Date: 2026-09-05. Row format: uuid · subject · bestSpan · sscFacts · eventTime · score (S1) / uuid · subject · bestSpan · sscFacts · eventTime (S2).",
   "cases": [
-
     {
       "name": "s1_two_rows_entelo_techfest",
       "description": "S1 canonical sample from ARIA_MCP_SPEC §8.3 / §11.2 — two Entelo/TechFest rows, no control lines",
@@ -11,24 +10,18 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "user: I'll definitely look into Entelo further.",
-          "ssc": { "kind": "decision", "entities": ["Entelo"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking; elevator pitch; tips" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5687
+          "score": 0.5687,
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
         },
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": "user: I'm looking to explore AI-powered recruitment tools for my company.",
-          "ssc": { "kind": "plan", "entities": ["recruitment tools"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "Sarah; Google; TechFest; 2026-01-01; three weeks ago" }
-          ],
           "eventTime": "2026-01-01T00:07:48Z",
-          "score": 0.5562
+          "score": 0.5562,
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": "kind: plan, entity: recruitment tools"
         }
       ],
       "control": {
@@ -40,33 +33,28 @@
         "tieNote": false,
         "hint": null
       },
-      "expectedText": "found 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · Sarah; Google; TechFest; 2026-01-01; three weeks ago · 2026-01-01T00:07:48Z · 0.5562",
+      "expectedText": "found 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z · 0.5687\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · 2026-01-01T00:07:48Z · 0.5562",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "Entelo follow-up decided at TechFest",
-            "firstSentence": "user: I'll definitely look into Entelo further.",
-            "ssc": { "kind": "decision", "entities": ["Entelo"] },
-            "adornment": "TechFest; 2026-01-01; networking; elevator pitch; tips",
-            "adornments": [{ "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking; elevator pitch; tips" }],
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.5687
+            "score": 0.5687,
+            "bestSpan": "user: I'll definitely look into Entelo further.",
+            "sscFacts": "kind: decision, entity: Entelo"
           },
           {
             "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
             "subject": "AI recruitment tool exploration for company",
-            "firstSentence": "user: I'm looking to explore AI-powered recruitment tools for my company.",
-            "ssc": { "kind": "plan", "entities": ["recruitment tools"] },
-            "adornment": "Sarah; Google; TechFest; 2026-01-01; three weeks ago",
-            "adornments": [{ "minterID": "apple-mint-001", "text": "Sarah; Google; TechFest; 2026-01-01; three weeks ago" }],
             "eventTime": "2026-01-01T00:07:48Z",
-            "score": 0.5562
+            "score": 0.5562,
+            "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+            "sscFacts": "kind: plan, entity: recruitment tools"
           }
         ]
       }
     },
-
     {
       "name": "s1_singular_header",
       "description": "S1 with exactly one row uses singular 'memory' in header",
@@ -75,56 +63,58 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "user: I'll definitely look into Entelo further.",
-          "ssc": { "kind": "decision", "entities": ["Entelo"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking; elevator pitch; tips" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5687
+          "score": 0.5687,
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z · 0.5687",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "Entelo follow-up decided at TechFest",
-            "firstSentence": "user: I'll definitely look into Entelo further.",
-            "ssc": { "kind": "decision", "entities": ["Entelo"] },
-            "adornment": "TechFest; 2026-01-01; networking; elevator pitch; tips",
-            "adornments": [{ "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking; elevator pitch; tips" }],
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.5687
+            "score": 0.5687,
+            "bestSpan": "user: I'll definitely look into Entelo further.",
+            "sscFacts": "kind: decision, entity: Entelo"
           }
         ]
       }
     },
-
     {
       "name": "s1_absent_optional_fields",
-      "description": "S1 row: absent firstSentence, SSC, and adornments each render as '-' (fixed columns)",
+      "description": "S1 row: absent bestSpan, sscFacts, and sscFacts each render as '-' (fixed columns)",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5687
+          "score": 0.5687,
+          "bestSpan": null
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · - · 2026-01-01T00:07:52Z · 0.5687",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · 2026-01-01T00:07:52Z · 0.5687",
       "expectedStructured": {
         "results": [
           {
@@ -136,27 +126,29 @@
         ]
       }
     },
-
     {
       "name": "s1_first_sentence_identical_to_subject",
-      "description": "S1 row: firstSentence byte-identical to subject (after normalization) renders '-' (§11.1 rule 2)",
+      "description": "S1 row: bestSpan byte-identical to subject (after normalization) renders '-' (§11.1 rule 2)",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "Entelo follow-up decided at TechFest",
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5687
+          "score": 0.5687,
+          "bestSpan": "Entelo follow-up decided at TechFest"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · - · 2026-01-01T00:07:52Z · 0.5687",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · 2026-01-01T00:07:52Z · 0.5687",
       "expectedStructured": {
         "results": [
           {
@@ -168,258 +160,251 @@
         ]
       }
     },
-
     {
       "name": "s1_normalization_newline_collapse",
-      "description": "S1 row: embedded newline in firstSentence → single space; whitespace collapse",
+      "description": "S1 row: embedded newline in bestSpan → single space; whitespace collapse",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "line one\nline two  extra  spaces",
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.9999
+          "score": 0.9999,
+          "bestSpan": "line one\nline two  extra  spaces"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · line one line two extra spaces · - · - · 2026-01-01T00:07:52Z · 0.9999",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · line one line two extra spaces · - · 2026-01-01T00:07:52Z · 0.9999",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "line one line two extra spaces",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.9999
+            "score": 0.9999,
+            "bestSpan": "line one line two extra spaces"
           }
         ]
       }
     },
-
     {
       "name": "s1_normalization_embedded_separator",
-      "description": "S1 row: embedded middle-dot (U+00B7) in firstSentence → '-'",
+      "description": "S1 row: embedded middle-dot (U+00B7) in bestSpan → '-'",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "value · with sep",
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.9999
+          "score": 0.9999,
+          "bestSpan": "value · with sep"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · value - with sep · - · - · 2026-01-01T00:07:52Z · 0.9999",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · value - with sep · - · 2026-01-01T00:07:52Z · 0.9999",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "value - with sep",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.9999
+            "score": 0.9999,
+            "bestSpan": "value - with sep"
           }
         ]
       }
     },
-
     {
       "name": "s1_first_sentence_120_cut",
-      "description": "S1 row: firstSentence is hard cut at 120 chars, no ellipsis (§11.1 rule 3)",
+      "description": "S1 row: bestSpan is hard cut at 120 chars, no ellipsis (§11.1 rule 3)",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A short subject",
-          "firstSentence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_EXTRA",
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.7500
+          "score": 0.75,
+          "bestSpan": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_EXTRA"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A short subject · AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA · - · - · 2026-01-01T00:07:52Z · 0.7500",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A short subject · AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA · - · 2026-01-01T00:07:52Z · 0.7500",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A short subject",
-            "firstSentence": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.7500
+            "score": 0.75,
+            "bestSpan": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
           }
         ]
       }
     },
-
     {
       "name": "s1_adornment_zero",
-      "description": "S1 row: zero active adornments → fifth column is '-'; structured row has no adornment/adornments keys",
+      "description": "S1 row: zero sscFacts → fourth column is '-'; structured row has no sscFacts/sscFacts keys",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "A first sentence.",
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.8000
+          "score": 0.8,
+          "bestSpan": "A first sentence."
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · - · 2026-01-01T00:07:52Z · 0.8000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · 2026-01-01T00:07:52Z · 0.8000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "A first sentence.",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.8000
+            "score": 0.8,
+            "bestSpan": "A first sentence."
           }
         ]
       }
     },
-
     {
       "name": "s1_adornment_one",
-      "description": "S1 row: one active adornment → text rendered unchanged in fifth column",
+      "description": "S1 row: one active sscFacts → text rendered unchanged in fourth column",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "A first sentence.",
-          "ssc": null,
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.8000
+          "score": 0.8,
+          "bestSpan": "A first sentence."
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · TechFest; 2026-01-01; networking · 2026-01-01T00:07:52Z · 0.8000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · 2026-01-01T00:07:52Z · 0.8000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "A first sentence.",
-            "adornment": "TechFest; 2026-01-01; networking",
-            "adornments": [{ "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking" }],
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.8000
+            "score": 0.8,
+            "bestSpan": "A first sentence."
           }
         ]
       }
     },
-
     {
       "name": "s1_adornment_many",
-      "description": "S1 row: many active adornments → joined with ' || ' in ascending minter-ID order",
+      "description": "S1 row: many sscFacts → joined with ' || ' in ascending minter-ID order",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "A first sentence.",
-          "ssc": null,
-          "activeAdornments": [
-            { "minterID": "candle-mint-001", "text": "second adornment text" },
-            { "minterID": "apple-mint-001", "text": "first adornment text" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.8000
+          "score": 0.8,
+          "bestSpan": "A first sentence."
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · first adornment text || second adornment text · 2026-01-01T00:07:52Z · 0.8000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · 2026-01-01T00:07:52Z · 0.8000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "A first sentence.",
-            "adornment": "first adornment text || second adornment text",
-            "adornments": [
-              { "minterID": "apple-mint-001", "text": "first adornment text" },
-              { "minterID": "candle-mint-001", "text": "second adornment text" }
-            ],
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.8000
+            "score": 0.8,
+            "bestSpan": "A first sentence."
           }
         ]
       }
     },
-
     {
       "name": "s1_adornment_literal_pipe_pipe_normalized",
-      "description": "S1 row: literal ' || ' inside an adornment text is normalized to ' / ' before joining (§11.1 rule 3)",
+      "description": "S1 row: literal ' || ' inside an sscFacts text is normalized to ' / ' before joining (§11.1 rule 3)",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": "A first sentence.",
-          "ssc": null,
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "term || other" },
-            { "minterID": "candle-mint-001", "text": "clean text" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.8000
+          "score": 0.8,
+          "bestSpan": "A first sentence."
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · term / other || clean text · 2026-01-01T00:07:52Z · 0.8000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · A first sentence. · - · 2026-01-01T00:07:52Z · 0.8000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
-            "firstSentence": "A first sentence.",
-            "adornment": "term / other || clean text",
-            "adornments": [
-              { "minterID": "apple-mint-001", "text": "term || other" },
-              { "minterID": "candle-mint-001", "text": "clean text" }
-            ],
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.8000
+            "score": 0.8,
+            "bestSpan": "A first sentence."
           }
         ]
       }
     },
-
     {
       "name": "s1_control_lines_all_in_order",
       "description": "S1 with ALL control lines present: discrimination → temporal → degradation → tie note → hint (absolute trailing order §11.3)",
@@ -428,11 +413,9 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5000
+          "score": 0.5,
+          "bestSpan": null
         }
       ],
       "control": {
@@ -451,24 +434,29 @@
         "tieNote": true,
         "hint": "Try narrowing your query to a specific time range."
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · - · 2026-01-01T00:07:52Z · 0.5000\ndiscrimination: low — top results within epsilon.\ntemporal: recent (event_time, earliest) window 2025-12-01T00:00:00Z..2026-01-31T00:00:00Z\nretrieval: degraded — one or more ranking stages unavailable\nnote: additional results share this score on a non-deterministic tie; refine the query\nhint: Try narrowing your query to a specific time range.",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · 2026-01-01T00:07:52Z · 0.5000\ndiscrimination: low — top results within epsilon.\ntemporal: recent (event_time, earliest) window 2025-12-01T00:00:00Z..2026-01-31T00:00:00Z\nretrieval: degraded — one or more ranking stages unavailable\nnote: additional results share this score on a non-deterministic tie; refine the query\nhint: Try narrowing your query to a specific time range.",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.5000
+            "score": 0.5
           }
         ],
         "capabilities": {
           "discrimination": "low",
-          "temporal": { "mode": "recent", "source": "event_time", "grab": "earliest", "from": "2025-12-01T00:00:00Z", "to": "2026-01-31T00:00:00Z" },
+          "temporal": {
+            "mode": "recent",
+            "source": "event_time",
+            "grab": "earliest",
+            "from": "2025-12-01T00:00:00Z",
+            "to": "2026-01-31T00:00:00Z"
+          },
           "degraded": true
         }
       }
     },
-
     {
       "name": "s1_control_discrimination_medium",
       "description": "S1 discrimination: medium renders 'partial separation' line",
@@ -477,11 +465,9 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5000
+          "score": 0.5,
+          "bestSpan": null
         }
       ],
       "control": {
@@ -493,14 +479,14 @@
         "tieNote": false,
         "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · - · 2026-01-01T00:07:52Z · 0.5000\ndiscrimination: medium — partial separation.",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · 2026-01-01T00:07:52Z · 0.5000\ndiscrimination: medium — partial separation.",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.5000
+            "score": 0.5
           }
         ],
         "capabilities": {
@@ -508,7 +494,6 @@
         }
       }
     },
-
     {
       "name": "s1_control_walk",
       "description": "S1 walk control line: walk replaces temporal in position 2",
@@ -517,11 +502,9 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "A subject",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.6000
+          "score": 0.6,
+          "bestSpan": null
         }
       ],
       "control": {
@@ -533,22 +516,24 @@
         "tieNote": false,
         "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · - · 2026-01-01T00:07:52Z · 0.6000\nwalk: stage=expansion stoppedEarly=yes",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · A subject · - · - · 2026-01-01T00:07:52Z · 0.6000\nwalk: stage=expansion stoppedEarly=yes",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "A subject",
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.6000
+            "score": 0.6
           }
         ],
         "capabilities": {
-          "walk": { "stage": "expansion", "stoppedEarly": true }
+          "walk": {
+            "stage": "expansion",
+            "stoppedEarly": true
+          }
         }
       }
     },
-
     {
       "name": "s1_empty_zero_rows",
       "description": "S1 empty: found 0 candidate memories + one hint line (§11.1 rule 7)",
@@ -557,7 +542,6 @@
       "hint": "Try a broader query or check your room filter.",
       "expectedText": "found 0 candidate memories, one per line\nhint: Try a broader query or check your room filter."
     },
-
     {
       "name": "s1_cap_line",
       "description": "S1 cap line appended only when cap is hit, naming the narrowing argument",
@@ -567,7 +551,6 @@
       "narrowingArg": "room",
       "expectedCapLine": "listing capped at 50 — narrow with room"
     },
-
     {
       "name": "s2_listing",
       "description": "S2 memory list: listing N memories in wing/room — filing order, unranked (no score column)",
@@ -578,25 +561,19 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "user: I'll definitely look into Entelo further.",
-          "ssc": { "kind": "decision", "entities": ["Entelo"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking" }
-          ],
-          "eventTime": "2026-01-01T00:07:52Z"
+          "eventTime": "2026-01-01T00:07:52Z",
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
         },
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
-          "eventTime": "2026-01-01T00:07:48Z"
+          "eventTime": "2026-01-01T00:07:48Z",
+          "bestSpan": null
         }
       ],
-      "expectedText": "listing 2 memories in Agentic Memory / recruiting — filing order, unranked\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking · 2026-01-01T00:07:52Z\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · - · 2026-01-01T00:07:48Z"
+      "expectedText": "listing 2 memories in Agentic Memory / recruiting — filing order, unranked\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · 2026-01-01T00:07:48Z"
     },
-
     {
       "name": "s2_batch_get",
       "description": "S2 batch get: resolved N of M in request order; 'not found: <uuid>' in place for missing IDs",
@@ -606,11 +583,9 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "found": true
+          "found": true,
+          "bestSpan": null
         },
         {
           "id": "DEADBEEF-0000-0000-0000-000000000000",
@@ -619,30 +594,23 @@
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:48Z",
-          "found": true
+          "found": true,
+          "bestSpan": null
         }
       ],
       "resolvedCount": 2,
-      "expectedText": "resolved 2 of 3 requested memories, in request order\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · - · 2026-01-01T00:07:52Z\nnot found: DEADBEEF-0000-0000-0000-000000000000\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · - · 2026-01-01T00:07:48Z"
+      "expectedText": "resolved 2 of 3 requested memories, in request order\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · 2026-01-01T00:07:52Z\nnot found: DEADBEEF-0000-0000-0000-000000000000\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · 2026-01-01T00:07:48Z"
     },
-
     {
       "name": "s3_full_record",
-      "description": "S3 full record pinned to §11.6 sample: adornments block present, tunnels listed",
+      "description": "S3 full record pinned to §11.6 sample: sscFacts block present, tunnels listed",
       "shape": "s3",
       "record": {
         "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
         "room": "recruiting",
         "wing": "Agentic Memory",
         "subject": "Entelo follow-up decided at TechFest",
-        "activeAdornments": [
-          { "minterID": "apple-mint-001", "text": "TechFest; Entelo evaluation; recruitment workflow; user follow-up" },
-          { "minterID": "candle-mint-001", "text": "Entelo; sourcing tool review; TechFest recommendation; next action" }
-        ],
         "filedAt": "2026-01-02T10:15:00Z",
         "eventTime": "2026-01-01T00:07:52Z",
         "state": "active",
@@ -652,24 +620,30 @@
         "confirmation": "unconfirmed",
         "lineageID": "9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60",
         "tunnels": [
-          { "direction": "outgoing", "targetID": "E70A5761-152D-4ABB-B16A-964B06A09404", "label": "relates" },
-          { "direction": "incoming", "targetID": "931F2411-95B7-4DE9-9B96-CF96DF66175E", "label": "precedes" }
+          {
+            "direction": "outgoing",
+            "targetID": "E70A5761-152D-4ABB-B16A-964B06A09404",
+            "label": "relates"
+          },
+          {
+            "direction": "incoming",
+            "targetID": "931F2411-95B7-4DE9-9B96-CF96DF66175E",
+            "label": "precedes"
+          }
         ],
         "content": "user: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
       },
-      "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: recruiting  wing: Agentic Memory\nsubject: Entelo follow-up decided at TechFest\nadornments: 2\n  TechFest; Entelo evaluation; recruitment workflow; user follow-up\n  Entelo; sourcing tool review; TechFest recommendation; next action\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 2\n  → E70A5761-152D-4ABB-B16A-964B06A09404  [relates]\n  ← 931F2411-95B7-4DE9-9B96-CF96DF66175E  [precedes]\ncontent:\nuser: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
+      "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: recruiting  wing: Agentic Memory\nsubject: Entelo follow-up decided at TechFest\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 2\n  → E70A5761-152D-4ABB-B16A-964B06A09404  [relates]\n  ← 931F2411-95B7-4DE9-9B96-CF96DF66175E  [precedes]\ncontent:\nuser: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
     },
-
     {
       "name": "s3_no_subject_no_adornments",
-      "description": "S3 full record: subject line absent when drawer has none; adornments block absent when none active",
+      "description": "S3 full record: subject line absent when drawer has none; sscFacts block absent when none active",
       "shape": "s3",
       "record": {
         "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
         "room": "inbox",
         "wing": "Default",
         "subject": null,
-        "activeAdornments": [],
         "filedAt": "2026-01-02T10:15:00Z",
         "eventTime": "2026-01-01T00:07:52Z",
         "state": "active",
@@ -683,7 +657,6 @@
       },
       "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: inbox  wing: Default\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 0\ncontent:\nSome content."
     },
-
     {
       "name": "s4_fact_search",
       "description": "S4 fact search: six fixed columns, '-' source for freestanding assertion",
@@ -708,7 +681,6 @@
       ],
       "expectedText": "found 2 facts, one per line\nFACT-001 · Entelo · is-tool-type · AI recruitment · 30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · 2026-01-01T00:08:00Z\nFACT-002 · TechFest · held-in · 2026 · - · 2026-01-01T00:09:00Z"
     },
-
     {
       "name": "s4_fact_timeline",
       "description": "S4 fact timeline: seven columns, time-major, lifecycle tags",
@@ -735,7 +707,6 @@
       ],
       "expectedText": "fact timeline: 2 facts in filing order (active and retired)\n2026-01-01T00:08:00Z · active · FACT-001 · Entelo · is-tool-type · AI recruitment · 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\n2026-01-01T00:09:00Z · retired(B) · FACT-002 · TechFest · held-in · 2025 · -"
     },
-
     {
       "name": "s5_edge_rows",
       "description": "S5 edge rows: tunnel id + kind/label + far endpoint S2 pick fields (no score)",
@@ -749,16 +720,14 @@
           "farEndpoint": {
             "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
             "subject": "AI recruitment tool exploration for company",
-            "firstSentence": null,
-            "ssc": null,
-            "activeAdornments": [],
+            "bestSpan": null,
+            "sscFacts": null,
             "eventTime": "2026-01-01T00:07:48Z"
           }
         }
       ],
-      "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-001 · relates · E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · - · 2026-01-01T00:07:48Z"
+      "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-001 · relates · E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · 2026-01-01T00:07:48Z"
     },
-
     {
       "name": "s6_tabular_query_lossless",
       "description": "S6 dataset query: lossless encoding — separator, embedded quote, newline, NULL, empty string, bool, numeric (§11.9)",
@@ -770,15 +739,34 @@
       "limit": 50,
       "orderCol": "id",
       "orderDir": "asc",
-      "columns": ["id", "note", "flag", "amount"],
+      "columns": [
+        "id",
+        "note",
+        "flag",
+        "amount"
+      ],
       "rows": [
-        [1, "plain text", true, 3.14],
-        [2, "text with · sep", false, null],
-        [3, "line one\nline two", null, 0]
+        [
+          1,
+          "plain text",
+          true,
+          3.14
+        ],
+        [
+          2,
+          "text with · sep",
+          false,
+          null
+        ],
+        [
+          3,
+          "line one\nline two",
+          null,
+          0
+        ]
       ],
       "expectedText": "dataset DSET-0001-0000-0000-000000000001 \"test_dataset\": returned 3 of 10 matching rows (limit 50, ordered by id asc)\nid · note · flag · amount\n1 · plain text · true · 3.14\n2 · \"text with · sep\" · false · \n3 · \"line one\\nline two\" ·  · 0"
     },
-
     {
       "name": "s6_tabular_stats",
       "description": "S6 dataset stats: per-column aggregate statistics format (§11.9)",
@@ -788,50 +776,73 @@
       "totalRows": 100,
       "totalCols": 2,
       "columns": [
-        { "name": "id", "count": 100, "nulls": 0, "distinct": 100 },
-        { "name": "amount", "count": 95, "nulls": 5, "distinct": 80, "min": "0", "max": "999.99", "mean": "150.5", "stddev": "42.1" }
+        {
+          "name": "id",
+          "count": 100,
+          "nulls": 0,
+          "distinct": 100
+        },
+        {
+          "name": "amount",
+          "count": 95,
+          "nulls": 5,
+          "distinct": 80,
+          "min": "0",
+          "max": "999.99",
+          "mean": "150.5",
+          "stddev": "42.1"
+        }
       ],
       "expectedText": "dataset DSET-0001-0000-0000-000000000001 \"test_dataset\": 100 rows, 2 columns\nid · count=100 · nulls=0 · distinct=100\namount · count=95 · nulls=5 · distinct=80 · min=0 · max=999.99 · mean=150.5 · stddev=42.1"
     },
-
     {
       "name": "synthesis_with_cue",
       "description": "Synthesis document: header, query cue line, summary paragraph, candidate section (§11.4) — NO scaffold fields",
       "shape": "synthesis",
       "drawerCount": 2,
-      "cueTerms": ["entelo", "recruitment", "techfest"],
+      "cueTerms": [
+        "entelo",
+        "recruitment",
+        "techfest"
+      ],
       "summary": "The user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool.",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "user: I'll definitely look into Entelo further.",
-          "ssc": { "kind": "decision", "entities": ["Entelo"] },
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5687
+          "score": 0.5687,
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
         },
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": "user: I'm looking to explore AI-powered recruitment tools for my company.",
-          "ssc": { "kind": "plan", "entities": ["recruitment tools"] },
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:48Z",
-          "score": 0.5562
+          "score": 0.5562,
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": "kind: plan, entity: recruitment tools"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "grounded_synthesis: 2 drawers\nquery: entelo, recruitment, techfest\nThe user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool.\nfound 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · - · 2026-01-01T00:07:52Z · 0.5687\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · - · 2026-01-01T00:07:48Z · 0.5562",
+      "expectedText": "grounded_synthesis: 2 drawers\nquery: entelo, recruitment, techfest\nThe user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool.\nfound 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z · 0.5687\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · 2026-01-01T00:07:48Z · 0.5562",
       "expectedStructuredTopLevel": {
-        "cues": ["entelo", "recruitment", "techfest"],
+        "cues": [
+          "entelo",
+          "recruitment",
+          "techfest"
+        ],
         "summary": "The user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool."
       }
     },
-
     {
       "name": "synthesis_whole_estate_no_cue_line",
       "description": "Synthesis whole-estate digest: NO query: line (absent in whole-estate form per §11.4)",
@@ -842,7 +853,6 @@
       "rows": [],
       "expectedText": "grounded_synthesis: 5 drawers\nThe estate contains memories about recruitment tools and TechFest.\nfound 0 candidate memories, one per line"
     },
-
     {
       "name": "vague_recall_two_tiers",
       "description": "Vague recall: two S1 sections under 'found N vague summaries' and 'found M hydrated originals' headers (§11.2)",
@@ -851,9 +861,8 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
+          "bestSpan": null,
+          "sscFacts": null,
           "eventTime": "2026-01-01T00:07:52Z",
           "score": 0.5687
         }
@@ -862,59 +871,60 @@
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": "user: I'm looking to explore AI-powered recruitment tools for my company.",
-          "ssc": null,
-          "activeAdornments": [],
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": null,
           "eventTime": "2026-01-01T00:07:48Z",
           "score": 0.5562
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 vague summary, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · - · 2026-01-01T00:07:52Z · 0.5687\nfound 1 hydrated original, one per line\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · - · - · 2026-01-01T00:07:48Z · 0.5562"
+      "expectedText": "found 1 vague summary, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · 2026-01-01T00:07:52Z · 0.5687\nfound 1 hydrated original, one per line\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · - · 2026-01-01T00:07:48Z · 0.5562"
     },
-
     {
-      "name": "distilled_recall_with_continuation_and_fallback",
-      "description": "Distilled recall: each row followed by 4-space indented continuation; row still owing distillate gets fallback marker then verbatim content (§11.2)",
+      "name": "distilled_recall_with_continuation",
+      "description": "Distilled recall: each row followed by 4-space indented inline distilled continuation rendered by ContextDistillLib at read time (§11.2)",
       "shape": "distilled",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Entelo follow-up decided at TechFest",
-          "firstSentence": "user: I'll definitely look into Entelo further.",
-          "ssc": { "kind": "decision", "entities": ["Entelo"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "TechFest; 2026-01-01; networking; elevator pitch; tips" }
-          ],
           "eventTime": "2026-01-01T00:07:52Z",
           "score": 0.5687,
           "distilled": "Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.",
-          "representation": "distilled"
+          "representation": "distilled",
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
         },
         {
           "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
           "subject": "AI recruitment tool exploration for company",
-          "firstSentence": "user: I'm looking to explore AI-powered recruitment tools for my company.",
-          "ssc": { "kind": "plan", "entities": ["recruitment tools"] },
-          "activeAdornments": [
-            { "minterID": "apple-mint-001", "text": "Sarah; Google; TechFest; 2026-01-01; three weeks ago" }
-          ],
           "eventTime": "2026-01-01T00:07:48Z",
           "score": 0.5562,
           "distilled": "I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago.",
-          "representation": "contentFallback"
+          "representation": "distilled",
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": "kind: plan, entity: recruitment tools"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687\n    Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · Sarah; Google; TechFest; 2026-01-01; three weeks ago · 2026-01-01T00:07:48Z · 0.5562\n    source: content (not yet distilled)\n    I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago."
+      "expectedText": "found 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z · 0.5687\n    Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.\nE70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · 2026-01-01T00:07:48Z · 0.5562\n    I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago."
     },
-
     {
       "name": "federated_search_per_estate_sections",
       "description": "Federated search: one section per estate with estate header (§11.2)",
@@ -927,16 +937,20 @@
             {
               "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
               "subject": "Entelo follow-up decided at TechFest",
-              "firstSentence": null,
-              "ssc": null,
-              "activeAdornments": [],
+              "bestSpan": null,
+              "sscFacts": null,
               "eventTime": "2026-01-01T00:07:52Z",
               "score": 0.5687
             }
           ],
           "control": {
-            "discrimination": null, "temporalNarration": null, "walkStage": null,
-            "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+            "discrimination": null,
+            "temporalNarration": null,
+            "walkStage": null,
+            "walkStoppedEarly": null,
+            "degraded": false,
+            "tieNote": false,
+            "hint": null
           }
         },
         {
@@ -944,80 +958,90 @@
           "estateID": "ESTATE-0002-0000-0000-000000000002",
           "rows": [],
           "control": {
-            "discrimination": null, "temporalNarration": null, "walkStage": null,
-            "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+            "discrimination": null,
+            "temporalNarration": null,
+            "walkStage": null,
+            "walkStoppedEarly": null,
+            "degraded": false,
+            "tieNote": false,
+            "hint": null
           }
         }
       ],
-      "expectedText": "estate: Work [ESTATE-0001-0000-0000-000000000001]\nfound 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · - · 2026-01-01T00:07:52Z · 0.5687\nestate: Personal [ESTATE-0002-0000-0000-000000000002]\nfound 0 candidate memories, one per line"
+      "expectedText": "estate: Work [ESTATE-0001-0000-0000-000000000001]\nfound 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · - · - · 2026-01-01T00:07:52Z · 0.5687\nestate: Personal [ESTATE-0002-0000-0000-000000000002]\nfound 0 candidate memories, one per line"
     },
-
     {
       "name": "ssc_multiple_entities",
-      "description": "SSC with multiple entities renders 'entities:' (plural) semicolon-separated",
+      "description": "sscFacts with multiple entities renders 'entities:' (plural) semicolon-separated",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Multi-entity record",
-          "firstSentence": null,
-          "ssc": { "kind": "event", "entities": ["Entelo", "Google", "TechFest"] },
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.9000
+          "score": 0.9,
+          "bestSpan": null,
+          "sscFacts": "kind: event, entities: Entelo; Google; TechFest"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Multi-entity record · - · kind: event, entities: Entelo; Google; TechFest · - · 2026-01-01T00:07:52Z · 0.9000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Multi-entity record · - · kind: event, entities: Entelo; Google; TechFest · 2026-01-01T00:07:52Z · 0.9000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "Multi-entity record",
-            "ssc": { "kind": "event", "entities": ["Entelo", "Google", "TechFest"] },
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.9000
+            "score": 0.9,
+            "sscFacts": "kind: event, entities: Entelo; Google; TechFest"
           }
         ]
       }
     },
-
     {
       "name": "ssc_kind_only_no_entities",
-      "description": "SSC with kind but empty entities array renders 'kind: X' only",
+      "description": "sscFacts with kind but empty entities array renders 'kind: X' only",
       "shape": "s1",
       "rows": [
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": "Kind only record",
-          "firstSentence": null,
-          "ssc": { "kind": "note", "entities": [] },
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.7000
+          "score": 0.7,
+          "bestSpan": null,
+          "sscFacts": "kind: note"
         }
       ],
       "control": {
-        "discrimination": null, "temporalNarration": null, "walkStage": null,
-        "walkStoppedEarly": null, "degraded": false, "tieNote": false, "hint": null
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
       },
-      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Kind only record · - · kind: note · - · 2026-01-01T00:07:52Z · 0.7000",
+      "expectedText": "found 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Kind only record · - · kind: note · 2026-01-01T00:07:52Z · 0.7000",
       "expectedStructured": {
         "results": [
           {
             "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
             "subject": "Kind only record",
-            "ssc": { "kind": "note", "entities": [] },
             "eventTime": "2026-01-01T00:07:52Z",
-            "score": 0.7000
+            "score": 0.7,
+            "sscFacts": "kind: note"
           }
         ]
       }
     },
-
     {
       "name": "s2_listing_empty",
       "description": "S2 listing 0 memories: 'listing 0 memories in …' header only (no hint for listing)",
@@ -1026,7 +1050,6 @@
       "room": "recruiting",
       "expectedText": "listing 0 memories in Agentic Memory / recruiting — filing order, unranked"
     },
-
     {
       "name": "structured_parity_absent_optional_fields_absent_from_json",
       "description": "Structured parity: optional fields absent from text row must also be ABSENT (not null) from structured JSON",
@@ -1035,14 +1058,19 @@
         {
           "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
           "subject": null,
-          "firstSentence": null,
-          "ssc": null,
-          "activeAdornments": [],
           "eventTime": "2026-01-01T00:07:52Z",
-          "score": 0.5000
+          "score": 0.5,
+          "bestSpan": null
         }
       ],
-      "forbiddenKeys": ["subject", "firstSentence", "ssc", "adornment", "adornments"]
+      "forbiddenKeys": [
+        "subject",
+        "bestSpan",
+        "sscFacts",
+        "ssc",
+        "adornment",
+        "adornments"
+      ]
     }
   ]
 }

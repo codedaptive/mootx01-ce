@@ -7,7 +7,7 @@
 //! operational feature-flag region is full — see
 //! PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and no bool field. Every
 //! content-touching write NULLs the trio in the same statement, exactly
-//! as it NULLs the distilled quad.
+//! as it NULLs `ssc_facts`.
 //!
 //! Twin-parity mirror of Swift `SubjectRepresentationTests` case-for-case.
 //!

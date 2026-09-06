@@ -31,16 +31,6 @@ pub enum SynapseKitError {
     /// vector. Payload describes the failure.
     DecodingFailure(String),
 
-    /// An `Int8` `VectorPayload` was submitted for persistence, but the
-    /// int8 quantization policy (symmetric vs asymmetric, per-vector vs
-    /// per-dim scale) has not been ratified. Writing an int8 payload now
-    /// would lock in undefined dequantization semantics. Use `Float32`
-    /// (float32 lane) or the `Binary` Engram lane instead. See
-    /// SYNAPSEKIT_SPEC §I-4a and arch spec §10.3. When a quantization
-    /// policy is ratified, remove this error case and the guards that
-    /// return it.
-    Int8QuantizationPolicyUndefined(String),
-
     /// Trained distributional provider's `embed_float` returned no vector
     /// because all query tokens are out-of-vocabulary (OOV). The provider
     /// HAS a trained basis (vocab is non-empty) but none of the query's

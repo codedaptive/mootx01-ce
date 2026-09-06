@@ -110,6 +110,7 @@ impl FaultSource {
                 digest: content_digest(text),
                 text: text.to_string(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         );
     }

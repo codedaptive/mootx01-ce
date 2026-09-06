@@ -17,8 +17,11 @@ import SynapseKit
 ///
 /// The director computes a `RecallPlan` before lane recall runs. The plan
 /// captures the effective mode and the frontier-K value
-/// (`min(max(limit * 4, 64), 256)`), which bounds candidate retrieval
-/// without pulling unbounded rows from the estate.
+/// (`min(max(limit * 4, 64), 256)`), which bounds the candidate pool each
+/// lane contributes to the weighted score. The unionBest lexical lane is the
+/// one lane that reads deeper than frontierK: its internal BM25 call runs at
+/// `SpanRerankStage.lexicalDepth` (1000) so the span rerank stage (contract
+/// sheet §8) reranks and fuses the true lexical head before the pool cap.
 public extension GeniusLocusKit {
 
     /// Logger for the Recall Director. Uses the fleet-standard subsystem
@@ -270,8 +273,8 @@ public extension GeniusLocusKit {
     /// FRAME-AWARE LATE HYDRATION — read specific drawer ids only when they
     /// satisfy the same bitmap/content filter pipeline used by normal recall.
     ///
-    /// Distillation recipes use vector/tunnel candidate ids rather than the
-    /// standard recall lanes, so they must explicitly apply a recall frame
+    /// Recipes that build candidate ids from vector/tunnel lanes rather than
+    /// the standard recall lanes must explicitly apply a recall frame
     /// before exposing hydrated bodies at the MCP boundary. `Estate` enforces
     /// tombstone exclusion and default state/trust/sensitivity filters inside
     /// `getDrawers(ids:matchingFrame:hydrationLevel:)`.
@@ -559,9 +562,10 @@ public extension GeniusLocusKit {
             // else: vectorList stays []
         }
         // Lane B — structural fingerprint ("distillation-features-v1").
-        // Queries per-drawer distillation fingerprints written by DistillationCycle.
-        // Undistilled drawers have no lane entry and are absent from fpMatches —
-        // they contribute zero candidates, never a penalty (dark-lane safety).
+        // Queries the per-drawer structural fingerprints the encode rider writes
+        // (`writeStructuralFingerprint`). Drawers not yet encoded have no lane
+        // entry and are absent from fpMatches — they contribute zero
+        // candidates, never a penalty (dark-lane safety).
         // nil queryFingerprint (query had no structural features) skips this block.
         if let fp = sketch.queryFingerprint, let store = vectorStores[handle] {
             do {
@@ -588,11 +592,11 @@ public extension GeniusLocusKit {
                 // Rebuild with updated scores for any Lane A items improved by Lane B.
                 vectorList = laneAItems.map { (id: $0.id, score: vectorByID[$0.id] ?? $0.score) }
             } catch {
-                // Lane B DEGRADED — expected on estates with no distillation entries.
+                // Lane B DEGRADED — expected on estates with no fingerprint entries.
                 // No telemetry: a dark Lane B is a normal operating state for any
-                // corpus whose content has not yet been distilled.
+                // corpus whose drawers have not been encoded yet.
                 Self.recallLog.debug(
-                    "RecallDirector corpusOnly: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
+                    "RecallDirector corpusOnly: fingerprint lane dark (expected before any drawer is encoded): \(error, privacy: .public)")
             }
         }
 
@@ -898,7 +902,7 @@ public extension GeniusLocusKit {
                 vectorList = merged.map { (id: $0.id, score: vectorByID[$0.id] ?? $0.score) }
             } catch {
                 Self.recallLog.debug(
-                    "RecallDirector hybrid: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
+                    "RecallDirector hybrid: fingerprint lane dark (expected before any drawer is encoded): \(error, privacy: .public)")
             }
         }
 
@@ -1194,8 +1198,8 @@ public extension GeniusLocusKit {
             tokens = []
         }
         // Lane B fingerprint: computed from query text via defaultExtractor (pure,
-        // no I/O). defaultExtractor matches the extractor used when writing
-        // "distillation-features-v1" entries in DistillationCycle, so stored and
+        // no I/O). defaultExtractor matches the extractor `writeStructuralFingerprint`
+        // uses when writing "distillation-features-v1" entries, so stored and
         // query fingerprints are self-consistent. A zero result means the query
         // has no structural features; nil is stored so Lane B is skipped rather
         // than executing a zero-probe search (which would return meaningless ranks).
@@ -1538,11 +1542,14 @@ public extension GeniusLocusKit {
         // resolver so the optimizer-emitted defaults reach the fixed lanes,
         // the dense per-model modifiers, and the union column multipliers
         // alike.
+        // The last resort is `RecallShape.defaultWeight(for:)`: 1.0 for every
+        // key except `signal:vector`, which defaults to 0 (the whole-record
+        // vector column is out of the fused score unless a shape asks for it).
         let provisionedWeights = await provisionedLaneWeights(estate: estate)
         let recallShapeForWeights = request.recallShape
         let laneWeight: (String) -> Float = { key in
             if let shaped = recallShapeForWeights?.laneWeights[key] { return shaped }
-            return provisionedWeights[key] ?? 1.0
+            return provisionedWeights[key] ?? RecallShape.defaultWeight(for: key)
         }
 
         // Step 1 — compile sketch (may be empty if no corpus is registered).
@@ -1609,12 +1616,17 @@ public extension GeniusLocusKit {
         }.prefix(plan.frontierK))
 
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
-        // Over-fetch 4× so all matching items survive CorpusContentEngine's UUID tiebreak
-        // at the internal K-boundary; content-derived re-sort and cap to frontierK happen
-        // at the unionBest content-sort block below before candidates enter the buffer.
+        // The internal lexical call runs at `SpanRerankStage.lexicalDepth` (1000,
+        // contract sheet §8), NOT at a multiple of frontierK: the span rerank
+        // stage (step 3.5) cuts its head from this list and the fusion reorders
+        // it, so the list must be the true lexical order to that depth. The
+        // depth also keeps every matching item clear of CorpusContentEngine's
+        // UUID tiebreak at its internal K-boundary; content-derived re-sort and
+        // the cap to frontierK happen at the content-sort block below, after the
+        // fusion, before candidates enter the buffer.
         var bm25Hits: [RecallHit] = []
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK * 4)
+            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: SpanRerankStage.lexicalDepth)
             bm25Hits = bm25Results.map { r in
                 let sv = RecallScoreVector(
                     locus: 0, bm25: r.score, vector: 0,
@@ -1687,11 +1699,11 @@ public extension GeniusLocusKit {
         // Fires independently of Lane A (RI binary). The probe is
         // `sketch.queryFingerprint`, computed in compileSketch via
         // `DistillationPipeline.queryFingerprint` with the capitalization-heuristic
-        // `defaultExtractor` — the same extractor used at distillation write time, so
+        // `defaultExtractor` — the same extractor used at lane write time, so
         // stored and query fingerprints are self-consistent.
         //
         // Dark-lane safety: drawers without a Lane B entry are absent from fpMatches
-        // and contribute zero candidates — no penalty relative to distilled drawers.
+        // and contribute zero candidates — no penalty relative to fingerprinted drawers.
         // A nil queryFingerprint (query had no structural features, or blank query)
         // skips this block entirely — same zero-contribution outcome.
         //
@@ -1717,11 +1729,11 @@ public extension GeniusLocusKit {
                 }
                 vectorHits.append(contentsOf: fpHits)
             } catch {
-                // Lane B dark — expected for estates with no distilled entries.
-                // No telemetry: this is a normal operating state during the organic
-                // testmark window (before distillation has run).
+                // Lane B dark — expected for estates with no fingerprint entries.
+                // No telemetry: this is a normal operating state before the first
+                // encode has run.
                 Self.recallLog.debug(
-                    "RecallDirector unionBest: fingerprint lane dark (expected for undistilled estates): \(error, privacy: .public)")
+                    "RecallDirector unionBest: fingerprint lane dark (expected before any drawer is encoded): \(error, privacy: .public)")
             }
         }
 
@@ -2149,11 +2161,58 @@ public extension GeniusLocusKit {
                 for d in filtered.admissible { unionContentByID[d.id] = d.content }
             }
         }
-        // Sort + cap BM25 (over-fetched 4×).
+        // Sort BM25 (fetched at lexicalDepth) into its content-deterministic order.
         bm25Hits.sort { x, y in
             if x.score.final != y.score.final { return x.score.final > y.score.final }
             return (unionContentByID[x.id] ?? x.id) < (unionContentByID[y.id] ?? y.id)
         }
+
+        // Step 3.5 — SPAN RERANK (Encoder Rerank Program, contract sheet §8).
+        // Runs only while the lifecycle registered an encoder for this estate,
+        // the query has text, and neither `signal:encoder` nor the encoder's own
+        // `dense:<modelID>` weight is 0. The head (`encoder_head` items of the
+        // content-sorted lexical list) is reranked by best span cosine and fused
+        // back over the WHOLE lexical list with reciprocal-rank fusion; the fused
+        // list replaces the lexical lane, so its `bm25` column carries the fused
+        // reciprocal-rank score (normalised at step 6 like every column) and the
+        // pool cap below keeps the fused top-frontierK. Items with no span rows
+        // keep their lexical rank. A stage failure (encoder or row read) leaves
+        // the lexical order standing and is surfaced on degradedStages as
+        // `spanRerank`; the caller sees no error (sheet §7 failure contract).
+        // `spanHitsByID` is hoisted so step 11 can attach each selected hit's
+        // span evidence and the explainer's `span:` token.
+        var spanHitsByID: [String: SpanRerankHit] = [:]
+        if let source = spanRerankSources[handle], !bm25Hits.isEmpty,
+           let text = sketch.queryText, !text.isEmpty,
+           laneWeight(RecallShape.SignalKey.encoder) != 0 {
+            let spanWeight = laneWeight(RecallShape.DenseSignal.key(forModelID: source.encoder.modelID))
+            if spanWeight != 0 {
+                let head = bm25Hits.prefix(source.head).enumerated().map { offset, hit in
+                    SpanRerankInput(itemID: hit.id, bm25Rank: offset + 1)
+                }
+                do {
+                    let hits = try await SpanRerankStage.spanRerank(
+                        head: Array(head), query: text, encoder: source.encoder, store: source.store)
+                    let fused = SpanRerankStage.fuse(
+                        bm25Order: bm25Hits.map(\.id), hits: hits, spanWeight: spanWeight)
+                    bm25Hits = fused.map { entry in
+                        let sv = RecallScoreVector(
+                            locus: 0, bm25: entry.score, vector: 0,
+                            fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                            redundancyPenalty: 0, final: entry.score
+                        )
+                        return RecallHit(id: entry.id, drawer: nil, sources: [.corpusBM25],
+                                         score: sv, explanation: ["corpusBM25"], spanHit: entry.hit)
+                    }
+                    for hit in hits { spanHitsByID[hit.itemID] = hit }
+                } catch {
+                    Self.recallLog.error(
+                        "RecallDirector unionBest: span rerank degraded (lexical order stands): \(error, privacy: .public)")
+                    degradedStages.append("spanRerank")
+                }
+            }
+        }
+        // Cap the (fused) lexical list to the pool bound.
         bm25Hits = Array(bm25Hits.prefix(plan.frontierK))
         // Sort + cap vector (over-fetched 4× across Lane A + Lane B).
         vectorHits.sort { x, y in
@@ -2634,14 +2693,10 @@ public extension GeniusLocusKit {
         // hydrateBodies fails, mmrContentByID is empty and the MMR selection
         // order may differ from the fully-hydrated path. The stage is recorded.
         var mmrContentByID: [String: String] = [:]
-        // The distilled TEXT rides the same late-hydration read (it is the
-        // second text column the structured pool projects away —
-        // SPEC_DISTILLATION_STORAGE §10.1 needs it on returned hits).
-        var mmrDistilledByID: [String: String] = [:]
         if case .full = request.frame.hydrationLevel {
             let forcedMMRError = _testForceMMRHydrationError
             _testForceMMRHydrationError = nil
-            let mmrResult: Result<[(id: String, content: String, distilled: String?)], Error>
+            let mmrResult: Result<[(id: String, content: String)], Error>
             if let forcedError = forcedMMRError {
                 mmrResult = .failure(forcedError)
             } else {
@@ -2652,7 +2707,7 @@ public extension GeniusLocusKit {
                     // would influence MMR similarity comparisons for admissible candidates
                     // (RD-01 §F1).
                     let bodies = try await estate.hydrateBodies(ids: Array(drawerIndex.keys))
-                    mmrResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
+                    mmrResult = .success(bodies.map { ($0.id, $0.content) })
                 } catch {
                     mmrResult = .failure(error)
                 }
@@ -2660,10 +2715,6 @@ public extension GeniusLocusKit {
             switch mmrResult {
             case .success(let pairs):
                 mmrContentByID = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0, $0.1) })
-                mmrDistilledByID = Dictionary(
-                    uniqueKeysWithValues: pairs.compactMap { pair in
-                        pair.2.map { (pair.0, $0) }
-                    })
             case .failure(let error):
                 // MMR content hydration DEGRADED — MMR uses sourceMask Jaccard proxy.
                 Self.recallLog.error(
@@ -2895,21 +2946,19 @@ public extension GeniusLocusKit {
         // correct. The stage is recorded in degradedStages.
         let selectedIDs = selected.map { buffer.ids[$0] }
         var returnedContentByID: [String: String]
-        var returnedDistilledByID: [String: String]
         switch request.frame.hydrationLevel {
         case .full:
             returnedContentByID = mmrContentByID
-            returnedDistilledByID = mmrDistilledByID
         case .structured:
             let forcedReturnError = _testForceReturnHydrationError
             _testForceReturnHydrationError = nil
-            let returnResult: Result<[(id: String, content: String, distilled: String?)], Error>
+            let returnResult: Result<[(id: String, content: String)], Error>
             if let forcedError = forcedReturnError {
                 returnResult = .failure(forcedError)
             } else {
                 do {
                     let bodies = try await estate.hydrateBodies(ids: selectedIDs)
-                    returnResult = .success(bodies.map { ($0.id, $0.content, $0.distilled) })
+                    returnResult = .success(bodies.map { ($0.id, $0.content) })
                 } catch {
                     returnResult = .failure(error)
                 }
@@ -2917,10 +2966,6 @@ public extension GeniusLocusKit {
             switch returnResult {
             case .success(let pairs):
                 returnedContentByID = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0, $0.1) })
-                returnedDistilledByID = Dictionary(
-                    uniqueKeysWithValues: pairs.compactMap { pair in
-                        pair.2.map { (pair.0, $0) }
-                    })
             case .failure(let error):
                 // Return hydration DEGRADED — structured hits carry empty content.
                 Self.recallLog.error(
@@ -2933,11 +2978,9 @@ public extension GeniusLocusKit {
                 )
                 degradedStages.append("pool.hydrateBodies.return")
                 returnedContentByID = [:]
-                returnedDistilledByID = [:]
             }
         case .bitmapOnly:
             returnedContentByID = [:]   // content is stripped by applyHydration
-            returnedDistilledByID = [:]
         }
 
         // Step 11 — build RecallHit array in presentation order (score DESC,
@@ -2983,9 +3026,7 @@ public extension GeniusLocusKit {
             // `.bitmapOnly` strips content regardless. This mirrors the stripping
             // RecallStream applies on the locus page-emission path.
             let drawer = drawerIndex[id].map { pool -> LocusKit.Drawer in
-                let hydrated = withContent(
-                    pool, returnedContentByID[id] ?? "",
-                    distilled: returnedDistilledByID[id])
+                let hydrated = withContent(pool, returnedContentByID[id] ?? "")
                 return applyHydration(hydrated, level: request.frame.hydrationLevel)
             }
             var sources: Set<RecallEvidencePath> = []
@@ -3012,9 +3053,12 @@ public extension GeniusLocusKit {
                 dense: buffer.dense[idx]
             )
             // Derive a temporary hit to pass to the explainer (explanation
-            // initialised empty; the real explanation is set below).
+            // initialised empty; the real explanation is set below). The span
+            // hit rides both so the explainer renders its `span:` token and the
+            // caller receives the best-span bounds (sheet §8/§9).
+            let spanHit = spanHitsByID[id]
             let bareHit = RecallHit(id: id, drawer: drawer, sources: sources,
-                                    score: sv, explanation: [])
+                                    score: sv, explanation: [], spanHit: spanHit)
             // The agreement bonus this hit earned: only the matrixAware weighted
             // score adds it; the other scoring paths read buffer.final and add
             // nothing, so they report 0 rather than a bonus they never applied.
@@ -3035,11 +3079,11 @@ public extension GeniusLocusKit {
                     "denseSignals: " + voters.map { "vectorDense:\($0)" }.joined(separator: ", "))
             }
             hits.append(RecallHit(id: id, drawer: drawer, sources: sources,
-                                  score: sv, explanation: explanationLines))
+                                  score: sv, explanation: explanationLines, spanHit: spanHit))
         }
 
         Self.recallLog.debug(
-            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) denseLane=\(denseLaneExplainerTag ?? "active", privacy: .public) degraded=\(degradedStages, privacy: .public)"
+            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) spanHits=\(spanHitsByID.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) denseLane=\(denseLaneExplainerTag ?? "active", privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
@@ -3255,20 +3299,15 @@ public extension GeniusLocusKit {
 
     // MARK: - Late-hydration helper
 
-    /// Return a copy of `d` with its TEXT columns re-materialized — the
-    /// dense-first late-hydration step. The pool is loaded body-free
-    /// (`content == ""` and `distilled == nil`; both text columns are
-    /// projected away at `.structured`); this re-materializes the body AND
-    /// the distilled rendering onto the returned drawer for exactly the
-    /// survivor/top-k ids, so the §10.1 hydration selector can read
-    /// `drawer.distilled` off returned hits. The distilled METADATA columns
-    /// (pipeline version, token count, generated-at) ride the structured
-    /// pool projection and are preserved from `d`. When `body` is empty and
-    /// `distilled` nil this is an identity rebuild, so callers may invoke
-    /// it unconditionally.
-    private func withContent(
-        _ d: LocusKit.Drawer, _ body: String, distilled: String?
-    ) -> LocusKit.Drawer {
+    /// Return a copy of `d` with its body re-materialized — the dense-first
+    /// late-hydration step. The pool is loaded body-free (`content == ""`;
+    /// the text column is projected away at `.structured`); this
+    /// re-materializes the body onto the returned drawer for exactly the
+    /// survivor/top-k ids, so the hydration selector can derive every
+    /// rendering from `drawer.content` off returned hits. When `body` is
+    /// empty this is an identity rebuild, so callers may invoke it
+    /// unconditionally.
+    private func withContent(_ d: LocusKit.Drawer, _ body: String) -> LocusKit.Drawer {
         LocusKit.Drawer(
             id: d.id,
             content: body,
@@ -3289,20 +3328,14 @@ public extension GeniusLocusKit {
             udcFacets: d.udcFacets,
             wikidataQID: d.wikidataQID,
             wikidataQidsSecondary: d.wikidataQidsSecondary,
-            distilled: distilled,
-            distilledPipelineVersion: d.distilledPipelineVersion,
-            distilledTokenCount: d.distilledTokenCount,
-            distilledAt: d.distilledAt,
-            distilledSourceDigest: d.distilledSourceDigest,
-            // Subject trio must survive the shared-content rebuild — the
-            // PR-03 dense row reads it off recall hits; dropping it here
-            // rendered every hit as "(no subject)" regardless of storage.
+            // The SSC facts and the subject trio ride the structured pool
+            // projection and must survive the rebuild — the candidate row
+            // reads both off recall hits; dropping them here rendered every
+            // hit as "(no subject)" regardless of storage.
+            sscFacts: d.sscFacts,
             subject: d.subject,
             subjectPipelineVersion: d.subjectPipelineVersion,
             subjectAt: d.subjectAt
-            // Adornment text is no longer a Drawer field (ADORN-STORE-02 v17).
-            // Active adornments are fetched separately via
-            // Estate.activeAdornments(drawerIDs:) before composition.
         )
     }
 

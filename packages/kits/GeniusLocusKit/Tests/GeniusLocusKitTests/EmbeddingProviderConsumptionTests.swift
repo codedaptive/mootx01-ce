@@ -126,10 +126,17 @@ struct EmbeddingProviderConsumptionTests {
             "provision(.glk) must register a CorpusContentEngine")
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
 
-        // Byte-identical pin: absent key must yield the five-signal default.
+        // Byte-identical pin: absent key must yield the RI-only default
+        // (plan 70BC55F3, 2026-09-05; dense families off by default).
+        // With DenseFamilies trait ON the expected array is the full five-signal set.
+        #if MOOTX01_DENSE_FAMILIES
+        let expectedDefault = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
+        #else
+        let expectedDefault = ["random-indexing-v1"]
+        #endif
         #expect(
-            modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-            "absent key must yield the unchanged five-signal default, got \(modelIDs)")
+            modelIDs == expectedDefault,
+            "absent key must yield the unchanged default ensemble, got \(modelIDs)")
     }
 
     // (c) Unknown model ID → falls back to default five-signal; no crash
@@ -163,14 +170,21 @@ struct EmbeddingProviderConsumptionTests {
             "second provision must register a CorpusContentEngine")
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
 
-        // Unknown ID must NOT add a slot. Ensemble must equal the five-signal default.
+        // Unknown ID must NOT add a slot. Ensemble must equal the default ensemble.
+        // RI-only by default (plan 70BC55F3); five-signal with DenseFamilies trait ON.
+        #if MOOTX01_DENSE_FAMILIES
+        let expectedFallback = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
+        #else
+        let expectedFallback = ["random-indexing-v1"]
+        #endif
         #expect(
-            modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-            "unknown embedding_provider ID must fall back to the five-signal default, got \(modelIDs)")
+            modelIDs == expectedFallback,
+            "unknown embedding_provider ID must fall back to the default ensemble, got \(modelIDs)")
     }
 
-#if canImport(NaturalLanguage)
-    // (a) apple-nl-v1 provisioned → corpus has six slots (five default + NL)
+#if canImport(NaturalLanguage) && APPLE_ENCODERS
+    // (a) apple-nl-v1 provisioned → corpus has NL provider slot
+    // (APPLE_ENCODERS ON; off by default, plan 70BC55F3, 2026-09-05)
     //
     // Setting `embedding_provider = "apple-nl-v1"` in the estate manifest causes
     // `wireSubstores` to append `.nlEmbedding(provider: AppleNLProvider())` to the
@@ -206,21 +220,29 @@ struct EmbeddingProviderConsumptionTests {
             "second provision must register a CorpusContentEngine")
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
 
-        // The NL slot must be present and the five default slots must be intact.
-        // The NL provider is appended AFTER the default ensemble, so it is last.
+        // The NL slot must be present; default slots must be intact.
+        // NL provider is appended AFTER the default ensemble (last slot).
         #expect(
             modelIDs.contains("apple-nl-v1"),
             "provisioned apple-nl-v1 must add an NL provider slot; got \(modelIDs)")
 
-        // Six total slots: five default + one NL.
+        // Total slots: default count + 1 NL.
+        // RI-only default (plan 70BC55F3) → 2 slots; five-signal (DenseFamilies ON) → 6 slots.
+        #if MOOTX01_DENSE_FAMILIES
+        let expectedCount = 6
+        let expectedPrefix: [String] = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
+        #else
+        let expectedCount = 2
+        let expectedPrefix: [String] = ["random-indexing-v1"]
+        #endif
         #expect(
-            modelIDs.count == 6,
-            "ensemble must have exactly 6 slots (5 default + 1 NL), got \(modelIDs.count): \(modelIDs)")
+            modelIDs.count == expectedCount,
+            "ensemble must have exactly \(expectedCount) slots (default + 1 NL), got \(modelIDs.count): \(modelIDs)")
 
-        // First five must be the default ensemble in insertion order.
+        // First N slots must be the default ensemble in insertion order.
         #expect(
-            modelIDs.prefix(5) == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"][...],
-            "first five slots must be the default ensemble in insertion order, got \(Array(modelIDs.prefix(5)))")
+            Array(modelIDs.prefix(expectedPrefix.count)) == expectedPrefix,
+            "first \(expectedPrefix.count) slots must be the default ensemble in insertion order, got \(Array(modelIDs.prefix(expectedPrefix.count)))")
     }
 #endif
 }
