@@ -94,8 +94,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted, kit: kit, handle: handle)
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -121,8 +120,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .normal, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -150,8 +148,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted, kit: kit, handle: handle)
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         _ = try await kit.consolidationSweep(
             handle: handle,
@@ -161,9 +158,7 @@ struct SensitivityInheritanceConsolidationTests {
         // A fifth NORMAL item arrives and folds in.
         let fifthBody = "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria confirmed the Falcon rollout checklist."
         _ = try await captureItem(body: fifthBody, sensitivity: .normal, kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
-            now: aged.addingTimeInterval(3_600), limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: aged.addingTimeInterval(3_600))
 
         var foldConfig = ConsolidationConfig()
         foldConfig.hammingCeiling = 90
@@ -201,8 +196,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .secret, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -240,8 +234,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .elevated, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         _ = try await kit.consolidationSweep(
             handle: handle,
@@ -280,8 +273,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted,
                                   kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let produced = try await kit.consolidationSweep(
             handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: aged)
         #expect(produced == 1, "setup: cluster must consolidate to one vague item")

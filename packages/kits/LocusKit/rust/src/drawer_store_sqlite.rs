@@ -365,80 +365,21 @@ impl DrawerStore for SqliteDrawerStore {
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
-    fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        source_digest: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.0.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            source_digest,
-            token_count,
-            generated_at,
-        )
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.0.set_ssc_facts(drawer_id, facts)
     }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.0.count_undistilled(pipeline_version)
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.0.set_span_indexed(drawer_id)
     }
-    fn rooms_with_stale_distilled_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        self.0.rooms_with_stale_distilled_representations(pipeline_version)
-    }
-    fn drawers_with_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.0.drawers_with_representations(pipeline_version)
-    }
-    fn list_adornment_minters(
-        &self,
-    ) -> Result<Vec<adornment_lib::AdornmentMinterDescriptor>, LocusKitError> {
-        self.0.list_adornment_minters()
-    }
-    fn register_adornment_minter(
-        &self,
-        minter: &adornment_lib::AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
-        self.0.register_adornment_minter(minter)
-    }
-    fn set_adornment_minter_active(&self, id: &str, active: bool) -> Result<usize, LocusKitError> {
-        self.0.set_adornment_minter_active(id, active)
-    }
-    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
-        self.0.set_active_adornment_minters(ids)
-    }
-    fn adornment_debt_batch(
+    fn span_index_debt_batch(
         &self,
         limit: usize,
         after_drawer_id: Option<&str>,
-    ) -> Result<Vec<crate::drawer_store::AdornmentDebt>, LocusKitError> {
-        self.0.adornment_debt_batch(limit, after_drawer_id)
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.span_index_debt_batch(limit, after_drawer_id)
     }
-    fn put_adornment(
-        &self,
-        adornment: &adornment_lib::StoredAdornment,
-    ) -> Result<usize, LocusKitError> {
-        self.0.put_adornment(adornment)
-    }
-    fn adornments(
-        &self,
-        drawer_id: &str,
-    ) -> Result<Vec<adornment_lib::StoredAdornment>, LocusKitError> {
-        self.0.adornments(drawer_id)
-    }
-    fn active_adornments(
-        &self,
-        drawer_ids: &[&str],
-    ) -> Result<std::collections::BTreeMap<String, Vec<adornment_lib::StoredAdornment>>, LocusKitError> {
-        self.0.active_adornments(drawer_ids)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_span_index_debt()
     }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.0.set_anomalous_flag(drawer_id, anomalous)

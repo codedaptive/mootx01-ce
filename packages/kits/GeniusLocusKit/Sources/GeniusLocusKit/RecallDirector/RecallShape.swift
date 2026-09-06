@@ -24,9 +24,13 @@
 ///     score (the per-signal `dense:<modelID>` keys below steer the dense
 ///     consensus fold that BUILDS that column).
 ///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
-///     embedding provider (e.g. `"dense:minilm-v6"`, `"dense:mpnet-base-v2"`).
-///     The `<modelID>` suffix mirrors the per-signal fan-out from 6b-core so a
-///     multi-provider corpus can weight each distributional signal independently.
+///     embedding provider (e.g. `"dense:random-indexing-v1"`). The `<modelID>`
+///     suffix mirrors the per-signal fan-out from 6b-core so a multi-provider
+///     corpus can weight each distributional signal independently. The same
+///     key spelled with the ACTIVE span encoder's registry model id
+///     (`DenseSignal.encoder`, `"dense:minilm-l6-v2-w60"` for the floor model)
+///     is the span rerank stage's weight `w` in its reciprocal-rank fusion
+///     (contract sheet §8): `1.0` neutral, `0` skips the stage.
 ///
 ///   Matrix/graph/preference columns (steer ONLY the unionBest `.matrixAware`
 ///   weighted score — the matrix columns are inactive under `.raw`/`.rrf`, so
@@ -48,11 +52,15 @@
 ///     `"signal:fieldFit"`, `"signal:matrix"` (coOccurrence + temporal),
 ///     `"signal:graph"`, `"signal:preference"`, `"signal:agreement"` (the
 ///     fixed signal-agreement bonus; it has no budget slice to redistribute).
+///   - `"signal:encoder"` — the span rerank stage switch (sheet §8): `0` skips
+///     the stage (the `no_encoder` ablation); it has no budget slice.
 ///
-/// A lane whose key is ABSENT from `laneWeights` uses the default weight `1.0`
-/// (forward at full strength) — so an empty map reproduces today's uniform fusion
-/// exactly. This is the back-compat contract: `nil` shape ⇒ all-1.0 ⇒ byte-identical
-/// to the pre-6b-modifiers fusion.
+/// A lane whose key is ABSENT from `laneWeights` uses `defaultWeight(for:)`:
+/// `1.0` (forward at full strength) for every key except `"signal:vector"`,
+/// whose default is `0` — the whole-record vector column (Hamming + dense)
+/// leaves the fused score unless a shape asks for it by setting the key
+/// (Encoder Rerank Program ruling: the span rerank replaces it). So an empty
+/// map, a `nil` shape and the `no_vector` preset fuse identically.
 ///
 /// ## Signed-weight semantics
 ///
@@ -225,17 +233,29 @@ public struct RecallShape: Sendable, Codable, Equatable {
         antiSimilarLanes.contains(laneKey)
     }
 
-    /// The signed weight for a lane key. Returns `1.0` for any key absent from
-    /// `laneWeights` — the neutral default that keeps unweighted lanes voting at
-    /// full strength.
+    /// The signed weight for a lane key. Returns `defaultWeight(for:)` for any
+    /// key absent from `laneWeights` — `1.0` for every key except
+    /// `SignalKey.vector`, whose default is `0`.
     ///
     /// - Parameter laneKey: a stable lane identifier — a retrieval lane
-    ///   (`"locus"`, `"bm25"`, `"hamming"`, `"dense"`, `"dense:<modelID>"`) or a
+    ///   (`"locus"`, `"bm25"`, `"hamming"`, `"dense"`, `"dense:<modelID>"`), a
     ///   matrix/graph/preference column (`"fieldFit"`, `"coOccurrence"`,
-    ///   `"temporal"`, `"graph"`, `"preference"`). See the lane-key scheme above.
-    /// - Returns: the configured weight, or `1.0` when the lane is not in the map.
+    ///   `"temporal"`, `"graph"`, `"preference"`) or a `signal:*` key. See the
+    ///   lane-key scheme above.
+    /// - Returns: the configured weight, or the key's default when absent.
     public func weight(for laneKey: String) -> Float {
-        laneWeights[laneKey] ?? 1.0
+        laneWeights[laneKey] ?? Self.defaultWeight(for: laneKey)
+    }
+
+    /// The weight a lane key carries when no shape and no provisioned default
+    /// names it. `1.0` (neutral) for every key except `SignalKey.vector`, which
+    /// defaults to `0`: the whole-record vector column (Hamming + dense) is out
+    /// of the fused score by ruling (Encoder Rerank Program — the span rerank
+    /// stage carries the semantic signal) and a shape brings it back by setting
+    /// the key explicitly. The director's weight resolver and `weight(for:)`
+    /// both read this, so the two agree. Rust twin: `RecallShape::default_weight`.
+    public static func defaultWeight(for laneKey: String) -> Float {
+        laneKey == SignalKey.vector ? 0 : 1.0
     }
 
     /// Resolve the effective candidate-pool depth for a computed engine default.
@@ -276,6 +296,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
         public static let preference = "signal:preference"
         /// The fixed signal-agreement bonus.
         public static let agreement = "signal:agreement"
+        /// The span rerank stage switch (contract sheet §8): `0` skips the
+        /// stage, any other value runs it. Not a scoring column — it has no
+        /// budget slice and never redistributes — so it is not in `all`.
+        public static let encoder = "signal:encoder"
         /// Every column-budget key, in step-9 column order.
         public static let all: [String] = [locus, bm25, vector, fieldFit, matrix, graph, preference, agreement]
     }
@@ -290,6 +314,20 @@ public struct RecallShape: Sendable, Codable, Equatable {
     public enum DenseSignal {
         /// Random-Indexing distributional provider — `"random-indexing-v1"`.
         public static let randomIndexing = "dense:random-indexing-v1"
+        /// The span rerank encoder lane, keyed by the floor model's registry id
+        /// (contract sheet §1: `<model>-w<window_words>`). The stage reads the
+        /// key for whichever model is ACTIVE via `key(forModelID:)`; this
+        /// constant is the floor model's spelling for presets and docs.
+        public static let encoder = "dense:minilm-l6-v2-w60"
+
+        /// The lane key for a model id: `"dense:<modelID>"`. One spelling for
+        /// the dense consensus fold and the span rerank weight alike.
+        public static func key(forModelID modelID: String) -> String { "dense:\(modelID)" }
+
+#if MOOTX01_DENSE_FAMILIES
+        // The PPMI, LSA, NMF and FDC providers are dark unless the package is
+        // built with the DenseFamilies trait (contract sheet §13); their lane
+        // keys and the presets that steer them compile in with them.
         /// Positive-PMI distributional provider — `"ppmi-v1"`.
         public static let ppmi = "dense:ppmi-v1"
         /// Latent-Semantic-Analysis provider — `"lsa-v1"`.
@@ -305,6 +343,11 @@ public struct RecallShape: Sendable, Codable, Equatable {
         /// is intentionally excluded — it is a structural-coding signal and
         /// is targeted by its own explicit presets rather than bundled here.
         public static let all: [String] = [randomIndexing, ppmi, lsa, nmf]
+#else
+        /// The distributional dense lane keys in stable order. Random Indexing
+        /// is the only live family; the others are dark (sheet §13).
+        public static let all: [String] = [randomIndexing]
+#endif
     }
 
     /// The names of every preset in the roster, in stable declaration order.
@@ -313,60 +356,77 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// `"balanced"` is included for completeness even though it resolves to a
     /// `nil` shape (uniform fusion = today's behaviour) — listing it lets a
     /// caller pick "no steering" by name alongside the steered shapes.
-    public static let presetNames: [String] = [
-        "balanced",
-        "precise",
-        "conceptual",
-        "broad",
-        "lexical",
-        "not_lexical",
-        "associative",
-        "consensus",
-        "ri_forward",
-        "ppmi_forward",
-        "lsa_forward",
-        "nmf_forward",
-        "fast",
-        "jaccard",
-        // Float-lane metric presets: identical fusion to balanced, but the
-        // dense float embedding lane uses L2 or dot-product distance instead
-        // of the default cosine. Mirrors the binaryMetric/jaccard pattern.
-        "float-l2",
-        "float-dot",
-        "matrix_decayed",
-        "structural",
-        "temporal",
-        "connection",
-        "field",
-        "preference",
-        "anti_redundant",
-        // Per-signal anti-similarity variants: same suppression shape as
-        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
-        // inverts a different per-signal dense lane to FARTHEST so callers
-        // can target diversity in the RI, LSA, or NMF semantic space.
-        "anti_redundant_ri",
-        "anti_redundant_lsa",
-        "anti_redundant_nmf",
-        "session_hybrid",
-        // Multi-column matrix presets: each amplifies two matrixAware columns
-        // simultaneously so both signals strengthen each other's ranking.
-        "temporal_connection",
-        "field_preference",
-        // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
-        // column of the matrixAware weighted score via its `signal:*` key and
-        // redistributes that column's budget over the rest. They exist so a
-        // harness arm can ask "what does ranking look like without this
-        // column" through the ARIA verb that carries a shape (moot_recall_shaped),
-        // which accepts a preset name and no inline shape.
-        "no_locus",
-        "no_field_fit",
-        "no_matrix",
-        "no_graph",
-        "no_preference",
-        "no_agreement",
-        "no_bm25",
-        "no_vector",
-    ]
+    public static let presetNames: [String] = {
+        var names: [String] = [
+            "balanced",
+            "precise",
+            "conceptual",
+            "broad",
+            "lexical",
+            "not_lexical",
+            "associative",
+            "consensus",
+            "ri_forward",
+        ]
+#if MOOTX01_DENSE_FAMILIES
+        // Single-family isolation presets for the dark families (sheet §13).
+        names += ["ppmi_forward", "lsa_forward", "nmf_forward"]
+#endif
+        names += [
+            "fast",
+            "jaccard",
+            // Float-lane metric presets: identical fusion to balanced, but the
+            // dense float embedding lane uses L2 or dot-product distance instead
+            // of the default cosine. Mirrors the binaryMetric/jaccard pattern.
+            "float-l2",
+            "float-dot",
+            "matrix_decayed",
+            "structural",
+            "temporal",
+            "connection",
+            "field",
+            "preference",
+            "anti_redundant",
+            // Per-signal anti-similarity variants: same suppression shape as
+            // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
+            // inverts a different per-signal dense lane to FARTHEST so callers
+            // can target diversity in that semantic space.
+            "anti_redundant_ri",
+        ]
+#if MOOTX01_DENSE_FAMILIES
+        names += ["anti_redundant_lsa", "anti_redundant_nmf"]
+#endif
+        names += [
+            "session_hybrid",
+            // Multi-column matrix presets: each amplifies two matrixAware columns
+            // simultaneously so both signals strengthen each other's ranking.
+            "temporal_connection",
+            "field_preference",
+            // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
+            // column of the matrixAware weighted score via its `signal:*` key and
+            // redistributes that column's budget over the rest. They exist so a
+            // harness arm can ask "what does ranking look like without this
+            // column" through the ARIA verb that carries a shape (moot_recall_shaped),
+            // which accepts a preset name and no inline shape.
+            "no_locus",
+            "no_field_fit",
+            "no_matrix",
+            "no_graph",
+            "no_preference",
+            "no_agreement",
+            "no_bm25",
+            "no_vector",
+            // Encoder Rerank Program: skip the span rerank stage so the lexical
+            // order stands unreranked. With the vector column out by default, the
+            // fused order equals `no_vector`'s — that identity is pinned by test.
+            // The name `cross_encoder` is RESERVED for the cross-encoder hook
+            // (sheet §8) and is deliberately NOT in this roster: no shape
+            // implements it in this program, so the tool must reject it as
+            // unknown rather than run balanced fusion under that name.
+            "no_encoder",
+        ]
+        return names
+    }()
 
     /// Resolve a named preset to its documented signed-weight shape.
     ///
@@ -387,7 +447,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
     ///
     /// Leave-one-out is reachable WITHOUT a dedicated preset: take any forward
     /// shape and zero one `dense:<modelID>` lane (e.g. set
-    /// `DenseSignal.lsa` to `0`) to ablate exactly that distributional signal.
+    /// `DenseSignal.randomIndexing` to `0`) to ablate exactly that signal.
     ///
     /// - Parameter name: a preset name from `presetNames`.
     /// - Returns: the resolved shape, or `nil` for `"balanced"` / an unknown name.
@@ -402,26 +462,19 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // forward the dense consensus, then NARROW the frontier so suppression
         // reshapes a tight, high-precision pool. The "find the exact answer" shape.
         case "precise":
-            return RecallShape(
-                laneWeights: [
-                    "bm25": 1.5,
-                    DenseSignal.fdc: 1.5,
-                    "dense": 1.2,
-                ],
-                frontierK: frontierKFloor)
+            var weights: [String: Float] = ["bm25": 1.5, "dense": 1.2]
+#if MOOTX01_DENSE_FAMILIES
+            weights[DenseSignal.fdc] = 1.5
+#endif
+            return RecallShape(laneWeights: weights, frontierK: frontierKFloor)
 
         // Concepts over keywords: amplify the distributional dense lanes
         // (RI/PPMI/LSA/NMF) and damp the literal keyword lane so semantically
         // related — not lexically identical — memories rise.
         case "conceptual":
-            return RecallShape(
-                laneWeights: [
-                    DenseSignal.randomIndexing: 1.5,
-                    DenseSignal.ppmi: 1.5,
-                    DenseSignal.lsa: 1.5,
-                    DenseSignal.nmf: 1.5,
-                    "bm25": 0.5,
-                ])
+            var weights: [String: Float] = ["bm25": 0.5]
+            for key in DenseSignal.all { weights[key] = 1.5 }
+            return RecallShape(laneWeights: weights)
 
         // Cast wide: forward every retrieval lane above neutral and WIDEN the
         // frontier to the ceiling so the fused set draws from a deep candidate
@@ -440,13 +493,11 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // (dense aggregate and 256-bit Hamming) so only literal/field signals
         // vote. The pure-lexical lane.
         case "lexical":
-            return RecallShape(
-                laneWeights: [
-                    "bm25": 1.5,
-                    DenseSignal.fdc: 1.5,
-                    "dense": 0,
-                    "hamming": 0,
-                ])
+            var weights: [String: Float] = ["bm25": 1.5, "dense": 0, "hamming": 0]
+#if MOOTX01_DENSE_FAMILIES
+            weights[DenseSignal.fdc] = 1.5
+#endif
+            return RecallShape(laneWeights: weights)
 
         // Binary-lane metric swap (W2.5 M1): identical fusion, but the
         // engram lanes score Jaccard set-overlap instead of Hamming
@@ -476,22 +527,21 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // Suppress the literal lanes: ZERO bm25 + fdc so only the distributional
         // and structural lanes decide. The complement of `lexical`.
         case "not_lexical":
-            return RecallShape(
-                laneWeights: [
-                    "bm25": 0,
-                    DenseSignal.fdc: 0,
-                ])
+            var weights: [String: Float] = ["bm25": 0]
+#if MOOTX01_DENSE_FAMILIES
+            weights[DenseSignal.fdc] = 0
+#endif
+            return RecallShape(laneWeights: weights)
 
         // Loose association: amplify the two most "associative" distributional
         // signals (RI and NMF) and widen the frontier so loosely-related memories
         // surface. The free-association shape.
         case "associative":
-            return RecallShape(
-                laneWeights: [
-                    DenseSignal.randomIndexing: 1.5,
-                    DenseSignal.nmf: 1.5,
-                ],
-                frontierK: frontierKCeiling)
+            var weights: [String: Float] = [DenseSignal.randomIndexing: 1.5]
+#if MOOTX01_DENSE_FAMILIES
+            weights[DenseSignal.nmf] = 1.5
+#endif
+            return RecallShape(laneWeights: weights, frontierK: frontierKCeiling)
 
         // Dense consensus: forward EVERY per-signal dense lane at full strength
         // (so the consensus fold that builds the `dense` column weighs every
@@ -500,20 +550,26 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "consensus":
             var weights: [String: Float] = [:]
             for key in DenseSignal.all { weights[key] = 1.0 }
+#if MOOTX01_DENSE_FAMILIES
             weights[DenseSignal.fdc] = 1.0
+#endif
             return RecallShape(laneWeights: weights, frontierK: frontierKFloor)
 
         // Single-signal forwarding: amplify ONE distributional dense lane and
-        // ZERO its siblings so only that provider's geometry votes. The four
-        // `*_forward` presets isolate each held provider for ablation/inspection.
+        // ZERO its siblings so only that provider's geometry votes. The
+        // `*_forward` presets isolate each held provider for ablation/inspection;
+        // with the dense families dark only `ri_forward` exists and it has no
+        // siblings to zero.
         case "ri_forward":
             return singleDenseForward(DenseSignal.randomIndexing)
+#if MOOTX01_DENSE_FAMILIES
         case "ppmi_forward":
             return singleDenseForward(DenseSignal.ppmi)
         case "lsa_forward":
             return singleDenseForward(DenseSignal.lsa)
         case "nmf_forward":
             return singleDenseForward(DenseSignal.nmf)
+#endif
 
         // Cheapest vote: boost the 256-bit Hamming lane and set the `dense`
         // weight to 0. RecallDirector still runs floatNearestPerSignal when a
@@ -560,11 +616,18 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // the top via keyword or SimHash similarity alone — only FDC farthest and
         // the remaining lanes contribute. The frontier is narrowed to frontierKFloor
         // so the re-rank pool is tight and focused rather than a wide list where
-        // duplicates can still cluster.
+        // duplicates can still cluster. With the dense families dark there is no
+        // FDC lane to invert: the preset keeps the suppression and the narrow
+        // frontier; `anti_redundant_ri` is the inversion that stays live.
         case "anti_redundant":
+#if MOOTX01_DENSE_FAMILIES
+            let antiSimilar: Set<String> = [DenseSignal.fdc]
+#else
+            let antiSimilar: Set<String> = []
+#endif
             return RecallShape(
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
-                antiSimilarLanes: [DenseSignal.fdc],
+                antiSimilarLanes: antiSimilar,
                 frontierK: frontierKFloor)
 
         // Per-signal anti-similarity: same suppression shape as anti_redundant
@@ -579,6 +642,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
                 antiSimilarLanes: [DenseSignal.randomIndexing],
                 frontierK: frontierKFloor)
 
+#if MOOTX01_DENSE_FAMILIES
         case "anti_redundant_lsa":
             return RecallShape(
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
@@ -590,6 +654,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
                 antiSimilarLanes: [DenseSignal.nmf],
                 frontierK: frontierKFloor)
+#endif
 
         // Session-granularity hybrid recall: amplify bm25 (keyword match for
         // conversation fragments), dense (semantic similarity within the
@@ -656,6 +721,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return RecallShape(laneWeights: [SignalKey.bm25: 0])
         case "no_vector":
             return RecallShape(laneWeights: [SignalKey.vector: 0])
+        // Span rerank ablation (sheet §8): the stage is skipped and the lexical
+        // list enters the pool in BM25 order. No budget slice is involved.
+        case "no_encoder":
+            return RecallShape(laneWeights: [SignalKey.encoder: 0])
 
         default:
             return nil
@@ -674,13 +743,13 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "balanced":
             return "Uniform fusion — every lane votes equally. The unsteered default."
         case "precise":
-            return "Exactness — amplify keyword (bm25) + field-coding (fdc) + dense consensus over a narrow frontier."
+            return "Exactness — amplify keyword (bm25) + dense consensus (+ field-coding when the dense families are compiled in) over a narrow frontier."
         case "conceptual":
-            return "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/LSA/NMF), damp bm25."
+            return "Concepts over keywords — amplify the distributional dense lanes (RI, plus PPMI/LSA/NMF when compiled in), damp bm25."
         case "broad":
             return "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling."
         case "lexical":
-            return "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes."
+            return "Keyword/field only — amplify bm25 (+ fdc when compiled in), exclude the dense and Hamming vector lanes."
         case "jaccard":
             return "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity."
         case "float-l2":
@@ -690,19 +759,21 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "matrix_decayed":
             return "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts."
         case "not_lexical":
-            return "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide."
+            return "Suppress the literal lanes — exclude bm25 (+ fdc when compiled in) so distributional and structural signals decide."
         case "associative":
-            return "Loose association — amplify the RI + NMF distributional lanes over a wide frontier."
+            return "Loose association — amplify the RI (+ NMF when compiled in) distributional lanes over a wide frontier."
         case "consensus":
             return "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree."
         case "ri_forward":
             return "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals."
+#if MOOTX01_DENSE_FAMILIES
         case "ppmi_forward":
             return "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals."
         case "lsa_forward":
             return "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals."
         case "nmf_forward":
             return "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals."
+#endif
         case "fast":
             return "Cheapest vote — keep only the 256-bit Hamming lane, skip the float-dense cosine pass."
         case "structural":
@@ -716,13 +787,15 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "preference":
             return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
         case "anti_redundant":
-            return "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64."
+            return "Diversity — suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate, invert FDC to farthest when the dense families are compiled in; narrow frontier to 64."
         case "anti_redundant_ri":
             return "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space."
+#if MOOTX01_DENSE_FAMILIES
         case "anti_redundant_lsa":
             return "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space."
         case "anti_redundant_nmf":
             return "Diversity (NMF space) — invert the NMF dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the NMF topic space."
+#endif
         case "session_hybrid":
             return "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal."
         case "temporal_connection":
@@ -744,15 +817,17 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "no_bm25":
             return "Ablation — exclude the BM25 column and redistribute its budget; candidates from the lexical lane still enter the pool; matrixAware scoring only."
         case "no_vector":
-            return "Ablation — exclude the vector column (Hamming + dense) and redistribute its budget; candidates from the excluded lane still enter the pool; matrixAware scoring only."
+            return "Ablation — exclude the vector column (Hamming + dense) and redistribute its budget; candidates from the excluded lane still enter the pool; matrixAware scoring only. The vector column is already out by default, so this names the default explicitly."
+        case "no_encoder":
+            return "Ablation — skip the span rerank stage; the lexical list enters the pool in BM25 order. Fuses identically to no_vector."
         default:
             return ""
         }
     }
 
-    /// A shape that forwards exactly one dense lane and zeroes the other three
-    /// distributional siblings — the `*_forward` preset body. The named lane is
-    /// amplified; every other `DenseSignal.all` key is excluded.
+    /// A shape that forwards exactly one dense lane and zeroes its distributional
+    /// siblings — the `*_forward` preset body. The named lane is amplified;
+    /// every other `DenseSignal.all` key is excluded.
     private static func singleDenseForward(_ forwardKey: String) -> RecallShape {
         var weights: [String: Float] = [:]
         for key in DenseSignal.all {

@@ -580,8 +580,8 @@ struct DrawerStoreTests {
     }
 
     /// A drawer constructed without an explicit `operationalBitmap` argument
-    /// is stored with whatever is in the struct (default = 0). Bits 27-30 are
-    /// FREE (ADORN-STORE-02 v17); adornment state lives in the adornments table.
+    /// is stored with whatever is in the struct (default = 0); no write path
+    /// ORs bits into it at insert.
     @Test("addDrawer persists default operationalBitmap = 0")
     func operationalBitmapDefaultZero() async throws {
         let (store, url) = try await makeStore()

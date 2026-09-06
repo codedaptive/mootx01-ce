@@ -60,12 +60,9 @@ pub fn hybrid_recall(
         .map(|d| DrawerRow {
             id: d.id.clone(),
             content: d.content.clone(),
-            // `adornment` was removed from LocusKit.Drawer in ADORN-STORE-02 v17.
-            // Active adornments are now fetched separately via
-            // `Estate.active_adornments(drawer_ids)` and passed into synthesis
-            // as a BTreeMap<String,String> keyed by drawer ID. The synthesis
-            // call site (the caller of hybrid_recall) owns the fetch-then-compose
-            // sequence; this assembly point does not have estate access.
+            // Adornments are dark (Encoder Rerank Program, 2026-09-05).
+            // DrawerRow carries only id + content; synthesis uses first-line
+            // content excerpts with no adornment augmentation.
         })
         .collect();
 
@@ -107,12 +104,9 @@ pub fn hybrid_recall(
 /// Swift engine over shared vectors of this shape; full
 /// `LocusKit.Drawer` round-trip lives in the LocusKit Rust version.
 ///
-/// `adornment` was retired in ADORN-STORE-02 v17: adornments now live
-/// in the normalized `adornments` table and are fetched separately via
-/// `Estate.active_adornments(drawer_ids)` by the caller. The
-/// `context_synthesizer::make_key_insights` function accepts
-/// `active_adornments: &BTreeMap<String, String>` and looks up by
-/// drawer ID rather than reading a field on this struct.
+/// Adornments are dark (Encoder Rerank Program, 2026-09-05). The struct
+/// carries only the fields required by the pure synthesis engine; adornment
+/// augmentation is off and `make_key_insights` reads first-line content only.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct DrawerRow {
     pub id: String,

@@ -1164,40 +1164,26 @@ fn run_memory_search(
         _ => &packaged.rows[..packaged.rows.len().min(50)],
     };
 
-    // S2-row reply (COMPOSER-02B §11.5): UUID · subject · firstSentence · SSC ·
-    // adornments · eventTime — the address plus the assertion, no content hauling.
+    // S2-row reply (COMPOSER-02B §11.5): UUID · subject · bestSpan · SSC ·
+    // eventTime — the address plus the assertion, no content hauling.
     // Redaction (provenance sensitivity restricted/secret) replaces the subject
     // field via result_composer::candidate_from_drawer — the body's access
     // control must not be bypassable through its content-derived summary. The
     // full text is one hop away via moot_memory_get depth:full. Mirrors Swift runMemorySearch.
     //
-    // Batch-read active adornments for the shown hits (ADORN-STORE-02 Part C).
-    // Zero-active-minters IS the suppression arm: no minters → no adornment
-    // lines, exactly matching the retired MOOT_SUPPRESS_ADORNMENT semantics.
-    // One call-scoped read per batch (GENIUSLOCUSKIT_SPEC §16.2).
-    let shown_drawer_ids_owned: Vec<String> = shown_hits.iter()
-        .filter_map(|h| h.drawer.as_ref().map(|d| d.id.clone()))
-        .collect();
-    let shown_drawer_id_refs: Vec<&str> = shown_drawer_ids_owned.iter().map(|s| s.as_str()).collect();
-    let search_adornment_map = coord
-        .estate_for(&estate.handle)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e)))?
-        .active_adornments(&shown_drawer_id_refs)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, e.to_string()))?;
     // S1 surface through the shared composer (COMPOSER-02B, the twin of Swift
     // runMemorySearch): one typed CandidateRowData per shown hit; the composer
     // renders the text rows and the structured twin from the same list, so the
     // two blocks can never cover different sets. Byte-identical to the Swift
-    // reply: the adornment text is column 5 of the row (never a separate line),
-    // `score` / `eventTime` / `firstSentence` / `adornment(s)` / `room` travel
+    // reply: `score` / `eventTime` / `bestSpan` / `sscFacts` / `room` travel
     // in the structured row, and the FULL content is handed to the composer,
-    // which truncates the first sentence to 120 chars and de-duplicates it
-    // against the subject (§11.1 rules 2–3).
+    // which truncates the best span to 120 chars and de-duplicates it
+    // against the subject (§11.1 rules 2–3). ENC-W6B: adornment column removed.
     //
     // Room is resolved in ONE batched node-name read over the shown rows (the
     // same resolution `memory_get_full_record_lines` uses per drawer).
     use crate::result_composer::{
-        iso8601_flex, render_empty_s1, render_s1_surface, AdornmentEntry, CandidateRowData,
+        iso8601_flex, render_empty_s1, render_s1_surface, CandidateRowData,
         ControlSignals, RESTRICTED_MARKER, SECRET_MARKER,
     };
     let shown_parent_ids: Vec<String> = {
@@ -1218,31 +1204,21 @@ fn run_memory_search(
                 // redaction marker so the body's access control cannot be
                 // bypassed through the summary. Same switch as Swift.
                 use locus_kit::provenance::Sensitivity;
-                let (subject, first_sentence): (Option<String>, Option<String>) = match d.sensitivity() {
+                let (subject, best_span): (Option<String>, Option<String>) = match d.sensitivity() {
                     Sensitivity::Restricted => (Some(RESTRICTED_MARKER.to_string()), None),
                     Sensitivity::Secret => (Some(SECRET_MARKER.to_string()), None),
                     _ => (
                         d.subject.clone(),
-                        // Full content: the composer truncates to 120 chars and
+                        // Full content as best span; the composer truncates to 120 chars and
                         // de-duplicates against the subject (§11.1 rules 2–3).
                         if d.content.is_empty() { None } else { Some(d.content.clone()) },
                     ),
                 };
-                // Adornments: ascending minter-ID order (caller's responsibility
-                // per composer contract; the composer never re-sorts).
-                let mut entries: Vec<AdornmentEntry> = search_adornment_map
-                    .get(&d.id)
-                    .map(|rows| rows.iter()
-                        .map(|a| AdornmentEntry { minter_id: a.minter_id.clone(), text: a.text.clone() })
-                        .collect())
-                    .unwrap_or_default();
-                entries.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
                 let mut row = CandidateRowData::new(
                     d.id.clone(),
                     subject,
-                    first_sentence,
-                    None, // SSC not yet surfaced by GLK in this build; renders '-'
-                    entries,
+                    best_span,
+                    None::<String>, // sscFacts: stubbed nil until W1 schema-19 Drawer.ssc_facts lands
                     iso8601_flex(d.event_time),
                     Some(hit.score.final_score as f64),
                 );
@@ -1255,8 +1231,7 @@ fn run_memory_search(
                     hit.id.clone(),
                     None::<String>,
                     None::<String>,
-                    None,
-                    vec![],
+                    None::<String>,
                     "-",
                     Some(hit.score.final_score as f64),
                 ));
@@ -1503,20 +1478,6 @@ fn run_memory_get(
         ));
     }
 
-    // Batch-read active adornments for the admissible rows (ADORN-STORE-02 Part C).
-    // Zero-active-minters IS the suppression arm: no minters → no adornment
-    // lines, exactly matching the retired MOOT_SUPPRESS_ADORNMENT semantics.
-    // One call-scoped read per batch (GENIUSLOCUSKIT_SPEC §16.2).
-    let get_drawer_ids_owned: Vec<String> = row_ids.iter()
-        .filter(|id| admissible_by_id.contains_key(*id))
-        .cloned()
-        .collect();
-    let get_drawer_id_refs: Vec<&str> = get_drawer_ids_owned.iter().map(|s| s.as_str()).collect();
-    let get_adornment_map = coord
-        .estate_for(&estate.handle)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e)))?
-        .active_adornments(&get_drawer_id_refs)
-        .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, e.to_string()))?;
     // Batch / shallow-depth rendering (PR-03). depth:full + single id falls
     // through to the original full record below.
     if !single_id_mode || depth != "full" {
@@ -1567,18 +1528,6 @@ fn run_memory_get(
             match depth.as_str() {
                 "subject" => {
                     lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
-                    // Adornment short form after the dense row (SPEC_ADORNMENT §4).
-                    // Absent when the adornments table has no active rows for this
-                    // drawer (zero-active-minters is the suppression arm).
-                    if let Some(adornments) = get_adornment_map.get(&d.id) {
-                        if !adornments.is_empty() {
-                            let text: String = adornments.iter()
-                                .map(|a| a.text.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" || ");
-                            lines.push(format!("adornment: {}", text));
-                        }
-                    }
                     // Content stays ABSENT at the travel tier — the text
                     // carries no body here, and the structured block must
                     // not defeat the depth knob's token economy.
@@ -1586,34 +1535,12 @@ fn run_memory_get(
                 }
                 "distilled" => {
                     lines.push(crate::result_composer::render_s2_row(&crate::result_composer::candidate_from_drawer(d)));
-                    // Adornment short form after the dense row (SPEC_ADORNMENT §4).
-                    // Precedes the distilled text so the AI sees the claim first.
-                    // Absent when no active minters have produced adornment for this drawer.
-                    if let Some(adornments) = get_adornment_map.get(&d.id) {
-                        if !adornments.is_empty() {
-                            let text: String = adornments.iter()
-                                .map(|a| a.text.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" || ");
-                            lines.push(format!("adornment: {}", text));
-                        }
-                    }
-                    match d.distilled.as_deref() {
-                        Some(text) if !text.is_empty() => {
-                            lines.push(text.to_string());
-                            results.push(structured_recall_row(
-                                &d.id, room, Some(text.to_string()), d));
-                        }
-                        _ => {
-                            // Fallback marker on fallback hits ONLY (PR-03
-                            // deviation-only contract): the text below is
-                            // verbatim content, not a distillate.
-                            lines.push("source: content (not yet distilled)".to_string());
-                            lines.push(d.content.clone());
-                            results.push(structured_recall_row(
-                                &d.id, room, Some(d.content.clone()), d));
-                        }
-                    }
+                    // The distilled tier is computed at read time from the
+                    // verbatim content (Encoder Rerank contract sheet §9); no
+                    // row owes a stored rendering, so there is no fallback arm.
+                    let text = genius_locus_kit::hydration_representation::distilled_rendering(&d.content);
+                    lines.push(text.clone());
+                    results.push(structured_recall_row(&d.id, room, Some(text), d));
                 }
                 _ => {
                     // depth:full in batch mode — repeat the full record shape.

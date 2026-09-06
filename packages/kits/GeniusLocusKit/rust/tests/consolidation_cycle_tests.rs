@@ -75,7 +75,22 @@ fn capture_at(
     coord.capture(handle, frame, at).expect("capture").id
 }
 
-/// Capture the fixture corpus, distill (fingerprints), sweep 91 days later.
+
+/// Write the structural fingerprint lane entry for every active drawer —
+/// the encode rider's per-drawer work, applied estate-wide so tests that
+/// capture without draining a corpus queue reach the same populated lane.
+fn fingerprint_all(coord: &EstateCoordinator, handle: &genius_locus_kit::EstateHandle, now: i64) {
+    let estate = coord.estate_for(handle).expect("estate");
+    for d in estate.all_drawers().expect("all_drawers") {
+        if !d.content.is_empty() {
+            coord
+                .write_structural_fingerprint(handle, &d.id, &d.content, now)
+                .expect("write_structural_fingerprint");
+        }
+    }
+}
+
+/// Capture the fixture corpus, fingerprint it, sweep 91 days later.
 fn consolidated_estate() -> (
     EstateCoordinator,
     genius_locus_kit::EstateHandle,
@@ -91,9 +106,7 @@ fn consolidated_estate() -> (
     for (i, body) in DISTINCT_BODIES.iter().enumerate() {
         let _ = capture_at(&coord, &handle, body, NOW + 100 + i as i64);
     }
-    coord
-        .distill_items_sweep(&handle, NOW, None)
-        .expect("distill sweep");
+    fingerprint_all(&coord, &handle, NOW);
     let aged = NOW + 91 * DAY;
     let produced = coord
         .consolidation_sweep(&handle, aged, &ConsolidationConfig::default(), None)
@@ -138,7 +151,7 @@ fn d5_minimum_cluster_size_holds() {
     for (i, body) in DISTINCT_BODIES.iter().enumerate() {
         let _ = capture_at(&coord, &handle, body, NOW + 100 + i as i64);
     }
-    coord.distill_items_sweep(&handle, NOW, None).expect("distill");
+    fingerprint_all(&coord, &handle, NOW);
     let produced = coord
         .consolidation_sweep(&handle, NOW + 91 * DAY, &ConsolidationConfig::default(), None)
         .expect("sweep");
@@ -152,7 +165,7 @@ fn d3_recent_recall_blocks_consolidation() {
     for (i, body) in CLUSTER_BODIES.iter().enumerate() {
         ids.push(capture_at(&coord, &handle, body, NOW + i as i64));
     }
-    coord.distill_items_sweep(&handle, NOW, None).expect("distill");
+    fingerprint_all(&coord, &handle, NOW);
     let aged = NOW + 91 * DAY;
     // Two hot members drop the 4-cluster below D5 (one would leave 3,
     // which correctly still consolidates) — twin of the Swift arithmetic.
@@ -209,9 +222,7 @@ fn fold_in_enlarges_the_vague_lineage() {
         "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria still owns the Falcon rollout checklist.",
         NOW + 200,
     );
-    coord
-        .distill_items_sweep(&handle, aged + 3_600, None)
-        .expect("distill fifth");
+    fingerprint_all(&coord, &handle, aged + 3_600);
 
     // Explicit D4 ceiling (configured wins — the ratified alternative to the
     // per-sweep derivation), mirroring the Swift test: the combined-distillate

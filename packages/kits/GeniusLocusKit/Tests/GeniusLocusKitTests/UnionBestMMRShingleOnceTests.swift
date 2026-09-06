@@ -7,13 +7,14 @@
 // candidate against every remaining candidate. The similarity term is the
 // SubstrateML character-3-gram shingle Jaccard over the bodies hydrated at
 // step 9.5; each body is shingled ONCE and the sets are reused across both
-// MMR phases. The expected orders below were captured from the build that
-// shingled both bodies on every pairwise call. The set overload computes the
-// same |∩|/|∪| as the string overload, so the selection must not move.
+// MMR phases. The pinned order below was produced by the current build under
+// the default lane budget (the whole-record vector column out of the fused
+// score). The set overload computes the same |∩|/|∪| as the string overload,
+// so the selection must not move.
 //
 // Tests:
 //   1. fullHydrationNearDuplicateOrderIsPinned — the matrixAware order
-//      matches the pinned pre-change order and is stable across two recalls.
+//      matches the pinned order and is stable across two recalls.
 //   2. setOverloadMatchesStringOverloadOnFixtureBodies — for every fixture
 //      body pair, the set overload used by step 10 equals the string overload
 //      the loop called before.
@@ -35,14 +36,8 @@ struct UnionBestMMRShingleOnceTests {
     /// 0 to 2: the query itself plus one trailing word, one shared 3-gram
     /// cluster) and six diverse bodies that carry the query terms in longer,
     /// different phrasing. The pool (9) is larger than the 2N working view
-    /// (4 at `limit: 2`), so step 10 decides which candidates enter the view.
-    /// With shingle similarity the second and third near-duplicates are
-    /// penalised out of the view and a diverse body takes the second slot.
-    /// With the sourceMask proxy alone (every body is supplied by the same
-    /// lanes, so every pair scores 1.0) the view is the top-4 by relevance
-    /// and two near-duplicates are returned. Observed: the proxy-only
-    /// mutation returns [body 0, body 2]; the shingle term returns the pinned
-    /// order below. The pin therefore discriminates the shingle term itself.
+    /// (4 at `limit: 2`), so step 10 decides which candidates enter the view
+    /// and in which order; see `pinnedOrder` for what the pin gates.
     static let bodies: [String] = [
         "quarterly budget review meeting notes finance team",
         "quarterly budget review meeting notes finance team ok",
@@ -63,23 +58,39 @@ struct UnionBestMMRShingleOnceTests {
     /// pool, and the whole tie group is returned, so the MMR term cannot move
     /// membership there.
     ///
-    /// The order captured before COL-1 was [body 0, body 8]: body 8 ("team
-    /// meeting notes ... new office lease") is the LAST capture, and the locus
-    /// column (rank in the `filedAt DESC` slice, 0.3/1.3 of the budget under
-    /// the `.unconfirmed` predicate) paid it for being newest. With the locus
-    /// column excluded from text-query scoring (COL-1) and the MMR similarity
-    /// term scaled by the step 8.5 redistribution factor ρ (COL-2) the working
-    /// view is the one the MMR selects on the pre-exclusion score scale: the
-    /// three near-duplicates stay out and body 6 ("quarterly finance team
-    /// notes: budget review meeting covering software licences"), the diverse
-    /// body with the highest bm25 + vector relevance, holds the second slot.
-    /// Two mutation controls: a build that still scores the recency rank
-    /// returns body 8 here; a build that leaves the similarity term unscaled
-    /// (ρ = 2.67 on this shape) returns body 1, the first near-duplicate.
+    /// The order is produced under the default lane budget, which since the
+    /// Encoder Rerank Program leaves the whole-record vector column out of the
+    /// fused score (`RecallShape.defaultWeight`: `signal:vector` = 0). On this
+    /// fixture that budget scores every body by bm25 alone (the locus column
+    /// is out of text-query scoring since COL-1; the cold columns are absent),
+    /// so the two trailing-word near-duplicates (bodies 1 and 2: identical
+    /// term frequencies, identical token length) tie exactly, and their bm25
+    /// lead over the diverse bodies exceeds the ρ-scaled shingle penalty for
+    /// the later view slots. The tie straddles the presentation cut at
+    /// limit 2, phase 2 widens to 4N, and ruling 1 returns the tie group
+    /// whole: three hits for a two-hit request. With the vector column in the
+    /// fused score (`signal:vector` = 1.0) the same recall returns
+    /// [body 0, body 6]: the vector column broke the near-duplicate tie and
+    /// lifted body 6 ("quarterly finance team notes: budget review meeting
+    /// covering software licences") into the second slot. That was the pin
+    /// until the default changed; the near-duplicate admission is the vector
+    /// tie-break going away, not the MMR losing its penalty.
+    ///
+    /// What the pin still gates: the MMR picks the near-duplicates in
+    /// shingle-penalty order (body 2, "... yes", shares fewer 3-grams with
+    /// body 0 than body 1, "... ok", so it is selected first) and the
+    /// presentation sort, stable in both ports, keeps that order inside the
+    /// tie group. Mutation control: a build with the similarity term zeroed
+    /// returns [body 0, body 1, body 2], the relevance-only selection order.
+    /// That gate is the mutual order of an exact (score, subject) tie, which
+    /// ruling 3 leaves unspecified by design; the admission gate proper is the
+    /// cross-port fixture (UnionBestMMRCrossPortFixtureTests), where the
+    /// near-duplicates stay out under the default budget.
     static let pinnedOrder: [GLKRecallScoring: [String]] = [
         .matrixAware: [
             "quarterly budget review meeting notes finance team",
-            "quarterly finance team notes: budget review meeting covering software licences",
+            "quarterly budget review meeting notes finance team yes",
+            "quarterly budget review meeting notes finance team ok",
         ],
     ]
 
@@ -146,7 +157,7 @@ struct UnionBestMMRShingleOnceTests {
 
     // MARK: - 1. Pinned order
 
-    @Test("full-hydration unionBest order over near-duplicates matches the pinned pre-change order")
+    @Test("full-hydration unionBest order over near-duplicates matches the pinned order")
     func fullHydrationNearDuplicateOrderIsPinned() async throws {
         // open/capture/recall cross telemetry emit sites; hold the process-wide
         // Intellectus mutex (see IntellectusTestLock.swift).

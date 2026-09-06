@@ -52,11 +52,6 @@ intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # the edge is strictly downstream→upstream (kit → lib), no cycle. Authority:
 # in-repository dependency direction (the #7 feature requires it).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
-# AdornmentLib supplies AdornmentMinterDescriptor and StoredAdornment value types
-# that LocusKit's normalized adornment store operates over. Zero external deps —
-# strictly upstream of LocusKit in the dependency graph (no cycle).
-# Required by LOCUSKIT_INTERFACE 2.0.1 § normalized adornment storage (ADORN-STORE-02 v17).
-adornment-lib = { path = "../../../libs/AdornmentLib/rust" }
 # unicode-normalization provides NFC normalization for lookup_name derivation
 #. Already a transitive dependency via the idna crate.
 unicode-normalization = "0.1"

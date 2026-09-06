@@ -14,12 +14,13 @@
 // existing binary conformance vector still holds.
 //
 // Float32 payloads: dim×4 bytes, IEEE-754 little-endian, no scale.
-// Int8 payloads: dim bytes (quantized coefficients) + scale field for
-// dequantization. The quantization policy (symmetric vs asymmetric,
-// per-vector vs per-dim scale) has NOT been ratified. Int8 WRITES are
-// REJECTED fail-closed by VectorStore with SynapseKitError.int8QuantizationPolicyUndefined
-// until a policy is ratified. The case and field remain in the type so
-// that a future ratification does not require an API change. See arch
+// Int8 payloads: dim bytes (two's-complement quantised coefficients) plus
+// the per-vector dequantisation `scale`. The quantisation policy is the
+// symmetric per-vector policy ratified by the Encoder Rerank Program
+// (SubstrateKernel `Int8Vec`: scale = max|v|/127, q = round-half-away
+// (v/scale) clamped to ±127, similarity = Σ u·q × scale). Int8 rows are
+// written by `VectorStore.writeSpanVectors` (one row per encoder span,
+// `vector_index` = span index) and read back by `spanVectors`. See arch
 // spec §10.3 and SYNAPSEKIT_SPEC §I-4a.
 
 import EngramLib
@@ -82,12 +83,12 @@ public enum VectorKind: UInt8, Sendable, Equatable, CaseIterable {
     /// reproducible-within-config, NOT four-way bit-identical.
     case float32 = 1
     /// Quantized int8 coefficients + per-vector dequant scale. dim
-    /// bytes + scale field. The quantization policy (symmetric vs
-    /// asymmetric, per-vector vs per-dim scale) has not been ratified.
-    /// VectorStore REJECTS int8 writes fail-closed until a policy is
-    /// ratified (SynapseKitError.int8QuantizationPolicyUndefined). The
-    /// case is preserved so a future ratification does not require an
-    /// API change. See arch spec §10.3 and SYNAPSEKIT_SPEC §I-4a.
+    /// bytes + scale field. Symmetric per-vector quantisation per the
+    /// ratified policy (SubstrateKernel `Int8Vec`, SYNAPSEKIT_SPEC §I-4a):
+    /// the row carries a non-null `scale` and `dim` bytes; the encoder
+    /// span rows written by `VectorStore.writeSpanVectors` are the
+    /// producers. Never enters the resident Hamming array or the float
+    /// indexes; served through `spanVectors` / `getPayload` only.
     case int8    = 2
 }
 
@@ -118,11 +119,12 @@ public struct VectorPayload: Sendable, Equatable {
     public let bytes: [UInt8]
 
     /// Dequantization scale for int8 vectors; nil for binary and float32.
-    /// Multiply each int8 coefficient by this value to recover approximate
-    /// float32. The quantization policy has not been ratified — int8 writes
-    /// are rejected fail-closed by VectorStore. This field is preserved as
-    /// a placeholder so the API does not need to change when the policy
-    /// is eventually ratified. See arch spec §10.3 and SYNAPSEKIT_SPEC §I-4a.
+    /// Multiply each int8 coefficient by this value to recover the
+    /// approximate float32 (`Int8Vec.dequantize`); a float query scores a
+    /// stored int8 vector as `Σ u_i × q_i × scale` (`Int8Vec.dotQuery`).
+    /// Non-nil on every persisted int8 row: `decodePayload` treats an int8
+    /// row without a scale as malformed. See arch spec §10.3 and
+    /// SYNAPSEKIT_SPEC §I-4a.
     public let scale: Float?
 
     // MARK: - Initialisers

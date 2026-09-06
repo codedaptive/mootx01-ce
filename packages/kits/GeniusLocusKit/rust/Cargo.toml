@@ -62,6 +62,14 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 # Corpus.recall for hybrid BM25+vector retrieval.
 synapsekit = { path = "../../SynapseKit/rust" }
 corpus-kit = { path = "../../CorpusKit/rust" }
+# corpus-kit-providers: `apply_provisioned_embedding_provider` builds the span
+# encoder for the `"encoder"` manifest value through `SpanEncoderFactory`, and
+# the I4 test provisions with `default_ensemble()`. Layering: GLK →
+# corpus-kit-providers is acyclic (providers depend on corpus-kit core, not on
+# GLK). The candle runtime behind the factory is optional: see the `encoder`
+# feature below; without it the factory reports the model unavailable and
+# recall runs lexical-only. Per in-repository dependency direction.
+corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 # Dual-Path Intake (G7): the per-estate encode queue is a real QueueKit
 # mounted on the in-memory PersistenceKit backend (D-B), so GLK depends on
 # queuekit with the persistencekit feature. Mirrors the Swift
@@ -132,6 +140,16 @@ adornment-lib = { path = "../../../libs/AdornmentLib/rust" }
 # 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
 # integration tests and the seam method would be absent.
 test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
+# encoder: compile the candle span-encoder runtime behind SpanEncoderFactory so
+# `embedding_provider = "encoder"` can load all-MiniLM-L6-v2 in-process. Off by
+# default (kit tests stay ML-free); the product crate (apps/mootx01/rust)
+# enables it in its default feature set.
+encoder = ["corpus-kit-providers/candle"]
+# dense-families: compiles the dark dense-family lane keys and presets (PPMI,
+# LSA, NMF, FDC — Encoder Rerank contract sheet §13) into RecallShape. Off by
+# default; Random Indexing is the only live family. Twin of the Swift package
+# trait `DenseFamilies` (`MOOTX01_DENSE_FAMILIES`).
+dense-families = []
 
 [dev-dependencies]
 # P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],
@@ -156,12 +174,6 @@ corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.
 locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
-# I4 test: provision with the production default ensemble (5 untrained signals)
-# to prove cluster assignment works on a fresh estate. The real providers live
-# in corpus-kit-providers (the factory layer above corpus-kit core). dev-dep
-# only; not linked into the production binary. Layering: GLK → corpus-kit-providers
-# is acyclic — providers depend on corpus-kit core, not on GLK.
-corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 # FED-SIG-01 grant-signature tests: LocalIdentity::from_secret / ::sign /
 # ::public_key_bytes to build and verify Ed25519-signed grants for D9 tests.
 # convergence-kit is already a production dep; the dev-dep makes it directly
@@ -206,12 +218,6 @@ required-features = ["test-seams"]
 
 [[test]]
 name = "coordinator_dispatcher_tests"
-required-features = ["test-seams"]
-
-# distillation_signal_tests uses the SchedulerNoopDispatcher stub, which is
-# gated behind test-seams (same pattern as standing_signals_parity above).
-[[test]]
-name = "distillation_signal_tests"
 required-features = ["test-seams"]
 
 # dreaming_queue_parity uses the test-seam accessors dreaming_queue_is_mounted,

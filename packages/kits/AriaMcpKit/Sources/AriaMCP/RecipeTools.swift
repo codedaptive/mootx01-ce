@@ -21,8 +21,8 @@ import AriaMCPWire
 //                                   promotion — B-3)
 //   - moot_confirm_migration     → MigrationBenchmark.confirmPromotion
 //                                   by branch id (the human-gated write)
-//   - moot_dream, moot_distill, moot_recall_distilled
-//                                 → Brain-layer and distillation tools
+//   - moot_dream, moot_recall_distilled
+//                                 → Brain-layer and distilled-recall tools
 //   - moot_recollect             → notice-only stub; tool removed; not listed
 //
 // The 23 lens tools (16 reasoning/federated, 4 temporal/information-theoretic,
@@ -39,7 +39,6 @@ import AriaMCPWire
 // of async completion is an additive transport, not needed for the
 // synchronous behaviour.
 
-import AdornmentLib
 import Foundation
 import GeniusLocusKit
 import NeuronKit
@@ -83,15 +82,8 @@ enum RecipeTools {
     /// this runs — the reason the matrix-driven precise compositions score zero
     /// on an undreamt estate.
     static let dreamToolName = "moot_dream"
-    /// On-demand distillation sweep (SPEC_DISTILLATION_STORAGE §3): populate
-    /// the on-row distilled representation of every eligible item. Delegates
-    /// to the Distill recipe → GeniusLocusKit.distillItemsSweep.
-    static let distillToolName = "moot_distill"
-    /// Force-redistill all active items + full laneScope .all reindex (CDL-02):
-    /// overwrites every active non-empty drawer's representation unconditionally,
-    /// then rebuilds BM25 and dense lanes so trailer tokens from the distillates
-    /// are admitted to the posting lists.
-    static let redistillToolName = "moot_redistill"
+    /// Environment variable name that enables the dark mint tools at launch.
+    ///
     /// Distilled-payload recall (SPEC §10.3): exact-search geometry over
     /// originals with the hydration selector pinned to `distilled` —
     /// identical ranking to exact search, smaller payloads, per-hit token
@@ -121,74 +113,12 @@ enum RecipeTools {
     /// when Stage 1 is insufficient. Faster than plain precise recall for the common
     /// case; falls back when the estate needs more precision.
     static let walkRecallToolName = "moot_recall_walk"
-    /// On-demand adornment pass: dark harness-only tool (gold-mining 2026-08-23).
-    ///
-    /// Never listed in tools/list so AI clients cannot discover or call it.
-    /// The benchmark mint subcommand invokes it by name through the MCP dispatch
-    /// router (`isRecipeTool` returns true so it routes here) — only when the
-    /// serving process was launched with `MOOTX01_MINT_TOOLS=1`
-    /// (`processMintToolsEnabled`). `batch_size` is clamped to
-    /// `ADORNMENT_PASS_MAX_BATCH_SIZE`. Drives
-    /// `GeniusLocusKit.runAdornmentPass(handle:batchSize:maxAdornmentLength:now:)`.
-    static let runAdornmentPassToolName = "moot_run_adornment_pass"
-    /// Minter registration + activation: dark harness-only tool (MINTCLI-78).
-    ///
-    /// Never listed in tools/list; dispatched only behind the
-    /// `MOOTX01_MINT_TOOLS=1` launch gate (every fresh minter id re-creates
-    /// debt for every live drawer, so registration is harness-only by
-    /// construction). The benchmark mint subcommand calls it once
-    /// per restored estate, before the adornment-pass loop: registers the full
-    /// minter descriptor (immutable-configuration contract, LOCUSKIT_SPEC
-    /// § ADORNMENT_STORE) and atomically replaces the active set with exactly
-    /// that minter. Drives `GeniusLocusKit.registerAdornmentMinter(in:minter:)`
-    /// then `GeniusLocusKit.setActiveAdornmentMinters(in:minterIDs:)`.
-    static let registerAdornmentMinterToolName = "moot_register_adornment_minter"
-
-    // MARK: - Dark mint tools — launch-time gate
-
-    /// Launch-time environment variable that enables the two dark mint tools.
-    /// Byte-identical to Rust `MINT_TOOLS_ENV_VAR`.
-    static let mintToolsEnvironmentVariable = "MOOTX01_MINT_TOOLS"
-
-    /// Gate decision for a given environment: exactly the literal `"1"`
-    /// enables; absent, empty, `"0"`, `"true"`, or anything else leaves the
-    /// dark tools off. Takes an explicit environment dictionary so the logic
-    /// is testable without mutating `ProcessInfo.processInfo.environment`.
-    /// Twin of Rust `mint_tools_enabled_from`.
-    static func mintToolsEnabled(environment: [String: String]) -> Bool {
-        environment[mintToolsEnvironmentVariable] == "1"
-    }
-
-    /// Process-wide dark-mint-tool gate: `MOOTX01_MINT_TOOLS=1` at launch.
-    ///
-    /// A `static let` is initialized once, on first access — the gate is a
-    /// launch-time decision, never a per-call environment probe, so a serve
-    /// cannot be flipped open after start. The benchmark mint driver sets the
-    /// variable on the serve command it launches for auditions (MintCLI); a
-    /// product serve never sets it, so a client that knows the dark names
-    /// gets the same unknown-tool error it would get for any unregistered
-    /// name. Twin of Rust `mint_tools_enabled`.
-    static let processMintToolsEnabled: Bool =
-        mintToolsEnabled(environment: ProcessInfo.processInfo.environment)
-
-    /// True when `name` is one of the two dark mint tools.
-    static func isDarkMintTool(_ name: String) -> Bool {
-        name == runAdornmentPassToolName || name == registerAdornmentMinterToolName
-    }
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     ///
     /// Includes `moot_recollect` (notice-only stub — never executes) and the
-    /// listed recipe tools. The two dark mint tools are in this set ONLY when
-    /// `mintToolsEnabled` is true (default: the process-wide launch gate);
-    /// otherwise they are unknown names and `ToolDispatcher` throws its
-    /// standard unknown-tool error for them. Tests pass the gate explicitly
-    /// so both arms are pinned without environment mutation.
-    static func isRecipeTool(
-        _ name: String,
-        mintToolsEnabled: Bool = processMintToolsEnabled
-    ) -> Bool {
-        if isDarkMintTool(name) { return mintToolsEnabled }
+    /// listed recipe tools.
+    static func isRecipeTool(_ name: String) -> Bool {
         return name == listRecipesToolName
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
@@ -200,8 +130,6 @@ enum RecipeTools {
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
-            || name == distillToolName
-            || name == redistillToolName
             || name == recallDistilledToolName
             || name == recollectToolName
             || name == huntContradictionsToolName
@@ -225,8 +153,6 @@ enum RecipeTools {
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
-            distillTool(),
-            redistillTool(),
             recallDistilledTool(),
             vagueRecallTool(),
             huntContradictionsTool(),
@@ -571,64 +497,6 @@ enum RecipeTools {
             outputSchema: ToolProjection.recallResultsOutputSchema())
     }
 
-    // MARK: - distill descriptor
-
-    /// On-demand per-item distillation sweep (SPEC §3/§7.1). Delegates all
-    /// work to the Distill recipe → GeniusLocusKit.distillItemsSweep, which
-    /// populates the four representation columns on every eligible SOURCE
-    /// drawer row (matrix path for ≥3 sentences, token compaction for
-    /// shorter items). No factoid drawers, no tunnels. The `cluster_id` and
-    /// `include_held` args are accepted for API stability but are not used
-    /// by the per-item sweep model.
-    private static func distillTool() -> ProjectedTool {
-        ProjectedTool(
-            name: distillToolName,
-            description: "Distill working memory: populate the on-row distilled "
-                + "representation (token-economical prose) of every active item whose "
-                + "representation is missing or stale. Idempotent — already-distilled "
-                + "items are skipped. Returns the count of items distilled this sweep.",
-            inputSchema: objectSchema(
-                properties: [
-                    "cluster_id": stringSchema(
-                        "Accepted for API stability; not used by the per-item sweep model."),
-                    "include_held": .object([
-                        "type": .string("boolean"),
-                        "description": .string(
-                            "Accepted for API stability; not used by the per-item sweep model. "
-                                + "Default false."),
-                    ]),
-                    "estateID": stringSchema(
-                        "Optional UUID of the open estate to target. Omit for the default estate."),
-                ],
-                required: []),
-            provenance: .recipe)
-    }
-
-    // MARK: - redistill descriptor
-
-    /// Force-redistill all active items and trigger a full laneScope .all reindex (CDL-02).
-    /// Delegates to the Redistill recipe → GLK.redistillItemsSweep +
-    /// GLK.reindexCorpus(handle:now:). Takes no required arguments — the sweep
-    /// is always estate-wide.
-    private static func redistillTool() -> ProjectedTool {
-        ProjectedTool(
-            name: redistillToolName,
-            description: "Force-redistill all active items in the estate: overwrite "
-                + "every active non-empty item's distilled representation unconditionally "
-                + "(ignores the hasCurrentRepresentation flag), then rebuild both recall "
-                + "indexes (BM25 + dense) so trailer tokens from the distillates are "
-                + "admitted to the BM25 posting lists. Use after a pipeline upgrade or "
-                + "when BM25 scores are suspected stale. Idempotent but slow on large "
-                + "estates — prefer moot_distill for incremental maintenance.",
-            inputSchema: objectSchema(
-                properties: [
-                    "estateID": stringSchema(
-                        "Optional UUID of the open estate to target. Omit for the default estate."),
-                ],
-                required: []),
-            provenance: .recipe)
-    }
-
     // MARK: - recall_distilled descriptor
 
     /// Distilled-payload recall (SPEC §10.3): the exact-search recall path
@@ -647,9 +515,7 @@ enum RecipeTools {
                 + "the full content — identical ranking to moot_memory_search, smaller "
                 + "payloads, per-hit token counts for context budgeting. Hits are the "
                 + "source memories themselves; call moot_memory_get with a returned id for "
-                + "the full verbatim body. Rows not yet distilled fall back to full "
-                + "content and are marked served_from_content (run moot_distill to "
-                + "populate them). v2 semantics: exact-search geometry with distilled "
+                + "the full verbatim body. v2 semantics: exact-search geometry with distilled "
                 + "hydration — there is no separate distilled tier.",
             inputSchema: objectSchema(
                 properties: [
@@ -685,31 +551,13 @@ enum RecipeTools {
     /// tools. Out-of-band faults throw `JSONRPCError`; recipe-level
     /// refusals come back as `errorResult` (isError == true) so the client
     /// keeps the call id, matching the lexicon-tool discipline.
-    ///
-    /// `mintToolsEnabled` is the dark-mint-tool launch gate; production
-    /// callers take the default (the process-wide `MOOTX01_MINT_TOOLS=1`
-    /// read), tests pass it explicitly.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         defaultHandle: EstateHandle,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        mintToolsEnabled: Bool = processMintToolsEnabled
+        resolveHandle: ([String: JSONValue]) throws -> EstateHandle
     ) async throws -> JSONValue {
-        // Dark mint tools: launch-time gate (MOOTX01_MINT_TOOLS=1). Hiding a
-        // tool from tools/list is not authorization — a raw client can call
-        // any name — so the gate is enforced HERE as well as in
-        // `isRecipeTool`, and a gated call throws the byte-identical
-        // unknown-tool error `ToolDispatcher` throws for any unregistered
-        // name, so the names stay undiscoverable. The benchmark mint driver
-        // sets the variable on the serve it launches (MintCLI serve command).
-        if isDarkMintTool(name) && !mintToolsEnabled {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.methodNotFound,
-                message: "Unknown tool: \(name)")
-        }
-
         // Recipe discovery needs no estate; answer before resolving a handle
         // so discovery tools work even with no estate targeted.
         if name == listRecipesToolName {
@@ -750,10 +598,6 @@ enum RecipeTools {
             return try await runConfirmPromotion(args, kit: kit, handle: handle)
         case dreamToolName:
             return try await runDream(args, kit: kit, handle: handle)
-        case distillToolName:
-            return try await runDistill(args, kit: kit, handle: handle)
-        case redistillToolName:
-            return try await runRedistill(args, kit: kit, handle: handle)
         case recallDistilledToolName:
             // Reaches here only when ack: "recall_distilled/v2" was present.
             return try await runRecallDistilled(args, kit: kit, handle: handle)
@@ -761,10 +605,6 @@ enum RecipeTools {
             return try await runHuntContradictions(args, kit: kit, handle: handle)
         case walkRecallToolName:
             return try await runWalkRecall(args, kit: kit, handle: handle)
-        case runAdornmentPassToolName:
-            return try await runAdornmentPass(args, kit: kit, handle: handle)
-        case registerAdornmentMinterToolName:
-            return try await runRegisterAdornmentMinter(args, kit: kit, handle: handle)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -995,9 +835,6 @@ enum RecipeTools {
         let orderedDrawers = out.rankedIDs.compactMap { drawersByID[$0] }
         let synthNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: orderedDrawers.map(\.parentNodeId))
-        // Call-scoped active-adornment batch read (GENIUSLOCUSKIT_SPEC §16.2).
-        let adornmentMap = try await kit.activeAdornments(
-            in: handle, drawerIDs: orderedDrawers.map(\.id))
         let candidateRows: [CandidateRowData] = orderedDrawers.compactMap { d in
             // Synthesis pool-removal gate: the recipe already excluded
             // provenance-restricted/secret rows (excludeProvenanceSensitive);
@@ -1008,11 +845,11 @@ enum RecipeTools {
             case .restricted, .secret: return nil
             case .normal, .elevated: break
             }
-            let entries = (adornmentMap[d.id] ?? []).sorted { $0.minterID < $1.minterID }
             return CandidateRowData(
                 id: d.id, subject: d.subject,
-                firstSentence: d.content.isEmpty ? nil : d.content,
-                activeAdornments: entries.map { AdornmentEntry(minterID: $0.minterID, text: $0.text) },
+                bestSpan: d.content.isEmpty ? nil : d.content,
+                // sscFacts: stubbed nil until W1 schema-19 Drawer.sscFacts lands
+                sscFacts: nil,
                 eventTime: ResultComposer.iso8601(d.eventTime),
                 room: synthNodeNames[d.parentNodeId]?.room)
         }
@@ -1134,7 +971,7 @@ enum RecipeTools {
 
         // COMPOSER-02B: migrate to ResultComposer.renderS1Surface.
         // Structured-tier fetch gates sensitivity; drawers supply subject/
-        // firstSentence/eventTime for the S1 columns. Score from PreciseMatch.score.
+        // bestSpan/eventTime for the S1 columns. Score from PreciseMatch.score.
         let estate = try await kit.estate(for: handle)
         let shownMatches = Array(matches.prefix(50))
         let drawersByID = try await structuredDrawersByID(
@@ -1145,16 +982,16 @@ enum RecipeTools {
 
         let candidateRows: [CandidateRowData] = shownMatches.map { match in
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: ResultComposer.iso8601(d.eventTime),
                     score: Double(match.score),
                     room: nodeNames[d.parentNodeId]?.room)
@@ -1242,7 +1079,7 @@ enum RecipeTools {
 
         // COMPOSER-02B: migrate to ResultComposer.renderS1Surface.
         // TemporalMatch carries its own eventTime (ISO-8601 string or nil);
-        // subject/firstSentence come from the structured-tier drawer fetch.
+        // subject/bestSpan come from the structured-tier drawer fetch.
         // TemporalMatch has no per-result score — pass nil (renders "0.0000").
         let estate = try await kit.estate(for: handle)
         let shownMatches = Array(matches.prefix(50))
@@ -1254,16 +1091,16 @@ enum RecipeTools {
         let candidateRows: [CandidateRowData] = shownMatches.map { match in
             let eventTime = match.eventTime ?? "-"
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: eventTime, score: nil,
                     room: nodeNames[d.parentNodeId]?.room)
             } else {
@@ -1343,16 +1180,16 @@ enum RecipeTools {
 
         let candidateRows: [CandidateRowData] = shownMatches.map { match in
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: ResultComposer.iso8601(d.eventTime), score: nil,
                     room: nodeNames[d.parentNodeId]?.room,
                     retrievalSource: match.source)
@@ -1506,16 +1343,16 @@ enum RecipeTools {
 
         let candidateRows: [CandidateRowData] = displayedMatches.map { match in
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: ResultComposer.iso8601(d.eventTime),
                     score: Double(match.score),
                     room: nodeNames[d.parentNodeId]?.room)
@@ -1553,7 +1390,7 @@ enum RecipeTools {
             let row = CandidateRowData(
                 id: d.id,
                 subject: d.subject,
-                firstSentence: d.content.isEmpty ? nil : d.content,
+                bestSpan: d.content.isEmpty ? nil : d.content,
                 eventTime: ResultComposer.iso8601(d.eventTime))
             return (d.id, ResultComposer.renderS2Row(row))
         })
@@ -2314,16 +2151,16 @@ enum RecipeTools {
 
         let candidateRows: [CandidateRowData] = shownMatches.map { match in
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: ResultComposer.iso8601(d.eventTime),
                     score: Double(match.score),
                     room: nodeNames[d.parentNodeId]?.room)
@@ -2350,78 +2187,6 @@ enum RecipeTools {
         return ToolDispatcher.composedResult(composed)
     }
 
-    // MARK: - distill
-
-    /// Run `moot_distill`: trigger a
-    /// per-item distillation sweep on demand.
-    ///
-    /// Decodes the optional `cluster_id` and `include_held` args (accepted
-    /// for API stability, not used by the per-item model) and delegates to
-    /// the Distill recipe, which calls GLK.distillItemsSweep. Returns a
-    /// plain-text summary of items distilled this sweep (drawer rows whose
-    /// representation columns were populated — SPEC §3).
-    private static func runDistill(
-        _ args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        let clusterID = try optionalString(args["cluster_id"], argument: "cluster_id")
-        // include_held: boolean parameter — absent means false (the safe default).
-        // Present non-bool values are rejected so the caller knows what went wrong.
-        let includeHeld: Bool
-        if let raw = args["include_held"] {
-            guard let b = raw.boolValue else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "include_held must be a boolean; omit it to use the default (false)")
-            }
-            includeHeld = b
-        } else {
-            includeHeld = false
-        }
-
-        let out = try await Distill().run(
-            input: .init(clusterID: clusterID, includeHeld: includeHeld),
-            estate: handle, kit: kit)
-
-        let body = """
-        moot_distill: sweep complete
-        itemsDistilled: \(out.itemsDistilled)
-        """
-        return ToolDispatcher.textResult(body)
-    }
-
-    // MARK: - redistill
-
-    /// Run `moot_redistill`: force-redistill all active items then trigger a
-    /// full laneScope .all corpus reindex (CDL-02).
-    ///
-    /// Unlike `moot_distill`, this verb ignores the hasCurrentRepresentation
-    /// flag — every active non-empty drawer is re-distilled unconditionally.
-    /// After the sweep, GLK.reindexCorpus(handle:now:) rebuilds BM25 posting
-    /// lists (admitting trailer tokens from the fresh distillates) and
-    /// re-embeds all dense float vectors.
-    ///
-    /// Returns a plain-text summary: item count + confirmation that both lanes
-    /// were reindexed.
-    private static func runRedistill(
-        _ args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        // No required arguments: redistill is an estate-wide operation.
-        let out = try await Redistill().run(
-            input: .init(limit: nil),
-            estate: handle, kit: kit)
-
-        let body = """
-        moot_redistill: sweep complete
-        itemsRedistilled: \(out.itemsRedistilled)
-        reindexed: both lanes (BM25 + dense)
-        """
-        return ToolDispatcher.textResult(body)
-    }
-
     // MARK: - recall_distilled
 
     /// Run `moot_recall_distilled`: exact-search geometry + distilled
@@ -2431,12 +2196,12 @@ enum RecipeTools {
     ///   found N memory(s) [distilled]
     ///   {id}  [{room}]  {distilled text or content fallback}
     ///       tokens: N | source: distilled            (per-hit metadata)
-    ///       tokens: — | source: content (run moot_distill)   (fallback rows)
+    ///       tokens: — | source: content              (fallback rows)
     ///   discrimination: {level} — {description}
     ///
     /// Ranking is identical to moot_memory_search by construction; only the
     /// payloads differ. Fallback rows (§10.2) still return results — served
-    /// from content, with a hint to run moot_distill.
+    /// from content.
     private static func runVagueRecall(
         _ args: [String: JSONValue],
         kit: GeniusLocusKit,
@@ -2469,7 +2234,7 @@ enum RecipeTools {
             CandidateRowData(
                 id: hit.id,
                 subject: hit.subject,
-                firstSentence: hit.content.isEmpty ? nil : hit.content,
+                bestSpan: hit.content.isEmpty ? nil : hit.content,
                 eventTime: ResultComposer.iso8601(hit.eventTime),
                 score: nil,
                 tier: "summary")
@@ -2478,7 +2243,7 @@ enum RecipeTools {
             CandidateRowData(
                 id: c.id,
                 subject: c.subject,
-                firstSentence: c.content.isEmpty ? nil : c.content,
+                bestSpan: c.content.isEmpty ? nil : c.content,
                 eventTime: ResultComposer.iso8601(c.eventTime),
                 score: nil,
                 tier: "original")
@@ -2524,7 +2289,7 @@ enum RecipeTools {
 
         // COMPOSER-02B: migrate to ResultComposer.renderDistilledRecall.
         // DistilledMatch.score is the exact-search fusion score.
-        // Subject/firstSentence come from the structured-tier drawer fetch.
+        // Subject/bestSpan come from the structured-tier drawer fetch.
         // The echo_query header is prepended after composing if needed.
         let estate = try await kit.estate(for: handle)
         let shownMatches = Array(out.matches.prefix(50))
@@ -2533,41 +2298,35 @@ enum RecipeTools {
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: drawersByID.values.map { $0.parentNodeId })
 
-        var anyFallback = false
         let candidateRows: [CandidateRowData] = shownMatches.map { match in
-            let rep = match.servedFromContent ? "contentFallback" : "distilled"
-            if match.servedFromContent { anyFallback = true }
             if let d = drawersByID[match.id] {
-                let (subject, firstSentence): (String?, String?)
+                let (subject, bestSpan): (String?, String?)
                 switch d.sensitivity {
-                case .restricted: (subject, firstSentence) = (ResultComposer.restrictedMarker, nil)
-                case .secret:     (subject, firstSentence) = (ResultComposer.secretMarker, nil)
+                case .restricted: (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
+                case .secret:     (subject, bestSpan) = (ResultComposer.secretMarker, nil)
                 case .normal, .elevated:
                     subject = d.subject
-                    firstSentence = d.content.isEmpty ? nil : d.content
+                    bestSpan = d.content.isEmpty ? nil : d.content
                 }
                 return CandidateRowData(
-                    id: d.id, subject: subject, firstSentence: firstSentence,
+                    id: d.id, subject: subject, bestSpan: bestSpan,
                     eventTime: ResultComposer.iso8601(d.eventTime),
                     score: match.score,
                     room: nodeNames[d.parentNodeId]?.room,
-                    distilled: match.text, representation: rep)
+                    distilled: match.text, representation: "distilled")
             } else {
                 return CandidateRowData(id: match.id, eventTime: "-",
                                         score: match.score,
-                                        distilled: match.text, representation: rep)
+                                        distilled: match.text, representation: "distilled")
             }
         }
         let discriminationArg: String? = switch out.discrimination {
             case .low: "low"; case .medium: "medium"
             case .high, .single: nil
         }
-        let hintText: String? = anyFallback
-            ? "some results are not yet distilled and were served from full content. Run moot_distill to populate distilled representations."
-            : nil
-        let control = ControlSignals(discrimination: discriminationArg, hint: hintText)
+        let control = ControlSignals(discrimination: discriminationArg, hint: nil)
         var composed = candidateRows.isEmpty
-            ? ResultComposer.renderEmptyS1(hint: hintText)
+            ? ResultComposer.renderEmptyS1(hint: nil)
             : ResultComposer.renderDistilledRecall(rows: candidateRows, control: control)
         // Replace the header with an echo_query variant when requested.
         // Applied to both empty and non-empty results so the caller always
@@ -2760,211 +2519,6 @@ enum RecipeTools {
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Unknown sensitivity: \(name)")
         }
-    }
-
-    // MARK: - run_adornment_pass (dark harness-only tool)
-
-    /// Descriptor for moot_run_adornment_pass — dark tool, never added to tools().
-    ///
-    /// The tool is excluded from tools/list so AI clients never discover or call
-    /// it spontaneously, and it dispatches only behind the `MOOTX01_MINT_TOOLS=1`
-    /// launch gate. The benchmark mint subcommand invokes it by name through
-    /// the MCP dispatch router (isRecipeTool returns true so it routes here).
-    ///
-    /// The `batch_size` argument bounds wall-clock per call (default
-    /// `AdornmentPass.defaultBatchSize`, clamped to
-    /// `ADORNMENT_PASS_MAX_BATCH_SIZE`). The `adornment_max_length` argument
-    /// is a harness-only audition override for the length gate; absent means
-    /// nil is forwarded to the GLK entry point, which resolves the product
-    /// default (`ADORNMENT_MAX_LENGTH` from AdornmentLib, currently 280) at
-    /// its single resolution point.
-    ///
-    /// The `now` argument accepts an ISO8601 instant for deterministic runs;
-    /// absent means wall clock. The benchmarker always passes a pinned `now` so
-    /// drawer timestamps are consistent within one adornment pass.
-    private static func runAdornmentPassTool() -> ProjectedTool {
-        ProjectedTool(
-            name: runAdornmentPassToolName,
-            description: "Dark harness-only tool: execute one adornment pass "
-                + "using MOOT_MINT_CMD from the environment against every registered "
-                + "active minter. Returns adornedPairs/failedPairs/skippedPairs counts. "
-                + "Never listed in tools/list; dispatched only when the serve was "
-                + "launched with MOOTX01_MINT_TOOLS=1.",
-            inputSchema: objectSchema(
-                properties: [
-                    "now": stringSchema("ISO8601 instant for deterministic drawer "
-                        + "timestamps. Omit to use the current wall clock."),
-                    "batch_size": stringSchema("Maximum (drawer, minter) pairs to process "
-                        + "in one pass (default \(AdornmentPass.defaultBatchSize), "
-                        + "clamped to \(ADORNMENT_PASS_MAX_BATCH_SIZE)). Bounds "
-                        + "wall-clock per call."),
-                    "adornment_max_length": stringSchema("Harness-only: character-count "
-                        + "ceiling for accepted adornment text. Overrides the product "
-                        + "constant ADORNMENT_MAX_LENGTH (280) for auditions only."),
-                    "estateID": stringSchema("Optional UUID of the open estate to target. "
-                        + "Omit for the default estate."),
-                ],
-                required: []),
-            provenance: .recipe)
-    }
-
-    /// Execute moot_run_adornment_pass: one on-demand AdornmentPass over the estate.
-    ///
-    /// Calls `kit.runAdornmentPass(handle:batchSize:maxAdornmentLength:now:)`,
-    /// the harness overload that threads the length ceiling through the minter
-    /// closure. The production resident-daemon path calls `runAdornmentPass(handle:now:)`
-    /// with product defaults; this tool is the harness-controlled variant.
-    ///
-    /// Returns a plain-text summary with adorned/rejected/skipped counts. The
-    /// benchmark mint subcommand parses these counts from the text and records
-    /// them in the per-unit mint sidecar.
-    private static func runAdornmentPass(
-        _ args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        // Deterministic `now` when supplied; wall clock otherwise.
-        let now: Date
-        if let raw = try optionalString(args["now"], argument: "now") {
-            guard let parsed = ISO8601DateFormatter().date(from: raw) else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "now is not a valid ISO8601 instant: \(raw)")
-            }
-            now = parsed
-        } else {
-            now = Date()
-        }
-
-        // batch_size: optional positive integer; absent → pass default.
-        // Clamped to ADORNMENT_PASS_MAX_BATCH_SIZE (clamped, not rejected: the
-        // mint driver passes large counts and pages by repeated calls). The
-        // pass entry point clamps again so no other caller can exceed the
-        // ceiling; this clamp keeps the tool's own contract explicit.
-        let batchSize: Int
-        if let raw = try optionalString(args["batch_size"], argument: "batch_size"),
-           let n = Int(raw), n > 0 {
-            batchSize = AdornmentPass.clampedBatchSize(n)
-        } else if let raw = args["batch_size"], case .integer(let n) = raw, n > 0 {
-            batchSize = AdornmentPass.clampedBatchSize(Int(n))
-        } else {
-            batchSize = AdornmentPass.defaultBatchSize
-        }
-
-        // adornment_max_length: optional harness override; absent → nil so GLK
-        // resolves the product default (ADORNMENT_MAX_LENGTH from AdornmentLib).
-        // The ceiling is resolved at ONE point — the GLK entry point — so this
-        // tool always forwards nil when no override was supplied.
-        let maxAdornmentLength: Int?
-        if let raw = try optionalString(args["adornment_max_length"],
-                                        argument: "adornment_max_length"),
-           let n = Int(raw), n > 0 {
-            maxAdornmentLength = n
-        } else if let raw = args["adornment_max_length"],
-                  case .integer(let n) = raw, n > 0 {
-            maxAdornmentLength = Int(n)
-        } else {
-            maxAdornmentLength = nil
-        }
-
-        let result = try await kit.runAdornmentPass(
-            handle: handle,
-            batchSize: batchSize,
-            maxAdornmentLength: maxAdornmentLength,
-            now: now)
-
-        let body = """
-        moot_run_adornment_pass: pass complete
-        adorned: \(result.adornedPairs)
-        rejected: \(result.failedPairs)
-        skipped: \(result.skippedPairs)
-        """
-        return ToolDispatcher.textResult(body)
-    }
-
-    // MARK: - register_adornment_minter (dark harness-only tool)
-
-    /// Execute moot_register_adornment_minter: register one minter descriptor
-    /// and replace the active set with exactly that minter (MINTCLI-78).
-    ///
-    /// Contract (all descriptor fields are caller-supplied — the harness owns
-    /// the audition identity):
-    ///   - `minter_id` (required)            — descriptor id; the configuration
-    ///     identity. A configuration change requires a NEW id (registration
-    ///     with a changed configuration for a known id throws, LOCUSKIT_SPEC
-    ///     § ADORNMENT_STORE).
-    ///   - `minter_name` (required)          — human-readable name.
-    ///   - `minter_family` (required)        — grouping key (e.g. "apple").
-    ///   - `minter_model_id` (required)      — generation model identifier.
-    ///   - `minter_model_version` (required) — model version/revision string.
-    ///   - `minter_prompt_digest` (required) — stable fingerprint of the
-    ///     prompt-affecting configuration.
-    ///   - `minter_parameters` (optional)    — string→string object of
-    ///     generation-affecting parameters.
-    ///   - `estateID` (optional)             — resolved by the shared handle
-    ///     resolver like every recipe tool.
-    ///
-    /// Registration and activation are two product verbs: register upserts the
-    /// immutable configuration row (initial `is_active` true on insert; never
-    /// retoggled for an existing row), then `setActiveAdornmentMinters`
-    /// atomically replaces the active set with `{minter_id}` so the following
-    /// adornment pass sees exactly one active minter (GENIUSLOCUSKIT_SPEC
-    /// § 16.1 — composition observes the complete old or new set, never a
-    /// partial intermediate state).
-    private static func runRegisterAdornmentMinter(
-        _ args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        let id = try requireString(args, "minter_id")
-        let name = try requireString(args, "minter_name")
-        let family = try requireString(args, "minter_family")
-        let modelID = try requireString(args, "minter_model_id")
-        let modelVersion = try requireString(args, "minter_model_version")
-        let promptDigest = try requireString(args, "minter_prompt_digest")
-
-        // minter_parameters: optional object whose values must all be strings
-        // (the descriptor's parameters map is string→string by contract).
-        var parameters: [String: String] = [:]
-        if let raw = args["minter_parameters"] {
-            guard case .object(let obj) = raw else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "minter_parameters must be an object of string values")
-            }
-            for (key, value) in obj {
-                guard let s = value.stringValue else {
-                    throw JSONRPCError(
-                        code: JSONRPCErrorCode.invalidParams,
-                        message: "minter_parameters.\(key) must be a string")
-                }
-                parameters[key] = s
-            }
-        }
-
-        let descriptor = AdornmentMinterDescriptor(
-            id: id,
-            name: name,
-            family: family,
-            modelID: modelID,
-            modelVersion: modelVersion,
-            promptDigest: promptDigest,
-            parameters: parameters,
-            isActive: true)
-        try await kit.registerAdornmentMinter(in: handle, minter: descriptor)
-        // setActiveAdornmentMinters returns TOTAL rows updated in the
-        // replacement transaction (deactivations plus activations), not the
-        // active-set size. The transaction guarantees the active set is now
-        // exactly {id} (unknown ids throw with full rollback), so the reply
-        // reports the set size — 1 — as the machine-parseable confirmation.
-        _ = try await kit.setActiveAdornmentMinters(in: handle, minterIDs: [id])
-
-        let body = """
-        moot_register_adornment_minter: registered
-        minter: \(id)
-        active: 1
-        """
-        return ToolDispatcher.textResult(body)
     }
 
     // MARK: - JSON schema helpers

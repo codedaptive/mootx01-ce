@@ -1805,8 +1805,8 @@ pub(crate) const KEY_ID_COL: &str = "keyID";
 ///    plaintext on an encrypting estate discloses the substance of a sealed
 ///    row. A column that records only *how* or *when* a value was produced
 ///    is not content-derived and stays plaintext:
-///    `subject_pipeline_version`, `subject_at`, `distilled_pipeline_version`,
-///    `distilled_at`. Nor are the `content_hash` / `content_fingerprint`
+///    `subject_pipeline_version`, `subject_at`. Nor are the
+///    `content_hash` / `content_fingerprint`
 ///    digests, which are computed over content rather than carrying it, and
 ///    which index and deduplication read directly.
 ///
@@ -1852,7 +1852,7 @@ pub(crate) const KEY_ID_COL: &str = "keyID";
 /// itself; a test that restates the map cannot fail when the map gains a
 /// wrong entry.
 pub(crate) const ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE: &[(&str, &[&str])] =
-    &[("drawers", &["content", "distilled", "subject"])];
+    &[("drawers", &["content", "ssc_facts", "subject"])];
 
 /// The protected text columns for `table`, or an empty slice when the
 /// table has none.
@@ -1917,7 +1917,7 @@ pub(crate) fn projection_needs_key_id(
 /// write in the schema is the expunge/zeroization scrub (`content = ""`),
 /// which must stay a plaintext-empty erasure marker — the same exemption
 /// `assert_content_key_id_invariant` documents (#76). A
-/// representation-only UPDATE (a value map with "distilled" but no
+/// representation-only UPDATE (a value map with "ssc_facts" but no
 /// "content") is sealed and keyID-stamped exactly like a content write.
 ///
 /// Mirrors Swift's `encryptedForWrite`.
@@ -2472,8 +2472,8 @@ impl RowStore for SqliteRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text —
+        // path since ssc_facts joined the protected column set (an SSC-facts
+        // write is an UPDATE carrying "ssc_facts" text —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals non-empty
         // protected text and stamps keyID; it is a no-op for bitmap/timestamp
         // updates and for the expunge scrub (empty text is exempt). The

@@ -105,9 +105,11 @@ pub type InferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + S
 /// (`0x4D49_4E4C_4D_5F76_31`); regrouped here into even nibble groups,
 /// same numeric value.
 const MINILM_PROJECTION_SEED: u64 = 0x4D49_4E4C_4D5F_7631;
+#[cfg(feature = "dense-families")]
 /// "MPNET_v1" — equals Swift `MPNetTextProvider.projectionSeed`
 /// (`0x4D50_4E45_54_5F76_31`); same numeric value, even nibble groups.
 const MPNET_PROJECTION_SEED: u64 = 0x4D50_4E45_545F_7631;
+#[cfg(feature = "dense-families")]
 /// "EMBGM_v1" — equals Swift `EmbeddingGemmaProvider.projectionSeed`
 /// (`0x454D_4247_4D_5F76_31`); same numeric value, even nibble groups.
 const EMBEDDING_GEMMA_PROJECTION_SEED: u64 = 0x454D_4247_4D5F_7631;
@@ -256,9 +258,10 @@ impl EmbeddingProvider for MiniLMTextProvider {
     }
 }
 
-// (MPNet and EmbeddingGemma providers follow; tests for all three live
-// at the end of the module.)
-
+// MPNet and EmbeddingGemma are dense-family providers: compiled only when the
+// `dense-families` feature is on (off by default, plan 70BC55F3, 2026-09-05).
+// Their tests are gated the same way at the bottom of this file.
+#[cfg(feature = "dense-families")]
 // MARK: - MPNetTextProvider
 
 /// mpnet (all-mpnet-base-v2 style) embedding provider. 768-dimensional
@@ -271,6 +274,7 @@ pub struct MPNetTextProvider {
     inference: InferenceFn,
 }
 
+#[cfg(feature = "dense-families")]
 impl MPNetTextProvider {
     /// Build with the Swift defaults (`model_id = "mpnet-base-v2"`,
     /// `model_version = "1.0.0"`, `DeterministicTokenizer` with the
@@ -311,6 +315,7 @@ impl MPNetTextProvider {
     }
 }
 
+#[cfg(feature = "dense-families")]
 impl EmbeddingProvider for MPNetTextProvider {
     fn model_id(&self) -> &str {
         &self.model_id
@@ -329,6 +334,7 @@ impl EmbeddingProvider for MPNetTextProvider {
     }
 }
 
+#[cfg(feature = "dense-families")]
 // MARK: - EmbeddingGemmaProvider
 
 /// EmbeddingGemma 300M provider. 768-dimensional pooled vector.
@@ -345,6 +351,7 @@ pub struct EmbeddingGemmaProvider {
     inference: InferenceFn,
 }
 
+#[cfg(feature = "dense-families")]
 impl EmbeddingGemmaProvider {
     /// Build with the Swift defaults (`model_id =
     /// "embedding-gemma-300m"`, `model_version = "1.0.0"`,
@@ -386,6 +393,7 @@ impl EmbeddingGemmaProvider {
     }
 }
 
+#[cfg(feature = "dense-families")]
 impl EmbeddingProvider for EmbeddingGemmaProvider {
     fn model_id(&self) -> &str {
         &self.model_id
@@ -423,6 +431,7 @@ mod tests {
         assert_eq!(a, b, "same input must produce the same engram");
     }
 
+    #[cfg(feature = "dense-families")]
     #[test]
     fn distinct_providers_have_distinct_seeds() {
         // Same pooled vector through MiniLM vs mpnet seeds must differ.
@@ -435,24 +444,32 @@ mod tests {
         );
     }
 
+    // Gates MPNet and EmbeddingGemma under dense-families; MiniLM is always compiled.
+    #[cfg(feature = "dense-families")]
+    #[test]
+    fn empty_input_short_circuits_before_the_seam_dense() {
+        // Dense-family providers: MPNet and EmbeddingGemma must also short-circuit
+        // on empty input without reaching the host inference closure.
+        let bomb = |_: &[i32]| -> Result<Vec<f32>, String> {
+            Err("inference must not be called on empty input".to_string())
+        };
+        let mpnet = MPNetTextProvider::new(bomb);
+        let gemma = EmbeddingGemmaProvider::new(bomb);
+        assert_eq!(mpnet.embed("").unwrap(), Engram::ZERO);
+        assert_eq!(gemma.embed("").unwrap(), Engram::ZERO);
+        assert!(mpnet.embed_float("").unwrap().is_empty());
+        assert!(gemma.embed_float("").unwrap().is_empty());
+    }
+
     #[test]
     fn empty_input_short_circuits_before_the_seam() {
-        // A host closure that errors unconditionally must never be
-        // reached on empty input: the providers return Engram::ZERO
-        // without tokenizing or inferring. Covers all three providers.
+        // MiniLM (always compiled) must not reach the host closure on empty input.
         let bomb = |_: &[i32]| -> Result<Vec<f32>, String> {
             Err("inference must not be called on empty input".to_string())
         };
         let mini = MiniLMTextProvider::new(bomb);
-        let mpnet = MPNetTextProvider::new(bomb);
-        let gemma = EmbeddingGemmaProvider::new(bomb);
         assert_eq!(mini.embed("").unwrap(), Engram::ZERO);
-        assert_eq!(mpnet.embed("").unwrap(), Engram::ZERO);
-        assert_eq!(gemma.embed("").unwrap(), Engram::ZERO);
-        // Float lane: empty input is the empty vector, also without the seam.
         assert!(mini.embed_float("").unwrap().is_empty());
-        assert!(mpnet.embed_float("").unwrap().is_empty());
-        assert!(gemma.embed_float("").unwrap().is_empty());
     }
 
     #[test]

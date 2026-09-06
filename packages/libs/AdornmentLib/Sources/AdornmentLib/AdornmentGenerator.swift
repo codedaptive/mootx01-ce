@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // AdornmentGenerator.swift
 //
 // Dream-time adornment generation seam for the MOOTx01 adornment feature
@@ -870,3 +871,4 @@ public func parseAdornmentBatchReply(_ reply: String, expectedRows: Int) -> [Str
     }
     return out
 }
+#endif // MOOTX01_MINERS

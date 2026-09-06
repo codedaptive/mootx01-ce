@@ -90,16 +90,11 @@ public enum ContextSynthesizer {
     public static func synthesize(
         from page: RecallStream.Page,
         estate: EstateHandle,
-        activeAdornments: [String: String?] = [:],
         maxKeyInsights: Int = 3
     ) async throws -> ContextDocument {
         _ = estate // C-9: reserved, never consulted. See header doc.
-        // `activeAdornments` is the call-scoped active projection from
-        // `GeniusLocusKit.activeAdornments(in:drawerIDs:)`. The caller
-        // produces this map before synthesis and passes it in; the engine
-        // consults it per-row without any estate verb call (C-9 invariant).
         return ContextSynthesisEngine.synthesize(
-            page: page, activeAdornments: activeAdornments, maxKeyInsights: maxKeyInsights)
+            page: page, maxKeyInsights: maxKeyInsights)
     }
 }
 
@@ -114,18 +109,8 @@ internal enum ContextSynthesisEngine {
     /// every ranked survivor is VISIBLE in the document — trial 3 measured
     /// 30/35 misses where the answer drawer was ranked into the capped set
     /// but invisible because only the first 3 rows were excerpted.
-    ///
-    /// `activeAdornments` is the call-scoped active projection from
-    /// `GeniusLocusKit.activeAdornments(in:drawerIDs:)`: a map of
-    /// `drawerID → composedText` where the composed text joins all active
-    /// minter outputs with " || " in ascending minter-ID order, or nil/absent
-    /// for drawers with no active adornment row. The caller produces this map
-    /// before synthesis and passes it in; the engine consults it per-row
-    /// without calling any estate verb (C-9 invariant). The default empty map
-    /// is correct for test contexts where no minters are registered.
     static func synthesize(
         page: RecallStream.Page,
-        activeAdornments: [String: String?] = [:],
         maxKeyInsights: Int = 3
     ) -> ContextDocument {
         let rows = page.rows
@@ -146,7 +131,7 @@ internal enum ContextSynthesisEngine {
         let averageReward: Float = 0 // No reward field on Drawer at v0.1 — see spec note.
         let recommendations = makeRecommendations(patterns: patterns)
         let keyInsights = makeKeyInsights(
-            rows: rows, activeAdornments: activeAdornments, maxCount: max(1, maxKeyInsights))
+            rows: rows, maxCount: max(1, maxKeyInsights))
 
         return ContextDocument(
             summary: summary,
@@ -257,41 +242,19 @@ internal enum ContextSynthesisEngine {
 
     /// Key insights from up to `maxCount` rows, in stream order.
     ///
-    /// GENIUSLOCUSKIT_SPEC 2.0.0 § 16.2 (Bob ruling 2026-08-25): when the
-    /// active projection supplies an adornment for a row, that text AUGMENTS
-    /// the excerpt as an UNLABELED indented sub-line — it never replaces the
-    /// excerpt and carries no label word (labeling with "adornment:" taints
-    /// the calling AI's context with scaffold vocabulary; the text is simply
-    /// present). When the projection has no entry for a row, the first line
-    /// of `content` is used alone.
-    ///
-    /// `activeAdornments` is the call-scoped projection: `drawerID → composedText`.
-    /// Composed text joins all active minter outputs with " || " in ascending
-    /// minter-ID order (caller's responsibility). An absent key or nil value
-    /// means no active adornment for that drawer.
+    /// Returns the first line of `content` for each row as the excerpt.
+    /// Adornment augmentation was removed in the Encoder Rerank Program
+    /// (2026-09-05): adornments did not earn their cost and are now dark.
     static func makeKeyInsights(
         rows: [Drawer],
-        activeAdornments: [String: String?] = [:],
         maxCount: Int
     ) -> [String] {
         rows.prefix(maxCount).map { row in
-            // First line of content is the base excerpt.
-            let excerpt: String
+            // First line of content is the excerpt.
             if let nl = row.content.firstIndex(of: "\n") {
-                excerpt = String(row.content[..<nl])
-            } else {
-                excerpt = row.content
+                return String(row.content[..<nl])
             }
-            // Look up the active projection for this drawer. A nil value or
-            // absent key means no active adornment — return content excerpt alone.
-            // The adornment AUGMENTS the excerpt — it never replaces it,
-            // and it carries NO label (Bob ruling 2026-08-25). The embedded
-            // newline renders it as an indented sub-line under the insight
-            // bullet in the digest output.
-            if let adornment = activeAdornments[row.id] as? String {
-                return "\(excerpt)\n    \(adornment)"
-            }
-            return excerpt
+            return row.content
         }
     }
 

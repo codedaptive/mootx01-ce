@@ -38,3 +38,8 @@ tempfile = "3"
 # tests/hamming_topk_boundary_ties_tests.rs — the same crate the GeniusLocusKit
 # and LocusKit test-vector loaders use. Test-only; the library has no JSON surface.
 serde_json = "1"
+# substrate-kernel: tests/int8_vec_conformance_tests.rs asserts the shared
+# int8 quantisation fixture ../Tests/Fixtures/encoder/int8_vectors.json against
+# `substrate_kernel::int8_vec`, which is the producer of the int8 span rows this
+# crate stores. Test-only; the library reaches the kernel through substrate-ml.
+substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }

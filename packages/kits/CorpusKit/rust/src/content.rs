@@ -75,6 +75,10 @@ pub struct CorpusContentRecord {
     /// means use `text` for both BM25 and dense embedding — the default
     /// for all consumers that do not supply a separate dense representation.
     pub dense_composition_text: Option<String>,
+    /// SSC facts from `drawers.ssc_facts` (schema 19). A bare comma-separated
+    /// pair list (e.g. `"entity: louvre, place: paris"`) appended to the BM25
+    /// document via `ssc_facts::lexical_supplement`. `None` = no facts computed yet.
+    pub ssc_facts: Option<String>,
 }
 
 impl CorpusContentRecord {

@@ -20,7 +20,7 @@
 //! the Rust encoding of the Swift recipe's heterogeneous untyped `throws`
 //! (`RecipeError` stays the closed, parity-gated guard set).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
@@ -336,13 +336,8 @@ fn run_grounded_synthesis_impl(
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the
     //    caller's recall frame governs which rows surface.
-    // ADORN-STORE-02 v17: `DrawerRow` no longer carries `adornment`.
-    // Active adornments are now fetched separately via
-    // `Estate.active_adornments(drawer_ids)` and passed into synthesis
-    // as a `BTreeMap<String,String>` keyed by drawer ID. The recipe caller
-    // owns the fetch-then-compose sequence; within this Rust port the
-    // active_adornments map is empty (fetch-and-compose requires an estate
-    // handle not available here — wired at the Swift GeniusLocusKit boundary).
+    // Adornments are dark (Encoder Rerank Program, 2026-09-05). DrawerRow
+    // carries only id + content; synthesis uses first-line content excerpts.
     let rows: Vec<DrawerRow> = drawers
         .iter()
         .map(|d| DrawerRow {
@@ -425,10 +420,7 @@ fn run_grounded_synthesis_impl(
     // the historical 3-row excerpt). Digest mode keeps the 3-row bound.
     // Twin of the Swift recipe's maxKeyInsights threading.
     let max_key_insights = if cue_terms.is_empty() { 3 } else { drawer_count };
-    // active_adornments: empty map — adornment fetch requires an estate handle
-    // not available inside this pure-Rust recipe. The fetch-and-compose step
-    // is owned by the Swift GeniusLocusKit boundary (ADORN-STORE-02 v17).
-    let context = synthesize(&page, &meta, &BTreeMap::new(), max_key_insights);
+    let context = synthesize(&page, &meta, max_key_insights);
 
     // Emit recipe complete. drawer_count is finalised before the emit call so
     // the return value is identical whether monitoring is on or off (C-Det

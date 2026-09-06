@@ -77,9 +77,8 @@ struct ToolProjectionTests {
         // + moot_recall_walk (D10 walk-recall escalation ladder)
         // + moot_rebuild_status (derived-state rebuild status, Bob ruling
         //   2026-08-26)
-        // + moot_redistill (CDL-02: force-redistill all items + laneScope .all reindex) = 82.
-        #expect(ToolProjection.tools(environment: [:]).count == 82,
-                "tools() must return exactly 82 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        #expect(ToolProjection.tools(environment: [:]).count == 80,
+                "tools() must return exactly 80 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -321,7 +320,7 @@ struct TierDecompositionTests {
         let tier4 = ToolProjection.journalTools().count              // 2
         let tier5 = ToolProjection.estateTools().count               // 10 (8 always + 2 vault-gated)
         let tier6 = 4 + LensTools.tools().count                      // 27 (4 recipe + 23 lens)
-        let tier7 = RecipeTools.tools().count - 4                    // 12 (remaining recipe, +1 redistill CDL-02)
+        let tier7 = RecipeTools.tools().count - 4                    // 10 (remaining recipe tools after subtracting the 4 in tier6)
         let tier8 = DatasetTools.tools().count                       // 3
         let tier9 = VaultTools.vaultToolNames.count                  // 5 (vault-on only)
         let tier10 = 1                                               // federation
@@ -336,9 +335,9 @@ struct TierDecompositionTests {
         // The specific figures the prose layer states today. When a tool is
         // added, these move — and so must every prose copy.
         #expect(tier5 == 11)
-        #expect(tier7 == 12)
-        #expect(RecipeTools.tools().count == 16)
+        #expect(tier7 == 10)
+        #expect(RecipeTools.tools().count == 14)
         #expect(packet == 4)
-        #expect(liveVaultOn == 82)
+        #expect(liveVaultOn == 80)
     }
 }

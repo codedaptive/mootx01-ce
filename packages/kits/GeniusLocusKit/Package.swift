@@ -52,15 +52,17 @@ let package = Package(
             name: "glk-scale-qual",
             targets: ["GLKScaleQual"]
         ),
-        // Benchmark-only applicator for a mechanically distilled overlay.
-        // It is deliberately a standalone tool: product capture/distillation
-        // behavior is unchanged, and callers must point it at a marked clone.
-        .executable(
-            name: "glk-distilled-overlay",
-            targets: ["GLKDistilledOverlay"]
-        ),
     ],
     traits: [
+        // DenseFamilies: compiles the dark dense-family lane keys and presets
+        // (PPMI, LSA, NMF, FDC — contract sheet §13) into RecallShape. Off by
+        // default; Random Indexing is the only live family. Enable with
+        // `swift build --traits DenseFamilies` together with CorpusKit's
+        // matching trait, which compiles the providers themselves.
+        .trait(
+            name: "DenseFamilies",
+            description: "Compile the dark dense-family lane keys and presets (PPMI, LSA, NMF, FDC) into the recall shape roster."
+        ),
         // Step traits name concrete historical code. Floor traits are the
         // consumer-facing cumulative selection and enable every required step.
         .trait(
@@ -70,10 +72,6 @@ let package = Package(
         .trait(
             name: "MigrationV1_1ToV1_2",
             description: "Compile the GLK 1.1 to 1.2 index-composition-column migration capsule."
-        ),
-        .trait(
-            name: "MigrationV1_2ToV1_3",
-            description: "Compile the GLK 1.2 to 1.3 distilled-source-digest-column migration capsule."
         ),
         .trait(
             name: "MigrationV1_3ToV1_4",
@@ -86,17 +84,17 @@ let package = Package(
         .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_1ToV1_2", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_1",
             description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule).",
-            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            enabledTraits: ["MigrationV1_1ToV1_2", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.2->1.3, 1.3->1.4, and 1.4->1.5 capsules).",
-            enabledTraits: ["MigrationV1_2ToV1_3", "MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.3->1.4 and 1.4->1.5 capsules; the 1.2->1.3 step added a LocusKit column that schema v19 removed, so 1.3->1.4 runs directly on a 1.2 stamp).",
+            enabledTraits: ["MigrationV1_3ToV1_4", "MigrationV1_4ToV1_5"]
         ),
         .trait(
             name: "MigrationFloor1_3",
@@ -107,6 +105,14 @@ let package = Package(
             name: "MigrationFloor1_4",
             description: "Support estates as old as GLK format 1.4 (compiles only the 1.4->1.5 storage-ledger kit-id capsule).",
             enabledTraits: ["MigrationV1_4ToV1_5"]
+        ),
+        // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
+        // Off by default (plan 70BC55F3, 2026-09-05): held for v1.2 iOS and
+        // Apple cloud compute. Mirror of CorpusKit's AppleEncoders trait and
+        // APPLE_ENCODERS Swift define. Enable: --traits AppleEncoders.
+        .trait(
+            name: "AppleEncoders",
+            description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle (off by default, plan 70BC55F3)."
         ),
     ],
     dependencies: [
@@ -171,18 +177,6 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "GLKDistilledOverlay",
-            dependencies: [
-                "GeniusLocusKit",
-                .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "CorpusKitProviders", package: "CorpusKit"),
-                .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
-            ],
-            path: "Sources/GLKDistilledOverlay"
-        ),
-        .executableTarget(
             name: "GLKScaleQual",
             dependencies: [
                 "GeniusLocusKit",
@@ -232,28 +226,10 @@ let package = Package(
                 ),
             ]
         ),
-        // GLK 1.2 -> 1.3 capsule: applies the drawers distilled_source_digest
-        // column (LocusKit schema v18) to populated estates that were written
-        // before the column existed. Mirrors the GLKMigrationV1_1ToV1_2 target.
-        .target(
-            name: "GLKMigrationV1_2ToV1_3",
-            dependencies: [
-                "GeniusLocusKit",
-                .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-            ],
-            path: "Sources/GLKMigrationV1_2ToV1_3",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_2_TO_V1_3",
-                    .when(traits: ["MigrationV1_2ToV1_3"])
-                ),
-            ]
-        ),
         // GLK 1.3 -> 1.4 capsule: stores the index composition setting
         // (manifest key index_composition_policy) on populated estates that
         // were written before the setting existed. Mirrors the
-        // GLKMigrationV1_2ToV1_3 target; CorpusKit supplies the policy type.
+        // GLKMigrationV1_1ToV1_2 target; CorpusKit supplies the policy type.
         .target(
             name: "GLKMigrationV1_3ToV1_4",
             dependencies: [
@@ -306,10 +282,6 @@ let package = Package(
                     condition: .when(traits: ["MigrationV1_1ToV1_2"])
                 ),
                 .target(
-                    name: "GLKMigrationV1_2ToV1_3",
-                    condition: .when(traits: ["MigrationV1_2ToV1_3"])
-                ),
-                .target(
                     name: "GLKMigrationV1_3ToV1_4",
                     condition: .when(traits: ["MigrationV1_3ToV1_4"])
                 ),
@@ -327,10 +299,6 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_1_TO_V1_2",
                     .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .define(
-                    "GLK_MIGRATION_V1_2_TO_V1_3",
-                    .when(traits: ["MigrationV1_2ToV1_3"])
                 ),
                 .define(
                     "GLK_MIGRATION_V1_3_TO_V1_4",
@@ -353,7 +321,8 @@ let package = Package(
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 // CorpusKitProviders: the concrete embedding providers. GLK's
                 // provision path defaults the Corpus to CorpusEnsemble.defaultEnsemble()
-                // (the 1.0 five-signal default), which NEWs concrete providers — so
+                // (RI-only by default; dense families off, plan 70BC55F3, 2026-09-05),
+                // which NEWs concrete providers — so
                 // the composition layer needs the providers product. Dependency per
                 // in-repository dependency direction; layering is
                 // upstream→downstream (CorpusKitProviders ← GeniusLocusKit), no inversion.
@@ -399,7 +368,16 @@ let package = Package(
                 // (BRR Group 10 — GLK Package.swift MUST_UPDATE)
                 .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
-            path: "Sources/GeniusLocusKit"
+            path: "Sources/GeniusLocusKit",
+            swiftSettings: [
+                // AppleEncoders: gates apple-nl-v1 and neural-embed-v1 provisioning
+                // paths in EstateLifecycle.swift. Off by default (plan 70BC55F3,
+                // 2026-09-05). Mirror of CorpusKit AppleEncoders trait.
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
+                // DenseFamilies: enables five-signal ensemble assertions in GLK tests.
+                // Off by default (plan 70BC55F3, 2026-09-05).
+                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+            ]
         ),
         .testTarget(
             name: "GeniusLocusKitTests",
@@ -432,7 +410,12 @@ let package = Package(
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
             ],
-            path: "Tests/GeniusLocusKitTests"
+            path: "Tests/GeniusLocusKitTests",
+            swiftSettings: [
+                // Mirror the production trait defines into the test target.
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
+                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+            ]
         ),
         .testTarget(
             name: "GeniusLocusKitMigrationsTests",
@@ -499,41 +482,6 @@ let package = Package(
             ],
             path: "Tests/GLKMigrationV1_1ToV1_2Tests",
             swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_1_TO_V1_2",
-                    .when(traits: ["MigrationV1_1ToV1_2"])
-                ),
-                .define(
-                    "GLK_MIGRATION_V1_0_TO_V1_1",
-                    .when(traits: ["MigrationV1_0ToV1_1"])
-                ),
-            ]
-        ),
-        // Tests for the GLK 1.2 -> 1.3 distilled-source-digest-column capsule.
-        // Verifies that drawers gains distilled_source_digest on v1_2-stamped
-        // estates, and that the catalog chain (v1_0 -> v1_1 -> v1_2 -> v1_3)
-        // ends at v1_3.
-        .testTarget(
-            name: "GLKMigrationV1_2ToV1_3Tests",
-            dependencies: [
-                "GeniusLocusKit",
-                "GeniusLocusKitMigrations",
-                .target(
-                    name: "GLKMigrationV1_2ToV1_3",
-                    condition: .when(traits: ["MigrationV1_2ToV1_3"])
-                ),
-                .product(name: "ContextDistillLib", package: "ContextDistillLib"),
-                .product(name: "LocusKit", package: "LocusKit"),
-                .product(name: "PersistenceKit", package: "PersistenceKit"),
-                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
-            ],
-            path: "Tests/GLKMigrationV1_2ToV1_3Tests",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_V1_2_TO_V1_3",
-                    .when(traits: ["MigrationV1_2ToV1_3"])
-                ),
                 .define(
                     "GLK_MIGRATION_V1_1_TO_V1_2",
                     .when(traits: ["MigrationV1_1ToV1_2"])

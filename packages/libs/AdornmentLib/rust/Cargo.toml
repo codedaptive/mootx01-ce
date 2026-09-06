@@ -41,6 +41,13 @@ candle-nn = { version = "=0.9.2", features = ["metal"] }
 candle-transformers = { version = "=0.9.2", features = ["metal"] }
 
 [features]
+# miners: enable the full adornment-minting library (GoldMiner, AdornmentGenerator,
+# MinterRecipe, CoreAIEngine, QwenTokenizer, AdornmentValidators, AdornmentIdentity).
+# Default OFF (Encoder Rerank Program ruling 2026-09-05: adornments did not earn their
+# cost at ingest; library retained for v1.2 NuExtract KGFact creation).
+# Enable with: cargo build --features miners
+miners = []
+
 # metal: force candle's Metal kernels on for a NON-macOS build that
 # somehow has them (not a supported product shape). On macOS the target
 # block above already enables them; this feature remains for explicit

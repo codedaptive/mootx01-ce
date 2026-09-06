@@ -189,12 +189,9 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     // ports but are governor-driven resident-scheduler concerns, not ARIA tool
     // arguments; no mode field is surfaced here.
     tools.push(dream_tool());
-    // Distillation tools — Rust parity with Swift RecipeTools.swift.
-    // moot_distill: run one per-item distillation sweep (SPEC §3).
-    // moot_recall_distilled: exact-search geometry + distilled hydration (§10.3).
+    // moot_recall_distilled: exact-search geometry + inline distilled
+    // hydration (§10.3). Rust parity with Swift RecipeTools.swift.
     // (moot_recollect retired with the factoid tier, §11.)
-    tools.push(distill_tool());
-    tools.push(redistill_tool());
     tools.push(recall_distilled_tool());
     tools.push(recall_vague_tool());
     // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
@@ -1078,42 +1075,6 @@ fn recall_walk_tool() -> serde_json::Value {
 /// (SPEC_DISTILLATION_STORAGE §3/§7.1). Populates the on-row distilled
 /// representation of every eligible drawer; no factoid drawers, no
 /// tunnels. Idempotent by the NULL predicate.
-fn distill_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_distill",
-        "description": "Distill working memory: populate the on-row distilled representation (token-economical prose) of every active item whose representation is missing or stale. Idempotent — already-distilled items are skipped. Returns the count of items distilled this sweep.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(
-            json!({
-                "cluster_id": string_schema("Accepted for API stability; not used by the per-item sweep model."),
-                "include_held": boolean_schema("Accepted for API stability; not used by the per-item sweep model. Default false.")
-            }),
-            json!([])
-        )))
-    })
-}
-
-/// Force-redistill tool — mirrors Swift `RecipeTools.redistillTool()`.
-/// Overwrites every active non-empty drawer's distilled representation
-/// unconditionally, then rebuilds both recall lanes; no required arguments
-/// because the sweep is always estate-wide. Description byte-identical to
-/// the Swift descriptor.
-fn redistill_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_redistill",
-        "description": "Force-redistill all active items in the estate: overwrite every active non-empty item's distilled representation unconditionally (ignores the hasCurrentRepresentation flag), then rebuild both recall indexes (BM25 + dense) so trailer tokens from the distillates are admitted to the BM25 posting lists. Use after a pipeline upgrade or when BM25 scores are suspected stale. Idempotent but slow on large estates — prefer moot_distill for incremental maintenance.",
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
-    })
-}
-
-/// Distilled recall tool — mirrors Swift `RecipeTools.recallDistilledTool()`
-/// (SPEC §10.3): the exact-search recall path with the hydration selector
-/// pinned to `distilled`. Identical ranking to moot_memory_search; smaller
-/// payloads; per-hit token counts.
-/// Distilled-payload recall descriptor.
-///
-/// Runs unconditionally (ARIA_MCP_SPEC 2.0.0 § 8.6: no acknowledgment
-/// ceremony precedes any result). v2 semantics: exact-search geometry +
-/// distilled hydration, not a separate distilled tier.
 fn recall_distilled_tool() -> serde_json::Value {
     json!({
         "name": "moot_recall_distilled",

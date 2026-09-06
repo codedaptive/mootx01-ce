@@ -52,29 +52,8 @@ import SubstrateKernel
 import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
-import AdornmentLib
 
 private let drawerStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit")
-
-/// One (drawer, minter) pair that does not yet have an adornment row.
-///
-/// Returned by `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)` to describe
-/// work that the AdornmentPass in GeniusLocusKit must perform. The minter holds
-/// the full descriptor so the caller can immediately invoke the minter without
-/// a separate registry lookup.
-///
-/// Per LOCUSKIT_INTERFACE 2.0.1 § normalized adornment storage.
-public struct AdornmentDebt: Sendable, Equatable {
-    /// The drawer that needs an adornment from `minter`.
-    public let drawer: Drawer
-    /// The active minter that has not yet produced an adornment for `drawer`.
-    public let minter: AdornmentMinterDescriptor
-
-    public init(drawer: Drawer, minter: AdornmentMinterDescriptor) {
-        self.drawer = drawer
-        self.minter = minter
-    }
-}
 
 public actor DrawerStore {
 
@@ -559,33 +538,24 @@ public actor DrawerStore {
         try await getDrawers(ids: ids, hydrationLevel: .full)
     }
 
-    /// Every `drawers` column EXCEPT the text-bearing pair `content` and
-    /// `distilled` — the no-blob structured projection. A
-    /// `.structured`/`.bitmapOnly` load selects exactly these columns, so
-    /// neither text column is ever read out of storage. The set is the
-    /// column list `drawerValues(_:)` writes minus `"content"`/`"distilled"`;
-    /// a column added to the schema must be added here too or it reads as
-    /// absent at `.structured`. `drawerFromRow` decodes an absent `content`
-    /// to "" via `string(_:)` and an absent `distilled` to nil, so a
-    /// structured drawer carries an empty body by design. The small distilled
-    /// metadata columns (pipeline version, token count, generated-at) DO ride
-    /// the structured projection — they are the context-budgeting signal
-    /// (SPEC_DISTILLATION_STORAGE §6) and cost a few bytes per row.
+    /// Every `drawers` column EXCEPT `content` — the no-blob structured
+    /// projection. A `.structured`/`.bitmapOnly` load selects exactly these
+    /// columns, so the content blob is never read out of storage. The set is
+    /// the column list `drawerValues(_:)` writes minus `"content"`; a column
+    /// added to the schema must be added here too or it reads as absent at
+    /// `.structured`. `drawerFromRow` decodes an absent `content` to "" via
+    /// `string(_:)`, so a structured drawer carries an empty body by design.
+    /// `ssc_facts` and the subject trio are short derived text that exists
+    /// precisely so a candidate row can be judged and rendered without
+    /// hydrating content, so both ride the projection.
     private static let structuredDrawerColumns: [String] = [
         "id", "parent_node_id", "sourceFile", "chunkIndex", "addedBy",
         "filedAt", "eventTime", "embeddingModelID", "tombstonedAt",
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
         "wikidataQidsSecondary",
-        "distilled_pipeline_version", "distilled_token_count", "distilled_at",
-        "distilled_source_digest",
-        // Subject trio (PR-01): the subject IS structured-tier data — it
-        // exists precisely so candidate rows can be judged without
-        // hydrating content, so the structured projection carries it.
+        "ssc_facts",
         "subject", "subject_pipeline_version", "subject_at",
-        // Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
-        // Adornments now live in the adornments table (drawer_id, minter_id, text);
-        // retrieve via DrawerStore.adornments(drawerID:) or activeAdornments(drawerIDs:).
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -1406,12 +1376,10 @@ public actor DrawerStore {
 
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt. The
-            // distilled representation is content-derived text — the scrub
-            // clears it (and the has_current_representation bit) in the same
+            // content-derived columns (ssc_facts, subject trio) are NULLed
+            // and the content-derived bits (19, 27) cleared in the same
             // statement (destruction contract, cookbook §2.4.1).
-            // Adornment rows for this drawer are deleted from the adornments
-            // table in the same transaction (see DELETE below).
-            let clearedOp = priorOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            let clearedOp = priorOperational & ~DrawerFeatureFlags.clearedOnContentWrite
             _ = try await txn.rowStore.update(
                 table: "drawers",
                 values: Self.withClearedRepresentation([
@@ -1421,13 +1389,6 @@ public actor DrawerStore {
                     "tombstonedAt": .timestamp(now),
                 ]),
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
-            )
-            // Delete adornment rows for this drawer (ADORN-STORE-02 v17 estate verbs rule):
-            // adornments are content-derived and the drawer is being tombstoned —
-            // remove them in the same transaction so no orphan rows remain.
-            _ = try await txn.rowStore.delete(
-                table: "adornments",
-                where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawerId))
             )
             try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
 
@@ -1494,10 +1455,9 @@ public actor DrawerStore {
 
                 if sibState == Int64(State.tombstoned.rawValue) {
                     // Already tombstoned — just ensure content is empty
-                    // (and the content-derived representation and the
-                    // has_current_representation bit with it).
+                    // (and the content-derived columns and bits with it).
                     let sibOpBitmap = Self.int64(sibRow["operationalBitmap"])
-                    let sibClearedOp = sibOpBitmap & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                    let sibClearedOp = sibOpBitmap & ~DrawerFeatureFlags.clearedOnContentWrite
                     _ = try await txn.rowStore.update(
                         table: "drawers",
                         values: Self.withClearedRepresentation([
@@ -1541,11 +1501,11 @@ public actor DrawerStore {
                     )
                     if case .success(let sibEvent) = sibResult {
                         // Gate accepted: update state bitmap, zero content, stamp.
-                        // has_current_representation (bit 19) cleared alongside
-                        // the four distillation columns (cookbook §2.4.1).
+                        // The content-derived bits (19, 27) clear alongside the
+                        // content-derived columns (cookbook §2.4.1).
                         let sibEventWithReason = sibEvent.withReason(
                             "lineage expunge cascade from \(drawerId)")
-                        let sibClearedOp = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                        let sibClearedOp = sibOperational & ~DrawerFeatureFlags.clearedOnContentWrite
                         _ = try await txn.rowStore.update(
                             table: "drawers",
                             values: Self.withClearedRepresentation([
@@ -3856,12 +3816,12 @@ public actor DrawerStore {
     /// replaces the old recompute-on-every-read path in
     /// `fingerprintsCaptured`/`fingerprintBitSeries`).
     private static func drawerValues(_ d: Drawer, fingerprint: Fingerprint256) -> [String: TypedValue] {
-        // Use the drawer struct's operationalBitmap directly. All bits are now
-        // managed by the write paths that own them (gatedCaptureBody,
-        // clearedRepresentationValues) before calling drawerValues. Bits 27-30
-        // are FREE (retired by ADORN-STORE-02 v17). OR-ing them here would
-        // write a different value than the audit event recorded in
-        // afterBitmaps.operational, causing AuditLogFold reconstruction to diverge.
+        // Use the drawer struct's operationalBitmap directly. Every bit is
+        // managed by the write path that owns it (gatedCaptureBody, the
+        // content-write clear, setSpanIndexed) before drawerValues runs;
+        // OR-ing anything here would write a different value than the audit
+        // event recorded in afterBitmaps.operational and make AuditLogFold
+        // reconstruction diverge.
         let opBitmap: Int64 = d.operationalBitmap
         return [
             "id": .text(d.id),
@@ -3887,26 +3847,16 @@ public actor DrawerStore {
             "wikidataQID": d.wikidataQID.map { TypedValue.text($0) } ?? .null,
             "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
             "content_fingerprint": .blob(Data(fingerprint.toBytes())),
-            // Distilled representation (SPEC §4): fresh captures carry nil
-            // in all five fields — population happens post-insert via
-            // setDistilledRepresentation (drain-stage or sweep), never on
-            // the capture path.
-            "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
-            "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
-            "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
-            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null,
-            "distilled_source_digest": d.distilledSourceDigest.map { TypedValue.text($0) } ?? .null,
-            // Subject trio (PR-01): same capture-path contract as the
-            // distilled quad — a fresh capture MAY carry a subject (the
+            // SSC facts: a fresh capture may carry them when the caller
+            // already ran the enrichment stage; otherwise NULL until
+            // setSSCFacts runs after the write.
+            "ssc_facts": d.sscFacts.map { TypedValue.text($0) } ?? .null,
+            // Subject trio (PR-01): a fresh capture MAY carry a subject (the
             // filing AI provides it at file time); backfill and the model
             // rider populate the rest via setSubjectRepresentation.
             "subject": d.subject.map { TypedValue.text($0) } ?? .null,
             "subject_pipeline_version": d.subjectPipelineVersion.map { TypedValue.text($0) } ?? .null,
             "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null,
-            // Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
-            // Adornment rows live in the adornments table keyed by (drawer_id, minter_id).
-            // The legacy drawers.adornment column remains physically in the schema
-            // (SQLite cannot DROP COLUMN) but is no longer written or read here.
         ]
     }
 
@@ -4131,22 +4081,14 @@ public actor DrawerStore {
             udcFacets: optString(row["udcFacets"]),
             wikidataQID: optString(row["wikidataQID"]),
             wikidataQidsSecondary: optString(row["wikidataQidsSecondary"]),
-            // Distilled representation (SPEC §4). Absent at `.structured`
-            // hydration (the text column is projected away like `content`);
-            // NULL on any row not yet swept. Both decode to nil.
-            distilled: optString(row["distilled"]),
-            distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
-            distilledTokenCount: optInt64(row["distilled_token_count"]),
-            distilledAt: optDate(row["distilled_at"]),
-            distilledSourceDigest: optString(row["distilled_source_digest"]),
+            // SSC facts: NULL on any row the enrichment stage has not
+            // written yet (or since the last content write); decodes to nil.
+            sscFacts: optString(row["ssc_facts"]),
             // Subject trio (PR-01). NULL on any row not yet subjected;
             // decodes to nil — the backfill-eligibility signal.
             subject: optString(row["subject"]),
             subjectPipelineVersion: optString(row["subject_pipeline_version"]),
             subjectAt: optDate(row["subject_at"])
-            // Adornment text is no longer a Drawer field (ADORN-STORE-02 v17).
-            // Adornment rows live in the adornments table keyed by (drawer_id, minter_id);
-            // retrieve via DrawerStore.adornments(drawerID:) or activeAdornments(drawerIDs:).
         )
     }
 
@@ -4665,13 +4607,14 @@ public actor DrawerStore {
         drawerId: String,
         content: String
     ) async throws -> Int {
-        // Content changed in place → the distilled representation (a view
-        // of the OLD content) is stale. NULL-on-edit in the same statement
-        // is the §7.3 regeneration trigger — no staleness flag, no Bool.
+        // Content changed in place → the content-derived columns
+        // (ssc_facts, subject trio) describe the OLD content. NULL-on-edit
+        // in the same statement is the regeneration trigger — no staleness
+        // flag, no Bool.
         //
         // Wrapped in a serializable transaction to read the current
-        // operationalBitmap before writing, so the has_current_representation
-        // bit (cookbook §2.4.1) can be cleared in the same statement as
+        // operationalBitmap before writing, so the content-derived bits
+        // (19, 27) can be cleared in the same statement as
         // the four distillation columns (§4 invariant: bit and columns
         // travel together). Pre-read cost is acceptable — dataset-content
         // writes are rare (signature computation only).
@@ -4685,12 +4628,10 @@ public actor DrawerStore {
             // same contract as the un-wrapped call). Compute the cleared
             // bitmap using the prior value, or 0 if the row is not found.
             let currentOp = rows.first.map { Self.int64($0["operationalBitmap"]) } ?? 0
-            // Clear hasCurrentRepresentation (bit 19) — content changed so
-            // the prior representations are stale. Adornment rows are not cleared
-            // here; they remain until explicitly replaced via putAdornment or
-            // deleted by expunge. The adornment debt queue is pair-based
-            // (adornmentDebtBatch), not bit-27 based (ADORN-STORE-02 v17).
-            let clearedOp = currentOp & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            // Content changed: clear the content-derived bits (19, 27) so the
+            // span rows are re-encoded, in the same UPDATE that NULLs the
+            // content-derived columns below.
+            let clearedOp = currentOp & ~DrawerFeatureFlags.clearedOnContentWrite
             return try await txn.rowStore.update(
                 table: "drawers",
                 values: Self.withClearedRepresentation([
@@ -5147,109 +5088,129 @@ public actor DrawerStore {
         }
     }
 
-    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+    // MARK: - Content-derived columns (ssc_facts, subject trio) and the span index bit
 
     /// Every content-derived column, all NULL — merged into every UPDATE
-    /// whose values touch `content`, so derived text can never outlive
-    /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
-    /// and the erasure scrub: distilled text and the subject line are both
-    /// content-derived, so zeroing content must scrub them in the same
-    /// statement). Covers the five representation columns and the subject
-    /// trio (PR-01).
-    ///
-    /// Adornment text was removed from the drawers row (ADORN-STORE-02 v17).
-    /// Adornment rows in the adornments table are NOT cleared on content edit;
-    /// they remain until replaced via putAdornment or deleted by expunge.
-    /// The adornment debt queue is pair-based, not bit-based.
+    /// whose values touch `content`, so derived text can never outlive the
+    /// content it was derived from (the erasure scrub and the content-edit
+    /// regeneration trigger). Covers `ssc_facts` (Encoder Rerank Program
+    /// §6: a NULL after a content write is the enrichment stage's "needs
+    /// facts" predicate) and the subject trio (PR-01). The matching bits
+    /// (19, 27) clear through `DrawerFeatureFlags.clearedOnContentWrite` in
+    /// the same statement.
     private static let clearedRepresentationValues: [String: TypedValue] = [
-        "distilled": .null,
-        "distilled_pipeline_version": .null,
-        "distilled_token_count": .null,
-        "distilled_at": .null,
-        "distilled_source_digest": .null,
+        "ssc_facts": .null,
         "subject": .null,
         "subject_pipeline_version": .null,
         "subject_at": .null,
     ]
 
-    /// Merge the representation-clearing NULLs into a content-writing
-    /// UPDATE's value map. Caller values win on key collision by
-    /// construction (no caller writes representation columns and content
-    /// in one statement — `setDistilledRepresentation` never carries
-    /// `content`).
+    /// Merge the content-derived NULLs into a content-writing UPDATE's
+    /// value map. Caller values win on key collision by construction (no
+    /// caller writes derived columns and content in one statement).
     private static func withClearedRepresentation(
         _ values: [String: TypedValue]
     ) -> [String: TypedValue] {
         values.merging(clearedRepresentationValues) { caller, _ in caller }
     }
 
-    /// Write the distilled representation of one drawer — all five columns
-    /// in ONE atomic UPDATE (SPEC §4 invariant: NULL together or populated
-    /// together).
+    /// Write (or clear, with `nil`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6): the grammar-v1 inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated. A direct column write like the
+    /// subject line: no audit event, no supersession cascade, no lifecycle
+    /// or lineage field touched, and no content digest bump (the facts are
+    /// derived from `content`, which has its own trail). The enrichment
+    /// stage calls this after the drawer write; every content write NULLs
+    /// the column again. Mirrors Rust `set_ssc_facts`.
     ///
-    /// A representation is a deterministic, regenerable function of
-    /// (content, converter ID) — a view, not a belief-state change —
-    /// so, like `updateDatasetContent`, this is a direct column write: no
-    /// audit event, no supersession cascade, no lifecycle or lineage field
-    /// touched, and no content digest/revision bump (search isolation §9:
-    /// a representation-only write emits no index job).
-    ///
-    /// Mirrors Rust `set_distilled_representation` (twin parity).
-    ///
-    /// - Parameters:
-    ///   - drawerId: The drawer row id (`Drawer.id`) of the SOURCE drawer.
-    ///   - distilled: The distilled rendering (SPEC §5 format).
-    ///   - pipelineVersion: The ContextDistillLib converter ID that produced
-    ///     `distilled`.
-    ///   - sourceDigest: SHA-256 hex (ContextDistillLib `sourceDigest`) of the
-    ///     complete content `distilled` was rendered from; stored beside the
-    ///     converter ID so a reader can prove the representation still
-    ///     describes the row's content.
-    ///   - tokenCount: Approximate token count of `distilled` (SPEC §6).
-    ///   - at: Generation instant (deterministic clock — passed in, never
-    ///     read here).
     /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
-    public func setDistilledRepresentation(
-        drawerId: String,
-        distilled: String,
-        pipelineVersion: String,
-        sourceDigest: String,
-        tokenCount: Int64,
-        at generatedAt: Date
-    ) async throws -> Int {
+    @discardableResult
+    public func setSSCFacts(_ facts: String?, for drawerId: String) async throws -> Int {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
-        try Self.validateNonEmpty(distilled, label: "distilled")
-        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
-        try Self.validateNonEmpty(sourceDigest, label: "sourceDigest")
-        // Read-modify-write within a serializable transaction so the
-        // has_current_representation bit (cookbook §2.4.1) is set in the
-        // SAME UPDATE as the five distillation columns (§4 invariant: bit
-        // and columns travel together; skew is structurally impossible).
+        if let facts, facts.isEmpty {
+            throw LocusKitError.invalidContent("ssc_facts must be nil or non-empty")
+        }
+        return try await storage.rowStore.update(
+            table: "drawers",
+            values: ["ssc_facts": facts.map { TypedValue.text($0) } ?? .null],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+    }
+
+    /// Set bit 27 (`spanIndexed`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write in one serializable transaction, the same shape as
+    /// `setAnomalousFlag`, so a concurrent content write cannot interleave
+    /// between the read and the write. Mirrors Rust `set_span_indexed`.
+    ///
+    /// - Returns: Count of rows updated (0 = drawer not found or bit already
+    ///   set; 1 = success).
+    @discardableResult
+    public func setSpanIndexed(drawerId: String) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
         return try await storage.transaction(isolation: .serializable) { txn in
             let rows = try await txn.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
                 orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
             )
-            // Row not found → zero rows updated (mirrors the prior single-
-            // UPDATE contract; the caller checks for 0 and skips downstream
-            // writes).
             guard let row = rows.first else { return 0 }
             let currentOp = Self.int64(row["operationalBitmap"])
-            let setOp = currentOp | DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            let updatedOp = currentOp | DrawerFeatureFlags.spanIndexed.rawValue
+            guard updatedOp != currentOp else { return 0 }
             return try await txn.rowStore.update(
                 table: "drawers",
-                values: [
-                    "distilled": .text(distilled),
-                    "distilled_pipeline_version": .text(pipelineVersion),
-                    "distilled_token_count": .int(tokenCount),
-                    "distilled_at": .timestamp(generatedAt),
-                    "distilled_source_digest": .text(sourceDigest),
-                    "operationalBitmap": .bitmap(setOp),
-                ],
+                values: ["operationalBitmap": .bitmap(updatedOp)],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
         }
+    }
+
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, oldest first, at most `limit`, resuming
+    /// after `afterDrawerID` when paging. Empty-content active rows
+    /// (gate-rejected erasure scrubs) carry nothing to encode and are
+    /// excluded. Bit 27 is cleared by every content write and by encoder
+    /// activation, so this predicate is the whole re-encode policy. Full
+    /// rows are returned because the duty needs `content` and
+    /// `content_hash`. Mirrors Rust `span_index_debt_batch`.
+    public func spanIndexDebtBatch(limit: Int, afterDrawerID: String? = nil) async throws -> [Drawer] {
+        var clauses: [StoragePredicate] = [Self.spanIndexDebtPredicate]
+        if let afterDrawerID {
+            clauses.append(.gt(Column(table: "drawers", name: "id"), .text(afterDrawerID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and(clauses),
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+            ],
+            limit: limit, offset: nil, columns: nil
+        )
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "spanIndexDebtBatch")
+    }
+
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`, measured off the rows themselves.
+    /// Projected to `id` only. Mirrors Rust `count_span_index_debt`.
+    public func countSpanIndexDebt() async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: Self.spanIndexDebtPredicate,
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]
+        )
+        return rows.count
+    }
+
+    /// Active, non-empty, bit 27 clear.
+    private static var spanIndexDebtPredicate: StoragePredicate {
+        .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
+                         mask: DrawerFeatureFlags.spanIndexed.rawValue),
+        ])
     }
 
     // ── Anomalous flag write (§11.18 anomalous-flag recall prefilter) ────────
@@ -5263,8 +5224,8 @@ public actor DrawerStore {
     /// belief-state change.
     ///
     /// Implemented as a read-modify-write within a single serializable
-    /// transaction, matching the `setDistilledRepresentation` pattern for
-    /// bitmap-bit changes: the read and the write are atomic so two
+    /// transaction, the pattern every bitmap-bit write here follows
+    /// (`setSpanIndexed` too): the read and the write are atomic so two
     /// concurrent sweep iterations on the same drawer cannot interleave.
     ///
     /// - Parameters:
@@ -5304,8 +5265,8 @@ public actor DrawerStore {
     }
 
     /// Write the subject line of one drawer — all three columns in ONE
-    /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
-    /// NULL together or populated together) PLUS a sealed `"setSubject"`
+    /// atomic UPDATE (PR-01: NULL together or populated together) PLUS a
+    /// sealed `"setSubject"`
     /// custody audit event, committed together in one transaction (Codex
     /// cc90c5dcecb081918c159788e1ffb3d6): the column write and the audit
     /// append succeed or fail together. No supersession cascade, no
@@ -5720,615 +5681,6 @@ public actor DrawerStore {
             orderBy: [], limit: nil, offset: nil, columns: ["id"]
         )
         return rows.count
-    }
-
-    /// Count of active drawers still awaiting distillation — the §7.1
-    /// eligibility predicate as an aggregate: not tombstoned, non-empty
-    /// content, and no representation that is current under
-    /// `pipelineVersion`. This is the storage-visible half of the currency
-    /// rule: bit 19 clear, OR `distilled_pipeline_version` differs, OR
-    /// `distilled_source_digest` IS NULL (written before the digest column
-    /// existed). The digest-equality half needs the row's content and is
-    /// applied by the sweep per drawer; under the NULL-on-content-write
-    /// invariant a populated digest always equals the digest of the content
-    /// beside it, so the two halves agree. This is the drain-accounting observable
-    /// (SPEC_DISTILLATION_STORAGE §7.1 / FINDING_11X_MAINTENANCE_WALK
-    /// constraint 6): `drainStatuses` reports it as the distillation
-    /// drain's `pending`, so "fully drained" cannot read true while any
-    /// row still owes a representation — measured off the rows themselves,
-    /// not a queue-depth proxy. Empty-content active rows (gate-rejected
-    /// erasure scrubs) are excluded: they carry nothing to distill.
-    /// Projected to `id` only, so no text column is materialized.
-    ///
-    /// The `bitmaskNone` predicate replaces the previous `isNull(distilled)`
-    /// test — both are correct (§4 invariant: bit and columns are always in
-    /// agreement), but the bitmap predicate is index-friendly and eliminates
-    /// the per-row NULL scan on the text column.
-    ///
-    /// Mirrors Rust `count_undistilled`.
-    public func countUndistilled(pipelineVersion: String) async throws -> Int {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .neq(Column(table: "drawers", name: "content"), .text("")),
-                .or([
-                    // Bit 19 (has_current_representation) clear → no
-                    // representation yet. Cookbook §2.4.1: the bit is the
-                    // authoritative presence indicator; faster than IS NULL
-                    // on the text column.
-                    .bitmaskNone(
-                        Column(table: "drawers", name: "operationalBitmap"),
-                        mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                    ),
-                    .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
-                         .text(pipelineVersion)),
-                    // A representation without a source digest was written
-                    // before the digest column existed: stale by definition.
-                    .isNull(Column(table: "drawers", name: "distilled_source_digest")),
-                ]),
-            ]),
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        return rows.count
-    }
-
-    /// Rooms containing at least one active, represented drawer whose stored
-    /// representation is not current under `pipelineVersion`: the converter
-    /// ID differs, or the source digest is NULL.
-    ///
-    /// This is the currency companion to the room-level bit-19 aggregate used
-    /// by `distillItemsSweep`. Bit 19 proves representation presence only; it
-    /// cannot prove that the stored converter ID and digest match the caller's
-    /// current contract. The query projects only `parent_node_id`, then
-    /// resolves the distinct room nodes, so a current estate pays no content
-    /// hydration cost and stale rooms can bypass the otherwise-valid bitmap
-    /// skip. Mirrors Rust `rooms_with_stale_distilled_representations`.
-    public func roomsWithStaleDistilledRepresentations(
-        pipelineVersion: String
-    ) async throws -> [(wing: String, room: String)] {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .bitmaskAll(
-                    Column(table: "drawers", name: "operationalBitmap"),
-                    mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                ),
-                .or([
-                    .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
-                         .text(pipelineVersion)),
-                    .isNull(Column(table: "drawers", name: "distilled_source_digest")),
-                ]),
-            ]),
-            orderBy: [], limit: nil, offset: nil, columns: ["parent_node_id"]
-        )
-        let parentNodeIds = Array(Set(rows.map { Self.string($0["parent_node_id"]) }))
-            .filter { !$0.isEmpty }
-        let names = try await resolveNodeNames(parentNodeIds: parentNodeIds)
-        return parentNodeIds.compactMap { names[$0] }.sorted {
-            $0.wing == $1.wing ? $0.room < $1.room : $0.wing < $1.wing
-        }
-    }
-
-    /// Active, non-empty drawers whose distilled representation is current
-    /// under `pipelineVersion` (bit 19 set, converter ID equal, digest
-    /// present), returned as `(id, distilledAt)` pairs with no content
-    /// hydration.
-    ///
-    /// Used by GeniusLocusKit's `distilledRepresentationsAwaitingReindex` to
-    /// compare each drawer's `distilledAt` instant against the corresponding
-    /// corpus index row's `updatedAt`, so the convergence step can detect the
-    /// mid-run crash scenario where the sweep committed but the reindex did not.
-    /// Stale rows are excluded on purpose: the sweep regenerates them first,
-    /// and only a current representation can be waiting on its reindex.
-    ///
-    /// Query shape mirrors `countUndistilled` inverted. Projects only `id` and
-    /// `distilled_at` — no text column is materialized. The §4 invariant (bit
-    /// and columns always in agreement) guarantees `distilled_at` is non-null
-    /// when bit 19 is set.
-    ///
-    /// Mirrors Rust `DrawerStore::drawers_with_representations`.
-    public func drawersWithRepresentations(
-        pipelineVersion: String
-    ) async throws -> [(id: String, distilledAt: Date)] {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .neq(Column(table: "drawers", name: "content"), .text("")),
-                // Bit 19 set → representation columns all populated (§4 invariant).
-                .bitmaskAll(
-                    Column(table: "drawers", name: "operationalBitmap"),
-                    mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                ),
-                // Current under the caller's converter: ID equal and digest present.
-                .eq(Column(table: "drawers", name: "distilled_pipeline_version"),
-                    .text(pipelineVersion)),
-                .isNotNull(Column(table: "drawers", name: "distilled_source_digest")),
-            ]),
-            orderBy: [], limit: nil, offset: nil, columns: ["id", "distilled_at"]
-        )
-        return rows.compactMap { row -> (id: String, distilledAt: Date)? in
-            let id = Self.string(row["id"])
-            guard !id.isEmpty, let ts = Self.optDate(row["distilled_at"]) else { return nil }
-            return (id: id, distilledAt: ts)
-        }
-    }
-
-    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
-
-    // MARK: - Minter registry
-
-    /// Return all registered adornment minters, ordered by name ascending.
-    ///
-    /// Mirrors Rust `list_adornment_minters`. The active flag on each
-    /// descriptor reflects the current is_active value in the store;
-    /// call `setAdornmentMinterActive` or `setActiveAdornmentMinters` to
-    /// change activation state without re-registering.
-    public func listAdornmentMinters() async throws -> [AdornmentMinterDescriptor] {
-        let rows = try await storage.rowStore.query(
-            table: "adornment_minters",
-            where: nil,
-            orderBy: [OrderClause(
-                column: Column(table: "adornment_minters", name: "name"),
-                direction: .ascending
-            )],
-            limit: nil,
-            offset: nil
-        )
-        return try rows.map { try Self.minterDescriptorFromRow($0) }
-    }
-
-    /// Register one adornment minter (immutable-configuration contract).
-    ///
-    /// A minter row is an immutable configuration identity
-    /// (LOCUSKIT_SPEC § ADORNMENT_STORE): re-registering the same `id`
-    /// with identical configuration is an idempotent no-op; re-registering
-    /// with ANY changed configuration field throws — a configuration
-    /// change requires a NEW minter id. The `isActive` value is initial
-    /// state only: registration never retoggles an existing row
-    /// (activation is the exclusive domain of `setAdornmentMinterActive`
-    /// / `setActiveAdornmentMinters`). Executed in a serializable
-    /// transaction so concurrent registrations on the same id do not
-    /// interleave.
-    ///
-    /// Mirrors Rust `register_adornment_minter`.
-    ///
-    /// - Parameter minter: The minter descriptor to register. `id` and
-    ///   `name` must be non-empty.
-    public func registerAdornmentMinter(_ minter: AdornmentMinterDescriptor) async throws {
-        try Self.validateNonEmpty(minter.id, label: "minter.id")
-        try Self.validateNonEmpty(minter.name, label: "minter.name")
-        // Serialize parameters to JSON with sorted keys so the stored form
-        // is deterministic regardless of insertion order (matches the Rust
-        // BTreeMap iteration guarantee for the twin port).
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        let parametersJSON: String
-        if minter.parameters.isEmpty {
-            parametersJSON = "{}"
-        } else {
-            let data = try encoder.encode(minter.parameters)
-            parametersJSON = String(data: data, encoding: .utf8) ?? "{}"
-        }
-        let values: [String: TypedValue] = [
-            "id": .text(minter.id),
-            "name": .text(minter.name),
-            "family": .text(minter.family),
-            "model_id": .text(minter.modelID),
-            "model_version": .text(minter.modelVersion),
-            "prompt_digest": .text(minter.promptDigest),
-            "parameters": .text(parametersJSON),
-            "is_active": .int(minter.isActive ? 1 : 0),
-        ]
-        try await storage.transaction(isolation: .serializable) { txn in
-            let existing = try await txn.rowStore.query(
-                table: "adornment_minters",
-                where: .eq(Column(table: "adornment_minters", name: "id"), .text(minter.id)),
-                orderBy: [], limit: 1, offset: nil
-            )
-            if existing.isEmpty {
-                _ = try await txn.rowStore.insert(table: "adornment_minters", values: values)
-                return
-            }
-            // Existing row: configuration is IMMUTABLE. Compare every
-            // configuration field (is_active deliberately excluded — it is
-            // runtime state owned by the activation setters, and
-            // registration must never retoggle it).
-            let stored = try Self.minterDescriptorFromRow(existing[0])
-            let sameConfiguration = stored.name == minter.name
-                && stored.family == minter.family
-                && stored.modelID == minter.modelID
-                && stored.modelVersion == minter.modelVersion
-                && stored.promptDigest == minter.promptDigest
-                && stored.parameters == minter.parameters
-            guard sameConfiguration else {
-                throw LocusKitError.invalidContent(
-                    "minter \(minter.id): configuration change rejected — "
-                    + "a configuration change creates a NEW minter row")
-            }
-            // Identical configuration: idempotent no-op. No UPDATE runs,
-            // so the stored is_active flag is untouched.
-        }
-    }
-
-    /// Set the active flag for one minter by id.
-    ///
-    /// The `is_active` column is the only mutable field on a registered
-    /// minter; all other fields are set at registration time. Returns the
-    /// number of rows updated (0 = minter id not found; 1 = success).
-    ///
-    /// Mirrors Rust `set_adornment_minter_active`.
-    ///
-    /// - Parameters:
-    ///   - id: The minter id to update.
-    ///   - active: The new activation state.
-    /// - Returns: Count of rows updated (0 or 1).
-    public func setAdornmentMinterActive(id: String, active: Bool) async throws -> Int {
-        try Self.validateNonEmpty(id, label: "id")
-        return try await storage.rowStore.update(
-            table: "adornment_minters",
-            values: ["is_active": .int(active ? 1 : 0)],
-            where: .eq(Column(table: "adornment_minters", name: "id"), .text(id))
-        )
-    }
-
-    /// Atomically replace the active minter set.
-    ///
-    /// In one serializable transaction: verify all ids exist (fails with
-    /// `LocusKitError.invalidContent` on the first unknown id, rolling back
-    /// the whole transaction), deactivate every minter, then activate the
-    /// minters in `ids`. Returns the total number of UPDATE operations
-    /// applied (deactivations + activations).
-    ///
-    /// Mirrors Rust `set_active_adornment_minters`.
-    ///
-    /// - Parameter ids: The exact set of minter ids that should be active
-    ///   after this call completes. An empty set deactivates all.
-    /// - Returns: Total update count (deactivations + activations).
-    public func setActiveAdornmentMinters(ids: Set<String>) async throws -> Int {
-        return try await storage.transaction(isolation: .serializable) { txn in
-            // Phase 1: verify every id exists; fail atomically on the first unknown.
-            for id in ids {
-                let rows = try await txn.rowStore.query(
-                    table: "adornment_minters",
-                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(id)),
-                    orderBy: [], limit: 1, offset: nil, columns: ["id"]
-                )
-                guard !rows.isEmpty else {
-                    throw LocusKitError.invalidContent("unknown adornment minter id: \(id)")
-                }
-            }
-            // Phase 2: fetch all minter ids so we can deactivate each explicitly
-            // (no nil-where UPDATE path required).
-            let allRows = try await txn.rowStore.query(
-                table: "adornment_minters",
-                where: nil,
-                orderBy: [], limit: nil, offset: nil, columns: ["id"]
-            )
-            var totalUpdated = 0
-            // Deactivate all minters.
-            for row in allRows {
-                guard let rowID = Self.optString(row["id"]) else { continue }
-                totalUpdated += try await txn.rowStore.update(
-                    table: "adornment_minters",
-                    values: ["is_active": .int(0)],
-                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(rowID))
-                )
-            }
-            // Activate the requested minters.
-            for id in ids {
-                totalUpdated += try await txn.rowStore.update(
-                    table: "adornment_minters",
-                    values: ["is_active": .int(1)],
-                    where: .eq(Column(table: "adornment_minters", name: "id"), .text(id))
-                )
-            }
-            return totalUpdated
-        }
-    }
-
-    // MARK: - Adornment debt queue
-
-    /// Fetch a bounded batch of (drawer, minter) pairs that do not yet have
-    /// an adornment row in the adornments table.
-    ///
-    /// Eligibility criteria: drawer is not tombstoned, has non-empty content,
-    /// and the (drawer.id, minter.id) pair is absent from the adornments table.
-    /// Only active minters are included. Ordered by `drawers.filedAt ASC,
-    /// drawers.id ASC` (oldest first) then by minter name within each drawer.
-    ///
-    /// Implementation: loads all active minters first (expected to be a tiny
-    /// set), then pages through eligible drawers, then filters out pairs that
-    /// already have an adornment row. Application-level join is correct here
-    /// because the minter set is small and the adornments lookup is indexed by
-    /// (drawer_id, minter_id) primary key.
-    ///
-    /// Mirrors Rust `adornment_debt_batch`.
-    ///
-    /// - Parameters:
-    ///   - limit: Maximum (drawer, minter) pairs to return per call.
-    ///   - afterDrawerID: Exclusive lower bound on `drawer.id` for cursor paging;
-    ///     `nil` starts from the beginning of the queue.
-    /// - Returns: Pairs of (Drawer, AdornmentMinterDescriptor) without an
-    ///   existing adornment, oldest drawer first, up to `limit` total pairs.
-    public func adornmentDebtBatch(
-        limit: Int,
-        afterDrawerID: String? = nil
-    ) async throws -> [AdornmentDebt] {
-        // Load all active minters — expected to be a small set (single digits).
-        let allMinterRows = try await storage.rowStore.query(
-            table: "adornment_minters",
-            where: .eq(Column(table: "adornment_minters", name: "is_active"), .int(1)),
-            orderBy: [OrderClause(
-                column: Column(table: "adornment_minters", name: "name"),
-                direction: .ascending
-            )],
-            limit: nil,
-            offset: nil
-        )
-        guard !allMinterRows.isEmpty else { return [] }
-        let activeMinters = try allMinterRows.map { try Self.minterDescriptorFromRow($0) }
-
-        // Page through eligible drawers (not tombstoned, has content, past cursor).
-        let tombstoneClause = StoragePredicate.isNull(Column(table: "drawers", name: "tombstonedAt"))
-        let contentClause = StoragePredicate.neq(Column(table: "drawers", name: "content"), .text(""))
-        let drawerPredicate: StoragePredicate
-        if let after = afterDrawerID {
-            drawerPredicate = .and([
-                tombstoneClause,
-                contentClause,
-                .gt(Column(table: "drawers", name: "id"), .text(after)),
-            ])
-        } else {
-            drawerPredicate = .and([tombstoneClause, contentClause])
-        }
-        // Scan eligible drawers in chunks until the batch fills or the table
-        // is exhausted. The scan MUST NOT stop at a fixed drawer count: a
-        // fully-minted prefix (e.g. after an earlier pass over the oldest
-        // drawers) would otherwise hide real debt further down the filedAt
-        // order and the fetch would falsely report the estate drained
-        // (MINT-DEBT-WINDOW, 2026-08-27). Chunked OFFSET paging is stable
-        // within one call because this method only reads — adornment writes
-        // happen after the batch returns, and minted drawers still match the
-        // drawer predicate either way.
-        let chunkSize = limit * max(1, activeMinters.count)
-        var result: [AdornmentDebt] = []
-        var offset = 0
-        while result.count < limit {
-            let drawerRows = try await storage.rowStore.query(
-                table: "drawers",
-                where: drawerPredicate,
-                orderBy: [
-                    OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
-                    OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
-                ],
-                limit: chunkSize,
-                offset: offset
-            )
-            if drawerRows.isEmpty { break }
-            offset += drawerRows.count
-            let drawers = try Self.decodeDrawerRowsSkipCorrupt(drawerRows, scan: "adornmentDebtBatch")
-
-            // For each drawer, check which minters already have an adornment
-            // row. Application-level join: the minter set is tiny and the
-            // adornments lookup is indexed by (drawer_id, minter_id) PK.
-            for drawer in drawers {
-                if result.count >= limit { break }
-                let adornmentRows = try await storage.rowStore.query(
-                    table: "adornments",
-                    where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawer.id)),
-                    orderBy: [], limit: nil, offset: nil, columns: ["minter_id"]
-                )
-                let mintedIDs = Set(adornmentRows.compactMap { Self.optString($0["minter_id"]) })
-                for minter in activeMinters {
-                    if result.count >= limit { break }
-                    if !mintedIDs.contains(minter.id) {
-                        result.append(AdornmentDebt(drawer: drawer, minter: minter))
-                    }
-                }
-            }
-        }
-        return result
-    }
-
-    // MARK: - Adornment rows
-
-    /// Write one (drawer, minter) adornment row, inserting or replacing.
-    ///
-    /// The `adornments` table has a composite primary key (drawer_id, minter_id),
-    /// so calling putAdornment twice for the same pair replaces the text.
-    /// This is a derived-signal write — no audit event, no supersession cascade,
-    /// no lifecycle or lineage field touched.
-    ///
-    /// - Returns: Count of rows inserted or updated (always 1 on success).
-    public func putAdornment(_ adornment: StoredAdornment) async throws -> Int {
-        try Self.validateNonEmpty(adornment.drawerID, label: "adornment.drawerID")
-        try Self.validateNonEmpty(adornment.minterID, label: "adornment.minterID")
-        try Self.validateNonEmpty(adornment.text, label: "adornment.text")
-        return try await storage.transaction(isolation: .serializable) { txn in
-            let existing = try await txn.rowStore.query(
-                table: "adornments",
-                where: .and([
-                    .eq(Column(table: "adornments", name: "drawer_id"), .text(adornment.drawerID)),
-                    .eq(Column(table: "adornments", name: "minter_id"), .text(adornment.minterID)),
-                ]),
-                orderBy: [], limit: 1, offset: nil, columns: ["drawer_id"]
-            )
-            if existing.isEmpty {
-                _ = try await txn.rowStore.insert(
-                    table: "adornments",
-                    values: [
-                        "drawer_id": .text(adornment.drawerID),
-                        "minter_id": .text(adornment.minterID),
-                        "text": .text(adornment.text),
-                    ]
-                )
-                return 1
-            } else {
-                return try await txn.rowStore.update(
-                    table: "adornments",
-                    values: ["text": .text(adornment.text)],
-                    where: .and([
-                        .eq(Column(table: "adornments", name: "drawer_id"), .text(adornment.drawerID)),
-                        .eq(Column(table: "adornments", name: "minter_id"), .text(adornment.minterID)),
-                    ])
-                )
-            }
-        }
-    }
-
-    /// Return all adornment rows for one drawer, ordered by minter_id.
-    ///
-    /// Returns an empty array if the drawer has no adornment rows. The caller
-    /// is responsible for correlating minter_id values with AdornmentMinterDescriptors
-    /// via listAdornmentMinters() if descriptor details are needed.
-    ///
-    /// Mirrors Rust `adornments`.
-    public func adornments(drawerID: String) async throws -> [StoredAdornment] {
-        try Self.validateNonEmpty(drawerID, label: "drawerID")
-        let rows = try await storage.rowStore.query(
-            table: "adornments",
-            where: .eq(Column(table: "adornments", name: "drawer_id"), .text(drawerID)),
-            orderBy: [OrderClause(
-                column: Column(table: "adornments", name: "minter_id"),
-                direction: .ascending
-            )],
-            limit: nil,
-            offset: nil
-        )
-        return try rows.map { try Self.storedAdornmentFromRow($0) }
-    }
-
-    /// Return the active adornments for a batch of drawers.
-    ///
-    /// Fetches all adornment rows for the supplied drawer ids whose minter is
-    /// currently active. Returns a dictionary keyed by drawer id; drawers with
-    /// no active adornment are absent from the map (not present with empty array).
-    ///
-    /// Implementation: loads active minter ids, then queries the adornments table
-    /// filtered to those minter ids and the supplied drawer ids. Application-level
-    /// join is correct here because both sets are small.
-    ///
-    /// Mirrors Rust `active_adornments`.
-    ///
-    /// - Parameter drawerIDs: The drawer ids to load adornments for.
-    /// - Returns: Dictionary of drawerID → [StoredAdornment] (active minters only).
-    public func activeAdornments(drawerIDs: [String]) async throws -> [String: [StoredAdornment]] {
-        guard !drawerIDs.isEmpty else { return [:] }
-        // Fetch active minter ids to filter adornment rows.
-        let minterRows = try await storage.rowStore.query(
-            table: "adornment_minters",
-            where: .eq(Column(table: "adornment_minters", name: "is_active"), .int(1)),
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        let activeMinterIDs = Set(minterRows.compactMap { Self.optString($0["id"]) })
-        guard !activeMinterIDs.isEmpty else { return [:] }
-
-        // Sensitivity gate (codex finding 2026-08-26): adornment text is a
-        // content-derived pre-minted claim, so it inherits the drawer's
-        // access posture. Restricted/secret drawers get NO adornments from
-        // this projection — the render layers redact subject/firstSentence
-        // for those rows, and an attached adornment would hand back the very
-        // content the markers withhold. Gated HERE, at the one
-        // result-composition read, so every surface in both ports inherits
-        // the rule (legacy-migrated and freshly minted rows alike).
-        let idColumn = Column(table: "drawers", name: "id")
-        let drawerRows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .or(drawerIDs.map { .eq(idColumn, .text($0)) }),
-            orderBy: [], limit: nil, offset: nil,
-            columns: ["id", "provenance"]
-        )
-        var sensitiveDrawerIDs: Set<String> = []
-        for row in drawerRows {
-            guard let id = Self.optString(row["id"]),
-                  let provenance = Self.optInt64(row["provenance"]) else { continue }
-            // Bits 30–35 of provenance: sensitivity raw (cookbook §2.5).
-            // restricted = 32, secret = 48 — both withhold content-derived
-            // columns; unrecognised raws fall back to normal, matching the
-            // drawer accessor.
-            let raw = Int(BitField.extractField(provenance, shift: 30, width: 6))
-            if raw >= Sensitivity.restricted.rawValue {
-                sensitiveDrawerIDs.insert(id)
-            }
-        }
-
-        // ONE batch statement for all requested drawer ids (the interface's
-        // one-batch-join contract): an OR-chain of drawer_id equalities is a
-        // single query; rows are grouped client-side and filtered to the
-        // active minter set read above.
-        let drawerColumn = Column(table: "adornments", name: "drawer_id")
-        let rows = try await storage.rowStore.query(
-            table: "adornments",
-            where: .or(drawerIDs.map { .eq(drawerColumn, .text($0)) }),
-            orderBy: [OrderClause(
-                column: Column(table: "adornments", name: "minter_id"),
-                direction: .ascending
-            )],
-            limit: nil,
-            offset: nil
-        )
-        var result: [String: [StoredAdornment]] = [:]
-        for row in rows {
-            let stored = try Self.storedAdornmentFromRow(row)
-            guard activeMinterIDs.contains(stored.minterID) else { continue }
-            guard !sensitiveDrawerIDs.contains(stored.drawerID) else { continue }
-            result[stored.drawerID, default: []].append(stored)
-        }
-        // Rows arrived in minter_id order globally; per-drawer grouping
-        // preserves that ascending order within each drawer's array.
-        return result
-    }
-
-    // MARK: - Adornment row decode helpers
-
-    /// Decode one row from `adornment_minters` into an `AdornmentMinterDescriptor`.
-    ///
-    /// The `parameters` column is a JSON object string (sorted keys). An absent
-    /// or malformed value decodes to an empty dictionary rather than throwing, to
-    /// tolerate rows written by older tooling.
-    private static func minterDescriptorFromRow(_ row: StorageRow) throws -> AdornmentMinterDescriptor {
-        guard let id = optString(row["id"]), !id.isEmpty else {
-            throw LocusKitError.corruptStoredValue(
-                table: "adornment_minters", column: "id", storedText: "(null)")
-        }
-        let parametersJSON = optString(row["parameters"]) ?? "{}"
-        let parameters: [String: String]
-        if let data = parametersJSON.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            parameters = decoded
-        } else {
-            parameters = [:]
-        }
-        return AdornmentMinterDescriptor(
-            id: id,
-            name: optString(row["name"]) ?? "",
-            family: optString(row["family"]) ?? "",
-            modelID: optString(row["model_id"]) ?? "",
-            modelVersion: optString(row["model_version"]) ?? "",
-            promptDigest: optString(row["prompt_digest"]) ?? "",
-            parameters: parameters,
-            isActive: int64(row["is_active"]) != 0
-        )
-    }
-
-    /// Decode one row from `adornments` into a `StoredAdornment`.
-    private static func storedAdornmentFromRow(_ row: StorageRow) throws -> StoredAdornment {
-        guard let drawerID = optString(row["drawer_id"]), !drawerID.isEmpty else {
-            throw LocusKitError.corruptStoredValue(
-                table: "adornments", column: "drawer_id", storedText: "(null)")
-        }
-        guard let minterID = optString(row["minter_id"]), !minterID.isEmpty else {
-            throw LocusKitError.corruptStoredValue(
-                table: "adornments", column: "minter_id", storedText: "(null)")
-        }
-        return StoredAdornment(
-            drawerID: drawerID,
-            minterID: minterID,
-            text: optString(row["text"]) ?? ""
-        )
     }
 
     // MARK: - Validation

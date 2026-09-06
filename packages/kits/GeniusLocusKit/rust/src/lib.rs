@@ -49,43 +49,15 @@ pub mod brain;
 /// The product's active dense-context converter: intent-span v23.2, the
 /// attributed peer-dialogue ruleset (activated 2026-09-03 per the addendum
 /// to DECISION_CONTEXTDISTILLLIB_2026-09-02). Twin of Swift
-/// `GeniusLocusKit.distillationConverter`. Its ID is written to
-/// `distilled_pipeline_version` on every distillation beside the SHA-256
-/// digest of the complete content the representation was rendered from
-/// (`distilled_source_digest`); `distilled_representation_is_current`
-/// compares both, so bumping the converter re-distills each estate lazily
-/// through the sweep and eagerly through the Redistill recipe. The v22
-/// ruleset stays in the library; nothing here routes between converters.
-/// Readers below GLK (CognitionKit, the CLI) take the ID from here, never
-/// from the library directly, so the choice of converter lives in exactly
-/// one place.
+/// `GeniusLocusKit.distillationConverter`. Every distilled rendering is
+/// computed inline at read time from the verbatim content
+/// (`hydration_representation::distilled_rendering`); nothing stores it.
+/// Readers below GLK (CognitionKit, the CLI) take the converter from here,
+/// never from the library directly, so the choice of converter lives in
+/// exactly one place. The v22 ruleset stays in the library; nothing here
+/// routes between converters.
 pub const DISTILLATION_CONVERTER: context_distill_lib::converter::ContextDistillConverter =
     context_distill_lib::converter::ContextDistillConverter::IntentSpanV23Attributed;
-
-/// The converter ID written to `distilled_pipeline_version`. Twin of Swift
-/// `GeniusLocusKit.distillationConverterID`.
-pub fn distillation_converter_id() -> &'static str {
-    DISTILLATION_CONVERTER.id()
-}
-
-/// The one representation-currency rule (both ports, one function): a
-/// drawer's stored representation is current iff bit 19 is set, its
-/// converter ID equals `distillation_converter_id()`, AND its stored source
-/// digest equals `source_digest(content)` — the digest of the complete
-/// content beside it. A `None` digest (written before the digest column
-/// existed) is stale by definition. Every regeneration decision — the sweep,
-/// the drain-stage rider, seeding, and the awaiting-reindex probe — keys on
-/// this rule; the storage-level aggregates in LocusKit apply the half SQL
-/// can see (converter ID and digest NULL-ness). Requires a fully hydrated
-/// drawer: at the structured projection `content` is empty and the digest
-/// comparison would read stale. Pure: no I/O, no clock. Twin of Swift
-/// `GeniusLocusKit.distilledRepresentationIsCurrent(_:)`.
-pub fn distilled_representation_is_current(drawer: &locus_kit::drawer::Drawer) -> bool {
-    drawer.has_current_representation()
-        && drawer.distilled_pipeline_version.as_deref() == Some(distillation_converter_id())
-        && drawer.distilled_source_digest.as_deref()
-            == Some(context_distill_lib::digest::source_digest(&drawer.content).as_str())
-}
 // packager.rs — GLKResultsPackager Rust port (PACKAGER mission). Post-recall,
 // pre-presentation packager: gate signals, confidence levels, cliff cutoff,
 // and the packed result type consumed by the ARIA boundary. Mirrors
@@ -99,6 +71,10 @@ pub mod dataset_signatures;
 pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
+pub mod encoder_activation;
+pub use encoder_activation::{
+    BundledModelDirectoryResolver, ModelDirectoryResolving, NilModelDirectoryResolver,
+};
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name
 // constants and the `glk_emit!` macro. Emit sites live in coordinator.rs at
 // open/close/provision/quiesce/drain and the verb-error remap boundary.
@@ -111,8 +87,8 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
-// The SPEC_DISTILLATION_STORAGE §10.1 recall-hydration representation
-// selector (content/distilled/tokenized variants, computed at read).
+// The recall-hydration representation selector (content/distilled/tokenized
+// variants, every one computed at read from the verbatim content).
 pub mod hydration_representation;
 // intake.rs — Dual-Path Intake (G7): WriteMode and mode-aware capture (D-A),
 // the capture→encode ORCHESTRATION. The encode queue + drain + worker pool +
@@ -126,6 +102,7 @@ pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
 pub mod recall_explainer;
+pub mod span_rerank;
 pub mod recall_signal_budget;
 pub mod training;
 pub mod verbs;
@@ -163,9 +140,9 @@ pub use brain::scheduler::{
 #[cfg(any(test, feature = "test-seams"))]
 pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
-    default_standing_signal_names, default_standing_signal_specs, AdornmentPassSignal,
+    default_standing_signal_names, default_standing_signal_specs, SpanEncodeSignal,
     AssociationEdgeChecker, ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal,
-    DistillationSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
     TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
 pub use migration::{

@@ -86,9 +86,9 @@ pub const KNOWN_HOST_IDENTITIES: [&str; 4] =
 /// Run the backfill against `storage`.
 ///
 /// Opening the storage applies the LocusKit schema ladder first — the
-/// v12 → v13 migration adds the three identity columns to estates that
-/// predate them, which is why this routes through the substrate open
-/// path and never raw SQLite.
+/// v10 → v19 hop adds the three identity columns to estates that predate
+/// them, which is why this routes through the substrate open path and
+/// never raw SQLite.
 ///
 /// `resolve_foreign_key` maps a candidate stable source key to the
 /// lineage id a palace import would have minted for it. The caller
@@ -99,8 +99,8 @@ pub fn run(
     storage: &dyn Storage,
     resolve_foreign_key: &dyn Fn(&str) -> Uuid,
 ) -> Result<KGFactIdentityBackfillReport, LocusKitError> {
-    // Apply the schema ladder (v12 → v13 addColumn on a pre-KH estate)
-    // before any row below is read or written.
+    // Apply the schema ladder (the v10 → v19 hop's AddColumn on a pre-KH
+    // estate) before any row below is read or written.
     storage.open(&schema()).map_err(storage_err)?;
     let rows = storage.row_store();
 
@@ -489,28 +489,28 @@ mod tests {
         assert_eq!(f.adjective_bitmap & 0x3F, 18);
     }
 
-    /// The schema leg: a pre-MXE-KH (v12) SQLite estate whose `kg_facts`
-    /// table lacks the identity trio gains the columns through the
-    /// v12 → v13 ladder entry when the backfill opens it, and its rows
-    /// migrate. Without the ladder entry this run dies with "no such
-    /// column: addedBy" (Smythe CRITICAL-1, the gap MXE-KH shipped).
+    /// The schema leg: a pre-MXE-KH SQLite estate at the supported upgrade
+    /// floor (schema 10) whose `kg_facts` table lacks the identity trio
+    /// gains the columns through the v10 → v19 hop when the backfill opens
+    /// it, and its rows migrate. Without the ladder entry this run dies with
+    /// "no such column: addedBy" (Smythe CRITICAL-1, the gap MXE-KH shipped).
     #[test]
-    fn v12_estate_gains_columns_and_migrates() {
+    fn schema_10_estate_gains_columns_and_migrates() {
         let path = std::env::temp_dir().join(format!(
             "locuskit-kgbackfill-migration-{}.sqlite",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
 
-        // The v12 shape: identical to the live declaration except
+        // The schema-10 shape: identical to the live declaration except
         // `kg_facts` lacks the identity trio and the ladder is empty, so
-        // opening records exactly version 12 the way a pre-KH estate on
+        // opening records exactly version 10 the way a CE 1.0.x estate on
         // disk is recorded.
-        let mut v12 = schema();
-        v12.version = 12;
-        v12.migrations.clear();
+        let mut v10 = schema();
+        v10.version = crate::schema::SUPPORTED_UPGRADE_FLOOR;
+        v10.migrations.clear();
         let trio = ["addedBy", "foreignSourceKey", "foreignRecordID"];
-        for table in v12.tables.iter_mut().filter(|t| t.name == "kg_facts") {
+        for table in v10.tables.iter_mut().filter(|t| t.name == "kg_facts") {
             table.columns.retain(|c| !trio.contains(&c.name.as_str()));
         }
 
@@ -523,7 +523,7 @@ mod tests {
                 },
             );
             let storage = SqliteStorage::new(config).unwrap();
-            storage.open(&v12).unwrap();
+            storage.open(&v10).unwrap();
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
             values.insert("id".into(), TypedValue::Text("f-host".into()));
             values.insert("subject".into(), TypedValue::Text("fleet".into()));

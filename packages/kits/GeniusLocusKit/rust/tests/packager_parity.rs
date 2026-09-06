@@ -126,6 +126,7 @@ fn make_hit(hf: &HitFixture) -> RecallHit {
             dense: hf.dense_score,
         },
         explanation: vec![],
+        span_hit: None,
     }
 }
 

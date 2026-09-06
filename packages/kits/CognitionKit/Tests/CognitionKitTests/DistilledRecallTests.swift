@@ -3,19 +3,16 @@
 // End-to-end tests for the DistilledRecall recipe over a real
 // GeniusLocusKit in-memory estate. No mocks.
 //
-// SPEC_DISTILLATION_STORAGE §10.3: `distilled_recall` is exact-search
-// geometry over ORIGINALS + distilled hydration of the hits. These tests
-// pin the §13.4 recall-equivalence criterion (identical ids and order to
-// the exact-search path), the §10.2 fallback marker, and per-hit token
-// counts (§6).
+// Inline rendering: distillation is computed at read time from the
+// verbatim content column via ContextDistillLib. There is no sweep,
+// no "not yet distilled" state, and no fallback path — every captured
+// item renders on its first recall hit.
 //
 // Coverage:
-//   CK-DR-1: distilled estate — hits hydrate the distilled rendering with
-//            token counts; payloads are strictly smaller than content.
+//   CK-DR-1: hit hydrates the inline distilled rendering with a token count.
 //   CK-DR-2: recall equivalence — ids and order identical to the
-//            exact-search request for the same query (§13.4).
-//   CK-DR-3: undistilled rows fall back to content with the
-//            served-from-content marker (§10.2).
+//            exact-search request for the same query.
+//   CK-DR-3: every row renders inline — no fallback marker, no sweep needed.
 //   CK-DR-4: empty estate → matches = [], no crash.
 
 import Testing
@@ -50,11 +47,10 @@ struct DistilledRecallTests {
         return (kit, handle)
     }
 
-    /// Capture one ordinary drawer; optionally distill it (on-row columns).
+    /// Capture one ordinary drawer. Inline rendering requires no sweep step.
     @discardableResult
     private func capture(
         _ content: String,
-        distill: Bool,
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> String {
@@ -66,16 +62,11 @@ struct DistilledRecallTests {
             addedBy: "distilled-recall-tests",
             embeddingModelID: "test-v1")
         let drawer = try await kit.capture(handle, frame)
-        if distill {
-            try await kit.distillItem(
-                handle: handle, drawerID: drawer.id, content: content,
-                distillFn: GeniusLocusKit.defaultDistillFn, now: t0)
-        }
         return drawer.id
     }
 
     /// The exact-search request DistilledRecall mirrors, run directly —
-    /// the §13.4 comparison arm.
+    /// the ranking-equivalence comparison arm.
     private func exactSearchIDs(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, query: String, limit: Int = 20
     ) async throws -> [String] {
@@ -92,34 +83,33 @@ struct DistilledRecallTests {
         return result.hits.compactMap { $0.drawer?.id }
     }
 
-    // MARK: - CK-DR-1: distilled hydration
+    // MARK: - CK-DR-1: inline distilled hydration
 
-    @Test("CK-DR-1: hits hydrate the distilled rendering with token counts")
+    @Test("CK-DR-1: hits hydrate the inline distilled rendering with token counts")
     func distilledHydration() async throws {
         try await withCognitionLock {
             let (kit, handle) = try await openEstate()
             let body = "The reactor schedule moved to March. Sarah approved the reactor plan. "
                 + "The reactor uptime is twelve percent better."
-            let id = try await capture(body, distill: true, kit: kit, handle: handle)
+            let id = try await capture(body, kit: kit, handle: handle)
 
             let output = try await DistilledRecall().run(
                 input: DistilledRecall.Input(query: "reactor schedule"),
                 estate: handle, kit: kit)
 
             let match = try #require(output.matches.first { $0.id == id })
-            #expect(!match.servedFromContent, "a distilled row serves its representation")
-            #expect(match.tokenCount != nil, "per-hit token count must be present (§13.4)")
-            // The payload is the row's distilled column — exactly the
-            // converter's representation of the body. For a short body the
-            // exact-span converter may keep every source byte, so the
-            // contract is identity with the converter, not inequality with
-            // the body.
-            #expect(match.text == GeniusLocusKit.distilledRepresentation(forContent: body))
+            // Every row renders inline — the text is ContextDistillLib's
+            // rendering of the verbatim content. Payload is the converter's
+            // output; for a short body the exact-span converter may keep
+            // every source byte, so the contract is identity with the converter.
+            #expect(match.text == GeniusLocusKit.distilledRendering(of: body))
+            #expect(match.tokenCount == GeniusLocusKit.estimatedTokenCount(of: match.text),
+                "per-hit token count must equal estimatedTokenCount for the rendered text")
             #expect(!match.text.hasPrefix("[DIST|"))
         }
     }
 
-    // MARK: - CK-DR-2: recall equivalence (§13.4)
+    // MARK: - CK-DR-2: recall equivalence
 
     @Test("CK-DR-2: ranking is identical to the exact-search path (ids and order)")
     func recallEquivalence() async throws {
@@ -130,7 +120,7 @@ struct DistilledRecallTests {
                 "Vendor contracts were renewed yesterday. The vendor is in Geneva. Terms held.",
                 "Travel policy updates landed. Flights require approval. Hotels are capped.",
             ] {
-                _ = try await capture(body, distill: true, kit: kit, handle: handle)
+                _ = try await capture(body, kit: kit, handle: handle)
             }
 
             for query in ["reactor schedule", "vendor Geneva", "travel policy"] {
@@ -139,28 +129,29 @@ struct DistilledRecallTests {
                     input: DistilledRecall.Input(query: query),
                     estate: handle, kit: kit)
                 #expect(distilled.matches.map(\.id) == exact,
-                    "§13.4: distilled recall must rank identically to exact search")
+                    "distilled recall must rank identically to exact search")
             }
         }
     }
 
-    // MARK: - CK-DR-3: §10.2 fallback
+    // MARK: - CK-DR-3: inline rendering on every row
 
-    @Test("CK-DR-3: undistilled rows fall back to content with the marker")
-    func fallbackMarker() async throws {
+    @Test("CK-DR-3: every row renders inline — no sweep needed, no fallback")
+    func everyRowRendersInline() async throws {
         try await withCognitionLock {
             let (kit, handle) = try await openEstate()
-            let body = "The undistilled reactor note stands alone."
-            let id = try await capture(body, distill: false, kit: kit, handle: handle)
+            let body = "The inline rendering note stands alone."
+            let id = try await capture(body, kit: kit, handle: handle)
 
             let output = try await DistilledRecall().run(
-                input: DistilledRecall.Input(query: "reactor note"),
+                input: DistilledRecall.Input(query: "inline rendering note"),
                 estate: handle, kit: kit)
 
             let match = try #require(output.matches.first { $0.id == id })
-            #expect(match.servedFromContent, "§10.2: pre-sweep rows serve content, marked")
-            #expect(match.text == body, "the fallback payload is the verbatim content")
-            #expect(match.tokenCount == nil, "no representation → no stored token count")
+            // Inline rendering: the text is the converter output, computed at
+            // read time. There is no stored column, no sweep, no fallback.
+            #expect(match.text == GeniusLocusKit.distilledRendering(of: body))
+            #expect(match.tokenCount == GeniusLocusKit.estimatedTokenCount(of: match.text))
         }
     }
 

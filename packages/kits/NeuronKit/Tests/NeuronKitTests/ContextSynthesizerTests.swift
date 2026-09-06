@@ -73,7 +73,7 @@ struct ContextSynthesisEngineTests {
         #expect(doc.recommendations[0].contains("broadening the recall frame"))
     }
 
-    @Test("key insights take the first line of up to three rows when no adornment")
+    @Test("key insights take the first line of up to three rows")
     func keyInsightsTakeFirstLineUpToThreeRows() {
         let rows = [
             drawer(content: "line one\nbody body"),
@@ -86,37 +86,10 @@ struct ContextSynthesisEngineTests {
         #expect(doc.keyInsights == ["line one", "single line", "three"])
     }
 
-    // ADORN-STORE-02 v17 — active-adornment augment path (GENIUSLOCUSKIT_SPEC 2.0.0 § 16.2)
-    //
-    // `Drawer` no longer carries an `adornment` field. Active adornments are
-    // fetched separately via `Estate.activeAdornments(drawerIDs:)` and passed
-    // into synthesis as a `[String: String?]` map, keyed by drawer ID,
-    // composed with " || " for multi-minter results (ascending minter-id order).
-    // The engine itself calls no estate verb (C-9 invariant).
-
-    @Test("key insights augment the excerpt with the active adornment")
-    func keyInsightsAugmentWithAdornment() {
-        // The adorned row keeps its first-line excerpt and gains the
-        // adornment as an UNLABELED indented sub-line — the adornment
-        // AUGMENTS, never replaces, and carries no label word. The bare
-        // row is the first content line alone.
-        //
-        // activeAdornments dict simulates the result of
-        // `Estate.activeAdornments(drawerIDs:)` composed to a single String?
-        // per drawer by the caller before invoking synthesize.
-        let adorned = drawer(content: "long content body\nmore body")
-        let bare = drawer(content: "no adornment here\nsecond line")
-        let rows = [adorned, bare]
-        // Compose the single active adornment for the adorned drawer ID.
-        let activeAdornments: [String: String?] = [adorned.id: "adornment short form"]
-        let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
-        let doc = ContextSynthesisEngine.synthesize(page: page, activeAdornments: activeAdornments)
-        #expect(doc.keyInsights == ["long content body\n    adornment short form", "no adornment here"])
-    }
-
-    @Test("key insights fall back to content when adornment absent")
-    func keyInsightsFallbackToContentWhenAdornmentAbsent() {
-        // No active adornments supplied — original first-line content behaviour.
+    @Test("key insights fall back to content for all rows (adornment augmentation removed)")
+    func keyInsightsFallbackToContentForAllRows() {
+        // Adornment augmentation removed in Encoder Rerank Program (2026-09-05).
+        // The synthesizer now always returns the first line of content per row.
         let rows = [
             drawer(content: "first line\nbody"),
             drawer(content: "single line"),
@@ -181,10 +154,6 @@ private func drawer(
     parentNodeId: String = "test-room-node",
     adjectiveBitmap: Int64 = 0
 ) -> Drawer {
-    // `adornment` was a Drawer stored field in the pre-v17 schema.
-    // ADORN-STORE-02 v17 removed it: adornments now live in the
-    // normalized `adornments` table and are fetched via
-    // `Estate.activeAdornments(drawerIDs:)` before synthesis.
     Drawer(
         id: UUID().uuidString,
         content: content,

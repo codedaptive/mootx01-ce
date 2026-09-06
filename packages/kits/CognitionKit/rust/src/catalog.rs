@@ -274,18 +274,10 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
         },
-        // Distillation-family recipes. Descriptions match Swift byte-for-byte
-        // (SPEC_DISTILLATION_STORAGE §3/§10.3 — the factoid tier is retired).
-        RecipeDescriptor {
-            name: "distill".into(),
-            version: "2.0.0".into(),
-            description:
-                "Distill working memory: populate the on-row distilled representation \
-                (token-economical prose) of every active item whose representation \
-                is missing or stale. Idempotent by the NULL predicate."
-                    .into(),
-            required_capabilities: vec![],
-        },
+        // Distilled-recall recipe: exact-search geometry with inline
+        // distilled-representation hydration — the ContextDistillLib converter
+        // runs at read time, so every row renders without a sweep dependency.
+        // Description matches Swift RecipeCatalog.swift byte-for-byte.
         RecipeDescriptor {
             name: "distilled_recall".into(),
             version: "2.0.0".into(),
@@ -293,20 +285,6 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                 "Distilled recall: exact-search geometry over originals with the \
                 hydration selector pinned to `distilled` — identical ranking to \
                 exact search, smaller payloads, per-hit token counts."
-                    .into(),
-            required_capabilities: vec![],
-        },
-        // Force-redistill every active item, then a full derived-lane reindex
-        // (`run_redistill` in redistill.rs; MCP surface `moot_redistill`).
-        RecipeDescriptor {
-            name: "redistill".into(),
-            version: "1.0.0".into(),
-            description:
-                "Force-redistill all active items in the estate and rebuild both recall \
-                indexes (BM25 + dense) from the updated distillates. Unlike moot_distill, \
-                this verb ignores the hasCurrentRepresentation flag and overwrites every \
-                active non-empty item unconditionally, then triggers a full laneScope .all \
-                reindex so BM25 can admit trailer tokens from the distilled text."
                     .into(),
             required_capabilities: vec![],
         },
@@ -347,17 +325,16 @@ mod tests {
 
     #[test]
     fn catalog_lists_all_shipped_recipes() {
-        // All 31 catalog entries register in both versions
+        // All 29 catalog entries register in both versions
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
-        // plus 3 distillation recipes (distill, distilled_recall, redistill —
-        // recollect retired with the factoid tier, SPEC §11)
+        // plus distilled_recall (inline rendering, no sweep dependency)
         // plus the escalation-ladder recipe (walk_recall, D10)
-        // = 31 total.
+        // = 29 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -370,7 +347,6 @@ mod tests {
                 "cohesion",
                 "complexity",
                 "constellation",
-                "distill",
                 "distilled_recall",
                 "drift",
                 "estate_divergence",
@@ -387,7 +363,6 @@ mod tests {
                 "partial_cue_recall",
                 "precedence",
                 "recall_exploratory",
-                "redistill",
                 "rhythm",
                 "shaped_recall",
                 "theme_weather",
@@ -536,16 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn distill_descriptor_matches_swift() {
-        // Byte-for-byte parity anchor with Swift Distill recipe
-        // metadata (`Distill.swift`).
-        let d = recipe_descriptor("distill").unwrap();
+    fn distilled_recall_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift DistilledRecall recipe metadata.
+        let d = recipe_descriptor("distilled_recall").unwrap();
         assert_eq!(d.version, "2.0.0");
         assert_eq!(
             d.description,
-            "Distill working memory: populate the on-row distilled representation \
-            (token-economical prose) of every active item whose representation \
-            is missing or stale. Idempotent by the NULL predicate."
+            "Distilled recall: exact-search geometry over originals with the \
+                hydration selector pinned to `distilled` — identical ranking to \
+                exact search, smaller payloads, per-hit token counts."
         );
         assert!(d.required_capabilities.is_empty());
     }

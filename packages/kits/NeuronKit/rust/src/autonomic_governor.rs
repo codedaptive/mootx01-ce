@@ -1007,7 +1007,7 @@ impl AutonomicGovernor {
 
     /// Register the thirteen standing signals (architecture spec §11.2 + SPEC_ADORNMENT §4)
     /// against this estate's scheduler. Mirrors Swift
-    /// `GeniusLocusKit.registerDefaultStandingSignals(in:vectorStore:huntCycle:anomalyCycle:adornmentCycle:now:)`
+    /// `GeniusLocusKit.registerDefaultStandingSignals(in:vectorStore:huntCycle:anomalyCycle:now:)`
     /// and the resident-daemon bootstrap that calls it.
     ///
     /// Requires a `VectorStore` registered for this estate (the
@@ -1019,16 +1019,20 @@ impl AutonomicGovernor {
     /// store — exactly as the Swift resident does ("no VectorStore → governor
     /// benign-skips signalTick").
     ///
-    /// `hunt_cycle`, `anomaly_cycle`, and `adornment_cycle` mirror the Swift
-    /// `huntCycle:`, `anomalyCycle:`, and `adornmentCycle:` parameters:
+    /// `hunt_cycle` and `anomaly_cycle` mirror the Swift `huntCycle:` and
+    /// `anomalyCycle:` parameters:
     ///
-    /// - `Some(f)` → the live spec factory is used (`ContradictionScoutSignal::spec`,
-    ///   `AnomalySweepSignal::spec`, or `AdornmentPassSignal::spec`), so real
-    ///   estate-coordinator work runs on each hourly fire. Pass the
-    ///   coordinator-backed closure from the resident thread (runtime.rs) here.
+    /// - `Some(f)` → the live spec factory is used (`ContradictionScoutSignal::spec`
+    ///   or `AnomalySweepSignal::spec`), so real estate-coordinator work runs on
+    ///   each hourly fire. Pass the coordinator-backed closure from the resident
+    ///   thread (runtime.rs) here.
     /// - `None` → the no-op `default_spec()` is used, matching the Swift parameter
-    ///   defaults `{ _ in (0, 0) }`, `{ _ in 0 }`, and `{ _ in 0 }`. Correct for
-    ///   test registration contexts and non-resident callers.
+    ///   defaults `{ _ in (0, 0) }` and `{ _ in 0 }`. Correct for test
+    ///   registration contexts and non-resident callers.
+    ///
+    /// `span_encode_cycle` mirrors the Swift `spanEncodeCycle:` parameter: the
+    /// live closure runs one `spanEncode` batch per fire (contract sheet §10);
+    /// `None` registers the no-op default spec.
     ///
     /// Returns the registered `(name, SignalID)` pairs in registration order.
     /// `model_id` defaults to the Swift default `"minilm-v6"` at the call site.
@@ -1038,7 +1042,7 @@ impl AutonomicGovernor {
         now: SystemTime,
         hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
         anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
-        adornment_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        span_encode_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
     ) -> Result<Vec<(String, SchedulerSignalID)>, String> {
         // Read the live VectorStore the same way the Swift resident does. No
         // fabricated fallback store — a missing store means "skip registration",
@@ -1062,7 +1066,7 @@ impl AutonomicGovernor {
 
         let model_id = model_id.into();
         let specs = default_standing_signal_specs(
-            vector_store, model_id, corpus, hunt_cycle, anomaly_cycle, adornment_cycle);
+            vector_store, model_id, corpus, hunt_cycle, anomaly_cycle, span_encode_cycle);
         let now_nanos = system_time_to_nanos(now);
         let scheduler = self.ensure_scheduler();
         let mut registered = Vec::with_capacity(specs.len());

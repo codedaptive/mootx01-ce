@@ -8,12 +8,16 @@
 //!
 //! The policy id is a stable string: `"lex=<value>;dense=<value>"`.
 //!
-//! Gauntlet cells (CDL-03):
+//! Policy ids (kept for stored-setting compatibility):
 //!   A — lex=original; dense=distilled           (`.current`, production default)
 //!   B — lex=originalPlusAdornments; dense=distilled
 //!   C — lex=original; dense=distilledPlusAdornments
 //!   D — lex=originalPlusAdornments; dense=distilledPlusAdornments
 //!   E — lex=original; dense=original             (lexical-only ablation baseline)
+//! Since schema 19 the adornment store and the stored distilled rendering are
+//! gone, so every id composes the same document as E: the content plus the
+//! `ssc_facts` supplement. The ids remain readable so an estate that stored
+//! one still opens; retiring the knob is an open item.
 //!
 //! The id is stored in `corpus_index_state.composition_policy` on every row
 //! the engine indexes (the Swift engine compares it to the configured policy

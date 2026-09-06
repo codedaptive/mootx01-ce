@@ -522,14 +522,17 @@ struct StandingSignalsTests {
 
         // brain-layer governor ownership added TrainingSignal as signal 9; the contradiction
         // scout (hunter background half) is signal 10; P3a added AnomalySweepSignal
-        // as signal 12; SPEC_ADORNMENT §4 added AdornmentPassSignal as signal 13.
+        // as signal 12; ENCODER_RERANK_CONTRACT §10 added SpanEncodeSignal as signal 13
+        // (replaces the former AdornmentPassSignal). Signal 8's slot is empty: the
+        // distilled rendering is computed inline at read time, so no sweep signal
+        // exists for it, and twelve signals register.
         // Any future addition must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 13, "all thirteen standing signals register")
+        #expect(registered.count == 12, "all twelve standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 13)
+        #expect(reports.count == 12)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -563,18 +566,15 @@ struct StandingSignalsTests {
         // decision superseding cookbook §6.4's weekly cadence.
         #expect(TemporalCausalitySignal.defaultCadenceSeconds == 3_600,
             "hourly T fold")
-        // Added 2026-06-19 (Dg4): distillation sweep runs hourly per
-        // architecture spec §11.2, signal 8.
-        #expect(DistillationSignal.defaultCadenceSeconds == 3_600,
-            "distillation sweep runs hourly per architecture spec §11.2")
         // Added 2026-06-20: training-daemon signal runs hourly
-        // matching the distillation-sweep and temporal-causality-fold rhythm.
+        // matching the temporal-causality-fold rhythm.
         #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
             "training-daemon signal runs hourly")
-        // Added 2026-08-23 (SPEC_ADORNMENT §4): adornment-minting pass runs hourly
-        // matching the anomaly-sweep and distillation-sweep cadence family.
-        #expect(AdornmentPassSignal.defaultCadenceSeconds == 3_600,
-            "adornment-minting pass runs hourly per SPEC_ADORNMENT §4")
+        // Updated by ENCODER_RERANK_CONTRACT §10: span-encode drain replaced the
+        // hourly adornment-minting pass. Cadence is REM-ALPHA (30 s) so fresh content
+        // is indexed before queries arrive.
+        #expect(SpanEncodeSignal.defaultCadenceSeconds == 30,
+            "span-encode drain runs every 30 s (REM-ALPHA cadence, contract §10)")
     }
 
     // MARK: - T-population end-to-end

@@ -248,9 +248,9 @@ impl ContainerFingerprintStore {
     /// OR one drawer's bitmaps into its room-level and wing-level rows,
     /// and AND the operational bitmap into the `operationalAND` column.
     ///
-    /// Called on every capture (new drawer, bit 19 clear) and on
-    /// `set_distilled_representation` (bit 19 set). The AND semantics
-    /// handle both correctly:
+    /// Called on every capture (new drawer, bit 19 clear). Bit 19 has no
+    /// writer at schema v19, so the AND aggregate only ever lowers it;
+    /// the semantics stay correct for rows written before v19:
     /// - Capture (bit 19 = 0): ANDs 0 into operationalAND → lowers bit 19
     ///   (safe; room will not be skipped by the sweep).
     /// - Distillation (bit 19 = 1): ANDs 1 → no change to bit 19 in AND
@@ -411,7 +411,7 @@ impl ContainerFingerprintStore {
     /// an existing estate's aggregates complete and accurate.
     ///
     /// This is the ONLY path that can raise an AND bit (correct a stale
-    /// under-approximation from a session that added new distilled rows).
+    /// under-approximation left by a session's captures).
     ///
     /// `node_names` maps each drawer's `parent_node_id` to its resolved
     /// `(wing_name, room_name)` pair from the node tree. Drawers whose

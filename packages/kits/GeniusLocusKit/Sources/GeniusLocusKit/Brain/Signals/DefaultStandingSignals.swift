@@ -2,14 +2,16 @@ import Foundation
 import LocusKit
 import SynapseKit
 
-/// Registration helper for the thirteen standing signals — architecture
+/// Registration helper for the twelve standing signals — architecture
 /// spec §11.2 plus the contradiction scout (signal 10, the hunter's
 /// background half), consolidation sweep (signal 11), the
-/// anomaly-flag sweep (signal 12, P3a), and the adornment-minting
-/// pass (signal 13, SPEC_ADORNMENT §4).
+/// anomaly-flag sweep (signal 12, P3a), and the span-encode drain
+/// (signal 13, ENCODER_RERANK_CONTRACT §10 — replaces adornment pass).
+/// Signal 8's slot (the stored-distillation sweep) is empty: the distilled
+/// rendering is computed inline at read time, so nothing sweeps for it.
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// thirteen default signal specs against the addressed estate's scheduler
+/// twelve default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -25,11 +27,6 @@ import SynapseKit
 /// `defaultSpec()` (diagnostic no-op); production callers wire a live
 /// fold closure via `TemporalCausalitySignal.spec(foldCycle:)`.
 ///
-/// Signal 8 (DistillationSignal) was wired in DG5. Production callers
-/// supply a `distillationCycle` closure that runs the per-item
-/// distillation sweep and returns the count of items distilled
-/// (drawer rows whose representation columns were populated).
-///
 /// Signal 9 (TrainingSignal) was wired. Production
 /// callers supply a `trainingCycle` closure that invokes
 /// `TrainingDaemon.runOnce` against the estate's audit log, matrix
@@ -43,13 +40,14 @@ import SynapseKit
 /// `kit.anomalyFlagSweep(handle:now:)` and returns the count of
 /// drawers whose `isAnomalous` bit changed.
 ///
-/// Signal 13 (AdornmentPassSignal) was wired in GENIUSLOCUSKIT_SPEC 2.0.0 § 16.
-/// Production callers supply an `adornmentCycle` closure that wraps
-/// `AdornmentPass.run(estate:now:)` with the estate handle and returns
-/// the count of (drawer, minter) pairs whose adornment was minted and stored.
+/// Signal 13 (SpanEncodeSignal) replaces the former AdornmentPassSignal.
+/// Production callers supply a `spanEncodeCycle` closure that wraps
+/// `kit.runSpanEncodeBatch(handle:encoder:store:now:)` with the estate,
+/// encoder, and vector store; the drain encodes unindexed drawers into
+/// int8 span vectors (contract §3) and sets bit 27 (spanIndexed) on success.
 public extension GeniusLocusKit {
 
-    /// Names of the thirteen standing signals, in the order they are
+    /// Names of the twelve standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -63,11 +61,10 @@ public extension GeniusLocusKit {
             ByReferenceValiditySignal.signalName,
             EndOfDayTournamentSignal.signalName,
             TemporalCausalitySignal.signalName,
-            DistillationSignal.signalName,
             TrainingSignal.signalName,
             ConsolidationSignal.signalName,
             AnomalySweepSignal.signalName,
-            AdornmentPassSignal.signalName,
+            SpanEncodeSignal.signalName,
         ]
     }
 
@@ -89,13 +86,6 @@ public extension GeniusLocusKit {
     ///     re-dispatching already-persisted frames (single-write invariant).
     ///     Defaults to a no-op that returns zero — correct for test
     ///     registration where no live daemon is available.
-    ///   - distillationCycle: async closure forwarded to
-    ///     `DistillationSignal.spec(distillationCycle:)`. The caller wraps
-    ///     the per-item distillation sweep (`kit.distillItemsSweep`) with
-    ///     the estate handle and `GeniusLocusKit.defaultDistillFn` (the p1
-    ///     contract) here. Defaults to a no-op that returns zero — correct
-    ///     for test registration where no live distillation engine is
-    ///     available.
     ///   - trainingCycle: async closure forwarded to
     ///     `TrainingSignal.spec(trainingCycle:)`. The caller wraps
     ///     `TrainingDaemon.runOnce` with the estate's audit log, matrix
@@ -117,13 +107,14 @@ public extension GeniusLocusKit {
     ///     the sweep sets/clears bit 26 and the closure returns the count of
     ///     changed drawers. Defaults to a no-op returning zero — correct for
     ///     test registration where no live sweep is wired.
-    ///   - adornmentCycle: async closure forwarded to
-    ///     `AdornmentPassSignal.spec(adornmentCycle:)`. The caller wraps
-    ///     `AdornmentPass.run(estate:now:)` with the estate here;
-    ///     the pass mints adornments for (drawer, minter) pairs without an
-    ///     adornment row and returns the count of pairs adorned.
+    ///   - spanEncodeCycle: async closure forwarded to
+    ///     `SpanEncodeSignal.spec(spanEncodeCycle:)`. The caller wraps
+    ///     `kit.runSpanEncodeBatch(handle:encoder:store:now:)` with the estate
+    ///     handle, the session's active `SpanEncoder`, and the estate's
+    ///     `VectorStore` here; the drain encodes drawers with bit 27 clear into
+    ///     int8 span rows and sets bit 27 (spanIndexed, contract §5) on success.
     ///     Defaults to a no-op returning zero — correct for test registration
-    ///     where no live generator is available.
+    ///     where no live encoder is wired.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -137,12 +128,11 @@ public extension GeniusLocusKit {
         in handle: EstateHandle,
         vectorStore: VectorStore,
         dreamingCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
-        distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" },
         huntCycle: @escaping @Sendable (Date) async throws -> (proposed: Int, borderline: Int)
             = { _ in (0, 0) },
         anomalyCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
-        adornmentCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
+        spanEncodeCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
@@ -160,7 +150,7 @@ public extension GeniusLocusKit {
             // Contradiction scout — the hunter's background half. The caller
             // wraps kit.huntContradictions with the estate's handle/model;
             // the no-op default is appropriate for tests without a wired
-            // hunter (same convention as dreaming/distillation/training).
+            // hunter (same convention as dreaming/training).
             ContradictionScoutSignal.spec(huntCycle: huntCycle),
             DecaySweepSignal.defaultSpec(),
             ByReferenceValiditySignal.defaultSpec(),
@@ -173,11 +163,6 @@ public extension GeniusLocusKit {
             // context (audit log, mutable MatrixTier) without breaking the
             // method's generic signature.
             TemporalCausalitySignal.defaultSpec(),
-            // DistillationSignal wired with the injected distillationCycle closure
-            // per architecture spec §11.2, signal 8 (DG5). The caller supplies
-            // a closure that runs the per-item distillation sweep; the default
-            // no-op (returns 0) is appropriate for tests without a live sweep engine.
-            DistillationSignal.spec(distillationCycle: distillationCycle),
             // TrainingSignal wired with the injected trainingCycle closure per
             // brain-layer governor ownership. The caller wraps TrainingDaemon.runOnce against the
             // estate's audit log, matrix tier, and calibration registry. The
@@ -201,13 +186,14 @@ public extension GeniusLocusKit {
             // no-op is appropriate for test registration where no live
             // sweep is available.
             AnomalySweepSignal.spec(anomalyCycle: anomalyCycle),
-            // AdornmentPassSignal (GENIUSLOCUSKIT_SPEC 2.0.0 § 16, signal 13):
-            // hourly dream-time minting pass that writes StoredAdornment rows for
-            // (drawer, active minter) pairs without an adornment row. The caller
-            // wraps AdornmentPass.run(estate:now:) with the estate;
+            // SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10, signal 13):
+            // REM-ALPHA (30 s) drain that encodes drawers with bit 27 clear
+            // into int8 span vectors (vectors_v6) and sets bit 27 (spanIndexed)
+            // on success. Replaces the hourly AdornmentPassSignal. The caller
+            // wraps kit.runSpanEncodeBatch(handle:encoder:store:now:);
             // the default no-op is appropriate for test registration where
-            // no live generator is available.
-            AdornmentPassSignal.spec(adornmentCycle: adornmentCycle),
+            // no live encoder is wired.
+            SpanEncodeSignal.spec(spanEncodeCycle: spanEncodeCycle),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

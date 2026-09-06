@@ -147,11 +147,19 @@ public extension GeniusLocusKit {
     func capture(_ handle: EstateHandle, _ frame: CaptureFrame) async throws -> Drawer {
         try requireMounted(handle, verb: "capture")
         let estate = try estate(for: handle)
+        let drawer: Drawer
         do {
-            return try await estate.capture(frame)
+            drawer = try await estate.capture(frame)
         } catch {
             throw remap(verb: "capture", estateID: handle.estateUUID.uuidString, error: error)
         }
+        // SSC facts (contract sheet §6) ride every content write: written
+        // right after the row lands and before any encode reads the column,
+        // because the corpus adapter composes the BM25 document from it.
+        // Every capture path (mode-aware, importers, seeding) funnels through
+        // this verb, so this is the one door for the facts write.
+        await writeSSCFacts(handle: handle, drawer: drawer)
+        return drawer
     }
 
     // MARK: - recall
@@ -490,7 +498,7 @@ public extension GeniusLocusKit {
         var adjectiveBitmap: Int64 = 0
         var provenanceBitmap: Int64 = 0
         if !sourceDrawerID.isEmpty {
-            let estate = try await estate(for: handle)
+            let estate = try estate(for: handle)
             guard let source = try await estate.getDrawers(
                 ids: [sourceDrawerID],
                 hydrationLevel: .structured
@@ -847,7 +855,7 @@ public extension GeniusLocusKit {
                             itemID: deleteId,
                             modelID: modelID
                         )
-                    } else if let vectorStore {
+                    } else if vectorStore != nil {
                         throw VerbError.crossKitVectorDeleteFailed(
                             rowID: deleteId,
                             reason: "standalone VectorStore registered without a Corpus — modelID unavailable for deleteAllVectors; manual cleanup required for estate \(handle.estateUUID.uuidString)"

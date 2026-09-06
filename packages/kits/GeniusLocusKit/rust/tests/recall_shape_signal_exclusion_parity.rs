@@ -154,21 +154,46 @@ fn signal_agreement_exclusion_lowers_every_final() {
     }
 }
 
+/// The back-compat contract extends to the `signal:*` namespace through
+/// `RecallShape::default_weight`: a None shape fuses byte-identically to a shape
+/// that spells every key's default explicitly (1.0 everywhere, 0 for
+/// `signal:vector`), and therefore to the `no_vector` preset. Mutation control:
+/// spelling `signal:vector` at 1.0 instead changes the finals (the vector
+/// budget re-enters the redistribution). Mirrors Swift test (c).
 #[test]
-fn none_shape_equals_all_ones_signal_keys() {
+fn none_shape_equals_default_signal_keys_and_no_vector() {
     let (mut coord, h) = two_drawer_estate();
     coord.register_graph_cache(&h, Arc::new(ConstantGraphCache { score: 0.8 }));
-    let ones: Vec<(&str, f32)> = ALL_SIGNAL_KEYS.iter().map(|k| (*k, 1.0)).collect();
+    let defaults: Vec<(&str, f32)> = ALL_SIGNAL_KEYS
+        .iter()
+        .map(|k| (*k, RecallShape::default_weight(k)))
+        .collect();
+    assert!(defaults.contains(&(RecallShape::SIGNAL_VECTOR, 0.0)));
     let neutral = coord.recall_scored(&h, matrix_req(None), NOW + 10).expect("neutral");
     let explicit = coord
-        .recall_scored(&h, matrix_req(Some(shape(&ones))), NOW + 11)
+        .recall_scored(&h, matrix_req(Some(shape(&defaults))), NOW + 11)
         .expect("explicit");
+    let no_vector = coord
+        .recall_scored(&h, matrix_req(RecallShape::preset("no_vector")), NOW + 12)
+        .expect("no_vector");
     let ids_a: Vec<&str> = neutral.hits.iter().map(|x| x.id.as_str()).collect();
     let ids_b: Vec<&str> = explicit.hits.iter().map(|x| x.id.as_str()).collect();
     assert_eq!(ids_a, ids_b);
     let f_a: Vec<f32> = neutral.hits.iter().map(|x| x.score.final_score).collect();
     let f_b: Vec<f32> = explicit.hits.iter().map(|x| x.score.final_score).collect();
+    let f_c: Vec<f32> = no_vector.hits.iter().map(|x| x.score.final_score).collect();
     assert_eq!(f_a, f_b);
+    assert_eq!(f_a, f_c);
+
+    let mut vector_on = defaults.clone();
+    for pair in vector_on.iter_mut() {
+        if pair.0 == RecallShape::SIGNAL_VECTOR { pair.1 = 1.0; }
+    }
+    let with_vector = coord
+        .recall_scored(&h, matrix_req(Some(shape(&vector_on))), NOW + 13)
+        .expect("with_vector");
+    let f_d: Vec<f32> = with_vector.hits.iter().map(|x| x.score.final_score).collect();
+    assert_ne!(f_a, f_d, "asking for the vector column must change the redistributed finals");
 }
 
 #[test]
@@ -182,6 +207,7 @@ fn ablation_presets_set_one_signal_key_each() {
         ("no_agreement", RecallShape::SIGNAL_AGREEMENT),
         ("no_bm25", RecallShape::SIGNAL_BM25),
         ("no_vector", RecallShape::SIGNAL_VECTOR),
+        ("no_encoder", RecallShape::SIGNAL_ENCODER),
     ];
     for (name, key) in expected {
         let s = RecallShape::preset(name).unwrap_or_else(|| panic!("preset {name} must resolve"));

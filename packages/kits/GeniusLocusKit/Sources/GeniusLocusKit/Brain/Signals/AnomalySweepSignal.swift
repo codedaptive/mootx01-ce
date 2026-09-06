@@ -11,11 +11,11 @@ import Foundation
 /// `AnomalyDetection`). Rooms below `anomalySweepMinRoomSize` (3) have
 /// bit 26 cleared on all members.
 ///
-/// Mirrors `DistillationSignal` exactly in structure: hourly cadence,
+/// Mirrors `TemporalCausalitySignal` in structure: hourly cadence,
 /// `.single` concurrency, diagnostic-only emission, injected closure for
-/// the live cycle. Registered 12th in `registerDefaultStandingSignals`.
+/// the live cycle. Registered by `registerDefaultStandingSignals`.
 ///
-/// Usage pattern (mirrors DistillationSignal):
+/// Usage pattern (mirrors TemporalCausalitySignal):
 ///
 ///     let spec = AnomalySweepSignal.spec { now in
 ///         return try await kit.anomalyFlagSweep(handle: handle, now: now)
@@ -26,8 +26,8 @@ import Foundation
 /// `defaultSpec()`, which fires a diagnostic-only no-op.
 public enum AnomalySweepSignal {
 
-    /// Hourly cadence in seconds — same family as the distillation sweep
-    /// and training-daemon tick (architecture spec §11.2).
+    /// Hourly cadence in seconds — same family as the temporal-causality
+    /// fold and training-daemon tick (architecture spec §11.2).
     public static let defaultCadenceSeconds: TimeInterval = 3_600
 
     /// Stable name surfaced in `SignalReport.name` and in

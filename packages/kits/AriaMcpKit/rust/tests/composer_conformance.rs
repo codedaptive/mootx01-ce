@@ -11,18 +11,17 @@
 //! in either port must be resolved by updating the fixture — both ports
 //! change together.
 //!
-//! Adornment ordering: the spec requires active_adornments in CandidateRowData
-//! to arrive in ascending minter-ID order (caller's responsibility). This test
-//! is the caller; it sorts by minter_id ascending before constructing
-//! CandidateRowData, so the golden output reflects pre-sorted input.
+//! Row format (ENC-W6B): uuid · subject · bestSpan · sscFacts · eventTime · score (S1)
+//!                       uuid · subject · bestSpan · sscFacts · eventTime (S2)
+//! activeAdornments, firstSentence, and ssc (object) are removed from the row schema.
 
 use std::path::Path;
 
 use aria_mcp::result_composer::{
     self,
-    AdornmentEntry, BatchGetEntry, CandidateRowData, ControlSignals, EdgeRow,
+    BatchGetEntry, CandidateRowData, ControlSignals, EdgeRow,
     FactSearchRow, FactTimelineRow, FederatedSection, FullRecordData, FullRecordTunnel,
-    SemanticSearchCandleData, SynthesisData, TabularCellValue, TabularColumnStats, TabularQueryData,
+    SynthesisData, TabularCellValue, TabularColumnStats, TabularQueryData,
     TabularStatsData, TemporalCapability,
 };
 
@@ -52,46 +51,20 @@ fn load_cases() -> Vec<serde_json::Value> {
 // ─── decoding helpers ─────────────────────────────────────────────────────────
 
 /// Decode one CandidateRowData from a fixture row JSON object.
-/// Sorts active_adornments by minter_id ascending (caller's responsibility
-/// per the spec).
+/// Row format (ENC-W6B): uuid · subject · bestSpan · sscFacts · eventTime · score (S1).
 fn decode_candidate_row(json: &serde_json::Value) -> CandidateRowData {
     let id = json["id"].as_str().unwrap_or("").to_string();
     let subject = json["subject"].as_str().map(|s| s.to_string());
-    let first_sentence = json["firstSentence"].as_str().map(|s| s.to_string());
-    // Fixture key "ssc" is the frozen wire literal; the decoded type is the
-    // renamed SemanticSearchCandleData.
-    let candle = if json["ssc"].is_null() || json["ssc"].is_object() && json["ssc"].as_object().map(|o| o.is_empty()).unwrap_or(true) && json["ssc"].is_null() {
-        None
-    } else {
-        json["ssc"].as_object().map(|o| SemanticSearchCandleData {
-            kind: o.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            entities: o.get("entities")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|e| e.as_str().map(|s| s.to_string())).collect())
-                .unwrap_or_default(),
-        })
-    };
-    // Sort by minter_id ascending — caller's responsibility per the spec.
-    let mut adornments: Vec<AdornmentEntry> = json["activeAdornments"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .map(|a| AdornmentEntry {
-            minter_id: a["minterID"].as_str().unwrap_or("").to_string(),
-            text: a["text"].as_str().unwrap_or("").to_string(),
-        })
-        .collect();
-    adornments.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
-
+    let best_span = json["bestSpan"].as_str().map(|s| s.to_string());
+    let ssc_facts = json["sscFacts"].as_str().map(|s| s.to_string());
     let event_time = json["eventTime"].as_str().unwrap_or("").to_string();
     let score = json["score"].as_f64();
 
     CandidateRowData {
         id,
         subject,
-        first_sentence,
-        semantic_search_candle: candle,
-        active_adornments: adornments,
+        best_span,
+        ssc_facts,
         event_time,
         score,
         room: json["room"].as_str().map(|s| s.to_string()),
@@ -278,22 +251,11 @@ fn verify_case(tc: &serde_json::Value) {
                     label: t["label"].as_str().unwrap_or("").to_string(),
                 })
                 .collect();
-            // Sort adornments ascending by minter_id (caller's responsibility).
-            let mut adornments: Vec<AdornmentEntry> = rec["activeAdornments"]
-                .as_array().unwrap_or(&vec![])
-                .iter()
-                .map(|a| AdornmentEntry {
-                    minter_id: a["minterID"].as_str().unwrap_or("").to_string(),
-                    text: a["text"].as_str().unwrap_or("").to_string(),
-                })
-                .collect();
-            adornments.sort_by(|a, b| a.minter_id.cmp(&b.minter_id));
             let record = FullRecordData {
                 id: rec["id"].as_str().unwrap_or("").to_string(),
                 room: rec["room"].as_str().unwrap_or("").to_string(),
                 wing: rec["wing"].as_str().unwrap_or("").to_string(),
                 subject: rec["subject"].as_str().map(|s| s.to_string()),
-                active_adornments: adornments,
                 filed_at: rec["filedAt"].as_str().unwrap_or("").to_string(),
                 event_time: rec["eventTime"].as_str().unwrap_or("").to_string(),
                 state: rec["state"].as_str().unwrap_or("").to_string(),

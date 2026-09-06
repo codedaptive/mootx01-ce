@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // PpmiTests.swift
 //
 // Conformance and correctness tests for PpmiProvider.
@@ -428,3 +431,5 @@ struct PpmiTests {
         provider.finalize()
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

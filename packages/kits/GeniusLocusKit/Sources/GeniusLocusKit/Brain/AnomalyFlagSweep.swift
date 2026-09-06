@@ -98,8 +98,8 @@ extension GeniusLocusKit {
         var changed = 0
 
         // Rooms-first sweep: enumerate room-level fingerprint entries,
-        // then load drawers per room. Matches the distillItemsSweep
-        // iteration pattern (DistillationCycle.swift) for consistency.
+        // then load drawers per room. Matches the subject backfill's
+        // iteration pattern (SubjectBackfillCycle.swift) for consistency.
         let rooms = try await estate.roomLevelFingerprints()
 
         for entry in rooms {

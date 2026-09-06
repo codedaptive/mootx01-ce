@@ -161,15 +161,23 @@ public actor GeniusLocusKit {
     /// LocusKit `Drawer` rows. Dropped when the estate is closed.
     internal var vectorStores: [EstateHandle: VectorStore] = [:]
 
-    /// Per-estate distillation function override for the drain-stage path
-    /// (SPEC_DISTILLATION_STORAGE §7.1). When absent, the drain-stage
-    /// distills with `GeniusLocusKit.defaultDistillFn` — the p1 contract
-    /// (intra-item pipeline, default extractor). Test scaffolds register a
-    /// stub via `registerDistillationFunction(_:for:)`; production wiring
-    /// never needs to (the p1 contract pins ONE function so drain-stage
-    /// and sweep renderings are byte-identical). Dropped on close.
-    internal var distillFunctions:
-        [EstateHandle: @Sendable (DistillationInput) -> DistillationOutput] = [:]
+    /// Per-estate `SpanEncoder` for the recall rerank stage and the
+    /// `spanEncode` duty. Populated by `activateSpanEncoder(for:)` when the
+    /// estate's `embedding_provider` is `"encoder"` and the model loads;
+    /// absent otherwise (lexical-only recall). Dropped when the estate is
+    /// closed. See EncoderActivation.swift.
+    internal var spanEncoders: [EstateHandle: any SpanEncoder] = [:]
+
+    /// Where encoder model directories live on this device. The bundling
+    /// unit installs the production resolver via
+    /// `setModelDirectoryResolver(_:)`; the default answers `nil` for every
+    /// model id, so an estate provisioned with `"encoder"` on a device
+    /// without the model runs lexical-only.
+    internal var modelDirectoryResolver: any ModelDirectoryResolving = NilModelDirectoryResolver()
+    /// Per-estate span rerank seams (encoder + span rows + head), registered by
+    /// `registerSpanRerank(_:spanVectors:head:for:)`. Absent ⇒ the unionBest
+    /// lane skips the span rerank stage (lexical-only, contract sheet §7).
+    internal var spanRerankSources: [EstateHandle: SpanRerankSource] = [:]
 
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the
@@ -473,19 +481,30 @@ public extension GeniusLocusKit {
         vectorStores[handle] = store
     }
 
-    /// Register a distillation-function override for the given estate's
-    /// drain-stage path (SPEC_DISTILLATION_STORAGE §7.1). Test scaffolds
-    /// inject stubs here; production wiring omits it and the drain-stage
-    /// runs `GeniusLocusKit.defaultDistillFn` (the p1 contract — one
-    /// function for drain-stage AND sweep, so renderings are
-    /// byte-identical regardless of which path produced them).
+    /// Register the span rerank seams for the given estate handle (Encoder
+    /// Rerank Program, contract sheet §7/§8): the query-side encoder built from
+    /// the active `encoder_models` row, the span-row reader (the estate's
+    /// SynapseKit store), and the head size (`encoder_head`, default
+    /// `SpanRerankStage.defaultEncoderHead`). The unionBest lane runs the span
+    /// rerank stage only while a source is registered; the lifecycle registers
+    /// one when the manifest key `embedding_provider` is `"encoder"` and the
+    /// model loaded, and registers nothing when the model is unavailable, so an
+    /// estate without an encoder recalls lexical-only with no error.
     ///
-    /// Re-registering replaces the existing entry.
-    func registerDistillationFunction(
-        _ distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+    /// Re-registering replaces the existing entry; `close` drops it.
+    ///
+    /// - Parameters:
+    ///   - encoder: the query encoder for the active model.
+    ///   - spanVectors: the span-row reader keyed by drawer id.
+    ///   - head: the number of lexical candidates the encoder reranks.
+    ///   - handle: the estate these seams serve. Must be open.
+    func registerSpanRerank(
+        _ encoder: any SpanRerankEncoding,
+        spanVectors: any SpanVectorReading,
+        head: Int = SpanRerankStage.defaultEncoderHead,
         for handle: EstateHandle
     ) {
-        distillFunctions[handle] = distillFn
+        spanRerankSources[handle] = SpanRerankSource(encoder: encoder, store: spanVectors, head: max(1, head))
     }
 
     /// The `VectorStore` registered for `handle`, or `nil` when none has been

@@ -669,7 +669,7 @@ enum LensTools {
                     result.admissible.map { d in
                         let row = CandidateRowData(
                             id: d.id, subject: d.subject,
-                            firstSentence: d.content.isEmpty ? nil : d.content,
+                            bestSpan: d.content.isEmpty ? nil : d.content,
                             eventTime: ResultComposer.iso8601(d.eventTime))
                         return (d.id, ResultComposer.renderS2Row(row))
                     })

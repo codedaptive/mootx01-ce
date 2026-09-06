@@ -17,10 +17,8 @@ struct RecipeCatalogTests {
         // Every catalog descriptor registers (LENS_DISCOVERABILITY_DECISION v2.0):
         // the 2 foundational recipes plus the 16 reasoning lenses plus the 3
         // analytics lenses plus the 4 temporal/entropy lenses plus shaped_recall,
-        // recall_exploratory, the 2 distillation-family recipes, the walk_recall
-        // escalation-ladder recipe (D10), and redistill (CDL-02) = 31 total.
-        // Catalog/descriptor parity is verified here; the Rust distillation entries
-        // have catalog descriptors but not full Rust recipe bodies in the Rust kit.
+        // recall_exploratory, distilled_recall, and the walk_recall
+        // escalation-ladder recipe (D10) = 29 total.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
             "apriori_rules",
@@ -29,7 +27,6 @@ struct RecipeCatalogTests {
             "cohesion",
             "complexity",
             "constellation",
-            "distill",
             "distilled_recall",
             "drift",
             "estate_divergence",
@@ -46,7 +43,6 @@ struct RecipeCatalogTests {
             "partial_cue_recall",
             "precedence",
             "recall_exploratory",
-            "redistill",
             "rhythm",
             "shaped_recall",
             "theme_weather",
@@ -94,14 +90,12 @@ struct RecipeCatalogTests {
         #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
     }
 
-    @Test("catalog names match catalog.rs declaration order — 31 entries")
+    @Test("catalog names match catalog.rs declaration order — 29 entries")
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
-        // All 31 entries are registered in both Swift and Rust. The
-        // distillation-family entries (distill, distilled_recall, redistill)
-        // carry descriptor metadata in Rust. Any reordering on either side, or a
-        // Swift recipe absent from this list, breaks this test — that is its
-        // purpose.
+        // All 29 entries are registered in both Swift and Rust. Any reordering
+        // on either side, or a Swift recipe absent from this list, breaks this
+        // test — that is its purpose.
         #expect(RecipeCatalog.names == [
             "grounded_synthesis",
             "migration_benchmark",
@@ -130,9 +124,7 @@ struct RecipeCatalogTests {
             "complexity",
             "shaped_recall",
             "recall_exploratory",
-            "distill",
             "distilled_recall",
-            "redistill",
             "walk_recall",
         ])
     }

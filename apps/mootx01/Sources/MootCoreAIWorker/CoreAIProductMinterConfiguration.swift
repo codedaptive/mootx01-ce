@@ -4,7 +4,9 @@
 // intentionally narrower than the benchmark harness: selecting Core AI does
 // not expose an arbitrary command, model family, prompt style, or token budget.
 
-#if os(macOS) && canImport(CoreAI)
+// Gated behind MOOTX01_MINERS: adornments are dark (Encoder Rerank Program,
+// 2026-09-05). Build with that define to enable Core AI minter configuration.
+#if MOOTX01_MINERS && os(macOS) && canImport(CoreAI)
 import AdornmentLib
 import Foundation
 

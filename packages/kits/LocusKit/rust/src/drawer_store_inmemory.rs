@@ -83,8 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use adornment_lib::{AdornmentMinterDescriptor, StoredAdornment};
-use crate::drawer_store::{AdornmentDebt, DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
+use crate::drawer_store::{DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -153,23 +152,13 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "wikidataQID",
     "wikidataQidsSecondary",
     "ext",
-    // Distilled representation metadata (SPEC_DISTILLATION_STORAGE §6)
-    // rides the structured projection — the context-budgeting signal at
-    // a few bytes per row. The `distilled` TEXT column itself is
-    // projected away like `content` (both text columns stay no-blob);
-    // `drawer_from_row` decodes its absence to None.
-    "distilled_pipeline_version",
-    "distilled_token_count",
-    "distilled_at",
-    "distilled_source_digest",
-    // Subject trio (PR-01): the subject IS structured-tier data — it
-    // exists precisely so candidate rows can be judged without hydrating
-    // content, so the structured projection carries all three.
+    // ssc_facts and the subject trio are short derived text that exists
+    // precisely so a candidate row can be judged and rendered without
+    // hydrating content, so both ride the structured projection.
+    "ssc_facts",
     "subject",
     "subject_pipeline_version",
     "subject_at",
-    // Adornment text was removed from drawer rows (ADORN-STORE-02 v17).
-    // Adornment rows live in the adornments table keyed by (drawer_id, minter_id).
 ];
 
 // ---------------------------------------------------------------------------
@@ -2020,17 +2009,12 @@ impl DrawerStore for DrawerStoreCore {
         .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
-        // zero the content blob, stamp tombstonedAt. The distilled
-        // representation is content-derived text — the scrub clears it
-        // (and the has_current_representation bit) in the same statement
+        // zero the content blob, stamp tombstonedAt. The content-derived
+        // columns (ssc_facts, subject trio) are NULLed and the
+        // content-derived bits (19, 27) cleared in the same statement
         // (destruction contract, SPEC §2; cookbook §2.4.1).
         let row_store = self.storage.row_store();
-        // Tombstone: clear hasCurrentRepresentation. Bits 27-30 are FREE
-        // (ADORN-STORE-02 v17). Adornment rows for this drawer are deleted
-        // from the adornments table below (same transaction semantics via
-        // the in-memory storage).
-        let cleared_op =
-            prior_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let cleared_op = prior_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
             "adjectiveBitmap".to_string(),
@@ -2042,7 +2026,7 @@ impl DrawerStore for DrawerStoreCore {
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
-        // Clear distilled + subject representation columns.
+        // Clear the content-derived columns (ssc_facts, subject trio).
         insert_cleared_representation(&mut update_vals);
         // Fold the recomputed content_fingerprint into the SAME update
         // (LocusKitSchema v9) rather than a separate write. Refreshed
@@ -2066,16 +2050,6 @@ impl DrawerStore for DrawerStoreCore {
                 ),
             )
             .map_err(map_storage_err)?;
-
-        // Delete adornment rows for this drawer (ADORN-STORE-02 v17 estate verbs rule):
-        // adornments are content-derived; tombstoned drawers lose their adornment rows.
-        let _ = row_store.delete(
-            "adornments",
-            &StoragePredicate::Eq(
-                Column::new("adornments", "drawer_id"),
-                TypedValue::Text(drawer_id.to_string()),
-            ),
-        );
 
         // Record head drawer in the erasure ledger.
         // Direct row_store insert — mirrors Swift ErasureLedgerOps.
@@ -2151,10 +2125,8 @@ impl DrawerStore for DrawerStoreCore {
                 let sib_op = self
                     .read_drawer_bitmap(sibling_id, "operationalBitmap")
                     .unwrap_or(0);
-                // Tombstone: clear hasCurrentRepresentation. Bits 27-30 are FREE
-                // (ADORN-STORE-02 v17); adornment rows deleted separately.
-                let sib_cleared_op =
-                    sib_op & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+                // Tombstone: clear the content-derived bits (19, 27).
+                let sib_cleared_op = sib_op & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
                 vals.insert(
@@ -2220,10 +2192,9 @@ impl DrawerStore for DrawerStoreCore {
                 );
 
                 if let Ok(sib_event) = sib_result {
-                    // Tombstone: clear hasCurrentRepresentation (bit 19).
-                    // Bits 27-30 are FREE (ADORN-STORE-02 v17).
+                    // Tombstone: clear the content-derived bits (19, 27).
                     let sib_cleared_op =
-                        sib_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+                        sib_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                     let mut vals = BTreeMap::new();
                     vals.insert(
                         "adjectiveBitmap".to_string(),
@@ -2426,45 +2397,52 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
-    /// Write the distilled representation of one drawer — all five columns
-    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
-    /// together or populated together). Also sets bit 19
-    /// (`HAS_CURRENT_REPRESENTATION`) in `operational_bitmap` in the same
-    /// UPDATE so the bit and the five columns are always in agreement
-    /// (cookbook §2.4.1). Read-then-update in the same synchronous call:
-    /// the in-memory and SQLite backends serialize via their own locking,
-    /// so TOCTOU is not a concern here. Direct column write: no audit
-    /// event, no supersession cascade, no lifecycle/lineage field, no
-    /// content digest/revision bump (§9 search isolation).
-    ///
-    /// Mirrors Swift `DrawerStore.setDistilledRepresentation`.
-    fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        source_digest: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
+    /// Write (or clear, with `None`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6). A direct column write like the subject line: no audit
+    /// event, no supersession cascade, no lifecycle/lineage field, no content
+    /// digest bump. Returns the count of rows updated (0 = drawer not
+    /// found). Mirrors Swift `DrawerStore.setSSCFacts(_:for:)`.
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
         if drawer_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
                 "drawerId must not be empty".to_string(),
             ));
         }
-        if distilled.is_empty() {
+        if facts == Some("") {
             return Err(LocusKitError::InvalidContent(
-                "distilled must not be empty".to_string(),
+                "ssc_facts must be None or non-empty".to_string(),
             ));
         }
-        if pipeline_version.is_empty() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "ssc_facts".to_string(),
+            facts
+                .map(|f| TypedValue::Text(f.to_string()))
+                .unwrap_or(TypedValue::Null),
+        );
+        self.storage
+            .row_store()
+            .update(
+                T_DRAWERS,
+                values,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(drawer_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)
+    }
+
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write like `set_anomalous_flag`; returns 0 when the
+    /// drawer is not found or the bit is already set. Mirrors Swift
+    /// `DrawerStore.setSpanIndexed(drawerId:)`.
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
-                "pipelineVersion must not be empty".to_string(),
-            ));
-        }
-        if source_digest.is_empty() {
-            return Err(LocusKitError::InvalidContent(
-                "sourceDigest must not be empty".to_string(),
+                "drawerId must not be empty".to_string(),
             ));
         }
         let row_store = self.storage.row_store();
@@ -2472,14 +2450,6 @@ impl DrawerStore for DrawerStoreCore {
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
-        // Read the current bitmap fields:
-        //   operationalBitmap — to set bit 19 (HAS_CURRENT_REPRESENTATION) in
-        //     the same UPDATE as the five distillation columns (§4 invariant).
-        //   adjectiveBitmap, provenance, parent_node_id — to OR into the
-        //     container-fingerprint aggregate after a successful write, so
-        //     recall filters on .hasFeatureFlag(.hasCurrentRepresentation) do
-        //     not falsely exclude this container mid-session without a reopen.
-        // Row not found → return 0.
         let rows = row_store
             .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
             .map_err(map_storage_err)?;
@@ -2488,55 +2458,59 @@ impl DrawerStore for DrawerStoreCore {
             None => return Ok(0),
         };
         let current_op = i64_value_of(row.get("operationalBitmap"));
-        let adjective = i64_value_of(row.get("adjectiveBitmap"));
-        let provenance = i64_value_of(row.get("provenance"));
-        let parent_node_id = string_value_of(row.get("parent_node_id"));
-        let set_op = current_op | DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
-        let mut values = BTreeMap::new();
-        values.insert(
-            "distilled".to_string(),
-            TypedValue::Text(distilled.to_string()),
-        );
-        values.insert(
-            "distilled_pipeline_version".to_string(),
-            TypedValue::Text(pipeline_version.to_string()),
-        );
-        values.insert(
-            "distilled_token_count".to_string(),
-            TypedValue::Int(token_count),
-        );
-        values.insert(
-            "distilled_at".to_string(),
-            TypedValue::Timestamp(generated_at),
-        );
-        values.insert(
-            "distilled_source_digest".to_string(),
-            TypedValue::Text(source_digest.to_string()),
-        );
-        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(set_op));
-        let updated = row_store
-            .update(T_DRAWERS, values, &id_pred)
-            .map_err(map_storage_err)?;
-        // OR bit 19 into the room/wing fingerprint aggregate. The OR aggregate
-        // is monotone — ORing a set bit is always safe. Clear paths need no
-        // rollup change: stale set bits are a harmless over-approximation
-        // (§ 11.5); rebuild_all at estate open tightens.
-        if updated == 1 {
-            let names = self.resolve_node_names(&[parent_node_id.clone()])?;
-            let (wing, room) = names
-                .get(&parent_node_id)
-                .map(|(w, r)| (w.as_str(), r.as_str()))
-                .unwrap_or(("", ""));
-            self.or_in_container_fingerprint(
-                wing,
-                room,
-                adjective,
-                set_op,
-                provenance,
-                generated_at,
-            )?;
+        let updated_op = current_op | DrawerFeatureFlags::SPAN_INDEXED;
+        if updated_op == current_op {
+            return Ok(0);
         }
-        Ok(updated)
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(updated_op));
+        row_store
+            .update(T_DRAWERS, values, &id_pred)
+            .map_err(map_storage_err)
+    }
+
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, ordered by id, at most `limit`,
+    /// resuming after `after_drawer_id`. Empty-content active rows
+    /// (gate-rejected erasure scrubs) carry nothing to encode and are
+    /// excluded. Mirrors Swift `DrawerStore.spanIndexDebtBatch`.
+    fn span_index_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut clauses = vec![span_index_debt_predicate()];
+        if let Some(after) = after_drawer_id {
+            clauses.push(StoragePredicate::Gt(
+                Column::new(T_DRAWERS, "id"),
+                TypedValue::Text(after.to_string()),
+            ));
+        }
+        let predicate = StoragePredicate::And(clauses);
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_skip_corrupt(
+                T_DRAWERS,
+                Some(&predicate),
+                &[OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending)],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "span_index_debt_batch")
+    }
+
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`. Projected to `id` only. Mirrors Swift
+    /// `DrawerStore.countSpanIndexDebt()`.
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query_projected(T_DRAWERS, &["id"], Some(&span_index_debt_predicate()), &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
     }
 
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
@@ -2595,640 +2569,6 @@ impl DrawerStore for DrawerStoreCore {
         Ok(n)
     }
 
-    // ── Normalized adornment store (LOCUSKIT_INTERFACE 2.0.1, ADORN-STORE-02 v17) ──
-
-    /// Return all registered adornment minters, ordered by name ascending.
-    /// Mirrors Swift `DrawerStore.listAdornmentMinters()`.
-    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
-        let rows = self
-            .storage
-            .row_store()
-            .query(
-                "adornment_minters",
-                None,
-                &[OrderClause::new(
-                    Column::new("adornment_minters", "name"),
-                    OrderDirection::Ascending,
-                )],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
-        rows.iter().map(minter_descriptor_from_row).collect()
-    }
-
-    /// Register one adornment minter (immutable-configuration contract).
-    ///
-    /// A minter row is an immutable configuration identity
-    /// (LOCUSKIT_SPEC § ADORNMENT_STORE): re-registering the same `id`
-    /// with identical configuration is an idempotent no-op; ANY changed
-    /// configuration field is rejected — a configuration change requires
-    /// a NEW minter id. `is_active` is initial state only: registration
-    /// never retoggles an existing row (activation belongs exclusively
-    /// to the activation setters).
-    /// Mirrors Swift `DrawerStore.registerAdornmentMinter(_:)`.
-    fn register_adornment_minter(
-        &self,
-        minter: &AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
-        if minter.id.is_empty() {
-            return Err(LocusKitError::InvalidContent("minter.id must not be empty".into()));
-        }
-        if minter.name.is_empty() {
-            return Err(LocusKitError::InvalidContent("minter.name must not be empty".into()));
-        }
-        // Serialize parameters as sorted-keys JSON (matches Swift's outputFormatting: .sortedKeys).
-        let params_json =
-            serde_json::to_string(&minter.parameters).unwrap_or_else(|_| "{}".into());
-        let row_store = self.storage.row_store();
-        let id_pred = StoragePredicate::Eq(
-            Column::new("adornment_minters", "id"),
-            TypedValue::Text(minter.id.clone()),
-        );
-        let existing = row_store
-            .query("adornment_minters", Some(&id_pred), &[], Some(1), None)
-            .map_err(map_storage_err)?;
-        let mut values = BTreeMap::new();
-        values.insert("id".into(), TypedValue::Text(minter.id.clone()));
-        values.insert("name".into(), TypedValue::Text(minter.name.clone()));
-        values.insert("family".into(), TypedValue::Text(minter.family.clone()));
-        values.insert("model_id".into(), TypedValue::Text(minter.model_id.clone()));
-        values.insert("model_version".into(), TypedValue::Text(minter.model_version.clone()));
-        values.insert("prompt_digest".into(), TypedValue::Text(minter.prompt_digest.clone()));
-        values.insert("parameters".into(), TypedValue::Text(params_json));
-        values.insert("is_active".into(), TypedValue::Bitmap(if minter.is_active { 1 } else { 0 }));
-        if existing.is_empty() {
-            row_store.insert("adornment_minters", values).map_err(map_storage_err)?;
-            return Ok(());
-        }
-        // Existing row: configuration is IMMUTABLE. Compare every
-        // configuration field (is_active deliberately excluded — it is
-        // runtime state owned by the activation setters, and registration
-        // must never retoggle it).
-        let stored = minter_descriptor_from_row(&existing[0])?;
-        let same_configuration = stored.name == minter.name
-            && stored.family == minter.family
-            && stored.model_id == minter.model_id
-            && stored.model_version == minter.model_version
-            && stored.prompt_digest == minter.prompt_digest
-            && stored.parameters == minter.parameters;
-        if !same_configuration {
-            return Err(LocusKitError::InvalidContent(format!(
-                "minter {}: configuration change rejected — a configuration change creates a NEW minter row",
-                minter.id
-            )));
-        }
-        // Identical configuration: idempotent no-op — no UPDATE runs, so
-        // the stored is_active flag is untouched.
-        Ok(())
-    }
-
-    /// Set the active flag for one minter. Returns 0 (not found) or 1 (updated).
-    /// Mirrors Swift `DrawerStore.setAdornmentMinterActive(id:active:)`.
-    fn set_adornment_minter_active(
-        &self,
-        id: &str,
-        active: bool,
-    ) -> Result<usize, LocusKitError> {
-        if id.is_empty() {
-            return Err(LocusKitError::InvalidContent("id must not be empty".into()));
-        }
-        let mut values = BTreeMap::new();
-        values.insert(
-            "is_active".into(),
-            TypedValue::Bitmap(if active { 1 } else { 0 }),
-        );
-        self.storage
-            .row_store()
-            .update(
-                "adornment_minters",
-                values,
-                &StoragePredicate::Eq(
-                    Column::new("adornment_minters", "id"),
-                    TypedValue::Text(id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)
-    }
-
-    /// Atomically replace the active minter set. Fails on unknown id.
-    /// Mirrors Swift `DrawerStore.setActiveAdornmentMinters(ids:)`.
-    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
-        let row_store = self.storage.row_store();
-        // Phase 1: verify all ids exist; fail on first unknown.
-        for &id in ids {
-            let rows = row_store
-                .query(
-                    "adornment_minters",
-                    Some(&StoragePredicate::Eq(
-                        Column::new("adornment_minters", "id"),
-                        TypedValue::Text(id.to_string()),
-                    )),
-                    &[],
-                    Some(1),
-                    None,
-                )
-                .map_err(map_storage_err)?;
-            if rows.is_empty() {
-                return Err(LocusKitError::InvalidContent(format!(
-                    "unknown adornment minter id: {id}"
-                )));
-            }
-        }
-        // Phase 2: fetch all minter ids so we can deactivate each.
-        let all_rows = row_store
-            .query("adornment_minters", None, &[], None, None)
-            .map_err(map_storage_err)?;
-        let mut total = 0usize;
-        // Deactivate all.
-        for row in &all_rows {
-            let row_id = match opt_string_value_of(row.get("id")) {
-                Some(s) => s,
-                None => continue,
-            };
-            let mut vals = BTreeMap::new();
-            vals.insert("is_active".into(), TypedValue::Bitmap(0));
-            total += row_store
-                .update(
-                    "adornment_minters",
-                    vals,
-                    &StoragePredicate::Eq(
-                        Column::new("adornment_minters", "id"),
-                        TypedValue::Text(row_id),
-                    ),
-                )
-                .map_err(map_storage_err)?;
-        }
-        // Activate the requested set.
-        for &id in ids {
-            let mut vals = BTreeMap::new();
-            vals.insert("is_active".into(), TypedValue::Bitmap(1));
-            total += row_store
-                .update(
-                    "adornment_minters",
-                    vals,
-                    &StoragePredicate::Eq(
-                        Column::new("adornment_minters", "id"),
-                        TypedValue::Text(id.to_string()),
-                    ),
-                )
-                .map_err(map_storage_err)?;
-        }
-        Ok(total)
-    }
-
-    /// Bounded batch of (drawer, minter) pairs without an adornment row.
-    /// Mirrors Swift `DrawerStore.adornmentDebtBatch(limit:afterDrawerID:)`.
-    fn adornment_debt_batch(
-        &self,
-        limit: usize,
-        after_drawer_id: Option<&str>,
-    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
-        // Load all active minters.
-        let minter_rows = self
-            .storage
-            .row_store()
-            .query(
-                "adornment_minters",
-                Some(&StoragePredicate::Eq(
-                    Column::new("adornment_minters", "is_active"),
-                    TypedValue::Bitmap(1),
-                )),
-                &[OrderClause::new(
-                    Column::new("adornment_minters", "name"),
-                    OrderDirection::Ascending,
-                )],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
-        if minter_rows.is_empty() {
-            return Ok(vec![]);
-        }
-        let active_minters: Vec<AdornmentMinterDescriptor> = minter_rows
-            .iter()
-            .filter_map(|r| minter_descriptor_from_row(r).ok())
-            .collect();
-
-        // Page through eligible drawers.
-        let tombstone_clause =
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt"));
-        let content_clause = StoragePredicate::Neq(
-            Column::new(T_DRAWERS, "content"),
-            TypedValue::Text(String::new()),
-        );
-        let drawer_predicate = if let Some(after) = after_drawer_id {
-            StoragePredicate::And(vec![
-                tombstone_clause,
-                content_clause,
-                StoragePredicate::Gt(
-                    Column::new(T_DRAWERS, "id"),
-                    TypedValue::Text(after.to_string()),
-                ),
-            ])
-        } else {
-            StoragePredicate::And(vec![tombstone_clause, content_clause])
-        };
-        // Scan eligible drawers in chunks until the batch fills or the table
-        // is exhausted. The scan MUST NOT stop at a fixed drawer count: a
-        // fully-minted prefix (e.g. after an earlier pass over the oldest
-        // drawers) would otherwise hide real debt further down the filedAt
-        // order and the fetch would falsely report the estate drained
-        // (MINT-DEBT-WINDOW, 2026-08-27). Chunked OFFSET paging is stable
-        // within one call because this method only reads — adornment writes
-        // happen after the batch returns, and minted drawers still match the
-        // drawer predicate either way. Mirrors Swift `adornmentDebtBatch`.
-        let chunk_size = limit * active_minters.len().max(1);
-        let row_store = self.storage.row_store();
-        let mut result = Vec::new();
-        let mut offset = 0usize;
-        'scan: while result.len() < limit {
-            let (drawer_rows, corrupt_skipped) = self
-                .storage
-                .row_store()
-                .query_skip_corrupt(
-                    T_DRAWERS,
-                    Some(&drawer_predicate),
-                    &[
-                        OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
-                        OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
-                    ],
-                    Some(chunk_size),
-                    Some(offset),
-                )
-                .map_err(map_storage_err)?;
-            // The SQL cursor consumed clean + corrupt rows, so the offset must
-            // advance by BOTH counts — advancing by the clean count alone would
-            // re-enter the tail of this window next iteration and return
-            // duplicate debt pairs. An empty result is "table exhausted" only
-            // when nothing was skipped either.
-            if drawer_rows.is_empty() && corrupt_skipped == 0 {
-                break;
-            }
-            let drawers = if drawer_rows.is_empty() {
-                // Whole-window drop: the trait-default query_skip_corrupt (no
-                // row-level skipping — InMemory, Postgres) discards every clean
-                // row that shares a window with a corrupt one. Salvage the
-                // window one raw row at a time so those clean rows are not
-                // silently lost from the debt scan; each probe consumes exactly
-                // one raw cursor row whether it decodes or not.
-                let mut salvaged = Vec::new();
-                for _ in 0..chunk_size {
-                    let (one, one_skipped) = self
-                        .storage
-                        .row_store()
-                        .query_skip_corrupt(
-                            T_DRAWERS,
-                            Some(&drawer_predicate),
-                            &[
-                                OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
-                                OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
-                            ],
-                            Some(1),
-                            Some(offset),
-                        )
-                        .map_err(map_storage_err)?;
-                    if one.is_empty() && one_skipped == 0 {
-                        break; // genuinely exhausted
-                    }
-                    offset += 1;
-                    salvaged.extend(one);
-                }
-                decode_rows_skip_corrupt(&salvaged, "adornment_debt_batch")?
-            } else {
-                offset += drawer_rows.len() + corrupt_skipped;
-                decode_rows_skip_corrupt(&drawer_rows, "adornment_debt_batch")?
-            };
-
-            for drawer in &drawers {
-                if result.len() >= limit {
-                    break 'scan;
-                }
-                // Fetch existing adornment minter ids for this drawer.
-                // Application-level join: the minter set is tiny and the
-                // adornments lookup is indexed by (drawer_id, minter_id) PK.
-                let adornment_rows = row_store
-                    .query(
-                        "adornments",
-                        Some(&StoragePredicate::Eq(
-                            Column::new("adornments", "drawer_id"),
-                            TypedValue::Text(drawer.id.clone()),
-                        )),
-                        &[],
-                        None,
-                        None,
-                    )
-                    .map_err(map_storage_err)?;
-                let minted_ids: std::collections::BTreeSet<String> = adornment_rows
-                    .iter()
-                    .filter_map(|r| opt_string_value_of(r.get("minter_id")))
-                    .collect();
-                for minter in &active_minters {
-                    if result.len() >= limit {
-                        break 'scan;
-                    }
-                    if !minted_ids.contains(&minter.id) {
-                        result.push(AdornmentDebt {
-                            drawer: drawer.clone(),
-                            minter: minter.clone(),
-                        });
-                    }
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    /// Insert or replace one (drawer, minter) adornment row.
-    /// Mirrors Swift `DrawerStore.putAdornment(_:)`.
-    fn put_adornment(&self, adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
-        if adornment.drawer_id.is_empty() {
-            return Err(LocusKitError::InvalidContent(
-                "adornment.drawer_id must not be empty".into(),
-            ));
-        }
-        if adornment.minter_id.is_empty() {
-            return Err(LocusKitError::InvalidContent(
-                "adornment.minter_id must not be empty".into(),
-            ));
-        }
-        if adornment.text.is_empty() {
-            return Err(LocusKitError::InvalidContent(
-                "adornment.text must not be empty".into(),
-            ));
-        }
-        let row_store = self.storage.row_store();
-        let pred = StoragePredicate::And(vec![
-            StoragePredicate::Eq(
-                Column::new("adornments", "drawer_id"),
-                TypedValue::Text(adornment.drawer_id.clone()),
-            ),
-            StoragePredicate::Eq(
-                Column::new("adornments", "minter_id"),
-                TypedValue::Text(adornment.minter_id.clone()),
-            ),
-        ]);
-        let existing = row_store
-            .query("adornments", Some(&pred), &[], Some(1), None)
-            .map_err(map_storage_err)?;
-        let mut values = BTreeMap::new();
-        values.insert("drawer_id".into(), TypedValue::Text(adornment.drawer_id.clone()));
-        values.insert("minter_id".into(), TypedValue::Text(adornment.minter_id.clone()));
-        values.insert("text".into(), TypedValue::Text(adornment.text.clone()));
-        if existing.is_empty() {
-            row_store.insert("adornments", values).map_err(map_storage_err)?;
-            Ok(1)
-        } else {
-            row_store
-                .update("adornments", values, &pred)
-                .map_err(map_storage_err)
-        }
-    }
-
-    /// Return all adornment rows for one drawer, ordered by minter_id.
-    /// Mirrors Swift `DrawerStore.adornments(drawerID:)`.
-    fn adornments(&self, drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
-        if drawer_id.is_empty() {
-            return Err(LocusKitError::InvalidContent("drawer_id must not be empty".into()));
-        }
-        let rows = self
-            .storage
-            .row_store()
-            .query(
-                "adornments",
-                Some(&StoragePredicate::Eq(
-                    Column::new("adornments", "drawer_id"),
-                    TypedValue::Text(drawer_id.to_string()),
-                )),
-                &[OrderClause::new(
-                    Column::new("adornments", "minter_id"),
-                    OrderDirection::Ascending,
-                )],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
-        rows.iter().map(stored_adornment_from_row).collect()
-    }
-
-    /// Return active adornments for a batch of drawers.
-    /// Mirrors Swift `DrawerStore.activeAdornments(drawerIDs:)`.
-    fn active_adornments(
-        &self,
-        drawer_ids: &[&str],
-    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
-        if drawer_ids.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        let row_store = self.storage.row_store();
-        // Fetch active minter ids.
-        let minter_rows = row_store
-            .query(
-                "adornment_minters",
-                Some(&StoragePredicate::Eq(
-                    Column::new("adornment_minters", "is_active"),
-                    TypedValue::Bitmap(1),
-                )),
-                &[],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
-        let active_ids: std::collections::BTreeSet<String> = minter_rows
-            .iter()
-            .filter_map(|r| opt_string_value_of(r.get("id")))
-            .collect();
-        if active_ids.is_empty() {
-            return Ok(BTreeMap::new());
-        }
-        // Sensitivity gate (codex finding 2026-08-26): adornment text is a
-        // content-derived pre-minted claim, so it inherits the drawer's
-        // access posture. Restricted/secret drawers get NO adornments from
-        // this projection — render layers redact subject/first_sentence for
-        // those rows, and an attached adornment would hand back the very
-        // content the markers withhold. Gated HERE, at the one
-        // result-composition read, so every surface inherits the rule
-        // (legacy-migrated and freshly minted rows alike). Twin of the
-        // Swift `DrawerStore.activeAdornments` gate.
-        // De-duplicate once for both batch reads below; chunked at 900
-        // ids per query because mint-in-place hands this surface
-        // thousands of drawer ids and an unchunked Or-chain exceeds
-        // SQLite's ~1000 expression-depth cap. See ID_BATCH_CHUNK_SIZE.
-        let unique_ids: BTreeSet<String> =
-            drawer_ids.iter().map(|id| (*id).to_string()).collect();
-        let drawer_rows =
-            query_by_id_chunks(&*row_store, T_DRAWERS, "id", &unique_ids, &[])?;
-        let mut sensitive_ids: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for row in &drawer_rows {
-            let Some(id) = opt_string_value_of(row.get("id")) else { continue };
-            let provenance = i64_value_of(row.get("provenance"));
-            // Bits 30–35 of provenance: sensitivity raw (cookbook §2.5).
-            // Restricted = 32, Secret = 48 — both withhold content-derived
-            // columns; unrecognised raws fall back to Normal, matching
-            // Sensitivity::from_raw.
-            let raw = (provenance >> 30) & 0x3F;
-            if raw >= crate::provenance::Sensitivity::Restricted.raw_value() {
-                sensitive_ids.insert(id);
-            }
-        }
-        // One Or-of-Eq batch statement per 900-id chunk of the requested
-        // drawer ids (SQLite expression-depth cap — see
-        // ID_BATCH_CHUNK_SIZE); rows are grouped client-side and filtered
-        // to the active minter set read above. minter_id ordering is
-        // per-chunk, which preserves the per-drawer ascending contract:
-        // ids are de-duplicated, so all of one drawer's rows come from
-        // exactly one chunk.
-        let rows = query_by_id_chunks(
-            &*row_store,
-            "adornments",
-            "drawer_id",
-            &unique_ids,
-            &[OrderClause::new(
-                Column::new("adornments", "minter_id"),
-                OrderDirection::Ascending,
-            )],
-        )?;
-        let mut result: BTreeMap<String, Vec<StoredAdornment>> = BTreeMap::new();
-        for row in &rows {
-            let Ok(stored) = stored_adornment_from_row(row) else { continue };
-            if !active_ids.contains(&stored.minter_id) {
-                continue;
-            }
-            if sensitive_ids.contains(&stored.drawer_id) {
-                continue;
-            }
-            // Rows arrive in minter_id order globally; per-drawer grouping
-            // preserves that ascending order within each drawer's vec.
-            result.entry(stored.drawer_id.clone()).or_default().push(stored);
-        }
-        Ok(result)
-    }
-
-    /// Count of active drawers still awaiting distillation (§7.1
-    /// eligibility predicate): not tombstoned, non-empty content, and
-    /// representation absent (bit 19 clear) OR produced under a different
-    /// pipeline contract. Projected to `id` only — no text column materialized.
-    ///
-    /// The `BitmaskNone` predicate replaces the previous `IsNull(distilled)`
-    /// test — both are correct (§4 invariant), but the bitmap predicate is
-    /// index-friendly and avoids per-row NULL scans on the text column
-    /// (cookbook §2.4.1).
-    ///
-    /// Mirrors Swift `DrawerStore.countUndistilled`.
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        let row_store = self.storage.row_store();
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            StoragePredicate::Neq(
-                Column::new(T_DRAWERS, "content"),
-                TypedValue::Text(String::new()),
-            ),
-            StoragePredicate::Or(vec![
-                // Bit 19 (HAS_CURRENT_REPRESENTATION) clear → no current
-                // representation. Cookbook §2.4.1: authoritative indicator;
-                // faster than IS NULL on the distilled text column.
-                StoragePredicate::BitmaskNone {
-                    column: Column::new(T_DRAWERS, "operationalBitmap"),
-                    mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
-                },
-                StoragePredicate::Neq(
-                    Column::new(T_DRAWERS, "distilled_pipeline_version"),
-                    TypedValue::Text(pipeline_version.to_string()),
-                ),
-                // A representation without a source digest was written before
-                // the digest column existed: stale by definition.
-                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled_source_digest")),
-            ]),
-        ]);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
-            .map_err(map_storage_err)?;
-        Ok(rows.len())
-    }
-
-    fn rooms_with_stale_distilled_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        let row_store = self.storage.row_store();
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            // Bit 19 set → a representation is present; the row is stale only
-            // through the converter id or the missing digest.
-            StoragePredicate::BitmaskAll {
-                column: Column::new(T_DRAWERS, "operationalBitmap"),
-                mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
-            },
-            StoragePredicate::Or(vec![
-                StoragePredicate::Neq(
-                    Column::new(T_DRAWERS, "distilled_pipeline_version"),
-                    TypedValue::Text(pipeline_version.to_string()),
-                ),
-                StoragePredicate::IsNull(Column::new(T_DRAWERS, "distilled_source_digest")),
-            ]),
-        ]);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["parent_node_id"], Some(&predicate), &[], None, None)
-            .map_err(map_storage_err)?;
-        let mut parent_node_ids: Vec<String> = rows
-            .iter()
-            .map(|r| string_value_of(r.get("parent_node_id")))
-            .filter(|id| !id.is_empty())
-            .collect();
-        parent_node_ids.sort();
-        parent_node_ids.dedup();
-        let names = self.resolve_node_names(&parent_node_ids)?;
-        let mut rooms: Vec<(String, String)> = parent_node_ids
-            .iter()
-            .filter_map(|id| names.get(id).cloned())
-            .collect();
-        rooms.sort();
-        rooms.dedup();
-        Ok(rooms)
-    }
-
-    fn drawers_with_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        let row_store = self.storage.row_store();
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            StoragePredicate::Neq(
-                Column::new(T_DRAWERS, "content"),
-                TypedValue::Text(String::new()),
-            ),
-            // Bit 19 (HAS_CURRENT_REPRESENTATION) set → all five distillation
-            // columns are populated (§4 invariant). Projects only id and
-            // distilled_at — no text column is materialized.
-            StoragePredicate::BitmaskAll {
-                column: Column::new(T_DRAWERS, "operationalBitmap"),
-                mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
-            },
-            // Current under the caller's converter: id equal and digest present.
-            StoragePredicate::Eq(
-                Column::new(T_DRAWERS, "distilled_pipeline_version"),
-                TypedValue::Text(pipeline_version.to_string()),
-            ),
-            StoragePredicate::IsNotNull(Column::new(T_DRAWERS, "distilled_source_digest")),
-        ]);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["id", "distilled_at"], Some(&predicate), &[], None, None)
-            .map_err(map_storage_err)?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                let id = string_value_of(r.get("id"));
-                if id.is_empty() {
-                    return None;
-                }
-                let ts = opt_int_value_of(r.get("distilled_at"))?;
-                Some((id, ts))
-            })
-            .collect())
-    }
-
     fn set_subject_representation(
         &self,
         drawer_id: &str,
@@ -3273,9 +2613,8 @@ impl DrawerStore for DrawerStoreCore {
         // committed together in one transaction (Codex
         // cc90c5dcecb081918c159788e1ffb3d6): a subject change that
         // persists without its audit row is the defect this closes.
-        // Unlike the distilled quad there is NO presence bit
-        // (feature-flag region is full; see
-        // PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
+        // There is NO presence bit for the subject (feature-flag region is
+        // full; see PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
         // rollup — the rollup exists because recall FILTERS on bit 19,
         // and nothing filters on subject presence.
         let row_uuid = require_uuid(drawer_id, "drawerId")?;
@@ -3673,8 +3012,8 @@ impl DrawerStore for DrawerStoreCore {
         let row_store = self.storage.row_store();
         let mut values = std::collections::BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(String::new()));
-        // Wipe covers the content-derived distilled representation too —
-        // derived text must not outlive the content it renders (SPEC §2).
+        // Wipe covers the content-derived columns too — derived text must
+        // not outlive the content it was derived from (SPEC §2).
         insert_cleared_representation(&mut values);
         row_store
             .update(T_DRAWERS, values, &StoragePredicate::IsTrue)
@@ -5768,8 +5107,8 @@ impl DrawerStore for DrawerStoreCore {
         // (`adjective_bitmap`, `operational_bitmap`, `provenance`) — so the
         // `content` blob is pure waste here. `all_drawers_bounded_projected`
         // issues a genuine projected SELECT over `DRAWER_STRUCTURED_COLUMNS`
-        // (every drawer column except the `content` and `distilled` text
-        // payloads), so the blob is never read off disk; `drawer_from_row`
+        // (every drawer column except the `content` text payload), so the
+        // blob is never read off disk; `drawer_from_row`
         // decodes the absent column to `""`. With `limit = None` the row set
         // and the `(filedAt ASC, id ASC)` order are exactly those of
         // `all_drawers()`, so the fingerprints are byte-identical to a
@@ -6437,79 +5776,24 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
     }
-    fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        source_digest: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.inner.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            source_digest,
-            token_count,
-            generated_at,
-        )
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.inner.set_ssc_facts(drawer_id, facts)
     }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.inner.count_undistilled(pipeline_version)
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.inner.set_span_indexed(drawer_id)
     }
-    fn rooms_with_stale_distilled_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, String)>, LocusKitError> {
-        self.inner.rooms_with_stale_distilled_representations(pipeline_version)
-    }
-    fn drawers_with_representations(
-        &self,
-        pipeline_version: &str,
-    ) -> Result<Vec<(String, i64)>, LocusKitError> {
-        self.inner.drawers_with_representations(pipeline_version)
-    }
-    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
-        self.inner.set_anomalous_flag(drawer_id, anomalous)
-    }
-    fn list_adornment_minters(&self) -> Result<Vec<AdornmentMinterDescriptor>, LocusKitError> {
-        self.inner.list_adornment_minters()
-    }
-    fn register_adornment_minter(
-        &self,
-        minter: &AdornmentMinterDescriptor,
-    ) -> Result<(), LocusKitError> {
-        self.inner.register_adornment_minter(minter)
-    }
-    fn set_adornment_minter_active(
-        &self,
-        id: &str,
-        active: bool,
-    ) -> Result<usize, LocusKitError> {
-        self.inner.set_adornment_minter_active(id, active)
-    }
-    fn set_active_adornment_minters(&self, ids: &[&str]) -> Result<usize, LocusKitError> {
-        self.inner.set_active_adornment_minters(ids)
-    }
-    fn adornment_debt_batch(
+    fn span_index_debt_batch(
         &self,
         limit: usize,
         after_drawer_id: Option<&str>,
-    ) -> Result<Vec<AdornmentDebt>, LocusKitError> {
-        self.inner.adornment_debt_batch(limit, after_drawer_id)
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.span_index_debt_batch(limit, after_drawer_id)
     }
-    fn put_adornment(&self, adornment: &StoredAdornment) -> Result<usize, LocusKitError> {
-        self.inner.put_adornment(adornment)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_span_index_debt()
     }
-    fn adornments(&self, drawer_id: &str) -> Result<Vec<StoredAdornment>, LocusKitError> {
-        self.inner.adornments(drawer_id)
-    }
-    fn active_adornments(
-        &self,
-        drawer_ids: &[&str],
-    ) -> Result<BTreeMap<String, Vec<StoredAdornment>>, LocusKitError> {
-        self.inner.active_adornments(drawer_ids)
+    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
+        self.inner.set_anomalous_flag(drawer_id, anomalous)
     }
     fn set_subject_representation(
         &self,
@@ -7007,25 +6291,37 @@ impl DrawerStore for InMemoryDrawerStore {
 /// populate the column (CRITICAL fix — this column replaces the old
 /// recompute-on-every-read path in `fingerprints_captured_in`/
 /// `fingerprint_bit_series`).
-/// Merge the representation-clearing NULLs into a content-writing
-/// UPDATE's value map (SPEC_DISTILLATION_STORAGE §4/§7.3): every write
-/// that touches `content` NULLs the distilled representation in the same
-/// statement, so a representation can never outlive the content it
-/// renders (the regeneration trigger and the erasure scrub). Existing
+/// Merge the content-derived NULLs into a content-writing UPDATE's value
+/// map: every write that touches `content` NULLs ssc_facts and the subject
+/// trio in the same statement, so derived text can never outlive the
+/// content it was derived from (the regeneration trigger and the erasure
+/// scrub). Existing
 /// caller values win on key collision by construction — no caller writes
 /// representation columns and content in one statement. Mirrors Swift
 /// `DrawerStore.withClearedRepresentation`.
+/// Active, non-empty, bit 27 clear — the span-encode duty's work predicate.
+/// Mirrors Swift `DrawerStore.spanIndexDebtPredicate`.
+fn span_index_debt_predicate() -> StoragePredicate {
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::BitmaskNone {
+            column: Column::new(T_DRAWERS, "operationalBitmap"),
+            mask: DrawerFeatureFlags::SPAN_INDEXED,
+        },
+    ])
+}
+
 pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
-    // Covers every content-derived column: the distilled quad AND the
-    // subject trio (PR-01). Adornment rows are content-derived but live in
-    // the separate `adornments` table (ADORN-STORE-02 v17); callers that
-    // clear content DELETE from `adornments` for the drawer, not here.
+    // Covers every content-derived column: ssc_facts (Encoder Rerank
+    // Program §6 — NULL after a content write is the enrichment stage's
+    // "needs facts" predicate) and the subject trio (PR-01). The matching
+    // bits (19, 27) clear through CLEARED_ON_CONTENT_WRITE in the same UPDATE.
     for column in [
-        "distilled",
-        "distilled_pipeline_version",
-        "distilled_token_count",
-        "distilled_at",
-        "distilled_source_digest",
+        "ssc_facts",
         "subject",
         "subject_pipeline_version",
         "subject_at",
@@ -7088,10 +6384,8 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         "adjectiveBitmap".to_string(),
         TypedValue::Bitmap(d.adjective_bitmap),
     );
-    // Use the drawer struct's operational_bitmap directly.
-    // Bits 27-30 are FREE (ADORN-STORE-02 v17 retired adornmentRequired and
-    // adornmentBitmask). Adornment state lives in the separate `adornments`
-    // table keyed by (drawer_id, minter_id); it is not encoded in the bitmap.
+    // Use the drawer struct's operational_bitmap directly: every bit is
+    // managed by the write path that owns it before drawer_values runs.
     m.insert(
         "operationalBitmap".to_string(),
         TypedValue::Bitmap(d.operational_bitmap),
@@ -7126,47 +6420,19 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         "content_fingerprint".to_string(),
         TypedValue::Blob(fingerprint.wire_bytes().to_vec()),
     );
-    // Distilled representation (SPEC §4): fresh captures carry None in all
-    // five fields — population happens post-insert via
-    // set_distilled_representation (drain-stage or sweep), never on the
-    // capture path. Mirrors Swift drawerValues.
+    // SSC facts: a fresh capture may carry them when the caller already ran
+    // the enrichment stage; otherwise None until set_ssc_facts runs after
+    // the write. Mirrors Swift drawerValues.
     m.insert(
-        "distilled".to_string(),
-        d.distilled
+        "ssc_facts".to_string(),
+        d.ssc_facts
             .as_ref()
             .map(|s| TypedValue::Text(s.clone()))
             .unwrap_or(TypedValue::Null),
     );
-    m.insert(
-        "distilled_pipeline_version".to_string(),
-        d.distilled_pipeline_version
-            .as_ref()
-            .map(|s| TypedValue::Text(s.clone()))
-            .unwrap_or(TypedValue::Null),
-    );
-    m.insert(
-        "distilled_token_count".to_string(),
-        d.distilled_token_count
-            .map(TypedValue::Int)
-            .unwrap_or(TypedValue::Null),
-    );
-    m.insert(
-        "distilled_at".to_string(),
-        d.distilled_at
-            .map(TypedValue::Timestamp)
-            .unwrap_or(TypedValue::Null),
-    );
-    m.insert(
-        "distilled_source_digest".to_string(),
-        d.distilled_source_digest
-            .as_ref()
-            .map(|s| TypedValue::Text(s.clone()))
-            .unwrap_or(TypedValue::Null),
-    );
-    // Subject trio (PR-01): same capture-path contract as the distilled
-    // quad — a fresh capture MAY carry a subject (the filing AI provides
-    // it at file time); backfill and the model rider populate the rest via
-    // set_subject_representation. Mirrors Swift drawerValues.
+    // Subject trio (PR-01): a fresh capture MAY carry a subject (the filing
+    // AI provides it at file time); backfill and the model rider populate
+    // the rest via set_subject_representation. Mirrors Swift drawerValues.
     m.insert(
         "subject".to_string(),
         d.subject
@@ -7656,80 +6922,14 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         udc_facets: opt_string_value_of(row.get("udcFacets")),
         wikidata_qid: opt_string_value_of(row.get("wikidataQID")),
         wikidata_qids_secondary: opt_string_value_of(row.get("wikidataQidsSecondary")),
-        // Distilled representation (SPEC §4). Absent at the structured
-        // projection (the text column is projected away like `content`);
-        // NULL on any row not yet swept. Both decode to None.
-        distilled: opt_string_value_of(row.get("distilled")),
-        distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
-        distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
-        distilled_at: opt_int_value_of(row.get("distilled_at")),
-        distilled_source_digest: opt_string_value_of(row.get("distilled_source_digest")),
+        // SSC facts: NULL on any row the enrichment stage has not written yet
+        // (or since the last content write); decodes to None.
+        ssc_facts: opt_string_value_of(row.get("ssc_facts")),
         // Subject trio (PR-01). NULL on any row not yet subjected;
         // decodes to None — the backfill-eligibility signal.
         subject: opt_string_value_of(row.get("subject")),
         subject_pipeline_version: opt_string_value_of(row.get("subject_pipeline_version")),
         subject_at: opt_int_value_of(row.get("subject_at")),
-        // Adornment rows live in the separate `adornments` table (ADORN-STORE-02 v17);
-        // retrieve via DrawerStore::adornments / active_adornments.
-    })
-}
-
-/// Decode one `adornment_minters` row into an `AdornmentMinterDescriptor`.
-///
-/// `parameters` is stored as sorted-keys JSON (mirrors Swift's
-/// `JSONEncoder.outputFormatting = .sortedKeys`); parse with serde_json
-/// into a `BTreeMap<String, String>` so Rust iteration matches Swift.
-fn minter_descriptor_from_row(
-    row: &StorageRow,
-) -> Result<AdornmentMinterDescriptor, LocusKitError> {
-    let id = string_value_of(row.get("id"));
-    if id.is_empty() {
-        return Err(LocusKitError::CorruptStoredValue {
-            table: "adornment_minters".to_string(),
-            column: "id".to_string(),
-            stored_text: "(null)".to_string(),
-        });
-    }
-    let params_json = string_value_of(row.get("parameters"));
-    let parameters: std::collections::BTreeMap<String, String> = if params_json.is_empty() {
-        std::collections::BTreeMap::new()
-    } else {
-        serde_json::from_str(&params_json).unwrap_or_default()
-    };
-    Ok(AdornmentMinterDescriptor {
-        id,
-        name: string_value_of(row.get("name")),
-        family: string_value_of(row.get("family")),
-        model_id: string_value_of(row.get("model_id")),
-        model_version: string_value_of(row.get("model_version")),
-        prompt_digest: string_value_of(row.get("prompt_digest")),
-        parameters,
-        is_active: i64_value_of(row.get("is_active")) != 0,
-    })
-}
-
-/// Decode one `adornments` row into a `StoredAdornment`.
-fn stored_adornment_from_row(row: &StorageRow) -> Result<StoredAdornment, LocusKitError> {
-    let drawer_id = string_value_of(row.get("drawer_id"));
-    if drawer_id.is_empty() {
-        return Err(LocusKitError::CorruptStoredValue {
-            table: "adornments".to_string(),
-            column: "drawer_id".to_string(),
-            stored_text: "(null)".to_string(),
-        });
-    }
-    let minter_id = string_value_of(row.get("minter_id"));
-    if minter_id.is_empty() {
-        return Err(LocusKitError::CorruptStoredValue {
-            table: "adornments".to_string(),
-            column: "minter_id".to_string(),
-            stored_text: "(null)".to_string(),
-        });
-    }
-    Ok(StoredAdornment {
-        drawer_id,
-        minter_id,
-        text: string_value_of(row.get("text")),
     })
 }
 
@@ -9949,109 +9149,81 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
-    // Mirrors Swift DistilledRepresentationTests case-for-case
+    // Content-derived columns and the span index bit (Encoder Rerank
+    // Program). Mirrors Swift ContentDerivedColumnsTests case-for-case
     // (twin-parity gate).
     // -----------------------------------------------------------------
 
+    /// A fresh row carries no facts and bit 27 clear: it is span-index debt.
     #[test]
-    fn fresh_row_reads_none_representation() {
+    fn fresh_row_has_no_facts_and_is_span_index_debt() {
         let store = open_store();
         let d = sample_drawer("dr1", "w", "k", "some content");
         store.add_drawer(&d, NOW).unwrap();
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert!(loaded.distilled.is_none());
-        assert!(loaded.distilled_pipeline_version.is_none());
-        assert!(loaded.distilled_token_count.is_none());
-        assert!(loaded.distilled_at.is_none());
-        assert!(loaded.distilled_source_digest.is_none());
+        assert!(loaded.ssc_facts.is_none());
+        assert!(!loaded.is_span_indexed());
+        assert_eq!(store.count_span_index_debt().unwrap(), 1);
+        let debt = store.span_index_debt_batch(10, None).unwrap();
+        assert_eq!(debt.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![d.id.as_str()]);
     }
 
+    /// set_ssc_facts writes the column; set_span_indexed sets bit 27 once
+    /// and leaves the debt queue. Failure mode: a port that stores facts
+    /// but never clears them, or that sets a different bit.
     #[test]
-    fn set_distilled_representation_populates_all_four_atomically() {
+    fn ssc_facts_and_span_index_write_and_read_back() {
         let store = open_store();
         let d = sample_drawer("dr2", "w", "k", "meeting moved thursday");
         store.add_drawer(&d, NOW).unwrap();
-        let updated = store
-            .set_distilled_representation(&d.id, "Meeting moved Thursday.", "p1", "digest-dr2", 4, NOW + 200)
-            .unwrap();
-        assert_eq!(updated, 1);
+        assert_eq!(store.set_ssc_facts(&d.id, Some("kind: meeting, when: thursday")).unwrap(), 1);
+        assert_eq!(store.set_span_indexed(&d.id).unwrap(), 1);
+        assert_eq!(store.set_span_indexed(&d.id).unwrap(), 0, "already set: no write");
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(loaded.distilled.as_deref(), Some("Meeting moved Thursday."));
-        assert_eq!(loaded.distilled_pipeline_version.as_deref(), Some("p1"));
-        assert_eq!(loaded.distilled_token_count, Some(4));
-        assert_eq!(loaded.distilled_at, Some(NOW + 200));
-        assert_eq!(loaded.distilled_source_digest.as_deref(), Some("digest-dr2"));
-        // Content and lifecycle untouched by a representation write.
+        assert_eq!(loaded.ssc_facts.as_deref(), Some("kind: meeting, when: thursday"));
+        assert!(loaded.is_span_indexed());
+        assert_eq!(loaded.operational_bitmap & DrawerFeatureFlags::SPAN_INDEXED, 1 << 27);
+        assert_eq!(store.count_span_index_debt().unwrap(), 0);
+        // Content and lifecycle untouched by derived-column writes.
         assert_eq!(loaded.content, "meeting moved thursday");
         assert!(loaded.tombstoned_at.is_none());
+        // Clearing the facts is an explicit None write.
+        assert_eq!(store.set_ssc_facts(&d.id, None).unwrap(), 1);
+        assert!(store.get_drawer(&d.id).unwrap().unwrap().ssc_facts.is_none());
+        assert!(store.set_ssc_facts(&d.id, Some("")).is_err(), "empty facts are a caller bug");
+        assert_eq!(
+            store.set_ssc_facts("99999999-9999-4999-8999-999999999999", Some("x")).unwrap(),
+            0
+        );
     }
 
+    /// Expunge scrubs ssc_facts and clears bit 27 with the content: the
+    /// facts are content-derived text and the span rows describe erased
+    /// content (SPEC §2 destruction contract).
     #[test]
-    fn set_distilled_representation_replaces_prior() {
-        let store = open_store();
-        let d = sample_drawer("dr3", "w", "k", "content");
-        store.add_drawer(&d, NOW).unwrap();
-        store
-            .set_distilled_representation(&d.id, "first", "p1", "digest-dr3", 1, NOW + 200)
-            .unwrap();
-        store
-            .set_distilled_representation(&d.id, "second rendering", "p1", "digest-dr3", 2, NOW + 300)
-            .unwrap();
-        let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(loaded.distilled.as_deref(), Some("second rendering"));
-        assert_eq!(loaded.distilled_token_count, Some(2));
-        assert_eq!(loaded.distilled_at, Some(NOW + 300));
-    }
-
-    #[test]
-    fn set_distilled_representation_unknown_id_updates_zero_rows() {
-        let store = open_store();
-        let updated = store
-            .set_distilled_representation(
-                "99999999-9999-4999-8999-999999999999",
-                "x",
-                "p1",
-                "digest-x",
-                1,
-                NOW + 200,
-            )
-            .unwrap();
-        assert_eq!(updated, 0);
-    }
-
-    #[test]
-    fn expunge_clears_representation_with_content() {
+    fn expunge_clears_facts_and_span_index_with_content() {
         let store = open_store();
         let d = sample_drawer("dr4", "w", "k", "derivable content");
         store.add_drawer(&d, NOW).unwrap();
+        store.set_ssc_facts(&d.id, Some("kind: note")).unwrap();
+        store.set_span_indexed(&d.id).unwrap();
         store
-            .set_distilled_representation(&d.id, "derived text", "p1", "digest-dr4", 2, NOW + 200)
-            .unwrap();
-        store
-            .expunge_gated(&d.id, "alice", Some("erasure covers representation"), NOW + 500, true)
+            .expunge_gated(&d.id, "alice", Some("erasure covers derived columns"), NOW + 500, true)
             .unwrap();
         let after = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.content, "");
-        // The representation is content-derived text: it must not outlive
-        // the erased content (SPEC §2 destruction contract).
-        assert!(after.distilled.is_none());
-        assert!(after.distilled_pipeline_version.is_none());
-        assert!(after.distilled_token_count.is_none());
-        assert!(after.distilled_at.is_none());
+        assert!(after.ssc_facts.is_none());
+        assert!(!after.is_span_indexed(), "bit 27 must clear with the content");
     }
 
+    /// The shared content-write helper NULLs ssc_facts alongside the
+    /// subject trio, so every content write path clears it.
     #[test]
-    fn dataset_content_patch_clears_representation() {
+    fn content_write_helper_clears_facts() {
         let store = open_store();
         let d = sample_drawer("dr5", "w", "k", "{\"orig\":true}");
         store.add_drawer(&d, NOW).unwrap();
-        store
-            .set_distilled_representation(&d.id, "stale rendering", "p1", "digest-dr5", 2, NOW + 200)
-            .unwrap();
-        // patch_dataset_handle_content routes through Estate; exercise the
-        // same NULL-on-edit write shape directly at the row-store layer via
-        // the shared helper, then assert the row reads back cleared.
+        store.set_ssc_facts(&d.id, Some("kind: dataset")).unwrap();
         let row_store = store.storage().row_store();
         let mut values = BTreeMap::new();
         values.insert(
@@ -10071,10 +9243,8 @@ mod tests {
             .unwrap();
         let after = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.content, "{\"patched\":true}");
-        assert!(after.distilled.is_none());
-        assert!(after.distilled_pipeline_version.is_none());
-        assert!(after.distilled_token_count.is_none());
-        assert!(after.distilled_at.is_none());
+        assert!(after.ssc_facts.is_none());
+        assert!(after.subject.is_none());
     }
 
     #[test]

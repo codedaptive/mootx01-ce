@@ -65,12 +65,6 @@ let package = Package(
         // upstream (kit → lib), no cycle. Authority:
         // in-repository dependency direction (the #7 feature requires it).
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
-        // AdornmentLib supplies the AdornmentMinterDescriptor and StoredAdornment
-        // value types that LocusKit's normalized adornment store operates over.
-        // AdornmentLib is a libs/ library with zero external dependencies —
-        // strictly upstream of LocusKit in the dependency graph (no cycle).
-        // Required by LOCUSKIT_INTERFACE 2.0.0 § normalized adornment storage.
-        .package(name: "AdornmentLib", path: "../../libs/AdornmentLib"),
     ],
     targets: [
         .target(
@@ -83,7 +77,6 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 "IntellectusLib",
                 .product(name: "LatticeLib", package: "LatticeLib"),
-                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Sources/LocusKit"
         ),
@@ -106,7 +99,6 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 "IntellectusLib",
-                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Tests/LocusKitTests"
         ),

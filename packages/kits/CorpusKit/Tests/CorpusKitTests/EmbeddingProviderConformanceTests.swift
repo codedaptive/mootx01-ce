@@ -1,3 +1,6 @@
+#if MOOTX01_DENSE_FAMILIES
+// Dense-family test — compiled only when DenseFamilies trait is on.
+// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
 // EmbeddingProviderConformanceTests.swift — Swift leg of the
 // cross-language bit-identity gate for the CorpusKitProviders text
 // providers (B2-5: CorpusKit Rust embedding parity).
@@ -264,3 +267,5 @@ struct EmbeddingProviderConformanceTests {
         }
     }
 }
+
+#endif // MOOTX01_DENSE_FAMILIES

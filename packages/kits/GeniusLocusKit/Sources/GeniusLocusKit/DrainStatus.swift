@@ -4,23 +4,21 @@
 // GeniusLocusKit accessor that assembles the status of every drain the estate
 // currently runs.
 //
-// The substrate reports TWO drains:
+// The substrate reports these drains:
 //
 //   1. "corpus_encode" — CorpusKit's encode drain (BM25 + vector lanes).
-//      Since the drain-stage distillation rider (SPEC_DISTILLATION_STORAGE
-//      §7.1), each encode job also distills its drawers BEFORE the job is
-//      replied, so this stream's frontiers cover capture-path distillation.
-//   2. "distillation" — the §7.1 accounting surface: `pending` is the
-//      count of active drawers whose representation is NULL or was
-//      produced under a stale pipeline contract (the sweep-eligibility
-//      predicate measured off the rows themselves — stronger than a
-//      queue-depth proxy, and it also covers lazy regeneration after a
-//      pipeline-version bump or an in-place content patch). `inFlight` is
-//      always 0: eligible rows are either awaiting the hourly
-//      distillation signal / a `moot_distill` sweep, or riding an encode
-//      job already counted by "corpus_encode". "Fully drained" therefore
-//      cannot read true while any row still owes a representation
-//      (FINDING_11X_MAINTENANCE_WALK constraint 6).
+//      The encode rider (room rollup, A2 marker, structural fingerprint
+//      lane entry) runs BEFORE each job is replied, so this stream's
+//      frontiers cover the rider's work too.
+//   2. "dreaming" — the persistent dreaming queue's job depth.
+//   3. "subject_backfill" — the subject producer's NULL-only debt, rendered
+//      only while a producer is registered.
+//   4. "span_encode" — drawers whose bit 27 is clear, rendered only while
+//      an encoder is active for the estate.
+//
+// There is no distillation drain: the distilled rendering is computed
+// inline at read time (Encoder Rerank contract sheet §9), so no row ever
+// owes one.
 //
 // `drainStatuses(_:)` returns a LIST so future drains append entries with
 // no wire reshape.
@@ -83,8 +81,7 @@ public struct DrainStatus: Sendable, Equatable {
     /// finisher). NON-GATING for the benchmarker's encode barrier — the
     /// debt is paid outside the measured session, so a gating lane would
     /// hang every encode barrier on healthy estates
-    /// (`barrierNonGatingLanes` gained this name in the same change; the
-    /// distillation-lane precedent).
+    /// (`barrierNonGatingLanes` gained this name in the same change).
     public static let dreamingName = "dreaming"
 
     /// Canonical name of the subject-backfill drain lane (PR-09). The
@@ -93,8 +90,7 @@ public struct DrainStatus: Sendable, Equatable {
     /// always-present eligibility-count lane would hold the
     /// benchmarker's encode barrier open on healthy estates. When a
     /// rider first ships enabled, the benchmarker's non-gating denylist
-    /// must gain this name in the same mission (the distillation-lane
-    /// precedent). Dispatcher-side mirrors:
+    /// must gain this name in the same mission. Dispatcher-side mirrors:
     /// AriaMcpKit `ToolDispatcher.subjectBackfillLaneName` /
     /// `SUBJECT_BACKFILL_LANE_NAME`.
     public static let subjectBackfillName = "subject_backfill"
@@ -106,13 +102,10 @@ public struct DrainStatus: Sendable, Equatable {
     /// Deliberately ignores every drain except "corpus_encode" — the T5
     /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
     /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
-    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
-    /// stream, the "distillation" entry also settles under a normal drain
-    /// (every enqueued drawer distills via the drain-stage rider before its
-    /// job replies); the gate stays encode-only anyway so the finisher's
-    /// lease tenure is bounded by its own queue, not by any other lane's
-    /// accounting (e.g. a pipeline-version bump that re-opens distillation
-    /// eligibility estate-wide without enqueuing anything).
+    /// The gate stays encode-only so the finisher's lease tenure is bounded
+    /// by its own queue, not by any other lane's accounting (the subject and
+    /// span-encode lanes are row-eligibility counts that can be non-zero
+    /// without anything enqueued).
     /// Mirrors Rust `DrainStatus::encode_settled`.
     public static func encodeSettled(_ statuses: [DrainStatus]) -> Bool {
         !statuses.contains { $0.name == corpusEncodeName && $0.isDraining }
@@ -156,21 +149,9 @@ extension GeniusLocusKit {
             ))
         }
 
-        // Drain 2 of N: distillation accounting (SPEC §7.1). Present on
-        // every estate — distillation is a row-level obligation, not a
-        // corpus feature. `pending` is the eligibility-predicate count;
-        // rows in the encode queue are also counted here until their
-        // drain-stage distillation lands (a truthful double-count for the
-        // boolean "is anything still draining?" barrier).
+        // No distillation lane: the distilled rendering is computed inline at
+        // read time (Encoder Rerank contract sheet §9), so no row owes one.
         let estate = try estate(for: handle)
-        let undistilled = try await estate.countUndistilled(
-            pipelineVersion: GeniusLocusKit.distillationConverterID)
-        statuses.append(DrainStatus(
-            name: "distillation",
-            pending: undistilled,
-            inFlight: 0,
-            detail: "converter: \(GeniusLocusKit.distillationConverterID)"
-        ))
 
         // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
         // the queue is MOUNTED (a fresh estate with no external-origin recall

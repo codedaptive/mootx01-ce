@@ -120,9 +120,6 @@ pub enum Command {
     /// (the detached background finisher an stdio serve spawns on startup/exit
     /// when the dreaming queue has pending items;  / recall-driven dreaming).
     Dream { db: Option<String> },
-    /// redistill [--db <name>] [--dry-run] — force-redistill every active item
-    /// with the active converter and rebuild both recall lanes
-    Redistill { db: Option<String>, dry_run: bool },
     /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart] [--backfill-only]
     Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool, backfill_only: bool },
     /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
@@ -301,7 +298,6 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "proxy" => parse_proxy(&mut it),
         "drain" => parse_drain(&mut it),
         "dream" => parse_dream(&mut it),
-        "redistill" => parse_redistill(&mut it),
         "upgrade" => parse_upgrade(&mut it),
         "unlock" => parse_unlock(&mut it),
         "lock" => {
@@ -422,19 +418,6 @@ fn parse_drain(it: &mut Args) -> Result<Command, UsageError> {
         }
     }
     Ok(Command::Drain { db })
-}
-
-fn parse_redistill(it: &mut Args) -> Result<Command, UsageError> {
-    let (mut db, mut dry_run) = (None, false);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--db" => db = Some(take_value(it, "--db")?),
-            "--dry-run" => dry_run = true,
-            "--help" | "-h" => return Ok(Command::HelpFor("redistill")),
-            other => return Err(unexpected(other, "redistill")),
-        }
-    }
-    Ok(Command::Redistill { db, dry_run })
 }
 
 fn parse_dream(it: &mut Args) -> Result<Command, UsageError> {
@@ -838,8 +821,8 @@ fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
             // convergence steps run the NEW code. See `upgrade::run`.
             "--converge-only" => converge_only = true,
             // Headless data-dir convergence for scripted and benchmark estates:
-            // run only the three migration steps (kg_facts identity, adornment
-            // store migration, shared-content reclaim) against MOOTX01_DATA_DIR,
+            // run only the migration steps (kg_facts identity, shared-content
+            // reclaim, dense pooling convergence) against MOOTX01_DATA_DIR,
             // then exit. No network, no service manager, no prompts.
             "--backfill-only" => backfill_only = true,
             "--help" | "-h" => return Ok(Command::HelpFor("upgrade")),
@@ -964,7 +947,6 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "proxy" => Ok("proxy"),
         "drain" => Ok("drain"),
         "dream" => Ok("dream"),
-        "redistill" => Ok("redistill"),
         "upgrade" => Ok("upgrade"),
         "unlock" => Ok("unlock"),
         "lock" => Ok("lock"),
@@ -996,7 +978,6 @@ pub fn root_usage() -> &'static str {
      \x20 botlink                 One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
      \x20 proxy                   Proxy stdin JSON-RPC frames to the resident daemon over loopback HTTP (for Claude Desktop).\n\
      \x20 upgrade                 Upgrade mootx01 to the latest release or a local build.\n\
-     \x20 redistill               Force-redistill every active item of an estate with the active converter and rebuild both recall lanes.\n\
      \x20 unlock                  Authenticate and issue a sensitivity-tier grant (private → midnight; secret → 30 min).\n\
      \x20 lock                    Revoke all sensitivity grants immediately.\n\
      \x20 enable                  Enable an optional feature (memory-tool, harness-memory).\n\
@@ -1142,13 +1123,6 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             OPTIONS:\n\
             \x20 --db <name>             Named estate to drain. Default: active estate.".into(),
-        "redistill" => "Force-redistill every active item of an estate with the active converter and rebuild both recall lanes (BM25 + dense). The same operation as the moot_redistill MCP tool, run from the terminal without a server.\n\
-            \n\
-            USAGE: mootx01 redistill [--db <name>] [--dry-run]\n\
-            \n\
-            OPTIONS:\n\
-            \x20 --db <name>             Named estate to redistill. Default: active estate.\n\
-            \x20 --dry-run               Report how many rows are stale under the active converter and exit without writing.".into(),
         "dream" => "Run one REM-ALPHA dreaming cycle, then exit. The detached background finisher an stdio serve spawns on startup or exit when the dreaming queue has pending items; rarely run by hand.\n\
             \n\
             USAGE: mootx01 dream [--db <name>]\n\
@@ -1164,7 +1138,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --check                 Print the latest available version and exit without downloading.\n\
             \x20 --yes                   Skip the confirmation prompt before downloading a new release.\n\
             \x20 --no-restart            Copy the binary but skip restarting the background agents.\n\
-            \x20 --backfill-only         Run only the data-directory migration steps (kg_facts identity, adornment store migration, shared-content reclaim, dense pooling convergence, distilled representation convergence) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
+            \x20 --backfill-only         Run only the data-directory migration steps (kg_facts identity, shared-content reclaim, dense pooling convergence, distilled representation convergence) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
         "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
             \n\
             USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
@@ -1331,16 +1305,6 @@ mod tests {
         );
         assert!(p(&["db", "composition", "--bogus"]).is_err());
         assert!(p(&["db", "composition", "--set"]).is_err());
-    }
-
-    #[test]
-    fn redistill_flags() {
-        assert_eq!(p(&["redistill"]).unwrap(), Command::Redistill { db: None, dry_run: false });
-        assert_eq!(
-            p(&["redistill", "--db", "clone", "--dry-run"]).unwrap(),
-            Command::Redistill { db: Some("clone".into()), dry_run: true }
-        );
-        assert!(p(&["redistill", "--bogus"]).is_err());
     }
 
     #[test]
@@ -1587,9 +1551,9 @@ mod tests {
         );
     }
 
-    /// `--backfill-only` runs only the five data-dir migration steps
-    /// (kg_facts identity, adornment store migration, shared-content reclaim, dense pooling
-    /// convergence, distilled representation convergence); no network, no service manager, no prompts.
+    /// `--backfill-only` runs only the data-dir migration steps
+    /// (kg_facts identity, shared-content reclaim, dense pooling convergence,
+    /// distilled representation convergence); no network, no service manager, no prompts.
     /// Exits non-zero when any step fails. Used by scripted and benchmark estates.
     #[test]
     fn upgrade_backfill_only_parses() {

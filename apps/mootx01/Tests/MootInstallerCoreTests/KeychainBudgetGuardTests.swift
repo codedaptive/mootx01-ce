@@ -14,7 +14,7 @@
 // a before/after snapshot across the whole suite. The cycle test discriminates
 // because it will fail as soon as deleteKey stops working or provideKey starts
 // writing to a different account. For identity keys the guard is the exec tests
-// themselves: RedistillCommandExecTests and DbCompositionCommandExecTests set
+// themselves: DbCompositionCommandExecTests sets
 // MOOTX01_ESTATE_LIFETIME=ephemeral, so any regression that removes the env var
 // path in the binary causes those exec tests to mint keys — Keychain pollution
 // reappears and the measurement done during KEY-1 is repeatable.

@@ -15,6 +15,10 @@
 //! exercise genuine primitive-form read-back (a TIMESTAMP column round-trips as
 //! a parsed `Timestamp(i64)` here), the same discipline as bundle_store_tests.
 
+// Every case persists an LSA, NMF or PPMI basis — dark dense families (contract sheet §13) —
+// so this file compiles only under the dense-families feature.
+#![cfg(feature = "dense-families")]
+
 use corpus_kit::{
     BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis,
     TrainableEmbeddingBasis, TrainingPathDecision,

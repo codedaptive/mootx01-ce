@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // AdornmentValidators.swift
 //
 // Pure, deterministic validators for adornment post-mint certification
@@ -180,3 +181,4 @@ public enum AdornmentValidators {
         return years
     }
 }
+#endif // MOOTX01_MINERS

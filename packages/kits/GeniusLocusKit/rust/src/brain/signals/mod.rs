@@ -1,10 +1,11 @@
 // brain/signals/mod.rs — Rust mirror of the standing signals.
 //
-// Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8)
-// + brain-layer governor ownership  (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
+// Mission GLK-05 (six v1 signals)
+// + brain-layer governor ownership (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
 // + contradiction-scout (signal 10) + consolidation-sweep (signal 11)
 // + P3a anomaly-flag sweep (signal 12, AnomalySweepSignal)
-// + SPEC_ADORNMENT §4 adornment-minting pass (signal 13, AdornmentPassSignal).
+// + ENCODER_RERANK_CONTRACT §10 span-encode drain (signal 13, SpanEncodeSignal,
+//   replaces the former AdornmentPassSignal which is removed).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The
@@ -19,32 +20,30 @@
 // closure; other signals still emit demonstrative shapes for the
 // conformance gate.
 
-pub mod adornment;
 pub mod anomaly_sweep;
 pub mod by_reference_validity;
 pub mod consolidation;
 pub mod contradiction_scout;
 pub mod decay_sweep;
 pub mod default_set;
-pub mod distillation;
 pub mod dreaming;
 pub mod end_of_day_tournament;
 pub mod maintenance;
+pub mod span_encode;
 pub mod temporal_causality;
 pub mod training;
 pub mod vector_similarity;
 
-pub use adornment::AdornmentPassSignal;
 pub use anomaly_sweep::AnomalySweepSignal;
 pub use by_reference_validity::ByReferenceValiditySignal;
 pub use consolidation::ConsolidationSignal;
 pub use contradiction_scout::ContradictionScoutSignal;
 pub use decay_sweep::DecaySweepSignal;
 pub use default_set::{default_standing_signal_names, default_standing_signal_specs};
-pub use distillation::DistillationSignal;
 pub use dreaming::DreamingSignal;
 pub use end_of_day_tournament::EndOfDayTournamentSignal;
 pub use maintenance::MaintenanceSignal;
+pub use span_encode::SpanEncodeSignal;
 pub use temporal_causality::TemporalCausalitySignal;
 pub use training::TrainingSignal;
 pub use vector_similarity::{AssociationEdgeChecker, VectorSimilaritySignal};

@@ -7,12 +7,12 @@
 //
 // ## What is under test
 //
-// The Rust port reads the `embedding_provider` manifest key and records
-// provenance to stderr (one line per estate open when a model_id is set).
-// It does NOT select a concrete embedding provider — NaturalLanguage is an
-// Apple-only framework unavailable on the Rust target platforms (Linux/Windows).
-// The parity ruling (GENIUSLOCUSKIT_INTERFACE §1.53, EMBED-PROV-E2) formalises
-// this: Rust reads and echoes, Swift reads and selects.
+// The Rust port reads the `embedding_provider` manifest key. For the
+// Apple-platform ids it records provenance to stderr (one line per estate
+// open) and selects nothing — NaturalLanguage is unavailable on Linux/Windows
+// (parity ruling GENIUSLOCUSKIT_INTERFACE §1.53, EMBED-PROV-E2). The
+// `"encoder"` value activates the span encoder on both ports; that path is
+// covered in encoder_activation_tests.rs.
 //
 // ## Coverage
 //
@@ -172,7 +172,7 @@ fn apply_with_absent_key_does_not_panic() {
     // No key written → early return path in apply_provisioned_embedding_provider.
     // The function must not panic and must not emit anything meaningful to stderr
     // (though we do not assert on stderr content here).
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     coord.apply_provisioned_embedding_provider(&handle);
     // Reaching here without panicking is the assertion.
 }
@@ -185,7 +185,7 @@ fn apply_with_absent_key_does_not_panic() {
 fn apply_with_apple_nl_key_does_not_panic() {
     // "apple-nl-v1" is the only key the Swift port selects to a concrete provider.
     // Rust records it to stderr and returns. Must complete without panicking.
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     coord
         .provision_embedding_provider(&handle, "apple-nl-v1")
         .expect("provision");
@@ -204,7 +204,7 @@ fn apply_with_apple_nl_key_does_not_panic() {
 fn apply_with_unknown_key_does_not_panic() {
     // Rust treats every non-empty model_id as a provenance line — there is no
     // switch statement and no "unknown" branch. Any model_id logs and returns.
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     coord
         .provision_embedding_provider(&handle, "unknown-provider-v99")
         .expect("provision");
@@ -239,7 +239,7 @@ fn apply_with_empty_string_does_not_panic() {
     // Empty string is treated as absent by apply_provisioned_embedding_provider
     // (the `model_id.is_empty()` guard fires before the eprintln).
     // Verify that branch also completes without panicking.
-    let (coord, handle) = open_one();
+    let (mut coord, handle) = open_one();
     coord
         .provision_embedding_provider(&handle, "")
         .expect("provision empty");

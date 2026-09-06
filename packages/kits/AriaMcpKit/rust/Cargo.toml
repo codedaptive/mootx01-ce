@@ -78,12 +78,6 @@ eidetic-lib      = { path = "../../../libs/EideticLib/rust" }
 # via neuron-kit; added as a direct dep so dream_runner can name DrainLease explicitly.
 # Per in-repository dependency direction; recorded in  blast-radius.
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
-# adornment-lib: production dependency since DEFAULT-MINT-01 — the estate
-# registry registers the platform-default minter (QUANTIZED_RECIPE) at the
-# rust open moment, and the dream runner drives the adornment pass. No
-# layering inversion: adornment-lib is upstream of locus-kit in the
-# dependency graph. (Previously dev-only for adornment_render_tests.rs.)
-adornment-lib = { path = "../../../libs/AdornmentLib/rust" }
 
 [dev-dependencies]
 # convergence-kit: EstateStatusSyncTests (Rust) directly names NoSyncEngine and
