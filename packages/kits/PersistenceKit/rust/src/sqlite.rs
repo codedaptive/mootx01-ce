@@ -1225,9 +1225,29 @@ fn apply_migration_operation(
             }
         }
         Op::DropColumn { table, column_name } => {
-            exec(&format!(
-                "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
-            ))?
+            // Idempotent, the AddColumn rule in reverse: a migration capsule
+            // replays a kit's ladder on estates that may already carry the
+            // drop (a fresh estate creates the latest layout, a re-run of the
+            // capsule finds the column gone). SQLite has no DROP COLUMN IF
+            // EXISTS, so probe the table's columns and skip when absent.
+            let exists: bool = conn
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        let name: String = row.get(1)?;
+                        if name == *column_name {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            if exists {
+                exec(&format!(
+                    "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
+                ))?;
+            }
         }
         Op::RenameColumn { table, from, to } => {
             exec(&format!(
