@@ -839,6 +839,15 @@ impl Corpus {
         storage
             .migrate(&BundleStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+        // rename keys its vector ledger row by the old id; migrating under the
+        // new id without moving that row replays the ladder from version 0
+        // and folds every row's generation to 0. The rename runs first; a
+        // conflicted ledger (rows under both ids) is left as it is with one
+        // warning and the estate still opens — the migrate below reads its
+        // ladder position from the current-id row, so nothing replays.
+        VectorStore::prepare_schema_ledger(storage.as_ref())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
@@ -1152,6 +1161,10 @@ impl Corpus {
         storage
             .migrate(&BundleStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        // SECURITY: same ledger rename as `open_many` — the legacy VectorKit
+        // row moves to SynapseKit before the vector ladder runs.
+        VectorStore::prepare_schema_ledger(storage.as_ref())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;

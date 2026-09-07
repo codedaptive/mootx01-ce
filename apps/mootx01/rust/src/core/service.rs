@@ -19,6 +19,12 @@
 //! out of task metadata and loaded by moot-mgr from its user-local token file.
 //! SCM services are out of scope for v1 (spec §6). macOS is Swift territory
 //! (launchd, LaunchAgent.swift).
+//!
+//! Beside the writers sits one reader, `daemon_registration`: `mootx01
+//! upgrade` asks it which data directory the registered daemon serves, so
+//! the quiesce decision follows the registration rather than the platform
+//! default (the pure parsers `data_dir_from_unit` / `data_dir_from_task_command`
+//! are the testable core).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +60,175 @@ pub fn is_cmd_safe(s: &str) -> bool {
 /// closes the injection window from a crafted MOOTX01_DATA_DIR value.
 pub fn is_systemd_safe(s: &str) -> bool {
     !s.contains('\n') && !s.contains('\r')
+}
+
+// ---------------------------------------------------------------------------
+// Registration readback — which data directory does the registered daemon serve?
+// ---------------------------------------------------------------------------
+
+/// What the service manager holds for the resident daemon, as `mootx01
+/// upgrade` reads it back to decide whether an estate is the daemon's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonRegistration {
+    /// No daemon registration exists (unit file absent / task not registered).
+    Absent,
+    /// A registration exists at the named location but could not be read or
+    /// is not a daemon registration this build understands. SECURITY: the
+    /// caller treats every estate as resident rather than guess which one
+    /// the daemon holds open.
+    Unreadable(PathBuf),
+    /// A registration exists; `data_dir` is the `MOOTX01_DATA_DIR` it bakes
+    /// in, or `None` when the daemon runs over the platform default.
+    Registered { data_dir: Option<String> },
+}
+
+/// The environment variable name the parsers below look for: the one
+/// `daemon_unit` and `daemon_task_command` bake into the registration.
+pub const DATA_DIR_ENV_VAR: &str = "MOOTX01_DATA_DIR";
+
+/// Parse the `Environment=MOOTX01_DATA_DIR=<dir>` directive out of a systemd
+/// unit's text, the inverse of what `daemon_unit` writes.
+///
+/// - `Ok(Some(dir))`: the unit bakes a non-empty override (an optional
+///   single pair of surrounding double quotes is stripped, since systemd
+///   accepts `Environment="K=V"`).
+/// - `Ok(None)`: a recognisable unit (`[Service]` section present) with no
+///   override; the daemon serves the platform default.
+/// - `Err(reason)`: the text has no `[Service]` section, so it is not a unit
+///   this reader understands; the caller reports the registration unreadable.
+pub fn data_dir_from_unit(unit: &str) -> Result<Option<String>, String> {
+    if !unit.lines().any(|l| l.trim() == "[Service]") {
+        return Err("no [Service] section".to_string());
+    }
+    for line in unit.lines() {
+        let Some(value) = line.trim().strip_prefix("Environment=") else {
+            continue;
+        };
+        let value = value.trim();
+        // systemd permits Environment="K=V" — strip one matching quote pair.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        let Some(dir) = value.strip_prefix(DATA_DIR_ENV_VAR).and_then(|v| v.strip_prefix('=')) else {
+            continue;
+        };
+        if !dir.is_empty() {
+            return Ok(Some(dir.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Parse the `set MOOTX01_DATA_DIR=<dir>&& ` prefix out of the command line a
+/// Windows logon task runs, the inverse of what `daemon_task_command` writes.
+/// `text` is the task's action (`<execute> <arguments>`) followed by the
+/// content of its hidden VBScript launcher when the arguments name one, so the
+/// `cmd /c "set …&& "<binary>" serve …"` line is present whichever form the
+/// task took.
+///
+/// - `Ok(Some(dir))`: a non-empty override precedes the `&&` separator
+///   (`is_cmd_safe` guarantees the directory itself contains no `&`).
+/// - `Ok(None)`: a recognisable daemon action (invokes `serve`) with no
+///   override; the daemon serves the platform default.
+/// - `Err(reason)`: no `serve` invocation, so this is not a daemon action
+///   this reader understands; the caller reports the registration unreadable.
+pub fn data_dir_from_task_command(text: &str) -> Result<Option<String>, String> {
+    if !text.contains(" serve") {
+        return Err("no `serve` invocation in the task action".to_string());
+    }
+    let marker = format!("set {DATA_DIR_ENV_VAR}=");
+    let Some(start) = text.find(&marker) else {
+        return Ok(None);
+    };
+    let rest = &text[start + marker.len()..];
+    let end = rest.find("&&").unwrap_or(rest.len());
+    let dir = rest[..end].trim();
+    Ok((!dir.is_empty()).then(|| dir.to_string()))
+}
+
+/// The hidden VBScript launcher a task's arguments point at
+/// (`//B //Nologo "<path>.vbs"`, written by `write_hidden_launcher`), or
+/// `None` when the arguments run the command directly.
+pub fn hidden_launcher_path(arguments: &str) -> Option<&str> {
+    let start = arguments.find('"')?;
+    let rest = &arguments[start + 1..];
+    let end = rest.find('"')?;
+    let path = &rest[..end];
+    path.to_ascii_lowercase().ends_with(".vbs").then_some(path)
+}
+
+/// Read the daemon's systemd user unit at `unit_path` and report what it
+/// registers. Pure filesystem: compiled on every platform so the Linux
+/// readback is testable from a temp directory anywhere.
+pub fn daemon_registration_from_unit_file(unit_path: &Path) -> DaemonRegistration {
+    if !unit_path.exists() {
+        return DaemonRegistration::Absent;
+    }
+    // SECURITY: a unit that exists but cannot be read or understood is
+    // reported unreadable, never as "no override" — the upgrade then
+    // quiesces the daemon rather than migrate under it.
+    match std::fs::read_to_string(unit_path) {
+        Ok(text) => match data_dir_from_unit(&text) {
+            Ok(data_dir) => DaemonRegistration::Registered { data_dir },
+            Err(_) => DaemonRegistration::Unreadable(unit_path.to_path_buf()),
+        },
+        Err(_) => DaemonRegistration::Unreadable(unit_path.to_path_buf()),
+    }
+}
+
+/// What the platform service manager registers for the resident daemon.
+/// Linux: the systemd user unit `~/.config/systemd/user/mootx01.service`.
+/// Windows: the `mootx01` logon task's action (and its hidden launcher).
+/// Other platforms register nothing from this binary and report `Absent`.
+#[cfg(target_os = "linux")]
+pub fn daemon_registration(home: &Path) -> DaemonRegistration {
+    daemon_registration_from_unit_file(&systemd_user_dir(home).join(DAEMON_UNIT))
+}
+
+/// See the Linux doc comment: the Windows reader queries Task Scheduler for
+/// the daemon task's action through the same PowerShell COM surface the
+/// writer uses. `ABSENT` on stdout is the task-not-registered signal; a
+/// PowerShell failure (cannot run, non-zero exit) is unreadable, never absent.
+#[cfg(target_os = "windows")]
+pub fn daemon_registration(_home: &Path) -> DaemonRegistration {
+    let at = PathBuf::from(format!("Task Scheduler\\{DAEMON_TASK}"));
+    let cmd = format!(
+        "$t = Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue; \
+         if (-not $t) {{ Write-Output 'ABSENT'; exit 0 }}; \
+         $t.Actions | ForEach-Object {{ Write-Output $_.Execute; Write-Output $_.Arguments }}",
+        name = ps_quote(DAEMON_TASK),
+    );
+    let output = match powershell(&cmd) {
+        Ok(o) => o,
+        Err(_) => return DaemonRegistration::Unreadable(at),
+    };
+    if output.trim() == "ABSENT" {
+        return DaemonRegistration::Absent;
+    }
+    // The task launches through a hidden VBScript launcher; the cmd line
+    // that bakes MOOTX01_DATA_DIR lives inside that file.
+    let mut text = output.clone();
+    if let Some(vbs) = hidden_launcher_path(&output) {
+        match std::fs::read_to_string(vbs) {
+            Ok(launcher) => {
+                text.push('\n');
+                text.push_str(&launcher);
+            }
+            Err(_) => return DaemonRegistration::Unreadable(at),
+        }
+    }
+    match data_dir_from_task_command(&text) {
+        Ok(data_dir) => DaemonRegistration::Registered { data_dir },
+        Err(_) => DaemonRegistration::Unreadable(at),
+    }
+}
+
+/// See the Linux doc comment. macOS is launchd territory (Swift); the Rust
+/// binary registers no daemon there.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub fn daemon_registration(_home: &Path) -> DaemonRegistration {
+    DaemonRegistration::Absent
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +746,104 @@ pub fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- registration readback: the reader inverts the writers -------------
+
+    #[test]
+    fn unit_with_data_dir_override_reads_back_that_directory() {
+        // Pinned fixture (twin of the Swift PathsTests): a registration that
+        // bakes MOOTX01_DATA_DIR=/x names /x.
+        let u = daemon_unit("/b", Some("/x"), true).unwrap();
+        assert_eq!(data_dir_from_unit(&u), Ok(Some("/x".to_string())));
+        // systemd's quoted spelling reads the same.
+        assert_eq!(
+            data_dir_from_unit("[Service]\nEnvironment=\"MOOTX01_DATA_DIR=/x\"\n"),
+            Ok(Some("/x".to_string()))
+        );
+    }
+
+    #[test]
+    fn unit_without_override_reads_back_platform_default() {
+        let u = daemon_unit("/b", None, true).unwrap();
+        assert_eq!(data_dir_from_unit(&u), Ok(None));
+        // An empty override is no override.
+        assert_eq!(
+            data_dir_from_unit("[Service]\nEnvironment=MOOTX01_DATA_DIR=\n"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_unit_is_unreadable() {
+        assert!(data_dir_from_unit("this is not a unit").is_err());
+        assert!(data_dir_from_unit("").is_err());
+    }
+
+    #[test]
+    fn unit_file_readback_absent_registered_unreadable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let unit_path = systemd_user_dir(tmp.path()).join(DAEMON_UNIT);
+        assert_eq!(daemon_registration_from_unit_file(&unit_path), DaemonRegistration::Absent);
+
+        std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+        std::fs::write(&unit_path, daemon_unit("/b", Some("/x"), true).unwrap()).unwrap();
+        assert_eq!(
+            daemon_registration_from_unit_file(&unit_path),
+            DaemonRegistration::Registered { data_dir: Some("/x".to_string()) }
+        );
+
+        std::fs::write(&unit_path, daemon_unit("/b", None, true).unwrap()).unwrap();
+        assert_eq!(
+            daemon_registration_from_unit_file(&unit_path),
+            DaemonRegistration::Registered { data_dir: None }
+        );
+
+        std::fs::write(&unit_path, "this is not a unit").unwrap();
+        assert_eq!(
+            daemon_registration_from_unit_file(&unit_path),
+            DaemonRegistration::Unreadable(unit_path.clone())
+        );
+    }
+
+    #[test]
+    fn task_command_with_override_reads_back_that_directory() {
+        let (exe, arg) = daemon_task_command(r"C:\b\mootx01.exe", Some(r"D:\moot"), true).unwrap();
+        assert_eq!(
+            data_dir_from_task_command(&format!("{exe} {arg}")),
+            Ok(Some(r"D:\moot".to_string()))
+        );
+        // The same line inside the hidden VBScript launcher (quotes doubled).
+        let vbs = format!(
+            "Set objShell = CreateObject(\"wscript.shell\")\r\nobjShell.Run \"{}\", 0, True\r\n",
+            format!("\"{exe}\" {arg}").replace('"', "\"\"")
+        );
+        assert_eq!(
+            data_dir_from_task_command(&format!("wscript.exe\n//B //Nologo \"C:\\x\\mootx01.vbs\"\n{vbs}")),
+            Ok(Some(r"D:\moot".to_string()))
+        );
+    }
+
+    #[test]
+    fn task_command_without_override_reads_back_platform_default() {
+        let (exe, arg) = daemon_task_command(r"C:\b\mootx01.exe", None, true).unwrap();
+        assert_eq!(data_dir_from_task_command(&format!("{exe} {arg}")), Ok(None));
+    }
+
+    #[test]
+    fn task_action_without_serve_is_unreadable() {
+        assert!(data_dir_from_task_command("notepad.exe").is_err());
+        assert!(data_dir_from_task_command("").is_err());
+    }
+
+    #[test]
+    fn hidden_launcher_path_is_extracted_only_for_vbs() {
+        assert_eq!(
+            hidden_launcher_path(r#"//B //Nologo "C:\Users\u\AppData\Local\MOOTx01\mootx01.vbs""#),
+            Some(r"C:\Users\u\AppData\Local\MOOTx01\mootx01.vbs")
+        );
+        assert_eq!(hidden_launcher_path(r#"/c "set MOOTX01_VAULT=1&& "C:\b\mootx01.exe" serve""#), None);
+        assert_eq!(hidden_launcher_path("serve"), None);
+    }
 
     #[test]
     fn daemon_unit_shape() {
