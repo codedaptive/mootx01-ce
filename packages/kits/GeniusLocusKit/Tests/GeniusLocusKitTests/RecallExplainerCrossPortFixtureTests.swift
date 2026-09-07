@@ -68,9 +68,13 @@ struct RecallExplainerCrossPortFixtureTests {
                 temporal: c.score.temporal, graph: c.score.graph,
                 preference: c.score.preference, redundancyPenalty: 0,
                 final: c.score.final, dense: c.score.dense)
+            // The explainer reads only the span index and cosine; the fixture JSON
+            // does not carry lexical_rank. Supply 1 as a neutral placeholder so the
+            // constructor compiles; the explainer never reads bm25Rank.
             let spanHit = c.spanHit.map {
                 SpanRerankHit(itemID: "fixture", bestSpanIndex: $0.bestSpanIndex,
-                              bestSpanStart: $0.bestSpanStart, bestSpanEnd: $0.bestSpanEnd, cosine: $0.cosine)
+                              bestSpanStart: $0.bestSpanStart, bestSpanEnd: $0.bestSpanEnd,
+                              cosine: $0.cosine, bm25Rank: 1)
             }
             let hit = RecallHit(id: "fixture", drawer: nil, sources: sources, score: sv,
                                 explanation: [], spanHit: spanHit)

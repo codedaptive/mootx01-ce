@@ -1126,10 +1126,15 @@ fn run_memory_search(
         .map(|h| h.score.final_score as f64)
         .collect();
     let discrimination = crate::recall_discrimination::classify(&hit_scores);
-    // Dense-lane dark flag: true when Lane D (deterministic vector) did not
-    // contribute to this ranking. Used to cap the discrimination signal so
-    // "high — clear top result" is never reported on a lexical-only ranking.
-    let dense_lane_dark = result.dense_lane_status.is_some();
+    // Dense-lane dark flag: true when the dense lane is dark AND no span rerank
+    // stage is registered for this estate. With a stage registered the encoder
+    // reorders the lexical head, so a dark dense lane no longer means the ranking
+    // is lexical-only. Used to cap the discrimination signal so "high — clear top
+    // result" is never reported on a ranking that lacked any semantic signal.
+    let dense_lane_dark = crate::recall_discrimination::dense_lane_dark(
+        result.dense_lane_status.as_deref(),
+        coord.is_span_rerank_registered(&estate.handle),
+    );
 
     // PACKAGER mission: run the results packager for non-never modes.
     //
