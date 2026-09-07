@@ -208,9 +208,11 @@ let package = Package(
             dependencies: [
                 "PersistenceKit",
                 "PersistenceKitSQLite",
-                // PersistenceKitInMemory: TransactionBoundaryTests uses InMemoryStorage
-                // as a comparison backend. Pre-existing implicit dep — made explicit here
-                // to fix the linker failure on SPM 6 strict mode. (MX-TAB-1 surfaced this.)
+                // PersistenceKitInMemory: TransactionBoundaryTests contrasts the SQLite
+                // transaction seam against the in-memory backend's no-op path, using
+                // InMemoryStorage as a comparison backend. Pre-existing implicit dep —
+                // made explicit here to fix the linker failure on SPM 6 strict mode.
+                // (MX-TAB-1 surfaced this.)
                 "PersistenceKitInMemory",
                 "PersistenceKitConformance",
                 "SubstrateTypes",
@@ -219,9 +221,6 @@ let package = Package(
                 "SQLCipher",
                 // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
                 "IntellectusLib",
-                // InMemoryStorage: TransactionBoundaryTests contrasts the SQLite
-                // transaction seam against the in-memory backend's no-op path.
-                "PersistenceKitInMemory",
             ],
             path: "Tests/PersistenceKitSQLiteTests"
         ),

@@ -179,7 +179,7 @@ public final class InMemoryEstateIdentityKeyStore: EstateIdentityKeyStore, @unch
     /// Remove the private key for the given estate UUID from the in-memory
     /// dictionary. Idempotent: deleting a UUID that was never stored is a no-op.
     public func deletePrivateKey(forEstateID estateID: UUID) throws {
-        lock.withLock { store.removeValue(forKey: estateID) }
+        _ = lock.withLock { store.removeValue(forKey: estateID) }
     }
 
     /// TEST-ONLY — read back the stored private key bytes for inspection.
