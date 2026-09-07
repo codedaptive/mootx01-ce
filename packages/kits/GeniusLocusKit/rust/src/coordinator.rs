@@ -33,7 +33,10 @@
 //                              corpus nor vector store is registered for the handle.
 //   GLKRecallMode::CorpusOnly — BM25 + vector lanes. If corpus/vector absent,
 //                              falls back to rank-normalised locus-only.
-//   GLKRecallMode::UnionBest — all three lanes + union profile. Same fallback.
+//   GLKRecallMode::UnionBest — all three lanes + union profile. No fallback:
+//                              every UnionBest request runs the full pipeline,
+//                              over the locus and graph lanes alone when neither
+//                              corpus nor vector store is registered (Swift twin).
 //   GLKRecallMode::NodeTreeNative — host-tree topology path; tree edges are
 //                              frozen once per recall_tunnels call (G1) and
 //                              unioned with estate tunnel edges for the
@@ -10050,7 +10053,9 @@ impl EstateCoordinator {
     /// **CorpusOnly** — BM25 + vector lanes only (locus lane excluded). Falls back
     /// to rank-normalised locus-only when neither is registered.
     ///
-    /// **UnionBest** — all three lanes + union profile. Falls back like Hybrid.
+    /// **UnionBest** — all three lanes + union profile. No fallback: the full
+    /// pipeline runs over the locus and graph lanes alone when neither corpus
+    /// nor vector store is registered, as Swift's recallUnionBest does.
     ///
     /// **NodeTreeNative** — host-tree topology path. Drawer retrieval delegates to
     /// the LocusOnly bitmap lane; tree-edge union is performed in `recall_tunnels`.
@@ -10375,10 +10380,12 @@ impl EstateCoordinator {
     ///   query_text. Embeds the query via Corpus.embed (requires corpus also
     ///   registered). Score = (256 - hamming_distance) / 256.0.
     ///
-    /// Fallback: when neither corpus nor vector is registered, falls back to
-    /// rank-normalised locus-only (identical to before CorpusKit/SynapseKit
-    /// were wired). This preserves existing behaviour for callers that have not
-    /// yet registered corpus/vector stores.
+    /// Fallback: when neither corpus nor vector is registered, Hybrid and
+    /// CorpusOnly fall back to rank-normalised locus-only (identical to before
+    /// CorpusKit/SynapseKit were wired), which preserves existing behaviour for
+    /// callers that have not yet registered corpus/vector stores. UnionBest
+    /// never falls back: it runs the full pipeline over the locus and graph
+    /// lanes alone, as Swift's recallUnionBest does.
     ///
     /// RRF fusion (k=60): for each candidate id appearing in any lane, the
     /// fused score is Σ_L 1/(k + rank_in_L), where rank_in_L is the 0-based
@@ -10879,13 +10886,19 @@ impl EstateCoordinator {
         //   to see through this path. Mirrors Swift RecallDirector.recallCorpusOnly which
         //   propagates RecallDirectorError.corpusUnavailable when FailClosed is set.
         //
-        //   All other cases — fall back to rank-normalised locus-only scoring for
-        //   Hybrid/UnionBest+Rrf/Raw. Exception: UnionBest + MatrixAware proceeds to
-        //   the full pipeline even without corpus/vector — the matrix scoring pass is
-        //   locus-based and does not require corpus/vector.
-        let is_matrix_aware_union = request.mode == GLKRecallMode::UnionBest
-            && request.scoring == GLKRecallScoring::MatrixAware;
-        if !has_corpus && !has_vector && !is_matrix_aware_union {
+        //   Hybrid and CorpusOnly otherwise: fall back to rank-normalised
+        //   locus-only scoring (`recall_scored_locus_ranked`).
+        //
+        //   UnionBest, every scoring: proceeds to the full pipeline. Swift's
+        //   recallUnionBest has no no-corpus short cut: it runs the candidate
+        //   buffer over the locus and graph lanes alone, normalises the columns
+        //   at step 6, scores from `buffer.final` (or the weighted formula under
+        //   matrixAware) and reports the normalised columns at step 11. The
+        //   locus-ranked fallback reports the un-normalised ramp and, under Rrf,
+        //   a reciprocal-rank final, and never runs the graph lane, so it is not
+        //   the Swift twin for this mode.
+        let is_union_best = request.mode == GLKRecallMode::UnionBest;
+        if !has_corpus && !has_vector && !is_union_best {
             use crate::recall::RecallFallbackPolicy;
             if request.mode == GLKRecallMode::CorpusOnly
                 && request.fallback == RecallFallbackPolicy::FailClosed
@@ -12354,6 +12367,30 @@ impl EstateCoordinator {
                     let effective_locus_raw = locus_raw.max(graph_raw);
                     let effective_locus_rank = if locus_rank < usize::MAX { locus_rank } else { graph_rank };
 
+                    // UnionBest + Raw / Rrf / Discriminative: the candidate is a row
+                    // of Swift's RecallCandidateBuffer. `buffer.merge` keeps the MAX
+                    // of each column across the lanes that supplied the id, and its
+                    // `final` column is the max of the per-lane finals: the locus
+                    // ramp, the graph lane's fixed 0.5, the BM25 score, the Hamming
+                    // similarity, and the dense lane's cosine PLUS its consensus
+                    // boost (Swift dense hit `final = dense + boost`, `dense` column
+                    // = cosine only). Swift step 9 scores `.raw` and `.rrf` from that
+                    // `final` column and never from a lane sum or a reciprocal-rank
+                    // fusion (unionBest has no distinct RRF; `unionBest.rrf` is the
+                    // recorded fallback), so this tuple carries the buffer values
+                    // and the UnionBest block below normalises them exactly as
+                    // Swift step 6 does. The locus column carries the graph max,
+                    // as `buffer.locus` does. Hybrid and CorpusOnly keep the lane
+                    // sum and the weighted RRF fusion in the match below.
+                    if request.mode == GLKRecallMode::UnionBest {
+                        let buffer_final = effective_locus_raw
+                            .max(bm25_raw)
+                            .max(vec_raw)
+                            .max(dense_raw + dense_boost);
+                        return Some((id.clone(), buffer_final, effective_locus_raw, bm25_raw, vec_raw, dense_raw,
+                                     0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32));
+                    }
+
                     let final_score = match request.scoring {
                         GLKRecallScoring::Raw =>
                             // Use effective_locus_raw so graph-only candidates score as 0.5,
@@ -12430,18 +12467,20 @@ impl EstateCoordinator {
                 .collect();
 
             if request.mode == GLKRecallMode::UnionBest {
-                // UnionBest + Raw / Rrf / Discriminative: the same step 10 MMR
-                // stage as the matrixAware branch. Swift computes the union
-                // profile (step 7) and the adaptive weights (step 8) for EVERY
-                // scoring strategy and step 10 takes λ from `weights.diversity`
-                // regardless of scoring, over the step 6 normalised `final`
-                // column. Rust builds the same profile here from the lane
-                // columns of the scored candidates (min-max normalised as in
-                // step 6) so λ has the same source, and feeds the normalised
-                // fused score to MMR as the relevance term so λ·score and
-                // (1−λ)·maxSim share the [0, 1] scale exactly as in Swift; the
-                // hit's reported `final_score` stays the fused value computed
-                // above. The returned `union_profile` stays
+                // UnionBest + Raw / Rrf / Discriminative: Swift steps 6 to 11
+                // over the candidate buffer rows built above. Step 6 min-max
+                // normalises every column, `final` included; step 7 computes
+                // the union profile from the normalised columns and step 8 the
+                // adaptive weights, for EVERY scoring strategy, so λ has the
+                // same source; step 9 scores each candidate from the normalised
+                // `final` (`.discriminative` multiplies it by the dense
+                // discrimination factor); step 10 feeds that score to MMR as
+                // the relevance term so λ·score and (1−λ)·maxSim share the
+                // [0, 1] scale; step 11 reports the normalised columns and the
+                // step 9 score on every hit. The tuples are rewritten with those
+                // normalised values after selection so the hit construction
+                // below reads exactly what Swift's `buffer.<column>[idx]` and
+                // `scores[idx]` carry. The returned `union_profile` stays
                 // `RecallUnionProfile::ZERO` for these scorings (below).
                 //
                 // Candidates are ordered by id first: `all_ids` is a HashSet,
@@ -12465,14 +12504,18 @@ impl EstateCoordinator {
                 let mut col_locus:  Vec<f32> = scored.iter().map(|t| t.2).collect();
                 let mut col_bm25:   Vec<f32> = scored.iter().map(|t| t.3).collect();
                 let mut col_vector: Vec<f32> = scored.iter().map(|t| t.4).collect();
+                let mut col_dense:  Vec<f32> = scored.iter().map(|t| t.5).collect();
                 // No matrix pass on this branch (Swift step 5.6 is matrixAware-
-                // only), so the co-occurrence column the profile reads is zero.
+                // only), so the co-occurrence column the profile reads is zero;
+                // fieldFit, temporal, graph and preference stay zero for the
+                // same reason (steps 5.6 and 5.7 are matrixAware-only).
                 let col_co_occur: Vec<f32> = vec![0.0; count];
-                let mut col_final_norm: Vec<f32> = scored.iter().map(|t| t.1).collect();
+                let mut col_final: Vec<f32> = scored.iter().map(|t| t.1).collect();
                 Self::normalize_column(&mut col_locus, count);
                 Self::normalize_column(&mut col_bm25, count);
                 Self::normalize_column(&mut col_vector, count);
-                Self::normalize_column(&mut col_final_norm, count);
+                Self::normalize_column(&mut col_dense, count);
+                Self::normalize_column(&mut col_final, count);
                 let primary_source_count = {
                     let mut n = 0usize;
                     if locus_contributed  { n += 1; }
@@ -12488,7 +12531,7 @@ impl EstateCoordinator {
                     &col_vector,
                     &col_co_occur,
                     &source_masks,
-                    &col_final_norm,
+                    &col_final,
                     count,
                     primary_source_count,
                 );
@@ -12498,6 +12541,16 @@ impl EstateCoordinator {
                 let weights =
                     RecallWeights::adaptive(has_bitmap_predicates, has_query_text, &profile);
                 let lambda = Self::union_best_mmr_lambda(weights.diversity);
+                // Step 9. `.raw` and `.rrf` read the normalised `final` as is;
+                // `.discriminative` scales it by the dense discrimination factor
+                // (1.0 when no dense lane ran, so it equals `.rrf` then), exactly
+                // Swift's `scores[i]`. This is both the MMR relevance term and the
+                // reported `final_score`.
+                let scores: Vec<f32> = if request.scoring == GLKRecallScoring::Discriminative {
+                    col_final.iter().map(|f| dense_discrimination_factor * f).collect()
+                } else {
+                    col_final.clone()
+                };
                 let (content_key, shingles) = Self::union_best_mmr_bodies(
                     &id_refs, &drawer_index, request.frame.hydration_level);
                 let admissible: Vec<bool> =
@@ -12509,9 +12562,14 @@ impl EstateCoordinator {
                 // similarity term runs at scale 1.0 (Swift: similarityScale is
                 // 1.0 for every scoring other than .matrixAware).
                 let selected = Self::union_best_mmr_select(
-                    &col_final_norm, &source_masks, &admissible, &content_key, &shingles,
+                    &scores, &source_masks, &admissible, &content_key, &shingles,
                     &subjects, lambda, 1.0, request.limit, &mut degraded_stages);
-                fused_scored = selected.into_iter().map(|i| scored[i].clone()).collect();
+                // Step 11 columns: the normalised buffer values and the step 9
+                // score, in the tuple order the hit construction reads.
+                fused_scored = selected.into_iter().map(|i| {
+                    (scored[i].0.clone(), scores[i], col_locus[i], col_bm25[i], col_vector[i], col_dense[i],
+                     0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)
+                }).collect();
             } else {
                 // Presentation sort: (score DESC, subject ASC). subject is content-derived
                 // and deterministic per seed; None subject sorts as "".
@@ -12555,10 +12613,10 @@ impl EstateCoordinator {
 
             union_profile = match request.mode {
                 // UnionBest with non-matrixAware scoring returns a minimal zero profile.
-                // The full buffer-based RecallUnionProfile is computed only on the
+                // The full buffer-based RecallUnionProfile is returned only from the
                 // matrixAware weighted pipeline (the branch above); for .raw and .rrf
-                // the buffer.final column carries the lane-normalised score and the
-                // profile is RecallUnionProfile::ZERO. The .rrf case additionally
+                // the hits carry the normalised buffer columns and `final` and the
+                // returned profile is RecallUnionProfile::ZERO. The .rrf case additionally
                 // records the `unionBest.rrf` scoring fallback above, so the caller
                 // can tell the requested rrf scoring was not distinctly applied.
                 GLKRecallMode::UnionBest => Some(RecallUnionProfile::ZERO),
@@ -12675,8 +12733,9 @@ impl EstateCoordinator {
         })
     }
 
-    /// Rank-normalised locus-only fallback for Hybrid/CorpusOnly/UnionBest when
-    /// neither corpus nor vector store is registered.
+    /// Rank-normalised locus-only fallback for Hybrid and CorpusOnly when
+    /// neither corpus nor vector store is registered. UnionBest never reaches
+    /// this path: it runs the full pipeline over the locus and graph lanes.
     ///
     /// Runs the locus lane with rank-based scoring and applies the requested
     /// scoring strategy (RRF or raw). Ensures .rrf/.matrixAware produce different
@@ -12712,7 +12771,6 @@ impl EstateCoordinator {
         // Build rank-normalised (id, score) list. Rank 0 → highest score.
         // Formula (`locus_rank_score`): score = (frontier_k - rank) / frontier_k,
         // range (0, 1].
-        let n = locus_rows.len();
         let locus_list: Vec<(String, f32)> = locus_rows
             .iter()
             .enumerate()
@@ -12741,14 +12799,14 @@ impl EstateCoordinator {
             .collect();
 
         // Scoring-fallback disposition (parity with Swift): this no-corpus path
-        // collapses Hybrid/CorpusOnly/UnionBest+Rrf to a single locus-ranked
-        // lane. A requested scoring strategy that is not distinctly implemented
-        // for the requested mode is SURFACED as a named degraded stage, keyed by
-        // the REQUESTED mode so the stage string matches the wired-path
-        // vocabulary cross-port (e.g. hybrid+matrixAware → "hybrid.matrixAware"
-        // here and on the wired multi-lane path). UnionBest+MatrixAware never
-        // reaches this path (is_matrix_aware_union guard routes it to the full
-        // pipeline). Raw, and Rrf in Hybrid/CorpusOnly (real RRF), record nothing.
+        // collapses Hybrid and CorpusOnly to a single locus-ranked lane. A
+        // requested scoring strategy that is not distinctly implemented for the
+        // requested mode is SURFACED as a named degraded stage, keyed by the
+        // REQUESTED mode so the stage string matches the wired-path vocabulary
+        // cross-port (e.g. hybrid+matrixAware → "hybrid.matrixAware" here and on
+        // the wired multi-lane path). UnionBest never reaches this path (the
+        // `is_union_best` guard routes it to the full pipeline). Raw, and Rrf in
+        // Hybrid/CorpusOnly (real RRF), record nothing.
         // Seed from the locus stream's internal-read failures (P0-5 sites 1-5);
         // genuine-empty seeds none.
         let mut degraded_stages: Vec<String> = locus_degraded;
@@ -12767,15 +12825,6 @@ impl EstateCoordinator {
                 degraded_stages.push("corpusOnly.matrixAware".to_string());
                 glk_emit!(
                     crate::telemetry::metric_names::CORPUS_ONLY_MATRIX_AWARE_FALLBACK,
-                    1.0,
-                    [("estate_id".to_string(), estate_tag.clone())]
-                        .into_iter().collect::<std::collections::HashMap<_, _>>()
-                );
-            }
-            (GLKRecallMode::UnionBest, GLKRecallScoring::Rrf) => {
-                degraded_stages.push("unionBest.rrf".to_string());
-                glk_emit!(
-                    crate::telemetry::metric_names::UNION_BEST_RRF_FALLBACK,
                     1.0,
                     [("estate_id".to_string(), estate_tag.clone())]
                         .into_iter().collect::<std::collections::HashMap<_, _>>()
@@ -12863,15 +12912,9 @@ impl EstateCoordinator {
             }
         };
 
-        // Build RecallHits from the fused candidate list.
-        let union_profile = if n == 0 {
-            None
-        } else {
-            match request.mode {
-                GLKRecallMode::UnionBest => Some(RecallUnionProfile::ZERO),
-                _ => None,
-            }
-        };
+        // Build RecallHits from the fused candidate list. No union profile:
+        // only UnionBest carries one, and UnionBest never reaches this path.
+        let union_profile: Option<RecallUnionProfile> = None;
 
         let hits: Vec<RecallHit> = fused
             .into_iter()
@@ -12903,22 +12946,14 @@ impl EstateCoordinator {
             .collect();
 
         // Rank-normalised locus-only fallback: neither corpus nor vector is
-        // registered, so the dense float lane was never attempted. For UnionBest
-        // — the only mode that runs the dense lane — this is the dark:noCorpus
-        // state (Wave B Part 2): an explicit tag so callers distinguish "no
-        // corpus" from "lane ran and produced hits" (None). Other modes never
-        // attempt the dense lane, so they carry None. Mirrors Swift
-        // RecallDirector's `else if corpusKits[handle] == nil` → "dark:noCorpus".
-        // (The main multi-lane path sets this in the dense block; this fallback
-        // return is the no-corpus short-circuit and must carry the same tag.)
-        let fallback_dense_lane_status = if matches!(request.mode, GLKRecallMode::UnionBest) {
-            Some("dark:noCorpus".to_string())
-        } else {
-            None
-        };
+        // registered, so the dense float lane was never attempted. Hybrid and
+        // CorpusOnly never attempt the dense lane, so they carry None; the
+        // dark:noCorpus tag belongs to UnionBest, which the multi-lane path
+        // sets in its dense block.
+        let fallback_dense_lane_status: Option<String> = None;
 
         // M4 single-derivation: this path runs for modes that compile a sketch
-        // (Hybrid, CorpusOnly, UnionBest) when no corpus/vector store is registered.
+        // (Hybrid, CorpusOnly) when no corpus/vector store is registered.
         // Derive the §8.3 lattice anchor from the query text exactly once here.
         // Callers read off the result; they MUST NOT call query_anchor separately.
         // None when the query is empty or unanchorable.
