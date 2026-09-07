@@ -18,6 +18,8 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
     // Counters for verification in tests.
     private(set) var captureDrawerCount: Int = 0
     private(set) var captureTunnelCount: Int = 0
+    /// Number of frame-gated by-id reads (`getDrawers(ids:matchingFrame:)`).
+    private(set) var frameGatedCalls: Int = 0
 
     // MARK: - WorkPacketEstateClient
 
@@ -65,6 +67,20 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
         ids.compactMap { drawers[$0] }
     }
 
+    /// The mock evaluates the one frame element the read-gate tests exercise:
+    /// the adjective sensitivity ceiling (`.sensitivityAtMost`), defaulting to
+    /// `.elevated` when the chain carries none — the same default
+    /// BitmapEvaluator inserts. Wing/room filters are ignored, as in
+    /// `listDrawers` — the test controls what is planted.
+    func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer] {
+        frameGatedCalls += 1
+        var ceiling: AdjectiveSensitivity = .elevated
+        for filter in frame.filterChain {
+            if case .sensitivityAtMost(let level) = filter { ceiling = level }
+        }
+        return ids.compactMap { drawers[$0] }.filter { $0.adjectiveSensitivity.rawValue <= ceiling.rawValue }
+    }
+
     // MARK: - Test helpers
 
     func storedTunnels() -> [Tunnel] { tunnels }
@@ -72,8 +88,20 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
     func allDrawers() -> [Drawer] { Array(drawers.values) }
     var drawerCount: Int { drawers.count }
 
-    /// Plant a pre-encoded packet directly (used for lineage trace tests).
-    func plant(_ packet: WorkPacket, filedAt: Date = MockEstateClient.epoch) throws {
+    /// Plant a pre-encoded packet directly (used for lineage trace and
+    /// read-gate tests).
+    ///
+    /// - Parameters:
+    ///   - sensitivity: adjective sensitivity written to bits 6-11 of the
+    ///     drawer's `adjectiveBitmap` (cookbook §2.3).
+    ///   - provenanceSensitivity: capture-time sensitivity written to bits
+    ///     30-35 of the drawer's `provenance` bitmap (cookbook §2.5).
+    func plant(
+        _ packet: WorkPacket,
+        filedAt: Date = MockEstateClient.epoch,
+        sensitivity: AdjectiveSensitivity = .normal,
+        provenanceSensitivity: Sensitivity = .normal
+    ) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(packet)
@@ -85,6 +113,8 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
             addedBy: "mock",
             filedAt: filedAt,
             embeddingModelID: "none",
+            provenance: Int64(provenanceSensitivity.rawValue) << 30,
+            adjectiveBitmap: Int64(sensitivity.rawValue) << 6,
             udcCode: "004"
         )
         drawers[packet.id] = drawer

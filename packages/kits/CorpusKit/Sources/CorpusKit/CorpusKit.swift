@@ -809,6 +809,14 @@ public actor Corpus {
         // the gate and ensures all tables are created regardless of which
         // schema was applied first.
         try await storage.migrate(to: BundleStore.schemaDeclaration)
+        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+        // rename keys its vector ledger row by the old id; migrating under the
+        // new id without moving that row replays the ladder from version 0
+        // and folds every row's generation to 0. The rename runs first; a
+        // conflicted ledger (rows under both ids) is left as it is with one
+        // warning and the estate still opens — the migrate below reads its
+        // ladder position from the current-id row, so nothing replays.
+        try await VectorStore.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
         // Additive basis-persistence table. A separate
         // schema declaration applied via migrate(to:) so the table is created
@@ -1052,6 +1060,9 @@ public actor Corpus {
     ///     are consistent with any pre-existing vectors in `storage`.
     init(storage: any Storage, provider: any EmbeddingProvider) async throws {
         try await storage.migrate(to: BundleStore.schemaDeclaration)
+        // SECURITY: same ledger rename as the production init — the legacy
+        // VectorKit row moves to SynapseKit before the vector ladder runs.
+        try await VectorStore.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
         try await storage.migrate(to: BasisStore.schemaDeclaration)
         // Additive maintained-counts table (P3): created via migrate like the

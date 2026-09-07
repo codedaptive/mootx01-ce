@@ -1,13 +1,15 @@
 """Tests for moot_hooks.py — plan capture (plan-approved, plan-filed,
 precommit-check) and the state those modes keep across a compaction.
+Also covers the state-file privacy hardening (4d04b9a3): per-user directory
+with mode 0o700, file mode 0o600, and plan_location cleared after filing.
 
 Run with:
     python3 -m unittest discover -s distribution/plugin/tests -p "test_*.py"
 
 Each test uses a unique session id and its own temp cwd, so the hook's
-temp-dir state file never leaks between tests. Printing is captured by
-patching builtins.print; the daemon probe is patched reachable unless a test
-says otherwise, so no test depends on a running mootx01.
+state file never leaks between tests. Printing is captured by patching
+builtins.print; the daemon probe is patched reachable unless a test says
+otherwise, so no test depends on a running mootx01.
 """
 import hashlib
 import json
@@ -251,6 +253,57 @@ class TestMainIsSilentOnBadStdin(unittest.TestCase):
                                         capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, (mode, stdin, result.stderr))
                 self.assertEqual(result.stdout, "", (mode, stdin))
+
+
+class TestStateFilePrivacy(PlanCase):
+    """4d04b9a3 — state files must be private to the process owner.
+
+    These tests FAIL on the pre-fix code (state_path returns a shared /tmp
+    path, save_state uses open() which inherits the process umask and does
+    not perform an atomic replace) and pass after the fix.
+    """
+
+    def test_state_file_is_not_under_shared_tmp(self):
+        """state_path must not return a path under the shared system temp dir."""
+        path = moot_hooks.state_path(self.session_id)
+        shared_tmp = __import__("tempfile").gettempdir()
+        self.assertFalse(
+            path.startswith(shared_tmp + os.sep) or path == shared_tmp,
+            "state_path returned a shared /tmp path: %s" % path,
+        )
+
+    def test_state_file_has_mode_0600(self):
+        """save_state must create the state file with mode 0600 (owner-only read/write)."""
+        self.approve(PLAN_A)
+        path = moot_hooks.state_path(self.session_id)
+        self.assertTrue(os.path.exists(path), "state file not written")
+        # SECURITY: 0o600 = no group or world read/write; mode bits only
+        mode = oct(os.stat(path).st_mode & 0o777)
+        self.assertEqual(mode, oct(0o600), "state file mode is %s, want 0o600" % mode)
+
+    def test_parent_dir_has_mode_0700(self):
+        """The directory containing state files must have mode 0700."""
+        self.approve(PLAN_A)
+        parent = os.path.dirname(moot_hooks.state_path(self.session_id))
+        # SECURITY: 0o700 = no group or world list/read/execute
+        mode = oct(os.stat(parent).st_mode & 0o777)
+        self.assertEqual(mode, oct(0o700), "state dir mode is %s, want 0o700" % mode)
+
+    def test_plan_location_cleared_after_filing(self):
+        """plan_location must not persist in the state file after the plan is filed.
+
+        Fails pre-fix because mode_plan_filed only pops plan_pending and leaves
+        plan_location in the state dict.
+        """
+        self.approve(PLAN_A)
+        location = "plans/%s/refactor-auth-flow" % self.project
+        self.assertIn("plan_location", self.state(),
+                      "plan_location must be set after approval")
+        self.file_to(location)
+        # SECURITY: plan_location (a slug derived from the plan title) must be
+        # gone once the plan has been filed so it does not persist in the state.
+        self.assertNotIn("plan_location", self.state(),
+                         "plan_location must be cleared after filing")
 
 
 if __name__ == "__main__":

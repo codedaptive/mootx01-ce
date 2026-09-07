@@ -85,7 +85,7 @@ use std::sync::Mutex;
 use std::sync::Arc;
 use persistence_kit::{
     BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause,
-    OrderDirection, ResidencyHint, SchemaDeclaration, SchemaOperation,
+    OrderDirection, ResidencyHint, SchemaDeclaration, SchemaKitRenameOutcome, SchemaOperation,
     Storage, StoragePredicate, StorageRow, TableDeclaration, TypedValue, physical_memory_bytes,
 };
 use uuid::Uuid;
@@ -489,6 +489,44 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
+    /// The kit id this store's schema-version ledger row is keyed by. The
+    /// single source for `schema_declaration().kit_id`; `FORMER_KIT_IDS`
+    /// lists the ids that row carried under earlier names of the kit.
+    /// Twin of Swift `VectorStore.kitID`.
+    pub const KIT_ID: &'static str = "SynapseKit";
+
+    /// Kit ids this store's ledger row carried before `KIT_ID`, oldest first.
+    /// The vector tier was renamed VectorKit → SynapseKit (the old name
+    /// collided with Apple's MapKit VectorKit framework); every populated
+    /// estate opened under the old name still keys its ledger row by it.
+    /// `prepare_schema_ledger` moves such a row to `KIT_ID`, and the
+    /// GeniusLocusKit 1.4 → 1.5 capsule reads its pair from here so there is
+    /// one source of the rename. Twin of Swift `VectorStore.formerKitIDs`.
+    pub const FORMER_KIT_IDS: &'static [&'static str] = &["VectorKit"];
+
+    /// Move this store's schema-version ledger row from any id in
+    /// `FORMER_KIT_IDS` to `KIT_ID` before `storage.migrate(&schema_declaration())`.
+    ///
+    /// SECURITY: an absent ledger row under `KIT_ID` makes `migrate` treat a
+    /// populated estate as version 0 and replay the whole ladder against the
+    /// current layout; the v5→v6 step rebuilds `vectors` through a copy table
+    /// that folds every row's `generation` to 0 (darkening a swapped estate's
+    /// recall) and fails outright when a serving and a shadow row share a key.
+    /// Calling this first keeps the ladder from running on a populated estate
+    /// that only changed its name. Outcomes per former id: `Renamed` moves the
+    /// row (version and applied-at kept); `NoRow` is a fresh estate or one
+    /// already carrying the current id, nothing changes; `Conflict` (rows
+    /// under both ids) leaves both rows in place, logs one warning naming
+    /// both ids and versions, and returns `Ok` — the estate stays openable,
+    /// and the following `migrate` reads the ladder position from the
+    /// current-id row, so nothing replays. Same policy as the GeniusLocusKit
+    /// 1.4 → 1.5 capsule; the operator resolves the duplicate. Only a failed
+    /// rename call (storage error) returns `SynapseKitError::StoreUnavailable`.
+    /// Twin of Swift `VectorStore.prepareSchemaLedger(storage:)`.
+    pub fn prepare_schema_ledger(storage: &dyn Storage) -> Result<(), SynapseKitError> {
+        prepare_schema_ledger_for(storage, Self::FORMER_KIT_IDS, Self::KIT_ID)
+    }
+
     /// Schema declaration consumed by `Storage::open`. Lane F
     /// multi-vector schema: UNIQUE(item_id, vector_index, model_id).
     ///
@@ -554,7 +592,7 @@ impl VectorStore {
             ],
         );
         SchemaDeclaration::new(
-            "SynapseKit",
+            Self::KIT_ID,
             6,
             vec![
                 TableDeclaration::new(
@@ -5145,4 +5183,52 @@ fn decode_stored_vector_light(
     }
     let key = VectorRecordKey::new(item_id, vector_index, model_id, model_version);
     Ok(Some((key, bytes)))
+}
+
+// MARK: - Schema-ledger preparation (shared by VectorStore and VectorRepresentationClaims)
+
+/// Move a kit's schema-version ledger row from its former ids to its current
+/// id through `Storage::rename_schema_kit` (PERSISTENCEKIT_SPEC I-7a). One
+/// implementation for both SynapseKit ledger rows (`VectorStore` and
+/// `VectorRepresentationClaims`) so the two never drift on what a conflict
+/// means. Twin of Swift `SchemaLedgerPreparation.moveFormerRows(on:from:to:)`.
+///
+/// SAFETY: `Conflict` is a warning, not a refusal. Rows under both a former
+/// id and the current id mean a runtime already opened the estate under the
+/// new id without the rename (the replay this preparation prevents), or the
+/// old row was restored by hand. Both rows stay in place, one warning names
+/// them, and the caller's `migrate` runs under the current id — whose row
+/// already records the ladder position, so no step replays. Refusing here
+/// would take away access to an estate's existing data; the GeniusLocusKit
+/// 1.4 → 1.5 capsule applies the same warn-and-leave-rows policy. Only a
+/// failed rename call returns an error. The crate has no logging facade, so
+/// the warning goes to stderr like CorpusKit's drain-loop diagnostics.
+pub(crate) fn prepare_schema_ledger_for(
+    storage: &dyn Storage,
+    former_kit_ids: &[&str],
+    kit_id: &str,
+) -> Result<(), SynapseKitError> {
+    for former_kit_id in former_kit_ids {
+        let outcome = storage
+            .rename_schema_kit(former_kit_id, kit_id)
+            .map_err(|e| {
+                SynapseKitError::StoreUnavailable(format!(
+                    "schema-version ledger rename {former_kit_id} → {kit_id} failed: {e:?}"
+                ))
+            })?;
+        match outcome {
+            SchemaKitRenameOutcome::Renamed { .. } | SchemaKitRenameOutcome::NoRow => {}
+            SchemaKitRenameOutcome::Conflict {
+                old_version,
+                new_version,
+            } => {
+                eprintln!(
+                    "synapsekit: schema-version ledger carries rows under both {former_kit_id} \
+                     (v{old_version}) and {kit_id} (v{new_version}); both left in place, \
+                     migrating under {kit_id}"
+                );
+            }
+        }
+    }
+    Ok(())
 }

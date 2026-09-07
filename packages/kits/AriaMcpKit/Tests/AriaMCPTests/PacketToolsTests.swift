@@ -10,6 +10,10 @@
 //   - moot_packet_lineage: two-packet chain returns one antecedent.
 //   - Required-arg enforcement: missing objective/model/agent → isError response.
 //   - Unknown drawer_id: moot_packet_get returns isError.
+//   - Read gate: adjective restricted/secret packets are not-found by default,
+//     a live grant lifts the adjective ceiling, provenance Restricted/Secret is
+//     never returned, the not-found shape matches a missing id, lineage gates
+//     its root and omits gated antecedents, and `wing` routes get/lineage.
 
 import Testing
 import Foundation
@@ -49,6 +53,54 @@ struct PacketToolsTests {
     /// True when the result carries isError: true.
     private func isError(_ result: JSONValue) -> Bool {
         result.objectValue?["isError"]?.boolValue == true
+    }
+
+    /// The text body of a result regardless of its isError flag.
+    private func body(_ result: JSONValue) -> String {
+        result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+    }
+
+    /// A minimal WorkPacket v1 JSON body as `moot_file_packet` would store it,
+    /// so a drawer can be seeded straight into the estate with chosen
+    /// sensitivity bits (the packet tools expose no sensitivity argument).
+    private func packetJSON(objective: String, lineageTargets: [String] = []) -> String {
+        let links = lineageTargets
+            .map { "{\"kind\":\"derivesFrom\",\"targetPacketID\":\"\($0)\"}" }
+            .joined(separator: ",")
+        return "{\"schemaVersion\":1,\"id\":\"\(UUID().uuidString)\",\"objective\":\"\(objective)\","
+            + "\"sources\":[],\"claims\":[],\"uncertainties\":[],\"nextSteps\":[],"
+            + "\"provenance\":{\"model\":\"seed-model\",\"agent\":\"seed-agent\","
+            + "\"createdAt\":\"2023-11-14T22:13:20Z\",\"updatedAt\":\"2023-11-14T22:13:20Z\"},"
+            + "\"lineageLinks\":[\(links)]}"
+    }
+
+    /// Seed a packet drawer directly into the packets room of the default wing
+    /// with full control over both sensitivity axes: the adjective axis (bits
+    /// 6-11, gated by the RecallFrame ceiling) and the provenance axis (bits
+    /// 30-35, gated unconditionally). Mirrors `MemoryGetTests.seed`.
+    @discardableResult
+    private func seedPacket(
+        objective: String,
+        lineageTargets: [String] = [],
+        sensitivity: AdjectiveSensitivity = .normal,
+        provenanceSensitivity: LocusKit.Sensitivity = .normal,
+        in handle: EstateHandle,
+        kit: GeniusLocusKit
+    ) async throws -> Drawer {
+        // "work-packets" is WorkPacketStore.room — the room moot_file_packet files into.
+        var frame = CaptureFrame(
+            content: packetJSON(objective: objective, lineageTargets: lineageTargets),
+            channel: .actuator,
+            room: "work-packets",
+            latticeAnchor: .udc("004"),
+            addedBy: "PacketToolsTests",
+            embeddingModelID: "none",
+            sensitivity: sensitivity,
+            kind: .structuredJSON,
+            provenanceSensitivity: provenanceSensitivity
+        )
+        frame.wing = LocusKit.defaultWingName
+        return try await kit.capture(handle, frame)
     }
 
     /// Parse a "  key: value" or "  - key: value" line from a multi-line response body.
@@ -293,6 +345,233 @@ struct PacketToolsTests {
             name: "moot_packet_get",
             arguments: .object(["drawer_id": .string(UUID().uuidString)]))
         #expect(isError(result), "Non-existent drawer_id must return isError: true")
+    }
+
+    // MARK: - Read gate: moot_packet_get
+
+    /// The not-found text the gate must reproduce exactly, so a gated id and a
+    /// missing id are indistinguishable to the caller.
+    private func notFound(_ id: String) -> String {
+        "moot_packet_get: no packet found for drawer_id \(id)"
+    }
+
+    @Test func getPacketAdjectiveRestrictedIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-adj-restricted"))
+        let objective = "restricted packet body that must not leak through packet-get"
+        let drawer = try await seedPacket(
+            objective: objective, sensitivity: .restricted, in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawer.id)]))
+        #expect(isError(result), "adjective-restricted packet must be reported not-found; got: \(result)")
+        #expect(body(result) == notFound(drawer.id),
+            "gated rows use the same not-found shape as a missing id")
+        #expect(!body(result).contains(objective))
+    }
+
+    @Test func getPacketAdjectiveSecretIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-adj-secret"))
+        let objective = "secret packet body that must not leak through packet-get"
+        let drawer = try await seedPacket(
+            objective: objective, sensitivity: .secret, in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawer.id)]))
+        #expect(isError(result))
+        #expect(body(result) == notFound(drawer.id))
+        #expect(!body(result).contains(objective))
+    }
+
+    @Test func getPacketNotFoundShapeMatchesMissingID() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-shape"))
+        let gated = try await seedPacket(
+            objective: "gated", sensitivity: .restricted, in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let missingID = UUID().uuidString
+
+        let gatedResult = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(gated.id)]))
+        let missingResult = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(missingID)]))
+        // Identical up to the echoed id — no field, flag, or wording differs.
+        #expect(body(gatedResult).replacingOccurrences(of: gated.id, with: "ID")
+            == body(missingResult).replacingOccurrences(of: missingID, with: "ID"))
+        #expect(isError(gatedResult) && isError(missingResult))
+    }
+
+    @Test func getPacketRestrictedGrantLiftsAdjectiveCeiling() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-grant-restricted"))
+        let restricted = try await seedPacket(
+            objective: "restricted packet visible under a restricted grant",
+            sensitivity: .restricted, in: handle, kit: kit)
+        let secret = try await seedPacket(
+            objective: "secret packet stays hidden under a restricted grant",
+            sensitivity: .secret, in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Locked: hidden.
+        let locked = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(restricted.id)]))
+        #expect(isError(locked))
+
+        // Restricted grant: restricted visible, secret still hidden. The grant
+        // is a ceiling — it lifts exactly one tier, as it does for moot_memory_get.
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date())
+        let lifted = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(restricted.id)]))
+        #expect(try text(lifted).contains("restricted packet visible under a restricted grant"))
+        let secretUnderRestricted = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(secret.id)]))
+        #expect(isError(secretUnderRestricted))
+
+        // Secret grant: both visible.
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+        let liftedSecret = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(secret.id)]))
+        #expect(try text(liftedSecret).contains("secret packet stays hidden under a restricted grant"))
+
+        // Lock: hidden again.
+        await dispatcher.sensitivityUnlockLedger.lock()
+        let relocked = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(restricted.id)]))
+        #expect(isError(relocked))
+    }
+
+    @Test func getPacketProvenanceSecretIsNotFoundEvenUnderSecretGrant() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-prov-secret"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        // The widest grant lifts the adjective axis only.
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+
+        for tier: LocusKit.Sensitivity in [.restricted, .secret] {
+            let objective = "provenance-\(tier) packet body must never be returned"
+            let drawer = try await seedPacket(
+                objective: objective, provenanceSensitivity: tier, in: handle, kit: kit)
+            let result = try await dispatcher.dispatch(
+                name: "moot_packet_get",
+                arguments: .object(["drawer_id": .string(drawer.id)]))
+            #expect(isError(result), "provenance \(tier) must be reported not-found; got: \(result)")
+            #expect(body(result) == notFound(drawer.id))
+            #expect(!body(result).contains(objective))
+        }
+    }
+
+    @Test func getPacketProvenanceNormalAndElevatedAreReturned() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-prov-open"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        for tier: LocusKit.Sensitivity in [.normal, .elevated] {
+            let objective = "provenance-\(tier) packet body is returned in full"
+            let drawer = try await seedPacket(
+                objective: objective, provenanceSensitivity: tier, in: handle, kit: kit)
+            let result = try await dispatcher.dispatch(
+                name: "moot_packet_get",
+                arguments: .object(["drawer_id": .string(drawer.id)]))
+            #expect(try text(result).contains(objective))
+        }
+    }
+
+    @Test func getPacketWingArgumentRoutesToTheFiledWing() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-wing"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_packet",
+            arguments: .object([
+                "objective": .string("Packet filed into a custom wing."),
+                "model":     .string("m"),
+                "agent":     .string("a"),
+                "wing":      .string("Research"),
+            ]))
+        let drawerID = try #require(extractValue(key: "drawer_id", from: try text(fileResult)))
+
+        // The read frame carries the wing, so the default wing does not see it...
+        let defaultWing = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawerID)]))
+        #expect(isError(defaultWing))
+        // ...and the filed wing does — same optional `wing` moot_packet_list takes.
+        let filedWing = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawerID), "wing": .string("Research")]))
+        #expect(try text(filedWing).contains("Packet filed into a custom wing."))
+    }
+
+    // MARK: - Read gate: moot_packet_lineage
+
+    @Test func lineageRestrictedRootIsReportedNotFound() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-lin-root"))
+        let ancestor = try await seedPacket(objective: "open ancestor", in: handle, kit: kit)
+        let root = try await seedPacket(
+            objective: "restricted root", lineageTargets: [ancestor.id],
+            sensitivity: .restricted, in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_packet_lineage",
+            arguments: .object(["drawer_id": .string(root.id)]))
+        #expect(isError(result), "a gated root must not be traversed; got: \(result)")
+        #expect(body(result) == "moot_packet_lineage: no packet found for drawer_id \(root.id)")
+        #expect(!body(result).contains(ancestor.id),
+            "a gated root's antecedents must not be enumerated")
+    }
+
+    @Test func lineageOmitsGatedAntecedents() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-lin-antecedent"))
+        let open = try await seedPacket(objective: "open ancestor", in: handle, kit: kit)
+        let restricted = try await seedPacket(
+            objective: "restricted ancestor", sensitivity: .restricted, in: handle, kit: kit)
+        let provenanceSecret = try await seedPacket(
+            objective: "provenance-secret ancestor", provenanceSensitivity: .secret,
+            in: handle, kit: kit)
+        let root = try await seedPacket(
+            objective: "open root",
+            lineageTargets: [open.id, restricted.id, provenanceSecret.id],
+            in: handle, kit: kit)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let locked = try await dispatcher.dispatch(
+            name: "moot_packet_lineage",
+            arguments: .object(["drawer_id": .string(root.id)]))
+        let lockedBody = try text(locked)
+        #expect(lockedBody.contains(open.id))
+        #expect(!lockedBody.contains(restricted.id), "adjective-restricted antecedent must be omitted")
+        #expect(!lockedBody.contains(provenanceSecret.id), "provenance-secret antecedent must be omitted")
+        #expect(lockedBody.contains("count: 1"))
+
+        // A restricted grant admits the adjective-restricted antecedent only.
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date())
+        let granted = try await dispatcher.dispatch(
+            name: "moot_packet_lineage",
+            arguments: .object(["drawer_id": .string(root.id)]))
+        let grantedBody = try text(granted)
+        #expect(grantedBody.contains(open.id))
+        #expect(grantedBody.contains(restricted.id))
+        #expect(!grantedBody.contains(provenanceSecret.id))
+        #expect(grantedBody.contains("count: 2"))
     }
 
     // MARK: - End-to-end round-trip over MCP surface (Part 2)

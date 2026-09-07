@@ -716,12 +716,18 @@ public extension GeniusLocusKit {
     /// when an engine is registered, calls `corpus.removeContent(id:)` to purge
     /// BM25 index entries and Drawer-keyed vector embeddings by exact key
     /// (shared-content 1.1: no second text copy exists to scrub). When a standalone
-    /// `VectorStore` is also registered (`.glk` estate), additionally calls
-    /// `vectorStore.deleteAllVectors` to invalidate the standalone store's
-    /// resident array (the corpus and the standalone store share backing storage
-    /// but maintain separate in-memory indexes; both must be updated). Failure
-    /// here seals an `"expungeOrphan"` audit event (honest record of partial
-    /// completion) and then raises `VerbError.crossKitVectorDeleteFailed`.
+    /// `VectorStore` is also registered (`.glk` estate), additionally scrubs
+    /// three vector lanes keyed by the drawer id: the distillation
+    /// fingerprint lane (`deleteAllVectors(distillation-features-v1)`), the
+    /// encoder span lanes (`deleteSpanVectors` under every `encoder_models`
+    /// registry id plus the session's registered encoder — the `spanEncode`
+    /// duty's int8 span rows live under the encoder's own model id, not the
+    /// corpus model id) and the corpus model lane (`deleteAllVectors(corpus
+    /// model id)`, which also invalidates the standalone store's resident
+    /// array; the corpus and the standalone store share backing storage but
+    /// maintain separate in-memory indexes). Failure in any lane seals an
+    /// `"expungeOrphan"` audit event (honest record of partial completion)
+    /// and then raises `VerbError.crossKitVectorDeleteFailed`.
     ///
     /// **Step 3 — Audit seal:** on success, seals the gate-produced `"tombstone"`
     /// event from step 1. On step-2 failure, seals an `"expungeOrphan"` event
@@ -846,6 +852,20 @@ public extension GeniusLocusKit {
                             itemID: deleteId,
                             modelID: Self.distillationLaneModelID
                         )
+                        // SECURITY: encoder-lane scrub (destruction contract,
+                        // GENIUSLOCUSKIT_SPEC §B-2a step 2). The spanEncode
+                        // duty stores up to maxSpans int8 span vectors per
+                        // drawer under the ENCODER's model id
+                        // (`<model>-w<window>`), which is neither the
+                        // distillation lane nor the corpus model id, so the
+                        // two deletes around this one never touch them.
+                        // Every registered encoder model id is scrubbed so no
+                        // content-derived span embedding, dequantisation
+                        // scale, word bound or content-version fingerprint
+                        // outlives the erase. Same fail-closed block: a
+                        // failure seals the orphan audit, never a success.
+                        try await scrubEncoderLanes(
+                            handle, vectorStore: vectorStore, rowID: deleteId)
                     }
                     if let vectorStore, let corpus {
                         // Invalidate the standalone VectorStore's resident slot
@@ -1003,6 +1023,50 @@ public extension GeniusLocusKit {
         return ExpungeVerbOutcome(refusedSiblingIDs: storageOutcome.refusedSiblingIDs)
     }
 
+    // MARK: - Encoder-lane scrub (expunge step 2 + integrity sweep)
+
+    /// Model ids whose int8 span rows an erase must scrub for `handle`:
+    /// every `encoder_models` registry row (a model that was active earlier
+    /// in the estate's life may still own span rows for the drawer) plus the
+    /// encoder registered for this session. When the registry read throws or
+    /// the estate's storage is not retained, the registered encoder alone is
+    /// the source. Registry order (ascending model id) with the registered
+    /// id appended when absent, so both ports issue the same deletes in the
+    /// same order. Twin of Rust `encoder_lane_model_ids`.
+    func encoderLaneModelIDs(for handle: EstateHandle) async -> [String] {
+        var ids: [String] = []
+        if let storage = storages[handle],
+           let rows = try? await EncoderModelStore(storage: storage).all() {
+            ids = rows.map(\.modelID)
+        }
+        if let registered = registeredSpanEncoder(for: handle)?.spec.modelID,
+           !ids.contains(registered) {
+            ids.append(registered)
+        }
+        return ids
+    }
+
+    /// Delete the span rows of `rowID` under every encoder lane of `handle`
+    /// (`encoderLaneModelIDs(for:)`). Fail-closed: a delete failure surfaces
+    /// as `VerbError.crossKitVectorDeleteFailed` naming the row and the lane,
+    /// so the caller seals the orphan audit instead of a success. Called by
+    /// `expunge` step 2 and by `runExpungeIntegritySweep`. Twin of Rust
+    /// `scrub_encoder_lanes`.
+    func scrubEncoderLanes(
+        _ handle: EstateHandle, vectorStore: VectorStore, rowID: String
+    ) async throws {
+        for modelID in await encoderLaneModelIDs(for: handle) {
+            do {
+                try await vectorStore.deleteSpanVectors(itemID: rowID, modelID: modelID)
+            } catch {
+                throw VerbError.crossKitVectorDeleteFailed(
+                    rowID: rowID,
+                    reason: "encoder lane \(modelID) span delete failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     // MARK: - Expunge integrity sweep
 
     /// Run the expunge integrity sweep for a single estate.
@@ -1017,6 +1081,10 @@ public extension GeniusLocusKit {
     ///      - `corpus.removeContent` — scrubs BM25 + semantic-embedding index
     ///      - `vectorStore.deleteAllVectors(distillation-features-v1)` — scrubs
     ///        the structural fingerprint lane, unconditional on corpus presence
+    ///      - `vectorStore.deleteSpanVectors(encoder model id)` for every
+    ///        `encoder_models` registry id plus the registered encoder — scrubs
+    ///        the int8 span rows the `spanEncode` duty wrote, unconditional on
+    ///        corpus presence
     ///      - `vectorStore.deleteAllVectors(corpus model id)` — scrubs the
     ///        semantic embedding lane (requires corpus for model id)
     ///   2. Seals a synthetic "expungeOrphan" audit event via
@@ -1103,6 +1171,13 @@ public extension GeniusLocusKit {
                             itemID: rowID,
                             modelID: Self.distillationLaneModelID
                         )
+                        // SECURITY: encoder-lane scrub, same invariant as the
+                        // live expunge step 2 — the crash-window row's int8
+                        // span rows live under the encoder model id(s), which
+                        // neither the distillation nor the corpus-model delete
+                        // reaches. Unconditional on the corpus handle.
+                        try await scrubEncoderLanes(
+                            handle, vectorStore: vectorStore, rowID: rowID)
                         if let corpus {
                             let modelID = await corpus.modelID
                             try await vectorStore.deleteAllVectors(itemID: rowID, modelID: modelID)

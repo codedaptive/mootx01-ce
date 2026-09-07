@@ -462,8 +462,20 @@ impl CorpusContentEngine {
             ))
             .bind(configuration.index_unit())?;
         }
+        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+        // rename keys its two vector-tier ledger rows (store and claims) by the
+        // old ids; migrating under the new ids without moving those rows
+        // replays both ladders from version 0 — the vector ladder folds every
+        // row's generation to 0. Both renames run first; a conflicted ledger
+        // (rows under both ids) is left as it is with one warning and the
+        // estate still opens — each migrate below reads its ladder position
+        // from the current-id row, so nothing replays.
+        VectorStore::prepare_schema_ledger(storage.as_ref())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         storage
             .migrate(&VectorStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        VectorRepresentationClaims::prepare_schema_ledger(storage.as_ref())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         storage
             .migrate(&VectorRepresentationClaims::schema_declaration())

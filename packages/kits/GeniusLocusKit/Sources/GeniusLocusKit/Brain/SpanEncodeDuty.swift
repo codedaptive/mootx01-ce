@@ -59,6 +59,11 @@ internal protocol SpanEncodeEstateContext: Sendable {
     func pendingSpanEncodeBatch(limit: Int) async throws -> [SpanDrawerItem]
     /// Set or clear bit 27 (`spanIndexed`) on one drawer.
     func setSpanIndexed(drawerID: String, indexed: Bool, now: Date) async throws
+    /// The drawer's content as stored NOW, or `nil` when the drawer is
+    /// missing or tombstoned. Read immediately before the span write so an
+    /// erase or content write that landed after the pending snapshot is
+    /// honoured (the liveness recheck).
+    func liveSpanEncodeContent(drawerID: String) async throws -> String?
 }
 
 /// Production adapter wrapping `LocusKit.Estate`.
@@ -99,15 +104,24 @@ internal struct EstateSpanContext: SpanEncodeEstateContext {
         guard indexed else { return }
         _ = try await estate.setSpanIndexed(drawerId: drawerID)
     }
+
+    func liveSpanEncodeContent(drawerID: String) async throws -> String? {
+        // `drawerById` returns tombstoned rows unfiltered; the tombstone
+        // stamp is the erase signal, the (zeroed) content is not consulted.
+        guard let drawer = try await estate.drawerById(rowID: drawerID),
+              drawer.tombstonedAt == nil else { return nil }
+        return drawer.content
+    }
 }
 
 // MARK: - SpanEncodeBatchResult
 
 /// Outcome of one `SpanEncodeDuty.encodeBatch` invocation.
 ///
-/// Three counters parallel `AdornmentPassResult`: encoded (span rows written,
-/// bit 27 set), skipped (empty content), failed (error, bit 27 stays clear
-/// for retry on the next pump).
+/// Three counters: encoded (span rows written, bit 27 set), skipped (empty
+/// content, or the drawer was erased or rewritten between the pending read
+/// and the span write — the liveness recheck), failed (error, bit 27 stays
+/// clear for retry on the next pump).
 public struct SpanEncodeBatchResult: Sendable, Equatable {
     public let encoded: Int
     public let skipped: Int
@@ -195,6 +209,25 @@ public enum SpanEncodeDuty {
             do {
                 let inputs = try await buildSpanInputs(id: item.id, content: item.content, spec: spec, encoder: encoder)
                 guard !inputs.isEmpty else { skipped += 1; continue }
+
+                // SECURITY: liveness recheck (destruction contract). The
+                // pending snapshot was read before this drawer was encoded;
+                // an erase or a content write that landed in between must
+                // not be undone by a span write that recreates
+                // content-derived rows for a tombstoned drawer, or stamps
+                // spans of the old text with a content version the drawer
+                // no longer has. Skip when the drawer is gone or tombstoned,
+                // or when its current content no longer hashes to the
+                // version stamped on the spans; bit 27 stays clear, so a
+                // rewritten drawer is re-encoded on the next pump from its
+                // current content.
+                let encodedVersion = contentVersion(item.content)
+                guard let liveContent = try await context.liveSpanEncodeContent(drawerID: item.id),
+                      contentVersion(liveContent) == encodedVersion else {
+                    skipped += 1
+                    log.info("spanEncode: drawer=\(item.id, privacy: .public) erased or rewritten during encode — span write skipped")
+                    continue
+                }
 
                 try await writer.writeSpanVectors(
                     itemID: item.id,

@@ -22,8 +22,13 @@
 // of the chain and `runStorageLedgerKitIDMigration` at the end. Both run
 // before `wireSubstores`, which is where the renamed store opens.
 //
-// The (old, new) pairs are frozen history: the capsule rewrites exactly these
-// ids whatever the store declares later. A later rename needs its own capsule.
+// The (old, new) pairs come from the kit that owns the ids: SynapseKit's
+// `formerKitIDs` (oldest first) and `kitID` on `VectorStore` and
+// `VectorRepresentationClaims`, so the capsule, the stores' own
+// `prepareSchemaLedger(storage:)` open-time rename, and the ledger id a
+// migrated estate carries all read one source. This capsule covers the first
+// rename of the tier (`formerKitIDs[0]`); a later rename appends to
+// `formerKitIDs` and needs its own capsule.
 //
 // Enabled by the MigrationV1_4ToV1_5 trait and every MigrationFloor trait
 // (floors 1.1 through 1.4 compile this capsule alone) and the
@@ -40,6 +45,7 @@
 import Foundation
 import GeniusLocusKit
 import PersistenceKit
+import SynapseKit
 import os.log
 
 private let log = Logger(
@@ -76,14 +82,19 @@ public struct StorageLedgerKitIDMigrationReport: Sendable, Equatable {
 
 public extension GeniusLocusKit {
 
-    /// The two ledger pairs the 1.4 → 1.5 capsule rewrites. Frozen history:
-    /// these literals never follow a later rename of the vector tier.
+    /// The two ledger pairs the 1.4 → 1.5 capsule rewrites, read from the
+    /// SynapseKit constants that own the ids: the first former id of each
+    /// store (the VectorKit → SynapseKit rename) to its current id. One
+    /// source of the pair for the capsule and for the stores' own open-time
+    /// rename (`prepareSchemaLedger(storage:)`).
     static let storageLedgerKitIDRenames: (
         vectorStore: StorageLedgerKitIDRename,
         representationClaims: StorageLedgerKitIDRename
     ) = (
-        vectorStore: StorageLedgerKitIDRename(from: "VectorKit", to: "SynapseKit"),
-        representationClaims: StorageLedgerKitIDRename(from: "VectorKitClaims", to: "SynapseKitClaims")
+        vectorStore: StorageLedgerKitIDRename(
+            from: VectorStore.formerKitIDs[0], to: VectorStore.kitID),
+        representationClaims: StorageLedgerKitIDRename(
+            from: VectorRepresentationClaims.formerKitIDs[0], to: VectorRepresentationClaims.kitID)
     )
 
     /// Move the vector tier's schema-version ledger rows to their SynapseKit

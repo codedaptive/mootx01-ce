@@ -31,12 +31,76 @@ pub fn data_dir() -> PathBuf {
     platform_data_dir()
 }
 
-/// The data directory the resident daemon serves: the platform default,
-/// with no `MOOTX01_DATA_DIR` override applied. `mootx01 install`
-/// registers the daemon over the directory it resolved at install time,
-/// which is this one unless `MOOTX01_DATA_DIR` was set for that install.
-pub fn resident_data_dir() -> PathBuf {
-    platform_data_dir()
+/// The resident daemon's data directory as `mootx01 upgrade` needs it: a
+/// directory to compare an estate against, or a registration that exists
+/// but could not be read. Twin of the Swift `MootPaths.ResidentDataDirectory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentDataDir {
+    /// The daemon serves this directory: the `MOOTX01_DATA_DIR` its service
+    /// registration bakes in, or the platform default when no registration
+    /// exists or the registration carries no override.
+    Directory(PathBuf),
+    /// A daemon registration exists at this location but could not be read.
+    /// Nothing can prove which estate the daemon has open, so every estate
+    /// is treated as resident.
+    UnreadableRegistration(PathBuf),
+}
+
+impl ResidentDataDir {
+    /// One operator-facing line explaining why a step is about to quiesce
+    /// the daemon for `data` although the directory may not be the one the
+    /// daemon serves; `None` when the resident directory is known.
+    pub fn registration_warning(&self, data: &Path) -> Option<String> {
+        match self {
+            ResidentDataDir::Directory(_) => None,
+            ResidentDataDir::UnreadableRegistration(at) => Some(format!(
+                "  daemon registration at {} could not be read; treating {} as the resident estate",
+                at.display(),
+                data.display()
+            )),
+        }
+    }
+}
+
+/// The data directory the resident daemon serves, read from its service
+/// registration. `mootx01 install` bakes the `MOOTX01_DATA_DIR` it was run
+/// with into the systemd unit / Task Scheduler action, so the registration —
+/// not the platform default — says which estate the daemon has open.
+/// `service::daemon_registration` reads it; `resident_data_dir_from` decides.
+pub fn resident_data_dir() -> ResidentDataDir {
+    resident_data_dir_from(
+        crate::core::service::daemon_registration(&home()),
+        platform_data_dir(),
+    )
+}
+
+/// Pure form of `resident_data_dir`: decide the resident directory from what
+/// the service manager registers. Tests inject the registration.
+///
+/// - `Absent`: `platform_default` (no daemon; the default is what a later
+///   install would serve).
+/// - `Registered { data_dir: Some(dir) }`: `dir`.
+/// - `Registered { data_dir: None }`: `platform_default` (the daemon
+///   started with no override).
+/// - `Unreadable(at)`: `UnreadableRegistration(at)`. SECURITY: a
+///   registration we cannot read is never assumed to serve some other
+///   directory; the upgrade quiesces the daemon rather than migrate an
+///   estate the daemon may hold open.
+pub fn resident_data_dir_from(
+    registration: crate::core::service::DaemonRegistration,
+    platform_default: PathBuf,
+) -> ResidentDataDir {
+    use crate::core::service::DaemonRegistration;
+    match registration {
+        DaemonRegistration::Absent => ResidentDataDir::Directory(platform_default),
+        DaemonRegistration::Registered { data_dir: None } => {
+            ResidentDataDir::Directory(platform_default)
+        }
+        DaemonRegistration::Registered { data_dir: Some(dir) } => {
+            ResidentDataDir::Directory(PathBuf::from(dir))
+        }
+        DaemonRegistration::Unreadable(at) => ResidentDataDir::UnreadableRegistration(at),
+    }
 }
 
 /// Whether `data` refers to the resident estate — the one the resident
@@ -45,12 +109,19 @@ pub fn resident_data_dir() -> PathBuf {
 /// `MOOTX01_DATA_DIR` is upgraded with the daemon left running, because
 /// the daemon has no stake in it.
 ///
-/// Both paths are canonicalised before comparison: symlinks resolved
-/// (`fs::canonicalize`), `.` components and trailing separators dropped,
-/// `..` collapsed. A path that does not exist cannot be symlink-resolved
-/// and compares by its lexically normalised form.
-pub fn is_resident_estate(data: &Path, resident: &Path) -> bool {
-    canonical_path(data) == canonical_path(resident)
+/// `Directory`: both paths are canonicalised before comparison: symlinks
+/// resolved (`fs::canonicalize`), `.` components and trailing separators
+/// dropped, `..` collapsed. A path that does not exist cannot be
+/// symlink-resolved and compares by its lexically normalised form.
+///
+/// `UnreadableRegistration`: always `true`. SAFETY: with the registration
+/// unreadable no directory can be ruled out, so every estate is treated as
+/// the daemon's and the step quiesces it.
+pub fn is_resident_estate(data: &Path, resident: &ResidentDataDir) -> bool {
+    match resident {
+        ResidentDataDir::Directory(dir) => canonical_path(data) == canonical_path(dir),
+        ResidentDataDir::UnreadableRegistration(_) => true,
+    }
 }
 
 /// `fs::canonicalize` when the path exists, else a lexical normalisation
@@ -224,11 +295,12 @@ mod tests {
     #[test]
     fn resident_dir_is_resident_estate() {
         let resident = Path::new("/srv/moot/resident");
-        assert!(is_resident_estate(resident, resident));
+        let registered = ResidentDataDir::Directory(resident.to_path_buf());
+        assert!(is_resident_estate(resident, &registered));
         // `.` segments and a trailing separator are spellings, not a
         // different directory.
-        assert!(is_resident_estate(Path::new("/srv/moot/./resident/"), resident));
-        assert!(is_resident_estate(Path::new("/srv/moot/other/../resident"), resident));
+        assert!(is_resident_estate(Path::new("/srv/moot/./resident/"), &registered));
+        assert!(is_resident_estate(Path::new("/srv/moot/other/../resident"), &registered));
     }
 
     #[cfg(unix)]
@@ -239,7 +311,7 @@ mod tests {
         fs::create_dir_all(&resident).expect("resident dir");
         let link = tmp.path().join("estate-link");
         std::os::unix::fs::symlink(&resident, &link).expect("symlink");
-        assert!(is_resident_estate(&link, &resident));
+        assert!(is_resident_estate(&link, &ResidentDataDir::Directory(resident)));
     }
 
     #[test]
@@ -251,11 +323,92 @@ mod tests {
         let scratch = tmp.path().join("resident-bench");
         fs::create_dir_all(&resident).expect("resident dir");
         fs::create_dir_all(&scratch).expect("scratch dir");
-        assert!(!is_resident_estate(&scratch, &resident));
+        assert!(!is_resident_estate(&scratch, &ResidentDataDir::Directory(resident)));
         // Neither side existing still compares the two spellings.
         assert!(!is_resident_estate(
             Path::new("/srv/moot/bench-clone"),
-            Path::new("/srv/moot/resident")
+            &ResidentDataDir::Directory(PathBuf::from("/srv/moot/resident"))
         ));
+    }
+
+    // -- the resident directory comes from the daemon registration ---------
+    // Pinned fixture semantics (twin of the Swift PathsTests): registration
+    // with MOOTX01_DATA_DIR=/x → /x; registration unparsable → resident
+    // (quiesce); registration absent → platform default.
+
+    #[test]
+    fn registration_with_override_names_that_directory() {
+        use crate::core::service::DaemonRegistration;
+        let default = PathBuf::from("/home/u/.local/share/mootx01");
+        let resident = resident_data_dir_from(
+            DaemonRegistration::Registered { data_dir: Some("/x".to_string()) },
+            default.clone(),
+        );
+        assert_eq!(resident, ResidentDataDir::Directory(PathBuf::from("/x")));
+        // The daemon's estate is /x: a step on /x quiesces, a step on the
+        // platform default (an estate the daemon never opened) does not.
+        assert!(is_resident_estate(Path::new("/x"), &resident));
+        assert!(!is_resident_estate(&default, &resident));
+        assert_eq!(resident.registration_warning(Path::new("/x")), None);
+    }
+
+    #[test]
+    fn registration_without_override_is_platform_default() {
+        use crate::core::service::DaemonRegistration;
+        let default = PathBuf::from("/home/u/.local/share/mootx01");
+        assert_eq!(
+            resident_data_dir_from(DaemonRegistration::Registered { data_dir: None }, default.clone()),
+            ResidentDataDir::Directory(default.clone())
+        );
+        assert_eq!(
+            resident_data_dir_from(DaemonRegistration::Absent, default.clone()),
+            ResidentDataDir::Directory(default)
+        );
+    }
+
+    #[test]
+    fn unreadable_registration_makes_every_estate_resident() {
+        use crate::core::service::DaemonRegistration;
+        let at = PathBuf::from("/home/u/.config/systemd/user/mootx01.service");
+        let default = PathBuf::from("/home/u/.local/share/mootx01");
+        let resident = resident_data_dir_from(DaemonRegistration::Unreadable(at.clone()), default.clone());
+        assert_eq!(resident, ResidentDataDir::UnreadableRegistration(at.clone()));
+        assert!(is_resident_estate(Path::new("/srv/moot/bench-clone"), &resident));
+        assert!(is_resident_estate(&default, &resident));
+        let warning = resident.registration_warning(&default).expect("warning");
+        assert!(warning.contains(&at.display().to_string()));
+        assert!(warning.contains(&default.display().to_string()));
+    }
+
+    #[test]
+    fn unit_file_on_disk_drives_the_resident_directory() {
+        // install with MOOTX01_DATA_DIR=<custom> then upgrade with the same
+        // override: the step on <custom> must quiesce.
+        use crate::core::service;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let unit_path = service::systemd_user_dir(tmp.path()).join(service::DAEMON_UNIT);
+        let custom = tmp.path().join("custom-estate");
+        let default = tmp.path().join("default-estate");
+        fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+        fs::write(
+            &unit_path,
+            service::daemon_unit("/b", Some(&custom.display().to_string()), true).unwrap(),
+        )
+        .unwrap();
+        let resident = resident_data_dir_from(
+            service::daemon_registration_from_unit_file(&unit_path),
+            default.clone(),
+        );
+        assert_eq!(resident, ResidentDataDir::Directory(custom.clone()));
+        assert!(is_resident_estate(&custom, &resident));
+        assert!(!is_resident_estate(&default, &resident));
+
+        fs::write(&unit_path, "not a unit").unwrap();
+        let unreadable = resident_data_dir_from(
+            service::daemon_registration_from_unit_file(&unit_path),
+            default.clone(),
+        );
+        assert_eq!(unreadable, ResidentDataDir::UnreadableRegistration(unit_path));
+        assert!(is_resident_estate(&default, &unreadable));
     }
 }
