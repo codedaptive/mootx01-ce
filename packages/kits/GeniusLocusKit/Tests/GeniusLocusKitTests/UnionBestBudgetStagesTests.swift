@@ -179,7 +179,9 @@ struct UnionBestBudgetStagesTests {
             frame: RecallFrame(
                 filterChain: [.unconfirmed], hydrationLevel: .full, ordering: .byCaptureTimeDesc),
             mode: .unionBest, scoring: .matrixAware, limit: limit,
-            fallback: .failClosed, queryText: Self.query, origin: .internal)
+            fallback: .failClosed, queryText: Self.query, origin: .internal,
+            // The budget stage only exists with the step 5.8 switch on.
+            subSpanScoring: .on)
     }
 
     @Test("a recall over long ingested records records the sub-span budget stage and marks the unscored hits")

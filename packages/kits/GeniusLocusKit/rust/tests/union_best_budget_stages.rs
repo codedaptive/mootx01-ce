@@ -38,7 +38,7 @@ use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     union_best_mmr_shingles, GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy, RecallOrigin, UNION_BEST_MMR_BODY_CAP_SCALARS,
+    GLKSubSpanScoring, RecallFallbackPolicy, RecallOrigin, UNION_BEST_MMR_BODY_CAP_SCALARS,
     UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS,
 };
 use locus_kit::drawer_operational::CaptureChannel;
@@ -191,6 +191,8 @@ fn full_request(limit: usize) -> GLKRecallRequest {
         frame, GLKRecallMode::UnionBest, GLKRecallScoring::MatrixAware, limit,
         RecallFallbackPolicy::FailClosed, RecallOrigin::Internal,
     ).with_query_text(QUERY)
+    // The budget stage only exists with the step 5.8 switch on.
+    .with_sub_span_scoring(GLKSubSpanScoring::On)
 }
 
 #[test]
