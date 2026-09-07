@@ -1,16 +1,19 @@
 // PacketsPaneTests.swift
 //
-// Part 2 verify: exportability filter test — non-exportable packets are
-// absent from the PacketsEngine read API; exportable packets appear.
+// Filter-chain tests for the PacketsEngine read API: list, fetch by id and
+// lineage by id all apply the same RecallFrame predicates (currently
+// believed, exportable, in the configured wing, in the packets room).
 //
 // Tests PacketsEngine directly via MockPacketsClient (no HTTP stack). This
 // is an in-process unit test of the filter gate that is the content-safety
 // boundary for the /api/packets* surface.
 //
-// The exportability invariant (comment in PacketsHandlers.swift):
-//   Only LocusKit drawers marked .public_ appear on any /api/packets* surface.
-//   .private_ drawers (adjectiveBitmap == 0, the LocusKit default) are silently
-//   excluded at the RecallFrame filter layer.
+// Part A: exportability. Only LocusKit drawers marked .public_ appear on any
+// /api/packets* surface; .private_ drawers (adjectiveBitmap == 0, the
+// LocusKit default) are absent.
+// Part B: the by-id reads return nil for a withdrawn or superseded packet, a
+// drawer outside the packets room and a packet in another wing, even though
+// the mock still serves those drawers by raw id.
 
 import Testing
 import Foundation
@@ -162,5 +165,137 @@ private func makePacketContent(
         #expect(r.links.count == 1)
         #expect(r.links.first?.kind == "derivesFrom")
         #expect(r.links.first?.targetPacketID == antecedentID)
+        }
+
+    // MARK: - Filter bypass tests (Part B: by-id path must honour list filter chain)
+
+    @Test("fetch with drawer outside the packets room returns nil")
+    func fetchOutsideRoomReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        // Plant in a different room; all other predicates pass.
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true,
+                   room: "wrong-room")
+        let engine = PacketsEngine(client: mock)
+        let detail = try await engine.fetch(drawerID: id)
+        #expect(detail == nil, "drawer outside packets room must not be reachable by id")
+    }
+
+    @Test("lineage with drawer outside the packets room returns nil")
+    func lineageOutsideRoomReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true,
+                   room: "wrong-room")
+        let engine = PacketsEngine(client: mock)
+        let result = try await engine.lineage(drawerID: id)
+        #expect(result == nil, "drawer outside packets room must not be reachable via lineage")
+    }
+
+    @Test("fetch with withdrawn packet returns nil")
+    func fetchWithdrawnReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        // State.withdrawn.rawValue == 18 (Cluster B, not currently believed).
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true, state: 18)
+        let engine = PacketsEngine(client: mock)
+        let detail = try await engine.fetch(drawerID: id)
+        #expect(detail == nil, "withdrawn packet must not be reachable by id")
+    }
+
+    @Test("fetch with superseded packet returns nil")
+    func fetchSupersededReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        // State.superseded.rawValue == 16 (Cluster B, not currently believed).
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true, state: 16)
+        let engine = PacketsEngine(client: mock)
+        let detail = try await engine.fetch(drawerID: id)
+        #expect(detail == nil, "superseded packet must not be reachable by id")
+    }
+
+    @Test("lineage with withdrawn packet returns nil")
+    func lineageWithdrawnReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true, state: 18)
+        let engine = PacketsEngine(client: mock)
+        let result = try await engine.lineage(drawerID: id)
+        #expect(result == nil, "withdrawn packet must not be reachable via lineage")
+    }
+
+    @Test("fetch with drawer in a different wing returns nil")
+    func fetchWrongWingReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true,
+                   wing: "different-wing")
+        let engine = PacketsEngine(client: mock)
+        let detail = try await engine.fetch(drawerID: id)
+        #expect(detail == nil, "drawer in a different wing must not be reachable by id")
+    }
+
+    @Test("lineage with drawer in a different wing returns nil")
+    func lineageWrongWingReturnsNil() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true,
+                   wing: "different-wing")
+        let engine = PacketsEngine(client: mock)
+        let result = try await engine.lineage(drawerID: id)
+        #expect(result == nil, "drawer in a different wing must not be reachable via lineage")
+    }
+
+    @Test("getDrawers(ids:) is still reachable for drawer in wrong room: raw id access bypasses filter")
+    func rawIdAccessUnfiltered() async throws {
+        // Verify the mock's unfiltered getDrawers(ids:) still returns the drawer
+        // regardless of wing/room/state, confirming the filter is in the engine
+        // layer and not silently lost.
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        mock.plant(id: id, content: makePacketContent(id: id), exportable: true,
+                   room: "wrong-room")
+        let drawers = try await mock.getDrawers(ids: [id])
+        #expect(drawers.count == 1, "unfiltered getDrawers(ids:) must return the drawer regardless of room")
+    }
+
+    @Test("public in-room active packet is returned by fetch")
+    func fetchPublicInRoomActiveReturns() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        let content = makePacketContent(id: id, objective: "in scope")
+        let drawer = mock.plant(id: id, content: content, exportable: true)
+        let engine = PacketsEngine(client: mock)
+        let detail = try await engine.fetch(drawerID: drawer.id)
+        let d = try #require(detail)
+        #expect(d.drawerID == drawer.id)
+        #expect(d.objective == "in scope")
+    }
+
+    @Test("public in-room active packet is returned by lineage")
+    func lineagePublicInRoomActiveReturns() async throws {
+        let mock = MockPacketsClient()
+        let id = UUID().uuidString
+        let antID = UUID().uuidString
+        let packet = WorkPacket(
+            id: id,
+            objective: "in scope",
+            provenance: WorkPacketProvenance(
+                model: "m",
+                agent: "a",
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            ),
+            lineageLinks: [LineageLink(kind: .derivesFrom, targetPacketID: antID)]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let content = String(data: try encoder.encode(packet), encoding: .utf8)!
+        let drawer = mock.plant(id: id, content: content, exportable: true)
+        let engine = PacketsEngine(client: mock)
+        let result = try await engine.lineage(drawerID: drawer.id)
+        let r = try #require(result)
+        #expect(r.drawerID == drawer.id)
+        #expect(r.links.count == 1)
     }
 }

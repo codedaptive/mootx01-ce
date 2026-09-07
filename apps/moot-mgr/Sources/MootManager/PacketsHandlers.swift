@@ -94,10 +94,14 @@ public struct LineageLinkWirePayload: Encodable, Sendable {
 
 /// Actor for work-packet read access over the estate substrate.
 ///
-/// Applies the exportability filter: only drawers marked `.public_` in their
-/// LocusKit adjective bitmap are surfaced. `.private_` drawers (the LocusKit
-/// default) are silently excluded from all read surfaces per the
-/// no-memory-bodies policy.
+/// Every read surface (list, fetch by id, lineage by id) applies the same
+/// filter chain: currently believed, exportable, in the configured wing, in
+/// the packets room. A drawer that fails any predicate is absent from the
+/// list and returns nil from the by-id reads, so a retained or guessed id
+/// cannot reach a withdrawn, superseded, wrong-room, wrong-wing or
+/// `.private_` (the LocusKit default) drawer. Exportability is the
+/// no-memory-bodies boundary; the other three predicates keep the by-id
+/// reads equal to the list.
 ///
 /// Constructed with any `WorkPacketEstateClient` conformer — use
 /// `EstateAdapter(estate)` in production; supply a mock in tests.
@@ -141,15 +145,20 @@ public actor PacketsEngine {
 
     /// Fetch a single exportable work packet by its drawer ID.
     ///
-    /// Returns `nil` when the drawer is absent OR when it is non-exportable
-    /// (exportability != .public_). The caller receives no signal distinguishing
-    /// the two cases — both surface as 404.
+    /// Applies the same RecallFrame filter chain as `list` — currently believed,
+    /// exportable, correct wing, correct room — so a caller holding an id for a
+    /// drawer that is withdrawn, superseded, in a different wing, or non-exportable
+    /// receives nil, indistinguishable from a drawer that does not exist.
+    ///
+    /// Returns `nil` when the drawer is absent or when the filter chain excludes it.
+    /// The caller receives no signal distinguishing the two cases — both surface as 404.
     public func fetch(drawerID: String) async throws -> PacketDetailPayload? {
-        let drawers = try await client.getDrawers(ids: [drawerID])
+        let frame = RecallFrame(
+            filterChain: [.currentlyBelieve, .exportable, .inWing(wing), .inRoom(WorkPacketStore.room)],
+            hydrationLevel: .full
+        )
+        let drawers = try await client.getDrawers(ids: [drawerID], matchingFrame: frame)
         guard let drawer = drawers.first else { return nil }
-        // Enforce exportability at the fetch level so direct-ID lookups
-        // cannot bypass the list-level filter.
-        guard drawer.exportability == .public_ else { return nil }
         guard let packet = try? decode(content: drawer.content) else { return nil }
         return PacketDetailPayload(
             drawerID: drawer.id,
@@ -171,13 +180,18 @@ public actor PacketsEngine {
 
     /// Return the lineage links for an exportable work packet.
     ///
+    /// Applies the same RecallFrame filter chain as `list` — currently believed,
+    /// exportable, correct wing, correct room — matching the same gate as `fetch`.
     /// Reads `WorkPacket.lineageLinks` (the embedded JSON, which is the source
     /// of truth per the atomicity policy in WorkPacketStore.swift). Returns `nil`
-    /// when the drawer is absent or non-exportable.
+    /// when the drawer is absent or when the filter chain excludes it.
     public func lineage(drawerID: String) async throws -> PacketLineagePayload? {
-        let drawers = try await client.getDrawers(ids: [drawerID])
+        let frame = RecallFrame(
+            filterChain: [.currentlyBelieve, .exportable, .inWing(wing), .inRoom(WorkPacketStore.room)],
+            hydrationLevel: .full
+        )
+        let drawers = try await client.getDrawers(ids: [drawerID], matchingFrame: frame)
         guard let drawer = drawers.first else { return nil }
-        guard drawer.exportability == .public_ else { return nil }
         guard let packet = try? decode(content: drawer.content) else { return nil }
         return PacketLineagePayload(drawerID: drawerID,
                                    links: packet.lineageLinks.map(wireLink))
