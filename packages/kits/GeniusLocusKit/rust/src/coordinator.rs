@@ -10840,14 +10840,13 @@ impl EstateCoordinator {
             // each import and must NOT be used as a tiebreak. Cap happens AFTER sort so the
             // selected subset is always drawn from the deterministic ordering.
             let locus_rows: Vec<Drawer> = stable_locus_rank_rows(all_locus, plan.frontier_k);
+            // Rank-normalised locus score from the one ramp definition
+            // (`locus_rank_score`): the divisor is the frontier size, never the
+            // slice length, exactly as the Swift unionBest supply.
             locus_list = locus_rows
                 .iter()
                 .enumerate()
-                .map(|(idx, d)| {
-                    let score = (plan.frontier_k.saturating_sub(idx)) as f32
-                        / plan.frontier_k.max(1) as f32;
-                    (d.id.clone(), score)
-                })
+                .map(|(idx, d)| (d.id.clone(), locus_rank_score(idx, plan.frontier_k)))
                 .collect();
             drawer_index = locus_rows.into_iter().map(|d| (d.id.clone(), d)).collect();
         } else {
@@ -12616,16 +12615,13 @@ impl EstateCoordinator {
         let locus_rows: Vec<Drawer> = stable_locus_rank_rows(all_locus, plan.frontier_k);
 
         // Build rank-normalised (id, score) list. Rank 0 → highest score.
-        // Formula: score = (frontier_k - rank) / frontier_k, range (0, 1].
+        // Formula (`locus_rank_score`): score = (frontier_k - rank) / frontier_k,
+        // range (0, 1].
         let n = locus_rows.len();
         let locus_list: Vec<(String, f32)> = locus_rows
             .iter()
             .enumerate()
-            .map(|(idx, d)| {
-                let score = (plan.frontier_k.saturating_sub(idx)) as f32
-                    / plan.frontier_k.max(1) as f32;
-                (d.id.clone(), score)
-            })
+            .map(|(idx, d)| (d.id.clone(), locus_rank_score(idx, plan.frontier_k)))
             .collect();
 
         // Per-lane rank capture (W2.5 Track R(a)): single locus candidate
@@ -12904,6 +12900,22 @@ fn stable_locus_rank_rows(mut rows: Vec<Drawer>, frontier_k: usize) -> Vec<Drawe
     // BitmapEvaluator delivers equal-filed_at items in non-deterministic SQLite scan order.
     rows.truncate(frontier_k);
     rows
+}
+
+/// The locus lane's rank-normalised score: `(frontier_k - rank) / frontier_k`,
+/// so rank 0 scores 1.0 and each later rank steps down by `1 / frontier_k`.
+///
+/// This is the one definition of the locus ramp. `recall_scored_multi_lane`
+/// (the unionBest supply) and `recall_scored_locus_ranked` (the no-corpus path)
+/// both call it, and the Swift twin is
+/// `GeniusLocusKit.locusRankScore(rank:frontierK:)`. The divisor is the
+/// frontier size, never the number of rows actually admitted: a slice shorter
+/// than `frontier_k` keeps the same per-rank step as a full one, so the ramp is
+/// a property of the plan, not of the estate's size. `rank` is always below
+/// `frontier_k` (rows are capped to `frontier_k` after the stable sort); the
+/// saturating subtraction and `max(1)` keep the function total.
+fn locus_rank_score(rank: usize, frontier_k: usize) -> f32 {
+    frontier_k.saturating_sub(rank) as f32 / frontier_k.max(1) as f32
 }
 
 #[cfg(test)]
@@ -15340,6 +15352,25 @@ mod tests {
             "highest-content drawer must be rank 0 after sort-then-cap");
         assert_eq!(r[1].content, d_mid.content,
             "middle-content drawer must be rank 1 after sort-then-cap");
+    }
+
+    /// The locus ramp divides by the frontier size, not by the slice length:
+    /// three rows at frontier_k 64 score 1.0, 63/64, 62/64 (each exact in
+    /// f32), never 1, 2/3, 1/3. Twin of Swift
+    /// `locusRankScoreDividesByFrontierKNotSliceLength`.
+    #[test]
+    fn locus_rank_score_divides_by_frontier_k_not_slice_length() {
+        let slice_len = 3usize;
+        let scores: Vec<f32> = (0..slice_len).map(|r| locus_rank_score(r, 64)).collect();
+        assert_eq!(scores, vec![1.0, 0.984375, 0.96875]);
+        // The slice-length ramp: a different shape, not a constant multiple.
+        let by_slice: Vec<f32> = (0..slice_len)
+            .map(|r| (slice_len - r) as f32 / slice_len as f32)
+            .collect();
+        assert_ne!(scores, by_slice);
+        // Total on the inputs the guards cover.
+        assert_eq!(locus_rank_score(0, 0), 0.0);
+        assert_eq!(locus_rank_score(5, 4), 0.0);
     }
 
     // GK-01: Regression test for the OCC guard in DrawerStoreCore::stamp_tunnel_review.
