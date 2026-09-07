@@ -499,10 +499,10 @@ pub struct RecallHit {
     /// CorpusOnly hits carry the sorted source raw values; the locus-only
     /// fallbacks carry `["locusBitmap"]`. Byte-identical to Swift `RecallHit.explanation`.
     pub explanation: Vec<String>,
-    /// The span rerank hit for this drawer (best span index, word bounds and
-    /// cosine under the active encoder), when the UnionBest span stage scored
-    /// it (contract sheet §8). None for every other lane and for drawers with
-    /// no span rows under the active model; the composer renders the evidence
+    /// The span rerank hit for this drawer (best span index, word bounds, cosine
+    /// and lexical rank under the active encoder), when the UnionBest span stage
+    /// scored it (contract sheet §8). None for every other lane and for drawers
+    /// with no span rows under the active model; the composer renders the evidence
     /// snippet from the bounds when present (sheet §9). Twin of Swift
     /// `RecallHit.spanHit`.
     pub span_hit: Option<crate::span_rerank::SpanRerankHit>,

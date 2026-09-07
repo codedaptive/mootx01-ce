@@ -42,15 +42,18 @@ private struct Pin: Decodable {
     let id: String
     let mode: String
     let composed_answer: String?   // swiftlint:disable:this identifier_name
-    let signal_agreement: Float    // swiftlint:disable:this identifier_name
     let hits: [HitFixture]
     let expected: ExpectedFixture
 }
 
+// Per hit, span_cosine and lexical_rank are the span rerank stage's evidence:
+// the best span cosine under the active encoder and the item's 1-based rank in
+// the lexical head. Both null means the stage did not score the hit.
 private struct HitFixture: Decodable {
     let id: String
     let final_score: Float         // swiftlint:disable:this identifier_name
-    let dense_score: Float         // swiftlint:disable:this identifier_name
+    let span_cosine: Float?        // swiftlint:disable:this identifier_name
+    let lexical_rank: Int?         // swiftlint:disable:this identifier_name
     let drawer_content: String?    // swiftlint:disable:this identifier_name
 }
 
@@ -77,8 +80,20 @@ private func makeDrawer(id: String, content: String) -> Drawer {
 }
 
 /// Build a RecallHit from fixture values.
+///
+/// Attaches a `SpanRerankHit` when `span_cosine` is present so the packager's
+/// footrule (m2) and cosine spread (m3) read the span evidence from the fixture.
 private func makeHit(from hf: HitFixture) -> RecallHit {
     let drawer: Drawer? = hf.drawer_content.map { makeDrawer(id: hf.id, content: $0) }
+    let spanHit: SpanRerankHit? = hf.span_cosine.map { cosine in
+        SpanRerankHit(
+            itemID: hf.id,
+            bestSpanIndex: 0,
+            bestSpanStart: 0,
+            bestSpanEnd: 0,
+            cosine: cosine,
+            bm25Rank: hf.lexical_rank ?? 0)
+    }
     return RecallHit(
         id: hf.id,
         drawer: drawer,
@@ -94,24 +109,18 @@ private func makeHit(from hf: HitFixture) -> RecallHit {
             preference: 0,
             redundancyPenalty: 0,
             final: hf.final_score,
-            dense: hf.dense_score
+            dense: 0
         ),
-        explanation: []
+        explanation: [],
+        spanHit: spanHit
     )
 }
 
-/// Build a GLKRecallResult from fixture hits and signal_agreement.
-private func makeResult(hits: [RecallHit], signalAgreement: Float) -> GLKRecallResult {
-    let profile: RecallUnionProfile? = signalAgreement > 0
-        ? RecallUnionProfile(
-            locusSharpness: 0.5,
-            bm25Sharpness: 0.0,
-            vectorSharpness: 0.0,
-            signalAgreement: signalAgreement,
-            redundancy: 0.0,
-            matrixCoherence: 0.0
-          )
-        : nil
+/// Build a GLKRecallResult from fixture hits.
+///
+/// m2 and m3 are now derived from SpanRerankHit evidence on each hit, so
+/// no signal_agreement profile is needed.
+private func makeResult(hits: [RecallHit]) -> GLKRecallResult {
     return GLKRecallResult(
         request: GLKRecallRequest(
             frame: RecallFrame(filterChain: []),
@@ -122,7 +131,7 @@ private func makeResult(hits: [RecallHit], signalAgreement: Float) -> GLKRecallR
             origin: .internal
         ),
         plan: RecallPlan(effectiveMode: .locusOnly, frontierK: 64, weights: .uniform),
-        unionProfile: profile,
+        unionProfile: nil,
         hits: hits,
         denseLaneStatus: nil,
         degradedStages: [],
@@ -181,7 +190,7 @@ struct GLKResultsPackagerParityTests {
 
         for pin in fixture.pins {
             let hits = pin.hits.map { makeHit(from: $0) }
-            let result = makeResult(hits: hits, signalAgreement: pin.signal_agreement)
+            let result = makeResult(hits: hits)
             let mode = parseMode(pin.mode)
             let packaged = packager.package(
                 result: result,

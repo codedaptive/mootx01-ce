@@ -97,9 +97,11 @@ pub mod span_encoder_factory;
 // mismatch. Called by SpanEncoderFactory::make. Swift port:
 // Sources/CorpusKitProviders/ModelDirectoryResolver.swift.
 pub mod model_directory_resolver;
-// Hardcoded seed constants for the bundled all-MiniLM-L6-v2 encoder model.
-// Consumed by `mootx01 upgrade` and estate provisioning to INSERT the initial
-// `encoder_models` row. Twin of Swift's `EncoderModelSeed`.
+// Hardcoded seed constants for the bundled arctic-embed-s encoder model.
+// Consumed by the GLK activation path (`EstateCoordinator::seed_default_encoder_model_in`,
+// called at open when the manifest names `embedding_provider = "encoder"`) and
+// by `mootx01 upgrade` to INSERT the initial `encoder_models` row. Twin of Swift's
+// `EncoderModelSeed`.
 pub mod encoder_model_seed;
 
 pub use basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};

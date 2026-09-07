@@ -10,22 +10,24 @@
 // open has finished, so no kit or daemon has to be alive for the backfill.
 //
 // Contract names this helper codes against:
+//   - `GeniusLocusKit.seedDefaultEncoderModel(in:)`, the one construction
+//     site for the seed row; seeds the bundled arctic-embed-s-w60 row when
+//     the registry holds no active row (ruling 2026-09-04);
 //   - CorpusKit `SpanEncoderFactory.make(spec:modelDirectory:)`,
 //     `SpanEncoder.encodeSpans(_:)`, `Spanner.words(_:)`,
 //     `Spanner.spans(wordCount:windowWords:overlapDivisor:maxSpans:)`,
 //     `EncoderError.modelUnavailable` / `.tokenizerMismatch` (§7);
 //   - `ModelDirectoryResolver.encoderModelDirectory(for:dataDirectory:)`
 //     (§7, bundling).
-// The registry row (LocusKit `EncoderModelRow`) and the CorpusKit encoder
-// spec carry the same fields; the conversion below is field for field.
 //
 // Failure contract (§7): no active row, a missing model directory, a vocab
-// hash mismatch, or a load failure is a clean skip — recall stays
+// hash mismatch, or a load failure is a clean skip: recall stays
 // lexical-only, the caller prints one line, nothing is written.
 
 import CorpusKit
 import CorpusKitProviders
 import Foundation
+import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import SubstrateKernel
@@ -57,26 +59,12 @@ enum SpanEncodeBackfill {
     /// `now` stamps the span rows' `filed_at`.
     static func run(storage: any Storage, dataDirectory: URL, now: Date) async throws -> SpanEncodeReport {
         let registry = EncoderModelStore(storage: storage)
-        // A CE 1.0.x estate arrives at 19 with an empty registry: seed the
-        // bundled model as the active row so the backfill (and every later
-        // open) encodes under it. An estate that already carries an active
-        // row keeps it — a later audition winner is a row swap, not a reseed.
-        let row: EncoderModelRow
-        if let active = try await registry.active() {
-            row = active
-        } else {
-            let seed = EncoderModelRow(
-                modelID: EncoderModelSeed.modelID, modelVersion: EncoderModelSeed.modelVersion,
-                dim: EncoderModelSeed.dim, queryPrefix: EncoderModelSeed.queryPrefix,
-                docPrefix: EncoderModelSeed.docPrefix,
-                pooling: EncoderModelSeed.pooling == "cls" ? .cls : .mean,
-                tokenizerHash: EncoderModelSeed.tokenizerHash, windowWords: EncoderModelSeed.windowWords,
-                overlapDivisor: EncoderModelSeed.overlapDivisor, maxSpans: EncoderModelSeed.maxSpans,
-                maxSequence: EncoderModelSeed.maxSequence, isActive: true)
-            try await registry.upsert(seed)
-            guard let seeded = try await registry.active() else { return .noActiveModel }
-            row = seeded
-        }
+        // The maintenance open seeds the registry through activation once the
+        // manifest names the encoder; this call keeps the backfill correct
+        // over its own storage (a CE 1.0.x estate whose key this upgrade step
+        // wrote after the open) and is idempotent otherwise.
+        _ = try await GeniusLocusKit.seedDefaultEncoderModel(in: registry)
+        guard let row = try await registry.active() else { return .noActiveModel }
         guard let modelDirectory = ModelDirectoryResolver.encoderModelDirectory(
             for: row.modelID, dataDirectory: dataDirectory)
         else {

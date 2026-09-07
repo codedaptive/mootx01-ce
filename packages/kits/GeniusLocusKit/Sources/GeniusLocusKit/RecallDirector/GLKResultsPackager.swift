@@ -29,8 +29,11 @@
 //
 //   Signals (all from GLKRecallResult; no new retrieval):
 //     m1 top-margin          = (score[0] − score[1]) / max(score[0], ε)
-//     m2 lane agreement      = unionProfile.signalAgreement (active proxy)
-//     m3 dense spread        = spread of dense scores over top hits
+//     m2 lane agreement      = normalised Spearman footrule agreement between
+//                              the lexical and span order of span-scored hits
+//                              in hits.prefix(10)
+//     m3 span spread         = population std deviation of span cosines over
+//                              the span-scored hits in hits.prefix(10)
 //     m4 containment         = word-boundary containment of answer text in
 //                              top citation content (1.0 = contained)
 //
@@ -95,9 +98,12 @@ public enum GLKResponseLevel: Sendable, Equatable {
 public struct GLKConfidenceSignals: Sendable, Equatable {
     /// m1: (score[0] − score[1]) / max(score[0], ε). Top-margin.
     public let margin: Double
-    /// m2: lane agreement proxy (unionProfile.signalAgreement).
+    /// m2: normalised Spearman footrule agreement between the lexical and span
+    /// order of span-scored hits in the top-10. 1.0 = both orders agree
+    /// exactly; 0.0 = completely reversed.
     public let laneAgreement: Double
-    /// m3: dense spread — spread of dense scores over top hits.
+    /// m3: population std deviation of span cosines over the span-scored hits
+    /// in the top-10. Near 0 = no semantic spread; near 1 = strong spread.
     public let denseSpread: Double
     /// m4: word-boundary containment of answer text in top citation.
     public let containment: Bool
@@ -179,7 +185,8 @@ public struct PackagerThresholds: Sendable, Equatable {
     // MARK: WEAK gate
     /// m1 below which WEAK is triggered regardless of other signals. Spec default: 0.05.
     public let t1Prime: Double
-    /// m3 below which WEAK is triggered regardless of other signals. Spec default: 0.10.
+    /// m3 (span cosine spread) below which WEAK is triggered regardless of other
+    /// signals. Spec default: 0.10.
     public let t3Prime: Double
 
     // MARK: Row cutoff
@@ -369,18 +376,27 @@ public struct GLKResultsPackager: Sendable {
             m1 = 0.0  // No hits.
         }
 
-        // m2: lane agreement proxy from unionProfile.signalAgreement.
-        // signalAgreement = mean of (popcount(sourceMask) / primarySourceCount)
-        // across candidates — measures how many lanes confirmed each candidate.
-        // Values near 1.0 = confirmed by every lane; near 0.0 = disjoint lanes.
-        let m2 = Double(result.unionProfile?.signalAgreement ?? 0.0)
+        // scored: the SpanRerankHit of every hit in hits.prefix(10) that carries
+        // one, in returned order. Used for m2 (footrule agreement) and m3 (spread).
+        let scored = hits.prefix(10).compactMap { $0.spanHit }
 
-        // m3: dense spread — population std deviation of dense scores over the
-        // top-k hits (k = min(10, hits.count)). Mirrors the denseDiscrimination-
-        // Factor logic used by .discriminative scoring in RecallDirector, but
-        // computed here on the already-returned hits. Values near 0 = flat
-        // dense curve (no semantic contrast); near 1 = strong semantic spread.
-        let m3 = denseSpreads(hits: hits)
+        // m2: normalised Spearman footrule agreement between the lexical and span
+        // order of span-scored hits. 1.0 = both orders agree; 0.0 = reversed.
+        let m2 = spanRerankAgreement(Array(scored))
+
+        // m3: population std deviation of span cosines over span-scored hits in
+        // the top-10. A result with no hits reads 0.0; a single hit reads 1.0
+        // so a lone result is never penalised by the WEAK gate for lacking spread.
+        // Multiple hits with fewer than 2 span-scored reads 0.0 (no usable signal
+        // from the encoder), which may trigger the WEAK gate.
+        let m3: Double
+        if hits.isEmpty {
+            m3 = 0.0
+        } else if hits.count == 1 {
+            m3 = 1.0
+        } else {
+            m3 = spanCosineSpread(Array(scored))
+        }
 
         // m4: word-boundary containment of the composed answer in the top
         // citation's content. Returns true if every word in a 5-word sliding
@@ -470,12 +486,41 @@ public struct GLKResultsPackager: Sendable {
 
     // MARK: - Signal helpers
 
-    /// Population std deviation of the dense score column over the top-10 hits.
-    /// Returns a value in [0, 1] approximating the dense discrimination factor.
-    private func denseSpreads(hits: [RecallHit]) -> Double {
-        let top = Array(hits.prefix(10))
-        guard top.count >= 2 else { return top.isEmpty ? 0.0 : 1.0 }
-        let values = top.map { Double($0.score.dense) }
+    /// Normalised Spearman footrule agreement between the lexical order and the
+    /// span order of `scored`. Returns 1.0 when both orders agree exactly, 0.0
+    /// when they are completely reversed.
+    ///
+    /// Lexical order: sorted by `bm25Rank` ascending.
+    /// Span order: sorted by `cosine` descending, ties broken by `bm25Rank` ascending.
+    /// Footrule: sum over lexical-enumerated index i of |i - posSpan[itemID]|.
+    /// Maximum footrule for n items: (n * n) / 2 (integer division).
+    /// Result: 1.0 - footrule / maximum.
+    private func spanRerankAgreement(_ scored: [SpanRerankHit]) -> Double {
+        let n = scored.count
+        guard n > 0 else { return 0.0 }
+        guard n > 1 else { return 1.0 }
+        let lexical = scored.sorted { $0.bm25Rank < $1.bm25Rank }
+        let span = scored.sorted { a, b in
+            if a.cosine != b.cosine { return a.cosine > b.cosine }
+            return a.bm25Rank < b.bm25Rank
+        }
+        var posS: [String: Int] = [:]
+        for (i, hit) in span.enumerated() { posS[hit.itemID] = i }
+        let footrule = lexical.enumerated().reduce(0) { acc, pair in
+            let (i, hit) = pair
+            return acc + abs(i - (posS[hit.itemID] ?? 0))
+        }
+        let maximum = (n * n) / 2
+        return 1.0 - Double(footrule) / Double(maximum)
+    }
+
+    /// Population std deviation of the span cosines over `scored`.
+    ///
+    /// Returns 0.0 when `scored` has fewer than 2 entries (no usable spread).
+    /// Formula: sqrt(sum((x - mean)^2) / n).
+    private func spanCosineSpread(_ scored: [SpanRerankHit]) -> Double {
+        guard scored.count >= 2 else { return 0.0 }
+        let values = scored.map { Double($0.cosine) }
         let mean = values.reduce(0, +) / Double(values.count)
         let variance = values.map { pow($0 - mean, 2) }.reduce(0, +) / Double(values.count)
         return variance.squareRoot()

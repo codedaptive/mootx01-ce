@@ -6,6 +6,14 @@
 //!
 //! Failure modes: a factory error escaping the apply path, or a malformed
 //! `encoder_head` value breaking the read instead of falling back.
+//!
+//! The seeding tests (`encoder_activation_seeds_the_default_encoder_row` and
+//! `wire_glk_substores_seeds_through_the_open_path`) verify Bob's ruling
+//! 2026-09-04: upgrade never creates content; seeding belongs to provision and
+//! serve. `activate_span_encoder` seeds the bundled row before reading the
+//! registry so an estate is encoder-active from its first open. Twin of
+//! Swift `EncoderActivationTests.provisionSeedsTheActiveEncoderRowAndActivatesUnderIt`
+//! and `serveOpenPathSeedsThroughWireGLKSubstores`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -134,5 +142,185 @@ fn default_encoder_provisioning_writes_once_and_never_overwrites() {
     assert_eq!(
         coord.provisioned_embedding_provider(&handle).unwrap().as_deref(),
         Some(EstateCoordinator::ENCODER_PROVIDER_ID)
+    );
+}
+
+// ─── Seeding tests (Part B, ruling 2026-09-04) ────────────────────────────────
+
+/// Records every model ID the resolver is queried for; returns None so no
+/// encoder loads. Shared via Arc so the test can inspect captured calls after
+/// the coordinator owns the Box<dyn ModelDirectoryResolving>.
+struct SpyResolver(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl ModelDirectoryResolving for SpyResolver {
+    fn model_dir_for(&self, model_id: &str) -> Option<PathBuf> {
+        self.0.lock().unwrap().push(model_id.to_string());
+        None
+    }
+}
+
+/// Returns the coordinator, handle, AND the DrawerStore Arc so tests can
+/// reach the estate's underlying storage for encoder_model_store reads.
+fn open_one_with_store() -> (EstateCoordinator, genius_locus_kit::EstateHandle, Arc<dyn DrawerStore>) {
+    let mut coord = EstateCoordinator::new();
+    let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let store_ref = Arc::clone(&store);
+    let handle = coord
+        .open(store, OwnerCredentials::new("encoder-seed-test"), 0, i64::MAX)
+        .expect("open must succeed");
+    (coord, handle, store_ref)
+}
+
+/// `activate_span_encoder` seeds the bundled encoder row before reading the
+/// registry when no active row exists, so an estate provisioned with the
+/// encoder key is encoder-active from its first open. The resolver spy
+/// confirms the seeded MODEL_ID was read, not the floor model.
+///
+/// Twin of Swift `EncoderActivationTests.provisionSeedsTheActiveEncoderRowAndActivatesUnderIt`.
+#[test]
+fn encoder_activation_seeds_the_default_encoder_row() {
+    use corpus_kit_providers::EncoderModelSeed;
+    use locus_kit::encoder_model_store::EncoderModelStore;
+
+    let spy_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (mut coord, handle, store) = open_one_with_store();
+    coord.set_model_directory_resolver(Box::new(SpyResolver(std::sync::Arc::clone(&spy_calls))));
+    coord
+        .provision_embedding_provider(&handle, EstateCoordinator::ENCODER_PROVIDER_ID)
+        .expect("provision");
+
+    // Activation seeds first: after this call the active row must exist.
+    coord.apply_provisioned_embedding_provider(&handle);
+
+    let storage = store.storage().expect("InMemoryDrawerStore must expose its storage");
+    let registry = EncoderModelStore::new(storage);
+    let row = registry
+        .active()
+        .expect("active() must not fail")
+        .expect("active row must exist after activation seeds it");
+    assert_eq!(row.model_id, EncoderModelSeed::MODEL_ID);
+    assert!(row.is_active);
+    // The resolver saw MODEL_ID, proving activation read the seeded row and
+    // not the floor model (minilm-l6-v2-w60).
+    let seen = spy_calls.lock().unwrap();
+    assert_eq!(seen.as_slice(), &[EncoderModelSeed::MODEL_ID]);
+    drop(seen);
+    // No model directory in tests: encoder and rerank stage are not registered.
+    assert!(coord.registered_span_encoder(&handle).is_none());
+    assert!(!coord.is_span_rerank_registered(&handle));
+    // seed_default_encoder_model_if_absent is idempotent.
+    let again = coord
+        .seed_default_encoder_model_if_absent(&handle)
+        .expect("seed must not fail");
+    assert!(!again, "seed must be idempotent when a row already exists");
+    assert_eq!(registry.all().expect("all() must not fail").len(), 1);
+}
+
+/// `wire_glk_substores` seeds the active encoder row through
+/// `activate_span_encoder`, so the serve-open path activates the encoder from
+/// the first open of a provisioned estate.
+///
+/// Twin of Swift `EncoderActivationTests.serveOpenPathSeedsThroughWireGLKSubstores`.
+#[test]
+fn wire_glk_substores_seeds_through_the_open_path() {
+    use corpus_kit_providers::{default_ensemble, EncoderModelSeed};
+    use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::encoder_model_store::EncoderModelStore;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    use persistence_kit::inmemory::InMemoryStorage;
+    use uuid::Uuid;
+
+    let (mut coord, handle, store) = open_one_with_store();
+    coord.provision_default_encoder_if_absent(&handle).expect("provision encoder key");
+
+    let storage = store.storage().expect("storage must be accessible");
+    let registry = EncoderModelStore::new(Arc::clone(&storage));
+    // Pre-wire: no active row; seeding happens inside activate_span_encoder.
+    assert!(
+        registry.active().expect("active() must not fail").is_none(),
+        "no row before wire_glk_substores"
+    );
+
+    // A fresh InMemoryStorage stamped at the current estate format, mirroring
+    // wire_inmemory_semantic_recall in AriaMcpKit/rust/src/estate_registry.rs.
+    let backing: Arc<dyn persistence_kit::storage::Storage> =
+        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    EstateFormatStore::new(Arc::clone(&backing))
+        .stamp(EstateFormatVersion::CURRENT, NOW)
+        .expect("format stamp must succeed");
+
+    coord
+        .wire_glk_substores(&handle, backing, default_ensemble(), NOW)
+        .expect("wire_glk_substores must succeed");
+
+    // Post-wire: the active row must be seeded with MODEL_ID.
+    let row = registry
+        .active()
+        .expect("active() must not fail")
+        .expect("active row must be seeded by wire_glk_substores");
+    assert_eq!(row.model_id, EncoderModelSeed::MODEL_ID);
+
+    // Span rows are empty until the span-encode signal runs.
+    let frame = CaptureFrame::new(
+        "hello world",
+        CaptureChannel::Typed,
+        "inbox",
+        LatticeAnchor::udc("0"),
+        "test",
+        EncoderModelSeed::MODEL_ID,
+    );
+    let drawer = coord.capture(&handle, frame, NOW).expect("capture must succeed");
+    let span_rows = coord
+        .vector_store_for(&handle)
+        .expect("vector store must be registered after wire_glk_substores")
+        .span_vectors(&[drawer.id.as_str()], EncoderModelSeed::MODEL_ID)
+        .expect("span_vectors must not fail");
+    assert!(span_rows.is_empty(), "span rows are empty until the signal drains them");
+}
+
+/// When a real Arctic CoreML model directory is available, the rerank stage is
+/// registered after activation seeds and activates the encoder.
+///
+/// Requires `MOOT_ENCODER_MODEL_DIR` set to a directory containing the Arctic
+/// vocab file and weights. Run with `--features encoder` to compile the
+/// model-loading path.
+///
+/// The estate must be wired through `wire_glk_substores` so the VectorStore
+/// is registered before `apply_provisioned_embedding_provider` runs.
+/// `activate_span_encoder` only registers the rerank stage when a VectorStore
+/// is present — without the wire step the assertion would always fail even
+/// when the real model loads. Mirrors Swift `kit.provision()`.
+#[test]
+#[ignore = "needs MOOT_ENCODER_MODEL_DIR and --features encoder"]
+fn real_model_registers_the_rerank_stage() {
+    use corpus_kit_providers::default_ensemble;
+    use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
+    use persistence_kit::inmemory::InMemoryStorage;
+    use uuid::Uuid;
+
+    let dir = std::env::var("MOOT_ENCODER_MODEL_DIR")
+        .expect("MOOT_ENCODER_MODEL_DIR must point at the Arctic model directory");
+    let (mut coord, handle, _store) = open_one_with_store();
+    coord.set_model_directory_resolver(Box::new(FixedDirectoryResolver(PathBuf::from(&dir))));
+    coord
+        .provision_embedding_provider(&handle, EstateCoordinator::ENCODER_PROVIDER_ID)
+        .expect("provision");
+    // Wire GLK substores so the VectorStore is registered before
+    // apply_provisioned_embedding_provider runs (called inside wire_glk_substores).
+    // A fresh InMemoryStorage stamped at the current estate format mirrors the
+    // wire_inmemory_semantic_recall pattern in AriaMcpKit/rust/src/estate_registry.rs.
+    let backing: Arc<dyn persistence_kit::storage::Storage> =
+        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    EstateFormatStore::new(Arc::clone(&backing))
+        .stamp(EstateFormatVersion::CURRENT, NOW)
+        .expect("format stamp must succeed");
+    coord
+        .wire_glk_substores(&handle, backing, default_ensemble(), NOW)
+        .expect("wire_glk_substores must succeed");
+    assert!(
+        coord.is_span_rerank_registered(&handle),
+        "rerank stage must be registered when a real model directory is provided"
     );
 }
