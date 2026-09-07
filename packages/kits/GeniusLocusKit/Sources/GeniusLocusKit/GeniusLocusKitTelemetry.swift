@@ -74,15 +74,17 @@ enum GLKMetricName {
     /// Tagged: `estate_id`, `verb`.
     static let verbError = "geniuslocus.estate.verb_error"
 
-    /// The dense float lane (Lane D) was dark for a recall query.
+#if MOOTX01_WHOLE_RECORD_DENSE
+    /// The whole-record dense float lane was dark for a recall query
+    /// (WholeRecordDense build only).
     ///
-    /// Emitted by Step 4.5 of the RecallDirector when `floatNearest` returns
-    /// any outcome other than `.hits`. The `reason` tag carries the dark-lane
-    /// classification: `providerOptOut`, `noFloatRows`, or `storeError`. Use
-    /// this counter to detect misconfigured estates where the dense lane is
-    /// expected but consistently dark (e.g. provider not wired up after ingest).
-    /// Tagged: `estate_id`, `reason`.
+    /// Emitted by Step 4.5 of the RecallDirector when a held signal's
+    /// per-signal outcome is anything other than `.hits`. The `reason` tag
+    /// carries the dark-lane classification: `providerOptOut`, `noFloatRows`,
+    /// `vocabMiss`, or `storeError`; `model_id` names the signal.
+    /// Tagged: `estate_id`, `reason`, `model_id`.
     static let denseLaneDark = "glk.recall.dense_lane_dark"
+#endif
 
     // MARK: — Stage-degradation counters (P1 fail-loud degradation contract)
 

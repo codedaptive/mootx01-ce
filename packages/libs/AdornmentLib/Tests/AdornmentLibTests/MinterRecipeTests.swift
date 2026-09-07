@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // MinterRecipeTests.swift — recipe identity, digest, and normalizer
 // contract tests (ADORNMENTLIB_SPEC 0.6.0 § Minter recipes).
 //
@@ -113,3 +114,4 @@ struct MinterRecipeTests {
         }
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

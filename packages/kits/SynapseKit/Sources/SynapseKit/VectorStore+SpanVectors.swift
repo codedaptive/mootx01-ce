@@ -312,6 +312,32 @@ extension VectorStore {
         return (retiredRows, nonServingRows)
     }
 
+    /// Delete every whole-record float row (`kind` 1, the `float32`
+    /// payloads the retired whole-record dense lane read) and every
+    /// `hnsw_graph` row (the float lane's graph, rebuilt from those rows
+    /// and useless without them), then rebuild the resident binary index
+    /// and the `.vec` sidecar from the surviving rows so the sidecar's live
+    /// count and generation match the serving table. Returns the two row
+    /// counts. Kind 0 (binary fingerprints) and kind 2 (int8 spans) are
+    /// never touched.
+    ///
+    /// The GLK 1.6 to 1.7 migration capsule calls this once per populated
+    /// estate. Idempotent: a vacuumed estate deletes nothing and the rebuild
+    /// rewrites an identical sidecar. Never runs inside a query path.
+    @discardableResult
+    public func reclaimWholeRecordFloatRows() async throws -> (floatRows: Int, graphRows: Int) {
+        let floatRows = try await storage.rowStore.delete(
+            table: "vectors",
+            where: .eq(Column(table: "vectors", name: "kind"),
+                       .int(Int64(VectorKind.float32.rawValue))))
+        let graphRows = try await storage.rowStore.delete(table: "hnsw_graph", where: .isTrue)
+        // The resident float and HNSW state described rows that are gone.
+        floatIndices.removeAll()
+        _invalidateAllHNSWLanes()
+        try await _rebuildBinaryIndexFromTable()
+        return (floatRows, graphRows)
+    }
+
     // MARK: - Helpers
 
     /// The serving-generation span rows of one item under one model.

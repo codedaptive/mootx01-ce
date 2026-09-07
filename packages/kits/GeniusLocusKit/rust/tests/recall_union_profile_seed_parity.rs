@@ -203,9 +203,13 @@ fn matrix_aware_profile_reads_the_lane_max_final_on_text_estate() {
     let d = describe(&profile);
 
     assert!(!result.hits.is_empty(), "the recall returns hits");
-    // Three supply lanes (locus, bm25, dense); sixteen candidates carry all
-    // three bits and four carry two: (16 * 3 + 4 * 2) / (20 * 3).
+    // Three supply lanes (locus, bm25, dense) with the whole-record lane;
+    // sixteen candidates carry all three bits and four carry two:
+    // (16 * 3 + 4 * 2) / (20 * 3). Without it, two lanes: (16 * 2 + 4) / (20 * 2).
+    #[cfg(feature = "whole-record-dense")]
     assert!((profile.signal_agreement - 56.0 / 60.0).abs() < 1e-5, "{d}");
+    #[cfg(not(feature = "whole-record-dense"))]
+    assert!((profile.signal_agreement - 36.0 / 40.0).abs() < 1e-5, "{d}");
     // The top 16 by `final` is the sixteen query drawers, one source mask.
     assert!((profile.redundancy - 1.0).abs() < 1e-6, "{d}");
     // Locus column: twenty ramp values, normalised to i / 19; population

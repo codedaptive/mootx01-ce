@@ -828,12 +828,12 @@ struct RecipeToolsTests {
             name: "moot_file_memory",
             arguments: fileArgs(content: "the indemnity was 46 million marks"))
 
-        // "dense-fused" is a known grid composition — must succeed.
+        // "hamming+text" is a known grid composition in every build — must succeed.
         let result = try await dispatcher.dispatch(
             name: "moot_recall_precise",
             arguments: .object([
                 "query": .string("indemnity"),
-                "composition": .string("dense-fused"),
+                "composition": .string("hamming+text"),
             ]))
 
         let obj = try #require(result.objectValue)
@@ -889,7 +889,7 @@ struct RecipeToolsTests {
             name: "moot_recall_shaped",
             arguments: .object([
                 "query": .string("river mill"),
-                "preset": .string("conceptual"),
+                "preset": .string("structural"),
                 "filter": .string("unconfirmed"),
                 "limit": .integer(10),
             ]))
@@ -960,18 +960,17 @@ struct RecipeToolsTests {
         let tool = try #require(
             RecipeTools.tools().first { $0.name == "moot_recall_shaped" })
         // The roster lists every preset name with its one-line description.
-        #expect(tool.description.contains("conceptual"))
-        #expect(tool.description.contains("anti_redundant"))
         #expect(tool.description.contains("Roster:"))
-        // Float-metric presets are present in the roster advertisement.
-        #expect(tool.description.contains("float-l2"))
-        #expect(tool.description.contains("float-dot"))
+        for name in RecallShape.presetNames {
+            #expect(tool.description.contains(name), "roster must advertise \(name)")
+        }
+        #expect(tool.description.contains("anti_redundant"))
     }
 
-    /// float-l2 and float-dot are accepted by the MCP boundary and return
-    /// a valid memory-search-shaped result. Mirrors testShapedRecallDispatchReturnsMootTextShape
-    /// but exercises the float-metric preset path through the full dispatch chain.
-    @Test func testShapedRecallFloatMetricPresetsAccepted() async throws {
+    /// Every roster name is accepted by the MCP boundary and returns a valid
+    /// memory-search-shaped result. Mirrors testShapedRecallDispatchReturnsMootTextShape
+    /// but exercises each preset through the full dispatch chain.
+    @Test func testShapedRecallEveryRosterPresetAccepted() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-float-metric"))
@@ -981,7 +980,7 @@ struct RecipeToolsTests {
             name: "moot_file_memory",
             arguments: fileArgs(content: "the tide rises past the sea wall at dusk"))
 
-        for presetName in ["float-l2", "float-dot"] {
+        for presetName in RecallShape.presetNames {
             let result = try await dispatcher.dispatch(
                 name: "moot_recall_shaped",
                 arguments: .object([

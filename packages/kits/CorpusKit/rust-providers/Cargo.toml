@@ -57,12 +57,18 @@ sha2 = { version = "0.10" }
 # local files; fetch-model.sh in tools/neural-embed is the only network
 # path (design doc §7.6 and §4 no-new-network requirement).
 [features]
-# Dense-family providers: LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma.
+# Dense-family providers: NMF, PPMI, FDC, MPNet, and EmbeddingGemma.
 # OFF by default (plan 70BC55F3, 2026-09-05): measured cost exceeds benefit
 # vs. BM25+RI on two corpora. RI stays always-on (binary fingerprint feeds
 # dreaming, contradiction, consolidation). Enable with --features dense-families.
 # Mirror of Swift trait DenseFamilies / #define MOOTX01_DENSE_FAMILIES.
 dense-families = []
+# lsa: the LsaProvider and its basis training on a switch of their own
+# (ruling 2026-09-07). dense-families does not enable it and the dark-variant
+# gate does not build it: the family is dark and unproven. Enables
+# dense-families (shared counts and reduced vocabulary). Mirror of Swift
+# trait LSA / #define MOOTX01_LSA.
+lsa = ["dense-families"]
 # Enable Candle-based in-process ML inference (CandleNLProvider).
 # Requires model assets on disk (see tools/neural-embed/fetch-model.sh).
 candle = [
@@ -106,3 +112,14 @@ optional = true
 # dependency is introduced to the project.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# LSA test binaries require the `lsa` feature (ruling 2026-09-07): LsaProvider
+# is dark without it, so these integration test files would fail to compile
+# under --features dense-families without the required-features guard.
+[[test]]
+name = "lsa_basis_serialization_tests"
+required-features = ["lsa"]
+
+[[test]]
+name = "trainable_embedding_basis_tests"
+required-features = ["dense-families"]

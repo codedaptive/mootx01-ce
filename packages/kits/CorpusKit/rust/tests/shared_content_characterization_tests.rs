@@ -21,6 +21,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vector_index 1) only with the `whole-record-dense` feature.
+const LANES_PER_ITEM: usize = if cfg!(feature = "whole-record-dense") { 2 } else { 1 };
+
 static GLOBAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn global_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -224,9 +228,9 @@ fn inventory_baseline_identifies_every_derived_table() {
         .collect();
     assert_eq!(by_table["chunks"].row_count, 2);
     assert_eq!(by_table["corpus_metadata"].row_count, 2);
-    // Binary engram row per chunk; the deterministic provider also stores a
-    // float row per chunk (its float lane is live).
-    assert_eq!(by_table["vectors"].row_count, 4);
+    // Binary engram row per chunk; the whole-record-dense feature also stores
+    // a float row per chunk.
+    assert_eq!(by_table["vectors"].row_count, 2 * LANES_PER_ITEM);
     assert_eq!(by_table["removed_sources"].row_count, 0);
 
     // Determinism: an identical build in a fresh estate produces the SAME

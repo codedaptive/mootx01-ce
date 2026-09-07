@@ -400,7 +400,7 @@ public actor CommunityTransferCoordinator: Sendable {
     public func importExecute(planToken: String) async -> JSONValue {
         // Exact retry: if a job with this planToken already exists, return
         // submitted{same jobID} without creating a new job.
-        if let existing = jobs.values.first(where: { $0.planToken == planToken }) {
+        if jobs.values.contains(where: { $0.planToken == planToken }) {
             log.info("importExecute: exact retry — reusing jobID for planToken")
             return TransferExecutionOutcome.submitted(jobID: existingJobID(for: planToken)!).toJSONValue()
         }
@@ -598,7 +598,6 @@ public actor CommunityTransferCoordinator: Sendable {
             let planUUID = UUID().uuidString.lowercased()
             let planToken = "\(planUUID):\(fingerprint)"
 
-            let destFileURL = dirURL.appendingPathComponent(fileName)
             let plan = TransferPlan(
                 format: TransferFormat(name: "MOOT JSON", recognized: true),
                 candidateCount: candidateCount,
@@ -814,7 +813,7 @@ public actor CommunityTransferCoordinator: Sendable {
             // Progress callback that checks the cancel flag between records
             // and updates processed count in the sidecar.
             let progress: VaultProgress = { [weak self] processed, total in
-                guard let self else { return }
+                guard self != nil else { return }
                 // VaultProgress is @Sendable; can't call actor methods directly.
                 // The update is not strictly required for the cancel check,
                 // which happens at window boundaries inside the bridge.

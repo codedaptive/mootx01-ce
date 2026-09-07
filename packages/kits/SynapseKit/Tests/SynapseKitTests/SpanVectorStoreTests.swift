@@ -16,6 +16,7 @@
 //      generation are deleted; serving rows of a live model survive.
 
 import Testing
+import EngramLib
 import Foundation
 import PersistenceKit
 @testable import SynapseKit
@@ -125,5 +126,46 @@ struct SpanVectorStoreTests {
             table: "vectors", where: .isTrue, orderBy: [], limit: nil, offset: nil, columns: ["model_id", "generation"])
         #expect(remaining.count == 2)
         #expect(remaining.allSatisfy { $0["model_id"] == .text("live-v1") && $0["generation"] == .int(0) })
+    }
+
+    @Test("whole-record vacuum removes every float row and graph row, keeps binary and span rows")
+    func wholeRecordVacuum() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        // Binary rows (kind 0) at lane 0 and float rows (kind 1) at lane 1 for
+        // two models; span rows (kind 2) under the encoder model.
+        for model in ["live-v1", "other-v1"] {
+            try await store.addPayload(itemID: "i1", vectorIndex: 0,
+                                       payload: VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0x0F, count: 32)),
+                                       modelID: model, modelVersion: "1", filedAt: now)
+            try await store.addPayload(itemID: "i1", vectorIndex: 1, payload: VectorPayload(floats: [1, 0]),
+                                       modelID: model, modelVersion: "1", filedAt: now)
+        }
+        try await store.writeSpanVectors(itemID: "i1", modelID: "arctic-embed-s-w60", modelVersion: "1", spans: [
+            span(0, [1, 2], scale: 1, start: 0, end: 30),
+        ], filedAt: now)
+        try await store.flush()
+        _ = try await store.storage.rowStore.insert(table: "hnsw_graph", values: [
+            "model_id": .text("live-v1"), "node_idx": .int(0), "node_id": .text("i1"),
+            "layer": .int(0), "neighbours": .blob(Data([0, 0, 0, 0])), "generation": .int(0),
+        ])
+        let counts = try await store.reclaimWholeRecordFloatRows()
+        #expect(counts.floatRows == 2)
+        #expect(counts.graphRows == 1)
+        let remaining = try await store.storage.rowStore.query(
+            table: "vectors", where: .isTrue, orderBy: [], limit: nil, offset: nil, columns: ["kind"])
+        let kinds = remaining.compactMap { row -> Int64? in
+            if case let .int(kind)? = row["kind"] { return kind }
+            return nil
+        }.sorted()
+        #expect(kinds == [0, 0, 2])
+        #expect(try await store.storage.rowStore.count(table: "hnsw_graph", where: nil) == 0)
+        // A second pass finds nothing and the binary lane still serves.
+        let again = try await store.reclaimWholeRecordFloatRows()
+        #expect(again.floatRows == 0 && again.graphRows == 0)
+        let probe = Engram(blocks: 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F)
+        #expect(try await store.findNearest(probe: probe, modelID: "live-v1", limit: 5).map(\.itemID) == ["i1"])
     }
 }

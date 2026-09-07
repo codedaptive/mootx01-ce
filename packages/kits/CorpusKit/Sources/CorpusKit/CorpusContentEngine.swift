@@ -178,13 +178,13 @@ public struct ContentIndexJob: Sendable, Codable, Equatable {
 /// GLK/MOOTx01 build this compiles to the identity function because passage
 /// keys cannot be produced. The parsing branch exists only in standalone
 /// passage builds.
-enum IndexUnitIdentity {
+package enum IndexUnitIdentity {
     /// Reserved internal separator. Content IDs reject it in every build so
     /// a database created without passages can safely enable them only via an
     /// explicit future rebuild.
-    static let reservedSeparator = "\u{1F}"
+    package static let reservedSeparator = "\u{1F}"
 
-    static func contentID(fromItemKey key: String) -> CorpusContentID {
+    package static func contentID(fromItemKey key: String) -> CorpusContentID {
 #if CORPUSKIT_STANDALONE_PASSAGES
         guard let range = key.range(of: reservedSeparator) else { return key }
         return String(key[key.startIndex..<range.lowerBound])
@@ -285,14 +285,26 @@ public actor CorpusContentEngine {
     /// The consumer name this engine claims representations under.
     public static let claimsConsumer = "corpus"
 
+    /// The vector lanes this engine writes, claims and deletes per slot:
+    /// lane 0 is the 256-bit engram row every build writes; lane 1 is the
+    /// whole-record float row, which exists only in the WholeRecordDense
+    /// build. The default build names lane 0 alone, so a populated estate
+    /// whose float rows the 1.6 to 1.7 capsule vacuumed (and whose lane-1
+    /// claim it released) is never re-claimed by `reconcileConfiguredProviders`.
+#if MOOTX01_WHOLE_RECORD_DENSE
+    static let claimedLanes: [Int] = [0, 1]
+#else
+    static let claimedLanes: [Int] = [0]
+#endif
+
     /// Reserved checkpoint row recording the last APPLIED feed cursor —
     /// the lane-level cursor a remove records (a removed ID has no
     /// per-content checkpoint row to carry it). The reserved ID starts
     /// with the key separator, which no validated content ID can.
     static let feedCursorRowID = "\u{1F}feed"
 
-    private struct Slot {
-        var provider: any EmbeddingProvider
+    package struct Slot {
+        package var provider: any EmbeddingProvider
         let freshBasisBlob: Data?
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         var countsDocumentCount: Int
@@ -327,16 +339,16 @@ public actor CorpusContentEngine {
     let storage: any Storage
     private let configuration: CorpusContentConfiguration
     // Internal so the queue drain worker resolves records at work time.
-    let source: any CorpusContentSource
+    package let source: any CorpusContentSource
     private let invertedIndex: InvertedIndexStore
-    private let vectorStore: VectorStore
+    package let vectorStore: VectorStore
     private let basisStore: BasisStore
     private let countsStore: CorpusProviderCountsStore
     private let indexState: CorpusIndexStateStore
     private let coverageStore: CorpusProviderCoverageStore
     private let providerConfigurationStore: CorpusProviderConfigurationStore
     private let claims: VectorRepresentationClaims
-    private var slots: [Slot]
+    package var slots: [Slot]
     /// Set after an ambiguous counts/checkpoint transaction failure. The next
     /// queue attempt must rehydrate the in-memory accumulators from durable
     /// state before it can fold another content reference.
@@ -543,7 +555,7 @@ public actor CorpusContentEngine {
     /// lifecycle paths can pre-claim at construction.
     public func registerClaims(now: Date) async throws {
         for (index, slot) in slots.enumerated() {
-            for lane: Int in [0, 1] {
+            for lane: Int in Self.claimedLanes {
                 // Attached mode writes binary (lane 0) rows for the DEFAULT
                 // slot only — GLK's Hamming readers all probe the default
                 // model — so non-default binary claims are not registered
@@ -567,7 +579,7 @@ public actor CorpusContentEngine {
     /// Reopen/replay is idempotent.
     public func reconcileConfiguredProviders(now: Date) async throws {
         let desired = Set(slots.enumerated().flatMap { index, slot -> [VectorRepresentationKey] in
-            [0, 1].compactMap { lane in
+            Self.claimedLanes.compactMap { lane in
                 if lane == 0 && index != 0 && configuration.mode == .attached { return nil }
                 return VectorRepresentationKey(
                     modelID: slot.provider.modelID,
@@ -604,6 +616,27 @@ public actor CorpusContentEngine {
                 try await vectorStore.deleteVectors(keys: exact)
             }
             retiredProviders.insert("\(key.modelID)\u{1F}\(key.modelVersion)")
+        }
+
+        // A provider whose persisted basis or counts row names a (modelID,
+        // modelVersion) no slot carries any more is retired even when it held
+        // no representation claim: a non-default attached slot writes no
+        // vector row in the default build (the engram row is the default
+        // slot's, the whole-record float row is the sidecar's), so the claims
+        // diff alone cannot see it leave.
+        let desiredProviders = Set(slots.map {
+            "\($0.provider.modelID)\u{1F}\($0.provider.modelVersion)"
+        })
+        for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+            let persisted = try await storage.rowStore.query(
+                table: table, where: .isTrue, orderBy: [], limit: nil, offset: nil,
+                columns: ["model_id", "model_version"])
+            for row in persisted {
+                guard case let .text(modelID)? = row["model_id"],
+                      case let .text(modelVersion)? = row["model_version"] else { continue }
+                let encoded = "\(modelID)\u{1F}\(modelVersion)"
+                if !desiredProviders.contains(encoded) { retiredProviders.insert(encoded) }
+            }
         }
 
         let desiredModelIDs = Set(slots.map { $0.provider.modelID })
@@ -729,7 +762,7 @@ public actor CorpusContentEngine {
 
     // MARK: - Content validation
 
-    private func validate(id: CorpusContentID) throws {
+    package func validate(id: CorpusContentID) throws {
         guard !id.isEmpty, !id.contains(IndexUnitIdentity.reservedSeparator) else {
             throw CorpusKitError.invalidConfiguration(
                 "content IDs must be non-empty and must not contain the U+001F separator")
@@ -753,68 +786,6 @@ public actor CorpusContentEngine {
         // idle — see settleYoungBasisIfGrown.
         try await settleYoungBasisIfGrown(now: now, requireIdleInFlight: true)
         return true
-    }
-
-    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
-    ///
-    /// Resolves the current record from the source — picking up any newly-written
-    /// `denseCompositionText` (e.g. a distillate written by the GLK distillation
-    /// rider) — and writes a fresh float-vector row (vectorIndex: 1) for each
-    /// active slot. Only the float (dense RI) lane is updated; BM25, binary
-    /// (Hamming) vectors, coverage, and the idempotence checkpoint are untouched.
-    ///
-    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
-    /// digest (unchanged by distillation). Calling `index(force: true)` would
-    /// bypass the gate but would also re-run BM25 indexing, changing IDF state for
-    /// content whose text has not changed — wrong for the distillation path. This
-    /// method bypasses BOTH the gate AND the BM25 path by targeting only the float
-    /// lane directly. §9 BM25 isolation (SPEC_DISTILLATION_STORAGE) is preserved:
-    /// the content and digest are unchanged, so BM25 scores remain byte-identical.
-    /// For a corpus-wide dense-only update (basis-only retrains), use
-    /// `reindex(now:laneScope:.dense)` instead of looping this method.
-    ///
-    /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
-    /// so `countsAdmission` serialization is maintained against concurrent
-    /// trainable-slot operations (FINDING_11X_MAINTENANCE_WALK_2026-07-28
-    /// constraint 3). Returns false only when the content ID no longer resolves
-    /// in the source; derived state is left unchanged in that case.
-    ///
-    /// - Parameters:
-    ///   - id: The content ID to re-embed.
-    ///   - now: The operation timestamp (passed in — never read inside the engine).
-    /// - Returns: true when live content was found and re-embedded; false when
-    ///   the ID no longer resolves.
-    @discardableResult
-    public func recomposeDenseVector(id: CorpusContentID, now: Date) async throws -> Bool {
-        try validate(id: id)
-        guard let record = try await source.record(for: id) else {
-            return false
-        }
-        try await recomposeDenseFloat(record: record, now: now)
-        return true
-    }
-
-    /// Dense-float-only vector upsert for one content record. Writes the float
-    /// (vectorIndex: 1) row across all active slots using `effectiveDenseText`.
-    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
-    /// Called by `recomposeDenseVector` and the drain/sweep integration points.
-    private func recomposeDenseFloat(record: CorpusContentRecord, now: Date) async throws {
-        let unit = IndexUnit(
-            key: record.id, text: record.text, denseText: record.denseCompositionText)
-        var rows: [VectorPayloadInput] = []
-        for slot in slots {
-            let (_, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
-            guard !floats.isEmpty else { continue }
-            rows.append(VectorPayloadInput(
-                itemID: unit.key, vectorIndex: 1,
-                payload: VectorPayload(floats: floats),
-                modelID: slot.provider.modelID,
-                modelVersion: slot.provider.modelVersion,
-                filedAt: now))
-        }
-        if !rows.isEmpty {
-            try await vectorStore.addPayloads(rows)
-        }
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
@@ -1070,7 +1041,14 @@ public actor CorpusContentEngine {
                 // the active basis digest. Their vectors are durable — re-embedding
                 // produces the same result at wasted compute cost.
                 if coveredBySlot[target.modelID]?.contains(record.id) == true { continue }
+#if MOOTX01_WHOLE_RECORD_DENSE
                 let (engram, floats) = try await target.provider.embedPair(denseText)
+#else
+                // The default build stores the engram only: the pooled float
+                // is computed for the projection and dropped (whole-record dense
+                // rows are a WholeRecordDense sidecar write).
+                let (engram, _) = try await target.provider.embedPair(denseText)
+#endif
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 0,
@@ -1078,6 +1056,7 @@ public actor CorpusContentEngine {
                         modelID: target.modelID, modelVersion: target.modelVersion,
                         filedAt: now))
                 }
+#if MOOTX01_WHOLE_RECORD_DENSE
                 if !floats.isEmpty {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 1,
@@ -1085,6 +1064,7 @@ public actor CorpusContentEngine {
                         modelID: target.modelID, modelVersion: target.modelVersion,
                         filedAt: now))
                 }
+#endif
                 covered.append((record.id, target.modelID, target.basisDigest))
             }
             return PreparedStructuralRecord(
@@ -1460,7 +1440,14 @@ public actor CorpusContentEngine {
                 for (targetIndex, target) in computeTargets.enumerated()
                     where missingSnapshot[targetSlotIndices[targetIndex]]?.contains(record.id) == true
                 {
+#if MOOTX01_WHOLE_RECORD_DENSE
                     let (engram, floats) = try await target.provider.embedPair(denseText)
+#else
+                    // The default build stores the engram only: the pooled float
+                    // is computed for the projection and dropped (whole-record dense
+                    // rows are a WholeRecordDense sidecar write).
+                    let (engram, _) = try await target.provider.embedPair(denseText)
+#endif
                     if target.writeBinary {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 0,
@@ -1468,6 +1455,7 @@ public actor CorpusContentEngine {
                             modelID: target.modelID, modelVersion: target.modelVersion,
                             filedAt: now))
                     }
+#if MOOTX01_WHOLE_RECORD_DENSE
                     if !floats.isEmpty {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 1,
@@ -1475,6 +1463,7 @@ public actor CorpusContentEngine {
                             modelID: target.modelID, modelVersion: target.modelVersion,
                             filedAt: now))
                     }
+#endif
                     covered.append((record.id, target.modelID, target.basisDigest))
                 }
                 return (rows, covered)
@@ -1952,7 +1941,14 @@ public actor CorpusContentEngine {
                 // lexical text otherwise). BM25 tokenisation above always
                 // uses unit.text (the lexical surface) — the two paths are
                 // kept independent so a nil denseText is a true no-op.
+#if MOOTX01_WHOLE_RECORD_DENSE
                 let (engram, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
+#else
+                // The default build stores the engram only: the pooled float
+                // is computed for the projection and dropped (whole-record dense
+                // rows are a WholeRecordDense sidecar write).
+                let (engram, _) = try await slot.provider.embedPair(unit.effectiveDenseText)
+#endif
                 if writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 0,
@@ -1961,6 +1957,7 @@ public actor CorpusContentEngine {
                         modelVersion: slot.provider.modelVersion,
                         filedAt: now))
                 }
+#if MOOTX01_WHOLE_RECORD_DENSE
                 if !floats.isEmpty {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 1,
@@ -1969,6 +1966,7 @@ public actor CorpusContentEngine {
                         modelVersion: slot.provider.modelVersion,
                         filedAt: now))
                 }
+#endif
             }
             covered.append((record.id, slot.provider.modelID, slot.basisDigest))
         }
@@ -2008,15 +2006,18 @@ public actor CorpusContentEngine {
     /// means fall back to `text` (default). Separating the two here keeps the
     /// BM25 / dense-embedding split explicit through every downstream code path
     /// that receives an `IndexUnit`.
-    private struct IndexUnit {
-        let key: String
+    package struct IndexUnit {
+        package let key: String
         /// Lexical text — BM25 tokenisation only.
-        let text: String
+        package let text: String
         /// Dense-composition text for vector embedding. nil → use `text`.
-        let denseText: String?
+        package let denseText: String?
         /// The text the engine passes to `embedPair`. Returns `denseText`
         /// when set, falls back to `text`.
-        var effectiveDenseText: String { denseText ?? text }
+        package var effectiveDenseText: String { denseText ?? text }
+        package init(key: String, text: String, denseText: String?) {
+            self.key = key; self.text = text; self.denseText = denseText
+        }
     }
 
     /// Compute the record's index units under the configured policy,
@@ -2117,7 +2118,7 @@ public actor CorpusContentEngine {
         for key in unitKeys.sorted() {
             try await invertedIndex.remove(itemID: key)
             for slot in slots {
-                for lane: Int in [0, 1] {
+                for lane: Int in Self.claimedLanes {
                     if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
                     vectorKeys.append(VectorExactKey(
                         itemID: key, vectorIndex: lane,
@@ -2134,7 +2135,7 @@ public actor CorpusContentEngine {
     private func sharedRepresentationFamilies() async throws -> Set<String> {
         var shared: Set<String> = []
         for slot in slots {
-            for lane: Int in [0, 1] {
+            for lane: Int in Self.claimedLanes {
                 let claimants = try await claims.claimants(
                     key: VectorRepresentationKey(
                         modelID: slot.provider.modelID,
@@ -3116,7 +3117,7 @@ public actor CorpusContentEngine {
             // try? discards any error from the abort itself; the ORIGINAL error is what
             // the caller needs to see.
             if !trainableModelIDs.isEmpty {
-                try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
+                _ = try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
             }
             throw error
         }
@@ -3505,7 +3506,7 @@ public actor CorpusContentEngine {
         for id in ids {
             for key in try await unitKeys(for: id) {
                 for slot in slots {
-                    for lane: Int in [0, 1] {
+                    for lane: Int in Self.claimedLanes {
                         if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
                         keys.append(VectorExactKey(
                             itemID: key, vectorIndex: lane,
@@ -3523,83 +3524,14 @@ public actor CorpusContentEngine {
         try await claims.releaseAllClaims(consumer: Self.claimsConsumer)
     }
 
-    // MARK: - Per-signal dense float lanes (the RecallDirector seam)
-
-    /// Per-signal dense float NEAREST recall — content-ID keyed. One
-    /// `(modelID, outcome)` pair per held slot, in slot order. Hit item IDs
-    /// are canonical content IDs (passage keys aggregate to their content
-    /// ID before ranking).
-    /// Per-signal dense float NEAREST recall.
-    ///
-    /// - Parameters:
-    ///   - query: the natural-language query string.
-    ///   - limit: the candidate-pool depth per signal.
-    ///   - metric: the distance function to use. Defaults to `.cosine` so
-    ///     callers that do not pass a metric (pre-floatMetric call sites) see
-    ///     byte-identical behaviour — no silent behaviour change.
-    public func floatNearestPerSignal(
-        query: String, limit: Int, metric: FloatMetric = .cosine
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .nearest, metric: metric)
-    }
-
-    /// Single-signal dense float nearest recall — the DEFAULT slot's
-    /// outcome (compatibility convenience over `floatNearestPerSignal`).
-    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
-        await floatNearestPerSignal(query: query, limit: limit).first?.outcome ?? .emptyQuery
-    }
-
-    /// Per-signal dense float FARTHEST (anti-similarity) recall.
-    ///
-    /// - Parameters:
-    ///   - query: the natural-language query string.
-    ///   - limit: the candidate-pool depth per signal.
-    ///   - metric: the distance function to use. Defaults to `.cosine`.
-    public func floatFarthestPerSignal(
-        query: String, limit: Int, metric: FloatMetric = .cosine
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .farthest, metric: metric)
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// Discrimination is non-nil exactly when the outcome is `.hits` with ≥1 result.
-    ///
-    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
-    /// RecallDirector (GLK) consumes the signal to discount the dense contribution
-    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
-    /// for their own fusion decisions.
-    ///
-    /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
-    ///
-    /// - Parameters:
-    ///   - query: the natural-language query string.
-    ///   - limit: the candidate-pool depth per signal.
-    ///   - metric: the distance function to use. Defaults to `.cosine`.
-    public func floatNearestPerSignalWithDiscrimination(
-        query: String, limit: Int, metric: FloatMetric = .cosine
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
-        let perSignal = await floatNearestPerSignal(query: query, limit: limit, metric: metric)
-        return perSignal.map { entry in
-            (modelID: entry.modelID,
-             outcome: entry.outcome,
-             discrimination: Corpus.discriminationSignal(from: entry.outcome))
-        }
-    }
-
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
     /// chain tests exercise the store-error contract. Never set in
     /// production.
-    var _forcedFloatError: Error? = nil
-
-    /// Install the single-use forced float store error (test seam).
-    public func _testForceFloatStoreError(_ error: Error) {
-        _forcedFloatError = error
-    }
+    package var _forcedFloatError: Error? = nil
+#endif
 
     /// Test-only ingest failure hook: invoked with the content ID BEFORE the
     /// drain processes a job; a throw simulates a transient index failure so
@@ -3638,116 +3570,6 @@ public actor CorpusContentEngine {
             provider: slots[0].provider)
     }
 
-    private func floatPerSignal(
-        query: String, limit: Int, direction: SearchDirection, metric: FloatMetric = .cosine
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-        // Consume the forced-error seam for the DEFAULT slot (nearest path
-        // only — same contract as the legacy engine's seam).
-        var forcedDefault: FloatLaneOutcome? = nil
-        if direction == .nearest, let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error", value: 1.0,
-                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-            forcedDefault = .storeError(forced)
-        }
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for (slotIndex, slot) in slots.enumerated() {
-            if slotIndex == 0, let forced = forcedDefault {
-                results.append((slot.provider.modelID, forced))
-                continue
-            }
-            let provider = slot.provider
-            let probe: [Float]
-            do {
-                let result = try await provider.embedFloat(query)
-                guard !result.isEmpty else {
-                    Intellectus.report(.metric(
-                        name: "corpus.float_lane.dark_provider", value: 1.0,
-                        tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                    results.append((provider.modelID, .unavailableProviderOptOut))
-                    continue
-                }
-                probe = result
-            } catch SynapseKitError.embedFloatVocabMiss {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_vocab_miss", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoVocabHit))
-                continue
-            } catch {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_provider", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableProviderOptOut))
-                continue
-            }
-            let matches: [VectorMatch]
-            do {
-                switch direction {
-                case .nearest:
-                    matches = try await vectorStore.findNearestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4, metric: metric)
-                case .farthest:
-                    matches = try await vectorStore.findFarthestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4, metric: metric)
-                }
-            } catch {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.store_error", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .storeError(error)))
-                continue
-            }
-            guard !matches.isEmpty else {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoFloatRows))
-                continue
-            }
-            // Aggregate unit hits to canonical content IDs — DIRECT identity;
-            // a passage key parses to its content ID, a whole-content key IS it.
-            var byContent: [String: Float] = [:]
-            for match in matches {
-                let id = IndexUnitIdentity.contentID(fromItemKey: match.itemID)
-                let similarity = 1.0 - Float(match.distance) / 10_000.0
-                switch direction {
-                case .nearest:
-                    byContent[id] = max(byContent[id] ?? -Float.greatestFiniteMagnitude, similarity)
-                case .farthest:
-                    byContent[id] = min(byContent[id] ?? Float.greatestFiniteMagnitude, similarity)
-                }
-            }
-            guard !byContent.isEmpty else {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoFloatRows))
-                continue
-            }
-            var ranked = byContent.map { (itemID: $0.key, similarity: $0.value) }
-            ranked.sort { a, b in
-                if a.similarity != b.similarity {
-                    switch direction {
-                    case .nearest: return a.similarity > b.similarity
-                    case .farthest: return a.similarity < b.similarity
-                    }
-                }
-                return a.itemID < b.itemID
-            }
-            let hits = Array(ranked.prefix(limit))
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.hit", value: Double(hits.count),
-                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-            results.append((provider.modelID, .hits(hits)))
-        }
-        return results
-    }
 }
 
 
