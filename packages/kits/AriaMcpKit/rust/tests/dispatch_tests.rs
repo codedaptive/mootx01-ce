@@ -11184,3 +11184,234 @@ fn memory_search_door_overrides_scoring_when_both_present() {
          retrieval; text: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// moot_file_memory under a live sensitivity grant: the write side shares the
+// read side's ceiling. An omitted `sensitivity` files at the grant's tier, an
+// explicit lower tier is refused with the ceiling named, an explicit higher
+// tier is kept, and with no grant nothing changes. Mirrors Swift
+// `FileMemorySensitivityCeilingTests.swift`. Drives the grant ledger directly
+// through `interface_tools::dispatch`, as the grant-read tests above do.
+// ---------------------------------------------------------------------------
+
+/// Dispatch `moot_file_memory` with an explicit grant ledger, through the
+/// same `surface_dispatch_failure` band production uses so a refusal arrives
+/// as an `isError` result (the Swift port returns it that way directly).
+fn file_memory_with_ledger(
+    registry: &EstateRegistry,
+    sensitivity_ledger: &aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger,
+    marker: &str,
+    sensitivity: Option<&str>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let content = format!("{marker} checkpoint body");
+    let subject = format!("{marker} checkpoint");
+    let mut a = args![
+        "content" => content.as_str(),
+        "subject" => subject.as_str(),
+        "location" => "session/ceiling-tests/checkpoint-30"
+    ];
+    if let Some(s) = sensitivity {
+        a.insert("sensitivity".to_string(), JsonValue::from(serde_json::json!(s)));
+    }
+    aria_mcp::dispatch::surface_dispatch_failure(
+        "moot_file_memory",
+        aria_mcp::interface_tools::dispatch(
+            "moot_file_memory",
+            &a,
+            registry,
+            &SurfacedRecallLedger::new(),
+            sensitivity_ledger,
+            EstatePosture::Live,
+            true,
+            "",
+            "",
+            None,
+            None,
+        ),
+    )
+}
+
+/// The id on the reply's first line, `filed memory <uuid>`.
+fn filed_id(result: &serde_json::Value) -> String {
+    content_text(result)
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("filed memory "))
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Read the filed drawer back through an explicit sensitivity filter, which
+/// suppresses the default Elevated ceiling that would hide a restricted or
+/// secret row.
+fn drawer_at(
+    registry: &EstateRegistry,
+    id: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) -> locus_kit::drawer::Drawer {
+    use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::Sensitivity(sensitivity)]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(50);
+    let drawers = coord
+        .recall(&registry.default.handle, frame, aria_mcp::dispatch::wall_now())
+        .expect("recall must succeed");
+    drawers
+        .into_iter()
+        .find(|d| d.id == id)
+        .unwrap_or_else(|| panic!("the filed drawer {id} must be readable at {sensitivity:?}"))
+}
+
+#[test]
+fn file_memory_omitted_sensitivity_under_restricted_grant_files_restricted() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    ledger.grant_restricted(aria_mcp::dispatch::wall_now());
+
+    let result = file_memory_with_ledger(&registry, &ledger, "ceiling-restricted-omitted", None)
+        .expect("filing under a grant must dispatch");
+    assert!(is_success(&result), "filing under a grant must succeed: {result:?}");
+    assert!(
+        content_text(&result).contains("sensitivity: restricted"),
+        "the reply must name the tier the server applied; got: {}",
+        content_text(&result)
+    );
+    let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Restricted);
+    assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Restricted);
+}
+
+#[test]
+fn file_memory_omitted_sensitivity_under_secret_grant_files_secret() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    ledger.grant_secret(aria_mcp::dispatch::wall_now());
+
+    let result = file_memory_with_ledger(&registry, &ledger, "ceiling-secret-omitted", None)
+        .expect("filing under a grant must dispatch");
+    assert!(is_success(&result), "filing under a grant must succeed: {result:?}");
+    assert!(content_text(&result).contains("sensitivity: secret"));
+    let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Secret);
+    assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Secret);
+}
+
+#[test]
+fn file_memory_explicit_lower_sensitivity_under_grant_is_refused() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    ledger.grant_secret(aria_mcp::dispatch::wall_now());
+
+    let result = file_memory_with_ledger(
+        &registry, &ledger, "ceiling-secret-lowered", Some("restricted"),
+    ).expect("a refusal is an isError result, not a transport fault");
+    assert!(is_tool_error(&result), "a tier below the ceiling must be refused, not filed: {result:?}");
+    assert!(
+        content_text(&result).contains("below the live grant ceiling secret"),
+        "the refusal must name the ceiling; got: {}",
+        content_text(&result)
+    );
+
+    // Nothing landed: the refused body is absent at every tier.
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::SensitivityAtMost(AdjectiveSensitivity::Secret)]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(50);
+    let drawers = coord
+        .recall(&registry.default.handle, frame, aria_mcp::dispatch::wall_now())
+        .expect("recall must succeed");
+    assert!(
+        !drawers.iter().any(|d| d.content.contains("ceiling-secret-lowered")),
+        "a refused filing must not write a drawer"
+    );
+}
+
+#[test]
+fn file_memory_explicit_normal_under_restricted_grant_message_matches_swift_port() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    ledger.grant_restricted(aria_mcp::dispatch::wall_now());
+
+    let result = file_memory_with_ledger(
+        &registry, &ledger, "ceiling-restricted-normal", Some("normal"),
+    ).expect("a refusal is an isError result, not a transport fault");
+    assert!(is_tool_error(&result));
+    assert_eq!(
+        content_text(&result),
+        "sensitivity normal is below the live grant ceiling restricted: while a restricted \
+         grant is live a memory files at restricted or higher. Omit sensitivity to file \
+         at the ceiling."
+    );
+}
+
+#[test]
+fn file_memory_explicit_higher_sensitivity_under_grant_is_kept() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    ledger.grant_restricted(aria_mcp::dispatch::wall_now());
+
+    let result = file_memory_with_ledger(
+        &registry, &ledger, "ceiling-restricted-raised", Some("secret"),
+    ).expect("filing above the ceiling must dispatch");
+    assert!(is_success(&result), "{result:?}");
+    assert!(content_text(&result).contains("sensitivity: secret"));
+    let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Secret);
+    assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Secret);
+}
+
+#[test]
+fn file_memory_without_grant_is_unchanged() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+
+    let result = file_memory_with_ledger(&registry, &ledger, "ceiling-no-grant", None)
+        .expect("filing must dispatch");
+    assert!(is_success(&result), "{result:?}");
+    let text = content_text(&result);
+    assert_eq!(text.lines().count(), 3, "no grant: filed memory / room / lineage only; got {text}");
+    assert!(!text.contains("sensitivity:"));
+    let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Normal);
+    assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Normal);
+
+    // An explicit tier is fine with no grant live.
+    let explicit = file_memory_with_ledger(
+        &registry, &ledger, "ceiling-no-grant-explicit", Some("normal"),
+    ).expect("filing must dispatch");
+    assert!(is_success(&explicit), "{explicit:?}");
+}
+
+#[test]
+fn file_memory_expired_grant_does_not_floor() {
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use locus_kit::adjectives::AdjectiveSensitivity;
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = SensitivityGrantLedger::new();
+    // A secret grant issued thirty-one minutes ago: its fixed thirty-minute
+    // window closed before this filing's `now`.
+    ledger.grant_secret(aria_mcp::dispatch::wall_now() - 31 * 60 * 1_000);
+
+    let result = file_memory_with_ledger(&registry, &ledger, "ceiling-secret-expired", None)
+        .expect("filing must dispatch");
+    assert!(is_success(&result), "{result:?}");
+    assert!(!content_text(&result).contains("sensitivity:"));
+    let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Normal);
+    assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Normal);
+}

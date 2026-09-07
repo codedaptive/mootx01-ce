@@ -255,7 +255,11 @@ fn memory_adapter_tool() -> serde_json::Value {
         "description": "Anthropic memory_20250818 compatible. Manages a virtual /memories \
 filesystem backed by the MOOTx01 estate with governance: audit \
 trail, lineage, sensitivity, confirmation state. Commands: view, \
-create, str_replace, insert, delete, rename.",
+create, str_replace, insert, delete, rename. While a restricted \
+or secret grant is live (mootx01 unlock), create, str_replace and \
+insert file at the grant's tier and the reply names it; a file \
+filed restricted or secret is outside this tool's read posture \
+until the grant lifts a grant-aware read such as moot_memory_get.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "command": string_schema("One of: view, create, str_replace, insert, delete, rename."),
@@ -288,7 +292,7 @@ fn file_memory_tool() -> serde_json::Value {
                 "subject": string_schema("REQUIRED. One sentence (≤120 chars) stating what this memory asserts. Write it for the NEXT AI that will scan it in a result list — telegraphic register, entities and claims front-loaded, no narrative framing. It is returned in recall rows, never searched. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""),
                 "location": string_schema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
                 "wing": string_schema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
-                "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
+                "sensitivity": string_schema("Optional sensitivity: normal (default), elevated, restricted, secret. While a restricted or secret grant is live (mootx01 unlock), an omitted sensitivity files at the grant's tier, a lower explicit tier is refused with an error naming the ceiling, and the reply names the tier applied. Omit to use the default; null is invalid."),
                 "exportability": string_schema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Omit to use the default; null is invalid."),
                 "kind": string_schema("Content kind: prose (default), code, transcript, list, structuredJSON, imageCaption, fingerprintOnly. Omit to use the default; null is invalid."),
                 "event_time": string_schema("Optional ISO8601 event timestamp to attach. Omit for capture time; null is invalid."),

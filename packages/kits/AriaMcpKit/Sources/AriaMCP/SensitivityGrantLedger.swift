@@ -117,6 +117,24 @@ actor SensitivityGrantLedger: Sendable {
         }
     }
 
+    /// The adjective sensitivity a capture files at when its caller names no
+    /// tier: the live grant's tier, or `nil` when neither tier is granted (the
+    /// caller then keeps its own default). Reads and writes share this one
+    /// ledger so material recalled under a grant cannot be written back a
+    /// rung below it; `ToolDispatcher.runFileMemory` is the write-side reader
+    /// and `ceilingFilter` the read-side one, and the two map tiers the same
+    /// way (secret to `.secret`, restricted to `.restricted`).
+    func ceilingSensitivity(now: Date) -> AdjectiveSensitivity? {
+        switch liveTier(now: now) {
+        case .secret:
+            return .secret
+        case .restricted:
+            return .restricted
+        case nil:
+            return nil
+        }
+    }
+
     /// The live tier and its expiry date, or `nil` if neither tier is granted.
     ///
     /// `expiresAt` is the instant the grant expires (exclusive: the grant is

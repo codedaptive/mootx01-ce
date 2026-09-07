@@ -2,8 +2,11 @@
 
 use crate::dispatch::{error_result, optional_integer, optional_string, require_string, text_result, wall_now};
 use crate::estate_registry::EstateRegistry;
+use crate::interface_tools::sensitivity_argument_name;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer::Drawer,
     drawer_operational::CaptureChannel,
     estate_types::LatticeAnchor,
@@ -20,10 +23,15 @@ const MAX_FILE_SIZE: usize = 100 * 1024;
 /// `memory_on` is resolved once at `Dispatcher::new` from the process
 /// environment and passed through the dispatch chain — matching the
 /// `EstatePosture` pattern. Never re-read from `std::env` here.
+///
+/// `sensitivity_ledger` is the dispatcher's grant ledger: the content-bearing
+/// writes (`create`, `str_replace`, `insert`) file at the live restricted or
+/// secret grant ceiling, the same ledger `run_file_memory` reads.
 pub fn dispatch_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     memory_on: bool,
+    sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL == "1"). The flag
     // gated only tool projection (the tool is absent from tools/list), so a
@@ -43,9 +51,9 @@ pub fn dispatch_memory(
     };
     match command {
         "view" => memory_view(args, registry),
-        "create" => memory_create(args, registry),
-        "str_replace" => memory_str_replace(args, registry),
-        "insert" => memory_insert(args, registry),
+        "create" => memory_create(args, registry, sensitivity_ledger),
+        "str_replace" => memory_str_replace(args, registry, sensitivity_ledger),
+        "insert" => memory_insert(args, registry, sensitivity_ledger),
         "delete" => memory_delete(args, registry),
         "rename" => memory_rename(args, registry),
         _ => Ok(error_result(&format!("Error: unknown command {command}"))),
@@ -121,10 +129,54 @@ fn list_drawers(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry)
     }).collect())
 }
 
+// SECURITY: the `memory` tool has no sensitivity argument (Anthropic's
+// memory_20250818 contract fixes its schema), so a create or edit while a
+// restricted or secret grant is live would file material recalled under
+// that grant at Normal, readable with no grant. The content-bearing writes
+// therefore share `run_file_memory`'s floor from the same ledger: the drawer
+// files at the higher of the tier it would otherwise carry (Normal for
+// create, the source drawer's tier for str_replace and insert) and the live
+// grant ceiling, and the reply names the tier while a grant is live. Rename
+// moves content without adding any and keeps the source tier. A drawer
+// filed restricted or secret is then outside the adapter's no-grant read
+// posture (`drawer_visible_to_adapter`) until read through a grant-aware
+// tool such as moot_memory_get. Mirrors `flooredSensitivity` in the Swift
+// MemoryToolAdapter.swift.
+
+/// The tier a content-bearing write files at: `base` lifted to the live
+/// grant ceiling when one is above it.
+fn floored_sensitivity(
+    base: AdjectiveSensitivity,
+    ceiling: Option<AdjectiveSensitivity>,
+) -> AdjectiveSensitivity {
+    match ceiling {
+        Some(c) if c.raw_value() > base.raw_value() => c,
+        _ => base,
+    }
+}
+
+/// The reply for a content-bearing write: `body`, plus a
+/// `sensitivity: <tier>` line while a grant is live so the caller learns
+/// the floor the server applied. With no grant the reply keeps its prior
+/// shape (Anthropic's contract text, unchanged).
+fn write_reply(
+    body: &str,
+    filed: AdjectiveSensitivity,
+    ceiling: Option<AdjectiveSensitivity>,
+) -> serde_json::Value {
+    if ceiling.is_some() {
+        text_result(&format!("{body}\nsensitivity: {}", sensitivity_argument_name(filed)))
+    } else {
+        text_result(body)
+    }
+}
+
 /// Build a capture frame for the adapter wing. `sensitivity` is the
 /// adjective-sensitivity tier the new drawer is filed at: creates pass
-/// Normal; edit/rename re-captures pass the SOURCE drawer's tier — a
-/// hardcoded Normal here silently DOWNGRADED elevated drawers on edit.
+/// Normal floored to the live grant ceiling; edit re-captures pass the
+/// SOURCE drawer's tier floored the same way (a hardcoded Normal here
+/// silently DOWNGRADED elevated drawers on edit); rename passes the source
+/// tier as is.
 fn new_frame(
     content: &str,
     room: &str,
@@ -224,7 +276,11 @@ fn memory_view(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) ->
     }
 }
 
-fn memory_create(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) -> Result<serde_json::Value, JSONRPCError> {
+fn memory_create(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    sensitivity_ledger: &SensitivityGrantLedger,
+) -> Result<serde_json::Value, JSONRPCError> {
     let path = validate_path(args, "path")?;
     // Match Swift's guard: absent → textResult (isError:false), not INVALID_PARAMS.
     let file_text = match optional_string(args, "file_text")? {
@@ -235,14 +291,22 @@ fn memory_create(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) 
     if find_drawer(&path, args, registry)?.is_some() { return Ok(text_result(&format!("Error: File {path} already exists"))); }
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
+    // One instant per request: the grant check and the capture agree on
+    // `now`. The adapter runs on the wall clock, as its other writes do.
+    let now = wall_now();
+    let ceiling = sensitivity_ledger.ceiling_sensitivity(now);
+    let filed = floored_sensitivity(AdjectiveSensitivity::Normal, ceiling);
     let coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(file_text, &room, &registry.server_identity,
-        locus_kit::adjectives::AdjectiveSensitivity::Normal), wall_now())
+    coord.capture(&estate.handle, new_frame(file_text, &room, &registry.server_identity, filed), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
-    Ok(text_result(&format!("File created successfully at: {path}")))
+    Ok(write_reply(&format!("File created successfully at: {path}"), filed, ceiling))
 }
 
-fn memory_str_replace(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) -> Result<serde_json::Value, JSONRPCError> {
+fn memory_str_replace(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    sensitivity_ledger: &SensitivityGrantLedger,
+) -> Result<serde_json::Value, JSONRPCError> {
     let path = validate_path(args, "path")?;
     // Match Swift's guard: absent → textResult (isError:false), not INVALID_PARAMS.
     let old_str = match optional_string(args, "old_str")? {
@@ -264,15 +328,21 @@ fn memory_str_replace(args: &BTreeMap<String, JsonValue>, registry: &EstateRegis
     let new_content = d.content.replacen(old_str, &new_str, 1);
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
+    let now = wall_now();
+    let ceiling = sensitivity_ledger.ceiling_sensitivity(now);
+    let filed = floored_sensitivity(d.adjective_sensitivity(), ceiling);
     let coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity,
-        d.adjective_sensitivity()), wall_now())
+    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity, filed), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
-    let _ = coord.withdraw(&estate.handle, &d.id, Some("memory str_replace supersession"), wall_now());
-    Ok(text_result("The memory file has been edited."))
+    let _ = coord.withdraw(&estate.handle, &d.id, Some("memory str_replace supersession"), now);
+    Ok(write_reply("The memory file has been edited.", filed, ceiling))
 }
 
-fn memory_insert(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) -> Result<serde_json::Value, JSONRPCError> {
+fn memory_insert(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    sensitivity_ledger: &SensitivityGrantLedger,
+) -> Result<serde_json::Value, JSONRPCError> {
     let path = validate_path(args, "path")?;
     // Match Swift's guard: absent → textResult (isError:false), not a silent
     // default of 0 (which would silently prepend instead of refusing).
@@ -298,12 +368,14 @@ fn memory_insert(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) 
     let new_content = lines.join("\n");
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
+    let now = wall_now();
+    let ceiling = sensitivity_ledger.ceiling_sensitivity(now);
+    let filed = floored_sensitivity(d.adjective_sensitivity(), ceiling);
     let coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity,
-        d.adjective_sensitivity()), wall_now())
+    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity, filed), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
-    let _ = coord.withdraw(&estate.handle, &d.id, Some("memory insert supersession"), wall_now());
-    Ok(text_result(&format!("The file {path} has been edited.")))
+    let _ = coord.withdraw(&estate.handle, &d.id, Some("memory insert supersession"), now);
+    Ok(write_reply(&format!("The file {path} has been edited."), filed, ceiling))
 }
 
 fn memory_delete(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) -> Result<serde_json::Value, JSONRPCError> {

@@ -451,6 +451,129 @@ struct PacketToolsTests {
         #expect(isError(relocked))
     }
 
+    // MARK: - moot_file_packet files at the live grant ceiling
+
+    /// Minimal file args; `sensitivity` is added only when given so the
+    /// omitted-key path is exercised.
+    private func minimalFileArgs(_ marker: String, sensitivity: String? = nil) -> JSONValue {
+        var args: [String: JSONValue] = [
+            "objective": .string("\(marker) objective"),
+            "model": .string("claude-sonnet-4-6"),
+            "agent": .string("PacketToolsTests"),
+        ]
+        if let sensitivity { args["sensitivity"] = .string(sensitivity) }
+        return .object(args)
+    }
+
+    /// Read the filed packet drawer back through an explicit sensitivity
+    /// filter, which suppresses the default `.elevated` ceiling that would
+    /// hide a restricted or secret row.
+    private func filedDrawer(
+        _ id: String, at tier: AdjectiveSensitivity, in handle: EstateHandle, kit: GeniusLocusKit
+    ) async throws -> Drawer {
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.sensitivity(tier)], hydrationLevel: .full, limit: 50))
+        return try #require(drawers.first { $0.id == id },
+                            "the filed packet must be readable at sensitivity \(tier)")
+    }
+
+    @Test func filePacketOmittedSensitivityUnderRestrictedGrantFilesRestricted() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-ceiling-restricted"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date())
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_packet", arguments: minimalFileArgs("ceiling-restricted"))
+        let reply = try text(result)
+        #expect(reply.contains("\n  sensitivity: restricted"),
+                "the reply must name the tier applied; got: \(reply)")
+        let drawerID = try #require(extractValue(key: "drawer_id", from: reply))
+        let drawer = try await filedDrawer(drawerID, at: .restricted, in: handle, kit: kit)
+        #expect(drawer.adjectiveSensitivity == .restricted)
+
+        // The packet reads back under the grant and is hidden once it lifts,
+        // the same gate moot_packet_get already enforces.
+        let underGrant = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(drawerID)]))
+        #expect(try text(underGrant).contains("ceiling-restricted objective"))
+        await dispatcher.sensitivityUnlockLedger.lock()
+        let locked = try await dispatcher.dispatch(
+            name: "moot_packet_get", arguments: .object(["drawer_id": .string(drawerID)]))
+        #expect(isError(locked))
+    }
+
+    @Test func filePacketOmittedSensitivityUnderSecretGrantFilesSecret() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-ceiling-secret"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_packet", arguments: minimalFileArgs("ceiling-secret"))
+        let reply = try text(result)
+        #expect(reply.contains("\n  sensitivity: secret"), "got: \(reply)")
+        let drawerID = try #require(extractValue(key: "drawer_id", from: reply))
+        let drawer = try await filedDrawer(drawerID, at: .secret, in: handle, kit: kit)
+        #expect(drawer.adjectiveSensitivity == .secret)
+    }
+
+    @Test func filePacketExplicitLowerSensitivityUnderGrantIsRefusedAndWritesNothing() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-ceiling-lowered"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_packet",
+            arguments: minimalFileArgs("ceiling-lowered", sensitivity: "restricted"))
+        #expect(isError(result), "a tier below the ceiling must be refused, not filed")
+        #expect(body(result) == "sensitivity restricted is below the live grant ceiling secret: while a "
+                + "secret grant is live a memory files at secret or higher. Omit sensitivity to file "
+                + "at the ceiling.",
+                "the refusal text is the moot_file_memory text, byte for byte; got: \(body(result))")
+
+        // Nothing landed at any tier.
+        let all = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.sensitivityAtMost(.secret)], hydrationLevel: .full, limit: 50))
+        #expect(!all.contains { $0.content.contains("ceiling-lowered objective") })
+
+        // An explicit tier at the ceiling is kept.
+        let kept = try await dispatcher.dispatch(
+            name: "moot_file_packet",
+            arguments: minimalFileArgs("ceiling-kept", sensitivity: "secret"))
+        #expect(try text(kept).contains("\n  sensitivity: secret"))
+    }
+
+    @Test func filePacketWithNoGrantFilesNormalAndReplyIsUnchanged() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "pkt-ceiling-none"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_packet", arguments: minimalFileArgs("ceiling-none"))
+        let reply = try text(result)
+        #expect(!reply.contains("sensitivity:"), "no grant, no sensitivity line; got: \(reply)")
+        #expect(reply.hasSuffix("  agent: PacketToolsTests"), "the no-grant reply keeps its prior shape")
+        let drawerID = try #require(extractValue(key: "drawer_id", from: reply))
+        let drawer = try await filedDrawer(drawerID, at: .normal, in: handle, kit: kit)
+        #expect(drawer.adjectiveSensitivity == .normal)
+
+        // An explicit tier with no grant is kept as given.
+        let explicit = try await dispatcher.dispatch(
+            name: "moot_file_packet",
+            arguments: minimalFileArgs("ceiling-none-explicit", sensitivity: "elevated"))
+        let explicitID = try #require(extractValue(key: "drawer_id", from: try text(explicit)))
+        let explicitDrawer = try await filedDrawer(explicitID, at: .elevated, in: handle, kit: kit)
+        #expect(explicitDrawer.adjectiveSensitivity == .elevated)
+    }
+
     @Test func getPacketProvenanceSecretIsNotFoundEvenUnderSecretGrant() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(

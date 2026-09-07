@@ -82,6 +82,11 @@ enum TeachmeGuides {
             that states nothing helps no one triage.
           - Truncating content to fit the subject cap. Compress the claim,
             don't cut it mid-sentence.
+          - Filing a note about restricted or secret material without naming
+            its sensitivity. While a restricted or secret grant is live an
+            omitted sensitivity files at the grant's tier, a lower explicit
+            tier is refused, and the response adds a fourth line,
+            "sensitivity: <tier>", naming what was applied.
         """
 
     private static let memorySearchGuide = """
