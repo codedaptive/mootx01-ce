@@ -210,7 +210,7 @@ extension SQLiteBackend {
         try beginTransactionDirect()
         do {
             for row in sortedRows {
-                try insertRow(table: tableName, values: row)
+                _ = try insertRow(table: tableName, values: row)
             }
             try commitTransactionDirect()
         } catch {
