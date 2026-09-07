@@ -21,11 +21,14 @@
 // On-disk format (arch spec §4.2):
 //
 //   [ magic:   4 bytes  = 0x56 0x45 0x43 0x31 ("VEC1") ]
-//   [ version: 2 bytes  = 0x00 0x02 (little-endian)    ]
+//   [ version: 2 bytes  = 0x00 0x03 (little-endian)    ]
 //   [ kind:    1 byte   = VectorKind raw value          ]
 //   [ stride:  4 bytes  (little-endian UInt32)          ]
 //   [ count:   4 bytes  (little-endian UInt32)          ]
 //   [ live_count: 4 bytes (little-endian UInt32)        ]
+//   [ generation_count: 4 bytes (little-endian UInt32)  ]
+//   [ generations: generation_count × (4B model_id_len | model_id_bytes | 8B serving_generation LE Int64),
+//                  in ascending model_id order          ]
 //   [ tombstone_words: 4 bytes (little-endian UInt32, number of UInt64 words) ]
 //   [ tombstones: tombstone_words × 8 bytes (UInt64 LE)  ]
 //   [ vectors: count × stride bytes, contiguous         ]
@@ -48,8 +51,10 @@
 //
 // The SQLite `vectors` table is always the source of truth. The sidecar
 // is a regenerable cache. The ResidentArrayStore exposes
-// `rebuild(from:)` to regenerate the sidecar from the table when
-// needed (e.g. after crash recovery or first open).
+// `rebuild(from:generations:)` to regenerate the sidecar from the table
+// when needed (e.g. after crash recovery or first open); the generation
+// stamp it takes is written into the header so the next open can tell
+// the array from one built under another serving generation.
 //
 // WRITE-AMORTISATION POLICY (TASK #24, import/migration-scale ingestion):
 //   The per-row sidecar rewrite was O(N) bytes per write, so a bulk import
@@ -86,15 +91,30 @@ let kVecMagic: [UInt8] = [0x56, 0x45, 0x43, 0x31]
 
 /// On-disk format version. Little-endian UInt16.
 ///
-/// Version 0x0002: adds a `live_count` field (LE UInt32) immediately
-/// after `count` and before `tombstone_words`. The field is written on
-/// save but not used on load — on load the live count is recomputed
-/// from the tombstone bitmap (`ResidentVectorArray.liveCount`) so a
-/// stale or hand-written value cannot corrupt search results. This
-/// matches the Rust sidecar format byte-for-byte (arch spec §4.3). No
-/// installed sidecars exist at version 0x0001; the old bytes are rejected
-/// by `parseSidecar`.
-let kVecVersion: UInt16 = 0x0002
+/// Version 0x0002 added a `live_count` field (LE UInt32) immediately after
+/// `count`. The field is written on save but not used on load — on load the
+/// live count is recomputed from the tombstone bitmap
+/// (`ResidentVectorArray.liveCount`) so a stale or hand-written value cannot
+/// corrupt search results.
+///
+/// Version 0x0003 adds the serving-generation stamp after `live_count`: the
+/// `vector_generations` registry (model_id, serving_generation) the array was
+/// built under. `VectorStore` accepts a sidecar only when the stamp equals the
+/// registry it reads at open AND the live count equals the serving-generation
+/// row count. The live count alone cannot tell a sidecar built from the
+/// previous generation of a full reindex apart from the current one when the
+/// two generations hold the same number of rows, which is the common case; a
+/// crash between the registry flip of `publishShadowGeneration` and its
+/// sidecar rebuild then served the old vectors under the new generation's
+/// name. This matches the Rust sidecar format byte-for-byte (arch spec §4.3).
+/// Sidecars at 0x0001 or 0x0002 are rejected by `parseSidecar`; `load()`
+/// starts empty and the store rebuilds the sidecar from the table once.
+let kVecVersion: UInt16 = 0x0003
+
+/// The serving-generation registry a sidecar was built under: `model_id` to
+/// `serving_generation`, one entry per `vector_generations` row. Empty when no
+/// model has ever swapped generations. Rust twin: `GenerationStamp`.
+public typealias GenerationStamp = [String: Int64]
 
 /// Threshold: when the ratio (tombstoned / total) exceeds this value,
 /// compaction is triggered automatically on the next write. Configurable
@@ -128,6 +148,19 @@ public actor ResidentArrayStore {
 
     /// The current in-memory resident array.
     private var array: ResidentVectorArray
+
+    /// The serving-generation registry the array was built under, written into
+    /// the sidecar header on every persist and read back on load. Set by
+    /// `rebuild(from:generations:)`; `append`, `tombstone` and `compact` carry
+    /// it forward.
+    private var generationStamp: GenerationStamp = [:]
+
+    /// The serving-generation registry the current array was built under (the
+    /// header stamp after `load()`, the caller's map after
+    /// `rebuild(from:generations:)`).
+    public func currentGenerationStamp() -> GenerationStamp {
+        generationStamp
+    }
 
     /// Count of on-disk sidecar writes performed in this store's lifetime.
     ///
@@ -186,40 +219,53 @@ public actor ResidentArrayStore {
             return
         }
         do {
-            let loaded = try ResidentArrayStore.readSidecar(from: sidecarURL)
+            let (loaded, stamp) = try ResidentArrayStore.readSidecar(from: sidecarURL)
             self.array = loaded
+            self.generationStamp = stamp
             isDirty = false // in-memory array now matches disk
             log.info("ResidentArrayStore: loaded \(loaded.count) vectors from sidecar")
         } catch {
             log.error("ResidentArrayStore: sidecar load failed (\(error)); starting empty")
-            // An invalid sidecar does not crash the store. The table is the
-            // source of truth; rebuild(from:) will regenerate the sidecar.
-            // Reset to the correct kind/stride but keep the store open.
+            // An invalid sidecar (including a pre-0x0003 header) does not
+            // crash the store. The table is the source of truth;
+            // rebuild(from:generations:) will regenerate the sidecar. The
+            // array keeps its kind/stride and the store stays open.
+            self.generationStamp = [:]
         }
     }
 
-    /// Rebuild the entire sidecar from a sorted [(key, bytes)] list.
+    /// Rebuild the entire sidecar from a sorted [(key, bytes)] list built
+    /// under `generations`, the serving-generation registry the records were
+    /// fetched with; the stamp rides the header so the next open can tell
+    /// this array from one built under another generation.
     ///
     /// Called when the sidecar is absent, corrupted, or out of date with
     /// the SQLite `vectors` table. The input must be sorted by key
     /// (VectorRecordKey natural order) so the model partition index is
     /// correct.
     ///
-    /// - Parameter records: sorted (key, 32-byte vector bytes) pairs.
-    public func rebuild(from records: [(key: VectorRecordKey, bytes: [UInt8])]) throws {
+    /// - Parameters:
+    ///   - records: sorted (key, 32-byte vector bytes) pairs.
+    ///   - generations: the registry the records are the serving rows of.
+    public func rebuild(
+        from records: [(key: VectorRecordKey, bytes: [UInt8])],
+        generations: GenerationStamp
+    ) throws {
         let newArray = Self.buildArray(from: records, kind: array.kind, stride: array.stride)
+        generationStamp = generations
         try persist(newArray)
         log.info("ResidentArrayStore: rebuilt sidecar with \(records.count) records")
     }
 
-    /// Persist `newArray` to the sidecar and adopt it as the current array.
+    /// Persist `newArray` to the sidecar under the current generation stamp
+    /// and adopt it as the current array.
     ///
     /// The single internal funnel for every on-disk write: it increments
     /// `sidecarWriteCount` (test instrumentation) and clears `isDirty`
     /// because the in-memory array now matches the file. All mutators that
     /// write eagerly route through here so the write count is exact.
     private func persist(_ newArray: ResidentVectorArray) throws {
-        try Self.writeSidecar(newArray, to: sidecarURL)
+        try Self.writeSidecar(newArray, generations: generationStamp, to: sidecarURL)
         self.array = newArray
         sidecarWriteCount += 1
         isDirty = false
@@ -549,18 +595,23 @@ public actor ResidentArrayStore {
 
     // MARK: - Sidecar I/O
 
-    /// Write a ResidentVectorArray to the .vec sidecar format.
+    /// Write a ResidentVectorArray built under `generations` to the .vec
+    /// sidecar format.
     ///
     /// Format (all integers little-endian):
     ///   magic(4) | version(2) | kind(1) | stride(4) | count(4)
-    ///   | live_count(4) | tombstone_words(4) | tombstones(8×T)
+    ///   | live_count(4) | generation_count(4)
+    ///   | generations(4B len | model_id | 8B serving_generation, ascending model_id)
+    ///   | tombstone_words(4) | tombstones(8×T)
     ///   | vectors(count×stride)
     ///   | keys(variable, see encodeKey)
     ///   | partition_index(variable, see encodePartitions)
     ///
     /// The format is byte-identical across Apple (Swift) and Linux/Windows
     /// (Rust) for the same logical array (arch spec §4.3).
-    static func writeSidecar(_ arr: ResidentVectorArray, to url: URL) throws {
+    static func writeSidecar(
+        _ arr: ResidentVectorArray, generations: GenerationStamp, to url: URL
+    ) throws {
         var data = Data()
         data.reserveCapacity(128 + arr.storage.count)
 
@@ -574,6 +625,16 @@ public actor ResidentArrayStore {
         // detection compare live-vs-live without a bitmap walk (format
         // 0x0002, byte-identical with the Rust sidecar).
         data.appendLE32(arr.liveCount)
+        // Serving-generation stamp (format 0x0003), ascending model_id: the
+        // order the Rust BTreeMap writes, so the two ports write the same
+        // bytes for the same registry.
+        data.appendLE32(UInt32(generations.count))
+        for modelID in generations.keys.sorted() {
+            let midBytes = Array(modelID.utf8)
+            data.appendLE32(UInt32(midBytes.count))
+            data.append(contentsOf: midBytes)
+            data.appendLE64(UInt64(bitPattern: generations[modelID]!))
+        }
 
         // Tombstone block
         let tombstoneWords = UInt32(arr.tombstones.count)
@@ -607,7 +668,7 @@ public actor ResidentArrayStore {
     /// Uses `Data(contentsOf:options:.mappedIfSafe)` on Apple platforms,
     /// which memory-maps the file read-only. Falls back to a heap read if
     /// mmap is unavailable. Both produce bit-identical arrays (arch spec §4.3).
-    static func readSidecar(from url: URL) throws -> ResidentVectorArray {
+    static func readSidecar(from url: URL) throws -> (ResidentVectorArray, GenerationStamp) {
         // .mappedIfSafe uses mmap when the OS supports it; otherwise it
         // reads into a heap buffer. The resulting Data has the same bytes
         // either way — mmap is transparent to the caller.
@@ -615,12 +676,13 @@ public actor ResidentArrayStore {
         return try parseSidecar(data)
     }
 
-    /// Parse the raw .vec bytes into a ResidentVectorArray.
+    /// Parse the raw .vec bytes into a ResidentVectorArray and the
+    /// serving-generation stamp it was built under.
     ///
     /// This is the canonical parser used by both the mmap and heap paths.
     /// It is `internal` so tests can exercise it directly without touching
     /// the filesystem.
-    static func parseSidecar(_ data: Data) throws -> ResidentVectorArray {
+    static func parseSidecar(_ data: Data) throws -> (ResidentVectorArray, GenerationStamp) {
         var offset = 0
 
         // --- Magic ---
@@ -680,6 +742,31 @@ public actor ResidentArrayStore {
             throw SynapseKitError.decodingFailure("ResidentArrayStore: truncated at live_count field")
         }
         _ = data.readLE32(at: offset); offset += 4
+
+        // --- Serving-generation stamp (format 0x0003) ---
+        guard data.count >= offset + 4 else {
+            throw SynapseKitError.decodingFailure("ResidentArrayStore: truncated at generation_count field")
+        }
+        let generationCount = Int(data.readLE32(at: offset)); offset += 4
+        var generations: GenerationStamp = [:]
+        generations.reserveCapacity(generationCount)
+        for _ in 0..<generationCount {
+            guard data.count >= offset + 4 else {
+                throw SynapseKitError.decodingFailure("ResidentArrayStore: truncated at generation model_id length")
+            }
+            let midLen = Int(data.readLE32(at: offset)); offset += 4
+            guard data.count >= offset + midLen else {
+                throw SynapseKitError.decodingFailure("ResidentArrayStore: truncated in generation model_id")
+            }
+            guard let modelID = String(bytes: data[offset..<(offset + midLen)], encoding: .utf8) else {
+                throw SynapseKitError.decodingFailure("ResidentArrayStore: generation model_id is not UTF-8")
+            }
+            offset += midLen
+            guard data.count >= offset + 8 else {
+                throw SynapseKitError.decodingFailure("ResidentArrayStore: truncated at serving_generation")
+            }
+            generations[modelID] = Int64(bitPattern: data.readLE64(at: offset)); offset += 8
+        }
 
         // --- Tombstones ---
         guard data.count >= offset + 4 else {
@@ -754,7 +841,7 @@ public actor ResidentArrayStore {
         offset += partBytesRead
         _ = offset // silence unused-variable warning
 
-        return ResidentVectorArray(
+        return (ResidentVectorArray(
             kind: kind,
             stride: stride,
             count: count,
@@ -762,7 +849,7 @@ public actor ResidentArrayStore {
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones
-        )
+        ), generations)
     }
 
     // MARK: - Key encode/decode
