@@ -34,6 +34,15 @@ import AriaMCPWire
 //   LINEAGE: moot_packet_lineage uses LineageGraph.trace, which walks
 //   WorkPacket.lineageLinks (JSON-embedded, source of truth) breadth-first.
 //   Tunnels are a best-effort index; this tool never touches them.
+//
+//   READ GATE: moot_packet_get and moot_packet_lineage read packets only
+//   through WorkPacketStore's frame-gated fetch — the same containment gate
+//   moot_memory_get applies: `.currentlyBelieve`, the packet wing and room,
+//   the adjective sensitivity ceiling (BitmapEvaluator's `.elevated` default,
+//   lifted only by a live SensitivityGrantLedger grant), and the unconditional
+//   provenance Restricted/Secret drop. A gated row is reported with the same
+//   not-found shape as a missing id, so drawer_id is never an existence
+//   oracle for hidden content. moot_packet_list already reads through a frame.
 
 import Foundation
 import GeniusLocusKit
@@ -64,22 +73,31 @@ enum PacketTools {
     /// InterfaceTools — it maps optional estateID args to a registered EstateHandle.
     /// `now` is the bench-clock instant threaded from `ToolDispatcher.dispatch()`.
     /// Runners must not call `Date()` directly (replay seam: `MOOT_BENCH_EPOCH_NOW`).
+    /// `sensitivityUnlockLedger` is the dispatcher's daemon-RAM grant ledger; the
+    /// by-id readers (get, lineage) ask it for the live sensitivity ceiling at `now`
+    /// so a restricted/secret grant lifts the packet read gate exactly as it lifts
+    /// moot_memory_get's.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
+        sensitivityUnlockLedger: SensitivityGrantLedger,
         now: Date
     ) async throws -> JSONValue {
         switch name {
         case "moot_file_packet":
             return try await runFilePacket(args: args, kit: kit, handle: try resolveHandle(args), now: now)
         case "moot_packet_get":
-            return try await runPacketGet(args: args, kit: kit, handle: try resolveHandle(args))
+            return try await runPacketGet(
+                args: args, kit: kit, handle: try resolveHandle(args),
+                ceiling: await sensitivityUnlockLedger.ceilingFilter(now: now))
         case "moot_packet_list":
             return try await runPacketList(args: args, kit: kit, handle: try resolveHandle(args))
         case "moot_packet_lineage":
-            return try await runPacketLineage(args: args, kit: kit, handle: try resolveHandle(args))
+            return try await runPacketLineage(
+                args: args, kit: kit, handle: try resolveHandle(args),
+                ceiling: await sensitivityUnlockLedger.ceilingFilter(now: now))
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -180,12 +198,15 @@ enum PacketTools {
                 description: """
                 Fetch a single work packet by its estate drawer ID. \
                 Returns the packet's objective, sources, claims, uncertainties, \
-                next steps, provenance, and lineage links.
+                next steps, provenance, and lineage links. A packet outside the \
+                current sensitivity ceiling is reported as not found.
                 """,
                 inputSchema: ToolProjection.withEstateID(ToolProjection.objectSchema(
                     properties: [
                         "drawer_id": ToolProjection.stringSchema(
                             "Estate drawer ID returned by moot_file_packet."),
+                        "wing": ToolProjection.stringSchema(
+                            "Optional wing name the packet was filed into. Omit for the default wing (Agentic Memory)."),
                     ],
                     required: ["drawer_id"]
                 )),
@@ -215,7 +236,9 @@ enum PacketTools {
                 Trace the lineage of a work packet breadth-first through its lineageLinks. \
                 Returns an ordered list of antecedent drawer IDs (not including the root). \
                 Cycles are detected and skipped. Use moot_packet_get on each returned ID \
-                to read the antecedent packet content.
+                to read the antecedent packet content. A root outside the current \
+                sensitivity ceiling is reported as not found; antecedents outside it \
+                are omitted.
                 """,
                 inputSchema: ToolProjection.withEstateID(ToolProjection.objectSchema(
                     properties: [
@@ -223,6 +246,8 @@ enum PacketTools {
                             "Estate drawer ID of the starting packet (from moot_file_packet)."),
                         "max_depth": ToolProjection.integerSchema(
                             "Maximum hops to follow (default 10, max 50)."),
+                        "wing": ToolProjection.stringSchema(
+                            "Optional wing name the packets were filed into. Omit for the default wing (Agentic Memory)."),
                     ],
                     required: ["drawer_id"]
                 )),
@@ -302,12 +327,16 @@ enum PacketTools {
 
     // MARK: - moot_packet_get
 
+    /// `ceiling` is the live sensitivity-grant ceiling from the dispatcher's
+    /// ledger (`nil` = no grant; BitmapEvaluator's `.elevated` default applies).
     private static func runPacketGet(
         args: [String: JSONValue],
         kit: GeniusLocusKit,
-        handle: EstateHandle
+        handle: EstateHandle,
+        ceiling: Filter?
     ) async throws -> JSONValue {
         let drawerID = try requireString(args, "drawer_id")
+        let wing = args["wing"]?.stringValue ?? LocusKit.defaultWingName
 
         let estate: LocusKit.Estate
         do {
@@ -317,10 +346,15 @@ enum PacketTools {
                 "moot_packet_get: estate not accessible: \(error.localizedDescription)")
         }
 
-        let store = WorkPacketStore(client: EstateAdapter(estate))
+        // SECURITY: the store's fetch is frame-gated (currentlyBelieve, wing,
+        // room, sensitivity ceiling, provenance Restricted/Secret drop) — the
+        // same containment gate moot_memory_get applies. A gated row comes back
+        // nil and takes the not-found branch below, indistinguishable from a
+        // missing id, so drawer_id cannot confirm that hidden content exists.
+        let store = WorkPacketStore(client: EstateAdapter(estate), wing: wing)
         let packet: WorkPacket?
         do {
-            packet = try await store.fetch(drawerID: drawerID)
+            packet = try await store.fetch(drawerID: drawerID, ceiling: ceiling)
         } catch {
             return ToolDispatcher.errorResult(
                 "moot_packet_get: fetch failed: \(error.localizedDescription)")
@@ -445,12 +479,16 @@ enum PacketTools {
 
     // MARK: - moot_packet_lineage
 
+    /// `ceiling` is the live sensitivity-grant ceiling from the dispatcher's
+    /// ledger (`nil` = no grant; BitmapEvaluator's `.elevated` default applies).
     private static func runPacketLineage(
         args: [String: JSONValue],
         kit: GeniusLocusKit,
-        handle: EstateHandle
+        handle: EstateHandle,
+        ceiling: Filter?
     ) async throws -> JSONValue {
         let drawerID = try requireString(args, "drawer_id")
+        let wing = args["wing"]?.stringValue ?? LocusKit.defaultWingName
         // maxDepth: default 10, cap 50.
         let rawDepth: Int
         if let dv = args["max_depth"]?.integerValue {
@@ -468,13 +506,44 @@ enum PacketTools {
                 "moot_packet_lineage: estate not accessible: \(error.localizedDescription)")
         }
 
-        let graph = LineageGraph(client: EstateAdapter(estate))
-        let antecedentIDs: [String]
+        // SECURITY: the root is resolved through the same frame-gated fetch as
+        // moot_packet_get before any traversal. A root outside the gate is
+        // reported with the not-found shape and its antecedents are never
+        // enumerated, so drawer_id cannot confirm that a hidden packet exists.
+        let client = EstateAdapter(estate)
+        let store = WorkPacketStore(client: client, wing: wing)
+        let root: WorkPacket?
         do {
-            antecedentIDs = try await graph.trace(from: drawerID, maxDepth: maxDepth)
+            root = try await store.fetch(drawerID: drawerID, ceiling: ceiling)
+        } catch {
+            return ToolDispatcher.errorResult(
+                "moot_packet_lineage: fetch failed: \(error.localizedDescription)")
+        }
+        guard root != nil else {
+            return ToolDispatcher.errorResult(
+                "moot_packet_lineage: no packet found for drawer_id \(drawerID)")
+        }
+
+        let graph = LineageGraph(client: client)
+        let tracedIDs: [String]
+        do {
+            tracedIDs = try await graph.trace(from: drawerID, maxDepth: maxDepth)
         } catch {
             return ToolDispatcher.errorResult(
                 "moot_packet_lineage: trace failed: \(error.localizedDescription)")
+        }
+
+        // SECURITY: every traced antecedent id passes through the same gated
+        // read before it is reported; ids that fail the gate are omitted, in
+        // one batched call, preserving breadth-first order for the survivors.
+        let antecedentIDs: [String]
+        do {
+            let admissible = Set(
+                try await store.fetchAdmissibleDrawers(ids: tracedIDs, ceiling: ceiling).map(\.id))
+            antecedentIDs = tracedIDs.filter { admissible.contains($0) }
+        } catch {
+            return ToolDispatcher.errorResult(
+                "moot_packet_lineage: fetch failed: \(error.localizedDescription)")
         }
 
         if antecedentIDs.isEmpty {

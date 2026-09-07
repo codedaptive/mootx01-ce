@@ -26,7 +26,8 @@ use synapsekit::vector_store::{SpanVectorInput, VectorStore};
 pub struct SpanEncodeBatchResult {
     /// Drawers whose span rows were written and bit 27 set.
     pub encoded: usize,
-    /// Drawers skipped because content was empty.
+    /// Drawers skipped: empty content, or the drawer was erased or rewritten
+    /// between the pending read and the span write (the liveness recheck).
     pub skipped: usize,
     /// Drawers whose encoding failed (bit 27 stays clear for retry).
     pub failed: usize,
@@ -59,6 +60,12 @@ pub trait SpanEncodeContext: Send + Sync {
     fn pending_span_encode_batch(&self, limit: usize) -> Result<Vec<(String, String)>, String>;
     /// Set or clear bit 27 (`span_indexed`) for one drawer.
     fn set_span_indexed(&self, drawer_id: &str, indexed: bool) -> Result<(), String>;
+    /// The drawer's content as stored NOW, or `None` when the drawer is
+    /// missing or tombstoned. Read immediately before the span write so an
+    /// erase or content write that landed after the pending snapshot is
+    /// honoured (the liveness recheck). Mirrors Swift
+    /// `SpanEncodeEstateContext.liveSpanEncodeContent(drawerID:)`.
+    fn live_span_encode_content(&self, drawer_id: &str) -> Result<Option<String>, String>;
 }
 
 // MARK: - Core duty
@@ -104,6 +111,32 @@ pub fn encode_batch_with(
                 skipped += 1;
             }
             Ok(inputs) => {
+                // SECURITY: liveness recheck (destruction contract). The
+                // pending snapshot was read before this drawer was encoded;
+                // an erase or a content write that landed in between must
+                // not be undone by a span write that recreates
+                // content-derived rows for a tombstoned drawer, or stamps
+                // spans of the old text with a content version the drawer
+                // no longer has. Skip when the drawer is gone or tombstoned,
+                // or when its current content no longer hashes to the
+                // version stamped on the spans; bit 27 stays clear, so a
+                // rewritten drawer is re-encoded on the next pump from its
+                // current content. Mirrors the Swift `_encodeBatch` guard.
+                let encoded_version = content_version(content);
+                let live = match context.live_span_encode_content(drawer_id) {
+                    Ok(live) => live,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                match live {
+                    Some(live_content) if content_version(&live_content) == encoded_version => {}
+                    _ => {
+                        skipped += 1;
+                        continue;
+                    }
+                }
                 // Write span vectors, then set bit 27.
                 let write_result = writer.write_span_vectors(
                     drawer_id, &spec.model_id, &spec.model_version, &inputs);
@@ -251,6 +284,15 @@ impl SpanEncodeContext for EstateSpanContext<'_> {
         }
         self.estate.set_span_indexed(drawer_id).map(|_| ()).map_err(|e| e.to_string())
     }
+
+    fn live_span_encode_content(&self, drawer_id: &str) -> Result<Option<String>, String> {
+        // `drawer_by_id` returns tombstoned rows unfiltered; the tombstone
+        // stamp is the erase signal, the (zeroed) content is not consulted.
+        let drawer = self.estate.drawer_by_id(drawer_id).map_err(|e| e.to_string())?;
+        Ok(drawer
+            .filter(|d| d.tombstoned_at.is_none())
+            .map(|d| d.content))
+    }
 }
 
 pub struct VectorStoreSpanWriter {
@@ -335,13 +377,31 @@ mod tests {
         drawers: Vec<(String, String)>,
         // Mutex instead of RefCell: SpanEncodeContext requires Send + Sync.
         indexed: std::sync::Mutex<Vec<String>>,
+        // The drawer state the liveness recheck sees, when it differs from
+        // the pending snapshot: `None` = erased (missing or tombstoned),
+        // `Some(text)` = rewritten. Drawers without an entry read back their
+        // snapshot content. The pending read deliberately ignores this map:
+        // it models the snapshot taken BEFORE the erase or rewrite landed.
+        live_overrides: std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
     }
 
     impl FakeContext {
         fn new(drawers: Vec<(String, String)>) -> Self {
-            FakeContext { drawers, indexed: std::sync::Mutex::new(vec![]) }
+            FakeContext {
+                drawers,
+                indexed: std::sync::Mutex::new(vec![]),
+                live_overrides: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
         }
         fn indexed_ids(&self) -> Vec<String> { self.indexed.lock().unwrap().clone() }
+        /// Erase `id` after the pending snapshot: the recheck sees no drawer.
+        fn erase_after_snapshot(&self, id: &str) {
+            self.live_overrides.lock().unwrap().insert(id.to_string(), None);
+        }
+        /// Rewrite `id` after the pending snapshot: the recheck sees `content`.
+        fn rewrite_after_snapshot(&self, id: &str, content: &str) {
+            self.live_overrides.lock().unwrap().insert(id.to_string(), Some(content.to_string()));
+        }
     }
 
     impl SpanEncodeContext for FakeContext {
@@ -362,6 +422,74 @@ mod tests {
             }
             Ok(())
         }
+        fn live_span_encode_content(&self, drawer_id: &str) -> Result<Option<String>, String> {
+            if let Some(overridden) = self.live_overrides.lock().unwrap().get(drawer_id) {
+                return Ok(overridden.clone());
+            }
+            Ok(self
+                .drawers
+                .iter()
+                .find(|(id, _)| id == drawer_id)
+                .map(|(_, content)| content.clone()))
+        }
+    }
+
+    /// Liveness recheck: a drawer erased between the pending read and the
+    /// span write gets NO span rows and keeps bit 27 clear; its four
+    /// untouched siblings are encoded. Pre-fix the duty wrote rows for all
+    /// five (an erased drawer's content-derived spans recreated after the
+    /// erase). Twin of Swift `inFlightEraseSkipsSpanWrite`.
+    #[test]
+    fn in_flight_erase_skips_span_write_and_keeps_bit_clear() {
+        let drawers: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("d-{i}"), format!("hello world foo bar baz qux quux {i}")))
+            .collect();
+        let context = FakeContext::new(drawers);
+        context.erase_after_snapshot("d-2");
+        let encoder = FakeEncoder::new();
+        let writer = FakeWriter::new();
+
+        let result = encode_batch_with(&context, Some(&encoder), &writer, 64).unwrap();
+
+        assert_eq!(result.encoded, 4, "the four live drawers are encoded");
+        assert_eq!(result.skipped, 1, "the erased drawer is skipped, not failed");
+        assert_eq!(result.failed, 0);
+        assert_eq!(writer.call_count(), 4, "no span write for the erased drawer");
+        assert!(
+            !writer.calls.lock().unwrap().iter().any(|(id, _)| id == "d-2"),
+            "d-2 must have no span rows written"
+        );
+        assert!(!context.indexed_ids().contains(&"d-2".to_string()), "bit 27 stays clear on d-2");
+    }
+
+    /// Liveness recheck: a drawer rewritten between the pending read and the
+    /// span write gets no rows from the STALE text and keeps bit 27 clear
+    /// (the next pump encodes the current text). Pre-fix the duty wrote the
+    /// old text's spans and set bit 27, freezing a stale span set under a
+    /// content version the drawer no longer has. Twin of Swift
+    /// `inFlightRewriteSkipsSpanWrite`.
+    #[test]
+    fn in_flight_rewrite_skips_stale_span_write() {
+        let drawers = vec![
+            ("d-1".to_string(), "alpha beta gamma delta epsilon zeta".to_string()),
+            ("d-2".to_string(), "one two three four five six seven".to_string()),
+        ];
+        let context = FakeContext::new(drawers);
+        context.rewrite_after_snapshot("d-2", "entirely different words now here");
+        let encoder = FakeEncoder::new();
+        let writer = FakeWriter::new();
+
+        let result = encode_batch_with(&context, Some(&encoder), &writer, 64).unwrap();
+
+        assert_eq!(result.encoded, 1);
+        assert_eq!(result.skipped, 1, "the rewritten drawer is skipped this pump");
+        assert_eq!(result.failed, 0);
+        assert_eq!(writer.call_count(), 1);
+        assert!(
+            !writer.calls.lock().unwrap().iter().any(|(id, _)| id == "d-2"),
+            "d-2 must not receive the stale span set"
+        );
+        assert!(!context.indexed_ids().contains(&"d-2".to_string()), "bit 27 stays clear on d-2");
     }
 
     #[test]
