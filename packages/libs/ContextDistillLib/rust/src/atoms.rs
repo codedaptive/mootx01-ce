@@ -2068,17 +2068,3 @@ mod tests {
     }
 }
 
-#[test]
-fn test_sentence_gdpr_para() {
-    // Paragraph from sample30 row 26, starts at cp=47041 in source.
-    // Oracle expects two sentence spans: [47041,47292) and [47293,47699).
-    // This tests that "U.S." abbreviations are handled and "GDPR." is a boundary.
-    let para = include_str!("/private/tmp/debug_para.txt");
-    let spans = sentence_spans(para, 47041);
-    eprintln!("spans: {:?}", spans.iter().map(|(s,e,_)| (*s,*e)).collect::<Vec<_>>());
-    assert_eq!(spans.len(), 2, "expected 2 spans, got {}", spans.len());
-    assert_eq!(spans[0].0, 47041);
-    assert_eq!(spans[0].1, 47292);
-    assert_eq!(spans[1].0, 47293);
-    assert_eq!(spans[1].1, 47699);
-}
