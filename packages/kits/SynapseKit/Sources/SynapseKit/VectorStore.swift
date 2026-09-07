@@ -3435,7 +3435,7 @@ public actor VectorStore {
         }
         liveBinaryCount = liveCount
         indexBuilt = true
-        await _selectIndex()
+        _selectIndex()
     }
 
     // MARK: - Exact-key batch mutation (GLK shared-content 1.1, P0)
@@ -3764,7 +3764,7 @@ public actor VectorStore {
         indexBuilt = true
 
         // Select the appropriate active index for the loaded count.
-        await _selectIndex()
+        _selectIndex()
     }
 
     /// Ensure the Lane D float index is populated. Idempotent — no-op once built.
