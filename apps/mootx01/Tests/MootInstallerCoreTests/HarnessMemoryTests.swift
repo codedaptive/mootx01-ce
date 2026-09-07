@@ -987,7 +987,7 @@ struct HarnessMemoryUninstallTests {
         try "#!/bin/sh\nexec mootx01 hook-capture\n".write(to: hookURL, atomically: true, encoding: .utf8)
 
         // --- Run the same cleanup sequence as UninstallCommand ---
-        try? HarnessMemorySettings.disable(settingsURL: settingsURL, homeDirectory: home)
+        _ = try? HarnessMemorySettings.disable(settingsURL: settingsURL, homeDirectory: home)
         try? HarnessMemoryHook.remove(at: hookURL)
         try? HarnessMemoryCLAUDE.disable(at: claudeURL)
 
@@ -1018,7 +1018,7 @@ struct HarnessMemoryUninstallTests {
         let hookURL = HarnessMemoryPaths.hookScriptURL(homeDirectory: home)
 
         // Nothing exists — cleanup must not crash.
-        try? HarnessMemorySettings.disable(settingsURL: settingsURL, homeDirectory: home)
+        _ = try? HarnessMemorySettings.disable(settingsURL: settingsURL, homeDirectory: home)
         try? HarnessMemoryHook.remove(at: hookURL)
         try? HarnessMemoryCLAUDE.disable(at: claudeURL)
 

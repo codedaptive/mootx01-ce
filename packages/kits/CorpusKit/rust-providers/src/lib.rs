@@ -27,11 +27,17 @@
 //! ## Compile-time switches
 //!
 //! `dense-families` (default: off, plan 70BC55F3 2026-09-05):
-//!     Compiles LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers.
+//!     Compiles NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers.
 //!     Off by default: measured cost exceeds benefit vs. BM25+RI on two corpora.
 //!     RI stays always-on: binary fingerprint feeds dreaming, contradiction,
 //!     and consolidation. Enable: `cargo test --features dense-families`.
 //!     Mirror of Swift trait DenseFamilies / #define MOOTX01_DENSE_FAMILIES.
+//!
+//! `lsa` (default: off, ruling 2026-09-07):
+//!     Compiles LsaProvider and its basis training on a switch of its own.
+//!     dense-families does not enable it: the family is dark and unproven.
+//!     Implies dense-families (shared counts and reduced vocabulary).
+//!     Mirror of Swift trait LSA / #define MOOTX01_LSA.
 
 pub mod deterministic_tokenizer;
 // Shared little-endian binary codec for distributional-provider
@@ -54,21 +60,25 @@ pub mod random_indexing;
 // MPNet and EmbeddingGemma are under dense-families; see text_providers.rs.
 pub mod text_providers;
 // The ONE definition of the default recall ensemble.
-// With dense-families OFF: RI only. With ON: RI/PPMI/LSA/NMF/FDC.
+// With dense-families OFF: RI only. With dense-families ON (without lsa):
+// RI, PPMI, NMF, FDC. With lsa ON (implies dense-families): RI, PPMI, LSA, NMF, FDC.
 // Mirrors Swift's CorpusEnsemble.defaultEnsemble() in CorpusKitProviders.
 pub mod default_ensemble;
 
 // Dense-family providers: compiled only when `dense-families` feature is on.
-// Off by default (plan 70BC55F3, 2026-09-05): LSA/NMF/PPMI/FDC add cost
+// Off by default (plan 70BC55F3, 2026-09-05): NMF/PPMI/FDC add cost
 // without beating BM25+RI on two corpora. RI stays always-on.
 // Enable: cargo test --features dense-families.
 #[cfg(feature = "dense-families")]
-// shared IDF-reduced vocabulary selection for the dense LSA/NMF
-// factorizations (bit-identical with Swift's CorpusKitProviders/ReducedVocab).
+// shared IDF-reduced vocabulary selection for the dense NMF
+// factorizations (also used by LSA when the `lsa` feature is on;
+// bit-identical with Swift's CorpusKitProviders/ReducedVocab).
 pub mod reduced_vocab;
-#[cfg(feature = "dense-families")]
 // Semantic fusion signal: LSA/SVD distributional-semantics provider.
+// Compiled only when the `lsa` feature is on (ruling 2026-09-07):
+// dark and unproven; dense-families does not enable it.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
+#[cfg(feature = "lsa")]
 pub mod lsa;
 #[cfg(feature = "dense-families")]
 // NMF latent-factor provider.
@@ -116,7 +126,7 @@ pub use random_indexing::{
 pub use text_providers::MiniLMTextProvider;
 #[cfg(feature = "dense-families")]
 pub use text_providers::{EmbeddingGemmaProvider, MPNetTextProvider};
-#[cfg(feature = "dense-families")]
+#[cfg(feature = "lsa")]
 pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};
 #[cfg(feature = "dense-families")]
 pub use nmf_provider::{
