@@ -16,7 +16,9 @@
 //! A hit the span rerank stage scored carries one more token on the score line,
 //! `span:<best_span_index>:<cosine to 3 dp>` (contract sheet §8); a hit without
 //! a span hit carries no `span:` token, so its absence means "no span row under
-//! the active encoder", not a zero cosine.
+//! the active encoder", not a zero cosine. A hit the step 5.8 sub-span window
+//! budget left unscored carries the token `subSpan:budget`: its dense column
+//! is the stored signal alone.
 
 use crate::recall::{GLKRecallScoring, RecallHit, RecallPlan};
 
@@ -29,13 +31,16 @@ use crate::recall::{GLKRecallScoring, RecallHit, RecallPlan};
 /// field is the same predicate). `agreement` is the signal-agreement bonus the
 /// hit earned in the UnionBest MatrixAware weighted score
 /// (`budget.agreement × 0.05 × popcount(sourceMask) / 5`); callers on paths
-/// that add no bonus pass 0.
+/// that add no bonus pass 0. `sub_span_unscored` is true when the step 5.8
+/// sub-span window budget ran out before this hit was scored (Swift
+/// `subSpanUnscored`); callers on paths without step 5.8 pass false.
 pub fn explain(
     hit: &RecallHit,
     has_query_text: bool,
     plan: &RecallPlan,
     scoring: GLKRecallScoring,
     agreement: f32,
+    sub_span_unscored: bool,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::with_capacity(4);
 
@@ -66,6 +71,12 @@ pub fn explain(
     // `span:%u:%.3f` token.
     if let Some(span) = &hit.span_hit {
         score_line.push_str(&format!(" span:{}:{:.3}", span.best_span_index, span.cosine));
+    }
+    // Sub-span budget evidence: the dense column of this hit is the stored
+    // signal alone because the step 5.8 window budget ran out before it.
+    // Swift renders the same `subSpan:budget` token.
+    if sub_span_unscored {
+        score_line.push_str(" subSpan:budget");
     }
     lines.push(score_line);
 
