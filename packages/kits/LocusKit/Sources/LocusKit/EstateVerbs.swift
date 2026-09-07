@@ -70,7 +70,7 @@ public extension Estate {
     ///   requirement is invariant I-5.
     /// - Returns: the stored `Drawer` with its generated id and all
     ///   bitmap fields populated.
-    public func capture(_ frame: CaptureFrame) async throws -> Drawer {
+    func capture(_ frame: CaptureFrame) async throws -> Drawer {
         guard !frame.content.isEmpty else {
             throw LocusKitError.invalidContent("content must not be empty")
         }
@@ -2214,7 +2214,7 @@ public extension Estate {
     /// Adjective sensitivity lives at bits 6–11 (shift 6, width 6) per
     /// cookbook §2.3. The caller uses BitField.writeField to compute the
     /// promoted value before calling this method.
-    public func repairVagueAdjectiveBitmap(drawerId: String, newAdjective: Int64, now: Date) async throws {
+    func repairVagueAdjectiveBitmap(drawerId: String, newAdjective: Int64, now: Date) async throws {
         try await store.mutateAdjective(
             drawerId: drawerId,
             newAdjective: newAdjective,
@@ -2230,7 +2230,7 @@ public extension Estate {
     /// Provenance sensitivity lives at bits 30–35 (shift 30, width 6) per
     /// cookbook §2.5. The caller uses BitField.writeField to compute the
     /// promoted value before calling this method.
-    public func repairVagueProvenance(drawerId: String, newProvenance: Int64, now: Date) async throws {
+    func repairVagueProvenance(drawerId: String, newProvenance: Int64, now: Date) async throws {
         try await store.mutateProvenance(
             drawerId: drawerId,
             newProvenance: newProvenance,
@@ -2242,7 +2242,7 @@ public extension Estate {
 
     /// Repair prologue helper (§D.6 #4): overwrites the adjective bitmap on a
     /// tunnel. Delegates to DrawerStore.updateTunnelAdjBitmap. No audit event.
-    public func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
+    func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
         try await store.updateTunnelAdjBitmap(id: tunnelId, adjBitmap: adjBitmap)
     }
 
@@ -2252,7 +2252,7 @@ public extension Estate {
     /// which seals an informational audit event (verb `encodeComplete`,
     /// actor `encode_worker`, `reason: "session=<id> rows=<n>"`) with no
     /// bitmap change. Mirrors Rust `Estate::append_encode_complete_marker`.
-    public func appendEncodeCompleteMarker(
+    func appendEncodeCompleteMarker(
         firstDrawerID: String,
         rowCount: Int,
         unitSessionID: String,
@@ -2270,20 +2270,20 @@ public extension Estate {
     /// `DrawerStore.auditEventsForRow` so audit consumers (the A2/A3 marker
     /// readers, the C3 timing derivation) read through the Estate seam
     /// rather than reaching into the store.
-    public func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+    func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
         try await store.auditEventsForRow(rowID)
     }
 
     /// Estate-wide audit page in HLC order, strictly after `after` (nil =
     /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
     /// watermark-paging seam. Mirrors Rust `Estate::audit_events`.
-    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+    func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
         try await store.auditEvents(after: after, limit: limit)
     }
 
     /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
     /// Mirrors Rust `Estate::append_reindex_complete_marker`.
-    public func appendReindexCompleteMarker(
+    func appendReindexCompleteMarker(
         rowCount: Int,
         unitSessionID: String,
         at completedAt: Date
@@ -2297,7 +2297,7 @@ public extension Estate {
     /// both with the same session id, so CYCLE-dreamt time is attributable
     /// from the audit log alone. Mirrors Rust
     /// `Estate::append_dream_cycle_marker`.
-    public func appendDreamCycleMarker(
+    func appendDreamCycleMarker(
         phase: DrawerStore.DreamCyclePhase,
         unitSessionID: String,
         at markedAt: Date
@@ -2331,7 +2331,7 @@ public extension Estate {
     /// lineage siblings the gate refused; the caller receives the full outcome
     /// so it can propagate partial refusals accurately rather than treating
     /// a partial expunge as a complete success (SPEC B-8b, MXE-FA).
-    public func archiveDrawer(
+    func archiveDrawer(
         id: String,
         reason: String,
         now: Date
