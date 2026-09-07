@@ -14,8 +14,9 @@
 //!   4. StorageUnavailable: an unregistered handle returns the error variant.
 //!   5. On a SQLite estate the column is physically gone (PRAGMA table_info)
 //!      and the row survives; a second ladder replay does not error.
-//!   6. V1_4-stamped estate: the chain runs the 1.4→1.5 capsule and then this
-//!      one, ending at V1_6 (gated on feature = "migration-v1-4-to-v1-5").
+//!   6. V1_4-stamped estate: the chain runs the 1.4→1.5 capsule, this one and
+//!      the 1.6→1.7 capsule, ending at CURRENT (gated on feature =
+//!      "migration-v1-4-to-v1-5").
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -183,8 +184,8 @@ fn v1_5_estate_with_ledger_row_drops_the_column() {
             format: EstateFormatVersion::V1_6,
         }
     );
+    // The capsule alone stamps V1_6; the chain's 1.6 → 1.7 step stamps CURRENT.
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_6);
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(ledger_version(&storage), expected_version);
     assert_row_intact_without_column(&checkpoint_row(&storage));
 }
@@ -327,7 +328,7 @@ fn sqlite_columns(path: &std::path::Path) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// §6 Chain from V1_4 ends at V1_6 (only when the 1.4→1.5 capsule is compiled)
+// §6 Chain from V1_4 ends at CURRENT (only when the 1.4→1.5 capsule is compiled)
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "migration-v1-4-to-v1-5")]
@@ -340,7 +341,7 @@ fn v1_4_estate_runs_both_capsules_to_current() {
     coord
         .run_migration_chain(&handle, NOW, default_ensemble())
         .expect("chain from V1_4");
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_6);
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
     assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_row_intact_without_column(&checkpoint_row(&storage));
 }

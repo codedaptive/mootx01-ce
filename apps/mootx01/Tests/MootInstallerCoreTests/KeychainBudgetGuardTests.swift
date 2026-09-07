@@ -26,6 +26,7 @@
 
 #if os(macOS) && canImport(Security)
 import Foundation
+import LocalAuthentication
 import Security
 import Testing
 @testable import MootInstallerCore
@@ -35,11 +36,17 @@ import PersistenceKitSQLite
 ///
 /// `kSecUseAuthenticationUIFail` makes the query return
 /// `errSecInteractionNotAllowed` immediately instead of blocking on the
-/// macOS Keychain access dialog. Without this flag a query against the
+/// macOS Keychain access dialog. Without this context a query against the
 /// shared-access-group service can hang indefinitely in an unsigned or
 /// un-entitled test binary, which widens the concurrent-test window and
 /// produces spurious `after != before` failures.
 private func keychainItemCount(service: String, account: String) -> Int {
+    // kSecUseAuthenticationUI + kSecUseAuthenticationUIFail are deprecated since
+    // macOS 11. The replacement is kSecUseAuthenticationContext with an LAContext
+    // whose interactionNotAllowed is true — identical semantics: fail immediately
+    // rather than blocking on a UI prompt.
+    let authContext = LAContext()
+    authContext.interactionNotAllowed = true
     let query: [CFString: Any] = [
         kSecClass:                  kSecClassGenericPassword,
         kSecAttrService:            service,
@@ -50,7 +57,7 @@ private func keychainItemCount(service: String, account: String) -> Int {
         kSecMatchLimit:             kSecMatchLimitAll,
         kSecReturnAttributes:       true,
         // Fail immediately rather than blocking on a UI prompt.
-        kSecUseAuthenticationUI:    kSecUseAuthenticationUIFail,
+        kSecUseAuthenticationContext: authContext,
     ]
     var result: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &result)

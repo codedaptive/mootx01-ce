@@ -376,6 +376,45 @@ impl VectorStore {
         }
         Ok((retired_rows, non_serving_rows))
     }
+
+    /// Delete every whole-record float row (`kind` 1, the `Float32` payloads
+    /// the retired whole-record dense lane read) and every `hnsw_graph` row
+    /// (the float lane's graph, rebuilt from those rows and useless without
+    /// them), then rebuild the resident binary index and the `.vec` sidecar
+    /// from the surviving rows so the sidecar's live count and generation
+    /// match the serving table. Returns `(float_rows, graph_rows)`. Kind 0
+    /// (binary fingerprints) and kind 2 (int8 spans) are never touched.
+    ///
+    /// The GLK 1.6 to 1.7 migration capsule calls this once per populated
+    /// estate. Idempotent: a vacuumed estate deletes nothing and the rebuild
+    /// rewrites an identical sidecar. Never runs inside a query path. Twin of
+    /// Swift `VectorStore.reclaimWholeRecordFloatRows()`.
+    pub fn reclaim_whole_record_float_rows(&self) -> Result<(usize, usize), SynapseKitError> {
+        let row_store = self.storage.row_store();
+        let store_err = |e: persistence_kit::StorageError| SynapseKitError::StoreUnavailable(e.to_string());
+        let float_rows = row_store
+            .delete(
+                "vectors",
+                &StoragePredicate::Eq(
+                    Column::new("vectors", "kind"),
+                    TypedValue::Int(VectorKind::Float32.raw()),
+                ),
+            )
+            .map_err(store_err)?;
+        let graph_rows = row_store
+            .delete("hnsw_graph", &StoragePredicate::IsTrue)
+            .map_err(store_err)?;
+        let mut state = self.state.lock().map_err(|_| {
+            SynapseKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        // The resident float and HNSW state described rows that are gone.
+        state.float_indices.clear();
+        state.hnsw_indices.clear();
+        state.live_float_counts.clear();
+        state.hnsw_graph_dirty.clear();
+        self.rebuild_binary_index_from_table_locked(&mut state)?;
+        Ok((float_rows, graph_rows))
+    }
 }
 
 /// The serving-generation span rows of one item under one model.

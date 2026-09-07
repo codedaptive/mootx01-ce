@@ -91,7 +91,7 @@ struct UnlockCommand: AsyncParsableCommand {
         do {
             approved = try await authority.requestApproval(tier: sensitivityTier, reason: reason)
         } catch let err as UnlockAuthorityError {
-            fputs("mootx01 unlock: \(err.localizedDescription ?? err.errorDescription ?? "authentication error")\n", stderr)
+            fputs("mootx01 unlock: \(err.localizedDescription)\n", stderr)
             throw ExitCode.failure
         }
 

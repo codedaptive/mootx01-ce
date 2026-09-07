@@ -83,10 +83,9 @@ struct BasisFormatGateTests {
                     try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
                 }
                 try await corpus.reindex(now: now)
-                guard case .hits = await corpus.floatNearest(query: "car engine", limit: 3) else {
-                    Issue.record("a trained corpus must serve the float lane")
-                    return
-                }
+                // A trained basis embeds the probe; an untrained slot returns [].
+                let trained = try await corpus.embedFloat("car engine")
+                #expect(!trained.isEmpty, "a trained corpus must embed through its basis")
             }
 
             // 2. Rewrite both rows under the previous format version — the
@@ -124,11 +123,9 @@ struct BasisFormatGateTests {
 
             // Reopen over the same file: the slot must open untrained.
             let reopened = try await riCorpus(at: url)
-            let outcome = await reopened.floatNearest(query: "car engine", limit: 3)
-            guard case .unavailableProviderOptOut = outcome else {
-                Issue.record("a stale-format basis must open the slot untrained (provider opt-out); got \(outcome)")
-                return
-            }
+            let untrained = try await reopened.embedFloat("car engine")
+            #expect(untrained.isEmpty,
+                    "a stale-format basis must open the slot untrained (empty embedding); got \(untrained.count) dims")
 
             // 4. The retrain republishes current-format rows and the lane serves.
             try await reopened.reindex(now: now)
@@ -141,10 +138,8 @@ struct BasisFormatGateTests {
                 .load(modelID: modelID, modelVersion: modelVersion))
             #expect(BasisBlobFrame.formatVersion(of: countsAfter.counts) == basisFormatVersion,
                     "reindex must republish the counts in the current format")
-            guard case .hits = await reopened.floatNearest(query: "car engine", limit: 3) else {
-                Issue.record("after the retrain the float lane must serve again")
-                return
-            }
+            let retrained = try await reopened.embedFloat("car engine")
+            #expect(!retrained.isEmpty, "after the retrain the basis must embed again")
         }
     }
 }

@@ -232,8 +232,8 @@ Response: \"found N memory(s)\" then one DENSE ROW per hit:
 Travel on subjects; fetch bodies via moot_memory_get
 (depth:subject|distilled|full). \"(no subject)\" rows are subject debt.
 A discrimination line appears ONLY when the ranking is not clear
-(low/medium); a recall_provenance line ONLY when the dense lane was dark
-or stages degraded. Silence means nominal.
+(low/medium); a degradation line ONLY when a stage was skipped. Silence
+means nominal.
 
 Mistakes:
   — Queries over 200 characters trigger a hint to shorten the query.
@@ -876,7 +876,7 @@ RECALL LIGHTS UP IN STAGES — this matters for what you can trust right after a
 import: keyword (exact-term) and structured (wing/room) recall work almost
 immediately, but full SEMANTIC / vector recall (meaning-based RAG search) is
 available only AFTER the basis retrain finishes. A just-imported term that
-appears only in a later chunk batch reads dense_lane:dark:vocabMiss until the
+appears only in a later chunk batch is reachable by keyword only until the
 retrain republishes the basis with the full vocabulary. So on a fresh import be
 patient: poll moot_drain_status until idle before relying on semantic search
 over the imported memories, and tell the user that deep meaning-based recall

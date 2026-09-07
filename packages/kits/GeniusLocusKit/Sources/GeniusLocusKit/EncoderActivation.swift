@@ -74,7 +74,9 @@ public struct BundledModelDirectoryResolver: ModelDirectoryResolving {
 public extension GeniusLocusKit {
 
     /// `embedding_provider` value that activates the span encoder.
-    static var encoderProviderID: String { "encoder" }
+    /// `package` so the 1.6 to 1.7 migration capsule (a sibling module) can
+    /// tell the span encoder from a whole-record provider in the manifest.
+    package static var encoderProviderID: String { "encoder" }
 
     /// Manifest key: BM25 head size the rerank stage encodes (Int).
     static var encoderHeadMetaKey: String { "encoder_head" }

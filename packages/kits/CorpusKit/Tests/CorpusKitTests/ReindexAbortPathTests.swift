@@ -41,6 +41,16 @@ import PersistenceKit
 import CorpusKitProviders
 @testable import CorpusKit
 
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vectorIndex 1) only in the WholeRecordDense build.
+private let vectorLanesPerItem: Int = {
+#if MOOTX01_WHOLE_RECORD_DENSE
+    2
+#else
+    1
+#endif
+}()
+
 // MARK: - Helpers (file-private; not reused from ShadowSwapCorpusTests)
 
 /// In-memory content source that can be armed to throw on the next record(for:) call.
@@ -194,7 +204,8 @@ struct ReindexAbortPathTests {
         let gen1 = try await servingGeneration(storage: storage, modelID: modelID)
         #expect(gen1 == 1, "setup: serving_generation must be 1 after first reindex")
         let countAfterFirst = try await vectorRowCount(storage: storage, modelID: modelID)
-        #expect(countAfterFirst == 6, "setup: 6 vectors after first reindex (3 items × 2 lanes)")
+        #expect(countAfterFirst == 3 * vectorLanesPerItem,
+                "setup: 3 items × \(vectorLanesPerItem) lane(s) after first reindex")
 
         // ── Arm fault: next record(for:) call throws ──────────────────────────
         // This fires inside trainTrainableSlots on the second reindex, which runs
@@ -231,11 +242,11 @@ struct ReindexAbortPathTests {
 
         // ── c4d: vector count unchanged — no vectors stranded at shadow gen ───
         // Failure was before the write pass, so no shadow vectors were written.
-        // Abandon confirms there is nothing to clean up; count stays at 6.
+        // Abandon confirms there is nothing to clean up; the count is unchanged.
         let countAfterFail = try await vectorRowCount(storage: storage, modelID: modelID)
         #expect(
-            countAfterFail == 6,
-            "c4d: vector count must remain 6 — no shadow vectors stranded at an invisible generation"
+            countAfterFail == 3 * vectorLanesPerItem,
+            "c4d: vector count must remain 3 × \(vectorLanesPerItem) — no shadow vectors stranded at an invisible generation"
         )
     }
 }

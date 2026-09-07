@@ -115,7 +115,6 @@ private func makeResult(hits: [RecallHit]) -> GLKRecallResult {
         plan: fixturePlan,
         unionProfile: nil,
         hits: hits,
-        denseLaneStatus: nil,
         degradedStages: [],
         laneRanks: [:],
         queryLatticeAnchor: nil
