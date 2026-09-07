@@ -57,12 +57,41 @@ pub struct VectorRepresentationClaims {
 }
 
 impl VectorRepresentationClaims {
+    /// The kit id this ledger's schema-version row is keyed by. The single
+    /// source for `schema_declaration().kit_id`; `FORMER_KIT_IDS` lists the
+    /// ids that row carried under earlier names of the kit. Twin of Swift
+    /// `VectorRepresentationClaims.kitID`.
+    pub const KIT_ID: &'static str = "SynapseKitClaims";
+
+    /// Kit ids this ledger's schema-version row carried before `KIT_ID`,
+    /// oldest first (the VectorKit → SynapseKit rename, see
+    /// `VectorStore::FORMER_KIT_IDS`). `prepare_schema_ledger` moves such a
+    /// row to `KIT_ID`; the GeniusLocusKit 1.4 → 1.5 capsule reads its pair
+    /// from here. Twin of Swift `VectorRepresentationClaims.formerKitIDs`.
+    pub const FORMER_KIT_IDS: &'static [&'static str] = &["VectorKitClaims"];
+
+    /// Move this ledger's schema-version row from any id in `FORMER_KIT_IDS`
+    /// to `KIT_ID` before `storage.migrate(&schema_declaration())`.
+    ///
+    /// SECURITY: without the rename a populated estate is treated as version
+    /// 0 under the new id and the ladder replays over its rows, leaving a
+    /// duplicate ledger row under the old id. Same outcomes as
+    /// `VectorStore::prepare_schema_ledger`: `Renamed` and `NoRow` pass;
+    /// `Conflict` (rows under both ids) leaves both rows in place, logs one
+    /// warning, and returns `Ok` so the estate stays openable and `migrate`
+    /// runs under the current id without replaying. Only a failed rename call
+    /// returns `SynapseKitError::StoreUnavailable`. Twin of Swift
+    /// `VectorRepresentationClaims.prepareSchemaLedger(storage:)`.
+    pub fn prepare_schema_ledger(storage: &dyn Storage) -> Result<(), SynapseKitError> {
+        crate::vector_store::prepare_schema_ledger_for(storage, Self::FORMER_KIT_IDS, Self::KIT_ID)
+    }
+
     /// Additive ledger schema. Applied via `storage.migrate(..)` like the
     /// other sidecar declarations; not part of any composite schema until
     /// the attached-profile composition (P3) adopts it.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
-            "SynapseKitClaims",
+            Self::KIT_ID,
             1,
             vec![TableDeclaration::new(
                 "vector_rep_claims",

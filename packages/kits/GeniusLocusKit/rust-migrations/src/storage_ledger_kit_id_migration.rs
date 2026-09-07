@@ -23,9 +23,13 @@
 //! `run_storage_ledger_kit_id_migration` last. Both run before
 //! `wire_substores`, which is where the renamed store opens.
 //!
-//! The (old, new) pairs are frozen history: the capsule rewrites exactly
-//! these ids whatever the store declares later. A later rename needs its own
-//! capsule.
+//! The (old, new) pairs come from the kit that owns the ids: SynapseKit's
+//! `FORMER_KIT_IDS` (oldest first) and `KIT_ID` on `VectorStore` and
+//! `VectorRepresentationClaims`, so the capsule, the stores' own
+//! `prepare_schema_ledger` open-time rename, and the ledger id a migrated
+//! estate carries all read one source. This capsule covers the first rename
+//! of the tier (`FORMER_KIT_IDS[0]`); a later rename appends to
+//! `FORMER_KIT_IDS` and needs its own capsule.
 //!
 //! Migration steps (all idempotent):
 //!   1. Rewrite each ledger pair in `STORAGE_LEDGER_KIT_ID_RENAMES`; a pair
@@ -38,6 +42,7 @@ use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::handle::EstateHandle;
 use persistence_kit::{SchemaKitRenameOutcome, Storage};
 use std::sync::Arc;
+use synapsekit::{VectorRepresentationClaims, VectorStore};
 
 /// One (old, new) kit-id pair the 1.4 → 1.5 capsule rewrites in the
 /// schema-version ledger.
@@ -58,16 +63,18 @@ pub struct StorageLedgerKitIdRenames {
     pub representation_claims: StorageLedgerKitIdRename,
 }
 
-/// The pairs, as frozen literals: these never follow a later rename of the
-/// vector tier.
+/// The pairs, read from the SynapseKit constants that own the ids: the first
+/// former id of each store (the VectorKit → SynapseKit rename) to its current
+/// id. One source of the pair for the capsule and for the stores' own
+/// open-time rename (`prepare_schema_ledger`).
 pub const STORAGE_LEDGER_KIT_ID_RENAMES: StorageLedgerKitIdRenames = StorageLedgerKitIdRenames {
     vector_store: StorageLedgerKitIdRename {
-        from: "VectorKit",
-        to: "SynapseKit",
+        from: VectorStore::FORMER_KIT_IDS[0],
+        to: VectorStore::KIT_ID,
     },
     representation_claims: StorageLedgerKitIdRename {
-        from: "VectorKitClaims",
-        to: "SynapseKitClaims",
+        from: VectorRepresentationClaims::FORMER_KIT_IDS[0],
+        to: VectorRepresentationClaims::KIT_ID,
     },
 };
 

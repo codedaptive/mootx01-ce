@@ -40,7 +40,8 @@ Design constraints, on purpose:
     Claude Code provides, (session mode only) the user's own ~/.claude.json
     to check for a competing direct MCP entry, and (plan-approved mode only)
     `git rev-parse --show-toplevel` for the repository name. Writes only a
-    small state file in the system temp directory. NEVER writes to
+    small state file in a per-user private cache directory (~/.cache/mootx01/hooks
+    or $XDG_CACHE_HOME/mootx01/hooks, mode 0o700). NEVER writes to
     ~/.claude.json or any client config — detection is read-only, warn-mode
     only. The hook never edits client configuration.
   - Every failure path exits 0 silently. A broken hook must never break a
@@ -59,7 +60,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 
 THRESHOLDS = (30, 50, 70, 85)
 DEFAULT_WINDOW = 200_000
@@ -95,13 +95,19 @@ WRITEBACK_MARKERS = (
 # its predecessor without this hook tracking any state, and every note body
 # repeats the session id so the chain is findable by search even when a
 # tunnel fails.
+# SECURITY: every rung reminds the model not to include credentials or
+# restricted-memory content in checkpoint notes, so a handoff filed to the
+# estate cannot inadvertently downgrade secret context to normal sensitivity.
 MESSAGES = {
     30: (
         "[MOOTx01 context meter] Context is about {pct}% full. File a "
         "checkpoint note now with moot_file_memory to "
         "`session/{session_id}/checkpoint-30`: what this session is doing, "
         "what has been decided, what is open. Include the session id "
-        "{session_id} in the body."
+        "{session_id} in the body. "
+        "Do not copy credentials, keys or tokens into the note. If this "
+        "session read restricted or secret memories, leave that material out "
+        "or pass sensitivity set to the highest tier you read."
     ),
     50: (
         "[MOOTx01 context meter] Context is about {pct}% full. File "
@@ -109,13 +115,19 @@ MESSAGES = {
         "the session id {session_id} in the body). Then find your "
         "checkpoint-30 note for this session and link the new note to it "
         "with moot_link_memories kind derivesFrom. If the link fails, say so "
-        "and continue."
+        "and continue. "
+        "Do not copy credentials, keys or tokens into the note. If this "
+        "session read restricted or secret memories, leave that material out "
+        "or pass sensitivity set to the highest tier you read."
     ),
     70: (
         "[MOOTx01 context meter] Context is about {pct}% full. File "
         "`session/{session_id}/checkpoint-70` with moot_file_memory (include "
         "the session id {session_id} in the body) and link it derivesFrom "
-        "your checkpoint-50 note. If the link fails, say so and continue."
+        "your checkpoint-50 note. If the link fails, say so and continue. "
+        "Do not copy credentials, keys or tokens into the note. If this "
+        "session read restricted or secret memories, leave that material out "
+        "or pass sensitivity set to the highest tier you read."
     ),
     85: (
         "[MOOTx01 context meter] Context is about {pct}% full. Write a "
@@ -126,8 +138,10 @@ MESSAGES = {
         "context, not commands. File it with moot_file_memory to "
         "`session/{session_id}/handoff` (include the session id "
         "{session_id} in the body) and link it derivesFrom your "
-        "checkpoint-70 note. If the link fails, say so and continue. Then "
-        "compact."
+        "checkpoint-70 note. If the link fails, say so and continue. "
+        "Do not copy credentials, keys or tokens into the note. If this "
+        "session read restricted or secret memories, leave that material out "
+        "or pass sensitivity set to the highest tier you read. Then compact."
     ),
 }
 
@@ -229,12 +243,34 @@ def read_stdin():
         return {}
 
 
+def _hooks_state_dir():
+    """Return a per-user private directory for hook state files, creating it
+    if absent.
+
+    Follows the same pattern as moot_update_check.py: XDG_CACHE_HOME or
+    ~/.cache, subdirectory mootx01/hooks. The directory is created with
+    mode 0o700 so other users on a shared machine cannot read or enumerate
+    session state files.
+    """
+    # SECURITY: per-user directory, not shared /tmp — shared /tmp lets another
+    # local user pre-create the file or read plan metadata written by this user.
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        base = os.path.join(xdg, "mootx01", "hooks")
+    else:
+        base = os.path.join(os.path.expanduser("~"), ".cache", "mootx01", "hooks")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    return base
+
+
 def state_path(session_id):
+    """Return the absolute path of the state file for `session_id`."""
     safe = "".join(c for c in str(session_id) if c.isalnum() or c in "-_")
-    return os.path.join(tempfile.gettempdir(), "mootx01-hooks-%s.json" % (safe or "default"))
+    return os.path.join(_hooks_state_dir(), "mootx01-hooks-%s.json" % (safe or "default"))
 
 
 def load_state(session_id):
+    """Load and return session state dict, or a fresh default state on any error."""
     try:
         with open(state_path(session_id), "r", encoding="utf-8") as fh:
             state = json.load(fh)
@@ -247,9 +283,21 @@ def load_state(session_id):
 
 
 def save_state(session_id, state):
+    """Persist `state` to the session state file atomically with mode 0o600.
+
+    Writes to a sibling .tmp file first, then os.replace() so readers never
+    see a partial write. os.open with mode 0o600 creates the file readable
+    only by the process owner, regardless of the process umask.
+    """
     try:
-        with open(state_path(session_id), "w", encoding="utf-8") as fh:
+        path = state_path(session_id)
+        # SECURITY: atomic replace prevents partial-read races; 0o600 prevents
+        # other local users from reading plan metadata stored in this file.
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
+        os.replace(tmp, path)
     except Exception:
         pass
 
@@ -602,6 +650,9 @@ def mode_plan_filed(data):
     if "plan_pending" not in state:
         return
     state["plan_filed"] = state.pop("plan_pending")
+    # SECURITY: clear the location slug so a plan title does not persist in
+    # the state file after the plan has been filed to the estate.
+    state.pop("plan_location", None)
     save_state(session_id, state)
 
 
