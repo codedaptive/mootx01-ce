@@ -23,14 +23,13 @@
 ///   - `"dense"`   — the aggregate dense float column in the unionBest weighted
 ///     score (the per-signal `dense:<modelID>` keys below steer the dense
 ///     consensus fold that BUILDS that column).
-///   - `"dense:<modelID>"` — a per-signal DENSE float lane, one key per held
-///     embedding provider (e.g. `"dense:random-indexing-v1"`). The `<modelID>`
-///     suffix mirrors the per-signal fan-out from 6b-core so a multi-provider
-///     corpus can weight each distributional signal independently. The same
-///     key spelled with the ACTIVE span encoder's registry model id
-///     (`DenseSignal.encoder`, `"dense:minilm-l6-v2-w60"` for the floor model)
-///     is the span rerank stage's weight `w` in its reciprocal-rank fusion
-///     (contract sheet §8): `1.0` neutral, `0` skips the stage.
+///   - `"dense:<modelID>"` — spelled with the ACTIVE span encoder's registry
+///     model id (`DenseSignal.encoder`, `"dense:minilm-l6-v2-w60"` for the
+///     floor model), the span rerank stage's weight `w` in its reciprocal-rank
+///     fusion (contract sheet §8): `1.0` neutral, `0` skips the stage. In the
+///     WholeRecordDense build the same spelling with a held whole-record
+///     provider's id (e.g. `"dense:random-indexing-v1"`) steers that provider's
+///     per-signal float lane in the unionBest consensus fold.
 ///
 ///   Matrix/graph/preference columns (steer ONLY the unionBest `.matrixAware`
 ///   weighted score — the matrix columns are inactive under `.raw`/`.rrf`, so
@@ -77,7 +76,7 @@
 ///     anti-similarity retrieval (which changes which candidates the store
 ///     returns). The two are deliberately distinct.
 ///
-/// ## Anti-similarity (`antiSimilarLanes`)
+/// ## Anti-similarity (`antiSimilarLanes`, WholeRecordDense build only)
 ///
 /// A DENSE lane key (`"dense:<modelID>"`) listed in `antiSimilarLanes` flips
 /// that lane's OBJECTIVE from nearest to FARTHEST: the lane queries the store
@@ -112,13 +111,15 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// candidates.
     public let laneWeights: [String: Float]
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Dense lane keys (`"dense:<modelID>"`) whose objective is FARTHEST rather
     /// than nearest — anti-similarity retrieval. A lane in this set queries the
     /// store for the most DISSIMILAR sources and forwards them. Empty ⇒ every
     /// lane nearest ⇒ byte-identical to today's fusion. Distinct from a negative
     /// weight (which demotes the NEAREST); the two compose. See the type-level
-    /// "Anti-similarity" note.
+    /// "Anti-similarity" note. WholeRecordDense build only.
     public let antiSimilarLanes: Set<String>
+#endif
 
     /// Optional candidate-pool depth override. `nil` keeps the RecallDirector's
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
@@ -134,6 +135,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// persisted before this field decode with the default.
     public let binaryMetric: String
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Float-lane metric selector: `"cosine"` (default), `"l2"`, or `"dot"`.
     ///
     /// Selects the distance function used by the dense float embedding lane
@@ -157,6 +159,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
     ///
     /// ONLY the float lane is affected; the binary lane keeps `binaryMetric`.
     public let floatMetric: String
+#endif
 
     /// Matrix-signal weighting selector (W2.5 S4-C): "counts" (default —
     /// the canonical Int64 count matrices) or "decayed" (the §8.13
@@ -186,9 +189,15 @@ public struct RecallShape: Sendable, Codable, Equatable {
     ///   - frontierK: optional candidate-pool depth override, clamped to
     ///     `[frontierKFloor, frontierKCeiling]` when read via `effectiveFrontierK`.
     ///     Defaults to `nil` (the engine's computed default).
+#if MOOTX01_WHOLE_RECORD_DENSE
     private enum CodingKeys: String, CodingKey {
         case laneWeights, antiSimilarLanes, frontierK, binaryMetric, floatMetric, matrixWeighting
     }
+#else
+    private enum CodingKeys: String, CodingKey {
+        case laneWeights, frontierK, binaryMetric, matrixWeighting
+    }
+#endif
 
     /// Custom decode so payloads persisted BEFORE any additive field existed
     /// decode with their defaults instead of failing on a missing key — the
@@ -200,13 +209,18 @@ public struct RecallShape: Sendable, Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.laneWeights = try c.decodeIfPresent([String: Float].self, forKey: .laneWeights) ?? [:]
+#if MOOTX01_WHOLE_RECORD_DENSE
         self.antiSimilarLanes = try c.decodeIfPresent(Set<String>.self, forKey: .antiSimilarLanes) ?? []
+#endif
         self.frontierK = try c.decodeIfPresent(Int.self, forKey: .frontierK)
         self.binaryMetric = try c.decodeIfPresent(String.self, forKey: .binaryMetric) ?? "hamming"
+#if MOOTX01_WHOLE_RECORD_DENSE
         self.floatMetric = try c.decodeIfPresent(String.self, forKey: .floatMetric) ?? "cosine"
+#endif
         self.matrixWeighting = try c.decodeIfPresent(String.self, forKey: .matrixWeighting) ?? "counts"
     }
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     public init(
         laneWeights: [String: Float] = [:],
         antiSimilarLanes: Set<String> = [],
@@ -222,7 +236,21 @@ public struct RecallShape: Sendable, Codable, Equatable {
         self.frontierK = frontierK
         self.matrixWeighting = matrixWeighting
     }
+#else
+    public init(
+        laneWeights: [String: Float] = [:],
+        frontierK: Int? = nil,
+        binaryMetric: String = "hamming",
+        matrixWeighting: String = "counts"
+    ) {
+        self.laneWeights = laneWeights
+        self.binaryMetric = binaryMetric
+        self.frontierK = frontierK
+        self.matrixWeighting = matrixWeighting
+    }
+#endif
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Whether the given dense lane key inverts its objective to FARTHEST
     /// (anti-similarity). Returns `false` for any key not in `antiSimilarLanes`
     /// — so an empty set keeps every lane nearest (the back-compat default).
@@ -232,6 +260,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
     public func isAntiSimilar(_ laneKey: String) -> Bool {
         antiSimilarLanes.contains(laneKey)
     }
+#endif
 
     /// The signed weight for a lane key. Returns `defaultWeight(for:)` for any
     /// key absent from `laneWeights` — `1.0` for every key except
@@ -306,14 +335,17 @@ public struct RecallShape: Sendable, Codable, Equatable {
 
     // MARK: - Named preset roster
 
-    /// The per-signal DENSE lane key for a held embedding provider, by its
-    /// `modelID`. These are the exact `modelID` strings the CorpusKit providers
-    /// ship (see CorpusKitProviders/*Provider.swift) — the suffix on a
-    /// `dense:<modelID>` lane key. The roster targets them by these constants so
-    /// a typo in a provider id surfaces as a build error, not a silent no-op.
+    /// The `dense:<modelID>` lane keys. `encoder` and `key(forModelID:)` name
+    /// the span rerank stage's weight in every build. The whole-record
+    /// provider keys (`randomIndexing` and, with DenseFamilies, the families)
+    /// exist only in the WholeRecordDense build: they are the exact `modelID`
+    /// strings the CorpusKit providers ship (CorpusKitProviders/*Provider.swift),
+    /// so a typo in a provider id surfaces as a build error, not a silent no-op.
     public enum DenseSignal {
+#if MOOTX01_WHOLE_RECORD_DENSE
         /// Random-Indexing distributional provider — `"random-indexing-v1"`.
         public static let randomIndexing = "dense:random-indexing-v1"
+#endif
         /// The span rerank encoder lane, keyed by the floor model's registry id
         /// (contract sheet §1: `<model>-w<window_words>`). The stage reads the
         /// key for whichever model is ACTIVE via `key(forModelID:)`; this
@@ -324,30 +356,38 @@ public struct RecallShape: Sendable, Codable, Equatable {
         /// the dense consensus fold and the span rerank weight alike.
         public static func key(forModelID modelID: String) -> String { "dense:\(modelID)" }
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 #if MOOTX01_DENSE_FAMILIES
-        // The PPMI, LSA, NMF and FDC providers are dark unless the package is
-        // built with the DenseFamilies trait (contract sheet §13); their lane
-        // keys and the presets that steer them compile in with them.
+        // PPMI, NMF, and FDC compile in with DenseFamilies (MOOTX01_DENSE_FAMILIES,
+        // contract sheet §13). LSA is on its own switch (MOOTX01_LSA); DenseFamilies
+        // does NOT enable it — enable with `--traits LSA` (ruling 2026-09-07).
         /// Positive-PMI distributional provider — `"ppmi-v1"`.
         public static let ppmi = "dense:ppmi-v1"
-        /// Latent-Semantic-Analysis provider — `"lsa-v1"`.
+#if MOOTX01_LSA
+        /// Latent-Semantic-Analysis provider — `"lsa-v1"`. Dark and unproven;
+        /// only available when the LSA trait is on (MOOTX01_LSA), not DenseFamilies.
         public static let lsa = "dense:lsa-v1"
+#endif
         /// Non-negative-Matrix-Factorisation provider — `"nmf-v1"`.
         public static let nmf = "dense:nmf-v1"
         /// Field-Distribution-Coding provider — `"fdc-v1"`.
         public static let fdc = "dense:fdc-v1"
 
-        /// The distributional dense lane keys (ri, ppmi, lsa, nmf) in stable
-        /// order. Used by the `consensus`/`broad` presets to forward (or the
-        /// leave-one-out pattern to zero) each distributional signal. `fdc`
-        /// is intentionally excluded — it is a structural-coding signal and
-        /// is targeted by its own explicit presets rather than bundled here.
+        /// The distributional dense lane keys (ri, ppmi, nmf — plus lsa when MOOTX01_LSA
+        /// is on) in stable canonical order. Used by `consensus`/`broad` presets to
+        /// forward each distributional signal. `fdc` is excluded — it is a
+        /// structural-coding signal targeted by its own explicit presets.
+#if MOOTX01_LSA
         public static let all: [String] = [randomIndexing, ppmi, lsa, nmf]
+#else
+        public static let all: [String] = [randomIndexing, ppmi, nmf]
+#endif
 #else
         /// The distributional dense lane keys in stable order. Random Indexing
         /// is the only live family; the others are dark (sheet §13).
         public static let all: [String] = [randomIndexing]
 #endif
+#endif // MOOTX01_WHOLE_RECORD_DENSE
     }
 
     /// The names of every preset in the roster, in stable declaration order.
@@ -360,26 +400,36 @@ public struct RecallShape: Sendable, Codable, Equatable {
         var names: [String] = [
             "balanced",
             "precise",
-            "conceptual",
             "broad",
             "lexical",
             "not_lexical",
-            "associative",
-            "consensus",
-            "ri_forward",
         ]
+#if MOOTX01_WHOLE_RECORD_DENSE
+        // Whole-record dense presets: they steer the per-signal float lanes
+        // of the held whole-record providers, which exist only in this build.
+        // `whole_record_baseline` is the audition arm the harness compares
+        // against the span stage (every held whole-record signal at 1.0).
+        names += ["conceptual", "associative", "consensus", "ri_forward", "whole_record_baseline"]
 #if MOOTX01_DENSE_FAMILIES
-        // Single-family isolation presets for the dark families (sheet §13).
-        names += ["ppmi_forward", "lsa_forward", "nmf_forward"]
+        // Single-family isolation presets for PPMI and NMF (DenseFamilies, sheet §13).
+        names += ["ppmi_forward", "nmf_forward"]
+#if MOOTX01_LSA
+        // LSA isolation preset — only when the LSA trait is on, not DenseFamilies.
+        names += ["lsa_forward"]
+#endif
+#endif
 #endif
         names += [
             "fast",
             "jaccard",
-            // Float-lane metric presets: identical fusion to balanced, but the
-            // dense float embedding lane uses L2 or dot-product distance instead
-            // of the default cosine. Mirrors the binaryMetric/jaccard pattern.
-            "float-l2",
-            "float-dot",
+        ]
+#if MOOTX01_WHOLE_RECORD_DENSE
+        // Float-lane metric presets: identical fusion to balanced, but the
+        // whole-record float lane uses L2 or dot-product distance instead of
+        // the default cosine. Mirrors the binaryMetric/jaccard pattern.
+        names += ["float-l2", "float-dot"]
+#endif
+        names += [
             "matrix_decayed",
             "structural",
             "temporal",
@@ -387,14 +437,20 @@ public struct RecallShape: Sendable, Codable, Equatable {
             "field",
             "preference",
             "anti_redundant",
-            // Per-signal anti-similarity variants: same suppression shape as
-            // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
-            // inverts a different per-signal dense lane to FARTHEST so callers
-            // can target diversity in that semantic space.
-            "anti_redundant_ri",
         ]
+#if MOOTX01_WHOLE_RECORD_DENSE
+        // Per-signal anti-similarity variants: same suppression shape as
+        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
+        // inverts a different per-signal dense lane to FARTHEST so callers
+        // can target diversity in that semantic space.
+        names += ["anti_redundant_ri"]
 #if MOOTX01_DENSE_FAMILIES
-        names += ["anti_redundant_lsa", "anti_redundant_nmf"]
+        names += ["anti_redundant_nmf"]
+#if MOOTX01_LSA
+        // Anti-similarity for LSA — only when the LSA trait is on, not DenseFamilies.
+        names += ["anti_redundant_lsa"]
+#endif
+#endif
 #endif
         names += [
             "session_hybrid",
@@ -445,9 +501,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// sets is a key the engine reads (verified in RecallDirector's unionBest
     /// weighted path), so no preset is a silent no-op.
     ///
-    /// Leave-one-out is reachable WITHOUT a dedicated preset: take any forward
-    /// shape and zero one `dense:<modelID>` lane (e.g. set
-    /// `DenseSignal.randomIndexing` to `0`) to ablate exactly that signal.
+    /// In the WholeRecordDense build leave-one-out is reachable WITHOUT a
+    /// dedicated preset: take any forward shape and zero one `dense:<modelID>`
+    /// lane (e.g. set `DenseSignal.randomIndexing` to `0`) to ablate exactly
+    /// that signal.
     ///
     /// - Parameter name: a preset name from `presetNames`.
     /// - Returns: the resolved shape, or `nil` for `"balanced"` / an unknown name.
@@ -468,13 +525,16 @@ public struct RecallShape: Sendable, Codable, Equatable {
 #endif
             return RecallShape(laneWeights: weights, frontierK: frontierKFloor)
 
+#if MOOTX01_WHOLE_RECORD_DENSE
         // Concepts over keywords: amplify the distributional dense lanes
-        // (RI/PPMI/LSA/NMF) and damp the literal keyword lane so semantically
-        // related — not lexically identical — memories rise.
+        // (RI/PPMI/NMF under DenseFamilies; plus LSA when MOOTX01_LSA is on)
+        // and damp the literal keyword lane so semantically related — not
+        // lexically identical — memories rise.
         case "conceptual":
             var weights: [String: Float] = ["bm25": 0.5]
             for key in DenseSignal.all { weights[key] = 1.5 }
             return RecallShape(laneWeights: weights)
+#endif
 
         // Cast wide: forward every retrieval lane above neutral and WIDEN the
         // frontier to the ceiling so the fused set draws from a deep candidate
@@ -506,9 +566,10 @@ public struct RecallShape: Sendable, Codable, Equatable {
         case "jaccard":
             return RecallShape(binaryMetric: "jaccard")
 
+#if MOOTX01_WHOLE_RECORD_DENSE
         // Float-lane metric presets: identical fusion to balanced, but the
-        // dense float embedding lane uses L2 or dot-product distance instead
-        // of the default cosine. Mirrors the jaccard/binaryMetric pattern:
+        // whole-record float lane uses L2 or dot-product distance instead of
+        // the default cosine. Mirrors the jaccard/binaryMetric pattern:
         // only the distance function changes; all lane weights remain neutral.
         case "float-l2":
             return RecallShape(floatMetric: "l2")
@@ -518,6 +579,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // inner products indicate higher relevance.
         case "float-dot":
             return RecallShape(floatMetric: "dot")
+#endif
 
         // W2.5 S4-C arm: identical fusion, but the matrixAware O/T signals
         // read the §8.13 exp-decayed projections instead of the counts.
@@ -533,6 +595,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
 #endif
             return RecallShape(laneWeights: weights)
 
+#if MOOTX01_WHOLE_RECORD_DENSE
         // Loose association: amplify the two most "associative" distributional
         // signals (RI and NMF) and widen the frontier so loosely-related memories
         // surface. The free-association shape.
@@ -565,11 +628,27 @@ public struct RecallShape: Sendable, Codable, Equatable {
 #if MOOTX01_DENSE_FAMILIES
         case "ppmi_forward":
             return singleDenseForward(DenseSignal.ppmi)
-        case "lsa_forward":
-            return singleDenseForward(DenseSignal.lsa)
         case "nmf_forward":
             return singleDenseForward(DenseSignal.nmf)
+#if MOOTX01_LSA
+        case "lsa_forward":
+            return singleDenseForward(DenseSignal.lsa)
 #endif
+#endif
+
+        // The audition baseline: every held whole-record signal forwarded at
+        // the neutral 1.0 with the engine's default frontier, so the harness
+        // can run the span stage against the whole-record lane by name. The
+        // fusion equals the nil shape of this build; the preset exists so the
+        // arm is explicit in a measurement record.
+        case "whole_record_baseline":
+            var weights: [String: Float] = [:]
+            for key in DenseSignal.all { weights[key] = 1.0 }
+#if MOOTX01_DENSE_FAMILIES
+            weights[DenseSignal.fdc] = 1.0
+#endif
+            return RecallShape(laneWeights: weights)
+#endif // MOOTX01_WHOLE_RECORD_DENSE
 
         // Cheapest vote: boost the 256-bit Hamming lane and set the `dense`
         // weight to 0. RecallDirector still runs floatNearestPerSignal when a
@@ -621,21 +700,23 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // frontier; `anti_redundant_ri` is the inversion that stays live.
         case "anti_redundant":
 #if MOOTX01_DENSE_FAMILIES
-            let antiSimilar: Set<String> = [DenseSignal.fdc]
-#else
-            let antiSimilar: Set<String> = []
-#endif
             return RecallShape(
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
-                antiSimilarLanes: antiSimilar,
+                antiSimilarLanes: [DenseSignal.fdc],
                 frontierK: frontierKFloor)
+#else
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                frontierK: frontierKFloor)
+#endif
 
+#if MOOTX01_WHOLE_RECORD_DENSE
         // Per-signal anti-similarity: same suppression shape as anti_redundant
         // (bm25/hamming at -0.5, frontier narrowed to the floor) but inverts
-        // the RI, LSA, or NMF dense lane to FARTHEST instead of FDC. Each
-        // variant targets diversity in the corresponding distributional
-        // semantic space — useful when the query is already well-covered by
-        // FDC structural coding and the caller wants distributional diversity.
+        // RI or NMF (under DenseFamilies) or LSA (under MOOTX01_LSA) to FARTHEST
+        // instead of FDC. Each variant targets diversity in the corresponding
+        // distributional semantic space — useful when FDC structural coding
+        // already covers the query and the caller wants distributional diversity.
         case "anti_redundant_ri":
             return RecallShape(
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
@@ -643,18 +724,20 @@ public struct RecallShape: Sendable, Codable, Equatable {
                 frontierK: frontierKFloor)
 
 #if MOOTX01_DENSE_FAMILIES
-        case "anti_redundant_lsa":
-            return RecallShape(
-                laneWeights: ["bm25": -0.5, "hamming": -0.5],
-                antiSimilarLanes: [DenseSignal.lsa],
-                frontierK: frontierKFloor)
-
         case "anti_redundant_nmf":
             return RecallShape(
                 laneWeights: ["bm25": -0.5, "hamming": -0.5],
                 antiSimilarLanes: [DenseSignal.nmf],
                 frontierK: frontierKFloor)
+#if MOOTX01_LSA
+        case "anti_redundant_lsa":
+            return RecallShape(
+                laneWeights: ["bm25": -0.5, "hamming": -0.5],
+                antiSimilarLanes: [DenseSignal.lsa],
+                frontierK: frontierKFloor)
 #endif
+#endif
+#endif // MOOTX01_WHOLE_RECORD_DENSE
 
         // Session-granularity hybrid recall: amplify bm25 (keyword match for
         // conversation fragments), dense (semantic similarity within the
@@ -744,35 +827,45 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Uniform fusion — every lane votes equally. The unsteered default."
         case "precise":
             return "Exactness — amplify keyword (bm25) + dense consensus (+ field-coding when the dense families are compiled in) over a narrow frontier."
+#if MOOTX01_WHOLE_RECORD_DENSE
         case "conceptual":
-            return "Concepts over keywords — amplify the distributional dense lanes (RI, plus PPMI/LSA/NMF when compiled in), damp bm25."
+            return "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/NMF under DenseFamilies; plus LSA when MOOTX01_LSA is on), damp bm25."
+#endif
         case "broad":
             return "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling."
         case "lexical":
             return "Keyword/field only — amplify bm25 (+ fdc when compiled in), exclude the dense and Hamming vector lanes."
         case "jaccard":
             return "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity."
+#if MOOTX01_WHOLE_RECORD_DENSE
         case "float-l2":
-            return "L2 float metric — the dense float embedding lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter."
+            return "L2 float metric — the whole-record float lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter."
         case "float-dot":
-            return "Dot-product float metric — the dense float embedding lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective."
+            return "Dot-product float metric — the whole-record float lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective."
+#endif
         case "matrix_decayed":
             return "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts."
         case "not_lexical":
             return "Suppress the literal lanes — exclude bm25 (+ fdc when compiled in) so distributional and structural signals decide."
+#if MOOTX01_WHOLE_RECORD_DENSE
         case "associative":
             return "Loose association — amplify the RI (+ NMF when compiled in) distributional lanes over a wide frontier."
         case "consensus":
             return "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree."
         case "ri_forward":
             return "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals."
+        case "whole_record_baseline":
+            return "Audition baseline — every held whole-record float signal at 1.0 over the default frontier; the arm the span stage is measured against."
 #if MOOTX01_DENSE_FAMILIES
         case "ppmi_forward":
             return "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals."
-        case "lsa_forward":
-            return "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals."
         case "nmf_forward":
             return "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals."
+#if MOOTX01_LSA
+        case "lsa_forward":
+            return "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals."
+#endif
+#endif
 #endif
         case "fast":
             return "Cheapest vote — keep only the 256-bit Hamming lane, skip the float-dense cosine pass."
@@ -788,13 +881,17 @@ public struct RecallShape: Sendable, Codable, Equatable {
             return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
         case "anti_redundant":
             return "Diversity — suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate, invert FDC to farthest when the dense families are compiled in; narrow frontier to 64."
+#if MOOTX01_WHOLE_RECORD_DENSE
         case "anti_redundant_ri":
             return "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space."
 #if MOOTX01_DENSE_FAMILIES
-        case "anti_redundant_lsa":
-            return "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space."
         case "anti_redundant_nmf":
             return "Diversity (NMF space) — invert the NMF dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the NMF topic space."
+#if MOOTX01_LSA
+        case "anti_redundant_lsa":
+            return "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space."
+#endif
+#endif
 #endif
         case "session_hybrid":
             return "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal."
@@ -825,6 +922,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         }
     }
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// A shape that forwards exactly one dense lane and zeroes its distributional
     /// siblings — the `*_forward` preset body. The named lane is amplified;
     /// every other `DenseSignal.all` key is excluded.
@@ -835,4 +933,5 @@ public struct RecallShape: Sendable, Codable, Equatable {
         }
         return RecallShape(laneWeights: weights)
     }
+#endif
 }

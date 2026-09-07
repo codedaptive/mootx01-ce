@@ -437,7 +437,7 @@ struct EstateCloseZeroResidueTests {
         for estateID in estateIDs {
             if let residue = try? probe.loadPrivateKey(forEstateID: estateID) {
                 #expect(
-                    residue == nil,
+                    residue.isEmpty,
                     "SQLite estate \(estateID) left a Keychain identity key — ephemeral lifetime must prevent this"
                 )
             }

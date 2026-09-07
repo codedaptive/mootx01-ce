@@ -1582,7 +1582,7 @@ struct StrictHTTPParserTests {
     static func raw(_ text: String) -> Data { Data(text.utf8) }
 
     @Test("A well-formed request parses and preserves duplicate headers in order")
-    func parsesAndPreservesDuplicates() {
+    func parsesAndPreservesDuplicates() throws {
         let request = StrictHTTPParser.parse(Self.raw(
             "POST /mcp/first-party HTTP/1.1\r\n"
             + "Content-Type: application/json\r\n"
@@ -1591,14 +1591,14 @@ struct StrictHTTPParserTests {
             + "Content-Length: 2\r\n"
             + "\r\n{}"
         ), maxBodyBytes: 4096)
-        let parsed = try? #require(request)
-        #expect(parsed?.method == "POST")
-        #expect(parsed?.requestTarget == "/mcp/first-party")
+        let parsed = try #require(request)
+        #expect(parsed.method == "POST")
+        #expect(parsed.requestTarget == "/mcp/first-party")
         // Both survive — which is the entire reason this parser exists.
-        #expect(parsed?.values(for: "mootx01-sequence") == ["1", "2"])
+        #expect(parsed.values(for: "mootx01-sequence") == ["1", "2"])
         // …and a duplicated header therefore has no single value.
-        #expect(parsed?.singleValue(for: "mootx01-sequence") == nil)
-        #expect(parsed?.body == Data("{}".utf8))
+        #expect(parsed.singleValue(for: "mootx01-sequence") == nil)
+        #expect(parsed.body == Data("{}".utf8))
     }
 
     @Test("Field names are matched case-insensitively")

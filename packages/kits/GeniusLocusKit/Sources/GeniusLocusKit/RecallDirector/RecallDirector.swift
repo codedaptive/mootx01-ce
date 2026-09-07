@@ -1,4 +1,7 @@
 import CorpusKit
+#if MOOTX01_WHOLE_RECORD_DENSE
+import CorpusKitWholeRecordDense
+#endif
 import EngramLib
 import Foundation
 import OSLog
@@ -161,15 +164,7 @@ public extension GeniusLocusKit {
                 guard let drawer = hit.drawer else { return true }
                 return drawer.isAnomalous == anomalousFilter
             }
-            result = GLKRecallResult(
-                request: laneResult.request,
-                plan: laneResult.plan,
-                unionProfile: laneResult.unionProfile,
-                hits: admissible,
-                denseLaneStatus: laneResult.denseLaneStatus,
-                degradedStages: laneResult.degradedStages,
-                laneRanks: laneResult.laneRanks,
-                queryLatticeAnchor: laneResult.queryLatticeAnchor)
+            result = laneResult.replacing(hits: admissible)
         } else {
             // No filter — pass through byte-identical.
             result = laneResult
@@ -227,15 +222,8 @@ public extension GeniusLocusKit {
                 } catch {
                     Self.recallLog.error(
                         "RecallDirector: reward-cycle trace write failed: \(error, privacy: .public)")
-                    finalResult = GLKRecallResult(
-                        request: result.request,
-                        plan: result.plan,
-                        unionProfile: result.unionProfile,
-                        hits: result.hits,
-                        denseLaneStatus: result.denseLaneStatus,
-                        degradedStages: result.degradedStages + ["recall.trace_write_failed"],
-                        laneRanks: result.laneRanks,
-                        queryLatticeAnchor: result.queryLatticeAnchor)
+                    finalResult = result.replacing(
+                        degradedStages: result.degradedStages + ["recall.trace_write_failed"])
                 }
             }
 
@@ -424,7 +412,6 @@ public extension GeniusLocusKit {
             plan: plan,
             unionProfile: nil,
             hits: hits,
-            denseLaneStatus: nil,
             degradedStages: degradedStages,
             laneRanks: laneRanks,
             queryLatticeAnchor: nil
@@ -475,16 +462,8 @@ public extension GeniusLocusKit {
                 let remappedStages: [String] = inner.degradedStages.map { stage in
                     stage == "locusOnly.matrixAware" ? "corpusOnly.matrixAware" : stage
                 }
-                return GLKRecallResult(
-                    request: inner.request,
-                    plan: inner.plan,
-                    unionProfile: inner.unionProfile,
-                    hits: inner.hits,
-                    denseLaneStatus: inner.denseLaneStatus,
-                    degradedStages: ["corpusOnly.degraded"] + remappedStages,
-                    laneRanks: inner.laneRanks,
-                    queryLatticeAnchor: inner.queryLatticeAnchor
-                )
+                return inner.replacing(
+                    degradedStages: ["corpusOnly.degraded"] + remappedStages)
             }
             throw GeniusLocusKitError.recallLaneUnavailable(.corpus)
         }
@@ -758,9 +737,9 @@ public extension GeniusLocusKit {
             laneRanks[entry.id, default: [:]]["hamming"] = idx + 1
         }
 
-        // corpusOnly does not include the dense float lane (BM25 + Hamming only).
+        // corpusOnly is BM25 + Hamming only.
         return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: sortedHits,
-                               denseLaneStatus: nil, degradedStages: degradedStages,
+                               degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
     }
 
@@ -1148,9 +1127,9 @@ public extension GeniusLocusKit {
             laneRanks[entry.id, default: [:]]["hamming"] = idx + 1
         }
 
-        // hybrid does not include the dense float lane (locus + BM25 + Hamming only).
+        // hybrid is locus + BM25 + Hamming only.
         return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
-                               denseLaneStatus: nil, degradedStages: degradedStages,
+                               degradedStages: degradedStages,
                                laneRanks: laneRanks,
                                queryLatticeAnchor: hybridSketch?.latticeAnchor)
     }
@@ -1391,6 +1370,7 @@ public extension GeniusLocusKit {
         shape?.binaryMetric == "jaccard" ? .binary(.jaccard) : .binary(.hamming)
     }
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Resolve the shape's float-lane metric (W2.5 M1 float unlock). Maps the
     /// string selector on `RecallShape.floatMetric` to a concrete `FloatMetric`
     /// value for the dense embedding lane. Unknown strings and nil shapes both
@@ -1404,6 +1384,7 @@ public extension GeniusLocusKit {
         default: return .cosine
         }
     }
+#endif
 
     /// The estate-manifest key carrying the OPTIMIZER-OWNED default lane
     /// weights (W2.5 Track R(b)): a JSON object of lane key → signed float.
@@ -1424,8 +1405,8 @@ public extension GeniusLocusKit {
     /// The estate-manifest key carrying the OPTIMIZER-OWNED embedding-provider
     /// selection: a plain string holding the `EmbeddingProvider.modelID` of
     /// the provider to use when constructing the Corpus ensemble for this
-    /// estate. Absent key → the deterministic default ensemble (RI/PPMI/LSA/
-    /// NMF/FDC) — no estate migration required.
+    /// estate. Absent key → the deterministic default ensemble (RI/PPMI/NMF/FDC
+    /// under DenseFamilies; RI only by default) — no estate migration required.
     ///
     /// Same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey` and
     /// `recallTuningMetaKey`: the benchmarker/optimizer selects the provider;
@@ -1846,6 +1827,18 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 4.5 — the whole-record DENSE FLOAT lane is a WholeRecordDense
+        // sidecar lane (ruling 2026-09-07: the span stage at step 3.5 is the
+        // one dense provider in the product). In the default build the lane
+        // never runs: `denseHits` stays empty, so the buffer merge, lane ranks
+        // and content-sorts below keep one shape; the discrimination factor
+        // stays neutral so `.discriminative` scoring equals `.rrf`.
+        var denseHits: [RecallHit] = []
+#if MOOTX01_WHOLE_RECORD_DENSE
+        // Discrimination factor for the matrixAware scoring formula (Item 3):
+        // declared here so the scoring loop at step 9 can read it after the
+        // corpus block closes. 1.0 = no discount.
+        var denseDiscriminationFactor: Float = 1.0
         // Step 4.5 — DENSE FLOAT lane (Lane D), PER-SIGNAL. The TRUE float-embedding
         // lane: cosine over the retained pooled vector, NOT the lossy 256-bit
         // SimHash-Hamming projection. Fires independently of the Hamming lane —
@@ -1888,13 +1881,11 @@ public extension GeniusLocusKit {
         // hit's explanation — the buffer/MMR pass does not carry explanation text,
         // so the modelIDs that voted are threaded through this map instead.
         var denseSignalsByID: [String: [String]] = [:]
-        var denseHits: [RecallHit] = []
         var denseLaneExplainerTag: String? = nil
         // Discrimination factor for the matrixAware scoring formula (Item 3).
         // Declared here (outside the corpus block) so it is in scope for the
         // scoring loop at step 9, which runs after the corpus block closes.
         // Default 1.0 = no discount (contrastive, or no dense lane at all).
-        var denseDiscriminationFactor: Float = 1.0
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
             // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
             // `dense:<modelID>` key is in `shape.antiSimilarLanes` inverts its
@@ -2163,6 +2154,9 @@ public extension GeniusLocusKit {
             // to return hits, so tag it explicitly rather than leaving nil.
             denseLaneExplainerTag = "dark:emptyQuery"
         }
+#else
+        let denseDiscriminationFactor: Float = 1.0
+#endif // MOOTX01_WHOLE_RECORD_DENSE
 
         // Content-derived re-sort for BM25, vector, and dense lanes.
         //
@@ -3105,14 +3099,17 @@ public extension GeniusLocusKit {
             // float index ranked this drawer; a signal that did not vote for this
             // id is absent. Additive: the existing source/score/mode/why lines are
             // unchanged, so the N=1 explainer output gains only this one line.
+#if MOOTX01_WHOLE_RECORD_DENSE
             if let voters = denseSignalsByID[id], !voters.isEmpty {
                 explanationLines.append(
                     "denseSignals: " + voters.map { "vectorDense:\($0)" }.joined(separator: ", "))
             }
+#endif
             hits.append(RecallHit(id: id, drawer: drawer, sources: sources,
                                   score: sv, explanation: explanationLines, spanHit: spanHit))
         }
 
+#if MOOTX01_WHOLE_RECORD_DENSE
         Self.recallLog.debug(
             "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) spanHits=\(spanHitsByID.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) denseLane=\(denseLaneExplainerTag ?? "active", privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
@@ -3120,6 +3117,15 @@ public extension GeniusLocusKit {
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
                                denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
+#else
+        Self.recallLog.debug(
+            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) spanHits=\(spanHitsByID.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
+        )
+
+        return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
+                               degradedStages: degradedStages,
+                               laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
+#endif
     }
 
     // MARK: - Empty-store column detection

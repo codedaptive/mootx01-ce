@@ -11,18 +11,20 @@
 //   1. v1_5-stamped estate whose ledger records CorpusKitIndexState at v3 and
 //      whose checkpoint row carries the column: after prepare the column is
 //      gone, the row's other fields are intact, the ledger reads v4 and the
-//      estate is stamped v1_6.
+//      estate is stamped current (the chain continues through the 1.6→1.7
+//      capsule after this one stamps v1_6).
 //   2. The same on an estate with NO CorpusKitIndexState ledger row (the
 //      composite-declaration shape every provisioned estate has): the ladder
 //      replays from version 0 and still drops the column.
 //   3. Idempotence: a second prepare is a no-op; running the capsule directly
 //      again leaves the ledger at v4 and the stamp at v1_6.
-//   4. Fresh estate (nil stamp): prepare stamps v1_6 without running the
+//   4. Fresh estate (nil stamp): prepare stamps current without running the
 //      capsule and without recording a CorpusKitIndexState row.
 //   5. On a SQLite estate the column is physically gone (a row read returns
 //      no such key) and the row survives.
-//   6. v1_4-stamped estate: the chain runs the 1.4→1.5 capsule and then this
-//      one, ending at v1_6 (gated on the 1.4→1.5 capsule being compiled).
+//   6. v1_4-stamped estate: the chain runs the 1.4→1.5 capsule, this one and
+//      the 1.6→1.7 capsule, ending at current (gated on the 1.4→1.5 capsule
+//      being compiled).
 
 import CorpusKit
 import Foundation
@@ -124,10 +126,10 @@ struct IndexCompositionColumnDropMigrationTests {
         #expect(try await checkpointRow(storage)["composition_policy"] == .text("lex=original;dense=original"))
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_6)
+        #expect(prep.format == .v1_7)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_6)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await storage.currentSchemaVersion(for: checkpointKitID)
             == CorpusIndexStateStore.schemaDeclaration.version)
 
@@ -165,9 +167,9 @@ struct IndexCompositionColumnDropMigrationTests {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_5)
         let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(first.format == .v1_6)
+        #expect(first.format == .current)
         let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(second.format == .v1_6)
+        #expect(second.format == .current)
         #expect(second.migrated == false)
 
         let report = try await kit.runIndexCompositionColumnDropMigration(handle: handle, now: testNow)
@@ -192,7 +194,7 @@ struct IndexCompositionColumnDropMigrationTests {
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(prep.migrationState == nil)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_6)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await storage.currentSchemaVersion(for: checkpointKitID) == 0)
     }
 
@@ -227,7 +229,7 @@ struct IndexCompositionColumnDropMigrationTests {
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_6)
+        #expect(prep.format == .current)
         let row = try await checkpointRow(storage)
         #expect(row["composition_policy"] == nil)
         #expect(row["content_id"] == .text("content-1"))
@@ -244,7 +246,7 @@ struct IndexCompositionColumnDropMigrationTests {
         await storage.close()
     }
 
-    // MARK: §6 Chain from v1_4 ends at v1_6
+    // MARK: §6 Chain from v1_4 ends at current
 
     #if GLK_MIGRATION_V1_4_TO_V1_5
     @Test
@@ -252,8 +254,8 @@ struct IndexCompositionColumnDropMigrationTests {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_4)
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_6)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_6)
+        #expect(prep.format == .current)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await checkpointRow(storage)["composition_policy"] == nil)
     }
     #endif
