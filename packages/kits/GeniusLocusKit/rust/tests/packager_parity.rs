@@ -25,8 +25,9 @@ use genius_locus_kit::packager::{
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, RecallEvidencePath, RecallFallbackPolicy,
-    RecallHit, RecallOrigin, RecallPlan, RecallScoreVector, RecallUnionProfile, RecallWeights,
+    RecallHit, RecallOrigin, RecallPlan, RecallScoreVector, RecallWeights,
 };
+use genius_locus_kit::span_rerank::SpanRerankHit;
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::RecallFrame;
 
@@ -56,7 +57,6 @@ struct Pin {
     id: String,
     mode: String,
     composed_answer: Option<String>,
-    signal_agreement: f32,
     hits: Vec<HitFixture>,
     expected: ExpectedFixture,
 }
@@ -65,7 +65,12 @@ struct Pin {
 struct HitFixture {
     id: String,
     final_score: f32,
-    dense_score: f32,
+    /// Cosine of the best span under the active encoder (span rerank evidence).
+    /// Null when the stage did not score this hit.
+    span_cosine: Option<f32>,
+    /// 1-based rank of this hit in the lexical head the span stage read.
+    /// Null when the stage did not score this hit.
+    lexical_rank: Option<usize>,
     drawer_content: Option<String>,
 }
 
@@ -104,10 +109,27 @@ fn fixture_plan() -> RecallPlan {
 }
 
 /// Build a RecallHit from fixture values.
+///
+/// Attaches a SpanRerankHit when span_cosine and lexical_rank are both
+/// present (bestSpanIndex/Start/End are zeroed; the packager reads only
+/// cosine and bm25_rank). score.dense stays 0 — the packager's m3 now reads
+/// span cosines, not the dense-lane score column. union_profile is left None
+/// for the same reason (m2 now reads the span order, not signal_agreement).
 fn make_hit(hf: &HitFixture) -> RecallHit {
     let drawer = hf.drawer_content.as_deref().map(|content| {
         Drawer::new(&hf.id, content, "test-wing-id", "packager-parity-test", 0, "test-model-v1")
     });
+    let span_hit = match (hf.span_cosine, hf.lexical_rank) {
+        (Some(cosine), Some(bm25_rank)) => Some(SpanRerankHit {
+            item_id: hf.id.clone(),
+            best_span_index: 0,
+            best_span_start: 0,
+            best_span_end: 0,
+            cosine,
+            bm25_rank,
+        }),
+        _ => None,
+    };
     RecallHit {
         id: hf.id.clone(),
         drawer,
@@ -123,31 +145,21 @@ fn make_hit(hf: &HitFixture) -> RecallHit {
             preference: 0.0,
             redundancy_penalty: 0.0,
             final_score: hf.final_score,
-            dense: hf.dense_score,
+            dense: 0.0,
         },
         explanation: vec![],
-        span_hit: None,
+        span_hit,
     }
 }
 
-/// Build a GLKRecallResult from fixture hits and signal_agreement.
-fn make_result(hits: Vec<RecallHit>, signal_agreement: f32) -> GLKRecallResult {
-    let union_profile = if signal_agreement > 0.0 {
-        Some(RecallUnionProfile {
-            locus_sharpness: 0.5,
-            bm25_sharpness: 0.0,
-            vector_sharpness: 0.0,
-            signal_agreement,
-            redundancy: 0.0,
-            matrix_coherence: 0.0,
-        })
-    } else {
-        None
-    };
+/// Build a GLKRecallResult from fixture hits.
+///
+/// union_profile is None: m2 now reads the span order, not signal_agreement.
+fn make_result(hits: Vec<RecallHit>) -> GLKRecallResult {
     GLKRecallResult {
         request: fixture_request(),
         plan: fixture_plan(),
-        union_profile,
+        union_profile: None,
         hits,
         dense_lane_status: None,
         degraded_stages: vec![],
@@ -219,7 +231,7 @@ fn packager_golden_pins_match_swift_twin() {
 
     for pin in &fixture.pins {
         let hits: Vec<RecallHit> = pin.hits.iter().map(make_hit).collect();
-        let result = make_result(hits, pin.signal_agreement);
+        let result = make_result(hits);
         let mode = parse_mode(&pin.mode);
         let composed = pin.composed_answer.as_deref();
 
@@ -285,23 +297,30 @@ fn packager_golden_pins_match_swift_twin() {
 /// Seven hits, two of them unhydrated (a tombstoned row the lane still
 /// scored). The block's citation ids are the first five hits filtered to
 /// the hydrated ones, exactly Swift `hits.prefix(5).compactMap { $0.drawer?.id }`.
+///
+/// Span evidence: lexical rank order matches span cosine order for all hits,
+/// so footrule = 0, m2 = 1.0 >= t2. m3 = stddev of 5 cosines > t3_prime.
+/// m1 = (0.90-0.30)/0.90 ≈ 0.67 >= t1. m4 = true. -> CONFIDENT.
 #[test]
 fn citations_are_the_first_five_hydrated_hits() {
     let content = "fruit banana mango recall content test paragraph information";
-    // Top margin (0.90 → 0.30) clears t1; the tail steps down by 0.05.
+    // Top margin (0.90 -> 0.30) clears t1; the tail steps down by 0.05.
+    // Span cosines decrease with rank so span order == lexical order (m2 = 1.0).
+    let cosines = [0.90f32, 0.70, 0.60, 0.40, 0.30, 0.20, 0.10];
     let fixtures: Vec<HitFixture> = (0..7)
         .map(|i| {
             let score = if i == 0 { 0.90 } else { 0.30 - 0.05 * (i - 1) as f32 };
             HitFixture {
                 id: format!("h-{i}"),
                 final_score: score,
-                dense_score: score,
+                span_cosine: Some(cosines[i]),
+                lexical_rank: Some(i + 1),
                 drawer_content: if i == 1 || i == 3 { None } else { Some(content.to_string()) },
             }
         })
         .collect();
     let hits: Vec<RecallHit> = fixtures.iter().map(make_hit).collect();
-    let result = make_result(hits, 0.80);
+    let result = make_result(hits);
     let packaged = GLKResultsPackager::new().package(
         &result,
         PackagerAnswerMode::Auto,
@@ -317,15 +336,32 @@ fn citations_are_the_first_five_hydrated_hits() {
 /// false (Swift's guard), so the gate can reach INTERMEDIATE but never
 /// CONFIDENT, whatever the margins say. The Rust product path passes no
 /// answer, which is why this rule decides its ceiling.
+///
+/// Span evidence: h-0(cos=0.90,rank=1), h-1(cos=0.50,rank=2). Lexical and span
+/// orders agree, footrule=0, m2=1.0>=t2. m3=stddev(0.90,0.50)=0.20>=t3_prime.
+/// m1=(0.90-0.30)/0.90=0.67>=t1. With answer: m4=true->CONFIDENT.
+/// Without answer: m4=false->INTERMEDIATE.
 #[test]
 fn auto_with_no_answer_text_never_reaches_confident() {
     let content = "fruit banana mango recall content test paragraph information";
     let fixtures = vec![
-        HitFixture { id: "h-0".into(), final_score: 0.90, dense_score: 0.90, drawer_content: Some(content.into()) },
-        HitFixture { id: "h-1".into(), final_score: 0.30, dense_score: 0.50, drawer_content: Some(content.into()) },
+        HitFixture {
+            id: "h-0".into(),
+            final_score: 0.90,
+            span_cosine: Some(0.90),
+            lexical_rank: Some(1),
+            drawer_content: Some(content.into()),
+        },
+        HitFixture {
+            id: "h-1".into(),
+            final_score: 0.30,
+            span_cosine: Some(0.50),
+            lexical_rank: Some(2),
+            drawer_content: Some(content.into()),
+        },
     ];
     let hits: Vec<RecallHit> = fixtures.iter().map(make_hit).collect();
-    let result = make_result(hits, 0.80);
+    let result = make_result(hits);
     let packager = GLKResultsPackager::new();
     let with_answer = packager.package(
         &result,
