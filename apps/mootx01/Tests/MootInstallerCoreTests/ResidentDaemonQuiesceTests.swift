@@ -37,7 +37,9 @@ private final class DaemonRecorder: @unchecked Sendable {
 struct ResidentDaemonQuiesceTests {
 
     private let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-    private var resident: URL { MootPaths.residentDataDirectory(homeDirectory: home) }
+    /// The daemon's directory as a registration with no override names it.
+    private var resident: URL { MootPaths.resolveDataDirectory(environment: [:], homeDirectory: home) }
+    private var registered: MootPaths.ResidentDataDirectory { .directory(resident) }
     private var scratch: URL {
         MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": "/Users/test/Library/Application Support/com.mootx01.ce-bench"],
@@ -49,7 +51,7 @@ struct ResidentDaemonQuiesceTests {
         let daemon = DaemonRecorder(running: true)
         var ran = false
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: scratch, residentDataDirectory: resident,
+            dataDirectory: scratch, residentDataDirectory: registered,
             step: "kg_facts identity backfill", daemon: daemon.control
         ) { ran = true; return true }
         #expect(result == true)
@@ -62,7 +64,7 @@ struct ResidentDaemonQuiesceTests {
         let daemon = DaemonRecorder(running: true)
         var order: [String] = []
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: resident,
+            dataDirectory: resident, residentDataDirectory: registered,
             step: "daemon stop restart test", daemon: daemon.control
         ) { order.append("work"); return true }
         #expect(result == true)
@@ -74,7 +76,7 @@ struct ResidentDaemonQuiesceTests {
     func failedWorkStillRestarts() async {
         let daemon = DaemonRecorder(running: true)
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: resident,
+            dataDirectory: resident, residentDataDirectory: registered,
             step: "shared-content reclaim", daemon: daemon.control
         ) { false }
         #expect(result == false)
@@ -85,7 +87,7 @@ struct ResidentDaemonQuiesceTests {
     func residentEstateWithDaemonDownNeverStartsOne() async {
         let daemon = DaemonRecorder(running: false)
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: resident,
+            dataDirectory: resident, residentDataDirectory: registered,
             step: "distilled representation convergence", daemon: daemon.control
         ) { true }
         #expect(result == true)
@@ -97,11 +99,47 @@ struct ResidentDaemonQuiesceTests {
         let daemon = DaemonRecorder(running: true, stopSucceeds: false)
         var ran = false
         let result: Bool? = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: resident,
+            dataDirectory: resident, residentDataDirectory: registered,
             step: "kg_facts identity backfill", daemon: daemon.control
         ) { ran = true; return true }
         #expect(result == nil)
         #expect(!ran)
         #expect(daemon.calls == ["isRunning", "stop"])
+    }
+
+    @Test("the registered override directory is the resident estate, not the platform default")
+    func registeredOverrideDirectoryIsQuiesced() async {
+        // `mootx01 install` run with MOOTX01_DATA_DIR=<scratch> registers the
+        // daemon over scratch. An upgrade step on scratch quiesces; a step
+        // on the platform default (an estate the daemon never opened) does not.
+        let registered = MootPaths.ResidentDataDirectory.directory(scratch)
+        let onScratch = DaemonRecorder(running: true)
+        let scratchResult = await ResidentDaemonQuiesce.run(
+            dataDirectory: scratch, residentDataDirectory: registered,
+            step: "schema upgrade", daemon: onScratch.control
+        ) { true }
+        #expect(scratchResult == true)
+        #expect(onScratch.calls == ["isRunning", "stop", "start"])
+
+        let onDefault = DaemonRecorder(running: true)
+        let defaultResult = await ResidentDaemonQuiesce.run(
+            dataDirectory: resident, residentDataDirectory: registered,
+            step: "schema upgrade", daemon: onDefault.control
+        ) { true }
+        #expect(defaultResult == true)
+        #expect(onDefault.calls.isEmpty)
+    }
+
+    @Test("an unreadable registration quiesces the daemon for any estate")
+    func unreadableRegistrationQuiescesEveryEstate() async {
+        let unreadable = MootPaths.ResidentDataDirectory.unreadableRegistration(
+            MootPaths.daemonPlistURL(homeDirectory: home))
+        let daemon = DaemonRecorder(running: true)
+        let result = await ResidentDaemonQuiesce.run(
+            dataDirectory: scratch, residentDataDirectory: unreadable,
+            step: "kg_facts identity backfill", daemon: daemon.control
+        ) { true }
+        #expect(result == true)
+        #expect(daemon.calls == ["isRunning", "stop", "start"])
     }
 }

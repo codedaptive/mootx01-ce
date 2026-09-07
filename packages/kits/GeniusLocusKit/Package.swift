@@ -223,6 +223,9 @@ let package = Package(
             dependencies: [
                 "GeniusLocusKit",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
+                // The capsule reads the VectorKit→SynapseKit ledger rename pair
+                // from SynapseKit's kitID/formerKitIDs constants (one source).
+                .product(name: "SynapseKit", package: "SynapseKit"),
             ],
             path: "Sources/GLKMigrationV1_4ToV1_5",
             swiftSettings: [

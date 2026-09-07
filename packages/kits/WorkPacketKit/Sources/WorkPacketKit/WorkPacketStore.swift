@@ -18,6 +18,15 @@ import LocusKit
 //   dropped silently. LineageGraph traces antecedents via JSON, not tunnels.
 //   A future reconciliation pass can re-file missing tunnels from the JSON.
 //
+// Read gate (fetch / fetchAdmissibleDrawers):
+//   By-id reads run through the estate's frame filter pipeline with the same
+//   chain `list` uses (`.currentlyBelieve`, the store's wing, the packets
+//   room) plus an optional sensitivity ceiling supplied by the caller (an
+//   ARIA grant ledger lifts it; absent, BitmapEvaluator's `.elevated` default
+//   applies). Rows whose PROVENANCE sensitivity is Restricted/Secret are then
+//   dropped unconditionally — that axis is not lifted by any ceiling. A gated
+//   row reads as absent (`nil` / omitted), never as "exists but hidden".
+//
 // All persistence routes through WorkPacketEstateClient — no direct SQL.
 
 // MARK: - WorkPacketStore
@@ -125,13 +134,54 @@ public actor WorkPacketStore {
 
     // MARK: - fetch
 
-    /// Fetch and decode a single work packet by its drawer ID.
+    /// Fetch and decode a single work packet by its drawer ID through the
+    /// read gate (file header).
     ///
-    /// Returns `nil` when no drawer with that ID exists in the estate.
-    public func fetch(drawerID: String) async throws -> WorkPacket? {
-        let drawers = try await client.getDrawers(ids: [drawerID])
-        guard let drawer = drawers.first else { return nil }
+    /// Returns `nil` when no drawer with that ID exists in the estate AND
+    /// when a drawer exists but fails the gate — the two cases are
+    /// deliberately indistinguishable so an id is not an existence oracle.
+    ///
+    /// - Parameters:
+    ///   - drawerID: estate drawer ID (as returned by `store`).
+    ///   - ceiling: optional `Filter.sensitivityAtMost` the caller is entitled
+    ///     to. `nil` leaves the estate's default ceiling (`.elevated`) in force.
+    public func fetch(drawerID: String, ceiling: Filter? = nil) async throws -> WorkPacket? {
+        guard let drawer = try await fetchAdmissibleDrawers(ids: [drawerID], ceiling: ceiling).first else {
+            return nil
+        }
         return try decodePacket(from: drawer)
+    }
+
+    /// Batch by-id read through the read gate. Returns the drawers among `ids`
+    /// that pass the frame filter (`.currentlyBelieve`, this store's wing, the
+    /// packets room, the sensitivity ceiling) and whose provenance sensitivity
+    /// is below Restricted. Ids that do not exist or fail the gate are simply
+    /// absent from the result. Order is the estate's; callers needing a
+    /// particular order re-sort by id.
+    ///
+    /// - Parameters:
+    ///   - ids: estate drawer IDs to load.
+    ///   - ceiling: optional `Filter.sensitivityAtMost` the caller is entitled
+    ///     to. `nil` leaves the estate's default ceiling (`.elevated`) in force.
+    public func fetchAdmissibleDrawers(ids: [String], ceiling: Filter? = nil) async throws -> [Drawer] {
+        guard !ids.isEmpty else { return [] }
+        // SECURITY: same chain as `list` so a by-id read can never see a row
+        // that a listing would not. `ceiling` is the only caller-controlled
+        // element; when absent BitmapEvaluator inserts `.sensitivityAtMost(.elevated)`.
+        var chain: [Filter] = [.currentlyBelieve, .inWing(wing), .inRoom(WorkPacketStore.room)]
+        if let ceiling { chain.append(ceiling) }
+        let frame = RecallFrame(filterChain: chain, hydrationLevel: .full)
+        let admissible = try await client.getDrawers(ids: ids, matchingFrame: frame)
+        // SECURITY: provenance sensitivity (bits 30-35, `Drawer.sensitivity`) is
+        // the capture-time access posture; Restricted/Secret bodies are never
+        // returned verbatim regardless of the adjective ceiling — the grant
+        // ledger lifts the adjective axis only. Mirrors moot_memory_get.
+        return admissible.filter { drawer in
+            switch drawer.sensitivity {
+            case .restricted, .secret: return false
+            case .normal, .elevated: return true
+            }
+        }
     }
 
     // MARK: - list

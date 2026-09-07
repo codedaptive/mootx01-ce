@@ -571,9 +571,12 @@ public struct ToolDispatcher: Sendable {
             } else if PacketTools.isPacketTool(name) {
                 // Agentic work-packet tools (FAB5-I2): file, get, list, lineage.
                 // Packets are structuredJSON drawers; PacketTools wraps WorkPacketKit.
+                // The grant ledger rides along so the by-id readers (get, lineage)
+                // apply the same sensitivity ceiling moot_memory_get does.
                 runnerResult = try await PacketTools.dispatch(
                     name: name, args: args, kit: kit,
                     resolveHandle: resolveHandle,
+                    sensitivityUnlockLedger: sensitivityUnlockLedger,
                     now: now)
             } else if InterfaceTools.isInterfaceTool(name) {
                 // Five-tier AI-client interface tools dispatched by name.
