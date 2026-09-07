@@ -457,6 +457,46 @@ public actor VectorStore {
 
     // MARK: - Schema declaration (version 6)
 
+    /// The kit id this store's schema-version ledger row is keyed by. The
+    /// single source for `schemaDeclaration.kitID`; `formerKitIDs` lists the
+    /// ids that row carried under earlier names of the kit.
+    public static let kitID = "SynapseKit"
+
+    /// Kit ids this store's ledger row carried before `kitID`, oldest first.
+    /// The vector tier was renamed VectorKit → SynapseKit (the old name
+    /// collided with Apple's MapKit VectorKit framework); every populated
+    /// estate opened under the old name still keys its ledger row by it.
+    /// `prepareSchemaLedger(storage:)` moves such a row to `kitID`, and the
+    /// GeniusLocusKit 1.4 → 1.5 capsule reads its pair from here so there is
+    /// one source of the rename.
+    public static let formerKitIDs: [String] = ["VectorKit"]
+
+    /// Move this store's schema-version ledger row from any id in
+    /// `formerKitIDs` to `kitID` before `storage.migrate(to: schemaDeclaration)`.
+    ///
+    /// SECURITY: an absent ledger row under `kitID` makes `migrate(to:)` treat
+    /// a populated estate as version 0 and replay the whole ladder against the
+    /// current layout; the v5→v6 step rebuilds `vectors` through a copy table
+    /// that folds every row's `generation` to 0 (darkening a swapped estate's
+    /// recall) and fails outright when a serving and a shadow row share a key.
+    /// Calling this first keeps the ladder from running on a populated estate
+    /// that only changed its name. Outcomes per former id: `.renamed` moves
+    /// the row (version and applied-at kept); `.noRow` is a fresh estate or
+    /// one already carrying the current id, nothing changes; `.conflict`
+    /// (rows under both ids) leaves both rows in place, logs one warning
+    /// naming both ids and versions, and returns normally — the estate stays
+    /// openable, and the following `migrate(to:)` reads the ladder position
+    /// from the current-id row, so nothing replays. Same policy as the
+    /// GeniusLocusKit 1.4 → 1.5 capsule; the operator resolves the duplicate.
+    ///
+    /// - Parameter storage: The estate storage the store will open on.
+    /// - Throws: `SynapseKitError.storeUnavailable` when the rename call
+    ///   itself fails (storage error). A conflicted ledger does not throw.
+    public static func prepareSchemaLedger(storage: any Storage) async throws {
+        try await SchemaLedgerPreparation.moveFormerRows(
+            on: storage, from: formerKitIDs, to: kitID)
+    }
+
     /// Schema declaration consumed by Storage.open(schema:).
     ///
     /// Column changes from v1:
@@ -501,7 +541,7 @@ public actor VectorStore {
     ///     Combined with `columns:` projection, this also enables an
     ///     index-only covering scan — payload blobs never read from disk.
     public static let schemaDeclaration = SchemaDeclaration(
-        kitID: "SynapseKit",
+        kitID: kitID,
         version: 6,
         tables: [
             // v6: `generation INTEGER NOT NULL DEFAULT 0` column added.
@@ -4290,5 +4330,51 @@ public actor VectorStore {
         let all = [unknownClause] + perModelClauses
         // Fold all clauses into a single OR.
         return .or(all)
+    }
+}
+
+// MARK: - Schema-ledger preparation (shared by VectorStore and VectorRepresentationClaims)
+
+/// Moves a kit's schema-version ledger row from its former ids to its current
+/// id through `Storage.renameSchemaKit(from:to:)` (PERSISTENCEKIT_SPEC I-7a).
+/// One implementation for both SynapseKit ledger rows (`VectorStore` and
+/// `VectorRepresentationClaims`) so the two never drift on what a conflict
+/// means. Rust twin: `synapsekit::vector_store::prepare_schema_ledger_for`.
+enum SchemaLedgerPreparation {
+
+    /// Kit-level logger for the ledger preparation. The enum has no instance,
+    /// so it cannot share `VectorStore`'s per-store logger; the category is
+    /// the kit's, matching the other module-level loggers in SynapseKit.
+    private static let log = Logger(subsystem: "com.mootx01.kit", category: "SynapseKit")
+
+    /// Rename the ledger row under each id in `formerKitIDs` to `kitID`.
+    ///
+    /// SAFETY: `.conflict` is a warning, not a refusal. Rows under both a
+    /// former id and the current id mean a runtime already opened the estate
+    /// under the new id without the rename (the replay this preparation
+    /// prevents), or the old row was restored by hand. Both rows stay in
+    /// place, one warning names them, and the caller's `migrate(to:)` runs
+    /// under the current id — whose row already records the ladder position,
+    /// so no step replays. Refusing here would take away access to an
+    /// estate's existing data; the GeniusLocusKit 1.4 → 1.5 capsule applies
+    /// the same warn-and-leave-rows policy. Only a failed rename call throws.
+    static func moveFormerRows(
+        on storage: any Storage, from formerKitIDs: [String], to kitID: String
+    ) async throws {
+        for formerKitID in formerKitIDs {
+            let outcome: SchemaKitRenameOutcome
+            do {
+                outcome = try await storage.renameSchemaKit(from: formerKitID, to: kitID)
+            } catch {
+                throw SynapseKitError.storeUnavailable(
+                    "schema-version ledger rename \(formerKitID) → \(kitID) failed: \(error)")
+            }
+            switch outcome {
+            case .renamed, .noRow:
+                continue
+            case let .conflict(oldVersion, newVersion):
+                log.warning("schema-version ledger carries rows under both \(formerKitID, privacy: .public) (v\(oldVersion)) and \(kitID, privacy: .public) (v\(newVersion)); both left in place, migrating under \(kitID, privacy: .public)")
+            }
+        }
     }
 }
