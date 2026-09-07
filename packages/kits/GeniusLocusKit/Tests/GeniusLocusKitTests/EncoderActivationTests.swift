@@ -142,8 +142,11 @@ struct EncoderActivationEstateTests {
         // The ensemble is the default dense ensemble exactly — Random Indexing
         // alone while the dense families are dark (contract sheet §13) — and
         // the encoder is never a member of it.
-        #if MOOTX01_DENSE_FAMILIES
+        #if MOOTX01_LSA
         #expect(modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
+                "the encoder is never an ensemble member, got \(modelIDs)")
+        #elseif MOOTX01_DENSE_FAMILIES
+        #expect(modelIDs == ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"],
                 "the encoder is never an ensemble member, got \(modelIDs)")
         #else
         #expect(modelIDs == ["random-indexing-v1"],

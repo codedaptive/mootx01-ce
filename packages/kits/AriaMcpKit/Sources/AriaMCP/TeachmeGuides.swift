@@ -115,8 +115,8 @@ enum TeachmeGuides {
         A "(no subject)" row is subject debt — the memory predates subjects;
         judge it by its lattice coordinates or fetch it by id. A
         discrimination line appears ONLY when the ranking is not clear
-        (low/medium); a recall_provenance line appears ONLY when the dense
-        lane was dark or stages degraded. Silence means nominal.
+        (low/medium); a degradation line appears ONLY when a stage was
+        skipped. Silence means nominal.
 
         Common mistakes:
           - Using a query over 200 chars. Queries work best as keywords or a
@@ -1256,9 +1256,9 @@ enum TeachmeGuides {
         after an import: keyword (exact-term) and structured (wing/room) recall
         work almost immediately, but full SEMANTIC / vector recall (meaning-based
         RAG search) is available only AFTER the basis retrain finishes. A
-        just-imported term that appears only in a later chunk batch reads
-        dense_lane:dark:vocabMiss until the retrain republishes the basis with
-        the full vocabulary. So on a fresh import be patient: poll
+        just-imported term that appears only in a later chunk batch is
+        reachable by keyword only until the retrain republishes the basis
+        with the full vocabulary. So on a fresh import be patient: poll
         moot_drain_status until idle before relying on semantic search over the
         imported memories, and tell the user that deep meaning-based recall over
         a fresh import becomes available shortly after import (tens of seconds to
@@ -1288,7 +1288,7 @@ enum TeachmeGuides {
         Common mistakes:
           - Reporting recall fully ready the instant the import returns —
             encoding runs in the BACKGROUND after the call; poll
-            moot_drain_status until idle before trusting dense recall.
+            moot_drain_status until idle before trusting semantic recall.
           - Telling the user to run moot_reindex / moot_dream as a required
             step — the import already triggers indexing; they are re-trigger
             tools, not a required follow-up.

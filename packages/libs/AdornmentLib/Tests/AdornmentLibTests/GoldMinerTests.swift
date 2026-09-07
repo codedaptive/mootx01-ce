@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // GoldMinerTests.swift — engine-plug contract tests for the resident
 // gold miner (ADORNMENTLIB_SPEC 0.5.0 § Gold miner).
 //
@@ -114,3 +115,4 @@ struct GoldMinerTests {
     #endif
 
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

@@ -104,6 +104,12 @@ fn reduction_is_rank_identical_to_swift() {
     let candidates: Vec<ReductionCandidate> = fixture.candidates.iter().map(candidate).collect();
 
     for case in &fixture.cases {
+        // Compositions gated out of this build (`dense-fused` without the
+        // `whole-record-dense` feature) fall back to the default composition in
+        // `named`, which would compare the wrong recipe; skip them instead.
+        if !neuron_kit::composition_grid::is_known(&case.composition) {
+            continue;
+        }
         let comp = named_composition(Some(&case.composition));
         let query = ReductionQuery::new(case.query.clone());
         let ranked = reduce(&comp, &query, &candidates, case.limit);

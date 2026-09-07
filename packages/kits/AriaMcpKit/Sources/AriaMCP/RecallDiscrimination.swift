@@ -15,18 +15,17 @@
 //
 // ## Dense-lane dark cap (saturation discount)
 //
-// When the semantic vector lane (Lane D) is dark (the recall result carried
-// `denseLaneStatus != nil`) AND no span rerank stage is registered for the
-// estate, the ranking is lexical/BM25 only. With a registered span
-// rerank stage the encoder reorders the lexical head, so a dark dense lane no
-// longer means the ranking lacks a semantic signal; in that case the cap does
+// When no span rerank stage is registered for the estate, the ranking is
+// lexical/BM25 only: the span stage is the one dense provider in the product
+// (ruling 2026-09-07). With a registered stage the encoder reorders the
+// lexical head, so the ranking carries a semantic signal and the cap does
 // NOT fire.
 //
 // A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
 // contains the exact query token, others do not), but the relative-gap
 // classification alone overstates the signal when no semantic component
-// contributed: the saturation discount is missing. When the dense lane is
-// dark and no span rerank stage is registered, the result is capped at .medium
+// contributed: the saturation discount is missing. When no span rerank stage
+// is registered, the result is capped at .medium
 // and a caveat is appended to the result line so the calling AI knows the
 // ranking is lexical-only.
 //
@@ -118,10 +117,10 @@ public enum RecallDiscrimination {
     /// The wording is intentionally factual and action-oriented so the calling
     /// AI knows what to do, not just what the level is.
     ///
-    /// When `denseLaneDark` is `true` (the dense lane is dark AND no span rerank
-    /// stage is registered, per `denseLaneDark(status:spanRerankRegistered:)`), a
-    /// `.high` level is capped to `.medium` and a caveat is appended so the
-    /// calling AI knows the ranking is lexical-only.
+    /// When `denseLaneDark` is `true` (no span rerank stage is registered, per
+    /// `denseLaneDark(spanRerankRegistered:)`), a `.high` level is capped to
+    /// `.medium` and a caveat is appended so the calling AI knows the ranking
+    /// is lexical-only.
     /// Parity: the same cap and caveat are applied in `recall_discrimination.rs`.
     public static func resultLine(
         for level: DiscriminationLevel,
@@ -176,13 +175,13 @@ public enum RecallDiscrimination {
     // MARK: - Dense-lane dark predicate
 
     /// Whether this ranking is lexical-only for the purposes of the
-    /// discrimination cap: the dense lane was dark for the query
-    /// (`GLKRecallResult.denseLaneStatus` is non-nil) AND the estate has no
-    /// span rerank stage registered (`GeniusLocusKit.isSpanRerankRegistered(for:)`).
-    /// With a rerank stage registered the encoder reorders the lexical head, so a
-    /// dark dense lane no longer means the ranking lacks a semantic signal.
+    /// discrimination cap: the estate has no span rerank stage registered
+    /// (`GeniusLocusKit.isSpanRerankRegistered(for:)`). The span stage is the
+    /// one dense provider in the product (ruling 2026-09-07), so its absence
+    /// is the whole predicate; with a stage registered the encoder reorders
+    /// the lexical head and the ranking carries a semantic signal.
     /// Parity: `recall_discrimination::dense_lane_dark`.
-    public static func denseLaneDark(status: String?, spanRerankRegistered: Bool) -> Bool {
-        status != nil && !spanRerankRegistered
+    public static func denseLaneDark(spanRerankRegistered: Bool) -> Bool {
+        !spanRerankRegistered
     }
 }

@@ -347,7 +347,7 @@ public extension GeniusLocusKit {
     /// `encoder_batch`, resolved here so the resident supplies only the
     /// handle and the clock. No VectorStore registered → nothing to write
     /// → 0. Returns the number of drawers encoded.
-    public func runSpanEncodeBatch(handle: EstateHandle, now: Date) async throws -> Int {
+    func runSpanEncodeBatch(handle: EstateHandle, now: Date) async throws -> Int {
         guard let store = vectorStores[handle] else { return 0 }
         let limit = await provisionedEncoderBatch(for: handle)
         return try await runSpanEncodeBatch(
