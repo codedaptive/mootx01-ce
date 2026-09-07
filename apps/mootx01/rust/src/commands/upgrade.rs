@@ -1364,16 +1364,19 @@ fn offer_estate_encryption_if_needed() {
 
     // The daemon seam: the platform control when this is the resident
     // estate, a no-op otherwise — a cloned estate is encrypted with the
-    // resident daemon left running over its own estate.
-    let resident = crate::core::paths::is_resident_estate(
-        &data,
-        &crate::core::paths::resident_data_dir(),
-    );
+    // resident daemon left running over its own estate. The resident
+    // directory comes from the daemon's service registration; an
+    // unreadable registration selects the platform control (SAFETY: the
+    // clone+swap never runs under a daemon that may hold this estate open).
+    let resident_dir = crate::core::paths::resident_data_dir();
+    let resident = crate::core::paths::is_resident_estate(&data, &resident_dir);
     if !resident {
         println!(
             "  data directory {} is not the resident estate; daemon left running",
             data.display()
         );
+    } else if let Some(warning) = resident_dir.registration_warning(&data) {
+        println!("{warning}");
     }
     let daemon: &dyn DaemonControl = if resident { &PlatformDaemon } else { &NoDaemon };
 
@@ -1562,12 +1565,17 @@ impl DaemonControl for NoDaemon {
 /// operator sees why nothing restarted, then run `work`. The daemon serves a
 /// different estate and has no stake in this one.
 ///
+/// Unreadable registration (`ResidentDataDir::UnreadableRegistration`):
+/// print the registration warning, then proceed exactly as for the resident
+/// estate. SAFETY: an estate the daemon may hold open is never migrated
+/// under a running daemon.
+///
 /// Returns `work`'s result, or `None` when the daemon was running and would
 /// not stop — the step is skipped, nothing is half-done, and the next
 /// `mootx01 upgrade` retries. Twin of the Swift `ResidentDaemonQuiesce.run`.
 pub(crate) fn with_resident_daemon_quiesced<T>(
     data: &std::path::Path,
-    resident: &std::path::Path,
+    resident: &crate::core::paths::ResidentDataDir,
     step: &str,
     daemon: &dyn DaemonControl,
     work: impl FnOnce() -> T,
@@ -1578,6 +1586,9 @@ pub(crate) fn with_resident_daemon_quiesced<T>(
             data.display()
         );
         return Some(work());
+    }
+    if let Some(warning) = resident.registration_warning(data) {
+        println!("{warning}");
     }
     let was_running = daemon.is_running();
     if was_running && !daemon.stop() {
@@ -2405,6 +2416,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    use crate::core::paths::ResidentDataDir;
+
+    /// A resident directory (as a registration with no override names it)
+    /// and a scratch clone beside it.
     fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let resident = tmp.path().join("resident");
@@ -2416,6 +2431,10 @@ mod tests {
         (tmp, resident, scratch)
     }
 
+    fn registered(dir: &std::path::Path) -> ResidentDataDir {
+        ResidentDataDir::Directory(dir.to_path_buf())
+    }
+
     #[test]
     fn scratch_estate_runs_the_work_and_never_touches_the_daemon() {
         let (_tmp, resident, scratch) = resident_and_scratch();
@@ -2423,7 +2442,7 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let out = super::with_resident_daemon_quiesced(
             &scratch,
-            &resident,
+            &registered(&resident),
             "kg_facts identity backfill",
             &daemon,
             || {
@@ -2442,7 +2461,7 @@ mod tests {
         let daemon = RecordingDaemon::new(true, true);
         let out = super::with_resident_daemon_quiesced(
             &resident,
-            &resident,
+            &registered(&resident),
             "schema upgrade",
             &daemon,
             || true,
@@ -2457,7 +2476,7 @@ mod tests {
         let daemon = RecordingDaemon::new(true, true);
         let out = super::with_resident_daemon_quiesced(
             &resident,
-            &resident,
+            &registered(&resident),
             "shared-content reclaim",
             &daemon,
             || false,
@@ -2472,7 +2491,7 @@ mod tests {
         let daemon = RecordingDaemon::new(false, true);
         let out = super::with_resident_daemon_quiesced(
             &resident,
-            &resident,
+            &registered(&resident),
             "span encode",
             &daemon,
             || true,
@@ -2488,7 +2507,7 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let out = super::with_resident_daemon_quiesced(
             &resident,
-            &resident,
+            &registered(&resident),
             "kg_facts identity backfill",
             &daemon,
             || {
@@ -2510,12 +2529,60 @@ mod tests {
         let daemon = RecordingDaemon::new(true, true);
         let out = super::with_resident_daemon_quiesced(
             &link,
-            &resident,
+            &registered(&resident),
             "corpus-counts migration",
             &daemon,
             || (),
         );
         assert_eq!(out, Some(()));
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+    }
+
+    #[test]
+    fn registered_override_directory_is_quiesced_not_the_platform_default() {
+        // `mootx01 install` run with MOOTX01_DATA_DIR=<scratch> registers the
+        // daemon over scratch. An upgrade step on scratch quiesces; a step on
+        // the platform default (an estate the daemon never opened) does not.
+        let (_tmp, resident, scratch) = resident_and_scratch();
+        let registration = registered(&scratch);
+        let on_scratch = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &scratch,
+            &registration,
+            "schema upgrade",
+            &on_scratch,
+            || true,
+        );
+        assert_eq!(out, Some(true));
+        assert_eq!(on_scratch.calls(), vec!["is_running", "stop", "start"]);
+
+        let on_default = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &resident,
+            &registration,
+            "schema upgrade",
+            &on_default,
+            || true,
+        );
+        assert_eq!(out, Some(true));
+        assert!(on_default.calls().is_empty());
+    }
+
+    #[test]
+    fn unreadable_registration_quiesces_every_estate() {
+        let (_tmp, _resident, scratch) = resident_and_scratch();
+        let unreadable = ResidentDataDir::UnreadableRegistration(std::path::PathBuf::from(
+            "/home/u/.config/systemd/user/mootx01.service",
+        ));
+        let daemon = RecordingDaemon::new(true, true);
+        let out = super::with_resident_daemon_quiesced(
+            &scratch,
+            &unreadable,
+            "kg_facts identity backfill",
+            &daemon,
+            || true,
+        );
+        assert_eq!(out, Some(true));
         assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
     }
 

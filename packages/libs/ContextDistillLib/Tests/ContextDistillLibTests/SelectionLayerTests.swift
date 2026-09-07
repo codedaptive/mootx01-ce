@@ -117,3 +117,39 @@ func selectionConformance_blind200() throws {
         try assertSelectionConformance(row)
     }
 }
+
+// MARK: - sourceOccurrences guard tests (db238897)
+
+/// Regression guard: value longer than source must return [] without trapping.
+/// Pre-fix: the closed range `0 ... (n - valLen)` trapped when valLen > n
+/// because Int subtraction underflowed to a huge positive, producing a
+/// lowerBound > upperBound closed range — a Swift runtime trap.
+/// Same vector used in Rust test `test_source_occurrences_basic` plus the
+/// longer-than-source case added for db238897.
+@Test("sourceOccurrences — value longer than source returns empty (db238897 guard)")
+func sourceOccurrences_valueLongerThanSource() {
+    // Source: "Hi" (2 scalars); value: "Hello" (5 scalars) — valLen > n.
+    // Pre-fix code: `for i in 0 ... (2 - 5)` → runtime trap.
+    // Post-fix code: guard valLen <= n → returns [].
+    let scalars = Array("Hi".unicodeScalars)
+    let result = sourceOccurrences(scalars: scalars, value: "Hello")
+    #expect(result.isEmpty, "value longer than source must return [] not trap")
+}
+
+/// Regression guard: empty value must return [] (unchanged from before fix).
+@Test("sourceOccurrences — empty value returns empty (db238897 guard)")
+func sourceOccurrences_emptyValue() {
+    let scalars = Array("Hello world".unicodeScalars)
+    let result = sourceOccurrences(scalars: scalars, value: "")
+    #expect(result.isEmpty, "empty value must return []")
+}
+
+/// Parity with Rust test_source_occurrences_basic: "world" in "Hello world" → [(6,11)].
+@Test("sourceOccurrences — basic match parity with Rust oracle (db238897)")
+func sourceOccurrences_basicMatchParityRust() {
+    let scalars = Array("Hello world".unicodeScalars)
+    let result = sourceOccurrences(scalars: scalars, value: "world")
+    #expect(result.count == 1)
+    #expect(result[0].start == 6)
+    #expect(result[0].end == 11)
+}

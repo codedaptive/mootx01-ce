@@ -2078,6 +2078,57 @@ impl EstateCoordinator {
         self.span_encoders.get(handle).cloned()
     }
 
+    /// Model ids whose int8 span rows an erase must scrub for `handle`:
+    /// every `encoder_models` registry row (a model that was active earlier
+    /// in the estate's life may still own span rows for the drawer) plus the
+    /// encoder registered for this session. When the registry read fails or
+    /// the estate's storage is not retained, the registered encoder alone is
+    /// the source. Registry order (ascending model id) with the registered
+    /// id appended when absent, so both ports issue the same deletes in the
+    /// same order. Twin of Swift `encoderLaneModelIDs(for:)`.
+    pub(crate) fn encoder_lane_model_ids(&self, handle: &EstateHandle) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .storages
+            .get(handle)
+            .and_then(|storage| {
+                locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage))
+                    .all()
+                    .ok()
+            })
+            .map(|rows| rows.into_iter().map(|row| row.model_id).collect())
+            .unwrap_or_default();
+        if let Some(encoder) = self.span_encoders.get(handle) {
+            let registered = encoder.spec().model_id.clone();
+            if !ids.contains(&registered) {
+                ids.push(registered);
+            }
+        }
+        ids
+    }
+
+    /// Delete the span rows of `row_id` under every encoder lane of `handle`
+    /// (`encoder_lane_model_ids`). Fail-closed: a delete failure surfaces as
+    /// `VerbError::CrossKitVectorDeleteFailed` naming the row and the lane,
+    /// so the caller seals the orphan audit instead of a success. Called by
+    /// `expunge` step 2 and by `run_expunge_integrity_sweep`. Twin of Swift
+    /// `scrubEncoderLanes(_:vectorStore:rowID:)`.
+    pub(crate) fn scrub_encoder_lanes(
+        &self,
+        handle: &EstateHandle,
+        vs: &VectorStore,
+        row_id: &str,
+    ) -> Result<(), VerbError> {
+        for model_id in self.encoder_lane_model_ids(handle) {
+            vs.delete_span_vectors(row_id, &model_id).map_err(|e| {
+                VerbError::CrossKitVectorDeleteFailed {
+                    row_id: row_id.to_string(),
+                    reason: format!("encoder lane {model_id} span delete failed: {e:?}"),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// Whether the span rerank stage is registered for `handle`: the encoder
     /// loaded and the estate's VectorStore was registered, so unionBest recall
     /// reranks the lexical head. False on an estate with no encoder, on a
@@ -6561,6 +6612,20 @@ impl EstateCoordinator {
                                 reason: format!("{:?}", e),
                             })
                         })?;
+                        // SECURITY: encoder-lane scrub (destruction contract,
+                        // GENIUSLOCUSKIT_SPEC §B-2a step 2). The span-encode
+                        // duty stores up to max_spans int8 span vectors per
+                        // drawer under the ENCODER's model id
+                        // (`<model>-w<window>`), which is neither the
+                        // distillation lane nor the corpus model id, so the
+                        // two deletes around this one never touch them.
+                        // Every registered encoder model id is scrubbed so no
+                        // content-derived span embedding, dequantisation
+                        // scale, word bound or content-version fingerprint
+                        // outlives the erase. Same fail-closed block: a
+                        // failure seals the orphan audit, never a success.
+                        self.scrub_encoder_lanes(handle, vs, delete_id)
+                            .map_err(VerbDispatchError::Verb)?;
                         if let Some(ref c) = corpus {
                             // For .glk estates: the standalone VectorStore's
                             // resident array must also be invalidated (it
@@ -6731,6 +6796,10 @@ impl EstateCoordinator {
     ///       * corpus.remove_content — scrubs BM25 + semantic-embedding index
     ///       * VectorStore.delete_all_vectors(distillation-features-v1) — scrubs
     ///         the structural fingerprint lane (unconditional on corpus presence)
+    ///       * VectorStore.delete_span_vectors(encoder model id) for every
+    ///         `encoder_models` registry id plus the registered encoder — scrubs
+    ///         the int8 span rows the span-encode duty wrote (unconditional on
+    ///         corpus presence)
     ///       * VectorStore.delete_all_vectors(corpus model id) — scrubs the
     ///         semantic embedding lane (requires corpus for model id)
     ///   - On success: seal a "tombstone" success audit (`seal_expunge_audit`).
@@ -6832,6 +6901,13 @@ impl EstateCoordinator {
                             e
                         )
                     })?;
+                    // SECURITY: encoder-lane scrub, same invariant as the live
+                    // expunge step 2 — the crash-window row's int8 span rows
+                    // live under the encoder model id(s), which neither the
+                    // distillation nor the corpus-model delete reaches.
+                    // Unconditional on the corpus handle.
+                    self.scrub_encoder_lanes(handle, vs, row_id)
+                        .map_err(|e| format!("{:?}", e))?;
                     if let Some(ref c) = corpus {
                         let model_id = c.model_id();
                         vs.delete_all_vectors(row_id, &model_id)
