@@ -181,24 +181,30 @@ struct ResidentEstateTests {
         return root
     }
 
-    @Test func residentDataDirectoryIsTheDefaultWithNoOverride() {
+    /// The platform-default directory under `home`, as the daemon serves it
+    /// when its registration carries no override.
+    private func platformDefault(_ home: URL) -> URL {
+        MootPaths.resolveDataDirectory(environment: [:], homeDirectory: home)
+    }
+
+    @Test func residentDataDirectoryIsTheDefaultWithNoRegistration() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         #expect(
-            MootPaths.residentDataDirectory(homeDirectory: home).path ==
-            "/Users/test/Library/Application Support/com.mootx01.ce"
+            MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: nil) ==
+            .directory(URL(fileURLWithPath: "/Users/test/Library/Application Support/com.mootx01.ce", isDirectory: true))
         )
     }
 
     @Test func residentDirectoryIsTheResidentEstate() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let resident = MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: nil)
         let resolved = MootPaths.resolveDataDirectory(environment: [:], homeDirectory: home)
         #expect(MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
     }
 
     @Test func dotSegmentsAndTrailingSeparatorDoNotDefeatThePredicate() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let resident = MootPaths.ResidentDataDirectory.directory(platformDefault(home))
         let spelled = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": "/Users/test/Library/./Application Support/com.mootx01.ce/"],
             homeDirectory: home)
@@ -208,19 +214,20 @@ struct ResidentEstateTests {
     @Test func symlinkToTheResidentDirectoryIsTheResidentEstate() throws {
         let root = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let resident = MootPaths.residentDataDirectory(homeDirectory: root)
+        let resident = platformDefault(root)
         try FileManager.default.createDirectory(at: resident, withIntermediateDirectories: true)
         let link = root.appendingPathComponent("estate-link", isDirectory: true)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: resident)
         let viaLink = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": link.path], homeDirectory: root)
-        #expect(MootPaths.isResidentEstate(dataDirectory: viaLink, residentDataDirectory: resident))
+        #expect(MootPaths.isResidentEstate(
+            dataDirectory: viaLink, residentDataDirectory: .directory(resident)))
     }
 
     @Test func siblingScratchDirectoryIsNotTheResidentEstate() throws {
         let root = try makeTempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let resident = MootPaths.residentDataDirectory(homeDirectory: root)
+        let resident = platformDefault(root)
         try FileManager.default.createDirectory(at: resident, withIntermediateDirectories: true)
         // A benchmark clone beside the resident directory: same parent,
         // same prefix, a different estate.
@@ -229,14 +236,114 @@ struct ResidentEstateTests {
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": scratch.path], homeDirectory: root)
-        #expect(!MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
+        #expect(!MootPaths.isResidentEstate(
+            dataDirectory: resolved, residentDataDirectory: .directory(resident)))
     }
 
     @Test func nonExistentScratchDirectoryIsNotTheResidentEstate() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resident = MootPaths.residentDataDirectory(homeDirectory: home)
+        let resident = MootPaths.ResidentDataDirectory.directory(platformDefault(home))
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": "/Volumes/scratch/bench-clone"], homeDirectory: home)
         #expect(!MootPaths.isResidentEstate(dataDirectory: resolved, residentDataDirectory: resident))
+    }
+
+    // MARK: - The resident directory comes from the daemon registration
+
+    /// The exact plist `mootx01 install` writes (`LaunchAgent.installDaemon`
+    /// → `makePlist`), with the environment it bakes in. What install
+    /// writes is what upgrade must read back.
+    private func installedDaemonPlist(environment: [String: String]) -> Data {
+        Data(LaunchAgent.makePlist(
+            label: MootPaths.daemonLabel,
+            programArguments: ["/Users/test/.mootx01/bin/mootx01", "serve"],
+            stdoutPath: "/Users/test/.mootx01/logs/out.log",
+            stderrPath: "/Users/test/.mootx01/logs/err.log",
+            environmentVariables: environment
+        ).utf8)
+    }
+
+    @Test("a registration that bakes MOOTX01_DATA_DIR=/x names /x as the resident directory")
+    func registrationWithOverrideNamesThatDirectory() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let plist = installedDaemonPlist(environment: [
+            "MOOTX01_HTTP_PORT": "4242",
+            "MOOTX01_DATA_DIR": "/x",
+        ])
+        let resident = MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: plist)
+        #expect(resident == .directory(URL(fileURLWithPath: "/x", isDirectory: true)))
+        // The daemon's estate is /x: a step on /x quiesces, a step on the
+        // platform default (an estate the daemon never opened) does not.
+        #expect(MootPaths.isResidentEstate(
+            dataDirectory: URL(fileURLWithPath: "/x", isDirectory: true), residentDataDirectory: resident))
+        #expect(!MootPaths.isResidentEstate(
+            dataDirectory: platformDefault(home), residentDataDirectory: resident))
+    }
+
+    @Test("a registration without MOOTX01_DATA_DIR means the platform default")
+    func registrationWithoutOverrideIsThePlatformDefault() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let noVariable = installedDaemonPlist(environment: ["MOOTX01_HTTP_PORT": "4242"])
+        #expect(MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: noVariable)
+                == .directory(platformDefault(home)))
+        let emptyVariable = installedDaemonPlist(environment: ["MOOTX01_DATA_DIR": ""])
+        #expect(MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: emptyVariable)
+                == .directory(platformDefault(home)))
+        let noEnvironmentBlock = installedDaemonPlist(environment: [:])
+        #expect(MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: noEnvironmentBlock)
+                == .directory(platformDefault(home)))
+    }
+
+    @Test("a registration that cannot be parsed makes every estate resident")
+    func unparsableRegistrationMakesEveryEstateResident() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let plistURL = MootPaths.daemonPlistURL(homeDirectory: home)
+        let garbage = Data("this is not a plist".utf8)
+        let resident = MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: garbage)
+        #expect(resident == .unreadableRegistration(plistURL))
+        #expect(MootPaths.isResidentEstate(
+            dataDirectory: URL(fileURLWithPath: "/Volumes/scratch/bench-clone", isDirectory: true),
+            residentDataDirectory: resident))
+        #expect(MootPaths.isResidentEstate(
+            dataDirectory: platformDefault(home), residentDataDirectory: resident))
+        #expect(resident.registrationWarning(for: platformDefault(home))?.contains(plistURL.path) == true)
+        // A file that exists but is empty is a registration we cannot read.
+        #expect(MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: Data())
+                == .unreadableRegistration(plistURL))
+        // A well-formed plist whose EnvironmentVariables is not a string
+        // dictionary is a registration we cannot read either.
+        let wrongShape = try? PropertyListSerialization.data(
+            fromPropertyList: ["Label": "x", "EnvironmentVariables": ["MOOTX01_DATA_DIR"]],
+            format: .xml, options: 0)
+        #expect(MootPaths.registeredResidentDataDirectory(homeDirectory: home, daemonPlist: wrongShape)
+                == .unreadableRegistration(plistURL))
+    }
+
+    @Test("residentDataDirectory reads the daemon plist under the home directory")
+    func residentDataDirectoryReadsThePlistOnDisk() throws {
+        let root = try makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plistURL = MootPaths.daemonPlistURL(homeDirectory: root)
+
+        // Absent: the platform default under this home.
+        #expect(MootPaths.residentDataDirectory(homeDirectory: root) == .directory(platformDefault(root)))
+
+        // Present with an override: the override, not the default. This is
+        // the install-with-MOOTX01_DATA_DIR then upgrade-with-the-same-override
+        // case: the step on the override directory must quiesce.
+        try FileManager.default.createDirectory(
+            at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let custom = root.appendingPathComponent("custom-estate", isDirectory: true)
+        try installedDaemonPlist(environment: ["MOOTX01_DATA_DIR": custom.path]).write(to: plistURL)
+        let registered = MootPaths.residentDataDirectory(homeDirectory: root)
+        #expect(registered == .directory(URL(fileURLWithPath: custom.path, isDirectory: true)))
+        #expect(MootPaths.isResidentEstate(dataDirectory: custom, residentDataDirectory: registered))
+        #expect(!MootPaths.isResidentEstate(dataDirectory: platformDefault(root), residentDataDirectory: registered))
+
+        // Present but unparsable: unreadable, and every estate is resident.
+        try Data("<plist".utf8).write(to: plistURL)
+        let unreadable = MootPaths.residentDataDirectory(homeDirectory: root)
+        #expect(unreadable == .unreadableRegistration(plistURL))
+        #expect(MootPaths.isResidentEstate(dataDirectory: platformDefault(root), residentDataDirectory: unreadable))
     }
 }

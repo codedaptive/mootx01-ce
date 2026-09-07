@@ -374,10 +374,13 @@ public func sourceOccurrences(
     scalars: [Unicode.Scalar],
     value: String
 ) -> [(start: Int, end: Int)] {
-    guard !value.isEmpty else { return [] }
     let valSc = Array(value.unicodeScalars)
     let valLen = valSc.count
     let n = scalars.count
+    // SECURITY: guard against closed-range trap (0 ... (n - valLen)) when valLen > n,
+    // and skip empty values. Mirrors the Rust guard at distiller.rs:125 exactly:
+    // `if vn == 0 || vn > n { return Vec::new(); }`
+    guard valLen > 0, valLen <= n else { return [] }
     var results: [(Int, Int)] = []
 
     // Case-insensitive comparison helper: compare two Unicode scalars ignoring ASCII case.

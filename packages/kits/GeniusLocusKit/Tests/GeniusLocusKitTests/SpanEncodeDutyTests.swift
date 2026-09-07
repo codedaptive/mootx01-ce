@@ -119,6 +119,29 @@ struct SpanEncodeDutyTests {
             guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
             entries[i] = (id: id, content: entries[i].content, indexed: false)
         }
+
+        // The drawer state the liveness recheck sees, when it differs from
+        // the pending snapshot: `.some(nil)` = erased (missing or
+        // tombstoned), `.some(text)` = rewritten. Drawers without an entry
+        // read back their snapshot content. `pendingSpanEncodeBatch`
+        // deliberately ignores this map: it models the snapshot taken
+        // BEFORE the erase or rewrite landed.
+        private var liveOverrides: [String: String?] = [:]
+
+        /// Erase `id` after the pending snapshot: the recheck sees no drawer.
+        func eraseAfterSnapshot(_ id: String) {
+            liveOverrides[id] = .some(nil)
+        }
+
+        /// Rewrite `id` after the pending snapshot: the recheck sees `content`.
+        func rewriteAfterSnapshot(_ id: String, content: String) {
+            liveOverrides[id] = .some(content)
+        }
+
+        func liveSpanEncodeContent(drawerID: String) async throws -> String? {
+            if let overridden = liveOverrides[drawerID] { return overridden }
+            return entries.first { $0.id == drawerID }?.content
+        }
     }
 
     // MARK: - Helpers
@@ -256,5 +279,65 @@ struct SpanEncodeDutyTests {
         // Bit 27 must be re-set on drawer-2.
         let bit27AfterReencode = await context.isIndexed("drawer-2")
         #expect(bit27AfterReencode, "bit 27 must be set again after re-encode")
+    }
+
+    // MARK: - Test 4: in-flight erase — no span write, bit 27 stays clear
+
+    /// Liveness recheck: a drawer erased between the pending read and the
+    /// span write gets NO span rows and keeps bit 27 clear; its four
+    /// untouched siblings are encoded. Pre-fix the duty wrote rows for all
+    /// five (an erased drawer's content-derived spans recreated after the
+    /// erase). Twin of Rust `in_flight_erase_skips_span_write_and_keeps_bit_clear`.
+    @Test("in-flight erase: the erased drawer gets no span write and bit 27 stays clear")
+    func inFlightEraseSkipsSpanWrite() async throws {
+        let context = FakeContext(items: fiveItems())
+        await context.eraseAfterSnapshot("drawer-2")
+        let writer = FakeWriter()
+        let encoder = FakeEncoder(windowWords: 3, maxSpans: 4)
+
+        let result = try await SpanEncodeDuty._encodeBatch(
+            context: context, encoder: encoder, writer: writer, limit: 64, now: t0)
+
+        #expect(result.encoded == 4, "the four live drawers are encoded")
+        #expect(result.skipped == 1, "the erased drawer is skipped, not failed")
+        #expect(result.failed == 0)
+        let callCount = await writer.callCount()
+        #expect(callCount == 4, "no span write for the erased drawer")
+        let erasedSpans = await writer.spanCount(for: "drawer-2")
+        #expect(erasedSpans == 0, "drawer-2 must have no span rows written")
+        let indexed = await context.isIndexed("drawer-2")
+        #expect(!indexed, "bit 27 stays clear on drawer-2")
+    }
+
+    // MARK: - Test 5: in-flight rewrite — stale spans are not written
+
+    /// Liveness recheck: a drawer rewritten between the pending read and the
+    /// span write gets no rows from the STALE text and keeps bit 27 clear
+    /// (the next pump encodes the current text). Pre-fix the duty wrote the
+    /// old text's spans and set bit 27, freezing a stale span set under a
+    /// content version the drawer no longer has. Twin of Rust
+    /// `in_flight_rewrite_skips_stale_span_write`.
+    @Test("in-flight rewrite: the stale span set is not written and bit 27 stays clear")
+    func inFlightRewriteSkipsSpanWrite() async throws {
+        let context = FakeContext(items: [
+            (id: "drawer-1", content: "alpha beta gamma delta epsilon zeta"),
+            (id: "drawer-2", content: "one two three four five six seven"),
+        ])
+        await context.rewriteAfterSnapshot("drawer-2", content: "entirely different words now here")
+        let writer = FakeWriter()
+        let encoder = FakeEncoder(windowWords: 3, maxSpans: 4)
+
+        let result = try await SpanEncodeDuty._encodeBatch(
+            context: context, encoder: encoder, writer: writer, limit: 64, now: t0)
+
+        #expect(result.encoded == 1)
+        #expect(result.skipped == 1, "the rewritten drawer is skipped this pump")
+        #expect(result.failed == 0)
+        let callCount = await writer.callCount()
+        #expect(callCount == 1)
+        let staleSpans = await writer.spanCount(for: "drawer-2")
+        #expect(staleSpans == 0, "drawer-2 must not receive the stale span set")
+        let indexed = await context.isIndexed("drawer-2")
+        #expect(!indexed, "bit 27 stays clear on drawer-2")
     }
 }
