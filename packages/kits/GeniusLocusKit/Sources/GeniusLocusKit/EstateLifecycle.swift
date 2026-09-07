@@ -190,8 +190,9 @@ public extension GeniusLocusKit {
 
         // Step 2a: a fresh estate is born with the span encoder as its default
         // recall stage. Written BEFORE wiring so this same open activates it
-        // (wireSubstores reads the key). LocusOnly estates have no Corpus, so
-        // there is nothing to activate.
+        // (wireSubstores reads the key, and activation seeds the encoder_models
+        // row so the first open finds an active row without an upgrade run).
+        // LocusOnly estates have no Corpus, so there is nothing to activate.
         if params.kind != .locusOnly {
             do {
                 try await provisionDefaultEncoderIfAbsent(for: handle)
@@ -506,8 +507,10 @@ public extension GeniusLocusKit {
             let vectorStore = await corpus.sharedVectorStore
             registerVectorStore(vectorStore, for: handle)
             // Span encoder activation runs AFTER the VectorStore is registered:
-            // `activateSpanEncoder` registers the rerank stage only when it can
-            // find the estate's store (the span rows live there), so activating
+            // `activateSpanEncoder` first seeds the encoder_models row when the
+            // registry is empty (ruling 2026-09-04: seeding belongs to provision
+            // and serve, not upgrade), then registers the rerank stage only when it
+            // can find the estate's store (the span rows live there). Activating
             // inside `applyProvisionedEmbeddingProvider` above would register the
             // duty-side encoder and silently skip the rerank stage. Rust twin:
             // coordinator.rs wire_substores calls apply_provisioned_embedding_provider
@@ -908,8 +911,10 @@ public extension GeniusLocusKit {
     /// Activate the span encoder when the manifest's `embedding_provider` is
     /// `"encoder"`. Called from `wireSubstores` after the Corpus (and, on a
     /// GLK estate, the VectorStore) is registered, so `activateSpanEncoder`
-    /// can attach the rerank stage to the store. Absent or other keys do
-    /// nothing; the failure contract of `activateSpanEncoder` applies.
+    /// can seed the encoder_models row when absent and attach the rerank stage
+    /// to the store. Absent or other keys do nothing; the failure contract of
+    /// `activateSpanEncoder` applies (seed failure logged once, activation
+    /// reads the registry as it stands).
     private func activateSpanEncoderIfProvisioned(for handle: EstateHandle) async {
         guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
               provisionedID == Self.encoderProviderID else {
@@ -935,9 +940,10 @@ public extension GeniusLocusKit {
         if provisionedID == Self.encoderProviderID {
             // The span encoder is a rerank stage over the BM25 head, not an
             // ensemble member: the lexical document and the dense families stay
-            // exactly as configured. Activation itself happens in
-            // `wireSubstores` through `activateSpanEncoderIfProvisioned` once the
-            // estate's VectorStore is registered (the rerank stage needs it).
+            // exactly as configured. Activation happens in `wireSubstores`
+            // through `activateSpanEncoderIfProvisioned` once the estate's
+            // VectorStore is registered (the rerank stage needs it). Activation
+            // also seeds the encoder_models row when absent (ruling 2026-09-04).
             return baseModels
         }
 
