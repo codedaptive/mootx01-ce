@@ -11437,7 +11437,7 @@ impl EstateCoordinator {
             })
             .collect();
 
-        // --- Step 4.35 — Graph / tunnel expansion lane ---
+        // --- Step 4.35: Graph / tunnel expansion lane (UnionBest only) ---
         //
         // Mirrors Swift RecallDirector step 4.35 in recallUnionBest. For every
         // drawer in the locus lane, fetch its active outgoing tunnels and collect
@@ -11445,6 +11445,13 @@ impl EstateCoordinator {
         // locus score of 0.5 — meaningful proximity via a known edge, but weaker
         // than a direct bitmap hit. Targets already collected from another locus
         // drawer via an earlier tunnel are de-duplicated by `seen_graph_ids`.
+        //
+        // The lane is a unionBest lane. Swift recallHybrid fuses the locus, BM25
+        // and vector lists and recallCorpusOnly the BM25 and vector lists; neither
+        // expands tunnels, so a drawer only a tunnel would reach is never a Hybrid
+        // or CorpusOnly candidate, appears in no lane rank and earns no LocusGraph
+        // provenance there. Those modes read an empty tunnel set below and the
+        // map stays empty (GENIUSLOCUSKIT_SPEC 3.5.0).
         //
         // Intentionally NOT seeding `seen_graph_ids` from the locus ID set: a drawer
         // that is ALSO a direct locus hit should receive the bitLocusGraph bit in
@@ -11462,7 +11469,12 @@ impl EstateCoordinator {
             let mut map = HashMap::new();
             let mut seen_graph_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut rank: usize = 0;
-            match estate.all_active_tunnels() {
+            let tunnels = if request.mode == GLKRecallMode::UnionBest {
+                estate.all_active_tunnels()
+            } else {
+                Ok(Vec::new())
+            };
+            match tunnels {
                 Ok(tunnels) => {
                     // Index tunnels by source_drawer_id for fast per-locus lookup.
                     let mut by_source: std::collections::HashMap<String, Vec<String>> =
@@ -12367,7 +12379,7 @@ impl EstateCoordinator {
                 .iter()
                 .filter_map(|id| {
                     let (locus_rank, locus_raw) = locus_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
-                    let (graph_rank, graph_raw)  = graph_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
+                    let (_, graph_raw)           = graph_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (bm25_rank, bm25_raw)   = bm25_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (vec_rank, vec_raw)      = vector_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
                     let (dense_rank, dense_raw)  = dense_score_map.get(id).copied().unwrap_or((usize::MAX, 0.0));
@@ -12378,9 +12390,10 @@ impl EstateCoordinator {
                     let dense_boost = dense_consensus_boost.get(id).copied().unwrap_or(0.0);
                     // Graph locus-effective score: the max of direct locus score and graph
                     // expansion score (0.5), mirroring Swift's buffer.merge max-score rule
-                    // (buffer.locus[idx] = max(existing, hit.score.locus)).
+                    // (buffer.locus[idx] = max(existing, hit.score.locus)). Read by the
+                    // UnionBest row below alone; the graph map is empty for Hybrid and
+                    // CorpusOnly (step 4.35), whose arms read the plain locus rank.
                     let effective_locus_raw = locus_raw.max(graph_raw);
-                    let effective_locus_rank = if locus_rank < usize::MAX { locus_rank } else { graph_rank };
 
                     // UnionBest + Raw / Rrf / Discriminative: the candidate is a row
                     // of Swift's RecallCandidateBuffer. `buffer.merge` keeps the MAX
@@ -12415,11 +12428,12 @@ impl EstateCoordinator {
                             // sum: a hit's `final` is the score of the first list
                             // that holds it (the locus ramp, the BM25 score, or
                             // the Hamming similarity), and the presentation branch
-                            // below orders by (list, rank in that list). The graph
-                            // lane is not one of Swift's hybrid lists, so a
-                            // graph-only candidate is dropped here; the dense lane
-                            // never runs for these modes. CorpusOnly has no locus
-                            // list, so its merge starts at BM25.
+                            // below orders by (list, rank in that list). Every
+                            // candidate in these modes is in one of the three
+                            // lists (the graph and dense lanes are unionBest
+                            // lanes), so the trailing `None` is a guard, never a
+                            // drop. CorpusOnly has no locus list, so its merge
+                            // starts at BM25.
                             if locus_rank < usize::MAX {
                                 locus_raw
                             } else if bm25_rank < usize::MAX {
@@ -12453,10 +12467,12 @@ impl EstateCoordinator {
                             // the id adds a term. An id with no contributing lane is
                             // absent from Swift's output, so it is dropped here too.
                             let mut contributed = false;
-                            if effective_locus_rank < usize::MAX && w_locus != 0.0 {
-                                // Use effective_locus_rank so graph-only candidates participate
-                                // in RRF with their graph discovery rank.
-                                rrf += w_locus * (1.0 / (k + effective_locus_rank as f32 + 1.0));
+                            if locus_rank < usize::MAX && w_locus != 0.0 {
+                                // The locus term reads the locus rank alone: Hybrid
+                                // has no graph lane (step 4.35 runs for unionBest,
+                                // which never reaches this arm), so no candidate
+                                // carries a graph discovery rank here.
+                                rrf += w_locus * (1.0 / (k + locus_rank as f32 + 1.0));
                                 contributed = true;
                             }
                             if bm25_rank < usize::MAX && w_bm25 != 0.0 {
