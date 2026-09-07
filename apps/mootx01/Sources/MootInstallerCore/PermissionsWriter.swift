@@ -150,6 +150,12 @@ public enum PermissionsWriter {
     /// tiered installer default here and the frozen serve posture in the
     /// dispatcher read the same tables, so a new mutating tool is triaged
     /// once. Only the read table is installer-local.
+    ///
+    /// The allow tier holds `moot_file_memory` without a confirmation prompt
+    /// because the server, not the host, keeps its sensitivity honest: a
+    /// memory filed while a restricted or secret grant is live takes the
+    /// grant's tier when the caller names none and refuses a lower one, so
+    /// no prompt is needed to stop a handoff downgrading granted material.
 
     /// Every tool name this module has explicitly triaged into a tier.
     /// Exposed so a test can assert this set equals the REAL tool inventory
