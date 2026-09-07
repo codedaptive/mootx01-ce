@@ -718,12 +718,15 @@ public extension GeniusLocusKit {
         // chain so corpus-lane candidates the frame excludes (e.g. withdrawn under
         // the default `.currentlyBelieve`) are dropped, and the requested hydration
         // level to the loaded drawers.
+        // Per-lane scores by id, keyed by max score so a repeated id (a second
+        // stored vector for one drawer) keeps its best lane score, the same rule
+        // the Lane B merge applies.
         let hits = await hydrateHits(
             fused,
             estate: estate,
             frame: request.frame,
-            bm25IDs: Set(bm25List.map(\.id)),
-            vectorIDs: Set(vectorList.map(\.id)),
+            bm25ByID: Dictionary(bm25List.map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) }),
+            vectorByID: Dictionary(vectorList.map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) }),
             hammingByID: hammingByID,
             level: request.frame.hydrationLevel,
             handle: handle,
@@ -772,6 +775,15 @@ public extension GeniusLocusKit {
     /// 4. Vector lane: top-`frontierK` from `VectorStore.findNearest`.
     /// 5. RRF-fuse all three lists (`k=60`, content-derived stable key tie-break).
     /// 6. Hydrate top-`request.limit` hits from the estate.
+    ///
+    /// Every returned hit carries per-signal lane columns under every scoring
+    /// (GENIUSLOCUSKIT_SPEC 3.5.0): `locus` is the locus ramp when the locus
+    /// lane supplied the hit, `bm25` the BM25 score when the BM25 lane did,
+    /// `vector` the Hamming similarity when the vector lane did, and 0 where a
+    /// lane did not; `final` alone carries the fused or merged score. The lane
+    /// roster is these three: the tunnel-expansion graph lane belongs to
+    /// `recallUnionBest`, so a drawer only a tunnel would reach is never a
+    /// hybrid candidate.
     private func recallHybrid(
         estate: LocusKit.Estate,
         request: GLKRecallRequest,
@@ -1013,8 +1025,16 @@ public extension GeniusLocusKit {
         // as a nil-drawer phantom — while the same candidate surfaces under a
         // `.usedToBelieve` frame.
         let locusIndex = Dictionary(uniqueKeysWithValues: locusRows.map { ($0.id, $0) })
-        let bm25IDs = Set(bm25List.map(\.id))
-        let vectorIDs = Set(vectorList.map(\.id))
+        // Per-lane scores by id, read onto each hit's lane columns below: the
+        // locus ramp, the BM25 score and the Hamming similarity. The locus rank
+        // list is unique by construction; the BM25 and vector lists are keyed
+        // by max score so a repeated id (a second stored vector for one drawer)
+        // keeps its best lane score, the same rule the Lane B merge applies.
+        let locusScoreByID = Dictionary(locusList.map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) })
+        let bm25ByID = Dictionary(bm25List.map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) })
+        let vectorByID = Dictionary(vectorList.map { ($0.id, $0.score) }, uniquingKeysWith: { max($0, $1) })
+        let bm25IDs = Set(bm25ByID.keys)
+        let vectorIDs = Set(vectorByID.keys)
         let extraIDs = (bm25IDs.union(vectorIDs)).subtracting(Set(locusIndex.keys))
         let extraIndex: [String: LocusKit.Drawer]
         // `extraLoadedIDs` records which extra ids physically loaded, so the drop
@@ -1088,12 +1108,19 @@ public extension GeniusLocusKit {
             if vectorIDs.contains(drawerID) { sources.insert(.vectorHamming) }
             if sources.isEmpty { sources.insert(.locusBitmap) }
 
-            let bm25Score: Float = bm25IDs.contains(drawerID) ? rrfScore : 0
-            let vectorScore: Float = vectorIDs.contains(drawerID) ? rrfScore : 0
-            let locusScore: Float = locusIndex[drawerID] != nil ? rrfScore : 0
+            // Per-signal lane columns: each lane's own score where that lane
+            // supplied the hit, 0 where it did not. The fused `rrfScore` (or the
+            // `.raw` entering-list score) lives in `final` alone and is the only
+            // ranking signal; the columns are evidence for the explainer, the
+            // optimizer and the reduction recipes, the shape the Rust port
+            // reports. A locus-supplied hit's ramp is `(frontierK - rank) /
+            // frontierK` from `stableLocusRankList`.
+            let bm25Score: Float = bm25ByID[drawerID] ?? 0
+            let vectorScore: Float = vectorByID[drawerID] ?? 0
+            let locusScore: Float = locusScoreByID[drawerID] ?? 0
             // Raw Hamming distance for vector-lane hits (sentinel otherwise),
-            // preserved from the vector lane. The fused `rrfScore` remains the
-            // ranking signal unchanged; the dense distance is additive enrichment.
+            // preserved from the vector lane; the dense distance is additive
+            // enrichment beside the `vector` similarity column.
             let hamming = hammingByID[drawerID] ?? RecallScoreVector.noHammingDistance
             let scoreVec = RecallScoreVector(
                 locus: locusScore, bm25: bm25Score, vector: vectorScore,
@@ -3219,12 +3246,18 @@ public extension GeniusLocusKit {
     /// drawer — never dropped. On total load failure both sets are empty so the
     /// drop is disabled and every fused id is emitted (nil drawer), recorded in
     /// `degradedStages` via the inout accumulator.
+    ///
+    /// `bm25ByID` and `vectorByID` carry each lane's own score by id; a hit reads
+    /// them onto its `bm25` and `vector` columns (0 where a lane did not supply
+    /// it) and its `sources`, while `final` carries the fused or merged score
+    /// alone (GENIUSLOCUSKIT_SPEC 3.5.0). `locus` is 0: corpusOnly has no locus
+    /// lane.
     private func hydrateHits(
         _ fused: [(id: String, score: Float)],
         estate: LocusKit.Estate,
         frame: RecallFrame,
-        bm25IDs: Set<String>,
-        vectorIDs: Set<String>,
+        bm25ByID: [String: Float],
+        vectorByID: [String: Float],
         hammingByID: [String: Int],
         level: LocusKit.HydrationLevel,
         handle: EstateHandle,
@@ -3280,15 +3313,18 @@ public extension GeniusLocusKit {
             // frame-aware load does not apply — re-apply it here for that contract.
             let drawer = drawerIndex[drawerID].map { applyHydration($0, level: level) }
             var sources: Set<RecallEvidencePath> = []
-            if bm25IDs.contains(drawerID) { sources.insert(.corpusBM25) }
-            if vectorIDs.contains(drawerID) { sources.insert(.vectorHamming) }
+            if bm25ByID[drawerID] != nil { sources.insert(.corpusBM25) }
+            if vectorByID[drawerID] != nil { sources.insert(.vectorHamming) }
             if sources.isEmpty { sources.insert(.corpusBM25) }
 
-            let bm25Score: Float = bm25IDs.contains(drawerID) ? rrfScore : 0
-            let vectorScore: Float = vectorIDs.contains(drawerID) ? rrfScore : 0
+            // Per-signal lane columns: the BM25 score and the Hamming similarity
+            // where those lanes supplied the hit, 0 where they did not. The
+            // fused `rrfScore` (or the `.raw` entering-list score) lives in
+            // `final` alone, the shape the Rust port reports.
+            let bm25Score: Float = bm25ByID[drawerID] ?? 0
+            let vectorScore: Float = vectorByID[drawerID] ?? 0
             // Raw Hamming distance for vector-lane hits (sentinel otherwise),
-            // preserved from the vector lane. `final`/`bm25`/`vector` keep the
-            // fused RRF score exactly as before — only the dense signal is added.
+            // preserved from the vector lane beside the `vector` similarity.
             let hamming = hammingByID[drawerID] ?? RecallScoreVector.noHammingDistance
             let scoreVec = RecallScoreVector(
                 locus: 0, bm25: bm25Score, vector: vectorScore,
