@@ -2263,8 +2263,12 @@ public extension GeniusLocusKit {
         var buffer = RecallCandidateBuffer(capacity: bufferCapacity)
 
         for (idx, drawer) in locusSlice.enumerated() {
-            // Rank-normalised score for locus: higher rank → higher score.
-            let locusScore = Float(locusSlice.count - idx) / Float(max(locusSlice.count, 1))
+            // Rank-normalised locus score: rank 0 scores 1.0 and each later rank
+            // steps down by 1/frontierK. The divisor is the frontier size, never
+            // the slice length, so a slice shorter than frontierK keeps the same
+            // per-rank step as a full one; the hybrid path (stableLocusRankList)
+            // and the Rust twin (recall_scored_multi_lane) read the same helper.
+            let locusScore = GeniusLocusKit.locusRankScore(rank: idx, frontierK: plan.frontierK)
             let sv = RecallScoreVector(
                 locus: locusScore, bm25: 0, vector: 0,
                 fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
@@ -3418,7 +3422,28 @@ public extension GeniusLocusKit {
         // Cap AFTER sort: prefix on an unsorted set selects an arbitrary subset when
         // BitmapEvaluator delivers equal-filedAt items in non-deterministic SQLite scan order.
         return sorted.prefix(frontierK).enumerated().map { idx, d in
-            (id: d.id, score: Float(frontierK - idx) / Float(frontierK))
+            (id: d.id, score: locusRankScore(rank: idx, frontierK: frontierK))
         }
+    }
+
+    /// The locus lane's rank-normalised score: `(frontierK - rank) / frontierK`,
+    /// so rank 0 scores 1.0 and each later rank steps down by `1 / frontierK`.
+    ///
+    /// This is the one definition of the locus ramp. The hybrid path
+    /// (`stableLocusRankList`) and the unionBest locus supply both call it, and
+    /// the Rust twin is `locus_rank_score` in `coordinator.rs`. The divisor is
+    /// the frontier size, never the number of rows actually admitted: a slice
+    /// shorter than `frontierK` keeps the same per-rank step as a full one, so
+    /// the ramp is a property of the plan, not of the estate's size. `rank` is
+    /// always below `frontierK` (the slice is capped to `frontierK` after the
+    /// stable sort); the clamps keep the function total and mirror the Rust
+    /// `saturating_sub` and `max(1)`.
+    ///
+    /// - Parameters:
+    ///   - rank: Zero-based position in the stable-sorted locus slice.
+    ///   - frontierK: The plan's frontier size.
+    /// - Returns: The rank-normalised locus score in `[0, 1]`.
+    internal static func locusRankScore(rank: Int, frontierK: Int) -> Float {
+        Float(max(frontierK - rank, 0)) / Float(max(frontierK, 1))
     }
 }

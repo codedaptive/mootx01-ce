@@ -2661,6 +2661,23 @@ struct RecallDirectorLocusRankDeterminismTests {
         #expect(r.last?.id == dMid.id,
                 "middle-content drawer must be rank 1 after sort-then-cap")
     }
+
+    /// The locus ramp divides by the frontier size, not by the slice length:
+    /// three rows at frontierK 64 score 1.0, 63/64, 62/64 (each exact in
+    /// Float), never 1, 2/3, 1/3. Twin of Rust
+    /// `locus_rank_score_divides_by_frontier_k_not_slice_length`.
+    @Test
+    func locusRankScoreDividesByFrontierKNotSliceLength() {
+        let sliceLen = 3
+        let scores = (0..<sliceLen).map { GeniusLocusKit.locusRankScore(rank: $0, frontierK: 64) }
+        #expect(scores == [1.0, 0.984375, 0.96875])
+        // The slice-length ramp: a different shape, not a constant multiple.
+        let bySlice = (0..<sliceLen).map { Float(sliceLen - $0) / Float(sliceLen) }
+        #expect(scores != bySlice)
+        // Total on the inputs the clamps cover.
+        #expect(GeniusLocusKit.locusRankScore(rank: 0, frontierK: 0) == 0)
+        #expect(GeniusLocusKit.locusRankScore(rank: 5, frontierK: 4) == 0)
+    }
 }
 
 // MARK: - RRF fusion determinism tests (MXE-JI-7)
