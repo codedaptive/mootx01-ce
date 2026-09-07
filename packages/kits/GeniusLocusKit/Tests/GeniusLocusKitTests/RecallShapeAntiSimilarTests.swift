@@ -27,10 +27,13 @@
 // The inference closure gives each drawer a distinct one-hot direction so the
 // nearest/farthest ordering is deterministic and reproduces across Swift/Rust.
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -325,3 +328,4 @@ struct RecallShapeAntiSimilarTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

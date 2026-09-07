@@ -55,13 +55,34 @@ let package = Package(
     ],
     traits: [
         // DenseFamilies: compiles the dark dense-family lane keys and presets
-        // (PPMI, LSA, NMF, FDC — contract sheet §13) into RecallShape. Off by
-        // default; Random Indexing is the only live family. Enable with
-        // `swift build --traits DenseFamilies` together with CorpusKit's
-        // matching trait, which compiles the providers themselves.
+        // (PPMI, NMF, FDC — contract sheet §13) into RecallShape. Off by
+        // default; Random Indexing is the only live family. LSA sits on its
+        // own trait below. Enable with `swift build --traits DenseFamilies`
+        // together with CorpusKit's matching trait, which compiles the
+        // providers themselves.
         .trait(
             name: "DenseFamilies",
-            description: "Compile the dark dense-family lane keys and presets (PPMI, LSA, NMF, FDC) into the recall shape roster."
+            description: "Compile the dark dense-family lane keys and presets (PPMI, NMF, FDC) into the recall shape roster. Enables WholeRecordDense: the families are whole-record float signals. LSA is on its own LSA trait.",
+            enabledTraits: ["WholeRecordDense"]
+        ),
+        // WholeRecordDense: compiles the whole-record dense float lane of
+        // unionBest (step 4.5), its lane keys, presets, anti-similar hook,
+        // float metric and telemetry, and links CorpusKit's sidecar target.
+        // Off by default (ruling 2026-09-07): the span stage is the one dense
+        // provider in the product. Enable with `swift build --traits WholeRecordDense`.
+        .trait(
+            name: "WholeRecordDense",
+            description: "Compile the whole-record dense float lane (unionBest step 4.5, its lane keys, presets, anti-similar hook, float metric, telemetry) and link CorpusKit's WholeRecordDense sidecar. Off by default; the span stage is the one dense provider."
+        ),
+        // LSA: the Latent-Semantic-Analysis family on a switch of its own
+        // (ruling 2026-09-07). DenseFamilies does not enable it and the
+        // dark-variant gate does not build it: the family is dark and unproven
+        // (its reindex recovery test fails). Enables DenseFamilies, which its
+        // lane key and presets need. Enable with `swift build --traits LSA`.
+        .trait(
+            name: "LSA",
+            description: "Compile the LSA lane key and presets (lsa_forward, anti_redundant_lsa) into the recall shape roster and the LsaProvider into CorpusKit. Dark and unproven since 2026-09-07; DenseFamilies does not enable it. Enables DenseFamilies.",
+            enabledTraits: ["DenseFamilies"]
         ),
         // Step traits name concrete historical code. Floor traits are the
         // consumer-facing cumulative selection and enable every required step.
@@ -77,40 +98,49 @@ let package = Package(
             name: "MigrationV1_5ToV1_6",
             description: "Compile the GLK 1.5 to 1.6 migration capsule (drops the retired corpus_index_state.composition_policy column)."
         ),
-        // Floors 1.1 through 1.4 compile the same two capsules: the 1.1->1.2
+        .trait(
+            name: "MigrationV1_6ToV1_7",
+            description: "Compile the GLK 1.6 to 1.7 migration capsule (vacuums the whole-record float rows and the hnsw_graph rows, rebuilds the binary sidecar, releases the float representation claim)."
+        ),
+        // Floors 1.1 through 1.4 compile the same three capsules: the 1.1->1.2
         // column is added by CorpusKit's own ladder at open, the 1.2->1.3 column
         // was removed by schema v19, and the 1.3->1.4 setting retired with the
         // index composition policy, so the 1.4->1.5 capsule runs directly on
-        // any of those stamps; the 1.5->1.6 capsule follows it.
+        // any of those stamps; the 1.5->1.6 and 1.6->1.7 capsules follow it.
         .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
         ),
         .trait(
             name: "MigrationFloor1_1",
-            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5 and 1.5->1.6 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5 and 1.5->1.6 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
         ),
         .trait(
             name: "MigrationFloor1_3",
-            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5 and 1.5->1.6 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
         ),
         .trait(
             name: "MigrationFloor1_4",
-            description: "Support estates as old as GLK format 1.4 (compiles the 1.4->1.5 storage-ledger kit-id capsule and the 1.5->1.6 capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6"]
+            description: "Support estates as old as GLK format 1.4 (compiles the 1.4->1.5 storage-ledger kit-id capsule, the 1.5->1.6 capsule and the 1.6->1.7 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
         ),
         .trait(
             name: "MigrationFloor1_5",
-            description: "Support estates as old as GLK format 1.5 (compiles only the 1.5->1.6 column-drop capsule).",
-            enabledTraits: ["MigrationV1_5ToV1_6"]
+            description: "Support estates as old as GLK format 1.5 (compiles the 1.5->1.6 column-drop capsule and the 1.6->1.7 vacuum capsule).",
+            enabledTraits: ["MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7"]
+        ),
+        .trait(
+            name: "MigrationFloor1_6",
+            description: "Support estates as old as GLK format 1.6 (compiles only the 1.6->1.7 whole-record float vacuum capsule).",
+            enabledTraits: ["MigrationV1_6ToV1_7"]
         ),
         // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
         // Off by default (plan 70BC55F3, 2026-09-05): held for v1.2 iOS and
@@ -133,7 +163,17 @@ let package = Package(
         .package(path: "../../libs/SubstrateTypes"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "SynapseKit", path: "../SynapseKit"),
-        .package(name: "CorpusKit", path: "../CorpusKit"),
+        // CorpusKit traits follow this package's: DenseFamilies compiles the
+        // family providers, WholeRecordDense the float sidecar. CorpusKit has
+        // no default traits, so the list is the whole selection.
+        .package(name: "CorpusKit", path: "../CorpusKit", traits: [
+            .trait(name: "DenseFamilies", condition: .when(traits: ["DenseFamilies"])),
+            .trait(name: "LSA", condition: .when(traits: ["LSA"])),
+            .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
+            // AppleEncoders compiles AppleNLProvider and NeuralEmbedProvider in
+            // CorpusKitProviders, which EstateLifecycle wires under APPLE_ENCODERS.
+            .trait(name: "AppleEncoders", condition: .when(traits: ["AppleEncoders"])),
+        ]),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
         // EideticLib: the deterministic FDC text-to-anchor utility. GeniusLocusKit's
         // capture_with_mode seam classifies the lattice anchor via EideticLib.lookup
@@ -189,6 +229,8 @@ let package = Package(
                 "GeniusLocusKitMigrations",
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
+                         condition: .when(traits: ["WholeRecordDense"])),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
@@ -199,6 +241,7 @@ let package = Package(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         .target(
@@ -254,6 +297,29 @@ let package = Package(
                 ),
             ]
         ),
+        // GLK 1.6 -> 1.7 capsule: vacuums the whole-record float rows
+        // (vectors kind 1) and the hnsw_graph rows from populated estates,
+        // rebuilds the binary sidecar and releases the float representation
+        // claim. Mirrors the GLKMigrationV1_5ToV1_6 target structure. Under the
+        // WholeRecordDense trait the capsule reads the manifest and leaves an
+        // audition estate's rows in place.
+        .target(
+            name: "GLKMigrationV1_6ToV1_7",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
+            ],
+            path: "Sources/GLKMigrationV1_6ToV1_7",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_6_TO_V1_7",
+                    .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+            ]
+        ),
         .target(
             name: "GeniusLocusKitMigrations",
             dependencies: [
@@ -276,6 +342,10 @@ let package = Package(
                     name: "GLKMigrationV1_5ToV1_6",
                     condition: .when(traits: ["MigrationV1_5ToV1_6"])
                 ),
+                .target(
+                    name: "GLKMigrationV1_6ToV1_7",
+                    condition: .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
             ],
             path: "Sources/GeniusLocusKitMigrations",
             swiftSettings: [
@@ -290,6 +360,10 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_5_TO_V1_6",
                     .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_6_TO_V1_7",
+                    .when(traits: ["MigrationV1_6ToV1_7"])
                 ),
             ]
         ),
@@ -310,6 +384,11 @@ let package = Package(
                 // in-repository dependency direction; layering is
                 // upstream→downstream (CorpusKitProviders ← GeniusLocusKit), no inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                // CorpusKitWholeRecordDense: the float query surface the
+                // unionBest whole-record lane reads. Linked only under the
+                // WholeRecordDense trait; the default graph never sees it.
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
+                         condition: .when(traits: ["WholeRecordDense"])),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitReplication (§5 full-snapshot flush/hydrate).
@@ -357,9 +436,14 @@ let package = Package(
                 // paths in EstateLifecycle.swift. Off by default (plan 70BC55F3,
                 // 2026-09-05). Mirror of CorpusKit AppleEncoders trait.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
-                // DenseFamilies: enables five-signal ensemble assertions in GLK tests.
-                // Off by default (plan 70BC55F3, 2026-09-05).
+                // DenseFamilies: the dark dense-family lane keys and presets
+                // (PPMI, NMF, FDC). Off by default (plan 70BC55F3, 2026-09-05).
                 .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+                // LSA: the LSA lane key and presets, on their own switch.
+                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
+                // WholeRecordDense: the whole-record dense float lane and its
+                // lane keys, presets, anti-similar hook and telemetry.
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         .testTarget(
@@ -375,6 +459,8 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
+                         condition: .when(traits: ["WholeRecordDense"])),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
@@ -398,6 +484,8 @@ let package = Package(
                 // Mirror the production trait defines into the test target.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
                 .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
+                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         .testTarget(
@@ -428,6 +516,10 @@ let package = Package(
                 ),
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                // The scale-qualification probe reads the whole-record float
+                // lane only in the sidecar build.
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
+                         condition: .when(traits: ["WholeRecordDense"])),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
@@ -440,6 +532,7 @@ let package = Package(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         // Tests for the GLK 1.4 -> 1.5 storage-ledger kit-id capsule.
@@ -506,6 +599,47 @@ let package = Package(
                     "GLK_MIGRATION_V1_4_TO_V1_5",
                     .when(traits: ["MigrationV1_4ToV1_5"])
                 ),
+                .define(
+                    "GLK_MIGRATION_V1_6_TO_V1_7",
+                    .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
+            ]
+        ),
+        // Tests for the GLK 1.6 -> 1.7 whole-record float vacuum capsule. A
+        // v1_6-stamped estate carrying binary, float and span rows and an
+        // hnsw_graph row ends with the float and graph rows gone, the binary
+        // and span rows intact, the sidecar loading without a rebuild, the
+        // same ordered binary neighbours, the float representation claim
+        // released and a v1_7 stamp; a second run is a no-op; the chain from
+        // v1_5 ends at v1_7; under WholeRecordDense an audition estate keeps
+        // its rows.
+        .testTarget(
+            name: "GLKMigrationV1_6ToV1_7Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_6ToV1_7",
+                    condition: .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
+            ],
+            path: "Tests/GLKMigrationV1_6ToV1_7Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_6_TO_V1_7",
+                    .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_5_TO_V1_6",
+                    .when(traits: ["MigrationV1_5ToV1_6"])
+                ),
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
     ]

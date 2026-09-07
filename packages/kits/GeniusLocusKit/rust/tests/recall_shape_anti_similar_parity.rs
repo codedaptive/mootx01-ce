@@ -24,6 +24,10 @@
 // proportional to its token COUNT, so "most dissimilar" is unambiguous (no
 // cosine ties). Mirrors the Swift fixture so both ports drop the same tail.
 
+// whole-record-dense feature only: the whole-record float lane is a sidecar
+// (ruling 2026-09-07).
+#![cfg(feature = "whole-record-dense")]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

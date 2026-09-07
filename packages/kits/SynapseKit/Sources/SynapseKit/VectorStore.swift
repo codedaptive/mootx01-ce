@@ -443,7 +443,7 @@ public actor VectorStore {
     /// means the sidecar was current on load (the normal path). Exposed
     /// for test assertions only — callers should not use this value to
     /// drive application logic.
-    private(set) var sidecarRebuildCount: Int = 0
+    public private(set) var sidecarRebuildCount: Int = 0
 
     /// Number of on-disk sidecar writes performed by the resident store in
     /// this VectorStore's lifetime.
@@ -1062,6 +1062,15 @@ public actor VectorStore {
         hnswIndices.removeValue(forKey: modelID)
         liveFloatCounts.removeValue(forKey: modelID)
         hnswGraphDirty.remove(modelID)
+    }
+
+    /// Drop every resident HNSW graph, live float count and dirty flag at
+    /// once. Used by the whole-record float vacuum after the `hnsw_graph`
+    /// rows are deleted: the graphs described rows that are gone.
+    func _invalidateAllHNSWLanes() {
+        hnswIndices.removeAll()
+        liveFloatCounts.removeAll()
+        hnswGraphDirty.removeAll()
     }
 
     // MARK: - HNSW graph maintenance (dreaming cadence duties)

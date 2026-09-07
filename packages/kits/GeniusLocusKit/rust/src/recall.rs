@@ -32,7 +32,9 @@
 // mirrors the NeuronKit policy-store precedent where value-level results agree
 // across both ports despite different async shapes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "whole-record-dense")]
+use std::collections::HashSet;
 
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::RecallFrame;
@@ -622,7 +624,9 @@ pub struct RecallShape {
     /// Dense lane keys (`"dense:<modelID>"`) whose objective is FARTHEST rather
     /// than nearest — anti-similarity retrieval. Empty ⇒ every lane nearest ⇒
     /// byte-identical to today's fusion. Distinct from a negative weight; the two
-    /// compose. See the type-level "Anti-similarity" note.
+    /// compose. See the type-level "Anti-similarity" note. Present only with
+    /// the `whole-record-dense` feature (the whole-record float lane).
+    #[cfg(feature = "whole-record-dense")]
     pub anti_similar_lanes: HashSet<String>,
     /// Optional candidate-pool depth override. `None` keeps the coordinator's
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
@@ -641,6 +645,9 @@ pub struct RecallShape {
     /// - "cosine": 1 − cos(a,b). Scale-invariant; the historical default.
     /// - "l2": Euclidean distance √Σ(aᵢ−bᵢ)². Magnitude-sensitive.
     /// - "dot": negative dot product −Σ(aᵢbᵢ). For dot-product-trained embeddings.
+    ///
+    /// Present only with the `whole-record-dense` feature.
+    #[cfg(feature = "whole-record-dense")]
     pub float_metric: String,
     /// Matrix-signal weighting selector (W2.5 S4-C): "counts" (default —
     /// the canonical i64 count matrices) or "decayed" (the §8.13
@@ -663,9 +670,11 @@ impl RecallShape {
     pub fn new(lane_weights: HashMap<String, f32>, frontier_k: Option<usize>) -> Self {
         Self {
             lane_weights,
+            #[cfg(feature = "whole-record-dense")]
             anti_similar_lanes: HashSet::new(),
             frontier_k,
             binary_metric: "hamming".to_string(),
+            #[cfg(feature = "whole-record-dense")]
             float_metric: "cosine".to_string(),
             matrix_weighting: "counts".to_string(),
         }
@@ -688,6 +697,7 @@ impl RecallShape {
     /// Builder: select the float-lane metric ("cosine" | "l2" | "dot",
     /// W2.5 M1 float unlock). Unknown values degrade to cosine at the read
     /// site. Twin of Swift `RecallShape.floatMetric`.
+    #[cfg(feature = "whole-record-dense")]
     pub fn with_float_metric(mut self, metric: &str) -> Self {
         self.float_metric = metric.to_string();
         self
@@ -696,6 +706,7 @@ impl RecallShape {
     /// Builder: set the dense lane keys (`"dense:<modelID>"`) that invert their
     /// objective to FARTHEST (anti-similarity). Distinct from a negative weight;
     /// the two compose. Returns `self` for chaining.
+    #[cfg(feature = "whole-record-dense")]
     pub fn with_anti_similar_lanes(mut self, lanes: HashSet<String>) -> Self {
         self.anti_similar_lanes = lanes;
         self
@@ -736,6 +747,7 @@ impl RecallShape {
     /// (anti-similarity). Returns `false` for any key not in
     /// `anti_similar_lanes` — an empty set keeps every lane nearest (the
     /// back-compat default).
+    #[cfg(feature = "whole-record-dense")]
     pub fn is_anti_similar(&self, lane_key: &str) -> bool {
         self.anti_similar_lanes.contains(lane_key)
     }
@@ -756,7 +768,9 @@ impl RecallShape {
     /// `model_id`. These are the exact `model_id` strings the CorpusKit providers
     /// ship (`dense:<model_id>`); the roster targets them by these constants so a
     /// typo surfaces at compile time, not as a silent no-op. Mirrors Swift
-    /// `RecallShape.DenseSignal`.
+    /// `RecallShape.DenseSignal`. Present only with the `whole-record-dense`
+    /// feature: the whole-record providers' per-signal float lanes.
+    #[cfg(feature = "whole-record-dense")]
     pub const DENSE_RANDOM_INDEXING: &'static str = "dense:random-indexing-v1";
     /// The span rerank encoder lane, keyed by the floor model's registry id
     /// (contract sheet §1: `<model>-w<window_words>`). The stage reads the key
@@ -774,14 +788,17 @@ impl RecallShape {
     pub fn dense_key_for_model(model_id: &str) -> String {
         format!("dense:{model_id}")
     }
-    // The PPMI, LSA, NMF and FDC providers are dark unless the crate is built
-    // with the `dense-families` feature (contract sheet §13); their lane keys
-    // and the presets that steer them compile in with them.
+    // The PPMI, NMF and FDC providers are dark unless the crate is built
+    // with the `dense-families` feature (contract sheet §13); LSA is dark
+    // unless built with the `lsa` feature (ruling 2026-09-07), which implies
+    // `dense-families`. Their lane keys and the presets that steer them compile
+    // in with them.
     /// Positive-PMI distributional provider dense lane key.
     #[cfg(feature = "dense-families")]
     pub const DENSE_PPMI: &'static str = "dense:ppmi-v1";
     /// Latent-Semantic-Analysis provider dense lane key.
-    #[cfg(feature = "dense-families")]
+    /// Compiled only with the `lsa` feature (ruling 2026-09-07).
+    #[cfg(feature = "lsa")]
     pub const DENSE_LSA: &'static str = "dense:lsa-v1";
     /// Non-negative-Matrix-Factorisation provider dense lane key.
     #[cfg(feature = "dense-families")]
@@ -791,37 +808,48 @@ impl RecallShape {
     pub const DENSE_FDC: &'static str = "dense:fdc-v1";
 
     /// Every per-signal dense lane key the standard provider stack ships, in
-    /// stable order (RI, PPMI, LSA, NMF — fdc is forwarded separately by the
-    /// consensus preset). Mirrors Swift `RecallShape.DenseSignal.all`.
-    #[cfg(feature = "dense-families")]
+    /// stable order: RI, PPMI, LSA, NMF (fdc is forwarded separately by the
+    /// consensus preset). With `lsa` ON: four keys. Mirrors Swift
+    /// `RecallShape.DenseSignal.all`.
+    #[cfg(all(feature = "dense-families", feature = "lsa"))]
     pub const DENSE_SIGNALS: [&'static str; 4] = [
         Self::DENSE_RANDOM_INDEXING,
         Self::DENSE_PPMI,
         Self::DENSE_LSA,
         Self::DENSE_NMF,
     ];
+    /// Every per-signal dense lane key without LSA: RI, PPMI, NMF (fdc is
+    /// forwarded separately by the consensus preset). LSA is dark on its own
+    /// `lsa` switch (ruling 2026-09-07). Mirrors Swift `RecallShape.DenseSignal.all`.
+    #[cfg(all(feature = "dense-families", not(feature = "lsa")))]
+    pub const DENSE_SIGNALS: [&'static str; 3] = [
+        Self::DENSE_RANDOM_INDEXING,
+        Self::DENSE_PPMI,
+        Self::DENSE_NMF,
+    ];
     /// The distributional dense lane keys in stable order. Random Indexing is
     /// the only live family; the others are dark (sheet §13). Mirrors Swift
     /// `RecallShape.DenseSignal.all`.
-    #[cfg(not(feature = "dense-families"))]
+    #[cfg(all(feature = "whole-record-dense", not(feature = "dense-families")))]
     pub const DENSE_SIGNALS: [&'static str; 1] = [Self::DENSE_RANDOM_INDEXING];
 
     /// The names of every preset in the roster, in stable declaration order — the
     /// discoverable surface the catalog and the ARIA tool enumerate. Same set as
-    /// Swift `RecallShape.presetNames` for the same feature state: the dark
-    /// families' presets (`ppmi/lsa/nmf_forward`, `anti_redundant_lsa/nmf`) are
-    /// present only with the `dense-families` feature (sheet §13).
-    #[cfg(feature = "dense-families")]
-    pub const PRESET_NAMES: [&'static str; 38] = [
+    /// Swift `RecallShape.presetNames` for the same feature state: the
+    /// whole-record presets (`conceptual`, `associative`, `consensus`,
+    /// `ri_forward`, `whole_record_baseline`, `anti_redundant_ri`, `float-l2`,
+    /// `float-dot`) exist only with `whole-record-dense`; the dense families'
+    /// presets (`ppmi/nmf_forward`, `anti_redundant_nmf`) only with `dense-families`
+    /// (sheet §13); the LSA presets (`lsa_forward`, `anti_redundant_lsa`) only with
+    /// the `lsa` feature (ruling 2026-09-07), which implies `dense-families`.
+    #[cfg(all(feature = "dense-families", feature = "lsa"))]
+    pub const PRESET_NAMES: [&'static str; 39] = [
         "balanced",
         "precise",
         "conceptual",
         "broad",
         "lexical",
         "jaccard",
-        // Float-lane metric presets: identical fusion to balanced, but the
-        // dense float embedding lane uses L2 or dot-product distance instead
-        // of the default cosine. Mirrors the jaccard/binary_metric pattern.
         "float-l2",
         "float-dot",
         "matrix_decayed",
@@ -829,6 +857,7 @@ impl RecallShape {
         "associative",
         "consensus",
         "ri_forward",
+        "whole_record_baseline",
         "ppmi_forward",
         "lsa_forward",
         "nmf_forward",
@@ -839,22 +868,12 @@ impl RecallShape {
         "field",
         "preference",
         "anti_redundant",
-        // Per-signal anti-similarity variants: same suppression shape as
-        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
-        // inverts a different per-signal dense lane to FARTHEST.
         "anti_redundant_ri",
         "anti_redundant_lsa",
         "anti_redundant_nmf",
-        // session_hybrid: session-granularity recall — hybridRecall scoredLane +
-        // bounded temporal-window boost + speaker-aware weighting. Added in
-        // W1-session-hybrid. Mirrors Swift RecallShape.presetNames.
         "session_hybrid",
-        // Multi-column matrix presets: amplify two matrixAware columns together.
         "temporal_connection",
         "field_preference",
-        // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
-        // column of the MatrixAware weighted score via its `signal:*` key and
-        // redistributes that column's budget over the rest. Mirrors Swift.
         "no_locus",
         "no_field_fit",
         "no_matrix",
@@ -863,28 +882,18 @@ impl RecallShape {
         "no_agreement",
         "no_bm25",
         "no_vector",
-        // Encoder Rerank Program: skip the span rerank stage so the lexical
-        // order stands unreranked. With the vector column out by default the
-        // fused order equals `no_vector`'s (pinned by test). `cross_encoder` is
-        // RESERVED for the cross-encoder hook (sheet §8) and deliberately NOT in
-        // this roster: nothing implements it in this program, so the tool must
-        // reject it as unknown rather than run balanced fusion under that name.
         "no_encoder",
     ];
-
-    /// The roster without the dark families (the default build). See the
-    /// `dense-families` variant above.
-    #[cfg(not(feature = "dense-families"))]
-    pub const PRESET_NAMES: [&'static str; 33] = [
+    /// Roster with `dense-families` ON but LSA dark (37 names, ruling 2026-09-07):
+    /// `lsa_forward` and `anti_redundant_lsa` are absent. See the `lsa` variant above.
+    #[cfg(all(feature = "dense-families", not(feature = "lsa")))]
+    pub const PRESET_NAMES: [&'static str; 37] = [
         "balanced",
         "precise",
         "conceptual",
         "broad",
         "lexical",
         "jaccard",
-        // Float-lane metric presets: identical fusion to balanced, but the
-        // dense float embedding lane uses L2 or dot-product distance instead
-        // of the default cosine. Mirrors the jaccard/binary_metric pattern.
         "float-l2",
         "float-dot",
         "matrix_decayed",
@@ -892,6 +901,9 @@ impl RecallShape {
         "associative",
         "consensus",
         "ri_forward",
+        "whole_record_baseline",
+        "ppmi_forward",
+        "nmf_forward",
         "fast",
         "structural",
         "temporal",
@@ -899,20 +911,11 @@ impl RecallShape {
         "field",
         "preference",
         "anti_redundant",
-        // Per-signal anti-similarity variants: same suppression shape as
-        // anti_redundant (bm25/hamming at -0.5, narrow frontier) but each
-        // inverts a different per-signal dense lane to FARTHEST.
         "anti_redundant_ri",
-        // session_hybrid: session-granularity recall — hybridRecall scoredLane +
-        // bounded temporal-window boost + speaker-aware weighting. Added in
-        // W1-session-hybrid. Mirrors Swift RecallShape.presetNames.
+        "anti_redundant_nmf",
         "session_hybrid",
-        // Multi-column matrix presets: amplify two matrixAware columns together.
         "temporal_connection",
         "field_preference",
-        // Column-exclusion (ablation) presets (COL-1): each EXCLUDES one scoring
-        // column of the MatrixAware weighted score via its `signal:*` key and
-        // redistributes that column's budget over the rest. Mirrors Swift.
         "no_locus",
         "no_field_fit",
         "no_matrix",
@@ -921,17 +924,81 @@ impl RecallShape {
         "no_agreement",
         "no_bm25",
         "no_vector",
-        // Encoder Rerank Program: skip the span rerank stage so the lexical
-        // order stands unreranked. With the vector column out by default the
-        // fused order equals `no_vector`'s (pinned by test). `cross_encoder` is
-        // RESERVED for the cross-encoder hook (sheet §8) and deliberately NOT in
-        // this roster: nothing implements it in this program, so the tool must
-        // reject it as unknown rather than run balanced fusion under that name.
         "no_encoder",
     ];
 
-    /// The `signal:*` lane keys (COL-1), spelled once. Each names a
-    /// `recall_signal_budget::SignalColumn`. Mirrors Swift `RecallShape.SignalKey`.
+    /// Roster with the whole-record float lane compiled in and the dense
+    /// families dark (34 names). See the `dense-families` variant above.
+    #[cfg(all(feature = "whole-record-dense", not(feature = "dense-families")))]
+    pub const PRESET_NAMES: [&'static str; 34] = [
+        "balanced",
+        "precise",
+        "conceptual",
+        "broad",
+        "lexical",
+        "jaccard",
+        "float-l2",
+        "float-dot",
+        "matrix_decayed",
+        "not_lexical",
+        "associative",
+        "consensus",
+        "ri_forward",
+        "whole_record_baseline",
+        "fast",
+        "structural",
+        "temporal",
+        "connection",
+        "field",
+        "preference",
+        "anti_redundant",
+        "anti_redundant_ri",
+        "session_hybrid",
+        "temporal_connection",
+        "field_preference",
+        "no_locus",
+        "no_field_fit",
+        "no_matrix",
+        "no_graph",
+        "no_preference",
+        "no_agreement",
+        "no_bm25",
+        "no_vector",
+        "no_encoder",
+    ];
+
+    /// The default roster (26 names): no whole-record dense presets. The span
+    /// stage is the one dense provider (ruling 2026-09-07).
+    #[cfg(not(feature = "whole-record-dense"))]
+    pub const PRESET_NAMES: [&'static str; 26] = [
+        "balanced",
+        "precise",
+        "broad",
+        "lexical",
+        "jaccard",
+        "matrix_decayed",
+        "not_lexical",
+        "fast",
+        "structural",
+        "temporal",
+        "connection",
+        "field",
+        "preference",
+        "anti_redundant",
+        "session_hybrid",
+        "temporal_connection",
+        "field_preference",
+        "no_locus",
+        "no_field_fit",
+        "no_matrix",
+        "no_graph",
+        "no_preference",
+        "no_agreement",
+        "no_bm25",
+        "no_vector",
+        "no_encoder",
+    ];
+
     pub const SIGNAL_LOCUS: &'static str = "signal:locus";
     /// BM25 column budget key.
     pub const SIGNAL_BM25: &'static str = "signal:bm25";
@@ -995,6 +1062,7 @@ impl RecallShape {
 
             // Concepts over keywords: amplify the distributional dense lanes and
             // damp the literal keyword lane.
+            #[cfg(feature = "whole-record-dense")]
             "conceptual" => {
                 let mut pairs: Vec<(&str, f32)> =
                     Self::DENSE_SIGNALS.iter().map(|k| (*k, 1.5)).collect();
@@ -1034,12 +1102,14 @@ impl RecallShape {
             // dense float embedding lane uses L2 or dot-product distance instead
             // of the default cosine. Mirrors the jaccard/binary_metric pattern:
             // only the distance function changes; all lane weights remain neutral.
+            #[cfg(feature = "whole-record-dense")]
             "float-l2" => Some(
                 shape(&[], None).with_float_metric("l2")
             ),
 
             // Negative dot product (−Σaᵢbᵢ) as the float-lane distance. Useful
             // for embeddings trained with a dot-product objective.
+            #[cfg(feature = "whole-record-dense")]
             "float-dot" => Some(
                 shape(&[], None).with_float_metric("dot")
             ),
@@ -1059,6 +1129,7 @@ impl RecallShape {
             }
 
             // Loose association: amplify RI + NMF and widen the frontier.
+            #[cfg(feature = "whole-record-dense")]
             "associative" => {
                 // `mut` is used only when the dark families are compiled in.
                 #[allow(unused_mut)]
@@ -1070,6 +1141,7 @@ impl RecallShape {
 
             // Dense consensus: forward EVERY per-signal dense lane at full
             // strength and narrow the frontier. "Where the embedding models agree."
+            #[cfg(feature = "whole-record-dense")]
             "consensus" => {
                 // `mut` is used only when the dark families are compiled in.
                 #[allow(unused_mut)]
@@ -1083,10 +1155,24 @@ impl RecallShape {
             // Single-signal forwarding: amplify ONE dense lane, ZERO its siblings.
             // With the dense families dark only `ri_forward` exists and it has no
             // siblings to zero.
+            #[cfg(feature = "whole-record-dense")]
             "ri_forward" => Some(single_dense_forward(Self::DENSE_RANDOM_INDEXING)),
+            // The audition baseline: every held whole-record signal at the
+            // neutral 1.0 with the engine's default frontier. The fusion equals
+            // this build's `None` shape; the preset names the arm explicitly.
+            #[cfg(feature = "whole-record-dense")]
+            "whole_record_baseline" => {
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(&str, f32)> =
+                    Self::DENSE_SIGNALS.iter().map(|k| (*k, 1.0)).collect();
+                #[cfg(feature = "dense-families")]
+                pairs.push((Self::DENSE_FDC, 1.0));
+                Some(shape(&pairs, None))
+            }
             #[cfg(feature = "dense-families")]
             "ppmi_forward" => Some(single_dense_forward(Self::DENSE_PPMI)),
-            #[cfg(feature = "dense-families")]
+            // lsa_forward is dark unless the `lsa` feature is on (ruling 2026-09-07).
+            #[cfg(feature = "lsa")]
             "lsa_forward" => Some(single_dense_forward(Self::DENSE_LSA)),
             #[cfg(feature = "dense-families")]
             "nmf_forward" => Some(single_dense_forward(Self::DENSE_NMF)),
@@ -1116,10 +1202,9 @@ impl RecallShape {
             // With the dense families dark there is no FDC lane to invert: the
             // preset keeps the suppression and the narrow frontier;
             // `anti_redundant_ri` is the inversion that stays live.
+            #[cfg(feature = "dense-families")]
             "anti_redundant" => {
-                #[allow(unused_mut)]
                 let mut anti = HashSet::new();
-                #[cfg(feature = "dense-families")]
                 anti.insert(Self::DENSE_FDC.to_string());
                 let s = shape(
                     &[("bm25", -0.5), ("hamming", -0.5)],
@@ -1127,6 +1212,13 @@ impl RecallShape {
                 );
                 Some(s.with_anti_similar_lanes(anti))
             }
+            // FDC is dark: nothing is inverted; the suppression and the narrow
+            // frontier remain.
+            #[cfg(not(feature = "dense-families"))]
+            "anti_redundant" => Some(shape(
+                &[("bm25", -0.5), ("hamming", -0.5)],
+                Some(Self::FRONTIER_K_FLOOR),
+            )),
 
             // Session-granularity hybrid recall: amplify bm25 (keyword match for
             // conversation fragments), dense (semantic similarity within the session
@@ -1144,6 +1236,7 @@ impl RecallShape {
             // (bm25/hamming at -0.5, frontier narrowed to the floor) but inverts
             // the RI, LSA, or NMF dense lane to FARTHEST. Each variant targets
             // diversity in the corresponding distributional semantic space.
+            #[cfg(feature = "whole-record-dense")]
             "anti_redundant_ri" => {
                 let mut anti = HashSet::new();
                 anti.insert(Self::DENSE_RANDOM_INDEXING.to_string());
@@ -1154,7 +1247,8 @@ impl RecallShape {
                 Some(s.with_anti_similar_lanes(anti))
             }
 
-            #[cfg(feature = "dense-families")]
+            // anti_redundant_lsa is dark unless the `lsa` feature is on (ruling 2026-09-07).
+            #[cfg(feature = "lsa")]
             "anti_redundant_lsa" => {
                 let mut anti = HashSet::new();
                 anti.insert(Self::DENSE_LSA.to_string());
@@ -1219,20 +1313,29 @@ impl RecallShape {
         match name {
             "balanced" => "Uniform fusion — every lane votes equally. The unsteered default.",
             "precise" => "Exactness — amplify keyword (bm25) + dense consensus (+ field-coding when the dense families are compiled in) over a narrow frontier.",
+            #[cfg(feature = "whole-record-dense")]
             "conceptual" => "Concepts over keywords — amplify the distributional dense lanes (RI, plus PPMI/LSA/NMF when compiled in), damp bm25.",
             "broad" => "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling.",
             "lexical" => "Keyword/field only — amplify bm25 (+ fdc when compiled in), exclude the dense and Hamming vector lanes.",
             "jaccard" => "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity.",
+            #[cfg(feature = "whole-record-dense")]
             "float-l2" => "L2 float metric — the dense float embedding lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter.",
+            #[cfg(feature = "whole-record-dense")]
             "float-dot" => "Dot-product float metric — the dense float embedding lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective.",
             "matrix_decayed" => "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts.",
             "not_lexical" => "Suppress the literal lanes — exclude bm25 (+ fdc when compiled in) so distributional and structural signals decide.",
+            #[cfg(feature = "whole-record-dense")]
             "associative" => "Loose association — amplify the RI (+ NMF when compiled in) distributional lanes over a wide frontier.",
+            #[cfg(feature = "whole-record-dense")]
             "consensus" => "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree.",
+            #[cfg(feature = "whole-record-dense")]
             "ri_forward" => "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals.",
+            #[cfg(feature = "whole-record-dense")]
+            "whole_record_baseline" => "Audition baseline — every held whole-record float signal at 1.0 over the default frontier; the arm the span stage is measured against.",
             #[cfg(feature = "dense-families")]
             "ppmi_forward" => "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals.",
-            #[cfg(feature = "dense-families")]
+            // lsa_forward description is dark unless the `lsa` feature is on (ruling 2026-09-07).
+            #[cfg(feature = "lsa")]
             "lsa_forward" => "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals.",
             #[cfg(feature = "dense-families")]
             "nmf_forward" => "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals.",
@@ -1243,8 +1346,10 @@ impl RecallShape {
             "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
             "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
             "anti_redundant" => "Diversity — suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate, invert FDC to farthest when the dense families are compiled in; narrow frontier to 64.",
+            #[cfg(feature = "whole-record-dense")]
             "anti_redundant_ri" => "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space.",
-            #[cfg(feature = "dense-families")]
+            // anti_redundant_lsa description is dark unless the `lsa` feature is on (ruling 2026-09-07).
+            #[cfg(feature = "lsa")]
             "anti_redundant_lsa" => "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space.",
             #[cfg(feature = "dense-families")]
             "anti_redundant_nmf" => "Diversity (NMF space) — invert the NMF dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the NMF topic space.",
@@ -1268,6 +1373,7 @@ impl RecallShape {
 /// A shape that forwards exactly one dense lane and zeroes the other three
 /// distributional siblings — the `*_forward` preset body. Mirrors Swift
 /// `RecallShape.singleDenseForward`.
+#[cfg(feature = "whole-record-dense")]
 fn single_dense_forward(forward_key: &str) -> RecallShape {
     let mut weights = HashMap::new();
     for key in RecallShape::DENSE_SIGNALS {
@@ -1494,6 +1600,8 @@ pub struct GLKRecallResult {
     /// `LocusOnly`, `CorpusOnly`, `Hybrid`, and `NodeTreeNative` carry `None`.
     ///
     /// Mirrors Swift `GLKRecallResult.denseLaneStatus` (GLKRecallResult.swift).
+    /// Present only with the `whole-record-dense` feature.
+    #[cfg(feature = "whole-record-dense")]
     pub dense_lane_status: Option<String>,
 
     /// Per-stage degradation indicators for this query.

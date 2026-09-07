@@ -18,8 +18,9 @@
 //   3. floatNearestPerSignal returns one ranked outcome per held signal, each
 //      tagged by its modelID, in slot order. `[0]` equals what the
 //      single-signal `floatNearest` returns.
-//   4. CROSS-PORT CONFORMANCE: with all five distributional/co-classification
-//      models (RI, PPMI, LSA, NMF trained via reindex; FDC stateless),
+//   4. CROSS-PORT CONFORMANCE: with the distributional/co-classification
+//      models (RI, PPMI, NMF trained via reindex; FDC stateless; LSA when
+//      MOOTX01_LSA is on),
 //      ingesting a FIXED corpus and calling floatNearestPerSignal yields
 //      per-signal ranked lists identical Swift↔Rust. Swift is canonical and
 //      emits the shared fixture (Tests/SharedVectors/n_provider_per_signal.json);
@@ -39,9 +40,11 @@
 // captured window. Every Corpus-op suite serialises against that window via
 // GlobalTestLock, so this suite does the same.
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import CorpusKit
+@testable import CorpusKitWholeRecordDense
 import CorpusKitProviders
 import PersistenceKit
 import PersistenceKitSQLite
@@ -66,17 +69,22 @@ struct NProviderTests {
     private let probe = "car engine"
     private let perSignalLimit = 5
 
-    /// The five 6a-iii signals, freshly constructed. The four distributional /
-    /// matrix providers are trainable (trained via `reindex`); FDC is stateless.
+    /// The default dense ensemble signals, freshly constructed.
+    /// Under DenseFamilies: four signals (RI, PPMI, NMF, FDC).
+    /// Under MOOTX01_LSA: five signals (RI, PPMI, LSA, NMF, FDC).
+    /// The trainable providers are trained via `reindex`; FDC is stateless.
     /// Built fresh each call so the test owns the construction.
     private func allFiveModels() -> [EmbeddingModel] {
-        [
+        var models: [EmbeddingModel] = [
             .randomIndexing(provider: RandomIndexingProvider()),
             .ppmi(provider: PpmiProvider()),
-            .lsa(provider: LsaProvider()),
-            .nmf(provider: NmfProvider()),
-            .fdc(provider: FDCProvider())
         ]
+#if MOOTX01_LSA
+        models.append(.lsa(provider: LsaProvider()))
+#endif
+        models.append(.nmf(provider: NmfProvider()))
+        models.append(.fdc(provider: FDCProvider()))
+        return models
     }
 
     private func scratchURL() -> URL {
@@ -157,7 +165,18 @@ struct NProviderTests {
             try writeFixtureIfGenerating(observed)
 
             // Assert against the committed fixture (Swift-canonical anchor).
-            let fixture = try loadFixture()
+            // The shared fixture always contains all five entries (including lsa-v1);
+            // when MOOTX01_LSA is off, filter out the lsa-v1 entry before comparing —
+            // the Rust twin does the same (the fixture file itself is unchanged).
+            let rawFixture = try loadFixture()
+#if MOOTX01_LSA
+            let fixture = rawFixture
+#else
+            let fixture = NPerSignalFixture(
+                probe: rawFixture.probe,
+                limit: rawFixture.limit,
+                signals: rawFixture.signals.filter { $0.modelID != "lsa-v1" })
+#endif
             #expect(observed.signals.count == fixture.signals.count,
                     "signal count must match the fixture")
             for (obs, exp) in zip(observed.signals, fixture.signals) {
@@ -269,3 +288,4 @@ private func floatOutcomeBits(_ outcome: FloatLaneOutcome) -> [String] {
 }
 
 #endif // MOOTX01_DENSE_FAMILIES
+#endif // MOOTX01_WHOLE_RECORD_DENSE

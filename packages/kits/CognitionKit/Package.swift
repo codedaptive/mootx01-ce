@@ -40,9 +40,23 @@ let package = Package(
             targets: ["CognitionKit"]
         ),
     ],
+    traits: [
+        // WholeRecordDense: turns on the whole-record float lane in
+        // GeniusLocusKit and NeuronKit so the dense-fused proof test compiles.
+        // Off by default (ruling 2026-09-07). Test-only: no CognitionKit source
+        // is gated.
+        .trait(
+            name: "WholeRecordDense",
+            description: "Enable the WholeRecordDense trait in GeniusLocusKit and NeuronKit for the dense-fused proof test. Off by default."
+        ),
+    ],
     dependencies: [
-        .package(path: "../GeniusLocusKit"),
-        .package(path: "../NeuronKit"),
+        .package(path: "../GeniusLocusKit", traits: [
+            .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
+        ]),
+        .package(path: "../NeuronKit", traits: [
+            .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
+        ]),
         .package(path: "../LocusKit"),
         .package(path: "../../libs/SubstrateTypes"),
         // IntellectusLib is the zero-dependency telemetry leaf.
@@ -104,7 +118,10 @@ let package = Package(
             // Shared conformance vectors — one artifact read by the Swift
             // CognitionVectorConformanceTests suite AND by
             // rust/tests/cognition_conformance.rs (BYCOPY_MIGRATION_001).
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+            ]
         ),
     ]
 )

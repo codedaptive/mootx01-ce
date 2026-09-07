@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // ResidentMintSessionTests.swift — batch-protocol tests for the resident
 // minter seam (capability-probe selected: CMD --mint-capabilities lists 'batch').
 //
@@ -116,3 +117,4 @@ struct ResidentMintSessionTests {
         #expect(try #require(out).count == 5)
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

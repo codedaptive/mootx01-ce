@@ -123,7 +123,7 @@ struct UninstallCommand: AsyncParsableCommand {
             let harnessHookURL = HarnessMemoryPaths.hookScriptURL(homeDirectory: home)
             let harnessClaudeURL = HarnessMemoryPaths.globalCLAUDEMDURL(homeDirectory: home)
             let harnessWasActive = FileManager.default.fileExists(atPath: harnessHookURL.path)
-            try? HarnessMemorySettings.disable(settingsURL: harnessSettingsURL, homeDirectory: home)
+            _ = try? HarnessMemorySettings.disable(settingsURL: harnessSettingsURL, homeDirectory: home)
             try? HarnessMemoryHook.remove(at: harnessHookURL)
             try? HarnessMemoryCLAUDE.disable(at: harnessClaudeURL)
             if harnessWasActive {

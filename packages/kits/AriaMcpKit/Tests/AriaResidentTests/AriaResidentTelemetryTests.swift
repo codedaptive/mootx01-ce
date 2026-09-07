@@ -136,7 +136,7 @@ struct InstallManagerTelemetryTests {
 
     @Test("installManagerTelemetry: nil path returns nil and does not install a real sink")
     func nilPathReturnsNilAndIsNoOp() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             // Save current state so the test is non-destructive.
             let wasEnabled = Intellectus.isEnabled
             defer {
@@ -153,7 +153,7 @@ struct InstallManagerTelemetryTests {
 
     @Test("installManagerTelemetry: empty path returns nil and does not install a real sink")
     func emptyPathReturnsNilAndIsNoOp() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let result = await AriaResident.installManagerTelemetry(storePath: "")
             #expect(result == nil, "empty path must return nil — no store opened")
         }

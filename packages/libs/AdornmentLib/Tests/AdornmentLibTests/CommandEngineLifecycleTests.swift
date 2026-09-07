@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 import Darwin
 import Foundation
 import Testing
@@ -225,3 +226,4 @@ struct CommandEngineLifecycleTests {
         }
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

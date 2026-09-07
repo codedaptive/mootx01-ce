@@ -20,6 +20,9 @@ import SynapseKit
 import CorpusKitProviders
 
 @testable import CorpusKit
+#if MOOTX01_WHOLE_RECORD_DENSE
+import CorpusKitWholeRecordDense
+#endif
 
 private final class ReindexConcurrencyProbe: @unchecked Sendable {
     private let lock = NSLock()
@@ -1122,8 +1125,15 @@ struct CorpusContentEngineTests {
             let claimed = try await claims.claims(consumer: CorpusContentEngine.claimsConsumer)
             #expect(claimed.contains(VectorRepresentationKey(
                 modelID: "corpus-deterministic-v1", modelVersion: "1.0.0", vectorIndex: 0)))
-            #expect(claimed.contains(VectorRepresentationKey(
-                modelID: "corpus-deterministic-v1", modelVersion: "1.0.0", vectorIndex: 1)))
+            // The whole-record float lane (vectorIndex 1) is claimed only when
+            // the sidecar build writes it (claimedLanes).
+            let floatLane = VectorRepresentationKey(
+                modelID: "corpus-deterministic-v1", modelVersion: "1.0.0", vectorIndex: 1)
+#if MOOTX01_WHOLE_RECORD_DENSE
+            #expect(claimed.contains(floatLane))
+#else
+            #expect(!claimed.contains(floatLane))
+#endif
         }
     }
 
@@ -1305,6 +1315,7 @@ struct CorpusContentEngineTests {
     ///
     /// This is the CorpusContentEngine equivalent of
     /// BasisPersistenceTests.perDocIngestProducesNonDegenerateBasis.
+#if MOOTX01_LSA
     @Test("per-doc queue drain of 20 docs produces a non-degenerate LSA basis (REGRESSION)")
     func perDocQueueDrainProducesNonDegenerateBasis() async throws {
         try await GlobalTestLock.shared.withLock {
@@ -1377,6 +1388,7 @@ struct CorpusContentEngineTests {
             await engine.dropIngestQueue()
         }
     }
+#endif // MOOTX01_LSA
 
     // MARK: - §13 Three-state basis — reindex recovery (CorpusContentEngine)
 
@@ -1392,6 +1404,7 @@ struct CorpusContentEngineTests {
     ///   5. Call engine.reindex(now:) — trainTrainableSlots(force: true) retrains
     ///      on ALL active source content.
     ///   6. Confirm recovery: trainedChunkCount == 20 and animal query returns hits.
+#if MOOTX01_LSA
     @Test("CorpusContentEngine.reindex recovers a deliberately-degenerate LSA basis")
     func contentEngineReindexRecoversDegenerateBasis() async throws {
         try await GlobalTestLock.shared.withLock {
@@ -1516,6 +1529,7 @@ struct CorpusContentEngineTests {
                     "animal doc must rank in top-5 after reindex on the full 20-doc corpus")
         }
     }
+#endif // MOOTX01_LSA
 }
 
 // MARK: - Static attached-source stand-in

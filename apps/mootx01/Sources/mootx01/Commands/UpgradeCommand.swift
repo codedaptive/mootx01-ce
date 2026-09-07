@@ -48,8 +48,8 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the data-directory migration steps
-            (schema 10 → 19, kg_facts identity, shared-content reclaim, dense
-            pooling convergence, span encode, vector reclaim)
+            (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record
+            vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
             against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
             cycle — each step quiesces and restores the daemon itself when the
@@ -89,8 +89,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     var noRestart: Bool = false
 
     /// Run ONLY the data-directory migration steps: schema 10 → 19, kg_facts
-    /// identity, shared-content reclaim, dense pooling convergence, span
-    /// encode, and vector reclaim. Intended for scripted and benchmark
+    /// identity, shared-content reclaim, whole-record vacuum, ssc facts, dense
+    /// pooling convergence, span encode, and vector reclaim. Intended for
+    /// scripted and benchmark
     /// estates where the caller owns the estate via MOOTX01_DATA_DIR. No
     /// network, no download, no plugin convergence, no encryption offer, no
     /// restartAgents cycle. Each step handles its own daemon quiesce and
@@ -102,13 +103,15 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// whether the estate is one this build upgrades at all; a refusal stops
     /// the sequence before any other step can open the schema), kg_facts
     /// identity second (correctness migration), shared-content reclaim third
-    /// (VACUUM-backed, most I/O), dense pooling convergence fourth (retrains
-    /// stale-format provider bases before any other step opens the corpus),
-    /// span encode fifth (needs the registry row and the corpus wired), vector
-    /// reclaim last (deletes what nothing serves any more).
+    /// (VACUUM-backed, most I/O), whole-record vacuum fourth (the first estate
+    /// open of the sequence, so the 1.6 to 1.7 capsule runs and reports here),
+    /// ssc facts fifth, dense pooling convergence sixth (retrains stale-format
+    /// provider bases before any other step opens the corpus), span encode
+    /// seventh (needs the registry row and the corpus wired), vector reclaim
+    /// last (deletes what nothing serves any more).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+        help: "Run only the data-directory migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -164,10 +167,11 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // --backfill-only: headless data-dir convergence for scripted and
-        // benchmark estates. Runs only the six data-directory migration steps
-        // (schema 10 → 19, kg_facts identity, shared-content reclaim, dense
-        // pooling convergence, span encode, vector reclaim) against the estate
-        // resolved via MOOTX01_DATA_DIR. No network, no download, no plugin
+        // benchmark estates. Runs only the eight data-directory migration
+        // steps (schema 10 → 19, kg_facts identity, shared-content reclaim,
+        // whole-record vacuum, ssc facts, dense pooling convergence, span
+        // encode, vector reclaim) against the estate resolved via
+        // MOOTX01_DATA_DIR. No network, no download, no plugin
         // convergence, no encryption offer, no restartAgents cycle. Each step
         // owns its daemon quiesce+restore through ResidentDaemonQuiesce, which
         // touches the daemon only for the resident estate. A refused schema
@@ -178,11 +182,12 @@ struct UpgradeCommand: AsyncParsableCommand {
             guard await runSchemaUpgrade(home: home) else { throw ExitCode.failure }
             let okKG     = await runKGFactIdentityBackfill(home: home)
             let okRecl   = await runSharedContentReclaimIfPending(home: home)
+            let okVacuum = await runWholeRecordVacuum(home: home)
             let okFacts  = await runSSCFactsBackfill(home: home)
             let okDense  = await runDensePoolingConvergence(home: home)
             let okSpan   = await runSpanEncodeBackfill(home: home)
             let okVec    = await runVectorReclaim(home: home)
-            guard okKG && okRecl && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
+            guard okKG && okRecl && okVacuum && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
             return
         }
 
@@ -304,10 +309,11 @@ struct UpgradeCommand: AsyncParsableCommand {
                 if await runSchemaUpgrade(home: home) {
                     await runKGFactIdentityBackfill(home: home)
                     await runSharedContentReclaimIfPending(home: home)
+                    await runWholeRecordVacuum(home: home)
                     await runSSCFactsBackfill(home: home)
                     await runDensePoolingConvergence(home: home)
                     await runSpanEncodeBackfill(home: home)
-                    await runVectorReclaim(home: home)
+                    _ = await runVectorReclaim(home: home)
                 }
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
@@ -588,7 +594,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         #endif
     }
 
-    /// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)
+    /// Bring the trainable provider bases a populated estate carries
+    /// (random-indexing in every build; PPMI, NMF and FDC only in a
+    /// DenseFamilies build; LSA only under its own switch)
     /// onto the basis format this binary's codec writes. A basis row persisted
     /// under an earlier format version holds vectors pooled the old way; the
     /// corpus opens such a slot untrained and its open-time provider reconcile
@@ -822,6 +830,118 @@ struct UpgradeCommand: AsyncParsableCommand {
         #else
         return true
         #endif
+    }
+
+    /// Vacuum the whole-record float rows (`vectors` kind 1) and the
+    /// `hnsw_graph` rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26).
+    /// The 1.6 to 1.7 capsule does the work inside `GLKMigrationCatalog.prepare`
+    /// when the estate opens (it also rebuilds the binary sidecar and releases
+    /// the float representation claim), so this step counts the rows before
+    /// the open, opens the estate through GeniusLocusKit, counts again, and
+    /// returns the freed pages to the filesystem with a VACUUM when anything
+    /// was deleted. It runs after the shared-content reclaim and before the
+    /// ssc facts backfill: the first estate open of the sequence, so the
+    /// capsule's work is reported here and every later step finds the estate
+    /// at 1.7. Idempotent: a vacuumed estate deletes nothing and skips the
+    /// VACUUM. Twin of the Rust `run_whole_record_vacuum`.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` on success or when there is nothing to vacuum.
+    @discardableResult
+    private func runWholeRecordVacuum(home: URL) async -> Bool {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+        } catch {
+            print("  ✗ whole-record vacuum skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            dataDirectory: dataDir,
+            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            step: "whole-record vacuum",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let before = try await Self.wholeRecordRowCounts(configuration: configuration)
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let upgradeLifetimeIsEphemeral =
+                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
+                        .lowercased() == "ephemeral"
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: upgradeLifetimeIsEphemeral
+                        ? InMemoryEstateIdentityKeyStore() : nil
+                )
+                // The chain runs the 1.6 to 1.7 capsule on an estate that has
+                // not taken it yet; closing the estate closes its connection.
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                try await kit.close(handle)
+                let after = try await Self.wholeRecordRowCounts(configuration: configuration)
+                let floatRows = before.floatRows - after.floatRows
+                let graphRows = before.graphRows - after.graphRows
+                var reclaimedBytes: Int64 = 0
+                if floatRows + graphRows > 0 {
+                    let maintenance = try SQLiteStorage(configuration: configuration)
+                    reclaimedBytes = try await maintenance.performMaintenance().reclaimedBytes
+                    await maintenance.close()
+                }
+                if floatRows + graphRows == 0 {
+                    print("  ✓ whole-record vacuum: nothing to reclaim")
+                } else {
+                    print("  ✓ whole-record vacuum: \(floatRows) float row(s), \(graphRows) graph row(s) deleted; \(reclaimedBytes) bytes returned to filesystem")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ whole-record vacuum failed: \(error)
+                        Every serving row is untouched. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// The whole-record float (`vectors` kind 1) and `hnsw_graph` row counts
+    /// of an estate, read through a connection of their own that is closed
+    /// before the caller opens the estate. Zero when the vector tier was
+    /// never registered (a Locus-only estate has no `vectors` table).
+    private static func wholeRecordRowCounts(
+        configuration: EstateConfiguration
+    ) async throws -> (floatRows: Int, graphRows: Int) {
+        let storage = try SQLiteStorage(configuration: configuration)
+        do {
+            guard try await storage.currentSchemaVersion(for: VectorStore.kitID) > 0 else {
+                await storage.close()
+                return (0, 0)
+            }
+            let floatRows = try await storage.rowStore.count(
+                table: "vectors",
+                where: .eq(Column(table: "vectors", name: "kind"),
+                           .int(Int64(VectorKind.float32.rawValue))))
+            let graphRows = try await storage.rowStore.count(table: "hnsw_graph", where: nil)
+            await storage.close()
+            return (floatRows, graphRows)
+        } catch {
+            await storage.close()
+            throw error
+        }
     }
 
     /// Models whose vector rows `mootx01 upgrade` reclaims: the dense
@@ -1323,9 +1443,10 @@ struct UpgradeCommand: AsyncParsableCommand {
         if await runSchemaUpgrade(home: home) {
             await runKGFactIdentityBackfill(home: home)
             await runSharedContentReclaimIfPending(home: home)
+            await runWholeRecordVacuum(home: home)
             await runDensePoolingConvergence(home: home)
             await runSpanEncodeBackfill(home: home)
-            await runVectorReclaim(home: home)
+            _ = await runVectorReclaim(home: home)
         }
         convergeDaemonBundle(home: home)
         restartAgents(home: home)

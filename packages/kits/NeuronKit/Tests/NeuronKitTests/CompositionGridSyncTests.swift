@@ -63,6 +63,18 @@ private func loadFixtureCompositions() throws -> [String] {
     return names
 }
 
+/// Compositions the benchmarker fixture lists that this build gates out.
+/// `dense-fused` reads the whole-record float column and compiles only under
+/// the WholeRecordDense trait (ruling 2026-09-07); the benchmarker keeps the
+/// column name for its WholeRecordDense arms.
+private let gatedCompositions: Set<String> = {
+#if MOOTX01_WHOLE_RECORD_DENSE
+    []
+#else
+    ["dense-fused"]
+#endif
+}()
+
 // MARK: - tests
 
 @Suite("CompositionGridSyncTests")
@@ -74,7 +86,7 @@ struct CompositionGridSyncTests {
     /// Fail here instead, loudly, at build time.
     @Test("every fixture composition name exists in CompositionGrid.all")
     func fixtureNamesExistInGrid() throws {
-        let fixtureNames = try loadFixtureCompositions()
+        let fixtureNames = try loadFixtureCompositions().filter { !gatedCompositions.contains($0) }
         let gridNames = Set(NeuronKit.CompositionGrid.all.map(\.name))
         for name in fixtureNames {
             #expect(gridNames.contains(name),
@@ -99,7 +111,7 @@ struct CompositionGridSyncTests {
     /// column order is stable.
     @Test("fixture composition order matches CompositionGrid.all order (excluding benchmarker omissions)")
     func fixtureOrderMatchesGrid() throws {
-        let fixtureNames = try loadFixtureCompositions()
+        let fixtureNames = try loadFixtureCompositions().filter { !gatedCompositions.contains($0) }
         let gridNames = NeuronKit.CompositionGrid.all.map(\.name)
         // Filter the grid to only names the fixture includes (the benchmarker's subset).
         let gridSubset = gridNames.filter { fixtureNames.contains($0) }

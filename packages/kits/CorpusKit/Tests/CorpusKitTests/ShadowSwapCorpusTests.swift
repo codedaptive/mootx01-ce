@@ -34,6 +34,16 @@ import PersistenceKit
 import CorpusKitProviders
 @testable import CorpusKit
 
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vectorIndex 1) only in the WholeRecordDense build.
+private let vectorLanesPerItem: Int = {
+#if MOOTX01_WHOLE_RECORD_DENSE
+    2
+#else
+    1
+#endif
+}()
+
 // MARK: - Helpers
 
 /// Simple in-memory CorpusContentSource backed by a dictionary.
@@ -165,13 +175,13 @@ struct ShadowSwapCorpusTests {
         #expect(gen1 == 1,
             "c1 pass1: serving_generation must be 1 after first reindex (shadow gen 1 published)")
 
-        // In standalone mode the RI slot writes both a binary row (vectorIndex=0)
-        // and a float row (vectorIndex=1) per item. 3 items × 2 lanes = 6 rows.
+        // In standalone mode the RI slot writes a binary row (vectorIndex=0) per
+        // item, plus a float row (vectorIndex=1) in the WholeRecordDense build.
         // No prior gen-0 RI rows existed (indexContent skips untrained slots), so
-        // all 6 rows are serving gen-1 with nothing pending-reclaim.
+        // every row is serving gen-1 with nothing pending-reclaim.
         let rows1 = try await vectorRowCount(storage: storage, modelID: modelID)
-        #expect(rows1 == 6,
-            "c1 pass1: 6 gen-1 serving rows (2 lanes × 3 items); no prior RI rows to pend-reclaim")
+        #expect(rows1 == 3 * vectorLanesPerItem,
+            "c1 pass1: gen-1 serving rows (\(vectorLanesPerItem) lane(s) × 3 items); no prior RI rows to pend-reclaim")
 
         // ── Pass 2: second shadow swap — gen-1 rows become pending-reclaim ──
         try await engine.reindex(now: now)
@@ -180,10 +190,10 @@ struct ShadowSwapCorpusTests {
         #expect(gen2 == 2,
             "c1 pass2: serving_generation must be 2 after second reindex")
 
-        // 6 gen-1 rows marked pending-reclaim + 6 gen-2 serving rows = 12 total.
+        // gen-1 rows marked pending-reclaim + gen-2 serving rows = twice pass 1.
         let rows2 = try await vectorRowCount(storage: storage, modelID: modelID)
-        #expect(rows2 == 12,
-            "c1 pass2: 12 total rows — 6 gen-1 pending-reclaim + 6 gen-2 serving")
+        #expect(rows2 == 6 * vectorLanesPerItem,
+            "c1 pass2: total rows — gen-1 pending-reclaim + gen-2 serving")
     }
 
     // ── c2: BM25 recall stable across reindex ────────────────────────────

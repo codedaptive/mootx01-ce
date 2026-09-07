@@ -45,6 +45,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vector_index 1) only with the `whole-record-dense` feature.
+const LANES_PER_ITEM: usize = if cfg!(feature = "whole-record-dense") { 2 } else { 1 };
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const NOW_MILLIS: i64 = 1_755_100_000_000;
@@ -268,7 +272,11 @@ fn c4_failed_reindex_abandons_orphaned_shadow() {
     assert_eq!(gen1, Some(1), "setup: serving_generation must be 1 after first reindex");
 
     let count_after_first = vector_row_count(&*storage, RI_MODEL_ID);
-    assert_eq!(count_after_first, 6, "setup: 6 vectors after first reindex (3 items × 2 lanes)");
+    assert_eq!(
+        count_after_first,
+        3 * LANES_PER_ITEM,
+        "setup: 3 items × {LANES_PER_ITEM} lane(s) after first reindex"
+    );
 
     // ── Arm fault: next record() call throws ─────────────────────────────────
     // This fires inside train_trainable_slots on the second reindex, which runs
@@ -308,7 +316,8 @@ fn c4_failed_reindex_abandons_orphaned_shadow() {
     // ── c4d: vector count unchanged — no vectors stranded at shadow gen ────────
     let count_after_fail = vector_row_count(&*storage, RI_MODEL_ID);
     assert_eq!(
-        count_after_fail, 6,
-        "c4d: vector count must remain 6 — no shadow vectors stranded at invisible generation"
+        count_after_fail,
+        3 * LANES_PER_ITEM,
+        "c4d: vector count must remain 3 × {LANES_PER_ITEM} — no shadow vectors stranded at invisible generation"
     );
 }

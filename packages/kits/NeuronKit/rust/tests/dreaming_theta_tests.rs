@@ -19,9 +19,9 @@
 use std::collections::BTreeMap;
 
 use neuron_kit::dreaming_cycle::{
-    DreamingCycleReport, DreamingDaemon, DreamingDaemonState, DreamingDiaryEntry, DreamingPolicy,
+    DreamingDaemon, DreamingDaemonState, DreamingDiaryEntry, DreamingPolicy,
     DreamingPolicyStore, DreamingProposalSink, DreamingSubstrateReader, InMemoryDreamingPolicyStore,
-    ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource, TunnelLink,
+    ProposeFrameOut, RecallTraceItem, TunnelLink,
 };
 use neuron_kit::rem_cycle_table::{RemCycleKind, rem_cycle_table};
 

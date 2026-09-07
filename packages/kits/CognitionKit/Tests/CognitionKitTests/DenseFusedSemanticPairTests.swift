@@ -27,6 +27,8 @@
 // pure-lexical `text` composition cannot rank the answer first. Only the
 // dense cosine separates them.
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import GeniusLocusKit
@@ -244,3 +246,4 @@ struct DenseFusedSemanticPairTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

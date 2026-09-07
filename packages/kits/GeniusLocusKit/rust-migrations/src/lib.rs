@@ -39,6 +39,16 @@ mod index_composition_column_drop_migration;
 #[cfg(feature = "migration-v1-5-to-v1-6")]
 pub use index_composition_column_drop_migration::*;
 
+// GLK 1.6 → 1.7 capsule: vacuums the whole-record float rows and the
+// hnsw_graph rows from populated estates, rebuilds the binary sidecar and
+// releases the float representation claim (parity with the Swift
+// GLKMigrationV1_6ToV1_7 target).
+#[cfg(feature = "migration-v1-6-to-v1-7")]
+mod whole_record_float_vacuum_migration;
+
+#[cfg(feature = "migration-v1-6-to-v1-7")]
+pub use whole_record_float_vacuum_migration::*;
+
 use genius_locus_kit::estate_format::EstateFormatVersion;
 
 /// The compiled historical chain, run in format order. Every capsule reads
@@ -50,8 +60,9 @@ use genius_locus_kit::estate_format::EstateFormatVersion;
 /// find its row under the new id), then 1.0 -> 1.1 (shared content, which
 /// stamps 1.1), then the 1.4 -> 1.5 stamp (storage ledger kit ids, which
 /// stamps 1.5 only once every older capsule has stamped its own format),
-/// then 1.5 -> 1.6 (the composition_policy column drop, which writes the
-/// final stamp). No capsule separates the 1.1, 1.2, 1.3 and 1.4 stamps: the
+/// then 1.5 -> 1.6 (the composition_policy column drop), then 1.6 -> 1.7
+/// (the whole-record float vacuum, which writes the final stamp). No capsule
+/// separates the 1.1, 1.2, 1.3 and 1.4 stamps: the
 /// 1.1 -> 1.2 column is added by CorpusKit's own ladder at open, the
 /// 1.2 -> 1.3 column was removed by schema v19, and the 1.3 -> 1.4 setting
 /// retired with the index composition policy; the 1.4 -> 1.5 capsule runs
@@ -105,9 +116,18 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
         {
             // The 1.5 -> 1.6 capsule: replay CorpusKit's checkpoint ladder
             // (v4 drops corpus_index_state.composition_policy) and write the
-            // V1_6 stamp, the last write of the chain (I-25).
+            // V1_6 stamp (I-25).
             self.run_index_composition_column_drop_migration(handle, now_millis)
                 .map_err(|error| format!("index-composition column-drop migration: {error:?}"))?;
+        }
+        #[cfg(feature = "migration-v1-6-to-v1-7")]
+        {
+            // The 1.6 -> 1.7 capsule: vacuum the whole-record float rows and
+            // the hnsw_graph rows, rebuild the binary sidecar, release the
+            // float representation claim and write the V1_7 stamp, the last
+            // write of the chain (I-26).
+            self.run_whole_record_float_vacuum_migration(handle, now_millis)
+                .map_err(|error| format!("whole-record float vacuum migration: {error:?}"))?;
         }
         Ok(())
     }
@@ -118,7 +138,7 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
-        // Floor covers the 1.0→1.1, 1.4→1.5 and 1.5→1.6 capsules.
+        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6 and 1.6→1.7 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
     #[cfg(all(
@@ -126,8 +146,9 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // The 1.4→1.5 and 1.5→1.6 capsules are compiled. They serve every
-        // stamp from 1.1 up: nothing separates 1.1, 1.2, 1.3 and 1.4 any more.
+        // The 1.4→1.5, 1.5→1.6 and 1.6→1.7 capsules are compiled. They serve
+        // every stamp from 1.1 up: nothing separates 1.1, 1.2, 1.3 and 1.4
+        // any more.
         return Some(EstateFormatVersion::V1_1);
     }
     #[cfg(all(
@@ -136,13 +157,24 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Only the 1.5→1.6 column-drop capsule is compiled.
+        // The 1.5→1.6 column-drop and 1.6→1.7 vacuum capsules are compiled.
         return Some(EstateFormatVersion::V1_5);
+    }
+    #[cfg(all(
+        feature = "migration-v1-6-to-v1-7",
+        not(feature = "migration-v1-5-to-v1-6"),
+        not(feature = "migration-v1-4-to-v1-5"),
+        not(feature = "migration-v1-0-to-v1-1")
+    ))]
+    {
+        // Only the 1.6→1.7 whole-record float vacuum capsule is compiled.
+        return Some(EstateFormatVersion::V1_6);
     }
     #[cfg(all(
         not(feature = "migration-v1-0-to-v1-1"),
         not(feature = "migration-v1-4-to-v1-5"),
-        not(feature = "migration-v1-5-to-v1-6")
+        not(feature = "migration-v1-5-to-v1-6"),
+        not(feature = "migration-v1-6-to-v1-7")
     ))]
     {
         None

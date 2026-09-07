@@ -91,6 +91,7 @@ struct TrainableEmbeddingBasisTests {
         #expect(blob == expected, "PPMI seam blob must equal the 6a-i canonical blob byte-for-byte")
     }
 
+#if MOOTX01_LSA
     @Test("LSA: trainOnCorpus → serializeBasis reproduces the 6a-i blob byte-for-byte")
     func lsaSeamMatchesFixture() throws {
         let fixture = try loadStringFixture("lsa_basis_blob.json")
@@ -105,6 +106,7 @@ struct TrainableEmbeddingBasisTests {
         let expected = Data(base64Encoded: fixture.blobBase64)!
         #expect(blob == expected, "LSA seam blob must equal the 6a-i canonical blob byte-for-byte")
     }
+#endif // MOOTX01_LSA
 
     @Test("NMF: trainOnCorpus → serializeBasis reproduces the 6a-i blob byte-for-byte")
     func nmfSeamMatchesFixture() throws {
@@ -155,6 +157,7 @@ struct TrainableEmbeddingBasisTests {
         #expect(a.map { $0.bitPattern } == b.map { $0.bitPattern })
     }
 
+#if MOOTX01_LSA
     @Test("EmbeddingModel.reconstruct round-trips LSA embeddings")
     func reconstructLSA() async throws {
         let fixture = try loadStringFixture("lsa_basis_blob.json")
@@ -168,6 +171,7 @@ struct TrainableEmbeddingBasisTests {
         let b = try await restored.embedFloat(probe)
         #expect(a.map { $0.bitPattern } == b.map { $0.bitPattern })
     }
+#endif // MOOTX01_LSA
 
     @Test("EmbeddingModel.reconstruct round-trips NMF embeddings")
     func reconstructNMF() async throws {
@@ -208,7 +212,9 @@ struct TrainableEmbeddingBasisTests {
     func isTrainableFlags() {
         #expect(EmbeddingModel.randomIndexing(provider: RandomIndexingProvider()).isTrainable)
         #expect(EmbeddingModel.ppmi(provider: PpmiProvider()).isTrainable)
+#if MOOTX01_LSA
         #expect(EmbeddingModel.lsa(provider: LsaProvider()).isTrainable)
+#endif // MOOTX01_LSA
         #expect(EmbeddingModel.nmf(provider: NmfProvider()).isTrainable)
 
         #expect(!EmbeddingModel.deterministic.isTrainable)
@@ -265,12 +271,14 @@ struct TrainableEmbeddingBasisTests {
         try assertCountsSeamRoundTrips(trained: PpmiProvider(), fresh: PpmiProvider())
     }
 
+#if MOOTX01_LSA
     @Test("LSA counts seam round-trips the maintained vocabulary anchor")
     func lsaCountsSeamRoundTrips() throws {
         try assertCountsSeamRoundTrips(
             trained: LsaProvider(rank: 3, svdSweeps: 30),
             fresh: LsaProvider(rank: 3, svdSweeps: 30))
     }
+#endif // MOOTX01_LSA
 
     @Test("NMF counts seam round-trips the maintained vocabulary anchor")
     func nmfCountsSeamRoundTrips() throws {
@@ -279,6 +287,7 @@ struct TrainableEmbeddingBasisTests {
             fresh: NmfProvider(rank: 3, maxIterations: 100))
     }
 
+#if MOOTX01_LSA
     @Test("LSA/NMF anchor tracks document count without retaining TF rows")
     func lsaNmfAnchorTracksDocumentCount() {
         // The lightweight anchor grows vocab + document count WITHOUT keeping the
@@ -289,6 +298,7 @@ struct TrainableEmbeddingBasisTests {
         #expect(lsa.documentCount == Self.countsCorpus.count,
                 "anchor must bump documentCount once per non-empty chunk")
     }
+#endif // MOOTX01_LSA
 }
 
 #endif // MOOTX01_DENSE_FAMILIES

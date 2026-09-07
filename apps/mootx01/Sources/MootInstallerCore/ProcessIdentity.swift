@@ -44,7 +44,8 @@ public enum ProcessIdentity {
         var buffer = [CChar](repeating: 0, count: 4 * 1024)
         let written = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard written > 0 else { return false }
-        let path = String(cString: buffer)
+        // Truncate at the first null byte before decoding; String(cString:) is deprecated.
+        let path = String(decoding: buffer.prefix(while: { $0 != 0 }).map({ UInt8(bitPattern: $0) }), as: UTF8.self)
         let name = (path as NSString).lastPathComponent
         return name.hasPrefix(expectedPrefix)
         #elseif canImport(Glibc)

@@ -31,10 +31,12 @@
 // acquire GlobalTestLock.shared for their entire duration to prevent
 // interleaving with the CorpusKitTelemetryTests suites.
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 import Testing
 import PersistenceKit
 @testable import CorpusKit
+@testable import CorpusKitWholeRecordDense
 import CorpusKitProviders
 import IntellectusLib
 import SynapseKit
@@ -877,3 +879,4 @@ struct FloatLaneVocabMissTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

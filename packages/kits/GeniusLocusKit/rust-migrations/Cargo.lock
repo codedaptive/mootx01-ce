@@ -1328,6 +1328,7 @@ version = "0.1.0"
 dependencies = [
  "corpus-kit",
  "corpus-kit-providers",
+ "engram-lib",
  "genius-locus-kit",
  "locus-kit",
  "persistence-kit",

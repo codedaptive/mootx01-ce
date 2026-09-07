@@ -773,13 +773,13 @@ mod tests {
             .expect_err("terminal completion failure must surface");
         assert!(format!("{error:?}").contains("content reply batch"));
         assert_eq!(queue.in_flight().expect("in-flight").len(), 1);
+        // The drained content stays searchable after the terminal reply failure:
+        // the lexical index written by the same drain job serves the record.
         assert!(engine
-            .float_nearest_per_signal("completion failure remains durable", 5, synapsekit::engine::metric::FloatMetric::Cosine)
+            .bm25_top_k("completion failure remains durable", 5)
+            .expect("bm25_top_k")
             .iter()
-            .any(|(model_id, outcome)| {
-                model_id == "corpus-deterministic-v1"
-                    && matches!(outcome, crate::FloatLaneOutcome::Hits(hits) if !hits.is_empty())
-            }));
+            .any(|(id, _)| id == "drawer-reply"));
     }
 
     #[test]

@@ -438,7 +438,7 @@ public final class AppleFoundationEngine: GoldMinerEngine {
             instructions: adornmentBatchInstructions(maxLength: maxLength))
         do {
             let raw = try await session.respond(
-                to: prompt, options: GenerationOptions(sampling: .greedy)).content
+                to: prompt, options: GenerationOptions(samplingMode: .greedy)).content
             return parseAdornmentBatchReply(raw, expectedRows: rows.count).map { claim in
                 guard let claim else { return nil }
                 let normalized = normalizeMintOutput(claim, kind: MinterRecipe.apple.output)

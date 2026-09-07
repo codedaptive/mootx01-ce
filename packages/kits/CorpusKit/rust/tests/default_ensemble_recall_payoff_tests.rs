@@ -22,9 +22,10 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as the other corpus integration tests.
 
-// The payoff under proof is the five-family ensemble — four of them dark dense
-// families (contract sheet §13) — so this file compiles only under the
-// dense-families feature, like its Swift twin behind MOOTX01_DENSE_FAMILIES.
+// The payoff under proof is the dense ensemble — dark dense families (contract sheet §13) —
+// so this file compiles only under the dense-families feature, like its Swift twin
+// behind MOOTX01_DENSE_FAMILIES. LSA-specific assertions additionally require `lsa`
+// (ruling 2026-09-07).
 #![cfg(feature = "dense-families")]
 
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
@@ -72,13 +73,20 @@ fn default_ensemble_invalidates_trainable_1_0_bases() {
         .map(|model| match model {
             EmbeddingModelConfig::RandomIndexing { provider }
             | EmbeddingModelConfig::Ppmi { provider }
-            | EmbeddingModelConfig::Lsa { provider }
             | EmbeddingModelConfig::Nmf { provider } => provider.model_version(),
+            // LSA is on its own `lsa` switch (ruling 2026-09-07); the Lsa arm
+            // is only reachable when the feature is on.
+            #[cfg(feature = "lsa")]
+            EmbeddingModelConfig::Lsa { provider } => provider.model_version(),
             EmbeddingModelConfig::Fdc { provider } => provider.model_version(),
             _ => panic!("unexpected model in the default ensemble"),
         })
         .collect();
+    // With `lsa` ON: five members RI/PPMI/LSA/NMF/FDC; without: four RI/PPMI/NMF/FDC.
+    #[cfg(feature = "lsa")]
     assert_eq!(versions, ["1.1.0", "1.1.0", "1.1.0", "1.1.0", "1.0.0"]);
+    #[cfg(not(feature = "lsa"))]
+    assert_eq!(versions, ["1.1.0", "1.1.0", "1.1.0", "1.0.0"]);
 }
 
 fn scratch_path() -> String {
@@ -165,10 +173,18 @@ fn hits_carry_multi_signal_provenance() {
     let per_signal = corpus.float_nearest_per_signal("orbit spacecraft mission", 3);
 
     let model_ids: Vec<&str> = per_signal.iter().map(|(id, _)| id.as_str()).collect();
+    // With `lsa` ON: five model_ids in order; without: four (LSA dark, ruling 2026-09-07).
+    #[cfg(feature = "lsa")]
     assert_eq!(
         model_ids,
         vec!["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
         "per-signal provenance must carry all five default model_ids in order, got {model_ids:?}"
+    );
+    #[cfg(not(feature = "lsa"))]
+    assert_eq!(
+        model_ids,
+        vec!["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"],
+        "per-signal provenance must carry four default model_ids in order, got {model_ids:?}"
     );
 
     // MULTI-SIGNAL VOTING: more than one signal must produce ranked hits.

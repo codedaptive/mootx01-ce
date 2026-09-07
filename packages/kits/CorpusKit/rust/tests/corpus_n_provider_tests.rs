@@ -15,14 +15,18 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as corpus_basis_persistence_tests.
 
-// Every case opens the FDC, LSA, NMF or PPMI providers — dark dense families (contract sheet §13) —
+// Every case opens the FDC, NMF or PPMI providers — dark dense families (contract sheet §13) —
 // so this file compiles only under the dense-families feature.
+// LSA constructions are additionally gated on the `lsa` feature (ruling 2026-09-07).
 #![cfg(feature = "dense-families")]
 
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
 use corpus_kit_providers::{
-    FDCProvider, LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider,
+    FDCProvider, NmfProvider, PpmiProvider, RandomIndexingProvider,
 };
+// LsaProvider is dark unless the `lsa` feature is on (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
+use corpus_kit_providers::LsaProvider;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -75,30 +79,32 @@ fn storage_at(path: &str) -> Arc<dyn Storage> {
     Arc::new(SqliteStorage::new(config).expect("open sqlite"))
 }
 
-/// The five 6a-iii signals, freshly constructed in the same slot order as the
-/// Swift `allFiveModels()`. The four distributional / matrix providers are
-/// trainable (trained via `reindex`); FDC is stateless.
+/// The recall ensemble, freshly constructed in the same slot order as the
+/// Swift `allFiveModels()`. With `lsa` ON: five providers (RI, PPMI, LSA, NMF, FDC);
+/// without `lsa`: four providers (RI, PPMI, NMF, FDC). The four distributional /
+/// matrix providers are trainable (trained via `reindex`); FDC is stateless.
 fn all_five_models() -> Vec<EmbeddingModelConfig> {
-    vec![
+    let mut models = vec![
         EmbeddingModelConfig::RandomIndexing {
             provider: Box::new(RandomIndexingProvider::new()),
         },
         EmbeddingModelConfig::Ppmi {
             provider: Box::new(PpmiProvider::new()),
         },
-        // LSA/NMF use their canonical default constructors (same rank / sweeps /
-        // iterations / seeds as the Swift parameterless inits) so the trained
-        // bases — and therefore the per-signal rankings — match Swift bit-for-bit.
-        EmbeddingModelConfig::Lsa {
-            provider: Box::new(LsaProvider::default_new()),
-        },
-        EmbeddingModelConfig::Nmf {
-            provider: Box::new(NmfProvider::default_new()),
-        },
-        EmbeddingModelConfig::Fdc {
-            provider: Box::new(FDCProvider::default_provider()),
-        },
-    ]
+    ];
+    // LSA is on its own `lsa` switch (ruling 2026-09-07): dark and unproven.
+    // With `lsa` ON the canonical slot order is RI/PPMI/LSA/NMF/FDC.
+    #[cfg(feature = "lsa")]
+    models.push(EmbeddingModelConfig::Lsa {
+        provider: Box::new(LsaProvider::default_new()),
+    });
+    models.push(EmbeddingModelConfig::Nmf {
+        provider: Box::new(NmfProvider::default_new()),
+    });
+    models.push(EmbeddingModelConfig::Fdc {
+        provider: Box::new(FDCProvider::default_provider()),
+    });
+    models
 }
 
 // ── Shared fixture model (mirrors the Swift NPerSignalFixture) ──
@@ -150,15 +156,25 @@ fn all_five_per_signal_matches_shared_fixture() {
     assert_eq!(fixture.probe, PROBE, "fixture probe must match");
     assert_eq!(fixture.limit, PER_SIGNAL_LIMIT as i64, "fixture limit must match");
 
+    // Filter the `lsa-v1` signal out of the fixture when the `lsa` feature is off
+    // (ruling 2026-09-07): LSA is dark by its own switch, so the live ensemble has
+    // four members (RI, PPMI, NMF, FDC) and the fixture is filtered to match.
+    // The Swift twin does the same under !MOOTX01_LSA. The fixture file is unchanged.
+    let expected_signals: Vec<&Signal> = fixture
+        .signals
+        .iter()
+        .filter(|s| cfg!(feature = "lsa") || s.model_id != "lsa-v1")
+        .collect();
+
     let path = scratch_path();
     let corpus = Corpus::open_many(storage_at(&path), all_five_models())
-        .expect("Corpus::open_many must succeed with all five models");
+        .expect("Corpus::open_many must succeed with the live model set");
     for (i, doc) in DOCS.iter().enumerate() {
         corpus
             .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
             .expect("ingest");
     }
-    // Train the four trainable signals from scratch on the fixed corpus; FDC is
+    // Train the trainable signals from scratch on the fixed corpus; FDC is
     // stateless (vector refresh only).
     corpus.reindex(NOW_MILLIS).expect("reindex");
 
@@ -166,11 +182,11 @@ fn all_five_per_signal_matches_shared_fixture() {
 
     assert_eq!(
         per_signal.len(),
-        fixture.signals.len(),
-        "signal count must match the Swift-canonical fixture"
+        expected_signals.len(),
+        "signal count must match the (possibly lsa-filtered) Swift-canonical fixture"
     );
 
-    for (observed, expected) in per_signal.iter().zip(fixture.signals.iter()) {
+    for (observed, expected) in per_signal.iter().zip(expected_signals.iter()) {
         let (model_id, outcome) = observed;
         assert_eq!(
             model_id, &expected.model_id,

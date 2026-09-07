@@ -48,6 +48,7 @@ pub mod metric_names {
     /// counter to detect misconfigured estates where the dense lane
     /// is expected but consistently dark. Mirrors Swift
     /// `GLKMetricName.denseLaneDark`. Tagged: `estate_id`, `reason`.
+    #[cfg(feature = "whole-record-dense")]
     pub const DENSE_LANE_DARK: &str = "glk.recall.dense_lane_dark";
 
     // ── Stage-degradation counters (P1 fail-loud degradation contract) ──

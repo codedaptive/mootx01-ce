@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 import Testing
 @testable import AdornmentLib
 
@@ -170,3 +171,4 @@ struct AdornmentIdentityTests {
         #expect(adornment.minterID == minter.id, "adornment.minterID must equal descriptor.id")
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

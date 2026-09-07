@@ -441,12 +441,19 @@ final class ContractDaemonHarness: @unchecked Sendable {
     }
 
     private func syncHTTPRequest(_ request: URLRequest) throws -> HTTPResult {
-        var result: HTTPResult?
-        var httpError: Error?
+        // Capture box: @unchecked Sendable because the DispatchSemaphore below
+        // guarantees that the closure writes complete before the caller reads.
+        // Swift 6 strict concurrency cannot see the semaphore ordering, so a
+        // class wrapper is the correct replacement for mutable captured vars here.
+        final class HTTPCapture: @unchecked Sendable {
+            var result: HTTPResult?
+            var httpError: Error?
+        }
+        let capture = HTTPCapture()
         let sema = DispatchSemaphore(value: 0)
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             defer { sema.signal() }
-            if let error = error { httpError = error; return }
+            if let error = error { capture.httpError = error; return }
             guard let http = response as? HTTPURLResponse,
                   let data = data else { return }
             var headers = [String: String]()
@@ -455,12 +462,12 @@ final class ContractDaemonHarness: @unchecked Sendable {
                     headers[ks.lowercased()] = vs
                 }
             }
-            result = HTTPResult(status: http.statusCode, headers: headers, body: data)
+            capture.result = HTTPResult(status: http.statusCode, headers: headers, body: data)
         }
         task.resume()
         sema.wait()
-        if let err = httpError { throw err }
-        guard let r = result else { throw HarnessError.authFailed("no HTTP response") }
+        if let err = capture.httpError { throw err }
+        guard let r = capture.result else { throw HarnessError.authFailed("no HTTP response") }
         return r
     }
 }

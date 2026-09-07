@@ -89,7 +89,9 @@ pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
 pub use corpus::CorpusPathReason;
 pub use corpus::EmbeddingModelConfig;
+#[cfg(feature = "whole-record-dense")]
 pub use corpus::FloatDiscriminationSignal;
+#[cfg(feature = "whole-record-dense")]
 pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
 pub use corpus::TrainingPathDecision;
