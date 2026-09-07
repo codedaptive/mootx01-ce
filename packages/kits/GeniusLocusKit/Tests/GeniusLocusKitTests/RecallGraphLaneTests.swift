@@ -204,4 +204,58 @@ struct RecallGraphLaneTests {
         #expect(sources.contains(.locusGraph),
                 "drawerB is a tunnel target — must also have .locusGraph (got \(sources))")
     }
+
+    // MARK: - 4. Locus ramp divisor — the normalised locus column, both ports
+
+    /// The unionBest locus ramp divides by `frontierK`, not by the slice length.
+    ///
+    /// Three drawers captured oldest to newest form a slice of 3 at a frontierK
+    /// of at least 64 (the clamp floor), and a tunnel from the newest to the
+    /// oldest merges the graph lane's fixed 0.5 onto the oldest by max. After
+    /// step 6 min-max normalisation the locus column reads 1.0 / 0.5 / 0.0
+    /// (newest / middle / oldest): the ramp is 1, (K-1)/K, (K-2)/K, the 0.5
+    /// never wins the max, and the middle lands exactly half-way. A
+    /// slice-length divisor would give 1, 2/3, max(1/3, 0.5) = 0.5, and the
+    /// middle would normalise to 1/3. The pin holds for every frontierK of 5 or
+    /// more. Twin of Rust `locus_ramp_divides_by_frontier_k_not_slice_length`.
+    @Test("unionBest locus ramp divides by frontierK: normalised column reads 1.0 / 0.5 / 0.0")
+    func locusRampDividesByFrontierKNotSliceLength() async throws {
+        let (kit, handle, estate) = try await openEstate()
+
+        // Content strings sort the same way as capture time (content DESC is the
+        // final tiebreak of the stable locus sort), so the slice order is fixed
+        // even if two captures share a filedAt.
+        let oldest = try await captureDrawer(content: "ramp-1-oldest", room: "ramp-room", kit: kit, handle: handle)
+        let middle = try await captureDrawer(content: "ramp-2-middle", room: "ramp-room", kit: kit, handle: handle)
+        let newest = try await captureDrawer(content: "ramp-3-newest", room: "ramp-room", kit: kit, handle: handle)
+
+        let tunnelFrame = TunnelCaptureFrame(
+            sourceWing: "ramp-room", sourceRoom: "ramp-room",
+            targetWing: "ramp-room", targetRoom: "ramp-room",
+            label: "ramp-divisor-link",
+            addedBy: "graph-lane-tests",
+            sourceDrawerId: newest.id,
+            targetDrawerId: oldest.id,
+            kind: .references
+        )
+        _ = try await estate.capture(tunnelFrame)
+
+        let request = GLKRecallRequest(
+            frame: activeFrame(),
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 20,
+            fallback: .allowDegraded,
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.hits.count == 3, "all three drawers must surface (got \(result.hits.count))")
+
+        func locus(_ id: String) -> Float {
+            result.hits.first { $0.id == id }?.score.locus ?? .nan
+        }
+        #expect(abs(locus(newest.id) - 1.0) < 1e-4, "newest: got \(locus(newest.id))")
+        #expect(abs(locus(middle.id) - 0.5) < 1e-4, "middle: got \(locus(middle.id))")
+        #expect(abs(locus(oldest.id) - 0.0) < 1e-4, "oldest: got \(locus(oldest.id))")
+    }
 }
