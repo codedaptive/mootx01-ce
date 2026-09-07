@@ -213,3 +213,55 @@ fn drawer_that_is_both_locus_hit_and_tunnel_target_carries_both_bits() {
         "drawerB is a tunnel target — must also have LocusGraph (got {sources:?})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. Locus ramp divisor — the normalised locus column, both ports
+// ---------------------------------------------------------------------------
+
+/// The unionBest locus ramp divides by `frontier_k`, not by the slice length.
+///
+/// Three drawers captured oldest to newest form a slice of 3 at a frontier_k of
+/// at least 64 (the clamp floor), and a tunnel from the newest to the oldest
+/// merges the graph lane's fixed 0.5 onto the oldest by max. After the min-max
+/// normalisation the locus column reads 1.0 / 0.5 / 0.0 (newest / middle /
+/// oldest): the ramp is 1, (K-1)/K, (K-2)/K, the 0.5 never wins the max, and the
+/// middle lands exactly half-way. A slice-length divisor would give
+/// 1, 2/3, max(1/3, 0.5) = 0.5, and the middle would normalise to 1/3. The pin
+/// holds for every frontier_k of 5 or more. Twin of Swift
+/// `locusRampDividesByFrontierKNotSliceLength`.
+#[test]
+fn locus_ramp_divides_by_frontier_k_not_slice_length() {
+    let (coord, h) = open_one("4");
+    let estate = coord.estate_for(&h).expect("estate");
+
+    // Content strings sort the same way as capture time (content DESC is the
+    // final tiebreak of the stable locus sort), so the slice order is fixed.
+    let oldest = coord
+        .capture(&h, capture_frame("ramp-1-oldest", "ramp-room"), NOW)
+        .expect("capture oldest");
+    let middle = coord
+        .capture(&h, capture_frame("ramp-2-middle", "ramp-room"), NOW + 1)
+        .expect("capture middle");
+    let newest = coord
+        .capture(&h, capture_frame("ramp-3-newest", "ramp-room"), NOW + 2)
+        .expect("capture newest");
+
+    estate
+        .capture_tunnel(
+            tunnel_frame_with_ids("ramp-room", "ramp-room", "ramp-divisor-link", &newest.id, &oldest.id),
+            NOW + 3,
+        )
+        .expect("capture tunnel");
+
+    let result = coord
+        .recall_scored(&h, union_best_request(20), NOW + 4)
+        .expect("recall");
+    assert_eq!(result.hits.len(), 3, "all three drawers must surface");
+
+    let locus = |id: &str| -> f32 {
+        result.hits.iter().find(|h| h.id == id).map(|h| h.score.locus).expect("hit present")
+    };
+    assert!((locus(&newest.id) - 1.0).abs() < 1e-4, "newest: got {}", locus(&newest.id));
+    assert!((locus(&middle.id) - 0.5).abs() < 1e-4, "middle: got {}", locus(&middle.id));
+    assert!((locus(&oldest.id) - 0.0).abs() < 1e-4, "oldest: got {}", locus(&oldest.id));
+}
