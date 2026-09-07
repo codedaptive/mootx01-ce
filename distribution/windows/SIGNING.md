@@ -129,7 +129,12 @@ absent; the candidate lane warns and ships unsigned.
 
 ## 4. How the workflows use it
 
-Both workflows sign in the same place:
+Scope: this section describes the Community Edition repository's workflows,
+the lane that publishes Windows builds. The Enterprise repository's
+`release.yml` carries no signing step and none is planned: EE is not tagged
+for public release and its internal Windows assets ship unsigned by design.
+
+Both CE workflows sign in the same place:
 
 1. Build `mootx01.exe` + `moot-mgr.exe`, copy to the workspace root.
 2. **Sign the two exes** (before zip and before Inno, so the archive and the
