@@ -2057,7 +2057,12 @@ extension ToolDispatcher {
             // composition exists on this direct search path.
             door: "memory_search",
             frontierK: frontierK,
-            anomalousFilter: anomalousFilter
+            anomalousFilter: anomalousFilter,
+            // Sub-span scoring is off at the ARIA edge: it is an additive-cost
+            // stage, the tool exposes no argument for it, and the edge names
+            // the value rather than relying on the request default (ruling
+            // 2026-09-07).
+            subSpanScoring: .off
         )
         let result = try await kit.recall(handle, request)
         // Anchor exclusion (PR-03): a near: pivot must not hand the anchor
