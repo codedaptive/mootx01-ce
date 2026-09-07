@@ -1,9 +1,17 @@
 //! Hardcoded seed values for the bundled snowflake-arctic-embed-s encoder model.
 //!
-//! `mootx01 upgrade` and estate provisioning call `EncoderModelStore::upsert`
-//! with a row constructed from these constants. The row is inserted into
-//! `encoder_models` when no active row exists; `is_active` is set to 1 only
-//! when none exists yet.
+//! Two paths consume these constants to upsert an `encoder_models` row:
+//!   - `EstateCoordinator::seed_default_encoder_model_in` (GeniusLocusKit):
+//!     the GLK activation path, called at open from `activate_span_encoder` when
+//!     the manifest names `embedding_provider = "encoder"` and no active row
+//!     exists yet (ruling 2026-09-04: seeding belongs to provision and serve).
+//!   - `mootx01 upgrade`: the upgrade backfill, which seeds the row over a
+//!     closed estate's storage so that pre-1.1 estates gain an active row on
+//!     their next open.
+//!
+//! The row is inserted with `is_active = true` only when no active row exists;
+//! an estate that already carries an active row (for example, a later audition
+//! winner) keeps it unchanged.
 //!
 //! Twin of Swift's `EncoderModelSeed` in
 //! `Sources/CorpusKitProviders/EncoderModelSeed.swift`. Both ports must carry
@@ -15,7 +23,7 @@
 //! 2. Re-run `tools/encoder-models/build-all.sh`.
 //! 3. Replace the model directory in app resources and installer package.
 //! Schema migration and re-encode are handled by `EncoderModelStore` and
-//! the drain duty — this file is only the seed source.
+//! the drain duty; this file is only the seed source.
 
 /// Static seed values for the bundled snowflake-arctic-embed-s encoder model.
 ///

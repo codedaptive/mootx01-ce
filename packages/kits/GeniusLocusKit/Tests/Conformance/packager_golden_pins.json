@@ -1,12 +1,12 @@
 {
-  "version": 1,
-  "description": "GLKResultsPackager cross-port golden pins. Read by both the Swift twin (GLKResultsPackagerParityTests.swift) and the Rust twin (packager_parity.rs). Identical level/confidence/has_answer_block/row_count assertions per gate branch in both ports. Values match the numeric seeds in GLKResultsPackagerTests.swift (pins A-D).",
+  "version": 2,
+  "description": "GLKResultsPackager cross-port golden pins. Read by both the Swift twin (GLKResultsPackagerParityTests.swift) and the Rust twin (packager_parity.rs). Identical level/confidence/has_answer_block/row_count assertions per gate branch in both ports. Values match the numeric seeds in GLKResultsPackagerTests.swift (pins A-D). Per hit, span_cosine and lexical_rank are the span rerank stage's evidence (RecallHit.spanHit: the best span cosine under the active encoder and the item's 1-based rank in the lexical head); both null means the stage did not score the hit. m2 is the normalised Spearman footrule agreement between the lexical order and the span order of the span-scored hits in the top-10; m3 is the population standard deviation of their cosines (a single-hit result reads 1.0).",
   "thresholds": {
     "t1": 0.25,
-    "t2": 0.50,
+    "t2": 0.5,
     "t1_prime": 0.05,
-    "t3_prime": 0.10,
-    "c": 0.20,
+    "t3_prime": 0.1,
+    "c": 0.2,
     "k_min": 3,
     "k_max": 20
   },
@@ -16,13 +16,42 @@
       "name": "never mode returns rowsOnly with all hits",
       "mode": "never",
       "composed_answer": null,
-      "signal_agreement": 0.0,
       "hits": [
-        {"id": "h-A1", "final_score": 0.9, "dense_score": 0.9, "drawer_content": null},
-        {"id": "h-A2", "final_score": 0.7, "dense_score": 0.7, "drawer_content": null},
-        {"id": "h-A3", "final_score": 0.5, "dense_score": 0.5, "drawer_content": null},
-        {"id": "h-A4", "final_score": 0.3, "dense_score": 0.3, "drawer_content": null},
-        {"id": "h-A5", "final_score": 0.1, "dense_score": 0.1, "drawer_content": null}
+        {
+          "id": "h-A1",
+          "final_score": 0.9,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        },
+        {
+          "id": "h-A2",
+          "final_score": 0.7,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        },
+        {
+          "id": "h-A3",
+          "final_score": 0.5,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        },
+        {
+          "id": "h-A4",
+          "final_score": 0.3,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        },
+        {
+          "id": "h-A5",
+          "final_score": 0.1,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "rowsOnly",
@@ -34,13 +63,24 @@
     },
     {
       "id": "pin-B",
-      "name": "CONFIDENT gate: auto mode → l0AnswerOnly (m1≥t1, m2≥t2, m4=true)",
+      "name": "CONFIDENT gate: auto mode -> l0AnswerOnly (m1>=t1, the span order matches the lexical order so m2=1.0>=t2, m3=0.20>=t3_prime, m4=true)",
       "mode": "auto",
       "composed_answer": "fruit banana information",
-      "signal_agreement": 0.80,
       "hits": [
-        {"id": "h-B1", "final_score": 0.90, "dense_score": 0.90, "drawer_content": "fruit banana mango recall content test paragraph information"},
-        {"id": "h-B2", "final_score": 0.30, "dense_score": 0.50, "drawer_content": null}
+        {
+          "id": "h-B1",
+          "final_score": 0.9,
+          "span_cosine": 0.9,
+          "lexical_rank": 1,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        },
+        {
+          "id": "h-B2",
+          "final_score": 0.3,
+          "span_cosine": 0.5,
+          "lexical_rank": 2,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "l0AnswerOnly",
@@ -52,14 +92,31 @@
     },
     {
       "id": "pin-C",
-      "name": "INTERMEDIATE gate: auto mode → l1Full (m2<t2 so CONFIDENT fails; not WEAK)",
+      "name": "INTERMEDIATE gate: auto mode -> l1Full (the encoder reverses the lexical head so m2=0<t2; m1 and m3 clear WEAK)",
       "mode": "auto",
       "composed_answer": "moderate recall result intermediate",
-      "signal_agreement": 0.30,
       "hits": [
-        {"id": "h-C1", "final_score": 0.70, "dense_score": 0.80, "drawer_content": null},
-        {"id": "h-C2", "final_score": 0.40, "dense_score": 0.50, "drawer_content": null},
-        {"id": "h-C3", "final_score": 0.30, "dense_score": 0.30, "drawer_content": null}
+        {
+          "id": "h-C1",
+          "final_score": 0.7,
+          "span_cosine": 0.8,
+          "lexical_rank": 3,
+          "drawer_content": null
+        },
+        {
+          "id": "h-C2",
+          "final_score": 0.4,
+          "span_cosine": 0.5,
+          "lexical_rank": 2,
+          "drawer_content": null
+        },
+        {
+          "id": "h-C3",
+          "final_score": 0.3,
+          "span_cosine": 0.3,
+          "lexical_rank": 1,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "l1Full",
@@ -71,14 +128,31 @@
     },
     {
       "id": "pin-D",
-      "name": "WEAK gate: m1<t1_prime → rowsOnly, no answer block (spec §5: WEAK never carries answer block)",
+      "name": "WEAK gate: m1<t1_prime -> rowsOnly, no answer block (spec section 5: WEAK never carries an answer block)",
       "mode": "auto",
       "composed_answer": "some answer text",
-      "signal_agreement": 0.80,
       "hits": [
-        {"id": "h-D1", "final_score": 0.520, "dense_score": 0.50, "drawer_content": null},
-        {"id": "h-D2", "final_score": 0.500, "dense_score": 0.50, "drawer_content": null},
-        {"id": "h-D3", "final_score": 0.480, "dense_score": 0.50, "drawer_content": null}
+        {
+          "id": "h-D1",
+          "final_score": 0.52,
+          "span_cosine": 0.5,
+          "lexical_rank": 1,
+          "drawer_content": null
+        },
+        {
+          "id": "h-D2",
+          "final_score": 0.5,
+          "span_cosine": 0.5,
+          "lexical_rank": 2,
+          "drawer_content": null
+        },
+        {
+          "id": "h-D3",
+          "final_score": 0.48,
+          "span_cosine": 0.5,
+          "lexical_rank": 3,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "rowsOnly",
@@ -90,13 +164,24 @@
     },
     {
       "id": "pin-E",
-      "name": "round-2 boundary: raw m1=0.245 rounds to 0.25=t1 in both ports → CONFIDENT (not INTERMEDIATE without rounding)",
+      "name": "round-2 boundary: raw m1=0.245 rounds to 0.25=t1 in both ports -> CONFIDENT (not INTERMEDIATE without rounding)",
       "mode": "auto",
       "composed_answer": "fruit banana information",
-      "signal_agreement": 0.80,
       "hits": [
-        {"id": "h-E1", "final_score": 0.80, "dense_score": 0.85, "drawer_content": "fruit banana mango recall content test paragraph information"},
-        {"id": "h-E2", "final_score": 0.604, "dense_score": 0.55, "drawer_content": null}
+        {
+          "id": "h-E1",
+          "final_score": 0.8,
+          "span_cosine": 0.85,
+          "lexical_rank": 1,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        },
+        {
+          "id": "h-E2",
+          "final_score": 0.604,
+          "span_cosine": 0.55,
+          "lexical_rank": 2,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "l0AnswerOnly",
@@ -108,13 +193,24 @@
     },
     {
       "id": "pin-F",
-      "name": "m4 parity: hyphenated token treated as one word by Swift delimiter set — state-of-the-art found in citation",
+      "name": "m4 parity: hyphenated token treated as one word by the Swift delimiter set - state-of-the-art found in citation",
       "mode": "auto",
       "composed_answer": "state-of-the-art deep-learning approach",
-      "signal_agreement": 0.80,
       "hits": [
-        {"id": "h-F1", "final_score": 0.90, "dense_score": 0.80, "drawer_content": "state-of-the-art deep-learning methodology approach analysis evaluation"},
-        {"id": "h-F2", "final_score": 0.35, "dense_score": 0.45, "drawer_content": null}
+        {
+          "id": "h-F1",
+          "final_score": 0.9,
+          "span_cosine": 0.8,
+          "lexical_rank": 1,
+          "drawer_content": "state-of-the-art deep-learning methodology approach analysis evaluation"
+        },
+        {
+          "id": "h-F2",
+          "final_score": 0.35,
+          "span_cosine": 0.45,
+          "lexical_rank": 2,
+          "drawer_content": null
+        }
       ],
       "expected": {
         "level": "l0AnswerOnly",
@@ -122,6 +218,129 @@
         "has_answer_block": true,
         "row_count": 0,
         "total_count": 2
+      }
+    },
+    {
+      "id": "pin-G",
+      "name": "no encoder evidence: a multi-hit result with no span hits is WEAK (m3=0<t3_prime) whatever the margin and containment say",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "hits": [
+        {
+          "id": "h-G1",
+          "final_score": 0.9,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        },
+        {
+          "id": "h-G2",
+          "final_score": 0.3,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": null
+        }
+      ],
+      "expected": {
+        "level": "rowsOnly",
+        "confidence": null,
+        "has_answer_block": false,
+        "row_count": 2,
+        "total_count": 2
+      }
+    },
+    {
+      "id": "pin-H",
+      "name": "lane disagreement: the encoder reverses the lexical head -> m2=0<t2 -> INTERMEDIATE although m1, m3 and m4 clear the CONFIDENT bar",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "hits": [
+        {
+          "id": "h-H1",
+          "final_score": 0.9,
+          "span_cosine": 0.4,
+          "lexical_rank": 1,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        },
+        {
+          "id": "h-H2",
+          "final_score": 0.3,
+          "span_cosine": 0.6,
+          "lexical_rank": 2,
+          "drawer_content": null
+        },
+        {
+          "id": "h-H3",
+          "final_score": 0.2,
+          "span_cosine": 0.8,
+          "lexical_rank": 3,
+          "drawer_content": null
+        }
+      ],
+      "expected": {
+        "level": "l1Full",
+        "confidence": "intermediate",
+        "has_answer_block": true,
+        "row_count": 3,
+        "total_count": 3
+      }
+    },
+    {
+      "id": "pin-I",
+      "name": "footrule boundary: one adjacent swap in three -> m2=1-2/4=0.5=t2 -> CONFIDENT",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "hits": [
+        {
+          "id": "h-I1",
+          "final_score": 0.9,
+          "span_cosine": 0.6,
+          "lexical_rank": 1,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        },
+        {
+          "id": "h-I2",
+          "final_score": 0.3,
+          "span_cosine": 0.8,
+          "lexical_rank": 2,
+          "drawer_content": null
+        },
+        {
+          "id": "h-I3",
+          "final_score": 0.2,
+          "span_cosine": 0.4,
+          "lexical_rank": 3,
+          "drawer_content": null
+        }
+      ],
+      "expected": {
+        "level": "l0AnswerOnly",
+        "confidence": "confident",
+        "has_answer_block": true,
+        "row_count": 0,
+        "total_count": 3
+      }
+    },
+    {
+      "id": "pin-J",
+      "name": "single hit without span evidence: m3 reads 1.0 (never WEAK on the only hit) and m2 reads 0.0 (no encoder agreement) -> INTERMEDIATE, one row",
+      "mode": "auto",
+      "composed_answer": "fruit banana information",
+      "hits": [
+        {
+          "id": "h-J1",
+          "final_score": 0.9,
+          "span_cosine": null,
+          "lexical_rank": null,
+          "drawer_content": "fruit banana mango recall content test paragraph information"
+        }
+      ],
+      "expected": {
+        "level": "l1Full",
+        "confidence": "intermediate",
+        "has_answer_block": true,
+        "row_count": 1,
+        "total_count": 1
       }
     }
   ]
