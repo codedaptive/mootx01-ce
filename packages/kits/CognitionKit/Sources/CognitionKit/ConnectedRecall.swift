@@ -107,7 +107,10 @@ public enum ConnectedRecall {
             fallback: .allowDegraded,
             queryText: query,
             traceLimit: safeLimit,
-            origin: .internal)
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let anchor = try await kit.recall(handle, request)
         // ReductionCandidate.from(hit:) is the established hit→(id, room,
         // content) projection (PreciseRecall uses the same one); reusing it

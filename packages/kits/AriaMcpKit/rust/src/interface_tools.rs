@@ -1091,7 +1091,11 @@ fn run_memory_search(
     // row this recall writes. The coordinator derives the composition
     // ("unionBest/<scoring>") since no recipe-level composition exists on
     // this direct search path. Mirrors Swift runMemorySearch.
-    .with_door("memory_search");
+    .with_door("memory_search")
+    // Sub-span scoring is off at the ARIA edge: it is an additive-cost stage,
+    // the tool exposes no argument for it, and the edge names the value
+    // rather than relying on the request default (ruling 2026-09-07).
+    .with_sub_span_scoring(genius_locus_kit::recall::GLKSubSpanScoring::Off);
     // §11.18: thread the anomalous_filter through the request when provided.
     if let Some(af) = anomalous_filter {
         request = request.with_anomalous_filter(af);
