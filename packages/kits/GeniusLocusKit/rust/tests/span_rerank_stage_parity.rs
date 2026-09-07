@@ -150,7 +150,13 @@ fn no_encoder_is_the_unreranked_order_and_balanced_runs_the_stage() {
     assert_eq!(ids(&no_vector_before), ids(&before));
     assert_eq!(ids(&default_before), ids(&before));
 
+    // Before registering the span rerank stage, it must not be reported as registered.
+    assert!(!coord.is_span_rerank_registered(&h), "is_span_rerank_registered must be false before register_span_rerank");
+
     coord.register_span_rerank(&h, Arc::new(FixedEncoder), Arc::new(OneDrawerRows { item_id: target.clone() }), 30);
+
+    // After registration, the predicate must reflect that the stage is live.
+    assert!(coord.is_span_rerank_registered(&h), "is_span_rerank_registered must be true after register_span_rerank");
 
     let balanced = coord.recall_scored(&h, request(None), NOW + 1001).expect("balanced");
     let no_encoder = coord.recall_scored(&h, request(RecallShape::preset("no_encoder")), NOW + 1002).expect("no_encoder");
@@ -166,11 +172,12 @@ fn no_encoder_is_the_unreranked_order_and_balanced_runs_the_stage() {
     assert_eq!(ids(&no_vector), ids(&balanced));
 
     // (b) balanced ran the stage: the only span-bearing drawer leads, with its
-    // bounds on the hit and the token on the explain line.
+    // bounds on the hit and the token on the explain line. bm25_rank is the
+    // lexical rank the target held in the pre-registration (no_encoder) result.
     assert_eq!(balanced.hits[0].id, target);
     assert_eq!(
         balanced.hits[0].span_hit,
-        Some(SpanRerankHit { item_id: target.clone(), best_span_index: 2, best_span_start: 60, best_span_end: 120, cosine: 0.5 })
+        Some(SpanRerankHit { item_id: target.clone(), best_span_index: 2, best_span_start: 60, best_span_end: 120, cosine: 0.5, bm25_rank: bm25_rank.try_into().unwrap() })
     );
     let score_line = balanced.hits[0]
         .explanation

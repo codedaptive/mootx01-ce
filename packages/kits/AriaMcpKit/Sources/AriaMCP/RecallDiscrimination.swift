@@ -15,18 +15,25 @@
 //
 // ## Dense-lane dark cap (saturation discount)
 //
-// When the semantic vector lane (Lane D) is dark — i.e. the recall result
-// carried `denseLaneStatus != nil` — the ranking is lexical/BM25 only.
+// When the semantic vector lane (Lane D) is dark (the recall result carried
+// `denseLaneStatus != nil`) AND no span rerank stage is registered for the
+// estate, the ranking is lexical/BM25 only. With a registered span
+// rerank stage the encoder reorders the lexical head, so a dark dense lane no
+// longer means the ranking lacks a semantic signal; in that case the cap does
+// NOT fire.
+//
 // A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
 // contains the exact query token, others do not), but the relative-gap
-// classification alone overstates the signal when the semantic lane did not
-// contribute — the saturation discount is missing. When the dense lane is dark
-// the result is capped at .medium and a caveat is appended to the result line
-// so the calling AI knows the semantic lane did not contribute.
+// classification alone overstates the signal when no semantic component
+// contributed: the saturation discount is missing. When the dense lane is
+// dark and no span rerank stage is registered, the result is capped at .medium
+// and a caveat is appended to the result line so the calling AI knows the
+// ranking is lexical-only.
 //
-// The cap is applied by `resultLine(for:denseLaneDark:)`. The plain
-// `resultLine(for:)` overload (no dark-lane parameter) is preserved for
-// callers that do not have dense-lane context (e.g. `recall_shaped`).
+// The cap condition is computed by `denseLaneDark(status:spanRerankRegistered:)`
+// and applied by `resultLine(for:denseLaneDark:)`. The plain `resultLine(for:)`
+// overload (no dark-lane parameter) is preserved for callers that do not have
+// dense-lane context (e.g. `recall_shaped`).
 //
 // Parity contract: Swift and Rust must produce identical DiscriminationLevel
 // for the same score vector. The thresholds are named constants here and
@@ -111,9 +118,10 @@ public enum RecallDiscrimination {
     /// The wording is intentionally factual and action-oriented so the calling
     /// AI knows what to do, not just what the level is.
     ///
-    /// When `denseLaneDark` is `true` (the semantic vector lane did not
-    /// contribute to this ranking), a `.high` level is capped to `.medium` and
-    /// a caveat is appended so the calling AI knows the ranking is lexical-only.
+    /// When `denseLaneDark` is `true` (the dense lane is dark AND no span rerank
+    /// stage is registered, per `denseLaneDark(status:spanRerankRegistered:)`), a
+    /// `.high` level is capped to `.medium` and a caveat is appended so the
+    /// calling AI knows the ranking is lexical-only.
     /// Parity: the same cap and caveat are applied in `recall_discrimination.rs`.
     public static func resultLine(
         for level: DiscriminationLevel,
@@ -157,11 +165,24 @@ public enum RecallDiscrimination {
         }
 
         // Append the dense-lane-dark caveat when the cap fired. The caveat is
-        // added regardless of the uncapped level (high → medium cap) so the AI
+        // added regardless of the uncapped level (high -> medium cap) so the AI
         // always knows WHY the signal is capped.
         if denseLaneDark && level == .high {
             return base + " (semantic lane dark — ranking is lexical-only; prefer moot_recall_precise.)"
         }
         return base
+    }
+
+    // MARK: - Dense-lane dark predicate
+
+    /// Whether this ranking is lexical-only for the purposes of the
+    /// discrimination cap: the dense lane was dark for the query
+    /// (`GLKRecallResult.denseLaneStatus` is non-nil) AND the estate has no
+    /// span rerank stage registered (`GeniusLocusKit.isSpanRerankRegistered(for:)`).
+    /// With a rerank stage registered the encoder reorders the lexical head, so a
+    /// dark dense lane no longer means the ranking lacks a semantic signal.
+    /// Parity: `recall_discrimination::dense_lane_dark`.
+    public static func denseLaneDark(status: String?, spanRerankRegistered: Bool) -> Bool {
+        status != nil && !spanRerankRegistered
     }
 }

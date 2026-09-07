@@ -134,12 +134,33 @@ struct SpanRerankStageTests {
         // its bounds on the hit and the token on the explain line.
         #expect(balanced.hits.first?.id == target)
         let lifted = try #require(balanced.hits.first)
-        #expect(lifted.spanHit == SpanRerankHit(itemID: target, bestSpanIndex: 2, bestSpanStart: 60, bestSpanEnd: 120, cosine: 0.5))
+        #expect(lifted.spanHit == SpanRerankHit(itemID: target, bestSpanIndex: 2, bestSpanStart: 60, bestSpanEnd: 120, cosine: 0.5, bm25Rank: bm25Rank))
         let scoreLine = try #require(lifted.explanation.first { $0.hasPrefix("score: ") })
         #expect(scoreLine.hasSuffix(" span:2:0.500"), "got \(scoreLine)")
         #expect(balanced.hits.dropFirst().allSatisfy { $0.spanHit == nil })
         #expect(balanced.hits.map(\.id) != noEncoder.hits.map(\.id))
         try await kit.close(handle)
+    }
+
+    @Test("isSpanRerankRegistered reflects span rerank registration lifecycle")
+    func isSpanRerankRegisteredLifecycle() async throws {
+        let (kit, handle) = try await openEstate(owner: "isprr-lifecycle")
+        // Before any registration: not registered.
+        // Extract via await before #expect (actor-isolated method).
+        let beforeReg = await kit.isSpanRerankRegistered(for: handle)
+        #expect(!beforeReg)
+        // After registerSpanRerank with the fakes from this suite: registered.
+        await kit.registerSpanRerank(
+            FixedEncoder(),
+            spanVectors: OneDrawerRows(itemID: "any"),
+            head: 30,
+            for: handle)
+        let afterReg = await kit.isSpanRerankRegistered(for: handle)
+        #expect(afterReg)
+        // After close: not registered (the entry is dropped by the lifecycle).
+        try await kit.close(handle)
+        let afterClose = await kit.isSpanRerankRegistered(for: handle)
+        #expect(!afterClose)
     }
 
     @Test("an encoder failure leaves the lexical order standing and names the stage")

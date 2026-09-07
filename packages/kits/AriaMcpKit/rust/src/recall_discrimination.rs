@@ -11,13 +11,17 @@
 //! ## Dense-lane dark cap (saturation discount)
 //!
 //! When the semantic vector lane (Lane D) is dark — i.e. the recall result
-//! carried `dense_lane_status = Some(reason)` — the ranking is lexical/BM25
-//! only. A pure-lexical ranking CAN produce a high score-gap (e.g. one memory
-//! contains the exact query token, others do not), but the relative-gap
-//! classification alone overstates the signal when the semantic lane did not
-//! contribute — the saturation discount is missing. When the dense lane is
-//! dark the result is capped at `Medium` and a caveat is appended to the
-//! result line. Apply via `result_line_with_dense_dark(level, dense_lane_dark)`.
+//! carried `dense_lane_status = Some(reason)` — AND no span rerank stage is
+//! registered for the estate, the ranking is lexical/BM25 only. A pure-lexical
+//! ranking CAN produce a high score-gap (e.g. one memory contains the exact
+//! query token, others do not), but the relative-gap classification alone
+//! overstates the signal when no semantic lane contributed — the saturation
+//! discount is missing. With a span rerank stage registered the encoder
+//! reorders the lexical head, so a dark dense lane no longer means the ranking
+//! lacks a semantic signal. When the predicate is true the result is capped at
+//! `Medium` and a caveat is appended to the result line.
+//! Apply via `result_line_with_dense_dark(level, dense_lane_dark)`.
+//! Compute the predicate via `dense_lane_dark(status, span_rerank_registered)`.
 //! Parity with Swift `RecallDiscrimination.resultLine(for:denseLaneDark:)`.
 //!
 //! ## Parity contract
@@ -121,6 +125,16 @@ pub fn result_line(level: DiscriminationLevel) -> &'static str {
     result_line_base(level)
 }
 
+/// Whether this ranking is lexical-only for the purposes of the discrimination
+/// cap: the dense lane was dark for the query (`status` is `Some`) AND the
+/// estate has no span rerank stage registered (`span_rerank_registered` is
+/// false). With a rerank stage registered the encoder reorders the lexical
+/// head, so a dark dense lane no longer means the ranking lacks a semantic
+/// signal. Parity: Swift `RecallDiscrimination.denseLaneDark(status:spanRerankRegistered:)`.
+pub fn dense_lane_dark(status: Option<&str>, span_rerank_registered: bool) -> bool {
+    status.is_some() && !span_rerank_registered
+}
+
 /// The AI-facing discrimination line, with optional dense-lane-dark capping.
 ///
 /// When `dense_lane_dark` is `true` and `level` is `High`, the result is
@@ -221,6 +235,20 @@ mod tests {
         assert_eq!(classify(&[1.0, 0.99, 0.98, 0.97]), DiscriminationLevel::Low);
         // Vector C: medium separation → Medium
         assert_eq!(classify(&[1.0, 0.9, 0.4]), DiscriminationLevel::Medium);
+    }
+
+    // Dense-lane dark predicate
+
+    /// Truth-table for `dense_lane_dark`. Discriminating row: ("dark:noFloatRows", true)
+    /// must return false; the old reading (`status.is_some()`) would return true there,
+    /// silently discarding the span-rerank signal.
+    #[test]
+    fn dense_lane_dark_requires_a_dark_lane_and_no_rerank_stage() {
+        // (status, span_rerank_registered) -> expected
+        assert!(!dense_lane_dark(None, false), "(None, false) -> false: no dark lane");
+        assert!(dense_lane_dark(Some("dark:noCorpus"), false), "(Some, false) -> true: dark and no stage");
+        assert!(!dense_lane_dark(Some("dark:noFloatRows"), true), "(Some, true) -> false: stage present overrides dark");
+        assert!(!dense_lane_dark(None, true), "(None, true) -> false: no dark lane");
     }
 
     // Wave B, Part 1a — NotFound level

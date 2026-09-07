@@ -82,7 +82,9 @@ fn fixture_cases_render_verbatim() {
             final_score: f(s, "final"),
             dense: f(s, "dense"),
         };
-        // Present only for a hit the span rerank stage scored.
+        // Present only for a hit the span rerank stage scored. bm25_rank is
+        // not carried in the explainer fixture (the explainer reads index and
+        // cosine only); supply 1 so both ports construct an identical hit.
         let span_hit = case.get("spanHit").filter(|v| !v.is_null()).map(|sh| {
             genius_locus_kit::span_rerank::SpanRerankHit {
                 item_id: "fixture".to_string(),
@@ -90,6 +92,7 @@ fn fixture_cases_render_verbatim() {
                 best_span_start: sh["bestSpanStart"].as_u64().expect("bestSpanStart") as usize,
                 best_span_end: sh["bestSpanEnd"].as_u64().expect("bestSpanEnd") as usize,
                 cosine: f(sh, "cosine"),
+                bm25_rank: 1,
             }
         });
         let hit = RecallHit {

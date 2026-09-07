@@ -147,6 +147,22 @@ struct RecallDiscriminationTests {
         #expect(!low.contains("semantic lane dark"))
     }
 
+    // MARK: - denseLaneDark predicate
+
+    @Test func denseLaneDarkRequiresADarkLaneAndNoRerankStage() {
+        // (nil, false) -> false: no dark lane, no stage -> not lexical-only.
+        #expect(RecallDiscrimination.denseLaneDark(status: nil, spanRerankRegistered: false) == false)
+        // ("dark:noCorpus", false) -> true: dark lane AND no span rerank stage.
+        #expect(RecallDiscrimination.denseLaneDark(status: "dark:noCorpus", spanRerankRegistered: false) == true)
+        // ("dark:noFloatRows", true) -> false: dark lane but stage IS registered;
+        // the encoder reorders the lexical head so the ranking has a semantic signal.
+        // The old reading (status != nil) would return true here; this row is
+        // the discriminating case that the new predicate gets right.
+        #expect(RecallDiscrimination.denseLaneDark(status: "dark:noFloatRows", spanRerankRegistered: true) == false)
+        // (nil, true) -> false: no dark lane -> not lexical-only.
+        #expect(RecallDiscrimination.denseLaneDark(status: nil, spanRerankRegistered: true) == false)
+    }
+
     // MARK: - Surface integration: low-discrimination result carries the signal
 
     /// An estate with near-identical memories produces a moot_memory_search

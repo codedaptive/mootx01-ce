@@ -2045,10 +2045,15 @@ extension ToolDispatcher {
         let hitScores = hits.map { Double($0.score.final) }
         let discriminationLevel = RecallDiscrimination.classify(hitScores)
         // Dense-lane dark flag: true when the vector lane (Lane D) did not
-        // contribute to this ranking. Used to cap the discrimination signal so
-        // "high — clear top result" is never reported on a lexical-only ranking
-        // (which would violate the signal's trustworthiness contract).
-        let denseLaneDark = result.denseLaneStatus != nil
+        // contribute to this ranking AND no span rerank stage is registered for
+        // the estate. With a registered stage the encoder reorders the lexical
+        // head, so a dark dense lane no longer means the ranking lacks a semantic
+        // signal. Used to cap the discrimination signal so "high, clear top
+        // result" is never reported on a purely lexical ranking.
+        let denseLaneDark = RecallDiscrimination.denseLaneDark(
+            status: result.denseLaneStatus,
+            spanRerankRegistered: await kit.isSpanRerankRegistered(for: handle)
+        )
 
         // answer:always|auto — compose an answer via GroundedSynthesis (the one-
         // seam synthesis path shared with moot_synthesize), then route through
@@ -2089,7 +2094,7 @@ extension ToolDispatcher {
         }
         // Build the packaged result. Pass the post-anchor-exclusion hit list
         // (`hits`, already anchor-filtered above) so gate signals (m1 top-margin,
-        // m3 dense spread) are computed on the same ranked set the caller receives.
+        // m3 span cosine spread) are computed on the same ranked set the caller receives.
         // For near: queries where the anchor is rank-1, computing m1 on the
         // pre-exclusion set would corrupt the margin signal — the anchor's self-
         // comparison dominates rank-1 and inflates m1 artificially.

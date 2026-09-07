@@ -75,13 +75,21 @@ public struct SpanRerankHit: Sendable, Equatable {
     public let bestSpanStart: Int
     public let bestSpanEnd: Int
     public let cosine: Float
+    /// The item's 1-based rank in the lexical head the stage read
+    /// (`SpanRerankInput.bm25Rank`). The packager's lane-agreement margin
+    /// compares this order with the span order.
+    public let bm25Rank: Int
 
-    public init(itemID: String, bestSpanIndex: UInt32, bestSpanStart: Int, bestSpanEnd: Int, cosine: Float) {
+    public init(
+        itemID: String, bestSpanIndex: UInt32, bestSpanStart: Int,
+        bestSpanEnd: Int, cosine: Float, bm25Rank: Int
+    ) {
         self.itemID = itemID
         self.bestSpanIndex = bestSpanIndex
         self.bestSpanStart = bestSpanStart
         self.bestSpanEnd = bestSpanEnd
         self.cosine = cosine
+        self.bm25Rank = bm25Rank
     }
 }
 
@@ -140,7 +148,7 @@ public enum SpanRerankStage {
         let queryVector = try await encoder.encodeQuery(query)
         guard !queryVector.isEmpty else { return [] }
         let rows = try await store.spanVectors(itemIDs: head.map(\.itemID), modelID: encoder.modelID)
-        var hits: [(hit: SpanRerankHit, bm25Rank: Int)] = []
+        var hits: [SpanRerankHit] = []
         for input in head {
             guard let spans = rows[input.itemID], !spans.isEmpty else { continue }
             var best: SpanRerankHit? = nil
@@ -155,16 +163,16 @@ public enum SpanRerankStage {
                     best = SpanRerankHit(
                         itemID: input.itemID, bestSpanIndex: span.index,
                         bestSpanStart: span.startWord, bestSpanEnd: span.endWord,
-                        cosine: cosine)
+                        cosine: cosine, bm25Rank: input.bm25Rank)
                 }
             }
-            if let best { hits.append((hit: best, bm25Rank: input.bm25Rank)) }
+            if let best { hits.append(best) }
         }
         hits.sort { a, b in
-            if a.hit.cosine != b.hit.cosine { return a.hit.cosine > b.hit.cosine }
+            if a.cosine != b.cosine { return a.cosine > b.cosine }
             return a.bm25Rank < b.bm25Rank
         }
-        return hits.map(\.hit)
+        return hits
     }
 
     /// Cosine between a unit float query `u` and a stored int8 span (sheet §4):
