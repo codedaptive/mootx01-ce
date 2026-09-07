@@ -526,8 +526,8 @@ struct ResidentArrayStoreTests {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rnd-trip-\(UUID().uuidString).vec")
         defer { try? FileManager.default.removeItem(at: url) }
-        try ResidentArrayStore.writeSidecar(original, to: url)
-        let parsed = try ResidentArrayStore.readSidecar(from: url)
+        try ResidentArrayStore.writeSidecar(original, generations: [:], to: url)
+        let parsed = try ResidentArrayStore.readSidecar(from: url).0
         _ = data // keep data accessible for debugging if needed
 
         // Structural equality.
@@ -600,9 +600,9 @@ struct ResidentArrayStoreTests {
         #expect(!anyTombstoned)
     }
 
-    // MARK: — rebuild(from:) → reopen
+    // MARK: — rebuild(from:generations:) → reopen
 
-    /// rebuild(from:) then reopen produces identical results.
+    /// rebuild(from:generations:) then reopen produces identical results.
     @Test func rebuildFromRecsAndReopenMatch() async throws {
         let url = tmpURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -615,7 +615,7 @@ struct ResidentArrayStoreTests {
         let sorted = records.sorted { $0.key < $1.key }
 
         let store1 = ResidentArrayStore(sidecarURL: url)
-        try await store1.rebuild(from: sorted)
+        try await store1.rebuild(from: sorted, generations: [:])
         let snap1 = await store1.snapshot()
         let idx1 = BruteForceIndex()
         await idx1.build(from: snap1)
@@ -667,13 +667,13 @@ struct ResidentArrayStoreTests {
             modelPartitions: [ModelPartitionEntry(modelID: "m1", range: 0..<1)],
             tombstones: [0]
         )
-        try ResidentArrayStore.writeSidecar(arr, to: url)
+        try ResidentArrayStore.writeSidecar(arr, generations: [:], to: url)
 
         // mmap path
-        let viaMap = try ResidentArrayStore.readSidecar(from: url)
+        let viaMap = try ResidentArrayStore.readSidecar(from: url).0
         // heap path: load the raw data without mmap option
         let rawData = try Data(contentsOf: url)
-        let viaHeap = try ResidentArrayStore.parseSidecar(rawData)
+        let viaHeap = try ResidentArrayStore.parseSidecar(rawData).0
 
         #expect(viaMap.storage == viaHeap.storage)
         #expect(viaMap.keys == viaHeap.keys)
@@ -691,7 +691,8 @@ struct ResidentArrayStoreTests {
         bad.append(VectorKind.binary.rawValue)
         bad.appendLE32(32)
         bad.appendLE32(0)  // count = 0
-        bad.appendLE32(0)  // live_count = 0 (version 0x0002)
+        bad.appendLE32(0)  // live_count = 0
+        bad.appendLE32(0)  // generation_count = 0 (version 0x0003)
         bad.appendLE32(0)  // tombstone_words = 0
         do {
             _ = try ResidentArrayStore.parseSidecar(bad)
@@ -766,9 +767,9 @@ struct ResidentArrayStoreTests {
         ]
         // Build a fresh (all-live) sidecar with 2 slots.
         let arr = ResidentArrayStore.buildArray(from: records, kind: .binary, stride: 32)
-        try ResidentArrayStore.writeSidecar(arr, to: url)
+        try ResidentArrayStore.writeSidecar(arr, generations: [:], to: url)
 
-        let loaded = try ResidentArrayStore.readSidecar(from: url)
+        let loaded = try ResidentArrayStore.readSidecar(from: url).0
         #expect(loaded.count == 2, "total slots")
         #expect(loaded.liveCount == 2, "all live")
 

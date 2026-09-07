@@ -3422,7 +3422,7 @@ public actor VectorStore {
         let records = try await _fetchAllBinaryRecords()
         let arr: ResidentVectorArray
         if let store = arrayStore {
-            try await store.rebuild(from: records)
+            try await store.rebuild(from: records, generations: try await _generationStamp())
             arr = await store.snapshot()
         } else {
             arr = ResidentArrayStore.buildArray(from: records, kind: .binary, stride: 32)
@@ -3653,12 +3653,15 @@ public actor VectorStore {
             where: .like(Column(table: "vectors", name: "id"), "%")
         )
         // Reset both indexes to empty. The table is now empty; the sidecar
-        // (if present) is rewritten as a valid empty file.
+        // (if present) is rewritten as a valid empty file under the registry
+        // stamp (the registry survives a destroy: it names generations, not
+        // rows), so the next open accepts the empty array instead of
+        // rebuilding it from the empty table.
         let emptyArray = ResidentVectorArray.empty(kind: .binary, stride: 32)
         await bruteForceIndex.build(from: emptyArray)
         await mihIndex.build(from: emptyArray)
         if let store = arrayStore {
-            try await store.rebuild(from: [])
+            try await store.rebuild(from: [], generations: try await _generationStamp())
         }
         // Reset live count and revert to brute-force (correct for empty state).
         liveBinaryCount = 0
@@ -3695,12 +3698,14 @@ public actor VectorStore {
     /// Ensure both DenseIndexes are populated. Idempotent — no-op once built.
     ///
     /// Build strategy (in priority order):
-    ///   1. Sidecar present and its live_count matches the table's
+    ///   1. Sidecar present, its generation stamp equals the registry read
+    ///      at open, and its live_count matches the table's
     ///      serving-generation binary-row count: load from sidecar (one OS
     ///      mmap read, no per-row SQLite fetch).
     ///   2. Otherwise: fetch all binary rows once from the table (the
     ///      source of truth), build the resident array, rewrite the sidecar
-    ///      if present. This one-time cost is amortised across all queries.
+    ///      if present under the registry stamp. This one-time cost is
+    ///      amortised across all queries.
     ///
     /// After building the array, _selectIndex is called to activate either
     /// BruteForceIndex or MIHIndex depending on the live count vs threshold.
@@ -3717,26 +3722,35 @@ public actor VectorStore {
             // Cross-check against the table to detect a stale sidecar
             // (crash mid-write, schema migration, etc.).
             let tableCount = try await _binaryRowCount()
+            let currentStamp = try await _generationStamp()
+            let sidecarStamp = await store.currentGenerationStamp()
 
-            // Compare live-vs-live: sidecar.liveCount is the number of
-            // non-tombstoned slots written to the header at flush time.
-            // tableCount is the number of serving-generation binary rows in
-            // the `vectors` table — the same row set _fetchAllBinaryRecords
-            // builds the sidecar from, so superseded rows pending reclaim do
-            // not count. They agree iff the sidecar is up-to-date (C5 fix:
-            // using snap.count here counts tombstoned slots and spuriously
-            // triggers a full rebuild after every delete).
-            if snap.liveCount == tableCount {
-                // Sidecar and table agree on live records — use it directly.
+            // Two checks, both required. (1) Generation: the header stamp
+            // must equal the registry read now; a sidecar left behind by a
+            // crash between the registry flip of publishShadowGeneration and
+            // its sidecar rebuild carries the previous stamp and is rejected
+            // even when the two generations hold the same number of rows (a
+            // full reindex commonly does). (2) Compare live-vs-live:
+            // sidecar.liveCount is the number of non-tombstoned slots written
+            // to the header at flush time. tableCount is the number of
+            // serving-generation binary rows in the `vectors` table — the
+            // same row set _fetchAllBinaryRecords builds the sidecar from, so
+            // superseded rows pending reclaim do not count. They agree iff the
+            // sidecar is up-to-date (C5 fix: using snap.count here counts
+            // tombstoned slots and spuriously triggers a full rebuild after
+            // every delete).
+            if sidecarStamp == currentStamp && snap.liveCount == tableCount {
+                // Sidecar and table agree on generation and live records — use it directly.
                 arr = snap
                 log.info("VectorStore: loaded \(snap.liveCount) live vectors from sidecar")
             } else {
-                // Stale sidecar: rebuild from the table and rewrite the sidecar.
+                // Stale sidecar: rebuild from the table and rewrite the sidecar
+                // under the registry stamp the rows were fetched with.
                 sidecarRebuildCount += 1
                 let records = try await _fetchAllBinaryRecords()
-                try await store.rebuild(from: records)
+                try await store.rebuild(from: records, generations: currentStamp)
                 arr = await store.snapshot()
-                log.info("VectorStore: rebuilt from table (\(records.count) vectors, sidecar was stale: sidecar liveCount=\(snap.liveCount) table=\(tableCount))")
+                log.info("VectorStore: rebuilt from table (\(records.count) vectors, sidecar was stale: sidecar liveCount=\(snap.liveCount) table=\(tableCount) stampMatched=\(sidecarStamp == currentStamp))")
             }
         } else {
             // No sidecar: build the array in memory from the table.
@@ -4295,6 +4309,28 @@ public actor VectorStore {
         shadowGenerations[modelID] = sg
         shadowStates[modelID] = state
         return sg
+    }
+
+    /// The serving-generation stamp of the sidecar: `model_id` to
+    /// `serving_generation` for every parseable `vector_generations` row, the
+    /// same rows `_servingGenPredicate` scopes the table reads with. A sidecar
+    /// is accepted at open only when its header stamp equals this map (see
+    /// `_ensureIndexBuilt`). Rust twin: `generation_stamp_from_rows`.
+    private func _generationStamp() async throws -> GenerationStamp {
+        let regRows = try await storage.rowStore.query(
+            table: "vector_generations",
+            where: .isTrue,
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        var stamp: GenerationStamp = [:]
+        for row in regRows {
+            guard case let .text(mid) = row["model_id"] ?? .null,
+                  case let .int(sg) = row["serving_generation"] ?? .null else { continue }
+            stamp[mid] = sg
+        }
+        return stamp
     }
 
     /// Build a generation predicate for a table-wide query that reads from

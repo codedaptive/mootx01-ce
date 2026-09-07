@@ -2527,45 +2527,49 @@ public actor Corpus {
 
     // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
 
-    /// Score a bounded candidate set at sub-span granularity (transient).
+    /// Compute sub-span max-cosine scores for a source ID set under a budget.
     ///
-    /// For each source ID in `sourceIDs`, retrieves the ingested chunk text
-    /// via `BundleStore.chunksForSource`, concatenates chunks into a single
-    /// text body, segments it into token-window sub-spans (alphanumeric-run
-    /// rule, cross-port identical), and returns the max-cosine ∈ [0,1] across
-    /// all sub-spans for each source.
+    /// Fetches every chunk of each source via `BundleStore.chunksForSource`,
+    /// concatenates them into a single body, cuts the body at
+    /// `budget.maxRecordBytes` on a scalar boundary, segments it into
+    /// token-window sub-spans (alphanumeric-run rule, cross-port identical),
+    /// and scores the sub-spans while the aggregate window budget lasts
+    /// (`SubSpanBudget`). Sources are visited in the caller's order.
     ///
     /// Uses the DEFAULT slot's provider. Sub-span vectors are computed on the
     /// fly and DISCARDED — zero persistence.
     ///
     /// For the `CorpusContentEngine` surface (GLK's path), use
-    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)` which resolves
-    /// `effectiveDenseText` via the canonical `CorpusContentSource` protocol
-    /// (supports both standalone and attached modes, including the dual-text
-    /// dense-composition capability from Stream A).
+    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:budget:)` which
+    /// resolves `effectiveDenseText` via the canonical `CorpusContentSource`
+    /// protocol (supports both standalone and attached modes, including the
+    /// dual-text dense-composition capability from Stream A).
     ///
     /// - Parameters:
     ///   - query: The query text.
-    ///   - sourceIDs: Bounded candidate source IDs (typically ~40).
-    /// - Returns: Max-cosine ∈ [0,1] per source ID. Missing keys → 0.0.
+    ///   - sourceIDs: Source IDs in priority order.
+    ///   - budget: The work bound (default `SubSpanBudget.default`).
+    /// - Returns: The scores (max-cosine ∈ [0,1] per scored source), the
+    ///   truncation flag, the unscored ids and the window count.
     public func scoreSubSpans(
         query: String,
-        sourceIDs: [String]
-    ) async -> [String: Float] {
-        guard !query.isEmpty, !sourceIDs.isEmpty else { return [:] }
+        sourceIDs: [String],
+        budget: SubSpanBudget = .default
+    ) async -> SubSpanScoringOutcome {
+        guard !query.isEmpty, !sourceIDs.isEmpty else { return .empty }
 
         // Embed the query once via the default provider.
         let queryVec: [Float]
         do {
             let result = try await defaultProvider.embedFloat(query)
-            guard !result.isEmpty else { return [:] }
+            guard !result.isEmpty else { return .empty }
             queryVec = result
         } catch {
-            return [:]
+            return .empty
         }
 
-        var out: [String: Float] = [:]
-        out.reserveCapacity(sourceIDs.count)
+        var outcome = SubSpanScoringOutcome()
+        outcome.scores.reserveCapacity(sourceIDs.count)
         for sourceID in sourceIDs {
             // Retrieve all chunks for this source and concatenate into one body.
             let chunks: [Chunk]
@@ -2578,11 +2582,20 @@ public actor Corpus {
             // Concatenate chunk text in chunk order (start-offset ascending).
             // The full concatenated text is the scoring surface, mirroring what
             // the ingest path stored.
-            let body = chunks
-                .sorted { $0.startOffset < $1.startOffset }
-                .map(\.text)
-                .joined(separator: " ")
+            let body = SubSpanScoring.cappedText(
+                chunks
+                    .sorted { $0.startOffset < $1.startOffset }
+                    .map(\.text)
+                    .joined(separator: " "),
+                maxBytes: budget.maxRecordBytes)
             guard !body.isEmpty else { continue }
+            if outcome.windowsEmbedded >= budget.maxWindows {
+                // Budget exhausted by an earlier source: this one keeps its
+                // stored signals.
+                outcome.truncated = true
+                outcome.unscoredIDs.append(sourceID)
+                continue
+            }
 
             let ranges = SubSpanScoring.subSpanRanges(
                 text: body,
@@ -2591,12 +2604,19 @@ public actor Corpus {
             guard !ranges.isEmpty else { continue }
 
             var maxNorm: Float = 0.0
+            var embeddedHere = 0
             let utf8 = body.utf8
             for (spanStart, spanLength) in ranges {
+                if outcome.windowsEmbedded >= budget.maxWindows {
+                    outcome.truncated = true
+                    break
+                }
                 guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
                 let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
                 let hi = utf8.index(lo, offsetBy: spanLength)
                 guard let spanText = String(utf8[lo..<hi]) else { continue }
+                outcome.windowsEmbedded += 1
+                embeddedHere += 1
                 let spanVec: [Float]
                 do {
                     let result = try await defaultProvider.embedFloat(spanText)
@@ -2609,9 +2629,13 @@ public actor Corpus {
                 let norm = max(0, min(1, (cosine + 1) / 2))
                 if norm > maxNorm { maxNorm = norm }
             }
-            if maxNorm > 0 { out[sourceID] = maxNorm }
+            if embeddedHere == 0 {
+                outcome.unscoredIDs.append(sourceID)
+                continue
+            }
+            if maxNorm > 0 { outcome.scores[sourceID] = maxNorm }
         }
-        return out
+        return outcome
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane
