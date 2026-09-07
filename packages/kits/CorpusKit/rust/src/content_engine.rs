@@ -4069,27 +4069,27 @@ impl CorpusContentEngine {
         Ok(ranked)
     }
 
-    /// Compute sub-span max-cosine scores for a bounded candidate set.
+    /// Compute sub-span max-cosine scores for a candidate set under a budget.
     ///
-    /// Rust twin of Swift `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)`.
+    /// Rust twin of Swift `CorpusContentEngine.scoreSubSpans(query:candidateIDs:budget:)`.
     /// Delegates entirely to `sub_span_scoring::score`, wiring `self.source`
     /// and `self.slots[0]`'s provider. See `sub_span_scoring` module doc for
-    /// the full algorithm description and cross-port contract.
+    /// the full algorithm description, the budget and the cross-port contract.
     ///
-    /// Candidates absent from the source, candidates where the default provider
-    /// returns Err on `embed_float`, and candidates whose text has no
-    /// alphanumeric tokens are not included in the returned map.
-    ///
-    /// # Returns
-    /// `HashMap<CorpusContentId, f32>` — max-cosine ∈ [0,1] per candidate.
-    /// Missing keys implicitly score 0.0.
+    /// `candidate_ids` is a priority order: the budget serves the front of
+    /// the slice first. Candidates absent from the source, candidates where
+    /// the default provider returns Err on `embed_float`, and candidates
+    /// whose text has no alphanumeric tokens are not included in the returned
+    /// scores; candidates the aggregate window budget did not reach are
+    /// listed in `unscored_ids`.
     ///
     /// Mission: MISSION_11X_RECALL_GAP_01 Item 1 — transient sub-span scoring.
     pub fn score_sub_spans(
         &self,
         query: &str,
         candidate_ids: &[&str],
-    ) -> HashMap<String, f32> {
+        budget: crate::sub_span_scoring::SubSpanBudget,
+    ) -> crate::sub_span_scoring::SubSpanScoringOutcome {
         let handle = self.slots[0].handle.lock().unwrap();
         let provider = handle.provider();
         crate::sub_span_scoring::score(
@@ -4099,6 +4099,7 @@ impl CorpusContentEngine {
             provider,
             crate::sub_span_scoring::DEFAULT_WINDOW_TOKENS,
             crate::sub_span_scoring::DEFAULT_OVERLAP_TOKENS,
+            budget,
         )
     }
 

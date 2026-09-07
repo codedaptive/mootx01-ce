@@ -19,7 +19,9 @@
 /// rerank stage scored carries one more token, `span:<bestSpanIndex>:<cosine
 /// to 3 dp>` (contract sheet §8); a hit without a span hit carries no `span:`
 /// token, so its absence means "no span row under the active encoder", not a
-/// zero cosine.
+/// zero cosine. A hit the step 5.8 sub-span window budget left unscored
+/// carries the token `subSpan:budget`: its dense column is the stored signal
+/// alone.
 struct RecallExplainer {
 
     /// Explain one selected recall hit.
@@ -37,11 +39,15 @@ struct RecallExplainer {
     ///   - agreement: The signal-agreement bonus this hit earned in the weighted
     ///     score (`0.05 × popcount(sourceMask) / 5`, scaled by the resolved
     ///     `signal:agreement` budget). Callers on paths that add no bonus pass 0.
+    ///   - subSpanUnscored: True when the step 5.8 sub-span window budget ran
+    ///     out before this hit was scored (Rust `sub_span_unscored`). Callers
+    ///     on paths without step 5.8 pass false.
     func explain(hit: RecallHit,
                  sketch: RecallQuerySketch,
                  plan: RecallPlan,
                  scoring: GLKRecallScoring,
-                 agreement: Float = 0) -> [String] {
+                 agreement: Float = 0,
+                 subSpanUnscored: Bool = false) -> [String] {
         var lines: [String] = []
 
         // Line 1 — active evidence sources, sorted for deterministic output.
@@ -70,6 +76,12 @@ struct RecallExplainer {
         // same `span:%u:%.3f` token.
         if let span = hit.spanHit {
             scoreTokens.append(String(format: "span:%u:%.3f", span.bestSpanIndex, span.cosine))
+        }
+        // Sub-span budget evidence: the dense column of this hit is the stored
+        // signal alone because the step 5.8 window budget ran out before it.
+        // The Rust twin renders the same `subSpan:budget` token.
+        if subSpanUnscored {
+            scoreTokens.append("subSpan:budget")
         }
         lines.append("score: \(scoreTokens.joined(separator: " "))")
 

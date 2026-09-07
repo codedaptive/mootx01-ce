@@ -46,7 +46,7 @@
 // .matrixAware) changes the final score math, producing ranked ≠ substring results.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 // ConvergenceKit: sync-backend abstraction. `SyncEngine` trait + `SyncState` enum
@@ -10542,7 +10542,7 @@ impl EstateCoordinator {
     }
 
     /// Step 9.5 twin: the MMR body view of the candidate slots, parallel to
-    /// `ids`. Returns `(content_key, shingles)`.
+    /// `ids`. Returns `(content_key, shingles, budget_truncated)`.
     ///
     /// Swift hydrates the bodies of the frame-admissible pool (`drawerIndex`
     /// keys) for a `.full` recall only. In Rust the frame-admissible pool
@@ -10552,21 +10552,26 @@ impl EstateCoordinator {
     /// by-id read is made. The view is still gated on `Full` so the selection
     /// matches Swift level for level:
     /// - `Full`: the content key is the body (possibly empty) for an admissible
-    ///   candidate and the id otherwise (Swift `mmrContentByID[id] ?? id`); a
-    ///   non-empty body is shingled ONCE into a character-3-gram set
-    ///   (SubstrateML `shingle_similarity::shingles`, the conformance-gated
-    ///   twin of Swift `ShingleSimilarity.shingles`) and reused across both
-    ///   MMR phases.
+    ///   candidate and the id otherwise (Swift `mmrContentByID[id] ?? id`); the
+    ///   bodies are shingled ONCE, under the step 9.5 budget
+    ///   (`recall::union_best_mmr_shingles`: every body over the same prefix,
+    ///   `UNION_BEST_MMR_BODY_CAP_SCALARS` or the even share of
+    ///   `UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS`, whichever is shorter), into
+    ///   character-3-gram sets (SubstrateML `shingle_similarity::shingles`,
+    ///   the conformance-gated twin of Swift `ShingleSimilarity.shingles`)
+    ///   reused across both MMR phases. `budget_truncated` reports that the
+    ///   aggregate budget shortened the prefix below the cap, which the caller
+    ///   records as the `unionBest.mmrBudget` stage.
     /// - `Structured` / `BitmapOnly`: the key is the id and no set is built, so
     ///   every pair falls back to the sourceMask proxy exactly as Swift.
     fn union_best_mmr_bodies<'a>(
         ids: &[&'a str],
         drawer_index: &'a HashMap<String, Drawer>,
         level: HydrationLevel,
-    ) -> (Vec<&'a str>, Vec<Option<BTreeSet<String>>>) {
+    ) -> (Vec<&'a str>, Vec<Option<BTreeSet<String>>>, bool) {
         let full = level == HydrationLevel::Full;
         let mut keys: Vec<&'a str> = Vec::with_capacity(ids.len());
-        let mut sets: Vec<Option<BTreeSet<String>>> = Vec::with_capacity(ids.len());
+        let mut bodies: Vec<Option<&'a str>> = Vec::with_capacity(ids.len());
         for &id in ids {
             let body: Option<&'a str> = if full {
                 drawer_index.get(id).map(|d| d.content.as_str())
@@ -10574,12 +10579,10 @@ impl EstateCoordinator {
                 None
             };
             keys.push(body.unwrap_or(id));
-            sets.push(match body {
-                Some(b) if !b.is_empty() => Some(substrate_ml::shingle_similarity::shingles(b)),
-                _ => None,
-            });
+            bodies.push(body);
         }
-        (keys, sets)
+        let (sets, truncated) = crate::recall::union_best_mmr_shingles(&bodies);
+        (keys, sets, truncated)
     }
 
     /// Greedy MMR selection with windowed tie resolution — the Rust twin of
@@ -10953,6 +10956,10 @@ impl EstateCoordinator {
         // Accumulates stage IDs for any lane that degraded (i.e. threw and was
         // recovered rather than propagated). Matches Swift GLKRecallResult.degradedStages.
         let mut degraded_stages: Vec<String> = vec![];
+        // The candidates step 5.8's sub-span window budget left unscored: their
+        // dense column is the stored signal alone and the explainer says so.
+        // Empty unless the budget truncated. Matches Swift `subSpanUnscoredIDs`.
+        let mut sub_span_unscored: HashSet<String> = HashSet::new();
         let has_corpus = corpus.is_some();
         let has_vector = vector.is_some();
 
@@ -12133,10 +12140,23 @@ impl EstateCoordinator {
             // step 5.8 (recallUnionBest, matrixAware only, which is exactly this
             // branch). When a CorpusContentEngine is registered and the request
             // carries query text, transient sentence-level sub-span vectors are
-            // computed for EVERY candidate in the buffer and the dense column
+            // computed for the candidates in the buffer and the dense column
             // takes max(col_dense[i], subSpanMaxCosine). Sub-span vectors are
-            // discarded at once (zero persistence); compute is bounded by the
-            // candidate pool, not the corpus.
+            // discarded at once (zero persistence).
+            //
+            // BOUND: the work is the CorpusKit `SubSpanBudget` (a per-record
+            // byte cap and an aggregate window budget per query), not the
+            // candidate pool: a large record or a wide pool cannot turn one
+            // search into an unbounded run of embedding calls under the
+            // coordinator lock. The budget serves candidates in PRIORITY order:
+            // BM25 score descending, then Hamming similarity descending, then
+            // id ascending (a port-independent tie-break: Swift's buffer is in
+            // lane merge order and this one is in id order), so the lexical and
+            // fingerprint evidence the refinement exists to rescue is scored
+            // before recency-only supply and both ports reach the same
+            // candidates. When the budget truncates, the stage `subSpan.budget` is
+            // recorded and the unscored candidates keep their stored dense
+            // signal; the explainer marks their hits `subSpan:budget`.
             //
             // BLEND RULE: max-cosine. The sub-span score can only raise the dense
             // column, so the whole-doc cosine survives when it is already high and
@@ -12146,19 +12166,35 @@ impl EstateCoordinator {
             // carry a zero dense column, the fused scores sit lower, and
             // locus-only candidates tie at the presentation cut.
             //
-            // Degradation: an empty map (provider has no float lane, source
+            // Degradation: an empty outcome (provider has no float lane, source
             // unavailable) leaves the column unchanged. Non-throwing, non-fatal.
             if !query_str.is_empty() {
                 if let Some(ref c) = corpus {
-                    let candidate_ids: Vec<&str> = ordered_ids.iter().map(|id| id.as_str()).collect();
-                    let sub_span_scores = c.score_sub_spans(&query_str, &candidate_ids);
-                    if !sub_span_scores.is_empty() {
-                        for (i, id) in ordered_ids.iter().enumerate() {
-                            if let Some(&sub_span) = sub_span_scores.get(id) {
-                                // max-cosine blend: sub-span only improves the dense column.
-                                col_dense[i] = col_dense[i].max(sub_span);
-                            }
+                    let mut priority: Vec<usize> = (0..count).collect();
+                    priority.sort_by(|&a, &b| {
+                        col_bm25[b]
+                            .partial_cmp(&col_bm25[a])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(
+                                col_vector[b]
+                                    .partial_cmp(&col_vector[a])
+                                    .unwrap_or(std::cmp::Ordering::Equal),
+                            )
+                            .then(ordered_ids[a].cmp(&ordered_ids[b]))
+                    });
+                    let candidate_ids: Vec<&str> =
+                        priority.iter().map(|&i| ordered_ids[i].as_str()).collect();
+                    let outcome = c.score_sub_spans(
+                        &query_str, &candidate_ids, corpus_kit::SubSpanBudget::DEFAULT);
+                    for (i, id) in ordered_ids.iter().enumerate() {
+                        if let Some(&sub_span) = outcome.scores.get(id) {
+                            // max-cosine blend: sub-span only improves the dense column.
+                            col_dense[i] = col_dense[i].max(sub_span);
                         }
+                    }
+                    if outcome.truncated {
+                        degraded_stages.push("subSpan.budget".to_string());
+                        sub_span_unscored.extend(outcome.unscored_ids);
                     }
                 }
             }
@@ -12355,8 +12391,11 @@ impl EstateCoordinator {
             // after the 2N / 4N tie rules.
             let lambda = Self::union_best_mmr_lambda(weights.diversity);
             let id_refs: Vec<&str> = ordered_ids.iter().map(String::as_str).collect();
-            let (content_key, shingles) = Self::union_best_mmr_bodies(
+            let (content_key, shingles, mmr_budget_truncated) = Self::union_best_mmr_bodies(
                 &id_refs, &drawer_index, request.frame.hydration_level);
+            if mmr_budget_truncated {
+                degraded_stages.push("unionBest.mmrBudget".to_string());
+            }
             let admissible: Vec<bool> =
                 id_refs.iter().map(|id| drawer_index.contains_key(*id)).collect();
             let subjects: Vec<&str> = id_refs.iter().map(|id| {
@@ -12699,8 +12738,11 @@ impl EstateCoordinator {
                 } else {
                     col_final.clone()
                 };
-                let (content_key, shingles) = Self::union_best_mmr_bodies(
+                let (content_key, shingles, mmr_budget_truncated) = Self::union_best_mmr_bodies(
                     &id_refs, &drawer_index, request.frame.hydration_level);
+                if mmr_budget_truncated {
+                    degraded_stages.push("unionBest.mmrBudget".to_string());
+                }
                 let admissible: Vec<bool> =
                     id_refs.iter().map(|id| drawer_index.contains_key(*id)).collect();
                 let subjects: Vec<&str> = id_refs.iter().map(|id| {
@@ -12865,6 +12907,7 @@ impl EstateCoordinator {
                         &plan,
                         request.scoring,
                         explain_agreement_scale * supply_bits / 5.0,
+                        sub_span_unscored.contains(&bare.id),
                     )
                 } else {
                     let mut names: Vec<String> =

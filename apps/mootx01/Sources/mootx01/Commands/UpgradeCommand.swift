@@ -801,8 +801,16 @@ struct UpgradeCommand: AsyncParsableCommand {
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
                 // Closing the estate closes its storage connection with it, so
                 // the backfill opens its own connection over the migrated file.
+                // A fresh SQLiteStorage carries no table declarations until a
+                // schema is opened on it, and the row store derives the
+                // primary key of a delete from the declared table: the span
+                // write replaces rows by deleting them first, so the vector
+                // schema is declared here before the backfill touches the
+                // table (the DrawerStore the backfill creates declares the
+                // LocusKit schema itself).
                 try await kit.close(handle)
                 let backfillStorage = try SQLiteStorage(configuration: configuration)
+                try await backfillStorage.open(schema: VectorStore.schemaDeclaration)
                 let report = try await SpanEncodeBackfill.run(
                     storage: backfillStorage, dataDirectory: dataDir, now: Date())
                 await backfillStorage.close()
@@ -1080,8 +1088,12 @@ struct UpgradeCommand: AsyncParsableCommand {
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // Closing the estate closes its storage connection with it, so
                 // the reclaim opens its own connection over the migrated file.
+                // The vector schema is declared on the fresh connection before
+                // use: the reclaim deletes by the declared primary key, and a
+                // bare connection has no declaration to derive it from.
                 try await kit.close(handle)
                 let reclaimStorage = try SQLiteStorage(configuration: configuration)
+                try await reclaimStorage.open(schema: VectorStore.schemaDeclaration)
                 let vectors = VectorStore(storage: reclaimStorage)
                 let counts = try await vectors.reclaimRetiredVectorRows(
                     retiredModelIDs: Self.retiredDenseFamilyModelIDs)

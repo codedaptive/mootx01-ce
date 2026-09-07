@@ -10,31 +10,40 @@
 //!
 //! - **Zero persistence**: sub-span vectors are computed and discarded
 //!   immediately. No storage write, no VectorStore interaction.
-//! - **Compute bounded**: by the candidate pool size (~40), not corpus size.
+//! - **Compute bounded**: by the `SubSpanBudget`, not by the candidate pool
+//!   or the corpus. The per-record byte cap bounds the windows one record can
+//!   produce and the aggregate window budget bounds the `embed_float` calls
+//!   one scoring call can make. Candidates are visited in the caller's order,
+//!   so the caller decides which candidates the budget reaches first; the
+//!   candidates the budget leaves without a window are reported as
+//!   `unscored_ids` and keep their stored signals.
 //! - **Cross-port determinism**: `sub_span_ranges` uses the same Unicode
 //!   alphabetic + ASCII digit (U+0030–U+0039) scalar predicate as Swift's
 //!   `subSpanRanges`, the same sliding window arithmetic, and the same UTF-8
 //!   byte-offset calculation. Given identical (text, window_tokens,
-//!   overlap_tokens), Swift and Rust produce bit-identical ranges.
+//!   overlap_tokens), Swift and Rust produce bit-identical ranges. The byte
+//!   cap cuts at the same scalar boundary in both ports, and both ports walk
+//!   the candidates in the caller's order, so the same budget truncates the
+//!   same candidates.
 //! - **Cosine inline**: `cosine_similarity` is pure f32 arithmetic with no
 //!   BLAS/NEON dependency — reproducible-within-config, not universally
 //!   bit-identical across optimization levels, but functionally equivalent
 //!   for the scoring comparison.
 //! - **Silent degradation**: if the provider returns Err on `embed_float`,
-//!   the candidate is skipped and the function returns an empty map. No
+//!   the candidate is skipped and the function returns an empty outcome. No
 //!   panic, no error propagation to the caller.
 //!
 //! # Cross-port contract
 //!
 //! The segment text fed to the embedding provider for any given candidate
-//! is identical in Swift and Rust for the same (text, window, overlap).
-//! Provider-identical scores result. The raw cosine values may differ by
-//! float rounding, but the ranking is stable across ports.
+//! is identical in Swift and Rust for the same (text, window, overlap,
+//! budget). Provider-identical scores result. The raw cosine values may
+//! differ by float rounding, but the ranking is stable across ports.
 //!
 //! See also:
 //! - `CorpusContentEngine::score_sub_spans` — the engine-level surface.
 //! - `Corpus::score_sub_spans` — the chunk-based Corpus surface.
-//! - GLK RecallDirector step 5.8 — the caller (Swift only).
+//! - GLK RecallDirector step 5.8 — the caller (both ports).
 
 use crate::content::{CorpusContentId, CorpusContentSource};
 use std::collections::HashMap;
@@ -50,34 +59,99 @@ pub const DEFAULT_WINDOW_TOKENS: usize = 32;
 /// `SubSpanScoring.defaultOverlapTokens`.
 pub const DEFAULT_OVERLAP_TOKENS: usize = 8;
 
+// ── Budget ────────────────────────────────────────────────────────────────────
+
+/// The work bound of one scoring call. Mirrors Swift `SubSpanBudget`.
+///
+/// Without a bound the cost of a call is the sum of every candidate's window
+/// count, and a candidate's window count grows with its content: a client
+/// that can file large records and issue ordinary searches could force
+/// hundreds of thousands of synchronous embedding calls per query while the
+/// caller holds the estate coordinator lock. The two limits make the cost of
+/// a call a constant of the build, not of the estate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubSpanBudget {
+    /// Bytes of a record's dense text the segmenter reads. The cut lands on
+    /// the last scalar boundary at or below the cap, so a window never
+    /// straddles a partial scalar. Mirrors Swift `maxRecordBytes`.
+    pub max_record_bytes: usize,
+    /// Aggregate sub-span `embed_float` calls one scoring call may make. The
+    /// query embedding is not counted. Mirrors Swift `maxWindows`.
+    pub max_windows: usize,
+}
+
+impl SubSpanBudget {
+    /// 16 KiB per record: covers about nine in ten drawers of a conversation
+    /// estate whole (the LME-S aggregate's p90 body is 17 KB) and bounds one
+    /// record at about 110 windows under the default 32/8 window.
+    pub const DEFAULT_MAX_RECORD_BYTES: usize = 16_384;
+    /// 1,024 windows per query: about 1 MB of text through the provider,
+    /// roughly a dozen full-cap records, which keeps a query on a small
+    /// on-device encoder inside a few seconds under the coordinator lock.
+    pub const DEFAULT_MAX_WINDOWS: usize = 1_024;
+    /// The default budget. Mirrors Swift `SubSpanBudget.default`.
+    pub const DEFAULT: Self = Self {
+        max_record_bytes: Self::DEFAULT_MAX_RECORD_BYTES,
+        max_windows: Self::DEFAULT_MAX_WINDOWS,
+    };
+}
+
+impl Default for SubSpanBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// The result of one scoring call. Mirrors Swift `SubSpanScoringOutcome`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubSpanScoringOutcome {
+    /// Max-cosine ∈ [0,1] per candidate the call embedded at least one
+    /// window for. Missing keys implicitly score 0.0.
+    pub scores: HashMap<CorpusContentId, f32>,
+    /// True when the aggregate window budget stopped the call before every
+    /// window of every candidate was embedded. The per-record byte cap alone
+    /// does not set it: the cap is a constant of the measure, the aggregate
+    /// budget is a truncation of the candidate set.
+    pub truncated: bool,
+    /// The candidates the aggregate budget left without a single embedded
+    /// window, in the caller's order. Their dense column stays at its stored
+    /// value; the recall explainer names them.
+    pub unscored_ids: Vec<CorpusContentId>,
+    /// Sub-span `embed_float` calls the call made.
+    pub windows_embedded: usize,
+}
+
 // ── Primary scoring entry point ───────────────────────────────────────────────
 
-/// Compute sub-span max-cosine scores for a bounded candidate set.
+/// Compute sub-span max-cosine scores for a candidate set under a budget.
 ///
-/// For each candidate content ID in `candidate_ids`:
-///   1. Resolves `effective_dense_text` via `source.record(id)`.
-///   2. Segments the text into token-window sub-spans using the
+/// For each candidate content ID in `candidate_ids`, in that order:
+///   1. Resolves `effective_dense_text` via `source.records_for(ids)`.
+///   2. Cuts the text at `budget.max_record_bytes` on a scalar boundary.
+///   3. Segments the text into token-window sub-spans using the
 ///      alphanumeric-run rule (`sub_span_ranges` — cross-port identical).
-///   3. Embeds each sub-span via `provider.embed_float`.
-///   4. Computes cosine similarity against the pre-embedded `query`.
-///   5. Returns the MAX cosine across all sub-spans, normalized to [0,1]
-///      using `(cosine + 1) / 2` — the same convention as the dense lane.
+///   4. Embeds each sub-span via `provider.embed_float` while the aggregate
+///      window budget lasts.
+///   5. Computes cosine similarity against the pre-embedded `query`.
+///   6. Returns the MAX cosine across the embedded sub-spans, normalized to
+///      [0,1] using `(cosine + 1) / 2` — the same convention as the dense lane.
 ///
 /// Candidates absent from the source, candidates where `embed_float` returns
 /// `Err`, and candidates whose text has no alphanumeric tokens are not
-/// included in the returned map (they contribute 0.0 implicitly).
+/// included in the returned scores (they contribute 0.0 implicitly). A
+/// candidate the budget reached only partway is scored over the windows it
+/// got; a candidate the budget did not reach at all is listed in
+/// `unscored_ids`.
 ///
 /// # Parameters
 /// - `query`: The query text. Embedded once via `provider.embed_float`.
-/// - `candidate_ids`: Bounded content ID slice (typically ~40 from the pool).
+/// - `candidate_ids`: Content IDs in priority order: the budget serves the
+///   front of the slice first.
 /// - `source`: The content source for resolving `effective_dense_text`.
 /// - `provider`: The embedding provider for query and sub-span vectors.
 /// - `window_tokens`: Tokens per sub-span window.
 /// - `overlap_tokens`: Token overlap between windows.
-///
-/// # Returns
-/// `HashMap<CorpusContentId, f32>` — max-cosine ∈ [0,1] per candidate.
-/// Missing keys implicitly score 0.0.
+/// - `budget`: The per-record byte cap and the aggregate window budget.
 pub fn score(
     query: &str,
     candidate_ids: &[&str],
@@ -85,28 +159,43 @@ pub fn score(
     provider: &dyn EmbeddingProvider,
     window_tokens: usize,
     overlap_tokens: usize,
-) -> HashMap<CorpusContentId, f32> {
+    budget: SubSpanBudget,
+) -> SubSpanScoringOutcome {
     if query.is_empty() || candidate_ids.is_empty() {
-        return HashMap::new();
+        return SubSpanScoringOutcome::default();
     }
 
     // Embed the query once. If the provider opts out of the float lane, return empty.
     let query_vec = match provider.embed_float(query) {
         Ok(v) if !v.is_empty() => v,
-        _ => return HashMap::new(),
+        _ => return SubSpanScoringOutcome::default(),
     };
 
     // Batch-resolve content records. Falls back to N serial record() calls
     // via the CorpusContentSource default implementation.
     let records = match source.records_for(candidate_ids) {
         Ok(r) => r,
-        Err(_) => return HashMap::new(),
+        Err(_) => return SubSpanScoringOutcome::default(),
     };
 
-    let mut out: HashMap<CorpusContentId, f32> = HashMap::with_capacity(records.len());
-    for (id, record) in &records {
-        let text = record.effective_dense_text();
+    let mut outcome = SubSpanScoringOutcome {
+        scores: HashMap::with_capacity(records.len()),
+        ..SubSpanScoringOutcome::default()
+    };
+    // The candidate slice, not the record map, drives the walk: the map has
+    // no order, and the budget must reach the caller's first candidates first.
+    for &id in candidate_ids {
+        let Some(record) = records.get(id) else { continue };
+        let text = capped_text(record.effective_dense_text(), budget.max_record_bytes);
         if text.is_empty() {
+            continue;
+        }
+        if outcome.windows_embedded >= budget.max_windows {
+            // Budget exhausted by an earlier candidate: this one keeps its
+            // stored signals. The ranges are not computed; the text is
+            // non-empty, which is the condition the caller can act on.
+            outcome.truncated = true;
+            outcome.unscored_ids.push(id.to_string());
             continue;
         }
         let ranges = sub_span_ranges(text, window_tokens, overlap_tokens);
@@ -115,7 +204,12 @@ pub fn score(
         }
         let text_bytes = text.as_bytes();
         let mut max_norm: f32 = 0.0;
+        let mut embedded_here = 0usize;
         for (span_start, span_length) in &ranges {
+            if outcome.windows_embedded >= budget.max_windows {
+                outcome.truncated = true;
+                break;
+            }
             let lo = *span_start;
             let hi = lo + span_length;
             // Byte-range guard (should always hold for well-formed input).
@@ -126,6 +220,8 @@ pub fn score(
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            outcome.windows_embedded += 1;
+            embedded_here += 1;
             let span_vec = match provider.embed_float(span_text) {
                 Ok(v) if !v.is_empty() => v,
                 _ => continue,
@@ -138,11 +234,30 @@ pub fn score(
                 max_norm = norm;
             }
         }
+        if embedded_here == 0 {
+            outcome.unscored_ids.push(id.to_string());
+            continue;
+        }
         if max_norm > 0.0 {
-            out.insert(id.clone(), max_norm);
+            outcome.scores.insert(id.to_string(), max_norm);
         }
     }
-    out
+    outcome
+}
+
+/// The longest prefix of `text` that is at most `max_bytes` long and ends on
+/// a scalar boundary. Mirrors Swift `SubSpanScoring.cappedText`: both ports
+/// step back from the cap to the nearest boundary, so the same bytes reach
+/// the segmenter.
+pub fn capped_text(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &text[..cut]
 }
 
 // ── Segmentation (cross-port identical) ──────────────────────────────────────

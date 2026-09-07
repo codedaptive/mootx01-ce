@@ -3545,29 +3545,35 @@ public actor CorpusContentEngine {
 
     // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
 
-    /// Score a bounded candidate set at sub-span granularity (transient).
+    /// Score a candidate set at sub-span granularity (transient) under a budget.
     ///
-    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:)`,
+    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:budget:)`,
     /// passing the engine's own `source` (the `CorpusContentSource` — works for
     /// BOTH standalone `CorpusDocumentStore` and GLK's LocusKit-backed adapter)
     /// and the DEFAULT slot's provider.
     ///
     /// Sub-span vectors are computed on the fly and DISCARDED — zero persistence.
-    /// Compute is bounded by `candidateIDs.count`, not corpus size.
+    /// Compute is bounded by `budget` (a per-record byte cap and an aggregate
+    /// window budget), not by the candidate set or the corpus; `candidateIDs`
+    /// is a priority order the budget serves front first.
     ///
     /// - Parameters:
     ///   - query: The query text to score against.
-    ///   - candidateIDs: Bounded content ID set (typically ~40 from the pool).
-    /// - Returns: Max-cosine ∈ [0,1] per candidate ID. Missing keys → 0.0.
+    ///   - candidateIDs: Content IDs in priority order.
+    ///   - budget: The work bound (default `SubSpanBudget.default`).
+    /// - Returns: The scores (max-cosine ∈ [0,1] per scored candidate), the
+    ///   truncation flag, the unscored ids and the window count.
     public func scoreSubSpans(
         query: String,
-        candidateIDs: [CorpusContentID]
-    ) async -> [CorpusContentID: Float] {
+        candidateIDs: [CorpusContentID],
+        budget: SubSpanBudget = .default
+    ) async -> SubSpanScoringOutcome {
         await SubSpanScoring.score(
             query: query,
             candidateIDs: candidateIDs,
             source: source,
-            provider: slots[0].provider)
+            provider: slots[0].provider,
+            budget: budget)
     }
 
 }

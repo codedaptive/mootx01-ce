@@ -9,11 +9,19 @@
 //
 // DESIGN INVARIANTS:
 //   - Zero persistence: sub-span vectors are computed and DISCARDED immediately.
-//   - Compute is bounded by candidate set size (~40), not corpus size.
+//   - Compute is bounded by the `SubSpanBudget`, not by the candidate set or
+//     the corpus: the per-record byte cap bounds the windows one record can
+//     produce and the aggregate window budget bounds the `embedFloat` calls
+//     one scoring call can make. Candidates are visited in the caller's
+//     order, so the caller decides which candidates the budget reaches
+//     first; the candidates the budget leaves without a window are reported
+//     as `unscoredIDs` and keep their stored signals.
 //   - Segmentation is deterministic and cross-port identical: the alphanumeric-
 //     run token-window rule mirrors the standalone-passages `PassageProduction`
 //     algorithm (same scalar classification, same sliding window arithmetic).
-//     The Rust twin (`sub_span_scoring.rs`) uses identical parameters.
+//     The Rust twin (`sub_span_scoring.rs`) uses identical parameters, cuts the
+//     byte cap at the same scalar boundary, and walks the candidates in the
+//     same order, so the same budget truncates the same candidates.
 //   - Cosine similarity is computed inline (no SynapseKit dependency):
 //     pure IEEE-754 arithmetic — same result cross-port within a config.
 //   - A candidate absent from the source, a provider that returns an empty
@@ -28,14 +36,85 @@
 //   scores result.
 //
 // See also:
-//   - CorpusContentEngine.scoreSubSpans(query:candidateIDs:) — the actor-level
-//     surface that wires this module to the engine's source and default provider.
+//   - CorpusContentEngine.scoreSubSpans(query:candidateIDs:budget:) — the
+//     actor-level surface that wires this module to the engine's source and
+//     default provider.
 //   - GLK RecallDirector step 5.8 — the caller that scores the candidate pool.
 //
 // Rust twin: `rust/src/sub_span_scoring.rs`.
 
 import Foundation
 import SynapseKit
+
+// MARK: - SubSpanBudget
+
+/// The work bound of one scoring call. Rust twin: `SubSpanBudget`.
+///
+/// Without a bound the cost of a call is the sum of every candidate's window
+/// count, and a candidate's window count grows with its content: a client that
+/// can file large records and issue ordinary searches could force hundreds of
+/// thousands of synchronous embedding calls per query while the caller holds
+/// the estate coordinator lock. The two limits make the cost of a call a
+/// constant of the build, not of the estate.
+public struct SubSpanBudget: Sendable, Equatable {
+    /// Bytes of a record's dense text the segmenter reads. The cut lands on the
+    /// last scalar boundary at or below the cap, so a window never straddles a
+    /// partial scalar. Rust twin: `max_record_bytes`.
+    public var maxRecordBytes: Int
+    /// Aggregate sub-span `embedFloat` calls one scoring call may make. The
+    /// query embedding is not counted. Rust twin: `max_windows`.
+    public var maxWindows: Int
+
+    public init(maxRecordBytes: Int, maxWindows: Int) {
+        self.maxRecordBytes = maxRecordBytes
+        self.maxWindows = maxWindows
+    }
+
+    /// 16 KiB per record: covers about nine in ten drawers of a conversation
+    /// estate whole (the LME-S aggregate's p90 body is 17 KB) and bounds one
+    /// record at about 110 windows under the default 32/8 window.
+    public static let defaultMaxRecordBytes = 16_384
+    /// 1,024 windows per query: about 1 MB of text through the provider,
+    /// roughly a dozen full-cap records, which keeps a query on a small
+    /// on-device encoder inside a few seconds under the coordinator lock.
+    public static let defaultMaxWindows = 1_024
+    /// The default budget. Rust twin: `SubSpanBudget::DEFAULT`.
+    public static let `default` = SubSpanBudget(
+        maxRecordBytes: defaultMaxRecordBytes, maxWindows: defaultMaxWindows)
+}
+
+/// The result of one scoring call. Rust twin: `SubSpanScoringOutcome`.
+public struct SubSpanScoringOutcome: Sendable, Equatable {
+    /// Max-cosine ∈ [0,1] per candidate the call embedded at least one window
+    /// for. Missing keys implicitly score 0.0.
+    public var scores: [CorpusContentID: Float]
+    /// True when the aggregate window budget stopped the call before every
+    /// window of every candidate was embedded. The per-record byte cap alone
+    /// does not set it: the cap is a constant of the measure, the aggregate
+    /// budget is a truncation of the candidate set.
+    public var truncated: Bool
+    /// The candidates the aggregate budget left without a single embedded
+    /// window, in the caller's order. Their dense column stays at its stored
+    /// value; the recall explainer names them.
+    public var unscoredIDs: [CorpusContentID]
+    /// Sub-span `embedFloat` calls the call made.
+    public var windowsEmbedded: Int
+
+    public init(
+        scores: [CorpusContentID: Float] = [:],
+        truncated: Bool = false,
+        unscoredIDs: [CorpusContentID] = [],
+        windowsEmbedded: Int = 0
+    ) {
+        self.scores = scores
+        self.truncated = truncated
+        self.unscoredIDs = unscoredIDs
+        self.windowsEmbedded = windowsEmbedded
+    }
+
+    /// No candidate scored, nothing truncated: the empty-input and opt-out result.
+    public static let empty = SubSpanScoringOutcome()
+}
 
 // MARK: - SubSpanScoring
 
@@ -64,49 +143,57 @@ public enum SubSpanScoring {
 
     // MARK: - Primary scoring entry point
 
-    /// Compute sub-span max-cosine scores for a bounded candidate set.
+    /// Compute sub-span max-cosine scores for a candidate set under a budget.
     ///
-    /// For each candidate content ID in `candidateIDs`:
+    /// For each candidate content ID in `candidateIDs`, in that order:
     ///   1. Resolves `effectiveDenseText` via `source.records(for:)`.
-    ///   2. Segments the text into token-window sub-spans using the
+    ///   2. Cuts the text at `budget.maxRecordBytes` on a scalar boundary.
+    ///   3. Segments the text into token-window sub-spans using the
     ///      alphanumeric-run rule (cross-port identical; see `subSpanRanges`).
-    ///   3. Embeds each sub-span via `provider.embedFloat`.
-    ///   4. Computes cosine similarity against the pre-embedded `query`.
-    ///   5. Returns the MAX cosine across all sub-spans, normalized to [0,1]
-    ///      using `(cosine + 1) / 2` — the same convention as the dense lane.
+    ///   4. Embeds each sub-span via `provider.embedFloat` while the aggregate
+    ///      window budget lasts.
+    ///   5. Computes cosine similarity against the pre-embedded `query`.
+    ///   6. Returns the MAX cosine across the embedded sub-spans, normalized to
+    ///      [0,1] using `(cosine + 1) / 2` — the same convention as the dense lane.
     ///
     /// Candidates absent from the source, candidates where `embedFloat` returns
     /// an empty vector, and candidates whose text has no alphanumeric tokens are
-    /// not included in the result dictionary (they contribute 0.0 implicitly).
+    /// not included in the result scores (they contribute 0.0 implicitly). A
+    /// candidate the budget reached only partway is scored over the windows it
+    /// got; a candidate the budget did not reach at all is listed in
+    /// `unscoredIDs`.
     ///
     /// - Parameters:
     ///   - query: The query text. Embedded once via `provider.embedFloat`.
-    ///   - candidateIDs: Bounded content ID set (typically ~40 from the pool).
+    ///   - candidateIDs: Content IDs in priority order: the budget serves the
+    ///     front of the array first.
     ///   - source: The content source used to resolve `effectiveDenseText`.
     ///   - provider: The embedding provider for both query and sub-span vectors.
     ///   - windowTokens: Tokens per sub-span window (default 32).
     ///   - overlapTokens: Token overlap between windows (default 8).
-    /// - Returns: `[CorpusContentID: Float]` — max-cosine ∈ [0,1] per candidate.
-    ///   Missing keys implicitly score 0.0.
+    ///   - budget: The per-record byte cap and the aggregate window budget.
+    /// - Returns: The scores, the truncation flag, the unscored ids and the
+    ///   window count.
     public static func score(
         query: String,
         candidateIDs: [CorpusContentID],
         source: any CorpusContentSource,
         provider: any EmbeddingProvider,
         windowTokens: Int = defaultWindowTokens,
-        overlapTokens: Int = defaultOverlapTokens
-    ) async -> [CorpusContentID: Float] {
-        guard !query.isEmpty, !candidateIDs.isEmpty else { return [:] }
+        overlapTokens: Int = defaultOverlapTokens,
+        budget: SubSpanBudget = .default
+    ) async -> SubSpanScoringOutcome {
+        guard !query.isEmpty, !candidateIDs.isEmpty else { return .empty }
 
         // Embed the query once. If the provider has no float lane, return empty.
         let queryVec: [Float]
         do {
             let result = try await provider.embedFloat(query)
-            guard !result.isEmpty else { return [:] }
+            guard !result.isEmpty else { return .empty }
             queryVec = result
         } catch {
             // Provider opted out (embedFloatVocabMiss, or structural opt-out).
-            return [:]
+            return .empty
         }
 
         // Batch-resolve content records to get effectiveDenseText.
@@ -117,29 +204,47 @@ public enum SubSpanScoring {
         do {
             records = try await source.records(for: candidateIDs)
         } catch {
-            return [:]
+            return .empty
         }
 
-        // Score each resolved candidate.
-        var out: [CorpusContentID: Float] = [:]
-        out.reserveCapacity(records.count)
-        for (id, record) in records {
-            let text = record.effectiveDenseText
+        // The candidate array, not the record dictionary, drives the walk: the
+        // dictionary has no order, and the budget must reach the caller's
+        // first candidates first.
+        var outcome = SubSpanScoringOutcome()
+        outcome.scores.reserveCapacity(records.count)
+        for id in candidateIDs {
+            guard let record = records[id] else { continue }
+            let text = cappedText(record.effectiveDenseText, maxBytes: budget.maxRecordBytes)
             guard !text.isEmpty else { continue }
+            if outcome.windowsEmbedded >= budget.maxWindows {
+                // Budget exhausted by an earlier candidate: this one keeps its
+                // stored signals. The ranges are not computed; the text is
+                // non-empty, which is the condition the caller can act on.
+                outcome.truncated = true
+                outcome.unscoredIDs.append(id)
+                continue
+            }
 
             let ranges = subSpanRanges(
                 text: text, windowTokens: windowTokens, overlapTokens: overlapTokens)
             guard !ranges.isEmpty else { continue }
 
             var maxNorm: Float = 0.0
+            var embeddedHere = 0
             let utf8 = text.utf8
             for (spanStart, spanLength) in ranges {
+                if outcome.windowsEmbedded >= budget.maxWindows {
+                    outcome.truncated = true
+                    break
+                }
                 // Extract the sub-span text from UTF-8 byte offsets.
                 guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
                 let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
                 let hi = utf8.index(lo, offsetBy: spanLength)
                 guard let spanText = String(utf8[lo..<hi]) else { continue }
 
+                outcome.windowsEmbedded += 1
+                embeddedHere += 1
                 let spanVec: [Float]
                 do {
                     let result = try await provider.embedFloat(spanText)
@@ -155,9 +260,30 @@ public enum SubSpanScoring {
                 let norm = max(0, min(1, (cosine + 1) / 2))
                 if norm > maxNorm { maxNorm = norm }
             }
-            if maxNorm > 0 { out[id] = maxNorm }
+            if embeddedHere == 0 {
+                outcome.unscoredIDs.append(id)
+                continue
+            }
+            if maxNorm > 0 { outcome.scores[id] = maxNorm }
         }
-        return out
+        return outcome
+    }
+
+    /// The longest prefix of `text` that is at most `maxBytes` UTF-8 bytes long
+    /// and ends on a scalar boundary. Rust twin: `capped_text`; both ports step
+    /// back from the cap to the nearest boundary, so the same bytes reach the
+    /// segmenter.
+    public static func cappedText(_ text: String, maxBytes: Int) -> String {
+        guard text.utf8.count > maxBytes else { return text }
+        var bytes = 0
+        var end = text.unicodeScalars.startIndex
+        for scalar in text.unicodeScalars {
+            let width = scalar.utf8.count
+            if bytes + width > maxBytes { break }
+            bytes += width
+            end = text.unicodeScalars.index(after: end)
+        }
+        return String(text.unicodeScalars[text.unicodeScalars.startIndex..<end])
     }
 
     // MARK: - Segmentation (cross-port identical)

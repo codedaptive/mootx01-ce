@@ -21,6 +21,11 @@
 //   §6a CorpusDocumentStore integration — CorpusContentEngine.scoreSubSpans.
 //         Verifies the engine delegates correctly and returns scored results.
 //   §6b Custom CorpusContentSource integration — SubSpanScoring.score() direct.
+//   §7  SubSpanBudget — the work bound (2026-09-07 security scan, finding
+//       49b0b7cd7). The aggregate window budget stops the walk in the caller's
+//       order and names the unscored candidates; the per-record byte cap cuts
+//       on a scalar boundary; the defaults are the documented bound. Rust twin:
+//       the §7 tests in sub_span_scoring_tests.rs.
 //         Exercises the source-protocol path (the GLK LocusKit-backed adapter
 //         profile) without a real SQL store.
 //
@@ -345,7 +350,7 @@ struct ScoreEmptyInputTests {
         let source = MapContentSource(backing: ["a": makeRecord("a", text: "hello world")])
         let result = await SubSpanScoring.score(
             query: "", candidateIDs: ["a"], source: source, provider: provider)
-        #expect(result.isEmpty, "empty query must return empty dict without calling provider")
+        #expect(result.scores.isEmpty, "empty query must return empty dict without calling provider")
     }
 
     // §3b — empty candidateIDs → empty dict without hitting source.
@@ -354,7 +359,7 @@ struct ScoreEmptyInputTests {
         let source = MapContentSource(backing: ["a": makeRecord("a", text: "hello world")])
         let result = await SubSpanScoring.score(
             query: "hello", candidateIDs: [], source: source, provider: provider)
-        #expect(result.isEmpty, "empty candidateIDs must return empty dict without calling source")
+        #expect(result.scores.isEmpty, "empty candidateIDs must return empty dict without calling source")
     }
 
     private func makeRecord(_ id: String, text: String) -> CorpusContentRecord {
@@ -379,7 +384,7 @@ struct ScoreNoFloatLaneTests {
             query: "document", candidateIDs: ["doc1", "doc2"],
             source: source, provider: provider)
         // Provider opt-out: empty dict, no crash.
-        #expect(result.isEmpty,
+        #expect(result.scores.isEmpty,
             "provider without float lane must return empty dict; got \(result)")
     }
 
@@ -442,11 +447,11 @@ struct SubSpanRescueTests {
 
         // All three candidates must appear: both vec_A cosine 1.0 (norm 1.0)
         // and vec_B cosine 0.0 (norm 0.5) are > 0.
-        let trueScore      = try #require(results["true_answer"],
+        let trueScore      = try #require(results.scores["true_answer"],
             "true_answer must appear in scored results")
-        let distScore1     = try #require(results["distractor1"],
+        let distScore1     = try #require(results.scores["distractor1"],
             "distractor1 must appear in scored results")
-        let distScore2     = try #require(results["distractor2"],
+        let distScore2     = try #require(results.scores["distractor2"],
             "distractor2 must appear in scored results")
 
         // True answer must score above the distractors.
@@ -475,9 +480,9 @@ struct SubSpanRescueTests {
             provider: provider,
             windowTokens: 4, overlapTokens: 0)
         // "present" must be scored; "absent_id" must be omitted.
-        #expect(results["present"] != nil,
+        #expect(results.scores["present"] != nil,
             "candidate present in source must appear in results")
-        #expect(results["absent_id"] == nil,
+        #expect(results.scores["absent_id"] == nil,
             "candidate absent from source must be omitted (implicit 0.0)")
     }
 
@@ -502,7 +507,7 @@ struct SubSpanRescueTests {
             source: source,
             provider: provider,
             windowTokens: 4, overlapTokens: 0)
-        let score = try #require(results["dual_text"],
+        let score = try #require(results.scores["dual_text"],
             "dual_text with denseCompositionText=target… must be scored")
         // denseCompositionText "target enrichment" → vec_A → cosine 1.0 → norm 1.0.
         #expect(abs(score - 1.0) < 0.001,
@@ -549,11 +554,11 @@ struct ContentEngineScoreSubSpansTests {
             //
             // We assert non-empty (delegation succeeded) and that doc1 outscores
             // doc2 (query matches doc1's direction, not doc2's).
-            #expect(!results.isEmpty,
+            #expect(!results.scores.isEmpty,
                 "scoreSubSpans must return scored results for content in the source")
 
-            let score1 = results["doc1"] ?? 0.0
-            let score2 = results["doc2"] ?? 0.0
+            let score1 = results.scores["doc1"] ?? 0.0
+            let score2 = results.scores["doc2"] ?? 0.0
             #expect(score1 > score2,
                 "doc1 (matching query direction) must outscore doc2; got doc1=\(score1), doc2=\(score2)")
         }
@@ -570,9 +575,9 @@ struct ContentEngineScoreSubSpansTests {
                 candidateIDs: ["present", "nonexistent_id"])
 
             // "present" is in the source; "nonexistent_id" is not.
-            #expect(results["present"] != nil,
+            #expect(results.scores["present"] != nil,
                 "candidate present in source must be scored")
-            #expect(results["nonexistent_id"] == nil,
+            #expect(results.scores["nonexistent_id"] == nil,
                 "candidate absent from source must be omitted (implicit 0.0)")
         }
     }
@@ -603,9 +608,9 @@ struct CustomSourceScoreTests {
             provider: provider,
             windowTokens: 4, overlapTokens: 0)
 
-        let answerScore = try #require(results["answer"],
+        let answerScore = try #require(results.scores["answer"],
             "answer must be scored by custom source path")
-        let noise1Score = try #require(results["noise1"],
+        let noise1Score = try #require(results.scores["noise1"],
             "noise1 must be scored (non-zero cosine with query)")
 
         // "answer": all sub-spans start with "target" → vec_A → norm 1.0
@@ -621,5 +626,114 @@ struct CustomSourceScoreTests {
     private func makeRecord(_ id: String, _ text: String) -> CorpusContentRecord {
         CorpusContentRecord(id: id, revision: 1,
             digest: CorpusContentDigest.digest(text), text: text)
+    }
+}
+
+// MARK: - §7: SubSpanBudget — the work bound
+
+/// Routes like `FirstTokenRoutingProvider` and counts every `embedFloat` call,
+/// the inference-call meter the budget bounds. Rust twin:
+/// `CountingRoutingProvider`.
+private final class CountingRoutingProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID = "test-counting-routing-v1"
+    let modelVersion = "1.0.0"
+    private let lock = NSLock()
+    private var _calls = 0
+    var calls: Int { lock.withLock { _calls } }
+
+    func embed(_ text: String) async throws -> Engram {
+        throw SynapseKitError.embeddingFailed("CountingRoutingProvider: embed() not used")
+    }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
+        lock.withLock { _calls += 1 }
+        return text.hasPrefix("target") ? [1.0, 0.0] : [0.0, 1.0]
+    }
+}
+
+@Suite("§7 SubSpanBudget — the work bound", .serialized)
+struct SubSpanBudgetTests {
+
+    /// Eight tokens: two windows at window 4 / overlap 0.
+    static let eightTokens = "target a b c d e f g"
+
+    private func makeRecord(_ id: String, _ text: String) -> CorpusContentRecord {
+        CorpusContentRecord(id: id, revision: 1,
+            digest: CorpusContentDigest.digest(text), text: text)
+    }
+
+    @Test("the defaults are the documented bound") func defaults() {
+        #expect(SubSpanBudget.default.maxRecordBytes == 16_384)
+        #expect(SubSpanBudget.default.maxWindows == 1_024)
+    }
+
+    @Test("the window budget stops the walk in the caller's order and names the unscored")
+    func windowBudgetStopsTheWalk() async {
+        let source = MapContentSource(backing: [
+            "c1": makeRecord("c1", Self.eightTokens),
+            "c2": makeRecord("c2", Self.eightTokens),
+            "c3": makeRecord("c3", Self.eightTokens),
+        ])
+        let provider = CountingRoutingProvider()
+        let outcome = await SubSpanScoring.score(
+            query: "target", candidateIDs: ["c1", "c2", "c3"],
+            source: source, provider: provider, windowTokens: 4, overlapTokens: 0,
+            budget: SubSpanBudget(maxRecordBytes: 16_384, maxWindows: 3))
+        // c1 takes two windows, c2 one (partial, still scored), c3 none.
+        #expect(outcome.windowsEmbedded == 3)
+        #expect(outcome.truncated, "the aggregate budget stopped the walk")
+        #expect(outcome.unscoredIDs == ["c3"])
+        #expect(outcome.scores["c1"] != nil)
+        #expect(outcome.scores["c2"] != nil, "a partially embedded candidate is scored over its windows")
+        #expect(outcome.scores["c3"] == nil)
+        #expect(provider.calls == 1 + 3, "one query embedding plus exactly maxWindows sub-span embeddings")
+
+        // The caller's order decides who the budget reaches: reversed, c3 wins.
+        let reversed = await SubSpanScoring.score(
+            query: "target", candidateIDs: ["c3", "c1"],
+            source: source, provider: CountingRoutingProvider(), windowTokens: 4, overlapTokens: 0,
+            budget: SubSpanBudget(maxRecordBytes: 16_384, maxWindows: 1))
+        #expect(reversed.scores["c3"] != nil)
+        #expect(reversed.unscoredIDs == ["c1"])
+        #expect(reversed.truncated)
+    }
+
+    @Test("a window budget that covers every window does not truncate")
+    func windowBudgetCoversEverything() async {
+        let source = MapContentSource(backing: [
+            "c1": makeRecord("c1", Self.eightTokens),
+            "c2": makeRecord("c2", Self.eightTokens),
+        ])
+        let outcome = await SubSpanScoring.score(
+            query: "target", candidateIDs: ["c1", "c2"],
+            source: source, provider: CountingRoutingProvider(), windowTokens: 4, overlapTokens: 0,
+            budget: SubSpanBudget(maxRecordBytes: 16_384, maxWindows: 4))
+        #expect(outcome.windowsEmbedded == 4)
+        #expect(!outcome.truncated)
+        #expect(outcome.unscoredIDs.isEmpty)
+        #expect(outcome.scores.count == 2)
+    }
+
+    @Test("the record byte cap bounds the windows one record produces")
+    func recordByteCap() async {
+        let source = MapContentSource(backing: ["c1": makeRecord("c1", Self.eightTokens)])
+        // "target a" is 8 bytes: one token window instead of two.
+        let outcome = await SubSpanScoring.score(
+            query: "target", candidateIDs: ["c1"],
+            source: source, provider: CountingRoutingProvider(), windowTokens: 4, overlapTokens: 0,
+            budget: SubSpanBudget(maxRecordBytes: 8, maxWindows: 1_024))
+        #expect(outcome.windowsEmbedded == 1, "the cap left one window")
+        #expect(!outcome.truncated, "the byte cap is a constant of the measure, not a truncation")
+        #expect(outcome.unscoredIDs.isEmpty)
+        #expect(outcome.scores["c1"] != nil)
+    }
+
+    @Test("cappedText cuts on a scalar boundary") func cappedText() {
+        // "target " is 7 bytes; "é" is 2 bytes. A cap of 8 lands inside the
+        // scalar and steps back to 7.
+        #expect(SubSpanScoring.cappedText("target é", maxBytes: 8) == "target ")
+        #expect(SubSpanScoring.cappedText("target é", maxBytes: 9) == "target é")
+        #expect(SubSpanScoring.cappedText("target", maxBytes: 100) == "target")
+        #expect(SubSpanScoring.cappedText("é", maxBytes: 1) == "")
     }
 }

@@ -1843,3 +1843,73 @@ impl RecallUnionProfile {
         variance.sqrt()
     }
 }
+
+// ── UnionBest step 9.5: the MMR shingle view under a budget ─────────────────
+
+/// Scalars of one body the step 9.5 shingler reads at most. A body longer
+/// than the cap is shingled over its first 4,096 scalars: the character-3-gram
+/// Jaccard the MMR penalises near-duplicates with is a measure of the
+/// opening of the body, which is where a near-duplicate declares itself, and
+/// a set of at most 4,094 3-grams bounds every pairwise intersection in
+/// step 10. Swift `GeniusLocusKit.unionBestMMRBodyCapScalars` twin.
+pub const UNION_BEST_MMR_BODY_CAP_SCALARS: usize = 4_096;
+
+/// Aggregate scalars the step 9.5 shingler reads per query across the whole
+/// candidate view. The budget is split evenly: every body is shingled over
+/// the same prefix length, `min(cap, budget / bodies)`, so the shingle
+/// memory and the step 10 work (picks × the shingled scalars) are a
+/// constant of the build, not of the estate. An even split keeps one
+/// similarity measure for the whole pool. A body without a set in a pool of
+/// bodies with sets would fall to the sourceMask proxy, which reads a
+/// same-lane neighbour as an exact duplicate and a cross-lane neighbour as
+/// unrelated, and the MMR then drops the lane's real hits for the
+/// unrelated-looking ones; a shorter prefix on every body keeps the
+/// comparison symmetric. One million scalars is 244 full-cap bodies, or
+/// about 600 scalars each across the widest fused pool the lanes can
+/// supply (the lexical, locus and fingerprint lanes at the 256 frontier
+/// ceiling plus the 4x over-fetched dense lanes). Swift
+/// `GeniusLocusKit.unionBestMMRShingleBudgetScalars` twin.
+pub const UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS: usize = 1_000_000;
+
+/// The shingle sets of the MMR body view under the budget. `bodies[i]` is the
+/// body of slot i (`None` when the slot has none: a body-free tier or a
+/// candidate outside the frame-admissible pool). Every non-empty body is
+/// shingled over the same prefix, `min(UNION_BEST_MMR_BODY_CAP_SCALARS,
+/// UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS / non-empty bodies)` scalars.
+/// Returns one set per slot (`None` where the slot has no body or an empty
+/// body) and whether the aggregate budget shortened the prefix below the cap
+/// for at least one body longer than the prefix (the cap alone shortening a
+/// body is the measure, not a truncation). Swift
+/// `GeniusLocusKit.unionBestMMRShingles` twin; the two ports build the same
+/// sets for the same inputs.
+pub fn union_best_mmr_shingles(
+    bodies: &[Option<&str>],
+) -> (Vec<Option<std::collections::BTreeSet<String>>>, bool) {
+    let non_empty = bodies.iter().filter(|b| b.map_or(false, |b| !b.is_empty())).count();
+    let prefix = if non_empty == 0 {
+        UNION_BEST_MMR_BODY_CAP_SCALARS
+    } else {
+        UNION_BEST_MMR_BODY_CAP_SCALARS.min(UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS / non_empty)
+    };
+    let mut sets: Vec<Option<std::collections::BTreeSet<String>>> = vec![None; bodies.len()];
+    let mut truncated = false;
+    for (i, body) in bodies.iter().enumerate() {
+        let Some(body) = body else { continue };
+        if body.is_empty() {
+            continue;
+        }
+        // `nth(prefix)` walks at most prefix + 1 scalars, so a long body is
+        // never scanned whole.
+        let longer_than_prefix = body.chars().nth(prefix).is_some();
+        if longer_than_prefix && prefix < UNION_BEST_MMR_BODY_CAP_SCALARS {
+            truncated = true;
+        }
+        let capped: String = if longer_than_prefix {
+            body.chars().take(prefix).collect()
+        } else {
+            (*body).to_string()
+        };
+        sets[i] = Some(substrate_ml::shingle_similarity::shingles(&capped));
+    }
+    (sets, truncated)
+}
