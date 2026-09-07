@@ -205,7 +205,10 @@ public enum TemporalRecall {
             fallback: .allowDegraded,
             queryText: query,
             traceLimit: limit,
-            origin: .internal)
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let result = try await kit.recall(handle, request)
         let candidates = result.hits.enumerated().map { index, hit in
             NeuronKit.ReductionCandidate.from(hit: hit, coarseRank: index)
@@ -279,7 +282,9 @@ public enum TemporalRecall {
                     fallback: .allowDegraded,
                     queryText: query,
                     traceLimit: limit,
-                    origin: .internal)
+                    origin: .internal,
+                    // Sub-span scoring off, as on the lexical pool request above.
+                    subSpanScoring: .off)
                 let datedResult = try await kit.recall(handle, datedRequest)
                 var seen = Set(candidatePool.map(\.id))
                 for (index, hit) in datedResult.hits.enumerated() where !seen.contains(hit.id) {

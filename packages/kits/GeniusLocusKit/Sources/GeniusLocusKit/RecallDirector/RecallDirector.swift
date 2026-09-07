@@ -2529,9 +2529,15 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Step 5.8 — sub-span dense refinement (MISSION_11X_RECALL_GAP_01 Item 1).
+        // Step 5.8 — sub-span dense refinement.
         //
-        // Runs for .matrixAware scoring when a CorpusContentEngine is registered.
+        // Runs only when the request turns it on (`request.subSpanScoring ==
+        // .on`), for .matrixAware scoring, when a CorpusContentEngine is
+        // registered and the request carries query text. The switch is off
+        // unless a caller sets it: sub-span scoring is an additive-cost stage,
+        // so no request gets it by absence (ruling 2026-09-07) and every
+        // internal caller names its choice at the call site. With the switch
+        // off the dense column keeps whatever the dense lane produced.
         // Computes transient sentence-level sub-span vectors for the candidates
         // in the buffer and takes max(buffer.dense[i], subSpanMaxCosine[i]) as the
         // refined dense score. Sub-span vectors are immediately discarded — zero
@@ -2557,15 +2563,17 @@ public extension GeniusLocusKit {
         // the true answer when the whole-doc score is saturated but a specific sub-
         // span matches the query (the 1.0.x rescue mechanism without storage cost).
         //
-        // The step fires unconditionally for matrixAware regardless of the
-        // discrimination factor: even in the contrastive regime, sub-span scores can
-        // only improve precision (they cannot lower the dense column). The gating
-        // on matrixAware keeps it off the cheaper .raw/.rrf paths.
+        // With the switch on, the step does not consult the discrimination
+        // factor: even in the contrastive regime, sub-span scores can only
+        // improve precision (they cannot lower the dense column). The gating
+        // on matrixAware keeps it off the cheaper .raw/.rrf paths. The Rust
+        // twin (coordinator.rs step 5.8) applies the same gates.
         //
         // Degradation: if scoreSubSpans returns an empty outcome (provider no
         // float lane, source unavailable), the buffer.dense column is left
         // unchanged. The step is non-throwing and non-fatal.
-        if request.scoring == .matrixAware,
+        if request.subSpanScoring == .on,
+           request.scoring == .matrixAware,
            let corpus = corpusKits[handle],
            let text = sketch.queryText, !text.isEmpty,
            buffer.count > 0 {

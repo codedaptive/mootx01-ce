@@ -192,7 +192,10 @@ public extension GeniusLocusKit {
             scoring: .raw,
             limit: frame.limit ?? 50,
             fallback: .failClosed,
-            origin: .internal
+            origin: .internal,
+            // Sub-span scoring is a matrixAware stage; this raw locus read
+            // names the switch off like every other caller (ruling 2026-09-07).
+            subSpanScoring: .off
         ))
         return result.drawers
     }

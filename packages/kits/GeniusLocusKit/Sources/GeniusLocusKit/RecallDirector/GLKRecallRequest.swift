@@ -20,6 +20,27 @@ public enum RecallOrigin: Sendable {
     case `internal`
 }
 
+/// Whether the unionBest matrixAware pipeline runs the step 5.8 sub-span
+/// dense refinement (`CorpusContentEngine.scoreSubSpans`) for a request.
+///
+/// Sub-span scoring is an additive-cost stage: transient sentence-window
+/// embeddings for every candidate the `SubSpanBudget` admits, under the
+/// coordinator lock. Ruling 2026-09-07: every non-minimum feature is a call
+/// parameter with an explicit default chosen by the caller, and
+/// additive-cost features default off. The request default is `.off`;
+/// every internal caller names its choice at the call site, and the switch
+/// is not an ARIA argument. The Rust twin is `recall::GLKSubSpanScoring`.
+public enum GLKSubSpanScoring: Sendable, Equatable {
+    /// Step 5.8 does not run: the dense column keeps the dense lane's
+    /// whole-record cosine (0 for candidates the dense lane never ranked).
+    case off
+    /// Step 5.8 runs when the other conditions hold (matrixAware scoring, a
+    /// registered CorpusContentEngine, non-empty query text): the dense
+    /// column becomes `max(dense, subSpanMaxCosine)` for every candidate
+    /// scored inside the budget.
+    case on
+}
+
 /// A fully-specified recall request at the GLK surface.
 ///
 /// `GLKRecallRequest` is the primary entry point for the Recall Director
@@ -134,6 +155,15 @@ public struct GLKRecallRequest: Sendable {
     /// this parameter — no performance cost when unused.
     public let anomalousFilter: Bool?
 
+    /// Whether the step 5.8 sub-span dense refinement runs for this request.
+    ///
+    /// `.off` (the request default) leaves the dense column as the dense lane
+    /// produced it. `.on` runs `CorpusContentEngine.scoreSubSpans` on the
+    /// unionBest matrixAware pipeline when a corpus is registered and the
+    /// request carries query text, and blends `max(dense, subSpanMaxCosine)`.
+    /// Every internal caller sets this explicitly; see `GLKSubSpanScoring`.
+    public let subSpanScoring: GLKSubSpanScoring
+
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
     /// All five behavioural parameters are required — there are no defaults.
@@ -170,6 +200,11 @@ public struct GLKRecallRequest: Sendable {
     ///   - anomalousFilter: Optional anomalous-flag admission gate (§11.18).
     ///     `nil` = no filter (byte-identical to omitting the parameter); `true` =
     ///     anomalous only; `false` = exclude anomalous. Applied BEFORE scoring.
+    ///   - subSpanScoring: Whether step 5.8 sub-span dense refinement runs.
+    ///     `.off` (the default) skips the step; `.on` runs it on the unionBest
+    ///     matrixAware pipeline when a corpus is registered and query text is
+    ///     present. Internal callers state the value; the ARIA surface does not
+    ///     expose it.
     public init(
         frame: LocusKit.RecallFrame,
         mode: GLKRecallMode,
@@ -183,7 +218,8 @@ public struct GLKRecallRequest: Sendable {
         door: String? = nil,
         composition: String? = nil,
         frontierK: Int? = nil,
-        anomalousFilter: Bool? = nil
+        anomalousFilter: Bool? = nil,
+        subSpanScoring: GLKSubSpanScoring = .off
     ) {
         self.frame = frame
         self.mode = mode
@@ -198,5 +234,6 @@ public struct GLKRecallRequest: Sendable {
         self.composition = composition
         self.frontierK = frontierK
         self.anomalousFilter = anomalousFilter
+        self.subSpanScoring = subSpanScoring
     }
 }

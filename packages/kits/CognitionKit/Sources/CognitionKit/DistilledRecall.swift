@@ -151,7 +151,10 @@ public struct DistilledRecall: Recipe {
             queryText: input.query,
             // origin: .internal — B-10a: recipe layer is never external;
             // only the ARIA_MCP boundary passes .external.
-            origin: .internal
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this recipe does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off
         )
         let result = try await kit.recall(estate, request)
 
