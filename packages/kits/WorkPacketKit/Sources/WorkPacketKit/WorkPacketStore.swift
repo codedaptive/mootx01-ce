@@ -90,6 +90,11 @@ public actor WorkPacketStore {
     ///     `LatticeAnchor.udc("004")` (Computer Science — default for agentic
     ///     work records). Supply a domain-specific anchor when the packet
     ///     describes content in a different UDC class.
+    ///   - sensitivity: the adjective sensitivity tier the packet drawer is
+    ///     filed at (SPEC B-1). Defaults to `.normal`. ARIA passes the live
+    ///     sensitivity grant ceiling here so a packet written while a
+    ///     restricted or secret grant is live is read back through the same
+    ///     gate (I-6) that hides it without the grant.
     /// - Returns: the estate-assigned drawer ID for the filed packet. The estate
     ///   issues its own UUID at capture time; this is NOT `packet.id`. Retain
     ///   the returned value and pass it as `LineageLink.targetPacketID` when
@@ -98,7 +103,8 @@ public actor WorkPacketStore {
     public func store(
         _ packet: WorkPacket,
         now: Date,
-        latticeAnchor: LatticeAnchor? = nil
+        latticeAnchor: LatticeAnchor? = nil,
+        sensitivity: AdjectiveSensitivity = .normal
     ) async throws -> String {
         let jsonData = try encoder.encode(packet)
         guard let jsonString = String(data: jsonData, encoding: .utf8) else {
@@ -117,6 +123,7 @@ public actor WorkPacketStore {
         frame.kind = ContentKind.structuredJSON
         frame.wing = wing
         frame.eventTime = now
+        frame.sensitivity = sensitivity
 
         // captured.id is the estate-assigned drawer UUID — different from packet.id.
         let captured = try await client.capture(frame)

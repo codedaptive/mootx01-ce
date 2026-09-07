@@ -95,9 +95,12 @@ WRITEBACK_MARKERS = (
 # its predecessor without this hook tracking any state, and every note body
 # repeats the session id so the chain is findable by search even when a
 # tunnel fails.
-# SECURITY: every rung reminds the model not to include credentials or
-# restricted-memory content in checkpoint notes, so a handoff filed to the
-# estate cannot inadvertently downgrade secret context to normal sensitivity.
+# SECURITY: every rung tells the model to keep credentials out of the note and
+# to file it at the highest sensitivity of anything it recalled under a
+# grant, naming that sensitivity in the moot_file_memory call. The server
+# enforces the same floor (an omitted sensitivity files at the live grant
+# ceiling); the wording here keeps the model and the server in agreement so
+# a handoff never lands a rung below the material it summarises.
 MESSAGES = {
     30: (
         "[MOOTx01 context meter] Context is about {pct}% full. File a "
@@ -106,8 +109,10 @@ MESSAGES = {
         "what has been decided, what is open. Include the session id "
         "{session_id} in the body. "
         "Do not copy credentials, keys or tokens into the note. If this "
-        "session read restricted or secret memories, leave that material out "
-        "or pass sensitivity set to the highest tier you read."
+        "session recalled restricted or secret memories under a grant, file "
+        "the note at the highest sensitivity of any material it recalled: "
+        "name that sensitivity explicitly (restricted or secret) in the "
+        "moot_file_memory call."
     ),
     50: (
         "[MOOTx01 context meter] Context is about {pct}% full. File "
@@ -117,8 +122,10 @@ MESSAGES = {
         "with moot_link_memories kind derivesFrom. If the link fails, say so "
         "and continue. "
         "Do not copy credentials, keys or tokens into the note. If this "
-        "session read restricted or secret memories, leave that material out "
-        "or pass sensitivity set to the highest tier you read."
+        "session recalled restricted or secret memories under a grant, file "
+        "the note at the highest sensitivity of any material it recalled: "
+        "name that sensitivity explicitly (restricted or secret) in the "
+        "moot_file_memory call."
     ),
     70: (
         "[MOOTx01 context meter] Context is about {pct}% full. File "
@@ -126,8 +133,10 @@ MESSAGES = {
         "the session id {session_id} in the body) and link it derivesFrom "
         "your checkpoint-50 note. If the link fails, say so and continue. "
         "Do not copy credentials, keys or tokens into the note. If this "
-        "session read restricted or secret memories, leave that material out "
-        "or pass sensitivity set to the highest tier you read."
+        "session recalled restricted or secret memories under a grant, file "
+        "the note at the highest sensitivity of any material it recalled: "
+        "name that sensitivity explicitly (restricted or secret) in the "
+        "moot_file_memory call."
     ),
     85: (
         "[MOOTx01 context meter] Context is about {pct}% full. Write a "
@@ -140,8 +149,10 @@ MESSAGES = {
         "{session_id} in the body) and link it derivesFrom your "
         "checkpoint-70 note. If the link fails, say so and continue. "
         "Do not copy credentials, keys or tokens into the note. If this "
-        "session read restricted or secret memories, leave that material out "
-        "or pass sensitivity set to the highest tier you read. Then compact."
+        "session recalled restricted or secret memories under a grant, file "
+        "the note at the highest sensitivity of any material it recalled: "
+        "name that sensitivity explicitly (restricted or secret) in the "
+        "moot_file_memory call. Then compact."
     ),
 }
 
@@ -179,7 +190,10 @@ RECOVERY_MESSAGE = (
     "(moot_memory_search for the session id {session_id}, then "
     "moot_memory_get). Earlier checkpoints are reachable from it by "
     "derivesFrom tunnels if you need more than the handoff carries — walk "
-    "back only if the handoff leaves you short."
+    "back only if the handoff leaves you short. A handoff filed restricted or "
+    "secret is read back under the same ceiling: the matching grant "
+    "(`mootx01 unlock private` or `mootx01 unlock secret`) must be live "
+    "before search can find it."
 )
 
 # Plan capture. The hook cannot call moot itself (MCP tools belong to the

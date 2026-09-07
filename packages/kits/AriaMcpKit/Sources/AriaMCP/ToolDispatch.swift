@@ -1566,9 +1566,9 @@ enum InterfaceTools {
     ) async throws -> JSONValue {
         switch name {
         // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
-        case "memory":                 return try await dispatcher.runMemoryTool(args)
+        case "memory":                 return try await dispatcher.runMemoryTool(args, now: now)
         // Tier 1
-        case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
+        case "moot_file_memory":       return try await dispatcher.runFileMemory(args, now: now)
         case "moot_memory_search":     return try await dispatcher.runMemorySearch(args, now: now)
         case "moot_memory_list":       return try await dispatcher.runMemoryList(args)
         case "moot_memory_get":        return try await dispatcher.runMemoryGet(args, now: now)
@@ -1627,7 +1627,12 @@ extension ToolDispatcher {
     /// actuator-driven capture by an MCP AI agent), source type (.imported),
     /// and addedBy (the dispatcher's `serverIdentity`). The caller supplies content, location,
     /// and optional adjectives (kind, sensitivity, exportability).
-    func runFileMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+    ///
+    /// `now` is the dispatch-boundary instant (`InterfaceTools.dispatch`
+    /// threads the bench-clock value) and gates the sensitivity-grant check
+    /// below; the `Date()` default covers direct runner calls in tests, the
+    /// same convention as `runMemorySearch`.
+    func runFileMemory(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let content = try requireString(args, "content")
         let location = try requireString(args, "location")
@@ -1659,7 +1664,28 @@ extension ToolDispatcher {
                     + "register — compress, don't truncate."
             )
         }
-        let sensitivity = try decodeSensitivity(args["sensitivity"])
+        // SECURITY: a memory filed while a restricted or secret grant is live
+        // may carry material recalled under that grant (the context-meter
+        // hook's checkpoint and handoff notes do exactly that), so the write
+        // side shares the read side's ceiling from the same ledger. An
+        // omitted sensitivity files at the grant's tier; an explicit tier
+        // below it is refused as an isError result naming the ceiling so the
+        // model can retry (a thrown JSON-RPC error would reach it as a bare
+        // "Tool execution failed"); an explicit tier at or above it is kept.
+        // With no live grant the argument decodes exactly as before, default
+        // `.normal`. Mirrors the Rust port's run_file_memory.
+        let grantCeiling = await sensitivityUnlockLedger.ceilingSensitivity(now: now)
+        let sensitivity: AdjectiveSensitivity
+        if args["sensitivity"] == nil {
+            sensitivity = grantCeiling ?? .normal
+        } else {
+            let requested = try decodeSensitivity(args["sensitivity"])
+            if let ceiling = grantCeiling, requested.rawValue < ceiling.rawValue {
+                return Self.errorResult(Self.sensitivityBelowCeilingMessage(
+                    requested: requested, ceiling: ceiling))
+            }
+            sensitivity = requested
+        }
         let exportability = try decodeExportability(args["exportability"])
         let kind = try decodeContentKind(args["kind"])
         let eventTime: Date?
@@ -1720,11 +1746,42 @@ extension ToolDispatcher {
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: [drawer.parentNodeId])
         let roomName = nodeNames[drawer.parentNodeId]?.room ?? ""
-        return Self.textResult([
+        var lines = [
             "filed memory \(drawer.id)",
             "room: \(roomName)",
             "lineage: \(drawer.lineageID.uuidString)",
-        ].joined(separator: "\n"))
+        ]
+        // Under a live grant the reply names the tier the memory was filed
+        // at, so a caller that omitted the argument learns the floor the
+        // server applied. With no grant the reply keeps its prior shape.
+        if grantCeiling != nil {
+            lines.append("sensitivity: \(Self.sensitivityArgumentName(sensitivity))")
+        }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// The `sensitivity` argument spelling of a tier, the inverse of
+    /// `decodeSensitivity`; used in replies and refusals that name a tier.
+    static func sensitivityArgumentName(_ sensitivity: AdjectiveSensitivity) -> String {
+        switch sensitivity {
+        case .normal: return "normal"
+        case .elevated: return "elevated"
+        case .restricted: return "restricted"
+        case .secret: return "secret"
+        }
+    }
+
+    /// The refusal text for an explicit `sensitivity` below the live grant
+    /// ceiling. Byte-identical in the Rust port (`run_file_memory`) so a
+    /// client sees one message whichever port serves it.
+    static func sensitivityBelowCeilingMessage(
+        requested: AdjectiveSensitivity, ceiling: AdjectiveSensitivity
+    ) -> String {
+        let want = sensitivityArgumentName(requested)
+        let have = sensitivityArgumentName(ceiling)
+        return "sensitivity \(want) is below the live grant ceiling \(have): while a \(have) "
+            + "grant is live a memory files at \(have) or higher. Omit sensitivity to file "
+            + "at the ceiling."
     }
 
     /// `moot_memory_search` — hybrid BM25+vector recall over the estate.

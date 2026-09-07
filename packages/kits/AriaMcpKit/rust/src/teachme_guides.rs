@@ -208,7 +208,12 @@ Mistakes:
   — Sending an empty content string (rejected by substrate).
   — Writing the subject as a title (\"Meeting notes\") instead of an
     assertion (\"Release slips one week\").
-  — Truncating the subject mid-sentence: compress the claim, don't cut it.";
+  — Truncating the subject mid-sentence: compress the claim, don't cut it.
+  — Filing a note about restricted or secret material without naming its
+    sensitivity. While a restricted or secret grant is live an omitted
+    sensitivity files at the grant's tier, a lower explicit tier is refused,
+    and the response adds a fourth line, \"sensitivity: <tier>\", naming what
+    was applied.";
 
 const GUIDE_MEMORY_SEARCH: &str = "\
 moot_memory_search — search memories by keyword, or pivot with near:<uuid>
