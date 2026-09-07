@@ -384,8 +384,8 @@ pub fn dispatch(
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
         // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
-        "memory" => crate::memory_adapter::dispatch_memory(args, registry, memory_on),
-        "moot_file_memory" => run_file_memory(args, registry),
+        "memory" => crate::memory_adapter::dispatch_memory(args, registry, memory_on, sensitivity_ledger),
+        "moot_file_memory" => run_file_memory(args, registry, sensitivity_ledger),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger, posture),
         "moot_memory_list" => run_memory_list(args, registry),
         "moot_memory_get" => run_memory_get(args, registry, sensitivity_ledger, ledger, posture),
@@ -440,11 +440,20 @@ pub fn dispatch(
 /// (`capture_with_mode`), which classifies via `Fdc::encode_anchor` when the
 /// sentinel arrives with non-empty content; UNRESOLVED content keeps the "000"
 /// sentinel (one-door principle). Mirrors Swift `runFileMemory`.
+///
+/// `sensitivity_ledger` is the dispatcher's grant ledger: a live restricted
+/// or secret grant floors the filed sensitivity (see the SECURITY note at
+/// the decode site), the same ledger the recall runners read.
 fn run_file_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
+    sensitivity_ledger: &SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
+    // One instant per request: gates the sensitivity-grant check, the
+    // event_time bounds and the capture. Bench-clock: pins to
+    // MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
     let content = require_string(args, "content")?;
     let location = require_string(args, "location")?;
     // Subject is REQUIRED at this boundary (PR-02): the calling AI is the
@@ -490,7 +499,31 @@ fn run_file_memory(
     // Decode caller-supplied adjectives. Absent → keep CaptureFrame defaults.
     // Unknown → reject with INVALID_PARAMS listing accepted values (mirrors Swift).
     let kind = decode_content_kind_arg(args.get("kind"))?;
-    let sensitivity = decode_sensitivity_arg(args.get("sensitivity"))?;
+    // SECURITY: a memory filed while a restricted or secret grant is live
+    // may carry material recalled under that grant (the context-meter
+    // hook's checkpoint and handoff notes do exactly that), so the write
+    // side shares the read side's ceiling from the same ledger. An omitted
+    // sensitivity files at the grant's tier; an explicit tier below it is
+    // refused as an isError result naming the ceiling so the model can
+    // retry (INVALID_PARAMS would reach it as a bare "Tool execution
+    // failed"); an explicit tier at or above it is kept. With no live grant
+    // the argument decodes exactly as before, default Normal. Mirrors Swift
+    // `runFileMemory`.
+    let grant_ceiling = sensitivity_ledger.ceiling_sensitivity(now);
+    let sensitivity = match decode_sensitivity_arg(args.get("sensitivity"))? {
+        None => grant_ceiling,
+        Some(requested) => {
+            if let Some(ceiling) = grant_ceiling {
+                if requested.raw_value() < ceiling.raw_value() {
+                    return Err(JSONRPCError::new(
+                        JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                        sensitivity_below_ceiling_message(requested, ceiling),
+                    ));
+                }
+            }
+            Some(requested)
+        }
+    };
 
     // Pass the unclassified sentinel anchor to the capture seam.
     // The GeniusLocusKit seam (capture_with_mode) classifies the content via
@@ -519,7 +552,8 @@ fn run_file_memory(
     if let Some(k) = kind {
         frame.kind = k;
     }
-    // Apply caller-supplied sensitivity tier (defaults to Normal if absent).
+    // Apply the resolved sensitivity tier: the caller's, or the live grant
+    // ceiling when the caller named none. None keeps the frame's Normal.
     if let Some(s) = sensitivity {
         frame.sensitivity = s;
     }
@@ -553,8 +587,7 @@ fn run_file_memory(
         // past or more than 1 day in the future. An extreme back-date forces
         // the matrix temporal buckets to span a huge range, triggering a full
         // rebuild on every subsequent capture.
-        // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW when set; wall clock otherwise.
-        let now_ms = bench_clock_now();
+        let now_ms = now;
         let ten_years_ms: i64 = 10 * 365 * 86_400 * 1_000;
         let one_day_ms: i64 = 86_400 * 1_000;
         if ms < now_ms - ten_years_ms || ms > now_ms + one_day_ms {
@@ -573,8 +606,6 @@ fn run_file_memory(
     let impatient = optional_bool(args, "impatient")?.unwrap_or(false);
     let mode = if impatient { WriteMode::Impatient } else { WriteMode::Regular };
 
-    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
-    let now = bench_clock_now();
     // `capture_with_mode` is a write verb that mounts/feeds the encode queue, so
     // it takes `&mut self`; lock the coordinator mutably for the duration.
     let mut coord = estate.coord.lock().unwrap();
@@ -589,10 +620,20 @@ fn run_file_memory(
                 .get(&drawer.parent_node_id)
                 .map(|(_, r)| r.as_str())
                 .unwrap_or("");
-            let body = format!(
+            let mut body = format!(
                 "filed memory {}\nroom: {}\nlineage: {}",
                 drawer.id, room, drawer.lineage_id
             );
+            // Under a live grant the reply names the tier the memory was
+            // filed at, so a caller that omitted the argument learns the
+            // floor the server applied. With no grant the reply keeps its
+            // prior shape.
+            if grant_ceiling.is_some() {
+                body.push_str(&format!(
+                    "\nsensitivity: {}",
+                    sensitivity_argument_name(drawer.adjective_sensitivity())
+                ));
+            }
             Ok(text_result(&body))
         }
         // Route the VerbDispatchError through the describe machinery so no
@@ -4634,6 +4675,35 @@ fn decode_sensitivity_arg(value: Option<&JsonValue>) -> Result<Option<AdjectiveS
     }
 }
 
+/// The `sensitivity` argument spelling of a tier, the inverse of
+/// `decode_sensitivity_arg`; used in replies and refusals that name a tier.
+/// Mirrors Swift `ToolDispatcher.sensitivityArgumentName`. Shared with
+/// `memory_adapter`, whose write replies name the tier the same way.
+pub(crate) fn sensitivity_argument_name(sensitivity: AdjectiveSensitivity) -> &'static str {
+    match sensitivity {
+        AdjectiveSensitivity::Normal => "normal",
+        AdjectiveSensitivity::Elevated => "elevated",
+        AdjectiveSensitivity::Restricted => "restricted",
+        AdjectiveSensitivity::Secret => "secret",
+    }
+}
+
+/// The refusal text for an explicit `sensitivity` below the live grant
+/// ceiling. Byte-identical in the Swift port
+/// (`ToolDispatcher.sensitivityBelowCeilingMessage`) so a client sees one
+/// message whichever port serves it.
+fn sensitivity_below_ceiling_message(
+    requested: AdjectiveSensitivity,
+    ceiling: AdjectiveSensitivity,
+) -> String {
+    let want = sensitivity_argument_name(requested);
+    let have = sensitivity_argument_name(ceiling);
+    format!(
+        "sensitivity {want} is below the live grant ceiling {have}: while a {have} grant is \
+         live a memory files at {have} or higher. Omit sensitivity to file at the ceiling."
+    )
+}
+
 /// Valid kind strings for `moot_link_memories`. Mirrors Swift `ToolDispatcher.validKindStrings`.
 /// Any string not in this list is rejected with INVALID_PARAMS before decode_tunnel_kind runs.
 const VALID_KIND_STRINGS: &[&str] = &[
@@ -4774,7 +4844,8 @@ mod timing_window_tests {
                 JsonValue::from(serde_json::json!("timing/window")),
             );
             args.insert("impatient".to_string(), JsonValue::from(serde_json::json!(true)));
-            let r = run_file_memory(&args, registry).expect("seed file_memory dispatches");
+            let r = run_file_memory(&args, registry, &SensitivityGrantLedger::new())
+                .expect("seed file_memory dispatches");
             assert_eq!(
                 r["isError"],
                 serde_json::Value::Bool(false),
