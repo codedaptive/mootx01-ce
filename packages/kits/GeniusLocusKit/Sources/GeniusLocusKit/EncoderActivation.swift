@@ -10,10 +10,19 @@
 // member: provisioning `"encoder"` leaves the Corpus ensemble exactly as
 // configured and registers the encoder beside the VectorStore instead.
 //
+// Seeding: when the manifest names the encoder and the registry holds no
+// active row, `activateSpanEncoder` seeds the bundled arctic-embed-s-w60
+// row before loading it (ruling 2026-09-04: upgrade never creates content;
+// seeding belongs to provision and serve). The upgrade backfill also seeds
+// through `seedDefaultEncoderModel(in:)`, keeping one construction site for
+// the seed row in this file. Consumers: the GLK activation path (at open)
+// and the `mootx01 upgrade` backfill (also behind `--backfill-only`).
+//
 // Failure contract: a missing model directory, a vocabulary hash mismatch
 // or a load failure leaves the estate with NO encoder for the session,
 // writes ONE OSLog line on the `GeniusLocusKit` category, and raises
-// nothing to the caller. Recall then runs lexical-only.
+// nothing to the caller. Recall then runs lexical-only. A seed failure is
+// also logged once; activation reads the registry as it stands.
 //
 // Mirror: rust/src/coordinator.rs `activate_span_encoder` and
 // rust/src/encoder_activation.rs.
@@ -106,6 +115,16 @@ public extension GeniusLocusKit {
         spanEncoders[handle]
     }
 
+    /// Whether the span rerank stage is registered for `handle`: the encoder
+    /// loaded and the estate's VectorStore was registered, so unionBest
+    /// recall reranks the lexical head. False on an estate with no encoder,
+    /// on a CorpusOnly estate (duty-side encoder only) and for a stale handle.
+    /// The ARIA discrimination line reads it to decide whether a dark dense
+    /// lane leaves the ranking lexical-only. Twin of Rust `is_span_rerank_registered`.
+    func isSpanRerankRegistered(for handle: EstateHandle) -> Bool {
+        spanRerankSources[handle] != nil
+    }
+
     /// Install the model-directory resolver used by every later activation.
     /// The bundling unit calls this once at daemon start; tests inject a
     /// scratch-directory resolver.
@@ -188,6 +207,51 @@ public extension GeniusLocusKit {
         return true
     }
 
+    // MARK: - Default encoder row
+
+    /// The bundled encoder (`EncoderModelSeed`, arctic-embed-s-w60) as an
+    /// `encoder_models` row. The one construction site for the seed row in
+    /// the Swift port: activation seeds it at open and the upgrade backfill
+    /// seeds it over a closed estate's storage. Twin of Rust
+    /// `EstateCoordinator::default_encoder_model_row`.
+    static func defaultEncoderModelRow(isActive: Bool) -> EncoderModelRow {
+        EncoderModelRow(
+            modelID: EncoderModelSeed.modelID,
+            modelVersion: EncoderModelSeed.modelVersion,
+            dim: EncoderModelSeed.dim,
+            queryPrefix: EncoderModelSeed.queryPrefix,
+            docPrefix: EncoderModelSeed.docPrefix,
+            pooling: EncoderModelSeed.pooling == "cls" ? .cls : .mean,
+            tokenizerHash: EncoderModelSeed.tokenizerHash,
+            windowWords: EncoderModelSeed.windowWords,
+            overlapDivisor: EncoderModelSeed.overlapDivisor,
+            maxSpans: EncoderModelSeed.maxSpans,
+            maxSequence: EncoderModelSeed.maxSequence,
+            isActive: isActive)
+    }
+
+    /// Seed the bundled encoder as the active row when `registry` holds no
+    /// active row; `true` when a row was written. An estate that already
+    /// carries an active row keeps it: a later audition winner is a row swap
+    /// through `EncoderModelStore.activate(modelID:)`, never a reseed. Twin of
+    /// Rust `EstateCoordinator::seed_default_encoder_model_in`.
+    static func seedDefaultEncoderModel(in registry: EncoderModelStore) async throws -> Bool {
+        guard try await registry.active() == nil else { return false }
+        try await registry.upsert(defaultEncoderModelRow(isActive: true))
+        return true
+    }
+
+    /// `seedDefaultEncoderModel(in:)` over the estate's own storage
+    /// (`storages[handle]`). Throws `GeniusLocusKitError.estateNotOpen` for a
+    /// stale handle. Twin of Rust `seed_default_encoder_model_if_absent`.
+    @discardableResult
+    func seedDefaultEncoderModelIfAbsent(for handle: EstateHandle) async throws -> Bool {
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        return try await Self.seedDefaultEncoderModel(in: EncoderModelStore(storage: storage))
+    }
+
     // MARK: - Activation
 
     /// The active `encoder_models` row for `handle` as a CorpusKit spec; the
@@ -205,6 +269,23 @@ public extension GeniusLocusKit {
     /// registry row, applying the failure contract: nil encoder + one log
     /// line on any failure, no throw.
     func activateSpanEncoder(for handle: EstateHandle) async {
+        // Seed before reading: an estate whose manifest names the encoder is
+        // encoder-active from its first open (ruling 2026-09-04: upgrade never
+        // creates content; seeding belongs to provision and serve). The span
+        // rows are the span-encode standing signal's work and drain in the
+        // background, so the open stays fast. A seed failure is logged once and
+        // activation reads the registry as it stands.
+        do {
+            if try await seedDefaultEncoderModelIfAbsent(for: handle) {
+                Self.encoderLog.info(
+                    "encoder: seeded \(EncoderModelSeed.modelID, privacy: .public) as the active encoder_models row (estate: \(handle.estateUUID, privacy: .public))"
+                )
+            }
+        } catch {
+            Self.encoderLog.warning(
+                "encoder: could not seed the default encoder_models row (\(String(describing: error), privacy: .public)); activation reads the registry as it stands (estate: \(handle.estateUUID, privacy: .public))"
+            )
+        }
         let spec = await activeEncoderModelSpec(for: handle)
         guard let directory = modelDirectoryResolver.encoderModelDirectory(for: spec.modelID) else {
             Self.encoderLog.warning(

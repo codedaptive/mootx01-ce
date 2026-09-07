@@ -12,13 +12,16 @@
 //!   - corpus-kit `EncoderModelSpec`, `SpanEncoder::encode_spans`,
 //!     `encoder::spanner::{words, spans}` (§7);
 //!   - corpus-kit-providers `SpanEncoderFactory::make(spec, model_dir)`,
-//!     `model_dir_for(model_id, data_dir) -> Option<PathBuf>` and the
-//!     `EncoderModelSeed` constants (§7, bundling).
-//! The registry row (locus-kit `EncoderModelRow`) and the corpus-kit encoder
-//! spec carry the same fields; the conversion below is field for field.
+//!     `model_dir_for(model_id, data_dir) -> Option<PathBuf>` (§7, bundling).
+//!
+//! The seed row is now constructed through
+//! `EstateCoordinator::seed_default_encoder_model_in` (ruling 2026-09-04:
+//! seeding belongs to provision and serve; the upgrade backfill is one of the
+//! two authorised seeders, alongside the GLK activation path at open). This
+//! keeps the one construction site for the seed row in the Rust port.
 //!
 //! Failure contract (§7): no active row, a missing model directory, a vocab
-//! hash mismatch, or a load failure is a clean skip — recall stays
+//! hash mismatch, or a load failure is a clean skip: recall stays
 //! lexical-only, the caller prints one line, nothing is written.
 
 use std::path::Path;
@@ -26,9 +29,10 @@ use std::sync::Arc;
 
 use corpus_kit::encoder::spanner;
 use corpus_kit::encoder::{EncoderModelSpec as EncoderSpec, Pooling as EncoderPooling, SpanEncoder};
-use corpus_kit_providers::{model_dir_for, EncoderModelSeed, SpanEncoderFactory};
+use corpus_kit_providers::{model_dir_for, SpanEncoderFactory};
+use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
-use locus_kit::encoder_model_store::{EncoderModelRow, EncoderModelStore, Pooling};
+use locus_kit::encoder_model_store::{EncoderModelStore, Pooling};
 use persistence_kit::predicate::StoragePredicate;
 use persistence_kit::types::{Column, TypedValue};
 use persistence_kit::Storage;
@@ -65,34 +69,17 @@ pub(crate) fn run(
     now_millis: i64,
 ) -> Result<SpanEncodeReport, String> {
     let registry = EncoderModelStore::new(Arc::clone(&storage));
-    // A CE 1.0.x estate arrives at 19 with an empty registry: seed the bundled
-    // model as the active row so the backfill (and every later open) encodes
-    // under it. An estate that already carries an active row keeps it — a
-    // later audition winner is a row swap, not a reseed.
-    let row = match registry.active().map_err(|e| e.to_string())? {
-        Some(active) => active,
-        None => {
-            registry
-                .upsert(&EncoderModelRow {
-                    model_id: EncoderModelSeed::MODEL_ID.to_string(),
-                    model_version: EncoderModelSeed::MODEL_VERSION.to_string(),
-                    dim: EncoderModelSeed::DIM as i64,
-                    query_prefix: EncoderModelSeed::QUERY_PREFIX.to_string(),
-                    doc_prefix: EncoderModelSeed::DOC_PREFIX.to_string(),
-                    pooling: if EncoderModelSeed::POOLING == "cls" { Pooling::Cls } else { Pooling::Mean },
-                    tokenizer_hash: EncoderModelSeed::TOKENIZER_HASH.to_string(),
-                    window_words: EncoderModelSeed::WINDOW_WORDS as i64,
-                    overlap_divisor: EncoderModelSeed::OVERLAP_DIVISOR as i64,
-                    max_spans: EncoderModelSeed::MAX_SPANS as i64,
-                    max_sequence: EncoderModelSeed::MAX_SEQUENCE as i64,
-                    is_active: true,
-                })
-                .map_err(|e| e.to_string())?;
-            let Some(seeded) = registry.active().map_err(|e| e.to_string())? else {
-                return Ok(SpanEncodeReport::NoActiveModel);
-            };
-            seeded
-        }
+    // A CE 1.0.x estate arrives at format 19 with an empty registry: seed the
+    // bundled model as the active row through the one construction site for the
+    // seed row in the Rust port. The maintenance open seeds the registry through
+    // activation once the manifest names the encoder; this call keeps the
+    // backfill correct over its own storage (an estate whose embedding_provider
+    // key was written after the open) and is idempotent otherwise. An estate
+    // that already carries an active row keeps it; a later audition winner is
+    // a row swap, not a reseed.
+    EstateCoordinator::seed_default_encoder_model_in(&registry).map_err(|e| e.to_string())?;
+    let Some(row) = registry.active().map_err(|e| e.to_string())? else {
+        return Ok(SpanEncodeReport::NoActiveModel);
     };
     let Some(model_dir) = model_dir_for(&row.model_id, data_dir) else {
         return Ok(SpanEncodeReport::ModelUnavailable(format!(

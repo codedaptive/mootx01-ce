@@ -1,8 +1,8 @@
 // EncoderModelSeed.swift
 //
 // Hardcoded seed values for the bundled arctic-embed-s-w60 encoder model.
-// Used by `mootx01 upgrade` (and estate provisioning) to INSERT a row
-// into the `encoder_models` table when none exists.
+// Used by the GLK activation path (at estate open) and the `mootx01 upgrade`
+// backfill to INSERT a row into the `encoder_models` table when none exists.
 //
 // The registry row (`EncoderModelRow`) and CorpusKit's `EncoderModelSpec`
 // carry the same fields; both are constructed from these constants.
@@ -12,14 +12,14 @@
 //   2. Re-run tools/encoder-models/build-all.sh.
 //   3. Replace the model directory in app resources and installer package.
 //   Schema migration and re-encode are handled by EncoderModelStore
-//   and the drain duty — this file is only the seed source.
+//   and the drain duty; this file is only the seed source.
 
 /// Static seed values for the bundled snowflake-arctic-embed-s encoder model.
 ///
-/// `mootx01 upgrade` and estate provisioning call
-/// `EncoderModelStore.upsert(_:)` with a row constructed from these
-/// constants. `is_active` is set to 1 only when no active row exists in
-/// `encoder_models`.
+/// `GeniusLocusKit.seedDefaultEncoderModel(in:)` (called at every encoder
+/// activation) and the upgrade backfill call `EncoderModelStore.upsert(_:)`
+/// with a row constructed from these constants. `is_active` is set to 1 only
+/// when no active row exists in `encoder_models`.
 public enum EncoderModelSeed {
 
     // MARK: - Model identity
