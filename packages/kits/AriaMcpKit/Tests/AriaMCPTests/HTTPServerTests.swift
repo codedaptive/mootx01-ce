@@ -1555,19 +1555,19 @@ struct FirstPartyLaneSeparationTests {
     }
 
     @Test("The legacy view reproduces LoopbackHTTP's field handling")
-    func legacyViewReproducesFieldHandling() {
+    func legacyViewReproducesFieldHandling() throws {
         let raw = Data(("POST /x?y=1 HTTP/1.1\r\n"
                         + "Content-Type :   application/json  \r\n"
                         + "X-Dup: first\r\nX-Dup: second\r\n"
                         + "Content-Length: 2\r\n\r\n{}").utf8)
-        let legacy = try? #require(HTTPServer.legacyCollapsedRequest(raw, maxBodyBytes: 4096))
-        #expect(legacy?.method == "POST")
-        #expect(legacy?.path == "/x")
-        #expect(legacy?.query == "y=1")
+        let legacy = try #require(HTTPServer.legacyCollapsedRequest(raw, maxBodyBytes: 4096))
+        #expect(legacy.method == "POST")
+        #expect(legacy.path == "/x")
+        #expect(legacy.query == "y=1")
         // Name trimmed then lowercased; value trimmed.
-        #expect(legacy?.headers["content-type"] == "application/json")
+        #expect(legacy.headers["content-type"] == "application/json")
         // Duplicates collapse last-wins.
-        #expect(legacy?.headers["x-dup"] == "second")
-        #expect(legacy?.body == Data("{}".utf8))
+        #expect(legacy.headers["x-dup"] == "second")
+        #expect(legacy.body == Data("{}".utf8))
     }
 }

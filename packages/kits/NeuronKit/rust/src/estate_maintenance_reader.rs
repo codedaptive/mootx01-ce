@@ -435,7 +435,6 @@ mod tests {
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::estate_types::LatticeAnchor;
     use locus_kit::learned_reference::LearnedReference;
-    use locus_kit::frames::LearnFrame;
 
     // ── test helpers ─────────────────────────────────────────────────
 
@@ -519,7 +518,7 @@ mod tests {
 
     #[test]
     fn mr4_reference_drift_returns_row_per_non_tombstoned_reference() {
-        let (coord, handle) = open_estate();
+        let (_coord, _handle) = open_estate();
 
         // File a learned reference with Minor drift severity.
         // Minor drift raw value: bits 6-11 = 16 → operational_bitmap |= (16 << 6) = 1024.

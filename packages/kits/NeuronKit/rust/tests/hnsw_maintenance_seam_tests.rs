@@ -129,6 +129,7 @@ fn alpha_hnsw_none_path_is_safe() {
 
 // ─── THETA seam ──────────────────────────────────────────────────────────────
 
+#[cfg(feature = "whole-record-dense")]
 /// `run_theta_cycle_with_hook_and_hnsw` calls `rebuild_float_index` once
 /// per invocation when the THETA gate is due.
 #[test]
@@ -149,6 +150,7 @@ fn theta_hnsw_rebuild_fires_per_cycle() {
         "rebuild_float_index must fire with the cycle timestamp");
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// `run_theta_cycle_with_hook_and_hnsw` fires the rebuild even when the retrain
 /// hook fails (non-fatal policy matches Swift).
 #[test]
@@ -168,6 +170,7 @@ fn theta_hnsw_rebuild_fires_even_when_retrain_fails() {
         "rebuild must still fire after a failed retrain (non-fatal)");
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// THETA rebuild with `hook: None` still calls rebuild (the hook is orthogonal).
 #[test]
 fn theta_hnsw_rebuild_fires_with_hook_none() {
@@ -201,6 +204,7 @@ fn theta_hnsw_none_path_is_safe() {
 
 // ─── BETA seam ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "whole-record-dense")]
 /// `run_beta_cycle_with_hnsw` calls `compact_float_index_tombstones` once per
 /// invocation.
 #[test]
@@ -215,6 +219,7 @@ fn beta_hnsw_compact_fires_per_cycle() {
         "compact_float_index_tombstones must fire with the cycle timestamp");
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// `run_beta_cycle_with_hnsw` compact fires even when consolidated is empty
 /// (nothing to prune — compaction is independent of the prune outcome).
 #[test]
@@ -229,6 +234,7 @@ fn beta_hnsw_compact_fires_on_empty_state() {
         "compact must fire even when consolidated map is empty");
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// HNSW compact failure (`fail_all: true`) is non-fatal: base BETA cycle
 /// advances the timestamp regardless.
 #[test]

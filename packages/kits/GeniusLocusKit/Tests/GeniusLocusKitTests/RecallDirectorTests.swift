@@ -2847,6 +2847,7 @@ struct RecallDirectorDiscriminativeScoringTests {
 
     // MARK: - 31. Discriminative differs from rrf on saturated dense lane
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// When every seeded item has identical content (deterministic embedding →
     /// identical vectors → cosine spread ≈ 0), `denseDiscriminationFactor` ≈ 0
     /// and `.discriminative` scores are ≈ 0 × buffer.final ≈ 0, while `.rrf`
@@ -2944,6 +2945,7 @@ struct RecallDirectorDiscriminativeScoringTests {
 
         try await kit.close(handle)
     }
+#endif
 
     // MARK: - 32. rrf unchanged when no dense lane
 

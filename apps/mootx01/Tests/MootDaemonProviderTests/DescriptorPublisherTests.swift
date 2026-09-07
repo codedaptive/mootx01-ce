@@ -563,7 +563,7 @@ struct Schema3MACFieldOrderingTests {
     func schema3MACInputLongerThanSchema2ByWireFields() {
         // The schema-3 extension must be exactly 7 × 8 = 56 bytes.
         let vector = ProviderVersionVector.current
-        var base3Desc = FirstPartyDescriptor(
+        let base3Desc = FirstPartyDescriptor(
             schemaVersion: FirstPartyAuthProtocol.descriptorSchemaVersion,
             providerIdentifier: FirstPartyAuthProtocol.providerIdentifier,
             serviceIdentifier: FirstPartyAuthProtocol.serviceIdentifier,
