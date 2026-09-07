@@ -52,9 +52,12 @@ enum SpanEncodeBackfill {
 
     /// Encode every drawer whose bit 27 is clear under the active model.
     ///
-    /// `storage` is an opened estate whose LocusKit and SynapseKit schemas
-    /// are current (the upgrade step opened it through GeniusLocusKit and
-    /// the migration catalog first). `dataDirectory` is the mootx01 data
+    /// `storage` is a connection over an estate whose LocusKit and SynapseKit
+    /// schemas are current (the upgrade step opened it through GeniusLocusKit
+    /// and the migration catalog first) with `VectorStore.schemaDeclaration`
+    /// opened on it by the caller, so the span rows' replace-by-delete finds
+    /// the declared primary key; the `DrawerStore` created below declares the
+    /// LocusKit schema itself. `dataDirectory` is the mootx01 data
     /// directory the model resolver searches first (the 1.2 download slot);
     /// `now` stamps the span rows' `filed_at`.
     static func run(storage: any Storage, dataDirectory: URL, now: Date) async throws -> SpanEncodeReport {

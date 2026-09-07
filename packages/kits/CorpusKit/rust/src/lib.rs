@@ -117,8 +117,8 @@ pub use hybrid_recall::*;
 // Re-export the scoring primitives so SDK consumers can call them directly
 // without reaching into the module path.
 pub use sub_span_scoring::{
-    cosine_similarity, score as score_sub_spans_raw, sub_span_ranges, DEFAULT_OVERLAP_TOKENS,
-    DEFAULT_WINDOW_TOKENS,
+    capped_text, cosine_similarity, score as score_sub_spans_raw, sub_span_ranges, SubSpanBudget,
+    SubSpanScoringOutcome, DEFAULT_OVERLAP_TOKENS, DEFAULT_WINDOW_TOKENS,
 };
 pub use sync_manifest::*;
 pub use tokenizer::*;

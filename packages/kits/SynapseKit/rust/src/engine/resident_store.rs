@@ -8,11 +8,14 @@
 //! On-disk format (all integers little-endian, arch spec §4.2):
 //!
 //!   magic(4)           = 0x56 0x45 0x43 0x31  ("VEC1")
-//!   version(2)         = 0x00 0x01
+//!   version(2)         = 0x00 0x03
 //!   kind(1)            = VectorKind raw value (0 = binary)
 //!   stride(4)          = bytes per vector slot (LE u32)
 //!   count(4)           = total allocated slots (LE u32)
 //!   live_count(4)      = live (non-tombstoned) slots (LE u32)
+//!   generation_count(4) = entries of the serving-generation stamp (LE u32)
+//!   generations        = (4B len | model_id UTF-8 | 8B LE i64 serving_generation)*
+//!                        in ascending model_id order
 //!   tombstone_words(4) = number of u64 tombstone words (LE u32)
 //!   tombstones(8×T)    = tombstone bitset (u64 LE each)
 //!   vectors(count×stride) = packed vector bytes
@@ -52,6 +55,7 @@ use crate::engine::key::VectorRecordKey;
 use crate::engine::payload::VectorKind;
 use crate::engine::resident::{ModelPartitionEntry, ResidentVectorArray};
 use crate::error::SynapseKitError;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -63,12 +67,28 @@ pub const VEC_MAGIC: [u8; 4] = [0x56, 0x45, 0x43, 0x31];
 
 /// Format version. LE u16.
 ///
-/// Version 0x0002: adds `live_count` field (LE u32) after `count` and
-/// before `tombstone_words`. The field is written on save but read and
-/// discarded on load — stale detection recomputes live count from the
-/// tombstone bitmap. No installed sidecars exist at version 0x0001;
-/// the old bytes are rejected by `parse_sidecar`.
-pub const VEC_VERSION: u16 = 0x0002;
+/// Version 0x0002 added `live_count` (LE u32) after `count`; it is written
+/// on save but read and discarded on load, since stale detection recomputes
+/// the live count from the tombstone bitmap.
+///
+/// Version 0x0003 adds the serving-generation stamp after `live_count`: the
+/// `vector_generations` registry (model_id, serving_generation) the array was
+/// built under. `VectorStore` accepts a sidecar only when the stamp equals
+/// the registry it reads at open AND the live count equals the
+/// serving-generation row count. The live count alone cannot tell a sidecar
+/// built from the previous generation of a full reindex apart from the
+/// current one when the two generations hold the same number of rows, which
+/// is the common case; a crash between the registry flip of
+/// `publish_shadow_generation` and its sidecar rebuild then served the old
+/// vectors under the new generation's name. Sidecars at 0x0001 or 0x0002 are
+/// rejected by `parse_sidecar`; `load` starts empty and the store rebuilds
+/// the sidecar from the table once.
+pub const VEC_VERSION: u16 = 0x0003;
+
+/// The serving-generation registry a sidecar was built under: `model_id` to
+/// `serving_generation`, one entry per `vector_generations` row. Empty when
+/// no model has ever swapped generations. Mirrors Swift `GenerationStamp`.
+pub type GenerationStamp = BTreeMap<String, i64>;
 
 /// Tombstone compaction threshold: when (dead / total) > threshold,
 /// compact is called automatically after the next write.
@@ -84,6 +104,10 @@ pub struct ResidentArrayStore {
     sidecar_path: PathBuf,
     compaction_threshold: f64,
     array: ResidentVectorArray,
+    /// The serving-generation registry the array was built under, written
+    /// into the sidecar header on every persist and read back on load. Set by
+    /// `rebuild_from`; `append`, `tombstone` and `compact` carry it forward.
+    generation_stamp: GenerationStamp,
     /// Count of on-disk sidecar writes in this store's lifetime.
     ///
     /// Incremented once per `write_sidecar` call (rebuild, append,
@@ -114,9 +138,16 @@ impl ResidentArrayStore {
             sidecar_path: sidecar_path.into(),
             compaction_threshold,
             array: ResidentVectorArray::empty(kind, stride),
+            generation_stamp: GenerationStamp::new(),
             sidecar_write_count: 0,
             is_dirty: false,
         }
+    }
+
+    /// The serving-generation registry the current array was built under
+    /// (the header stamp after `load`, the caller's map after `rebuild_from`).
+    pub fn generation_stamp(&self) -> &GenerationStamp {
+        &self.generation_stamp
     }
 
     /// Number of on-disk sidecar writes performed in this store's lifetime.
@@ -147,21 +178,27 @@ impl ResidentArrayStore {
             return Ok(()); // empty start
         }
         match Self::read_sidecar(&path) {
-            Ok(loaded) => {
+            Ok((loaded, stamp)) => {
                 self.array = loaded;
+                self.generation_stamp = stamp;
                 self.is_dirty = false; // in-memory array now matches disk
                 Ok(())
             }
             Err(e) => {
-                // Invalid sidecar: reset to empty (table is the source of truth).
+                // Invalid sidecar (including a pre-0x0003 header): reset to
+                // empty (table is the source of truth).
                 self.array = ResidentVectorArray::empty(self.array.kind, self.array.stride);
+                self.generation_stamp = GenerationStamp::new();
                 self.is_dirty = false;
                 Err(e)
             }
         }
     }
 
-    /// Rebuild the sidecar from a sorted (key, bytes) list.
+    /// Rebuild the sidecar from a sorted (key, bytes) list built under
+    /// `generations`, the serving-generation registry the records were
+    /// fetched with; the stamp rides the header so the next open can tell
+    /// this array from one built under another generation.
     ///
     /// The list must be sorted by `VectorRecordKey` natural order for the
     /// partition index to be correct. This is the warm-start path after
@@ -169,18 +206,21 @@ impl ResidentArrayStore {
     pub fn rebuild_from(
         &mut self,
         records: &[(VectorRecordKey, Vec<u8>)],
+        generations: GenerationStamp,
     ) -> Result<(), SynapseKitError> {
         let new_array = Self::build_array(records, self.array.kind, self.array.stride);
+        self.generation_stamp = generations;
         self.persist(new_array)
     }
 
-    /// Persist `new_array` to the sidecar and adopt it as the current array.
+    /// Persist `new_array` to the sidecar under the current generation stamp
+    /// and adopt it as the current array.
     ///
     /// The single internal funnel for every on-disk write: it increments
     /// `sidecar_write_count` (test instrumentation) and clears `is_dirty`
     /// because the in-memory array now matches the file.
     fn persist(&mut self, new_array: ResidentVectorArray) -> Result<(), SynapseKitError> {
-        Self::write_sidecar(&new_array, &self.sidecar_path)?;
+        Self::write_sidecar(&new_array, &self.generation_stamp, &self.sidecar_path)?;
         self.array = new_array;
         self.sidecar_write_count += 1;
         self.is_dirty = false;
@@ -511,12 +551,14 @@ impl ResidentArrayStore {
 
     // ── Sidecar I/O ───────────────────────────────────────────────────────
 
-    /// Write a `ResidentVectorArray` to the `.vec` format.
+    /// Write a `ResidentVectorArray` built under `generations` to the `.vec`
+    /// format.
     ///
     /// Writes to a `.tmp` file first, then renames atomically to avoid
     /// leaving a corrupted sidecar on crash.
     pub fn write_sidecar(
         arr: &ResidentVectorArray,
+        generations: &GenerationStamp,
         path: &Path,
     ) -> Result<(), SynapseKitError> {
         let mut buf: Vec<u8> = Vec::new();
@@ -530,6 +572,16 @@ impl ResidentArrayStore {
         // live_count: number of non-tombstoned slots. Lets VectorStore
         // stale detection compare live-vs-live in O(1) on reopen (C5 fix).
         buf.extend_from_slice(&(arr.live_count() as u32).to_le_bytes());
+        // Serving-generation stamp (format 0x0003), ascending model_id: the
+        // BTreeMap order, which Swift reproduces by sorting its keys, so the
+        // two ports write the same bytes for the same registry.
+        buf.extend_from_slice(&(generations.len() as u32).to_le_bytes());
+        for (model_id, serving) in generations {
+            let mid = model_id.as_bytes();
+            buf.extend_from_slice(&(mid.len() as u32).to_le_bytes());
+            buf.extend_from_slice(mid);
+            buf.extend_from_slice(&serving.to_le_bytes());
+        }
 
         // Tombstone block
         buf.extend_from_slice(&(arr.tombstones.len() as u32).to_le_bytes());
@@ -580,7 +632,9 @@ impl ResidentArrayStore {
     /// On POSIX, uses `memmap2` for a read-only memory map. On platforms
     /// where memmap2 is unavailable or mmap fails, falls back to a heap
     /// read. Both produce bit-identical arrays (arch spec §4.3).
-    pub fn read_sidecar(path: &Path) -> Result<ResidentVectorArray, SynapseKitError> {
+    pub fn read_sidecar(
+        path: &Path,
+    ) -> Result<(ResidentVectorArray, GenerationStamp), SynapseKitError> {
         let data = fs::read(path).map_err(|e| {
             SynapseKitError::StoreUnavailable(format!(
                 "ResidentArrayStore.read_sidecar: could not read {:?}: {}", path, e
@@ -589,11 +643,14 @@ impl ResidentArrayStore {
         Self::parse_sidecar(&data)
     }
 
-    /// Parse raw `.vec` bytes into a `ResidentVectorArray`.
+    /// Parse raw `.vec` bytes into a `ResidentVectorArray` and the
+    /// serving-generation stamp it was built under.
     ///
     /// `pub` so tests can exercise the codec directly without touching the
     /// filesystem. Mirrors the Swift `parseSidecar` method.
-    pub fn parse_sidecar(data: &[u8]) -> Result<ResidentVectorArray, SynapseKitError> {
+    pub fn parse_sidecar(
+        data: &[u8],
+    ) -> Result<(ResidentVectorArray, GenerationStamp), SynapseKitError> {
         // Magic (bytes 0..4)
         if data.len() < 4 {
             return Err(SynapseKitError::DecodingFailure(
@@ -634,6 +691,17 @@ impl ResidentArrayStore {
         // live_count: read and discard — recomputed from the tombstone
         // bitmap after load; the parsed value is cross-checked in tests.
         let _live_count = read_le_u32(data, pos)? as usize; pos += 4;
+
+        // Serving-generation stamp (format 0x0003).
+        let generation_count = read_le_u32(data, pos)? as usize; pos += 4;
+        let mut generations = GenerationStamp::new();
+        for _ in 0..generation_count {
+            let model_id = read_utf8_string(data, pos)?;
+            pos += 4 + model_id.len();
+            check_bounds(data, pos, 8, "serving_generation")?;
+            let serving = read_le_i64(data, pos)?; pos += 8;
+            generations.insert(model_id, serving);
+        }
 
         // Tombstones
         let tombstone_words = read_le_u32(data, pos)? as usize; pos += 4;
@@ -679,11 +747,14 @@ impl ResidentArrayStore {
         pos += consumed;
         let _ = pos; // silence unused warning
 
-        Ok(ResidentVectorArray {
-            kind, stride, count, storage, keys,
-            model_partitions: partitions,
-            tombstones,
-        })
+        Ok((
+            ResidentVectorArray {
+                kind, stride, count, storage, keys,
+                model_partitions: partitions,
+                tombstones,
+            },
+            generations,
+        ))
     }
 }
 
@@ -787,6 +858,11 @@ fn read_le_u32(data: &[u8], pos: usize) -> Result<u32, SynapseKitError> {
     check_bounds(data, pos, 4, "u32")?;
     Ok(u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()))
 }
+fn read_le_i64(data: &[u8], pos: usize) -> Result<i64, SynapseKitError> {
+    check_bounds(data, pos, 8, "i64")?;
+    Ok(i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()))
+}
+
 fn read_le_u64(data: &[u8], pos: usize) -> Result<u64, SynapseKitError> {
     check_bounds(data, pos, 8, "u64")?;
     Ok(u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()))
@@ -921,8 +997,10 @@ mod tests {
             tombstones,
         };
         let path = tmp_path();
-        ResidentArrayStore::write_sidecar(&original, &path).unwrap();
-        let parsed = ResidentArrayStore::read_sidecar(&path).unwrap();
+        let stamp: GenerationStamp = [("model-test".to_string(), 3_i64)].into_iter().collect();
+        ResidentArrayStore::write_sidecar(&original, &stamp, &path).unwrap();
+        let (parsed, parsed_stamp) = ResidentArrayStore::read_sidecar(&path).unwrap();
+        assert_eq!(parsed_stamp, stamp, "the serving-generation stamp round-trips");
         assert_eq!(parsed.kind, original.kind);
         assert_eq!(parsed.stride, original.stride);
         assert_eq!(parsed.count, original.count);
@@ -986,10 +1064,10 @@ mod tests {
             model_partitions: partitions,
             tombstones: vec![0u64],
         };
-        ResidentArrayStore::write_sidecar(&arr, &path).unwrap();
-        let via_file = ResidentArrayStore::read_sidecar(&path).unwrap();
+        ResidentArrayStore::write_sidecar(&arr, &GenerationStamp::new(), &path).unwrap();
+        let (via_file, _) = ResidentArrayStore::read_sidecar(&path).unwrap();
         let raw = fs::read(&path).unwrap();
-        let via_parse = ResidentArrayStore::parse_sidecar(&raw).unwrap();
+        let (via_parse, _) = ResidentArrayStore::parse_sidecar(&raw).unwrap();
         assert_eq!(via_file.storage, via_parse.storage);
         assert_eq!(via_file.keys, via_parse.keys);
         assert_eq!(via_file.count, via_parse.count);
@@ -1006,9 +1084,36 @@ mod tests {
         bad.push(0); // kind = binary
         bad.extend_from_slice(&32u32.to_le_bytes()); // stride
         bad.extend_from_slice(&0u32.to_le_bytes());  // count
+        bad.extend_from_slice(&0u32.to_le_bytes());  // live_count
+        bad.extend_from_slice(&0u32.to_le_bytes());  // generation_count
         bad.extend_from_slice(&0u32.to_le_bytes());  // tombstone_words=0
         let res = ResidentArrayStore::parse_sidecar(&bad);
         assert!(matches!(res, Err(SynapseKitError::DecodingFailure(_))));
+    }
+
+    // ── Pre-0x0003 header is rejected ────────────────────────────────────
+
+    /// A 0x0002 sidecar (no generation stamp) fails to parse, so `load`
+    /// starts empty and the store rebuilds it once under the new format.
+    #[test]
+    fn previous_format_version_is_rejected() {
+        let mut old = VEC_MAGIC.to_vec();
+        old.extend_from_slice(&0x0002_u16.to_le_bytes());
+        old.push(0); // kind = binary
+        old.extend_from_slice(&32u32.to_le_bytes()); // stride
+        old.extend_from_slice(&0u32.to_le_bytes());  // count
+        old.extend_from_slice(&0u32.to_le_bytes());  // live_count
+        old.extend_from_slice(&0u32.to_le_bytes());  // tombstone_words=0
+        let res = ResidentArrayStore::parse_sidecar(&old);
+        assert!(matches!(res, Err(SynapseKitError::DecodingFailure(_))));
+
+        let path = tmp_path();
+        fs::write(&path, &old).unwrap();
+        let mut store = ResidentArrayStore::new_binary(&path);
+        assert!(store.load().is_err(), "a rejected sidecar surfaces as a load error");
+        assert_eq!(store.snapshot().count, 0, "and the store starts empty");
+        assert!(store.generation_stamp().is_empty());
+        let _ = fs::remove_file(&path);
     }
 
     // ── rebuild_from → reopen ─────────────────────────────────────────────
@@ -1023,13 +1128,15 @@ mod tests {
         let mut sorted = records.clone();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
+        let stamp: GenerationStamp = [("m1".to_string(), 7_i64)].into_iter().collect();
         let mut store1 = ResidentArrayStore::new_binary(&path);
-        store1.rebuild_from(&sorted).unwrap();
+        store1.rebuild_from(&sorted, stamp.clone()).unwrap();
         let snap1 = store1.snapshot();
 
         let mut store2 = ResidentArrayStore::new_binary(&path);
         store2.load().unwrap();
         let snap2 = store2.snapshot();
+        assert_eq!(store2.generation_stamp(), &stamp, "the reopened store carries the stamp");
 
         assert_eq!(snap1.count, snap2.count);
         assert_eq!(snap1.storage, snap2.storage);
@@ -1133,9 +1240,9 @@ mod tests {
             (key("item-b"), engram_bytes(&Engram::new(2, 0, 0, 0))),
         ];
         let arr = ResidentArrayStore::build_array(&records, VectorKind::Binary, 32);
-        ResidentArrayStore::write_sidecar(&arr, &path).unwrap();
+        ResidentArrayStore::write_sidecar(&arr, &GenerationStamp::new(), &path).unwrap();
 
-        let loaded = ResidentArrayStore::read_sidecar(&path).unwrap();
+        let (loaded, _) = ResidentArrayStore::read_sidecar(&path).unwrap();
         assert_eq!(loaded.count, 2);
         assert_eq!(loaded.live_count(), 2);
 

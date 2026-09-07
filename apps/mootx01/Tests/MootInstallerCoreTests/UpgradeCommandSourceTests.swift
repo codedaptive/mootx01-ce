@@ -25,6 +25,27 @@ struct UpgradeCommandSourceTests {
         #expect(source.contains("Freed pages are on the freelist"))
     }
 
+    @Test("every fresh maintenance storage opens the vector schema before the reclaim and the span backfill use it")
+    func freshMaintenanceStoragesOpenTheVectorSchema() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        // A fresh SQLiteStorage carries no table declarations; the row store
+        // derives the primary key of a delete from the declared table, so the
+        // vector schema must be opened before the first use of each fresh
+        // connection. The open must precede the use in source order.
+        let backfillOpen = try #require(
+            source.range(of: "try await backfillStorage.open(schema: VectorStore.schemaDeclaration)"))
+        let backfillUse = try #require(
+            source.range(of: "SpanEncodeBackfill.run(\n                    storage: backfillStorage"))
+        #expect(backfillOpen.upperBound <= backfillUse.lowerBound,
+                "the span backfill storage is opened with the vector schema before SpanEncodeBackfill.run")
+        let reclaimOpen = try #require(
+            source.range(of: "try await reclaimStorage.open(schema: VectorStore.schemaDeclaration)"))
+        let reclaimUse = try #require(
+            source.range(of: "VectorStore(storage: reclaimStorage)"))
+        #expect(reclaimOpen.upperBound <= reclaimUse.lowerBound,
+                "the reclaim storage is opened with the vector schema before the VectorStore is built on it")
+    }
+
     @Test("--backfill-only flag is declared in UpgradeCommand")
     func backfillOnlyFlagDeclared() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)

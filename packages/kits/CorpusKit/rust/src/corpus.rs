@@ -3016,13 +3016,14 @@ impl Corpus {
             .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))
     }
 
-    /// Compute sub-span max-cosine scores for a bounded source ID set.
+    /// Compute sub-span max-cosine scores for a source ID set under a budget.
     ///
-    /// Rust twin of Swift `Corpus.scoreSubSpans(query:sourceIDs:)`. Uses the
-    /// chunk-based path: for each source ID, fetches all chunks from
-    /// `bundle_store`, concatenates their text in `start_offset` order, then
-    /// delegates sub-span scoring to `sub_span_scoring::score` via a temporary
-    /// in-memory `CorpusContentSource`-like computation.
+    /// Rust twin of Swift `Corpus.scoreSubSpans(query:sourceIDs:budget:)`. Uses
+    /// the chunk-based path: for each source ID, in the caller's order, fetches
+    /// all chunks from `bundle_store`, concatenates their text in
+    /// `start_offset` order, cuts the body at `budget.max_record_bytes` on a
+    /// scalar boundary, and scores its sub-spans while the aggregate window
+    /// budget lasts (`sub_span_scoring::SubSpanBudget`).
     ///
     /// This is the older chunk-based Corpus path. The `CorpusContentEngine`
     /// path (`score_sub_spans` on the engine) is preferred for GLK usage and
@@ -3031,16 +3032,19 @@ impl Corpus {
     ///
     /// Candidates absent from the bundle store, providers that return Err on
     /// `embed_float`, and sources with no alphanumeric tokens are not included
-    /// in the returned map.
+    /// in the returned scores; sources the aggregate window budget did not
+    /// reach are listed in `unscored_ids`.
     ///
     /// Mission: MISSION_11X_RECALL_GAP_01 Item 1 — transient sub-span scoring.
     pub fn score_sub_spans(
         &self,
         query: &str,
         source_ids: &[&str],
-    ) -> HashMap<String, f32> {
+        budget: crate::sub_span_scoring::SubSpanBudget,
+    ) -> crate::sub_span_scoring::SubSpanScoringOutcome {
+        use crate::sub_span_scoring::SubSpanScoringOutcome;
         if query.is_empty() || source_ids.is_empty() {
-            return HashMap::new();
+            return SubSpanScoringOutcome::default();
         }
 
         // Embed the query once. If the provider has no float lane, return empty.
@@ -3051,10 +3055,13 @@ impl Corpus {
         };
         let query_vec = match guard.provider().embed_float(query) {
             Ok(v) if !v.is_empty() => v,
-            _ => return HashMap::new(),
+            _ => return SubSpanScoringOutcome::default(),
         };
 
-        let mut out: HashMap<String, f32> = HashMap::with_capacity(source_ids.len());
+        let mut outcome = SubSpanScoringOutcome {
+            scores: HashMap::with_capacity(source_ids.len()),
+            ..SubSpanScoringOutcome::default()
+        };
         for &source_id in source_ids {
             // Fetch chunks, sort by start_offset (the natural ingest order).
             let mut chunks = match self.bundle_store.chunks_for_source(source_id, None) {
@@ -3075,13 +3082,22 @@ impl Corpus {
                 .map(|c| c.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
+            let combined =
+                crate::sub_span_scoring::capped_text(&combined, budget.max_record_bytes);
 
             if combined.is_empty() {
                 continue;
             }
+            if outcome.windows_embedded >= budget.max_windows {
+                // Budget exhausted by an earlier source: this one keeps its
+                // stored signals.
+                outcome.truncated = true;
+                outcome.unscored_ids.push(source_id.to_string());
+                continue;
+            }
 
             let ranges = crate::sub_span_scoring::sub_span_ranges(
-                &combined,
+                combined,
                 crate::sub_span_scoring::DEFAULT_WINDOW_TOKENS,
                 crate::sub_span_scoring::DEFAULT_OVERLAP_TOKENS,
             );
@@ -3091,7 +3107,12 @@ impl Corpus {
 
             let combined_bytes = combined.as_bytes();
             let mut max_norm: f32 = 0.0;
+            let mut embedded_here = 0usize;
             for (span_start, span_length) in &ranges {
+                if outcome.windows_embedded >= budget.max_windows {
+                    outcome.truncated = true;
+                    break;
+                }
                 let lo = *span_start;
                 let hi = lo + span_length;
                 if hi > combined_bytes.len() {
@@ -3101,6 +3122,8 @@ impl Corpus {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+                outcome.windows_embedded += 1;
+                embedded_here += 1;
                 let span_vec = match guard.provider().embed_float(span_text) {
                     Ok(v) if !v.is_empty() => v,
                     _ => continue,
@@ -3111,11 +3134,15 @@ impl Corpus {
                     max_norm = norm;
                 }
             }
+            if embedded_here == 0 {
+                outcome.unscored_ids.push(source_id.to_string());
+                continue;
+            }
             if max_norm > 0.0 {
-                out.insert(source_id.to_string(), max_norm);
+                outcome.scores.insert(source_id.to_string(), max_norm);
             }
         }
-        out
+        outcome
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane

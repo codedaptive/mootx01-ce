@@ -115,6 +115,7 @@ fn fixture_cases_render_verbatim() {
             &plan,
             scoring(case["scoring"].as_str().expect("scoring")),
             f(case, "agreement"),
+            false,
         );
         let expected: Vec<String> = case["expected"]
             .as_array()
