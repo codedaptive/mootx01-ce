@@ -2104,14 +2104,12 @@ extension ToolDispatcher {
         // reflects the full ordered hit list, not just the displayed prefix.
         let hitScores = hits.map { Double($0.score.final) }
         let discriminationLevel = RecallDiscrimination.classify(hitScores)
-        // Dense-lane dark flag: true when the vector lane (Lane D) did not
-        // contribute to this ranking AND no span rerank stage is registered for
-        // the estate. With a registered stage the encoder reorders the lexical
-        // head, so a dark dense lane no longer means the ranking lacks a semantic
-        // signal. Used to cap the discrimination signal so "high, clear top
-        // result" is never reported on a purely lexical ranking.
+        // Dense-lane dark flag: true when no span rerank stage is registered
+        // for the estate. The span stage is the one dense provider, so without
+        // it the ranking is lexical-only. Used to cap the discrimination
+        // signal so "high, clear top result" is never reported on a purely
+        // lexical ranking.
         let denseLaneDark = RecallDiscrimination.denseLaneDark(
-            status: result.denseLaneStatus,
             spanRerankRegistered: await kit.isSpanRerankRegistered(for: handle)
         )
 
@@ -2166,16 +2164,7 @@ extension ToolDispatcher {
         if anchorID != nil {
             // Rebuild the result with the anchor-excluded hit list so the packager's
             // gate math operates on the post-filter ranked set.
-            packagerResult = GLKRecallResult(
-                request: result.request,
-                plan: result.plan,
-                unionProfile: result.unionProfile,
-                hits: hits,
-                denseLaneStatus: result.denseLaneStatus,
-                degradedStages: result.degradedStages,
-                laneRanks: result.laneRanks,
-                queryLatticeAnchor: result.queryLatticeAnchor
-            )
+            packagerResult = result.replacing(hits: hits)
         } else {
             packagerResult = result
         }
@@ -3287,24 +3276,6 @@ extension ToolDispatcher {
                 object: f.object,
                 sourceDrawerID: sourceID,
                 filedAt: filed)
-        }
-        // Dark-lane probe: runs as before for internal logging continuity; the
-        // denseLaneStatus result is NOT appended to the payload (recall_provenance
-        // removed from payload surface per BRR §Part 1 — moved to log side).
-        if query != nil {
-            // origin: .internal — no reward trace rows; only denseLaneStatus needed.
-            let probeRequest = GLKRecallRequest(
-                frame: RecallFrame(filterChain: [], hydrationLevel: .bitmapOnly,
-                                   limit: 1, ordering: .byCaptureTimeDesc),
-                mode: .unionBest,
-                scoring: .matrixAware,
-                limit: 1,
-                fallback: .allowDegraded,
-                queryText: queryRaw,
-                origin: .internal
-            )
-            _ = try await kit.recall(handle, probeRequest)
-            // denseLaneStatus available on probeResult — log only; no payload append.
         }
         return Self.composedResult(ResultComposer.renderS4FactSearch(facts: factRows))
     }

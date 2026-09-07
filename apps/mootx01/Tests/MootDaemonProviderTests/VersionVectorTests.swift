@@ -404,7 +404,7 @@ struct LegacyClassificationTests {
 
     @Test("extra fields disqualify the legacy classification")
     func extraFieldNotLegacy() {
-        var object: [String: Any] = [
+        let object: [String: Any] = [
             "schemaVersion": 2, "providerIdentifier": "x", "serviceIdentifier": "x",
             "endpoint": "x", "authProtocol": "x", "authKeyIdentifier": "x",
             "publishedAt": 0, "instanceIdentifier": "x", "estateIdentifier": "x",

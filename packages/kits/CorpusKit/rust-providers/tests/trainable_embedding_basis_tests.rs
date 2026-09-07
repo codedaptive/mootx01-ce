@@ -3,7 +3,8 @@
 //!
 //! Asserts that driving training THROUGH the seam — `train_on_corpus` then
 //! `serialize_basis` (the `TrainableEmbeddingBasis` trait) — reproduces the
-//! 6a-i committed Swift canonical basis blob BYTE-FOR-BYTE, for RI/PPMI/LSA/NMF.
+//! 6a-i committed Swift canonical basis blob BYTE-FOR-BYTE, for RI/PPMI/NMF
+//! (always under `dense-families`) and LSA (requires the `lsa` feature).
 //! Swift is the canonical source; this Rust leg asserts byte-identity. This is
 //! the proof that the seam routes training identically to the direct 6a-i API
 //! on both ports, so the same trained state is produced wherever the seam runs.
@@ -20,9 +21,12 @@
 
 use corpus_kit::{CorpusKitError, EmbeddingModelConfig, TrainableEmbeddingBasis};
 use corpus_kit_providers::{
-    LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider, LSA_PROJECTION_SEED,
+    NmfProvider, PpmiProvider, RandomIndexingProvider,
     NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED, PPMI_PROJECTION_SEED, RI_PROJECTION_SEED,
 };
+// LsaProvider and its seed are dark unless the `lsa` feature is on (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
+use corpus_kit_providers::{LsaProvider, LSA_PROJECTION_SEED};
 use serde::Deserialize;
 use synapsekit::EmbeddingProvider;
 
@@ -31,6 +35,8 @@ use basis_fixture::decode_base64;
 
 const RI_FIXTURE: &[u8] = include_bytes!("../../Tests/SharedVectors/ri_basis_blob.json");
 const PPMI_FIXTURE: &[u8] = include_bytes!("../../Tests/SharedVectors/ppmi_basis_blob.json");
+// LSA fixture is only needed when the `lsa` feature is on (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
 const LSA_FIXTURE: &[u8] = include_bytes!("../../Tests/SharedVectors/lsa_basis_blob.json");
 const NMF_FIXTURE: &[u8] = include_bytes!("../../Tests/SharedVectors/nmf_basis_blob.json");
 
@@ -93,6 +99,7 @@ fn ppmi_seam_matches_swift_blob_byte_for_byte() {
     );
 }
 
+#[cfg(feature = "lsa")]
 #[test]
 fn lsa_seam_matches_swift_blob_byte_for_byte() {
     let f: StringCorpusFixture =
@@ -158,6 +165,7 @@ fn reconstruct_round_trips_ri_embeddings() {
     assert_eq!(a, b, "reconstructed RI embeddings must match the trained provider");
 }
 
+#[cfg(feature = "lsa")]
 #[test]
 fn reconstruct_round_trips_lsa_embeddings() {
     let f: StringCorpusFixture =
@@ -216,10 +224,14 @@ fn is_trainable_flags() {
     };
     assert!(ppmi.is_trainable());
 
-    let lsa = EmbeddingModelConfig::Lsa {
-        provider: Box::new(LsaProvider::new(3, 30, LSA_PROJECTION_SEED)),
-    };
-    assert!(lsa.is_trainable());
+    // LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
+    #[cfg(feature = "lsa")]
+    {
+        let lsa = EmbeddingModelConfig::Lsa {
+            provider: Box::new(LsaProvider::new(3, 30, LSA_PROJECTION_SEED)),
+        };
+        assert!(lsa.is_trainable());
+    }
 
     let nmf = EmbeddingModelConfig::Nmf {
         provider: Box::new(NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED)),
@@ -292,6 +304,7 @@ fn ppmi_counts_seam_round_trips() {
     assert_counts_seam_round_trips(PpmiProvider::new(), PpmiProvider::new());
 }
 
+#[cfg(feature = "lsa")]
 #[test]
 fn lsa_counts_seam_round_trips() {
     assert_counts_seam_round_trips(
@@ -311,6 +324,8 @@ fn nmf_counts_seam_round_trips() {
 /// The lightweight LSA/NMF anchor grows vocab + document count WITHOUT retaining
 /// the per-document TF rows (it bounds maintained state to O(vocab)). Document
 /// count must equal the number of non-empty chunks folded.
+/// Gated on `lsa` because the test constructs LsaProvider (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
 #[test]
 fn lsa_nmf_anchor_tracks_document_count() {
     let mut lsa = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);

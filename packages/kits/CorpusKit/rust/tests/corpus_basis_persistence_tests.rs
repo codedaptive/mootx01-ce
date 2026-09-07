@@ -15,15 +15,22 @@
 //! exercise genuine primitive-form read-back (a TIMESTAMP column round-trips as
 //! a parsed `Timestamp(i64)` here), the same discipline as bundle_store_tests.
 
-// Every case persists an LSA, NMF or PPMI basis — dark dense families (contract sheet §13) —
+// Every case persists an NMF or PPMI basis — dark dense families (contract sheet §13) —
 // so this file compiles only under the dense-families feature.
+// LSA-specific tests are additionally gated on the `lsa` feature (ruling 2026-09-07).
 #![cfg(feature = "dense-families")]
 
 use corpus_kit::{
-    BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis,
+    BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, PersistedBasis,
     TrainableEmbeddingBasis, TrainingPathDecision,
 };
-use corpus_kit_providers::{LsaProvider, NmfProvider, PpmiProvider, RandomIndexingProvider};
+// FloatLaneOutcome is only used in lsa-gated tests (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
+use corpus_kit::FloatLaneOutcome;
+use corpus_kit_providers::{NmfProvider, PpmiProvider, RandomIndexingProvider};
+// LsaProvider is dark unless the `lsa` feature is on (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
+use corpus_kit_providers::LsaProvider;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -231,18 +238,18 @@ fn first_ingest_auto_trains_and_growth_retrains() {
 }
 
 // ── §8 per-doc ingest non-degeneracy (REGRESSION — Kinsta-verified bug) ──
+// These helpers and tests construct LsaProvider; gated on `lsa` (ruling 2026-09-07).
 
-/// Car-topic and animal-topic docs for LSA non-degeneracy tests.
-/// Two distinct vocabularies: car (engine/fuel/road) vs animal (dog/bark/fetch).
-/// A degenerate 1-car-doc basis would have only car vocabulary,
-/// so animal-topic queries would be all-OOV.
+#[cfg(feature = "lsa")]
 fn lsa_car_doc(n: usize) -> String {
     format!("car engine fuel road vehicle drive speed combustion power auto document {n}")
 }
+#[cfg(feature = "lsa")]
 fn lsa_animal_doc(n: usize) -> String {
     format!("dog cat bark fetch run animal pet fur forest wild document {n}")
 }
 
+#[cfg(feature = "lsa")]
 fn fresh_lsa_corpus(storage: Arc<dyn Storage>) -> Corpus {
     Corpus::open(
         storage,
@@ -254,8 +261,10 @@ fn fresh_lsa_corpus(storage: Arc<dyn Storage>) -> Corpus {
 }
 
 /// REGRESSION TEST — fails on code with the degenerate-basis bug, passes after fix.
+/// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
 ///
 /// Mirrors Swift `perDocIngestProducesNonDegenerateBasis`.
+#[cfg(feature = "lsa")]
 ///
 /// The old per-doc ingest path trained the LSA basis on the FIRST document only,
 /// producing a rank-1 SVD. All subsequent documents folded onto this 1-doc basis,
@@ -327,6 +336,8 @@ fn per_doc_ingest_produces_non_degenerate_basis() {
 // ── §9 reindex recovers a deliberately-degenerate basis ──
 
 /// Mirrors Swift `reindexRecoversDegenerateBasis`.
+/// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
 ///
 /// Flow:
 ///   1. Ingest 20 docs via ingest_batch (Phase 1b trains on the full corpus).
@@ -1293,6 +1304,8 @@ fn t8_ppmi_corrupted_blob_detected() {
 
 // T9 — LSA counts-only unsupported: finalize_from_counts must return false
 //      and leave provider state unchanged.
+// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
+#[cfg(feature = "lsa")]
 #[test]
 fn t9_lsa_counts_only_unsupported() {
     // Build an LSA provider with counts accumulated.

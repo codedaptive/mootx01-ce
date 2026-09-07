@@ -150,7 +150,6 @@ struct TraceRewardWiringTests {
     func internalRecallWritesZeroTraceRows() async throws {
         let (kit, handle, tmp) = try await openSQLite()
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let now = Date(timeIntervalSinceReferenceDate: 4_000_000)
 
         // Capture one drawer so recall has something to return.
         _ = try await captureOne(kit: kit, handle: handle)
@@ -172,7 +171,6 @@ struct TraceRewardWiringTests {
     @Test("External GLKRecallRequest writes recall-trace rows")
     func externalRecallWritesTraceRows() async throws {
         let (kit, handle) = try await openInMemory()
-        let now = Date(timeIntervalSinceReferenceDate: 5_000_000)
 
         _ = try await captureOne(kit: kit, handle: handle)
 

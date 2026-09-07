@@ -26,6 +26,7 @@
 //! disabled + NoOpSink before releasing, so the singleton is clean
 //! for the next test regardless of execution order.
 
+#[cfg(feature = "whole-record-dense")]
 use corpus_kit::CorpusContentEngine;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -620,6 +621,7 @@ fn provision_then_quiesce_is_quiesced_regardless_of_monitoring() {
 
 // MARK: - §D6-counters: storeError dark counters (gate-2 chain sentence)
 
+#[cfg(feature = "whole-record-dense")]
 /// The dense-lane storeError chain COUNTER half (status + COUNTER + no fake
 /// evidence). Lives in THIS binary — not recall_scored_parity — because the
 /// global Intellectus enable would crosstalk with that binary's parallel

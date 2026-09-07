@@ -21,10 +21,13 @@
 // cross telemetry emit sites (open, recall) hold withIntellectusLock for their
 // entire duration.
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 @testable import CorpusKit
 import SynapseKit
 import PersistenceKit
@@ -481,3 +484,4 @@ struct DenseLaneStoreErrorTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

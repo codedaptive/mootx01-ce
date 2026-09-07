@@ -246,8 +246,10 @@ struct NmfProviderTests {
 
     @Test("projection seed differs from LSA, RI, and PPMI seeds")
     func projectionSeedIsolation() {
+#if MOOTX01_LSA
         #expect(nmfProjectionSeed != lsaProjectionSeed,
                 "NMF and LSA projection seeds must differ for bucket isolation")
+#endif // MOOTX01_LSA
         #expect(nmfProjectionSeed != riProjectionSeed,
                 "NMF and RI projection seeds must differ for bucket isolation")
         #expect(nmfProjectionSeed != ppmiProjectionSeed,

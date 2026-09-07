@@ -26,11 +26,13 @@
 // INTELLECTUS LOCK: all tests that call corpus.ingest or engine.indexContent
 // hold GlobalTestLock.shared to prevent telemetry cross-contamination.
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 import Testing
 import PersistenceKit
 @testable import PersistenceKitSQLite
 @testable import CorpusKit
+@testable import CorpusKitWholeRecordDense
 import CorpusKitProviders
 import SynapseKit
 import EngramLib
@@ -433,3 +435,4 @@ struct GlkDiscriminationFactorFormula {
         #expect(f < 1.0, "both signals saturated must produce discount")
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

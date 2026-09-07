@@ -22,7 +22,7 @@
 //! Tests verify:
 //!
 //! 4. A bare estate (no corpus) + a query → `recall_provenance:` and
-//!    `dense_lane:` tokens are present in the response.
+//!    no provenance line is emitted without a query.
 //! 5. A bare estate (no corpus) with no query → `recall_provenance:` is
 //!    absent (list-all path has no semantic query to misinterpret).
 //!
@@ -178,43 +178,6 @@ fn explicit_source_id_naming_no_drawer_fails_the_write() {
 // ---------------------------------------------------------------------------
 // Bug D: Dark-lane hint in moot_fact_search
 // ---------------------------------------------------------------------------
-
-/// When the dense lane is dark (no corpus registered) and a query is supplied,
-/// moot_fact_search must append a recall_provenance line so the caller knows
-/// the match was lexical-only.
-///
-/// Mirrors Swift test: factSearchAppendsProvenance_whenQueryAndDenseLaneDark.
-#[test]
-fn fact_search_appends_provenance_when_query_and_dense_lane_dark() {
-    // Bare estate — no corpus registered, dense lane is dark by design.
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
-
-    // File a fact so the estate is non-empty (proves the hint is about
-    // lane state, not about the estate being empty).
-    let file_args = args![
-        "subject" => "Swift",
-        "predicate" => "created_by",
-        "object" => "Apple",
-    ];
-    dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
-        .expect("moot_file_fact must not error");
-
-    // Search with a query — dense lane is dark so a recall_provenance line
-    // must appear.
-    let search_args = args!["query" => "Swift"];
-    let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
-        .expect("moot_fact_search must not error");
-    let text = content_text(&search_result);
-    assert!(
-        text.contains("recall_provenance:"),
-        "moot_fact_search with a query on a dark-dense-lane estate must emit recall_provenance:; got: {text}"
-    );
-    assert!(
-        text.contains("dense_lane:"),
-        "recall_provenance line must include a dense_lane: token; got: {text}"
-    );
-}
 
 /// When no query is supplied (list-all path), no recall_provenance hint is
 /// emitted — there is no semantic query to misinterpret.

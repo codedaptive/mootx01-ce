@@ -451,6 +451,16 @@ mod tests {
 
     // Schema 19 tests for facts() API (ssc_facts column path)
     #[test]
+    fn facts_place_carries_country() {
+        // The word-class fallback anchors the capitalised token through its QID and
+        // emits the country fact after the place fact (Swift twin: same path, reached
+        // only when NLTagger finds no named entity).
+        let f = facts("We got back from an awesome trip to Rio de Janeiro yesterday.").unwrap_or_default();
+        assert!(f.contains("place: rio"), "{f}");
+        assert!(f.contains("country: brazil"), "{f}");
+    }
+
+    #[test]
     fn facts_evaluative_adjectives_blocked() {
         // Failure mode: stop list missing "good" → "entity: good" appears.
         let content = "We met Sarah at the Louvre on Tuesday, it was good";

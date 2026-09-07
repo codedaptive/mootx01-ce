@@ -11,6 +11,9 @@
 // resumable (kill and re-run to continue from the persisted record).
 
 import CorpusKit
+#if MOOTX01_WHOLE_RECORD_DENSE
+import CorpusKitWholeRecordDense
+#endif
 import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
@@ -138,6 +141,8 @@ let queries = ["project planning decisions",
                "release engineering process",
                "memory estate"]
 for (i, query) in queries.enumerated() {
+#if MOOTX01_WHOLE_RECORD_DENSE
+    // Whole-record float lane probe (WholeRecordDense build only).
     let tF = Date()
     let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
     q("recall.q\(i).float_all_signals_ms",
@@ -149,6 +154,7 @@ for (i, query) in queries.enumerated() {
             q("recall.q\(i).float.\(modelID).served", false)
         }
     }
+#endif
     let tQ = Date()
     let hits = try await engine.bm25TopK(query: query, limit: 5)
     q("recall.q\(i).latency_ms",

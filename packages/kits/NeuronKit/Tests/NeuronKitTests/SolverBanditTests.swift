@@ -57,14 +57,14 @@ struct SolverBanditSelectionTests {
 
     @Test("select returns a valid DreamingTriggerMode")
     func selectReturnsValidMode() {
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         let mode = bandit.select(seed: 42)
         #expect(DreamingTriggerMode.allCases.contains(mode))
     }
 
     @Test("select returns a mode across multiple seeds")
     func selectReturnsModeForMultipleSeeds() {
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         for seed: UInt64 in [0, 1, 42, 999, UInt64.max / 2] {
             let mode = bandit.select(seed: seed)
             #expect(DreamingTriggerMode.allCases.contains(mode))
@@ -125,7 +125,7 @@ struct SolverBanditDeterminismTests {
 
     @Test("same seed on same bandit state → same selection")
     func sameSeedSameStateSameResult() {
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         let first  = bandit.select(seed: 7)
         let second = bandit.select(seed: 7)
         #expect(first == second)
@@ -135,7 +135,7 @@ struct SolverBanditDeterminismTests {
     func differentSeedsMayDiffer() {
         // With a uniform prior, draw 100 seeds and confirm select doesn't
         // always crash or return the same mode (basic smoke).
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         var modes = Set<DreamingTriggerMode>()
         for seed: UInt64 in 0..<100 {
             modes.insert(bandit.select(seed: seed))
@@ -214,7 +214,7 @@ struct SolverBanditForceTests {
 
     @Test("canonical seed produces a valid, deterministic selection")
     func canonicalSeedPinnedSelection() {
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         // The canonical seed used in SubstrateML's conformance vectors.
         let seed: UInt64 = 0xCAFE_BABE_DEAD_BEEF
         let first  = bandit.select(seed: seed)
@@ -229,7 +229,7 @@ struct SolverBanditForceTests {
 
     @Test("ten consecutive seeds produce a stable, reproducible sequence")
     func tenConsecutiveSeedsStableSequence() {
-        var bandit = freshBandit()
+        let bandit = freshBandit()
         // Pin a 10-element sequence from seeds 0..9 on a fresh bandit.
         // Any change to the sampling path will shift these selections.
         let firstPass  = (UInt64(0)..<10).map { bandit.select(seed: $0) }

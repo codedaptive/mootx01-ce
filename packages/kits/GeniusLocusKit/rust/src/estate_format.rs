@@ -41,7 +41,12 @@ impl EstateFormatVersion {
     /// is dropped from every populated estate through the migration catalog
     /// (CorpusKit checkpoint schema v4).
     pub const V1_6: Self = Self { major: 1, minor: 6 };
-    pub const CURRENT: Self = Self::V1_6;
+    /// Format 1.7: the whole-record float rows (`vectors` kind 1) and the
+    /// `hnsw_graph` rows are vacuumed from every populated estate through the
+    /// migration catalog, the binary sidecar is rebuilt and the float
+    /// representation claim is released; a fresh estate is born without them.
+    pub const V1_7: Self = Self { major: 1, minor: 7 };
+    pub const CURRENT: Self = Self::V1_7;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

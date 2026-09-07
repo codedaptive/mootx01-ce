@@ -16,12 +16,7 @@
 //!    (non-impatient) capture → drain → search. Proves the encode-queue path
 //!    on in-memory.
 //!
-//! 3. `lane_d_live_under_deterministic_provider` — the beta default embedding
-//!    model (`EmbeddingModelConfig::Deterministic`) has a live Lane D (dense
-//!    float recall). The deterministic provider's `embed_float` returns a
-//!    non-empty float vector; `floatNearest` returns results, not an opt-out.
-//!
-//! 4. `postgres_wiring_shape_proof` — env-gated (skipped when
+//! 3. `postgres_wiring_shape_proof` — env-gated (skipped when
 //!    `ARIA_MCP_POSTGRES_URL` is absent). When the env var is set, the full
 //!    capture → search e2e runs against a live PG server using `new_postgres`.
 //!
@@ -31,7 +26,6 @@
 //!    representation once the drain settles, with NO `moot_distill` call.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use aria_mcp::{
     dispatch::dispatch_tool,
@@ -39,10 +33,6 @@ use aria_mcp::{
     jsonrpc::JsonValue,
     surfaced_recall_ledger::SurfacedRecallLedger,
 };
-use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
-use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::storage::Storage;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -172,68 +162,6 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
 // ---------------------------------------------------------------------------
 // 3. Lane D live under the beta default (deterministic provider)
 // ---------------------------------------------------------------------------
-
-/// Prove that the beta default embedding model (`EmbeddingModelConfig::Deterministic`)
-/// has a live Lane D (dense float lane). The deterministic provider implements
-/// `embed_float` and returns a non-empty float vector. `floatNearest` therefore
-/// returns results rather than an opt-out outcome.
-///
-/// Dark-by-default (the float lane silently absent) is forbidden per the
-/// no-deferrals mandate.
-#[test]
-fn lane_d_live_under_deterministic_provider() {
-    // Build a Corpus directly against InMemoryStorage — bypasses the dispatcher
-    // layer to assert on the float lane outcome directly.
-    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-
-    // EmbeddingModelConfig::Deterministic is the production default.
-    let corpus = Corpus::open(storage as Arc<dyn Storage>, EmbeddingModelConfig::Deterministic)
-        .expect("Corpus::open on InMemoryStorage must succeed");
-
-    // Ingest a document. The deterministic provider's embed_float returns a
-    // non-empty float vector; ingest writes a float row at vector_index=1.
-    corpus
-        .ingest("kestrel hovering wind updraft prey detection hunting", "birds/kestrel", 1_700_000_000)
-        .expect("ingest must succeed");
-
-    // floatNearest must return hits — Lane D is live.
-    let outcome = corpus.float_nearest("kestrel hovering wind", 5);
-    match outcome {
-        corpus_kit::FloatLaneOutcome::Hits(results) => {
-            assert!(
-                !results.is_empty(),
-                "floatNearest must return ≥1 hit for the ingested document; got empty"
-            );
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableProviderOptOut => {
-            panic!(
-                "Lane D DARK — deterministic provider threw embed_float (opt-out). \
-                 The beta default must have a live float lane (no deferrals)."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableNoFloatRows => {
-            panic!(
-                "Lane D DARK — no float rows stored after ingest. \
-                 The deterministic provider must write Lane D rows during ingest."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::EmptyQuery => {
-            panic!("floatNearest returned EmptyQuery — query was non-empty, this is a bug.");
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableNoVocabHit => {
-            // Trained distributional provider + all-OOV query. Not expected
-            // here — the deterministic provider does not use vocabulary-based
-            // embedding, so this variant should not appear in this test.
-            panic!(
-                "floatNearest returned UnavailableNoVocabHit — unexpected for the \
-                 deterministic provider (Bug-A: vocabMiss path should not fire here)."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::StoreError(e) => {
-            panic!("Lane D store error (unexpected): {e:?}");
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 4. PostgreSQL wiring shape proof (env-gated)

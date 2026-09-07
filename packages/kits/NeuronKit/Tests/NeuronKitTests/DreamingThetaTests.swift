@@ -144,7 +144,7 @@ struct ThetaDueTests {
         let store = InMemoryDreamingPolicyStore()
         // Seed a state with lastThetaRunAt = 12 h ago.
         let twelveHoursAgo = Date().addingTimeInterval(-43_200)
-        var state = DreamingDaemonState(
+        let state = DreamingDaemonState(
             lastTickAt: nil,
             proposedKeys: [],
             lastReindexVocab: -1,

@@ -142,7 +142,7 @@ struct DreamRunnerTests {
     /// This is the primary positive test: the cycle actually runs when there is work.
     @Test func dreamRunnerNonemptyQueueCycleRan() async throws {
         let url = try tempEstateURL(label: "nonempty")
-        let (kit, handle, _storage) = try await openAndWireEstate(at: url)
+        let (kit, handle, _) = try await openAndWireEstate(at: url)
 
         // Seed the dreaming queue so pending_count = 1.
         try await seedDreamingQueue(kit: kit, handle: handle, now: kNow)
@@ -202,7 +202,7 @@ struct DreamRunnerTests {
     /// This is the anti-waste negative: an idle estate costs nothing per dreaming tick.
     @Test func dreamRunnerEmptyQueueNoCycle() async throws {
         let url = try tempEstateURL(label: "empty")
-        let (kit, handle, _storage) = try await openAndWireEstate(at: url)
+        let (kit, handle, _) = try await openAndWireEstate(at: url)
 
         // Force-mount the dreaming queue — simulates what DreamCommand does.
         await kit.mountDreamingQueue(for: handle)

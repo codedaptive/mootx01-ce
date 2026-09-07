@@ -455,7 +455,7 @@ struct MatrixTierTests {
         let evtA: Int64 = 1_000_000
         let evtB: Int64 =   900_000   // before A in world time
 
-        var eventTimes: [UUID: Int64] = [rowA: evtA, rowB: evtB]
+        let eventTimes: [UUID: Int64] = [rowA: evtA, rowB: evtB]
 
         // Prefix log: only A.
         var prefixLog = UnifiedAuditLog()

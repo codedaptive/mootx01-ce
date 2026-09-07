@@ -43,6 +43,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vector_index 1) only with the `whole-record-dense` feature.
+const LANES_PER_ITEM: usize = if cfg!(feature = "whole-record-dense") { 2 } else { 1 };
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Deterministic epoch-millis shared across all tests. Never SystemTime::now().
@@ -255,14 +259,15 @@ fn c1_two_reindex_passes_advance_generation_and_leave_reclaim_rows() {
         "c1 pass1: serving_generation must be 1 after first reindex (shadow gen 1 published)"
     );
 
-    // In standalone mode the RI slot writes both a binary row (vector_index=0)
-    // and a float row (vector_index=1) per item. 3 items × 2 lanes = 6 rows.
-    // No prior gen-0 RI rows existed (index_content skips untrained slots), so
-    // all 6 rows are serving gen-1 with nothing pending-reclaim.
+    // In standalone mode the RI slot writes a binary row (vector_index=0) per
+    // item, plus a float row (vector_index=1) with the whole-record-dense
+    // feature. No prior gen-0 RI rows existed (index_content skips untrained
+    // slots), so every row is serving gen-1 with nothing pending-reclaim.
     let rows1 = vector_row_count(&*storage, RI_MODEL_ID);
     assert_eq!(
-        rows1, 6,
-        "c1 pass1: 6 gen-1 serving rows (2 lanes × 3 items); no prior RI rows to pend-reclaim"
+        rows1,
+        3 * LANES_PER_ITEM,
+        "c1 pass1: gen-1 serving rows ({LANES_PER_ITEM} lane(s) × 3 items); no prior RI rows to pend-reclaim"
     );
 
     // ── Pass 2: second shadow swap — gen-1 rows become pending-reclaim ──
@@ -271,11 +276,12 @@ fn c1_two_reindex_passes_advance_generation_and_leave_reclaim_rows() {
     let gen2 = serving_generation(&*storage, RI_MODEL_ID);
     assert_eq!(gen2, Some(2), "c1 pass2: serving_generation must be 2 after second reindex");
 
-    // 6 gen-1 rows marked pending-reclaim + 6 gen-2 serving rows = 12 total.
+    // gen-1 rows marked pending-reclaim + gen-2 serving rows = twice pass 1.
     let rows2 = vector_row_count(&*storage, RI_MODEL_ID);
     assert_eq!(
-        rows2, 12,
-        "c1 pass2: 12 total rows — 6 gen-1 pending-reclaim + 6 gen-2 serving"
+        rows2,
+        6 * LANES_PER_ITEM,
+        "c1 pass2: total rows — gen-1 pending-reclaim + gen-2 serving"
     );
 }
 

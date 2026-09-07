@@ -33,10 +33,10 @@ struct UpgradeCommandSourceTests {
         #expect(source.contains("backfillOnly"))
     }
 
-    @Test("--backfill-only branch calls only the six data-dir steps, gates them on the schema step, and exits non-zero on failure")
+    @Test("--backfill-only branch calls only the eight data-dir steps, gates them on the schema step, and exits non-zero on failure")
     func backfillOnlyBranchIsHeadless() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
-        // The backfillOnly branch must contain all six steps in order.
+        // The backfillOnly branch must contain all eight steps in order.
         let branchStart = try #require(
             source.range(of: "if backfillOnly {")?.lowerBound)
         let branchEnd = try #require(
@@ -47,21 +47,30 @@ struct UpgradeCommandSourceTests {
         #expect(branch.contains("guard await runSchemaUpgrade(home: home) else { throw ExitCode.failure }"))
         #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
         #expect(branch.contains("await runSharedContentReclaimIfPending(home: home)"))
+        #expect(branch.contains("await runWholeRecordVacuum(home: home)"))
+        #expect(branch.contains("await runSSCFactsBackfill(home: home)"))
         #expect(branch.contains("await runDensePoolingConvergence(home: home)"))
         #expect(branch.contains("await runSpanEncodeBackfill(home: home)"))
         #expect(branch.contains("await runVectorReclaim(home: home)"))
         // Retired steps must not come back.
         #expect(!branch.contains("runAdornmentStoreMigration"))
         #expect(!branch.contains("runDistilledRepresentationConvergence"))
-        // The dense pooling convergence runs BEFORE the span-encode step, so
-        // the latter's estate open never absorbs the rebuild unreported; the
-        // vector reclaim runs last, after the span rows exist.
+        // The whole-record vacuum is the first estate open after the
+        // shared-content reclaim, so the 1.6 to 1.7 capsule reports there;
+        // the ssc facts backfill follows it; the dense pooling convergence
+        // runs BEFORE the span-encode step, so the latter's estate open never
+        // absorbs the rebuild unreported; the vector reclaim runs last, after
+        // the span rows exist.
         let schemaAt = try #require(branch.range(of: "runSchemaUpgrade(home: home)")?.lowerBound)
+        let reclAt = try #require(branch.range(of: "await runSharedContentReclaimIfPending(home: home)")?.lowerBound)
+        let vacuumAt = try #require(branch.range(of: "await runWholeRecordVacuum(home: home)")?.lowerBound)
+        let factsAt = try #require(branch.range(of: "await runSSCFactsBackfill(home: home)")?.lowerBound)
         let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(home: home)")?.lowerBound)
         let spanAt = try #require(branch.range(of: "await runSpanEncodeBackfill(home: home)")?.lowerBound)
         let reclaimAt = try #require(branch.range(of: "await runVectorReclaim(home: home)")?.lowerBound)
-        #expect(schemaAt < denseAt && denseAt < spanAt && spanAt < reclaimAt,
-                "schema → dense pooling → span encode → vector reclaim")
+        #expect(schemaAt < reclAt && reclAt < vacuumAt && vacuumAt < factsAt && factsAt < denseAt
+                && denseAt < spanAt && spanAt < reclaimAt,
+                "schema → shared-content reclaim → whole-record vacuum → ssc facts → dense pooling → span encode → vector reclaim")
         // A failed step must surface as a non-zero exit for scripted callers.
         #expect(branch.contains("throw ExitCode.failure"))
         // launchd and network calls must NOT appear in the branch.

@@ -23,7 +23,7 @@ public extension GeniusLocusKit {
     /// (`MOOTX01_ENCODE_MARKERS=off` disables both — they are one recording
     /// facility). Called by `EstateDreamingSink`'s lifecycle hooks; the
     /// daemon mints one session id per cycle and both ends carry it.
-    public func appendDreamCycleMarker(
+    func appendDreamCycleMarker(
         in handle: EstateHandle,
         phase: DrawerStore.DreamCyclePhase,
         sessionID: String,

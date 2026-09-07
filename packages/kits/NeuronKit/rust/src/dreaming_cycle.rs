@@ -1865,6 +1865,7 @@ impl DreamingDaemon {
     ///
     /// Pass `hook: None` to skip the daily retrain (equivalent to calling
     /// `run_theta_cycle` directly). Pass `hnsw: None` to skip the graph rebuild.
+    #[cfg_attr(not(feature = "whole-record-dense"), allow(unused_variables))]
     pub fn run_theta_cycle_with_hook_and_hnsw<R, S, H, M>(
         &mut self,
         now_epoch_secs: f64,
@@ -1892,6 +1893,9 @@ impl DreamingDaemon {
         // the old graph topology stale. Rebuild from the current float records
         // so `find_nearest_float` queries immediately use the new geometry.
         // Non-fatal on failure — falls back to exact scan.
+        // The float-index rebuild is a `whole-record-dense` duty; without the
+        // feature THETA has no graph to rebuild and `hnsw` is unused here.
+        #[cfg(feature = "whole-record-dense")]
         if let Some(m) = hnsw {
             let _ = m.rebuild_float_index(now_epoch_secs);
         }
@@ -1942,7 +1946,12 @@ impl DreamingDaemon {
         // Mirrors Swift DreamingDaemon REM-BETA (reclaimSupersededGenerations
         // called alongside compactFloatIndexTombstones).
         if let Some(m) = hnsw {
-            let _ = m.compact_float_index_tombstones(now_epoch_secs);
+            // Tombstone compaction is a `whole-record-dense` duty; generation
+            // reclaim runs in every build (engram rows regenerate on a swap).
+            #[cfg(feature = "whole-record-dense")]
+            {
+                let _ = m.compact_float_index_tombstones(now_epoch_secs);
+            }
             let _ = m.reclaim_superseded_generations(now_epoch_secs);
         }
 
@@ -2099,13 +2108,6 @@ mod tests {
     fn window(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|s| s.to_string()).collect()
     }
-    fn link(a: &str, b: &str) -> TunnelLink {
-        TunnelLink {
-            source_drawer_id: Some(a.to_string()),
-            target_drawer_id: Some(b.to_string()),
-        }
-    }
-
     /// Build a DreamingTunnelItem (active dreamed tunnel) for ALPHA dedup tests.
     /// The id is synthetic — ALPHA only uses source/target for the candidate key.
     fn dreamed_link(a: &str, b: &str) -> DreamingTunnelItem {
@@ -3099,18 +3101,23 @@ mod tests {
         let ts = 1_755_000_000.0_f64;
 
         // Pre-condition: no calls yet.
+        #[cfg(feature = "whole-record-dense")]
         assert!(hnsw.compact_calls.is_empty(), "compact_calls must be empty before BETA");
         assert!(hnsw.reclaim_calls.is_empty(), "reclaim_calls must be empty before BETA");
 
         // Fire REM-BETA with the HNSW seam wired.
         let _report = daemon.run_beta_cycle_with_hnsw(ts, Some(&mut hnsw));
 
-        // Both compact and reclaim must fire exactly once with the injected ts.
-        assert_eq!(hnsw.compact_calls.len(), 1, "compact must fire once per BETA cycle");
-        assert_eq!(
-            hnsw.compact_calls[0], ts,
-            "compact_float_index_tombstones must receive the injected timestamp"
-        );
+        // Reclaim fires exactly once with the injected ts in every build; the
+        // tombstone compaction is a whole-record-dense duty.
+        #[cfg(feature = "whole-record-dense")]
+        {
+            assert_eq!(hnsw.compact_calls.len(), 1, "compact must fire once per BETA cycle");
+            assert_eq!(
+                hnsw.compact_calls[0], ts,
+                "compact_float_index_tombstones must receive the injected timestamp"
+            );
+        }
         assert_eq!(hnsw.reclaim_calls.len(), 1, "reclaim must fire once per BETA cycle");
         assert_eq!(
             hnsw.reclaim_calls[0], ts,

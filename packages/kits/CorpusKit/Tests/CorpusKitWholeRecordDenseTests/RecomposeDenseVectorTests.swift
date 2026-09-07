@@ -17,6 +17,7 @@
 //   §false-on-miss  recomposeDenseVector returns false (no throw) when the
 //       content ID has no record in the source.
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import EngramLib
@@ -26,6 +27,7 @@ import SynapseKit
 import CorpusKitProviders
 
 @testable import CorpusKit
+@testable import CorpusKitWholeRecordDense
 
 @Suite("RecomposeDenseVector", .serialized)
 struct RecomposeDenseVectorTests {
@@ -199,3 +201,4 @@ struct RecomposeDenseVectorTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

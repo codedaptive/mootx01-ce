@@ -173,9 +173,15 @@ struct RecallUnionProfileSeedTests {
         let profile = try #require(result.unionProfile, "unionBest returns a profile")
 
         #expect(!result.hits.isEmpty, "the recall returns hits")
+#if MOOTX01_WHOLE_RECORD_DENSE
         // Three supply lanes (locus, bm25, dense); sixteen candidates carry all
         // three bits and four carry two: (16 * 3 + 4 * 2) / (20 * 3).
         #expect(abs(profile.signalAgreement - 56.0 / 60.0) < 1e-5, "\(describe(profile))")
+#else
+        // Two supply lanes (locus, bm25): sixteen candidates carry both bits
+        // and the four quiet drawers carry locus alone: (16 * 2 + 4) / (20 * 2).
+        #expect(abs(profile.signalAgreement - 36.0 / 40.0) < 1e-5, "\(describe(profile))")
+#endif
         // The top 16 by `final` is the sixteen query drawers, one source mask.
         #expect(abs(profile.redundancy - 1.0) < 1e-6, "\(describe(profile))")
         // Locus column: twenty ramp values, normalised to i / 19; population

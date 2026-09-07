@@ -4,7 +4,8 @@
 // DefaultEnsembleRecallPayoffTests.swift
 //
 // Mission 6a-iii-wire — end-to-end PAYOFF proof: the default recall ensemble
-// (CorpusEnsemble.defaultEnsemble(): RI/PPMI/LSA/NMF/FDC) un-pins recall.
+// (CorpusEnsemble.defaultEnsemble(): RI/PPMI/NMF/FDC under DenseFamilies;
+// RI/PPMI/LSA/NMF/FDC when MOOTX01_LSA is also on) un-pins recall.
 //
 // This is the deterministic, CI-verifiable proof that flipping the production
 // default from a single hash lane to the five honest signals actually fixes
@@ -19,7 +20,8 @@
 // its similarity reflects only surface byte overlap, so varied queries tend to
 // pin onto the same handful of lexically-overlapping documents, and a query that
 // is semantically related but lexically different misses entirely. The five-signal
-// ensemble — trained on the estate's own corpus (RI/PPMI/LSA/NMF) plus stateless
+// ensemble — trained on the estate's own corpus (RI/PPMI/NMF; plus LSA when
+// MOOTX01_LSA is on) plus stateless
 // taxonomic FDC — produces distributional + categorical structure, so:
 //   (a) varied queries return DIVERSE top hits (not pinned to one cluster),
 //   (b) every hit carries MULTI-SIGNAL dense provenance (multiple modelIDs vote),
@@ -33,9 +35,11 @@
 // captured window, so every Corpus-op suite serialises via GlobalTestLock. This
 // suite follows that convention.
 
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import CorpusKit
+@testable import CorpusKitWholeRecordDense
 import CorpusKitProviders
 import PersistenceKit
 import PersistenceKitSQLite
@@ -56,7 +60,13 @@ struct DefaultEnsembleRecallPayoffTests {
                 return nil
             }
         }
+#if MOOTX01_LSA
+        // Five signals: RI / PPMI / LSA / NMF / FDC.
         #expect(versions == ["1.1.0", "1.1.0", "1.1.0", "1.1.0", "1.0.0"])
+#else
+        // Four signals: RI / PPMI / NMF / FDC. LSA is dark (MOOTX01_LSA off).
+        #expect(versions == ["1.1.0", "1.1.0", "1.1.0", "1.0.0"])
+#endif
     }
 
     /// A diverse multi-topic corpus spanning four clearly separated topical
@@ -107,9 +117,9 @@ struct DefaultEnsembleRecallPayoffTests {
         for doc in docs {
             try await corpus.ingest(doc.text, sourceID: doc.id, now: now)
         }
-        // reindex trains the four trainable signals (RI/PPMI/LSA/NMF) on the full
-        // corpus and re-embeds every chunk under every signal's modelID. FDC is
-        // stateless and needs no training.
+        // reindex trains the trainable signals (RI/PPMI/NMF; plus LSA when
+        // MOOTX01_LSA is on) on the full corpus and re-embeds every chunk under
+        // every signal's modelID. FDC is stateless and needs no training.
         try await corpus.reindex(now: now)
         return corpus
     }
@@ -171,12 +181,18 @@ struct DefaultEnsembleRecallPayoffTests {
             let perSignal = await corpus.floatNearestPerSignal(
                 query: "orbit spacecraft mission", limit: 3)
 
-            // The default ensemble holds five signals; each appears once, in slot
-            // order, tagged by its own modelID.
+            // The default ensemble's signals appear once each, in slot order.
+            // Four signals under DenseFamilies; five when MOOTX01_LSA is also on.
             let modelIDs = perSignal.map(\.modelID)
+#if MOOTX01_LSA
             #expect(
                 modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
                 "per-signal provenance must carry all five default modelIDs in order, got \(modelIDs)")
+#else
+            #expect(
+                modelIDs == ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"],
+                "per-signal provenance must carry the four default modelIDs in order, got \(modelIDs)")
+#endif
 
             // MULTI-SIGNAL VOTING: more than one signal must produce ranked hits
             // for the query (the single-hash default could only ever produce one
@@ -232,3 +248,4 @@ struct DefaultEnsembleRecallPayoffTests {
 }
 
 #endif // MOOTX01_DENSE_FAMILIES
+#endif // MOOTX01_WHOLE_RECORD_DENSE

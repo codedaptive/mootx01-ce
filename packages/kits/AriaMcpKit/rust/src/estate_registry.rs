@@ -41,7 +41,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
+// The default recall ensemble (RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
+// Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
@@ -884,8 +885,9 @@ fn wire_postgres_semantic_recall(
 /// CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through the
 /// shared connection.
 ///
-/// Recall ensemble is the five honest signals (`default_ensemble()`:
-/// RI/PPMI/LSA/NMF/FDC) — reproducible across Swift/Rust ports, no CoreML.
+/// Recall ensemble is the honest signals (`default_ensemble()`:
+/// RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on) — reproducible
+/// across Swift/Rust ports, no CoreML.
 /// Matches `provision`'s default and the Swift `AriaMCPMain.swift` Lane D wiring
 /// (`CorpusEnsemble.defaultEnsemble()`).
 fn wire_sqlite_semantic_recall(

@@ -15,6 +15,7 @@
 //!
 //! INTELLECTUS LOCK: all tests hold GLOBAL_LOCK to prevent telemetry
 //! cross-contamination with concurrently-running telemetry test suites.
+#![cfg(feature = "whole-record-dense")]
 
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome, NamedInferenceFn};
 use intellectus_lib::Intellectus;

@@ -3091,7 +3091,7 @@ impl EstateCoordinator {
     /// the provider the Corpus ensemble should use for this estate.
     /// Mirrors Swift `GeniusLocusKit.embeddingProviderMetaKey`.
     ///
-    /// Absent key → deterministic default ensemble (RI/PPMI/LSA/NMF/FDC).
+    /// Absent key → deterministic default ensemble (RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
     /// No estate migration required.
     pub const EMBEDDING_PROVIDER_META_KEY: &str = "embedding_provider";
 
@@ -9743,7 +9743,7 @@ impl EstateCoordinator {
     /// - `embedding_models`: The recall ensemble passed to `Corpus::open_many`.
     ///                       Production callers pass
     ///                       `corpus_kit_providers::default_ensemble()` (the
-    ///                       canonical five-signal default: RI/PPMI/LSA/NMF/FDC).
+    ///                       canonical default: RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
     ///                       Rust has no default arguments, so the caller supplies
     ///                       the Vec explicitly; the app layer owns the default. A
     ///                       single-element `vec![EmbeddingModelConfig::Deterministic]`
@@ -10264,6 +10264,7 @@ impl EstateCoordinator {
                 plan: result.plan,
                 union_profile: result.union_profile,
                 hits: admissible,
+                #[cfg(feature = "whole-record-dense")]
                 dense_lane_status: result.dense_lane_status,
                 degraded_stages: result.degraded_stages,
                 lane_ranks: result.lane_ranks,
@@ -10429,6 +10430,7 @@ impl EstateCoordinator {
             plan,
             union_profile: None,
             // locusOnly does not attempt the dense float lane — None per contract.
+            #[cfg(feature = "whole-record-dense")]
             dense_lane_status: None,
             degraded_stages,
             hits,
@@ -10847,6 +10849,7 @@ impl EstateCoordinator {
     /// to signed weights. Returns `(boost_by_id, cosine_by_id)`; `cosine_by_id` is
     /// the MAX normalized cosine across FORWARDING signals (the aggregate `dense`
     /// column). Mirrors Swift RecallDirector's dense-steered consensus fold.
+    #[cfg(feature = "whole-record-dense")]
     fn dense_consensus_boost(
         per_signal_lists: &[(String, Vec<(String, f32)>)],
         k: f32,
@@ -11265,253 +11268,272 @@ impl EstateCoordinator {
         // model_id, while other signals still vote. dense_lane_status (the aggregate
         // marker) reports the DEFAULT signal's (slot 0) dark reason, preserving
         // pre-6b single-signal semantics — at N=1 the default is the only signal.
-        let include_dense = matches!(request.mode, GLKRecallMode::UnionBest);
-        let mut dense_lane_status: Option<String> = None;
-        // RRF voter lists, each TAGGED with its model_id so the dense-steering weight
-        // `shape.weight("dense:<model_id>")` can scale it (6b-modifiers-core-2). The
-        // model_id is the only place per-signal dense identity exists before the lists
-        // collapse into the single aggregate `dense` column built in the consensus fold.
-        let mut per_signal_dense_lists: Vec<(String, Vec<(String, f32)>)> = Vec::new();
-        // model_ids that voted for each id, in slot order, for per-hit provenance.
-        let mut dense_signals_by_id: HashMap<String, Vec<String>> = HashMap::new();
-        // First-seen id order (deterministic). The aggregate cosine column is built
-        // LATER (in the consensus fold, weight-aware) so a signal weighted <= 0
-        // contributes no cosine.
-        let mut dense_order: Vec<String> = Vec::new();
-        let mut dense_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // DISCRIMINATION FACTOR (Item 3, MISSION_11X_RECALL_GAP_01): continuous
-        // discount applied to the dense column in the matrixAware scoring formula.
-        // Declared here (outside the corpus block) so it is in scope for the
-        // scoring loop that follows. Default 1.0 = no discount. Mirrors Swift
-        // RecallDirector's `denseDiscriminationFactor`. See coordinator comments
-        // at the scoring loop for the full mapping.
-        let mut dense_discrimination_factor: f32 = 1.0;
-        if include_dense {
-            if let Some(ref c) = corpus {
-                if !query_str.is_empty() {
-                    use corpus_kit::{FloatDiscriminationSignal, FloatLaneOutcome};
-                    let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
-                    // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
-                    // `dense:<model_id>` key is in `shape.anti_similar_lanes`
-                    // inverts its OBJECTIVE — it surfaces the FARTHEST (most
-                    // dissimilar) sources via `float_farthest_per_signal` instead
-                    // of the nearest. Distinct from a negative weight (which keeps
-                    // the nearest and subtracts their mass). When any dense lane is
-                    // anti-similar we fetch BOTH passes and pick, per signal, by
-                    // model_id; with none (the default) only the nearest pass runs
-                    // — byte-identical to the pre-antisim behaviour. Mirrors Swift
-                    // RecallDirector's unionBest dense lane.
-                    let anti_similar_lanes: std::collections::HashSet<String> = request
-                        .recall_shape
-                        .as_ref()
-                        .map(|s| s.anti_similar_lanes.clone())
-                        .unwrap_or_default();
-                    // Use the discrimination-aware call. Discrimination is always
-                    // measured on the standard nearest-similarity pass — it measures
-                    // "are the top-K nearest cosines near-uniform?". The outcomes are
-                    // extracted for the anti-similar substitution logic below.
-                    // Resolve the shape's float-lane metric once; thread it into
-                    // both nearest and farthest corpus calls so both use the same
-                    // distance function for the same request.
-                    let f_metric = float_metric_for(request.recall_shape.as_ref());
-                    let nearest_per_signal_with_disc: Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> =
-                        c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k, f_metric);
-                    // Aggregate discrimination: mean relative spread across .Hits signals.
-                    // Saturation threshold 0.15 mirrors Swift RecallDirector.
-                    // linear ramp: factor = min(1.0, mean_spread / 0.15)
-                    //   spread ≈ 0.05 (saturated, short turns): factor ≈ 0.33
-                    //   spread ≥ 0.15 (contrastive, clear winner): factor = 1.0
-                    let saturation_threshold: f32 = 0.15;
-                    let spreads: Vec<f32> = nearest_per_signal_with_disc.iter()
-                        .filter_map(|(_, _, d)| d.as_ref().map(|s| s.relative_spread))
-                        .collect();
-                    if !spreads.is_empty() {
-                        let mean_spread: f32 = spreads.iter().sum::<f32>() / spreads.len() as f32;
-                        dense_discrimination_factor = (mean_spread / saturation_threshold).min(1.0);
-                    }
-                    // Extract (model_id, outcome) pairs for the anti-similar substitution.
-                    let nearest_per_signal: Vec<(String, FloatLaneOutcome)> =
-                        nearest_per_signal_with_disc.into_iter().map(|(m, o, _)| (m, o)).collect();
-                    let per_signal: Vec<(String, FloatLaneOutcome)> = if anti_similar_lanes
-                        .is_empty()
-                    {
-                        nearest_per_signal
+        // Step 4.5 — the whole-record DENSE FLOAT lane is a `whole-record-dense`
+        // feature lane (ruling 2026-09-07: the span stage is the one dense
+        // provider). In the default build the lane never runs: `dense_list` is
+        // empty so lane ranks, the buffer merge and attribution keep one shape,
+        // and the discrimination factor stays neutral so Discriminative scoring
+        // equals Rrf.
+        #[cfg(feature = "whole-record-dense")]
+        let (dense_lane_status, dense_signals_by_id, dense_discrimination_factor, dense_consensus_boost, mut dense_list): (
+            Option<String>,
+            HashMap<String, Vec<String>>,
+            f32,
+            HashMap<String, f32>,
+            Vec<(String, f32)>,
+        ) = {
+            let include_dense = matches!(request.mode, GLKRecallMode::UnionBest);
+            let mut dense_lane_status: Option<String> = None;
+            // RRF voter lists, each TAGGED with its model_id so the dense-steering weight
+            // `shape.weight("dense:<model_id>")` can scale it (6b-modifiers-core-2). The
+            // model_id is the only place per-signal dense identity exists before the lists
+            // collapse into the single aggregate `dense` column built in the consensus fold.
+            let mut per_signal_dense_lists: Vec<(String, Vec<(String, f32)>)> = Vec::new();
+            // model_ids that voted for each id, in slot order, for per-hit provenance.
+            let mut dense_signals_by_id: HashMap<String, Vec<String>> = HashMap::new();
+            // First-seen id order (deterministic). The aggregate cosine column is built
+            // LATER (in the consensus fold, weight-aware) so a signal weighted <= 0
+            // contributes no cosine.
+            let mut dense_order: Vec<String> = Vec::new();
+            let mut dense_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // DISCRIMINATION FACTOR (Item 3, MISSION_11X_RECALL_GAP_01): continuous
+            // discount applied to the dense column in the matrixAware scoring formula.
+            // Declared here (outside the corpus block) so it is in scope for the
+            // scoring loop that follows. Default 1.0 = no discount. Mirrors Swift
+            // RecallDirector's `denseDiscriminationFactor`. See coordinator comments
+            // at the scoring loop for the full mapping.
+            let mut dense_discrimination_factor: f32 = 1.0;
+            if include_dense {
+                if let Some(ref c) = corpus {
+                    if !query_str.is_empty() {
+                        use corpus_kit::{FloatDiscriminationSignal, FloatLaneOutcome};
+                        let estate_tag = uuid::Uuid::from_bytes(handle.estate_uuid).to_string();
+                        // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
+                        // `dense:<model_id>` key is in `shape.anti_similar_lanes`
+                        // inverts its OBJECTIVE — it surfaces the FARTHEST (most
+                        // dissimilar) sources via `float_farthest_per_signal` instead
+                        // of the nearest. Distinct from a negative weight (which keeps
+                        // the nearest and subtracts their mass). When any dense lane is
+                        // anti-similar we fetch BOTH passes and pick, per signal, by
+                        // model_id; with none (the default) only the nearest pass runs
+                        // — byte-identical to the pre-antisim behaviour. Mirrors Swift
+                        // RecallDirector's unionBest dense lane.
+                        let anti_similar_lanes: std::collections::HashSet<String> = request
+                            .recall_shape
+                            .as_ref()
+                            .map(|s| s.anti_similar_lanes.clone())
+                            .unwrap_or_default();
+                        // Use the discrimination-aware call. Discrimination is always
+                        // measured on the standard nearest-similarity pass — it measures
+                        // "are the top-K nearest cosines near-uniform?". The outcomes are
+                        // extracted for the anti-similar substitution logic below.
+                        // Resolve the shape's float-lane metric once; thread it into
+                        // both nearest and farthest corpus calls so both use the same
+                        // distance function for the same request.
+                        let f_metric = float_metric_for(request.recall_shape.as_ref());
+                        let nearest_per_signal_with_disc: Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> =
+                            c.float_nearest_per_signal_with_discrimination(&query_str, plan.frontier_k, f_metric);
+                        // Aggregate discrimination: mean relative spread across .Hits signals.
+                        // Saturation threshold 0.15 mirrors Swift RecallDirector.
+                        // linear ramp: factor = min(1.0, mean_spread / 0.15)
+                        //   spread ≈ 0.05 (saturated, short turns): factor ≈ 0.33
+                        //   spread ≥ 0.15 (contrastive, clear winner): factor = 1.0
+                        let saturation_threshold: f32 = 0.15;
+                        let spreads: Vec<f32> = nearest_per_signal_with_disc.iter()
+                            .filter_map(|(_, _, d)| d.as_ref().map(|s| s.relative_spread))
+                            .collect();
+                        if !spreads.is_empty() {
+                            let mean_spread: f32 = spreads.iter().sum::<f32>() / spreads.len() as f32;
+                            dense_discrimination_factor = (mean_spread / saturation_threshold).min(1.0);
+                        }
+                        // Extract (model_id, outcome) pairs for the anti-similar substitution.
+                        let nearest_per_signal: Vec<(String, FloatLaneOutcome)> =
+                            nearest_per_signal_with_disc.into_iter().map(|(m, o, _)| (m, o)).collect();
+                        let per_signal: Vec<(String, FloatLaneOutcome)> = if anti_similar_lanes
+                            .is_empty()
+                        {
+                            nearest_per_signal
+                        } else {
+                            let farthest_per_signal =
+                                c.float_farthest_per_signal(&query_str, plan.frontier_k, f_metric);
+                            let mut farthest_by_model: HashMap<String, FloatLaneOutcome> =
+                                HashMap::new();
+                            for (m, o) in farthest_per_signal {
+                                farthest_by_model.insert(m, o);
+                            }
+                            nearest_per_signal
+                                .into_iter()
+                                .map(|(model_id, outcome)| {
+                                    // An anti-similar lane forwards its FARTHEST
+                                    // candidates; other lanes keep their nearest list.
+                                    if anti_similar_lanes.contains(&format!("dense:{model_id}")) {
+                                        if let Some(f) = farthest_by_model.remove(&model_id) {
+                                            return (model_id, f);
+                                        }
+                                    }
+                                    (model_id, outcome)
+                                })
+                                .collect()
+                        };
+                        for (idx, (model_id, outcome)) in per_signal.into_iter().enumerate() {
+                            match outcome {
+                                FloatLaneOutcome::Hits(matches) => {
+                                    // This signal contributed a ranked dense list. A signal
+                                    // EXCLUDED by the shape (w==0) did not vote in the fusion,
+                                    // so it must not claim per-hit provenance either; record
+                                    // its model_id only when it forwards or suppresses (w!=0).
+                                    // A suppressing signal (w<0) DID contribute (subtracted
+                                    // mass), so it stays in provenance — mirrors Swift.
+                                    let signal_votes = request
+                                        .recall_shape
+                                        .as_ref()
+                                        .map(|s| s.weight(&format!("dense:{model_id}")))
+                                        .unwrap_or(1.0)
+                                        != 0.0;
+                                    let mut ranked: Vec<(String, f32)> =
+                                        Vec::with_capacity(matches.len());
+                                    for (id, sim) in matches {
+                                        let dense = ((sim + 1.0) / 2.0).clamp(0.0, 1.0);
+                                        ranked.push((id.clone(), dense));
+                                        if dense_seen.insert(id.clone()) {
+                                            dense_order.push(id.clone());
+                                        }
+                                        if signal_votes {
+                                            dense_signals_by_id
+                                                .entry(id)
+                                                .or_default()
+                                                .push(model_id.clone());
+                                        }
+                                    }
+                                    per_signal_dense_lists.push((model_id.clone(), ranked));
+                                }
+                                FloatLaneOutcome::UnavailableProviderOptOut => {
+                                    // This signal has no float lane — dark, tagged by model_id.
+                                    if idx == 0 {
+                                        dense_lane_status = Some("dark:providerOptOut".to_string());
+                                    }
+                                    glk_emit!(
+                                        crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                        1.0,
+                                        [("estate_id".to_string(), estate_tag.clone()),
+                                         ("reason".to_string(), "providerOptOut".to_string()),
+                                         ("model_id".to_string(), model_id.clone())]
+                                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                    );
+                                }
+                                FloatLaneOutcome::UnavailableNoFloatRows => {
+                                    // This signal has no stored float rows — dark, tagged by model_id.
+                                    if idx == 0 {
+                                        dense_lane_status = Some("dark:noFloatRows".to_string());
+                                    }
+                                    glk_emit!(
+                                        crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                        1.0,
+                                        [("estate_id".to_string(), estate_tag.clone()),
+                                         ("reason".to_string(), "noFloatRows".to_string()),
+                                         ("model_id".to_string(), model_id.clone())]
+                                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                    );
+                                }
+                                FloatLaneOutcome::UnavailableNoVocabHit => {
+                                    // Trained distributional provider, all query tokens OOV.
+                                    // Truthful relabel: provider HAS a basis, query misses vocab.
+                                    // Surface string: "dark:vocabMiss". Mirrors Swift RecallDirector.
+                                    if idx == 0 {
+                                        dense_lane_status = Some("dark:vocabMiss".to_string());
+                                    }
+                                    glk_emit!(
+                                        crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                        1.0,
+                                        [("estate_id".to_string(), estate_tag.clone()),
+                                         ("reason".to_string(), "vocabMiss".to_string()),
+                                         ("model_id".to_string(), model_id.clone())]
+                                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                    );
+                                }
+                                FloatLaneOutcome::EmptyQuery => {
+                                    // Guard above (query_str.is_empty()) prevents this;
+                                    // handle defensively for exhaustive match.
+                                    if idx == 0 {
+                                        dense_lane_status = Some("dark:emptyQuery".to_string());
+                                    }
+                                }
+                                FloatLaneOutcome::StoreError(_) => {
+                                    // CorpusKit already printed the error and emitted
+                                    // corpus.float_lane.store_error for this signal. GLK
+                                    // adds the estate-level dark counter, tagged by model_id.
+                                    if idx == 0 {
+                                        dense_lane_status = Some("dark:storeError".to_string());
+                                    }
+                                    glk_emit!(
+                                        crate::telemetry::metric_names::DENSE_LANE_DARK,
+                                        1.0,
+                                        [("estate_id".to_string(), estate_tag.clone()),
+                                         ("reason".to_string(), "storeError".to_string()),
+                                         ("model_id".to_string(), model_id.clone())]
+                                            .into_iter().collect::<std::collections::HashMap<_, _>>()
+                                    );
+                                }
+                            }
+                        }
                     } else {
-                        let farthest_per_signal =
-                            c.float_farthest_per_signal(&query_str, plan.frontier_k, f_metric);
-                        let mut farthest_by_model: HashMap<String, FloatLaneOutcome> =
-                            HashMap::new();
-                        for (m, o) in farthest_per_signal {
-                            farthest_by_model.insert(m, o);
-                        }
-                        nearest_per_signal
-                            .into_iter()
-                            .map(|(model_id, outcome)| {
-                                // An anti-similar lane forwards its FARTHEST
-                                // candidates; other lanes keep their nearest list.
-                                if anti_similar_lanes.contains(&format!("dense:{model_id}")) {
-                                    if let Some(f) = farthest_by_model.remove(&model_id) {
-                                        return (model_id, f);
-                                    }
-                                }
-                                (model_id, outcome)
-                            })
-                            .collect()
-                    };
-                    for (idx, (model_id, outcome)) in per_signal.into_iter().enumerate() {
-                        match outcome {
-                            FloatLaneOutcome::Hits(matches) => {
-                                // This signal contributed a ranked dense list. A signal
-                                // EXCLUDED by the shape (w==0) did not vote in the fusion,
-                                // so it must not claim per-hit provenance either; record
-                                // its model_id only when it forwards or suppresses (w!=0).
-                                // A suppressing signal (w<0) DID contribute (subtracted
-                                // mass), so it stays in provenance — mirrors Swift.
-                                let signal_votes = request
-                                    .recall_shape
-                                    .as_ref()
-                                    .map(|s| s.weight(&format!("dense:{model_id}")))
-                                    .unwrap_or(1.0)
-                                    != 0.0;
-                                let mut ranked: Vec<(String, f32)> =
-                                    Vec::with_capacity(matches.len());
-                                for (id, sim) in matches {
-                                    let dense = ((sim + 1.0) / 2.0).clamp(0.0, 1.0);
-                                    ranked.push((id.clone(), dense));
-                                    if dense_seen.insert(id.clone()) {
-                                        dense_order.push(id.clone());
-                                    }
-                                    if signal_votes {
-                                        dense_signals_by_id
-                                            .entry(id)
-                                            .or_default()
-                                            .push(model_id.clone());
-                                    }
-                                }
-                                per_signal_dense_lists.push((model_id.clone(), ranked));
-                            }
-                            FloatLaneOutcome::UnavailableProviderOptOut => {
-                                // This signal has no float lane — dark, tagged by model_id.
-                                if idx == 0 {
-                                    dense_lane_status = Some("dark:providerOptOut".to_string());
-                                }
-                                glk_emit!(
-                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                    1.0,
-                                    [("estate_id".to_string(), estate_tag.clone()),
-                                     ("reason".to_string(), "providerOptOut".to_string()),
-                                     ("model_id".to_string(), model_id.clone())]
-                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
-                                );
-                            }
-                            FloatLaneOutcome::UnavailableNoFloatRows => {
-                                // This signal has no stored float rows — dark, tagged by model_id.
-                                if idx == 0 {
-                                    dense_lane_status = Some("dark:noFloatRows".to_string());
-                                }
-                                glk_emit!(
-                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                    1.0,
-                                    [("estate_id".to_string(), estate_tag.clone()),
-                                     ("reason".to_string(), "noFloatRows".to_string()),
-                                     ("model_id".to_string(), model_id.clone())]
-                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
-                                );
-                            }
-                            FloatLaneOutcome::UnavailableNoVocabHit => {
-                                // Trained distributional provider, all query tokens OOV.
-                                // Truthful relabel: provider HAS a basis, query misses vocab.
-                                // Surface string: "dark:vocabMiss". Mirrors Swift RecallDirector.
-                                if idx == 0 {
-                                    dense_lane_status = Some("dark:vocabMiss".to_string());
-                                }
-                                glk_emit!(
-                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                    1.0,
-                                    [("estate_id".to_string(), estate_tag.clone()),
-                                     ("reason".to_string(), "vocabMiss".to_string()),
-                                     ("model_id".to_string(), model_id.clone())]
-                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
-                                );
-                            }
-                            FloatLaneOutcome::EmptyQuery => {
-                                // Guard above (query_str.is_empty()) prevents this;
-                                // handle defensively for exhaustive match.
-                                if idx == 0 {
-                                    dense_lane_status = Some("dark:emptyQuery".to_string());
-                                }
-                            }
-                            FloatLaneOutcome::StoreError(_) => {
-                                // CorpusKit already printed the error and emitted
-                                // corpus.float_lane.store_error for this signal. GLK
-                                // adds the estate-level dark counter, tagged by model_id.
-                                if idx == 0 {
-                                    dense_lane_status = Some("dark:storeError".to_string());
-                                }
-                                glk_emit!(
-                                    crate::telemetry::metric_names::DENSE_LANE_DARK,
-                                    1.0,
-                                    [("estate_id".to_string(), estate_tag.clone()),
-                                     ("reason".to_string(), "storeError".to_string()),
-                                     ("model_id".to_string(), model_id.clone())]
-                                        .into_iter().collect::<std::collections::HashMap<_, _>>()
-                                );
-                            }
-                        }
+                        // Part 2 — dense_lane dark:emptyQuery. A corpus is registered
+                        // but the query string is empty: the float index cannot be
+                        // queried without query text. Tag explicitly so callers can
+                        // distinguish "lane never attempted due to empty query" from
+                        // "lane ran and returned hits" (None). Mirrors Swift
+                        // RecallDirector's else branch on `!text.isEmpty`.
+                        dense_lane_status = Some("dark:emptyQuery".to_string());
                     }
                 } else {
-                    // Part 2 — dense_lane dark:emptyQuery. A corpus is registered
-                    // but the query string is empty: the float index cannot be
-                    // queried without query text. Tag explicitly so callers can
-                    // distinguish "lane never attempted due to empty query" from
+                    // Part 2 — dense_lane dark:noCorpus. No corpus is registered for
+                    // this handle (corpus.is_none()): the dense lane was never attempted.
+                    // The explicit tag keeps "corpus not configured" distinct from
                     // "lane ran and returned hits" (None). Mirrors Swift
-                    // RecallDirector's else branch on `!text.isEmpty`.
-                    dense_lane_status = Some("dark:emptyQuery".to_string());
+                    // RecallDirector's `else if corpusKits[handle] == nil` branch.
+                    dense_lane_status = Some("dark:noCorpus".to_string());
                 }
-            } else {
-                // Part 2 — dense_lane dark:noCorpus. No corpus is registered for
-                // this handle (corpus.is_none()): the dense lane was never attempted.
-                // Previously serialized as None (indistinguishable from "active"); now
-                // carries an explicit tag. Mirrors Swift RecallDirector's `else if
-                // corpusKits[handle] == nil` branch.
-                dense_lane_status = Some("dark:noCorpus".to_string());
             }
-        }
-        // N-way consensus RRF over the per-signal dense lists, DENSE-STEERED by the
-        // `dense:<model_id>` weights (6b-modifiers-core-2). The boost folded into a
-        // candidate's final score is the EXTRA-voter RRF mass beyond the single best
-        // weighted term (0 for a single forwarding voter, so N=1 is byte-identical);
-        // `dense_cosine_by_id` is the aggregate cosine column over FORWARDING signals
-        // (an excluded/suppressed signal contributes no cosine). At all-1.0 weights
-        // both maps equal the unweighted code byte-for-byte.
-        let (dense_consensus_boost, dense_cosine_by_id): (HashMap<String, f32>, HashMap<String, f32>) =
-            Self::dense_consensus_boost(&per_signal_dense_lists, 60.0, &request.recall_shape);
-        // Consensus deduped dense list (id → max normalized cosine over FORWARDING
-        // signals), first-seen order. Equals the single `float_nearest` list at N=1
-        // with neutral weights. Every id seen by the dense lane stays in the list
-        // (structural parity with Swift, which builds one dense hit per dense_order
-        // id); an id whose every voting signal was excluded/suppressed has cosine 0
-        // (no forwarding signal raised it), so it carries no dense mass — its dense
-        // column is 0 in the matrixAware score and its dense `final` contribution is
-        // the consensus boost only (0 at N=1, mirroring Swift's `cosine + boost`).
-        //
-        // QUANTIZATION: cosines are rounded to 2 decimal places (0.01 precision) to
-        // absorb provider-training float variance (~0.003 in mean cosine across two
-        // estates built from the same seed via LAPACK SVD/NMF). Without quantization
-        // an item at the K-boundary can flip rank across replay runs because the
-        // float delta is larger than the score gap between adjacent items.
-        // 0.01 quantization collapses any pair of cosines within 0.005 to the same
-        // bucket, making the content-derived tiebreak the deciding factor. Mirrors
-        // Swift RecallDirector's `((denseCosineByID[id] ?? 0) * 100).rounded() / 100`.
-        let mut dense_list: Vec<(String, f32)> = dense_order
-            .iter()
-            .map(|id| {
-                let raw = dense_cosine_by_id.get(id).copied().unwrap_or(0.0);
-                // Quantize to 2dp to absorb provider-training float variance.
-                let quantized = (raw * 100.0).round() / 100.0;
-                (id.clone(), quantized)
-            })
-            .collect();
+            // N-way consensus RRF over the per-signal dense lists, DENSE-STEERED by the
+            // `dense:<model_id>` weights (6b-modifiers-core-2). The boost folded into a
+            // candidate's final score is the EXTRA-voter RRF mass beyond the single best
+            // weighted term (0 for a single forwarding voter, so N=1 is byte-identical);
+            // `dense_cosine_by_id` is the aggregate cosine column over FORWARDING signals
+            // (an excluded/suppressed signal contributes no cosine). At all-1.0 weights
+            // both maps equal the unweighted code byte-for-byte.
+            let (dense_consensus_boost, dense_cosine_by_id): (HashMap<String, f32>, HashMap<String, f32>) =
+                Self::dense_consensus_boost(&per_signal_dense_lists, 60.0, &request.recall_shape);
+            // Consensus deduped dense list (id → max normalized cosine over FORWARDING
+            // signals), first-seen order. Equals the single `float_nearest` list at N=1
+            // with neutral weights. Every id seen by the dense lane stays in the list
+            // (structural parity with Swift, which builds one dense hit per dense_order
+            // id); an id whose every voting signal was excluded/suppressed has cosine 0
+            // (no forwarding signal raised it), so it carries no dense mass — its dense
+            // column is 0 in the matrixAware score and its dense `final` contribution is
+            // the consensus boost only (0 at N=1, mirroring Swift's `cosine + boost`).
+            //
+            // QUANTIZATION: cosines are rounded to 2 decimal places (0.01 precision) to
+            // absorb provider-training float variance (~0.003 in mean cosine across two
+            // estates built from the same seed via LAPACK SVD/NMF). Without quantization
+            // an item at the K-boundary can flip rank across replay runs because the
+            // float delta is larger than the score gap between adjacent items.
+            // 0.01 quantization collapses any pair of cosines within 0.005 to the same
+            // bucket, making the content-derived tiebreak the deciding factor. Mirrors
+            // Swift RecallDirector's `((denseCosineByID[id] ?? 0) * 100).rounded() / 100`.
+            let dense_list: Vec<(String, f32)> = dense_order
+                .iter()
+                .map(|id| {
+                    let raw = dense_cosine_by_id.get(id).copied().unwrap_or(0.0);
+                    // Quantize to 2dp to absorb provider-training float variance.
+                    let quantized = (raw * 100.0).round() / 100.0;
+                    (id.clone(), quantized)
+                })
+                .collect();
+            (dense_lane_status, dense_signals_by_id, dense_discrimination_factor, dense_consensus_boost, dense_list)
+        };
+        #[cfg(not(feature = "whole-record-dense"))]
+        let (dense_discrimination_factor, dense_consensus_boost, mut dense_list): (f32, HashMap<String, f32>, Vec<(String, f32)>) =
+            (1.0, HashMap::new(), Vec::new());
 
         // --- Step 4.35: Graph / tunnel expansion lane (UnionBest only) ---
         //
@@ -12834,6 +12856,8 @@ impl EstateCoordinator {
                 // token and the caller receives the best-span bounds (sheet §8/§9).
                 let span_hit = span_hits.get(&id).cloned();
                 let bare = RecallHit { id, drawer, sources, score, explanation: Vec::new(), span_hit };
+                // `mut` is needed only by the whole-record provenance push below.
+                #[cfg_attr(not(feature = "whole-record-dense"), allow(unused_mut))]
                 let mut explanation = if request.mode == GLKRecallMode::UnionBest {
                     crate::recall_explainer::explain(
                         &bare,
@@ -12852,6 +12876,7 @@ impl EstateCoordinator {
                 // voted for this id, in slot order. Mirrors Swift's step-11
                 // "denseSignals: vectorDense:<modelID>, ..." line. Additive — only
                 // present when the dense lane surfaced this id.
+                #[cfg(feature = "whole-record-dense")]
                 if let Some(voters) = dense_signals_by_id.get(&bare.id) {
                     if !voters.is_empty() {
                         let names: Vec<String> =
@@ -12869,6 +12894,7 @@ impl EstateCoordinator {
             union_profile,
             // dense_lane_status is populated from the float_nearest outcome above:
             // Some("dark:<reason>") when the lane was dark, None on hits or no corpus.
+            #[cfg(feature = "whole-record-dense")]
             dense_lane_status,
             // degraded_stages accumulates stage IDs for any lane that threw and was
             // recovered. Empty on the happy path. "stage failed" (non-empty) is
@@ -13099,6 +13125,7 @@ impl EstateCoordinator {
         // CorpusOnly never attempt the dense lane, so they carry None; the
         // dark:noCorpus tag belongs to UnionBest, which the multi-lane path
         // sets in its dense block.
+        #[cfg(feature = "whole-record-dense")]
         let fallback_dense_lane_status: Option<String> = None;
 
         // M4 single-derivation: this path runs for modes that compile a sketch
@@ -13119,6 +13146,7 @@ impl EstateCoordinator {
             request,
             plan,
             union_profile,
+            #[cfg(feature = "whole-record-dense")]
             dense_lane_status: fallback_dense_lane_status,
             // Only a scoring-fallback stage can be recorded here (set above);
             // there is no throwing stage on the locus-ranked path.
@@ -15732,6 +15760,7 @@ fn binary_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric:
 /// Unknown strings and `None` shapes both degrade to cosine per the shape
 /// contract — a shape must degrade, never fail. Twin of Swift
 /// `RecallDirector.floatMetric(for:)`.
+#[cfg(feature = "whole-record-dense")]
 fn float_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric::FloatMetric {
     match shape.map(|s| s.float_metric.as_str()) {
         Some("l2") => synapsekit::engine::metric::FloatMetric::L2,

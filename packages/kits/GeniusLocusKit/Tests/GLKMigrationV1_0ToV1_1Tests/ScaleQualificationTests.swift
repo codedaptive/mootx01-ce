@@ -109,7 +109,9 @@ struct ScaleQualificationTests {
                        "release engineering process",
                        "memory palace estate"]
         for (i, query) in queries.enumerated() {
-            // Per-signal dense float lane: every configured signal must serve.
+#if MOOTX01_WHOLE_RECORD_DENSE
+            // Per-signal whole-record float lane (sidecar build only): every
+            // configured signal must serve.
             let tF = Date()
             let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
             q("recall.q\(i).float_all_signals_ms",
@@ -121,6 +123,7 @@ struct ScaleQualificationTests {
                     q("recall.q\(i).float.\(modelID).served", false)
                 }
             }
+#endif
             let tQ = Date()
             let hits = try await engine.bm25TopK(query: query, limit: 5)
             q("recall.q\(i).latency_ms",

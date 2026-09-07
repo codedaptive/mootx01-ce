@@ -5287,10 +5287,10 @@ fn recall_precise_default_composition_returns_memory_shape() {
 fn recall_precise_named_composition_is_accepted() {
     let registry = EstateRegistry::new_inmemory();
     file_one_memory(&registry, "current as of 1921 the indemnity was 46 million marks", "history");
-    // A known grid composition ("dense-fused") must dispatch without error.
+    // A known grid composition ("hamming+text") must dispatch without error.
     let result = dispatch_tool(
         "moot_recall_precise",
-        &args!["query" => "indemnity", "composition" => "dense-fused"],
+        &args!["query" => "indemnity", "composition" => "hamming+text"],
         &registry,
         &SurfacedRecallLedger::new(),
     )
@@ -5343,7 +5343,7 @@ fn recall_shaped_known_preset_returns_memory_shape() {
     file_one_memory(&registry, "the river flows north past the old mill", "history");
     let result = dispatch_tool(
         "moot_recall_shaped",
-        &args!["query" => "river mill", "preset" => "conceptual"],
+        &args!["query" => "river mill", "preset" => "structural"],
         &registry,
         &SurfacedRecallLedger::new(),
     )
@@ -5408,51 +5408,28 @@ fn recall_shaped_missing_query_is_transport_fault() {
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
 }
 
-// ── float-metric presets (float-l2, float-dot) ───────────────────────────────
-// Mirror the Swift testShapedRecallFloatMetricPresetsAccepted cases.
+// ── every roster preset is accepted by the boundary ───────────────────────
 
+/// Every name in the roster dispatches through moot_recall_shaped and returns
+/// the moot_memory_search shape. Mirrors Swift
+/// `testShapedRecallEveryRosterPresetAccepted`.
 #[test]
-fn recall_shaped_float_l2_preset_is_accepted() {
-    // float-l2 is a valid roster name — the MCP boundary must accept it and
-    // return the moot_memory_search shape (not a tool error).
+fn recall_shaped_every_roster_preset_is_accepted() {
     let registry = EstateRegistry::new_inmemory();
-    file_one_memory(&registry, "the tide rises past the sea wall at dusk", "history");
-    let result = dispatch_tool(
-        "moot_recall_shaped",
-        &args!["query" => "tide sea wall", "preset" => "float-l2"],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("moot_recall_shaped with float-l2 preset must succeed");
-    assert!(is_success(&result), "float-l2 must not return a tool error");
-    let text = content_text(&result);
-    assert!(
-        text.starts_with("found ") && text.contains("candidate memor"),
-        "float-l2 must emit the moot_memory_search shape; got: {text}"
-    );
+    file_one_memory(&registry, "the tide rises past the sea wall at dusk", "shore");
+    for preset in genius_locus_kit::recall::RecallShape::PRESET_NAMES {
+        let result = dispatch_tool(
+            "moot_recall_shaped",
+            &args!["query" => "tide sea wall", "preset" => preset],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .unwrap_or_else(|e| panic!("moot_recall_shaped with preset {preset} must succeed: {e:?}"));
+        assert!(is_success(&result), "{preset} must not return a tool error");
+        let text = content_text(&result);
+        assert!(text.starts_with("found "), "{preset} must emit the moot_memory_search shape; got: {text}");
+    }
 }
-
-#[test]
-fn recall_shaped_float_dot_preset_is_accepted() {
-    // float-dot is a valid roster name — the MCP boundary must accept it and
-    // return the moot_memory_search shape (not a tool error).
-    let registry = EstateRegistry::new_inmemory();
-    file_one_memory(&registry, "the crane stands motionless at the water's edge", "history");
-    let result = dispatch_tool(
-        "moot_recall_shaped",
-        &args!["query" => "crane water edge", "preset" => "float-dot"],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("moot_recall_shaped with float-dot preset must succeed");
-    assert!(is_success(&result), "float-dot must not return a tool error");
-    let text = content_text(&result);
-    assert!(
-        text.starts_with("found ") && text.contains("candidate memor"),
-        "float-dot must emit the moot_memory_search shape; got: {text}"
-    );
-}
-
 /// Run moot_run_migration and return the (winner_bid, full_text).
 fn run_migration_for_confirm(registry: &EstateRegistry) -> (String, String) {
     let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();

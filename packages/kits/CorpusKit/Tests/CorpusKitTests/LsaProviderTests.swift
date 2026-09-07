@@ -1,6 +1,7 @@
-#if MOOTX01_DENSE_FAMILIES
-// Dense-family test — compiled only when DenseFamilies trait is on.
-// Off by default (plan 70BC55F3, 2026-09-05). See Package.swift.
+#if MOOTX01_LSA
+// LSA test — compiled only when the LSA trait is on (MOOTX01_LSA).
+// Dark and unproven since 2026-09-07; DenseFamilies does NOT enable it.
+// Enable with `swift test --traits LSA`. See CorpusKit/Package.swift.
 // LsaProviderTests.swift
 //
 // Conformance and correctness tests for LsaProvider.
@@ -228,4 +229,4 @@ struct LsaProviderTests {
     }
 }
 
-#endif // MOOTX01_DENSE_FAMILIES
+#endif // MOOTX01_LSA

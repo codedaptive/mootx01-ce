@@ -27,8 +27,8 @@
 //!   classifies the sentinel via `Fdc::encode_anchor` on the way in — one
 //!   classification door for `moot_file_memory`, vault import, and branch
 //!   promotion (one-door principle). UNRESOLVED content keeps the "000" sentinel.
-//! - `embedding_model_id` = `"default"` (selects the 1.0 default recall
-//!   ensemble — the five honest signals RI/PPMI/LSA/NMF/FDC fused in Lane D,
+//! - `embedding_model_id` = `"default"` (selects the default recall
+//!   ensemble — RI/PPMI/NMF/FDC fused in Lane D; plus LSA when the `lsa` feature is on,
 //!   trained on-corpus and reproducible cross-port; NOT a learned model-weight
 //!   embedding)
 
@@ -1167,13 +1167,12 @@ fn run_memory_search(
         .map(|h| h.score.final_score as f64)
         .collect();
     let discrimination = crate::recall_discrimination::classify(&hit_scores);
-    // Dense-lane dark flag: true when the dense lane is dark AND no span rerank
-    // stage is registered for this estate. With a stage registered the encoder
-    // reorders the lexical head, so a dark dense lane no longer means the ranking
-    // is lexical-only. Used to cap the discrimination signal so "high — clear top
-    // result" is never reported on a ranking that lacked any semantic signal.
+    // Dense-lane dark flag: true when no span rerank stage is registered for
+    // this estate. The span stage is the one dense provider, so without it the
+    // ranking is lexical-only. Used to cap the discrimination signal so "high —
+    // clear top result" is never reported on a ranking that lacked any
+    // semantic signal.
     let dense_lane_dark = crate::recall_discrimination::dense_lane_dark(
-        result.dense_lane_status.as_deref(),
         coord.is_span_rerank_registered(&estate.handle),
     );
 
@@ -2538,10 +2537,6 @@ fn run_fact_search(
     let limit = clamp_limit(optional_integer(args, "limit")?, "limit", 100, crate::dispatch::LIMIT_HARD_CEILING)?;
 
     let coord = estate.coord.lock().unwrap();
-    // Capture dense-lane availability before consuming the lock via recall_kg_facts.
-    // `has_corpus` is a cheap registry lookup — no I/O — so it is safe to call
-    // under the same lock acquisition before the recall call.
-    let dense_lane_dark = !coord.has_corpus(&estate.handle);
     let facts_raw = coord
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
@@ -2628,13 +2623,6 @@ fn run_fact_search(
             "{}  [{}] {} [{}]  filed={}  {}  addedBy={}",
             f.id, f.subject, f.predicate, f.object, filed_iso, source_field, f.added_by
         ));
-    }
-    // Dark-lane hint: when a query was supplied and the dense lane is dark (no
-    // corpus registered), append a recall_provenance line using the same format
-    // as moot_memory_search so AI callers receive a consistent signal. "0 results"
-    // then means "no lexical match", not "this fact does not exist semantically".
-    if query.is_some() && dense_lane_dark {
-        lines.push("recall_provenance: dense_lane:dark:noCorpus degraded_stages:none".to_owned());
     }
     Ok(text_result(&lines.join("\n")))
 }

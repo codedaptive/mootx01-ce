@@ -84,7 +84,8 @@ pub struct PreciseMatch {
 /// `PreciseRecall.run`.
 ///
 /// - `composition`: the named reduction composition from `CompositionGrid`
-///   (e.g. "hamming+tokenExact", "dense-fused", "weighted-all"). `None` ⇒ the
+///   (e.g. "hamming+tokenExact", "weighted-all"; "dense-fused" only with the
+///   `whole-record-dense` feature). `None` ⇒ the
 ///   default `text` — the original `query_precision` behavior — so an
 ///   unspecified or unknown name reproduces today's recipe.
 ///

@@ -17,7 +17,7 @@
 
 use corpus_kit::basis_blob_frame;
 use corpus_kit::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
-use corpus_kit::{BasisStore, Corpus, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis};
+use corpus_kit::{BasisStore, Corpus, EmbeddingModelConfig, PersistedBasis};
 use corpus_kit_providers::{RandomIndexingProvider, BASIS_FORMAT_VERSION};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -92,10 +92,9 @@ fn stale_format_opens_untrained_and_reindex_republishes() {
             corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
         }
         corpus.reindex(NOW_MILLIS).expect("reindex");
-        assert!(
-            matches!(corpus.float_nearest("car engine", 3), FloatLaneOutcome::Hits(_)),
-            "a trained corpus must serve the float lane"
-        );
+        // A trained basis embeds the probe; an untrained slot returns [].
+        let trained = corpus.embed_float("car engine").expect("embed_float");
+        assert!(!trained.is_empty(), "a trained corpus must embed through its basis");
     }
 
     // 2. Rewrite both rows under the previous format version — the shape an
@@ -149,10 +148,11 @@ fn stale_format_opens_untrained_and_reindex_republishes() {
 
     // Reopen over the same file: the slot must open untrained.
     let reopened = ri_corpus(storage_at(&path));
-    let outcome = reopened.float_nearest("car engine", 3);
+    let untrained = reopened.embed_float("car engine").unwrap_or_default();
     assert!(
-        matches!(outcome, FloatLaneOutcome::UnavailableProviderOptOut),
-        "a stale-format basis must open the slot untrained (provider opt-out); got {outcome:?}"
+        untrained.is_empty(),
+        "a stale-format basis must open the slot untrained (empty embedding); got {} dims",
+        untrained.len()
     );
 
     // 4. The retrain republishes current-format rows and the lane serves.
@@ -176,8 +176,6 @@ fn stale_format_opens_untrained_and_reindex_republishes() {
         Some(BASIS_FORMAT_VERSION),
         "reindex must republish the counts in the current format"
     );
-    assert!(
-        matches!(reopened.float_nearest("car engine", 3), FloatLaneOutcome::Hits(_)),
-        "after the retrain the float lane must serve again"
-    );
+    let retrained = reopened.embed_float("car engine").expect("embed_float");
+    assert!(!retrained.is_empty(), "after the retrain the basis must embed again");
 }

@@ -930,6 +930,7 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
 // dark:noFloatRows (store has no float rows), NOT dark:providerOptOut.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "whole-record-dense")]
 /// D-1: locusOnly result carries dense_lane_status = None.
 #[test]
 fn d1_locus_only_dense_lane_status_is_none() {
@@ -950,6 +951,7 @@ fn d1_locus_only_dense_lane_status_is_none() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-2: unionBest with no corpus registered → dark:noCorpus (Wave B Part 2).
 /// Previously serialized as None; now carries an explicit tag so callers can
 /// distinguish "lane never attempted (no corpus)" from "lane ran and produced hits".
@@ -975,6 +977,7 @@ fn d2_union_best_no_corpus_dense_lane_status_is_dark_no_corpus() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-6: unionBest with corpus registered but empty query text → dark:emptyQuery
 /// (Wave B Part 2). The float index cannot be queried without a query string.
 #[test]
@@ -1005,6 +1008,7 @@ fn d6_union_best_corpus_empty_query_dense_lane_status_is_dark_empty_query() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-3: unionBest with deterministic corpus + no ingest → dark:noFloatRows.
 /// The deterministic provider supports embed_float (returns 32 floats) so the
 /// probe succeeds; the store has no float rows → UnavailableNoFloatRows.
@@ -1034,6 +1038,7 @@ fn d3_union_best_corpus_no_ingest_dense_lane_status_dark_no_float_rows() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-4: unionBest with ingested content → dense_lane_status = None
 /// (the lane ran and contributed hits — no dark marker).
 #[test]
@@ -1067,6 +1072,7 @@ fn d4_union_best_with_ingest_dense_lane_status_is_none_on_hits() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-5: unionBest with forced provider opt-out → dark:providerOptOut.
 #[test]
 fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
@@ -1094,6 +1100,7 @@ fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-6: UnionBest with forced storeError — full chain proof.
 ///
 /// Uses the `forced_float_error` seam (enabled via the `test-seams` feature on
@@ -1172,6 +1179,7 @@ fn d6_union_best_forced_store_error_full_chain() {
     }
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-7 (mode-gating): Hybrid recall with a registered corpus produces NO dense
 /// status and NO VectorDense evidence — the dense lane is UnionBest-only.
 ///
@@ -1225,6 +1233,7 @@ fn d7_hybrid_mode_produces_no_dense_status_no_dense_evidence() {
     }
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// D-8 (mode-gating): CorpusOnly recall with a registered corpus produces NO
 /// dense status and NO VectorDense evidence — the dense lane is UnionBest-only.
 ///
@@ -1755,6 +1764,7 @@ fn f3_union_best_matrix_aware_with_tier_populates_union_profile() {
     );
 }
 
+#[cfg(feature = "whole-record-dense")]
 /// F-4: Dense column still consumed per the gate-2 contract.
 ///
 /// Verifies that when a corpus is registered and the dense lane runs in
@@ -2228,6 +2238,7 @@ fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<CorpusContentEng
 
 // H-1: single-provider (production default) dense lane runs and surfaces a
 // VectorDense source — the pre-6b single-float_nearest path.
+#[cfg(feature = "whole-record-dense")]
 #[test]
 fn h1_single_provider_dense_lane_runs_unchanged() {
     let (mut coord, h) = open_one();
@@ -2269,6 +2280,7 @@ fn h1_single_provider_dense_lane_runs_unchanged() {
 // H-2: two-provider consensus — both dense signals vote, the fused hit records
 // per-signal provenance for both model_ids, and the strong-agreement drawer
 // ranks at/above the weak-agreement drawer.
+#[cfg(feature = "whole-record-dense")]
 #[test]
 fn h2_two_provider_dense_consensus_records_provenance_and_outranks() {
     let (mut coord, h) = open_one();

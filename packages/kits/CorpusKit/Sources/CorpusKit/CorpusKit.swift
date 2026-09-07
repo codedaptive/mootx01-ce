@@ -34,120 +34,11 @@ import SubstrateML
 import SubstrateTypes
 import SynapseKit
 
-// MARK: - FloatLaneOutcome
-
-/// The observable outcome of a `Corpus.floatNearest` call.
-///
-/// Dark outcomes (`.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
-/// `.emptyQuery`) are EXPECTED degradations — the calling lane degrades
-/// gracefully and emits an explainer marker. `.storeError` is NOT expected:
-/// it is logged via OSLog and emitted as a telemetry counter so that store
-/// failures are never swallowed silently. `.hits` is the happy path.
-///
-/// Callers must never treat a dark outcome as an error — per the softPrior
-/// grammar a dark dense lane means the query runs on the other lanes only,
-/// not that the query failed.
-public enum FloatLaneOutcome: Sendable {
-    /// The lane ran and returned at least one ranked hit.
-    ///
-    /// - Parameter hits: `(itemID, cosineSimilarity)` pairs, nearest first.
-    ///   `itemID` is the `sourceID` the caller ingested under (drawer ID in
-    ///   the GLK context). Similarity ∈ [−1, 1], 1.0 = identical direction.
-    case hits([(itemID: String, similarity: Float)])
-
-    /// Provider opted out of the float lane — expected, not an error.
-    ///
-    /// The configured `EmbeddingProvider` threw `SynapseKitError.embeddingFailed`
-    /// on the embed call, indicating it has no float lane at all (structural
-    /// opt-out). This is the normal outcome for the default `.deterministic`
-    /// provider and for any provider that does not override `embedFloat`. The
-    /// dense lane is dark for this corpus; all other lanes are unaffected.
-    ///
-    /// Distinct from `.unavailableNoVocabHit`: that case indicates a TRAINED
-    /// distributional provider where this specific query's tokens are all
-    /// out-of-vocabulary. Both produce no float candidates, but the cause
-    /// differs — a structural opt-out vs a vocabulary coverage gap.
-    case unavailableProviderOptOut
-
-    /// Trained distributional provider returned no float vector because all
-    /// query tokens are out-of-vocabulary (OOV) — expected, not an error.
-    ///
-    /// The provider HAS a trained basis (vocab is non-empty) but none of the
-    /// query's tokens appear in it. This is the normal outcome for a query on
-    /// a thinly-trained estate or a query using vocabulary the corpus never saw.
-    /// The dense lane is dark for this query; recall continues on other lanes.
-    ///
-    /// Distinct from `.unavailableProviderOptOut` (provider has no float lane
-    /// at all) and from `.unavailableNoFloatRows` (provider supports float but
-    /// ingest has not run yet or stored no rows).
-    ///
-    /// Surface string: `dense_lane:dark:vocabMiss`.
-    case unavailableNoVocabHit
-
-    /// No float rows are stored — expected when ingest has not run yet or the
-    /// provider opted out during ingest. Dense lane is dark; other lanes are
-    /// unaffected.
-    case unavailableNoFloatRows
-
-    /// Query was empty or `limit` was zero — the call was a no-op.
-    ///
-    /// Not a store error; the caller supplied a query that cannot produce
-    /// results. No telemetry emitted for this case beyond the outcome itself.
-    case emptyQuery
-
-    /// The vector store threw an error during `findNearestFloat`.
-    ///
-    /// This is NOT an expected degradation. CorpusKit logs the error via OSLog
-    /// (category "CorpusKit") and emits a `corpus.float_lane.store_error`
-    /// telemetry counter so the failure is observable. The query still succeeds
-    /// on the other lanes — this outcome degrades, not fails.
-    ///
-    /// - Parameter error: The underlying store error. Included for logging at
-    ///   the call site; not propagated to the caller as a thrown error.
-    case storeError(Error)
-}
-
-// MARK: - FloatDiscriminationSignal
-
-/// Per-query discrimination signal from the dense float lane.
-///
-/// Measures how spread the top-K cosine similarity scores are, distinguishing
-/// a contrastive regime (clear semantic winner) from a saturated regime (all
-/// scores near-uniform, as observed with short chat turns dominated by stopword
-/// mass — pairwise document cosines 0.93–0.98 collapse query-to-document cosines
-/// to a similarly narrow band).
-///
-/// **Statistic choice — relative spread:**
-/// `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
-/// - Saturated regime (short-text RI vectors): spread ≈ 0.05 (no clear winner).
-/// - Contrastive regime (meaningful semantic hit): spread ≥ 0.15.
-/// - Only two values needed: the first and last of the already-sorted `.hits`
-///   list — O(1) cost with zero extra store access or embed calls.
-/// - Degrades safely when `maxSim ≤ 0`: returns 0.0 (treat as saturated).
-///
-/// **Design boundary:** CorpusKit computes and reports; GLK (RecallDirector)
-/// decides what to do with the signal. CorpusKit never changes behaviour based
-/// on it — measurement only. Standalone CorpusKit consumers receive the raw
-/// signal for their own fusion decisions.
-public struct FloatDiscriminationSignal: Sendable {
-    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
-    ///
-    /// 0.0 = perfectly saturated (all scores identical, or max cosine non-positive);
-    /// 1.0 = maximally discriminating (best score, worst near 0).
-    ///
-    /// Threshold guidance for GLK consumers (defined in RecallDirector):
-    ///   < 0.10 → clearly saturated regime — strong discount.
-    ///   0.10–0.15 → transition band — partial discount.
-    ///   ≥ 0.15 → contrastive — no discount (discriminationFactor = 1.0).
-    public let relativeSpread: Float
-
-    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
-    public let hitCount: Int
-}
-
 /// CorpusKit OSLog logger (category "CorpusKit").
 ///
-/// Used by `floatNearest` to log store errors so they are never swallowed.
+/// Logs store errors so they are never swallowed; in the default build the
+/// callers are the content engine and the span stage, and under the
+/// WholeRecordDense trait the sidecar's `floatNearest` as well.
 /// Declared at file scope to avoid repeated Logger construction on the hot path
 /// (Logger init is not free on older OS versions).
 private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
@@ -449,7 +340,7 @@ public enum EmbeddingModel: Sendable {
 /// by (modelID, modelVersion) — hold the N providers' rows side by side with
 /// no schema change.
 ///
-/// The single-signal entry points (`recall`, `floatNearest`, `embed`,
+/// The single-signal entry points (`recall`, `embed`, and `floatNearest` under the WholeRecordDense trait,
 /// `embedFloat`, `modelID`, `supportsFloat`) delegate to the DEFAULT signal —
 /// the first held slot — so existing callers are unaffected. The per-signal
 /// fan-out for recall is exposed additively via `floatNearestPerSignal`, the
@@ -558,11 +449,11 @@ public actor Corpus {
     /// trainable provider with no persisted basis (see the field doc below).
     /// For N=1 the corpus holds exactly one slot, and every fan-out loop runs
     /// once — byte-identical to the single-provider path.
-    private struct ProviderSlot {
+    package struct ProviderSlot {
         /// The serving provider for this signal. `var` because the load-on-open
         /// path and each training pass install a replacement. Never exposed on
         /// the public surface (sealed-vector principle).
-        var provider: any EmbeddingProvider
+        package var provider: any EmbeddingProvider
         /// The serialized EMPTY (untrained) basis of a trainable provider — the
         /// from-scratch factory. Non-nil for EVERY trainable slot (RI/PPMI/LSA/
         /// NMF), whether the slot was built fresh OR restored from a persisted
@@ -614,7 +505,7 @@ public actor Corpus {
     /// so BM25 keyword state persists across process restarts. Loaded into RAM on open
     /// via `open()` (reads iix_termfreqs + iix_doclens rows; no chunk bodies touched).
     private let invertedIndex: InvertedIndexStore
-    private let vectorStore: VectorStore
+    package let vectorStore: VectorStore
     private let basisStore: BasisStore
     /// Persisted, incrementally-maintained per-provider statistics (the counts
     /// table). Holds each trainable provider's additive state so it is grown on
@@ -633,21 +524,23 @@ public actor Corpus {
     /// construction order. `slots[0]` is the DEFAULT signal that the
     /// single-signal entry points delegate to. Never empty: every init builds
     /// at least one slot. For N=1 this holds exactly one slot.
-    private var slots: [ProviderSlot]
+    package var slots: [ProviderSlot]
     private var hlcGenerator: HLCGenerator
-    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` and `floatNearest` joins.
+    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join (and the sidecar `floatNearest` join under the WholeRecordDense trait).
     ///
     /// Populated on `init` via a compact `(id, source_id)` projection from the chunks
     /// table (no body text loaded — O(N) row count only). Updated on each `ingest`
     /// call. Cleared per-source on `remove(sourceID:)`. In-memory only; warm-loaded
     /// on every open alongside `InvertedIndexStore.open()` so both stay in sync.
-    private var chunkSourceMap: [UUID: String] = [:]
+    package private(set) var chunkSourceMap: [UUID: String] = [:]
 
+#if MOOTX01_WHOLE_RECORD_DENSE
     /// Test-only: when non-nil, `floatNearest` returns `.storeError(this)` immediately,
     /// bypassing the real vector store. Set via `_testForceFloatStoreError(_:)`.
     /// Never set in production code; documented here so future agents do not mistake
     /// this property for production logic.
-    var _forcedFloatError: Error? = nil
+    package var _forcedFloatError: Error? = nil
+#endif
 
     // MARK: - Training path decision seam (Part 3, standalone reindex)
 
@@ -936,7 +829,7 @@ public actor Corpus {
     /// callers see exactly the first held provider, identical to the
     /// single-provider behaviour. `slots` is never empty (every init
     /// builds at least one slot), so the force-unwrap of `first` cannot trap.
-    private var defaultProvider: any EmbeddingProvider {
+    package var defaultProvider: any EmbeddingProvider {
         // swiftlint:disable:next force_unwrapping — slots is never empty (init invariant)
         slots.first!.provider
     }
@@ -1117,18 +1010,6 @@ public actor Corpus {
         // WS2-F3: backfill corpus_metadata rows for any existing chunks (same
         // as production init — idempotent upsert).
         try await bundleStore.recomputeAllCorpusMerkleRoots()
-    }
-
-    /// Test-only: force `floatNearest` to return `.storeError(error)` on the next call.
-    ///
-    /// Intended for tests that need to verify the store-error code path (observable
-    /// degradation contract §4). The error is consumed on the first `floatNearest`
-    /// call after this is set; subsequent calls behave normally.
-    ///
-    /// Never call this in production code. Marked `internal` so it is visible to
-    /// `@testable import CorpusKit` test suites and invisible to callers outside the module.
-    func _testForceFloatStoreError(_ error: Error) {
-        _forcedFloatError = error
     }
 
     // MARK: - Public API
@@ -1328,7 +1209,14 @@ public actor Corpus {
                         // Single inference pass: embedPair computes the provider's
                         // pooled vector ONCE and returns both the binary engram and
                         // the dense float vector.
+#if MOOTX01_WHOLE_RECORD_DENSE
                         let (engram, floats) = try await fp.provider.embedPair(chunk.text)
+#else
+                        // The default build stores the engram only: the pooled float
+                        // is computed for the projection and dropped (whole-record dense
+                        // rows are a WholeRecordDense sidecar write).
+                        let (engram, _) = try await fp.provider.embedPair(chunk.text)
+#endif
                         // Binary engram row (vectorIndex 0) — always written.
                         rows.append(VectorPayloadInput(
                             itemID: chunk.id.uuidString,
@@ -1338,6 +1226,7 @@ public actor Corpus {
                             modelVersion: fp.provider.modelVersion,
                             filedAt: fp.now
                         ))
+#if MOOTX01_WHOLE_RECORD_DENSE
                         // Float lane (Lane D): vectorIndex 1 (kind=float32), present
                         // only when the provider's float lane is live and the chunk
                         // resolved (`floats` non-empty).
@@ -1351,6 +1240,7 @@ public actor Corpus {
                                 filedAt: fp.now
                             ))
                         }
+#endif
                     }
                     return rows
                 }
@@ -1751,17 +1641,26 @@ public actor Corpus {
                     let nowLocal = itemNows[input.idx]
                     for p in provs {
                         for chunk in input.chunks {
+#if MOOTX01_WHOLE_RECORD_DENSE
                             let (engram, floats) = try await p.provider.embedPair(chunk.text)
+#else
+                            // The default build stores the engram only: the pooled float
+                            // is computed for the projection and dropped (whole-record dense
+                            // rows are a WholeRecordDense sidecar write).
+                            let (engram, _) = try await p.provider.embedPair(chunk.text)
+#endif
                             rows.append(VectorPayloadInput(
                                 itemID: chunk.id.uuidString, vectorIndex: 0,
                                 payload: VectorPayload(engram: engram),
                                 modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
+#if MOOTX01_WHOLE_RECORD_DENSE
                             if !floats.isEmpty {
                                 rows.append(VectorPayloadInput(
                                     itemID: chunk.id.uuidString, vectorIndex: 1,
                                     payload: VectorPayload(floats: floats),
                                     modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
                             }
+#endif
                         }
                     }
                     out.append((input.idx, rows))
@@ -2309,7 +2208,14 @@ public actor Corpus {
                 for chunk in batch {
                     // Single inference pass: embedPair returns the engram and the
                     // float vector from ONE computation.
+#if MOOTX01_WHOLE_RECORD_DENSE
                     let (engram, floats) = try await prov.embedPair(chunk.text)
+#else
+                    // The default build stores the engram only: the pooled float
+                    // is computed for the projection and dropped (whole-record dense
+                    // rows are a WholeRecordDense sidecar write).
+                    let (engram, _) = try await prov.embedPair(chunk.text)
+#endif
                     rows.append(VectorPayloadInput(
                         itemID: chunk.id.uuidString,
                         vectorIndex: 0,
@@ -2318,6 +2224,7 @@ public actor Corpus {
                         modelVersion: modelVersion,
                         filedAt: filedAt
                     ))
+#if MOOTX01_WHOLE_RECORD_DENSE
                     // Float lane (Lane D): added only when non-empty.
                     if !floats.isEmpty {
                         rows.append(VectorPayloadInput(
@@ -2329,6 +2236,7 @@ public actor Corpus {
                             filedAt: filedAt
                         ))
                     }
+#endif
                 }
                 return rows
             }
@@ -2615,436 +2523,6 @@ public actor Corpus {
     public func embedFloat(_ text: String) async throws -> [Float] {
         // Single-signal entry point: embeds on the DEFAULT signal.
         try await defaultProvider.embedFloat(text)
-    }
-
-    /// Dense float nearest-neighbour recall (Lane D): embed `query` to its
-    /// pooled float vector and rank stored chunks by cosine over the in-house
-    /// `FloatBruteForceIndex`. Returns a `FloatLaneOutcome` that is always
-    /// observable — dark lanes carry a typed reason, store errors are logged
-    /// and counted, never swallowed.
-    ///
-    /// This is the cosine path the 256-bit SimHash-Hamming lane could not
-    /// serve: cosine is scale-invariant, so an answer statement ranks above a
-    /// near-duplicate of the question.
-    ///
-    /// **Degradation contract:** this method never throws. A dark lane is
-    /// represented as `.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
-    /// or `.emptyQuery` — all expected outcomes. `.storeError` is NOT expected:
-    /// the error is logged (OSLog "CorpusKit") and emitted as
-    /// `corpus.float_lane.store_error` telemetry before returning so the
-    /// failure is always observable. The query continues on other lanes.
-    ///
-    /// **Telemetry** (off by default — single `Atomic<Bool>` load when disabled):
-    /// - `corpus.float_lane.hit`           — lane ran and returned ≥1 result.
-    /// - `corpus.float_lane.dark_provider` — provider opted out.
-    /// - `corpus.float_lane.dark_no_rows`  — no float rows stored.
-    /// - `corpus.float_lane.store_error`   — unexpected store failure.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches.
-    /// - Returns: a `FloatLaneOutcome` describing the result.
-    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
-        guard limit > 0, !query.isEmpty else {
-            // Empty query or zero limit — no telemetry: this is a no-op call.
-            return .emptyQuery
-        }
-
-        // Test-only hook: if a forced error is installed, consume it and return
-        // .storeError immediately. This exercises the observable store-error code
-        // path without requiring production modifications to the vector store.
-        // Both entry points consult the hook: this single-signal path, and the
-        // per-signal `floatNearestPerSignal` for its DEFAULT slot (slot 0), so the
-        // store-error dark contract is observable through whichever path GLK uses.
-        if let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            corpusLog.error("floatNearest: findNearestFloat failed — \(forced, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .storeError(forced)
-        }
-
-        // Single-signal entry point: run the dense float lane on the DEFAULT
-        // signal. The per-provider mechanics live in `floatNearest(provider:…)`
-        // so `floatNearestPerSignal` can reuse them unchanged.
-        return await floatNearest(provider: defaultProvider, query: query, limit: limit)
-    }
-
-    /// Dense float recall for ONE provider — the per-signal mechanics shared by
-    /// `floatNearest`/`floatNearestPerSignal` (nearest) and
-    /// `floatFarthestPerSignal` (farthest, anti-similarity).
-    ///
-    /// Embeds `query` via `provider.embedFloat`, ranks stored chunks for that
-    /// provider's modelID by cosine over the in-house `FloatBruteForceIndex`,
-    /// aggregates chunk hits to source (drawer) level, and returns an observable
-    /// `FloatLaneOutcome`. The telemetry counters and the degradation contract
-    /// are identical regardless of direction.
-    ///
-    /// `direction` selects the objective (mission 6b-modifiers-antisim):
-    ///   - `.nearest`  — surface the most SIMILAR sources. The store returns the
-    ///     nearest chunks (`findNearestFloat`); a source's similarity is its
-    ///     BEST (max) chunk cosine; sources rank similarity DESCENDING. This is
-    ///     byte-identical to the pre-antisim behaviour (default).
-    ///   - `.farthest` — surface the most DISSIMILAR sources ("find things
-    ///     UNLIKE this"). The store returns the farthest chunks
-    ///     (`findFarthestFloat`); a source's dissimilarity is its WORST (min)
-    ///     chunk cosine; sources rank similarity ASCENDING. The max→min
-    ///     inversion is required: a source's anti-similarity is governed by its
-    ///     LEAST-similar chunk, the mirror of nearest's best-chunk rule.
-    private func floatNearest(
-        provider: any EmbeddingProvider,
-        query: String,
-        limit: Int,
-        direction: SearchDirection = .nearest
-    ) async -> FloatLaneOutcome {
-        // Attempt to embed the query text via the float lane.
-        //
-        // Three distinct paths:
-        //   1. Result is non-empty → proceed with the probe vector.
-        //   2. Result is empty ([] from an untrained provider, or text that
-        //      tokenises to nothing) → structural opt-out. Emit the
-        //      dark_provider counter and return .unavailableProviderOptOut.
-        //   3. Throw SynapseKitError.embedFloatVocabMiss → the provider HAS a
-        //      trained basis but all query tokens are OOV. This is a vocabulary
-        //      coverage miss, not a structural opt-out. Return
-        //      .unavailableNoVocabHit with its own counter so callers observe
-        //      the correct dark-lane reason.
-        //   4. Any other throw → structural opt-out (same as path 2).
-        //
-        // Path 2 and 4 share the dark_provider counter. Path 3 has its own
-        // dark_vocabMiss counter (corpus.float_lane.dark_vocab_miss).
-        let probe: [Float]
-        do {
-            let result = try await provider.embedFloat(query)
-            guard !result.isEmpty else {
-                // Provider returned an empty vector (untrained distributional
-                // provider, or text that produces no tokens). Classify as
-                // structural opt-out: the provider cannot produce a float vector
-                // for structural reasons, not because of vocabulary coverage.
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_provider",
-                    value: 1.0,
-                    tags: ["kit": "CorpusKit"],
-                    ts: Date().timeIntervalSince1970
-                ))
-                return .unavailableProviderOptOut
-            }
-            probe = result
-        } catch SynapseKitError.embedFloatVocabMiss {
-            // Trained distributional provider: basis exists but query tokens
-            // are all OOV. This is a vocabulary coverage miss — truthfully
-            // distinct from a structural opt-out. Emit a separate counter
-            // so telemetry surfaces vocabulary coverage vs. lane availability.
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_vocab_miss",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoVocabHit
-        } catch {
-            // Provider threw a non-vocabMiss error — structural opt-out (e.g.
-            // the deterministic provider, or any provider without a float lane).
-            // Log nothing; emit the dark_provider counter only.
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_provider",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableProviderOptOut
-        }
-
-        // Over-fetch 4× at the CHUNK granularity so that after source-level
-        // aggregation we still have at least `limit` sources, mirroring
-        // bm25TopKBySource's over-fetch discipline. The float index keys rows by
-        // chunk.id (the vector item_id); we aggregate to sourceID below.
-        let matches: [VectorMatch]
-        do {
-            // Direction selects which end of the cosine ranking the store
-            // returns. Farthest is NOT a reordering of nearest results — the
-            // dissimilar chunks are not in the nearest top-K, so the store must
-            // run the farthest scan (mission 6b-modifiers-antisim).
-            switch direction {
-            case .nearest:
-                matches = try await vectorStore.findNearestFloat(
-                    probe: probe, modelID: provider.modelID, limit: limit * 4)
-            case .farthest:
-                matches = try await vectorStore.findFarthestFloat(
-                    probe: probe, modelID: provider.modelID, limit: limit * 4)
-            }
-        } catch {
-            // Store threw — this is NOT expected. Log it via OSLog so it is
-            // never silent, then emit the store_error counter for telemetry
-            // dashboards and alerts.
-            corpusLog.error("floatNearest: findNearestFloat failed — \(error, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .storeError(error)
-        }
-
-        // Empty matches means no float rows are stored — expected dark outcome.
-        guard !matches.isEmpty else {
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_no_rows",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoFloatRows
-        }
-
-        // Aggregate chunk-level cosine to SOURCE (drawer) level. The vector
-        // item_id is the chunk uuid string; chunkSourceMap resolves it to the
-        // sourceID the caller ingested under (the drawer id in the GLK context),
-        // exactly as bm25TopKBySource does, so float hits hydrate back to the
-        // real Drawer row.
-        //   .nearest  — a source's similarity is its BEST (max) chunk cosine.
-        //   .farthest — a source's anti-similarity is governed by its WORST
-        //               (min) chunk cosine: a source is "unlike the query" only
-        //               if even its closest chunk is far. Picking max here would
-        //               surface sources that happen to have one near chunk, the
-        //               opposite of the anti-similarity objective.
-        // VectorMatch.distance is the cosine DISTANCE (1 − sim) quantised
-        // ×10_000 (FloatBruteForceIndex convention); recover sim = 1 − dist/1e4.
-        var bySource: [String: Float] = [:]
-        for m in matches {
-            guard let chunkUUID = UUID(uuidString: m.itemID),
-                  let sourceID = chunkSourceMap[chunkUUID] else { continue }
-            let similarity = 1.0 - Float(m.distance) / 10_000.0
-            switch direction {
-            case .nearest:
-                bySource[sourceID] = max(bySource[sourceID] ?? -Float.greatestFiniteMagnitude, similarity)
-            case .farthest:
-                bySource[sourceID] = min(bySource[sourceID] ?? Float.greatestFiniteMagnitude, similarity)
-            }
-        }
-
-        // After source aggregation, no results means no chunks are in the
-        // chunk→source map (all chunks were removed). Treat as no-rows dark.
-        guard !bySource.isEmpty else {
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_no_rows",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoFloatRows
-        }
-
-        // Sort by similarity, sourceID ascending on tie (the universal
-        // deterministic tie-break), and return the top `limit`.
-        //   .nearest  — similarity DESCENDING (most similar first).
-        //   .farthest — similarity ASCENDING (most dissimilar first).
-        // The tie-break (sourceID ascending) is identical in both directions.
-        var ranked = bySource.map { (itemID: $0.key, similarity: $0.value) }
-        ranked.sort { a, b in
-            if a.similarity != b.similarity {
-                switch direction {
-                case .nearest:  return a.similarity > b.similarity
-                case .farthest: return a.similarity < b.similarity
-                }
-            }
-            return a.itemID < b.itemID
-        }
-        let result = Array(ranked.prefix(limit))
-
-        // Happy path — lane ran. Emit hit counter (count = result size so
-        // dashboards can see both that the lane ran and how many hits emerged).
-        Intellectus.report(.metric(
-            name: "corpus.float_lane.hit",
-            value: Double(result.count),
-            tags: ["kit": "CorpusKit"],
-            ts: Date().timeIntervalSince1970
-        ))
-        return .hits(result)
-    }
-
-    /// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
-    ///
-    /// Returns non-nil only for `.hits` with at least one result. The relative spread
-    /// `(maxSim − minSim) / max(maxSim, 0.001)` is computed from the FIRST and LAST
-    /// elements of the already-sorted similarity list — O(1), zero extra I/O.
-    ///
-    /// This helper is shared by `floatNearestPerSignalWithDiscrimination` on both
-    /// `Corpus` and `CorpusContentEngine` so the measurement is defined once.
-    nonisolated internal static func discriminationSignal(
-        from outcome: FloatLaneOutcome
-    ) -> FloatDiscriminationSignal? {
-        guard case .hits(let hits) = outcome, !hits.isEmpty else { return nil }
-        // `.hits` is sorted nearest-first (highest cosine first) for nearest recall.
-        // maxSim is hits[0].similarity; minSim is hits.last!.similarity.
-        let maxSim = hits[0].similarity
-        let minSim = hits[hits.endIndex - 1].similarity
-        // Guard against non-positive maxSim: cosines can be negative on an
-        // insufficiently trained basis; treat that regime as saturated (spread = 0).
-        let spread = maxSim > 0.001 ? (maxSim - minSim) / maxSim : 0.0
-        return FloatDiscriminationSignal(
-            relativeSpread: max(0.0, spread),
-            hitCount: hits.count)
-    }
-
-    /// Per-signal dense float nearest-neighbour recall (the 6b RRF-fusion seam).
-    ///
-    /// Runs the dense float lane independently for EVERY held provider slot,
-    /// each queried against its own modelID float index, and returns one ranked
-    /// `FloatLaneOutcome` per signal tagged by that signal's `modelID`. The
-    /// outcome ordering follows slot (construction) order, so `[0]` is always
-    /// the default signal.
-    ///
-    /// This is the seam the 6b mission's RRF/consensus fusion consumes: each
-    /// signal's per-source similarity ranking is exposed separately, preserving
-    /// the `FloatLaneOutcome` dark-lane observability per signal (a signal whose
-    /// provider opted out reports `.unavailableProviderOptOut`; one with no rows
-    /// reports `.unavailableNoFloatRows`; and so on). NO fusion happens here —
-    /// the caller (6b) decides how to combine the per-signal lists.
-    ///
-    /// For N=1 this returns a single-element array whose only outcome equals what
-    /// `floatNearest(query:limit:)` would return — same default-signal mechanics.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot order.
-    ///   An empty query or zero limit returns one `.emptyQuery` outcome per
-    ///   signal (no store access), mirroring the single-signal no-op guard.
-    public func floatNearestPerSignal(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        // No-op guard mirrors floatNearest: an empty query / zero limit yields a
-        // per-signal .emptyQuery without touching the store. Returning one entry
-        // per signal keeps the result shape stable (the caller can still see
-        // every signal's modelID).
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-
-        // Test-only hook: a forced store error is consumed for the DEFAULT slot
-        // (slot 0), mirroring the single-signal `floatNearest(query:limit:)`
-        // contract. GLK's dense lane consumes this method, so the store-error dark
-        // contract must remain observable through the per-signal path: the default
-        // signal reports `.storeError`, other slots run normally. The seam is
-        // single-use and consumed here exactly as the single-signal entry does.
-        var forcedDefaultStoreError: FloatLaneOutcome? = nil
-        if let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            corpusLog.error("floatNearestPerSignal: findNearestFloat failed (default signal) — \(forced, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            forcedDefaultStoreError = .storeError(forced)
-        }
-
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for (index, slot) in slots.enumerated() {
-            let provider = slot.provider
-            // Slot 0 (default signal) honours the forced-error seam if installed;
-            // all other slots — and slot 0 when no seam is set — run the real lane.
-            let outcome: FloatLaneOutcome
-            if index == 0, let forced = forcedDefaultStoreError {
-                outcome = forced
-            } else {
-                outcome = await floatNearest(provider: provider, query: query, limit: limit)
-            }
-            results.append((modelID: provider.modelID, outcome: outcome))
-        }
-        return results
-    }
-
-    /// Per-signal dense float FARTHEST recall — the anti-similarity sibling of
-    /// `floatNearestPerSignal` (mission 6b-modifiers-antisim).
-    ///
-    /// Runs the dense float lane in the FARTHEST direction independently for
-    /// EVERY held provider slot: each signal surfaces the most DISSIMILAR
-    /// sources for its modelID ("find things UNLIKE this"), ranked least-similar
-    /// first. The outcome shape, dark-lane observability, telemetry counters,
-    /// and slot ordering are identical to `floatNearestPerSignal`; only the
-    /// ranking objective differs (the store returns the farthest chunks, and a
-    /// source's score is its WORST chunk cosine — see `floatNearest(provider:…)`).
-    ///
-    /// This is the seam GLK's RecallShape `antiSimilarLanes` consumes: a dense
-    /// lane marked anti-similar queries THIS method for its per-signal list
-    /// instead of `floatNearestPerSignal`, so the dissimilar candidates flow
-    /// into the same RRF/consensus fold.
-    ///
-    /// The forced-error test seam is NOT consulted here — it is nearest-path
-    /// test infrastructure (`floatNearest`/`floatNearestPerSignal` only), so the
-    /// farthest path always runs the real lane.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot
-    ///   order. An empty query or zero limit returns one `.emptyQuery` outcome
-    ///   per signal (no store access), mirroring the nearest no-op guard.
-    public func floatFarthestPerSignal(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for slot in slots {
-            let provider = slot.provider
-            let outcome = await floatNearest(
-                provider: provider, query: query, limit: limit, direction: .farthest)
-            results.append((modelID: provider.modelID, outcome: outcome))
-        }
-        return results
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// The discrimination signal is non-nil exactly when the outcome is `.hits` with
-    /// at least one result; it is `nil` for all dark-lane outcomes.
-    ///
-    /// **Discrimination computation:**
-    /// For each `.hits` outcome, `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
-    /// where `maxSim` and `minSim` are the first and last cosines of the already-sorted
-    /// ranked list. This is O(1) and adds no store access or embed calls.
-    ///
-    /// **Policy boundary:** CorpusKit computes and exposes; calling code decides.
-    /// No behaviour change inside this method or anywhere in CorpusKit — measurement only.
-    /// RecallDirector (GLK) is the policy consumer: it discounts the dense contribution
-    /// when the lane self-reports degeneracy. Standalone CorpusKit consumers may use
-    /// the signal for their own fusion decisions.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome, discrimination)` triples, one per held signal,
-    ///   in slot order. `discrimination` is nil for non-`.hits` outcomes.
-    public func floatNearestPerSignalWithDiscrimination(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
-        // Delegate to the existing per-signal call, then compute discrimination from
-        // each `.hits` outcome's already-sorted similarity list. The existing function
-        // handles the forced-error test seam and all dark-lane paths, so this wrapper
-        // stays thin and does not duplicate that logic.
-        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
-        return perSignal.map { entry in
-            let discrimination: FloatDiscriminationSignal? = Self.discriminationSignal(from: entry.outcome)
-            return (modelID: entry.modelID, outcome: entry.outcome, discrimination: discrimination)
-        }
     }
 
     // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)

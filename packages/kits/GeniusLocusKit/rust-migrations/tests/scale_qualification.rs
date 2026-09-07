@@ -29,6 +29,7 @@ use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
 use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationState};
+#[cfg(feature = "whole-record-dense")]
 use synapsekit::engine::metric::FloatMetric;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
@@ -323,16 +324,20 @@ fn qualify_large_estate_migration() {
     .iter()
     .enumerate()
     {
-        // Per-signal dense float lane: every configured signal must serve.
-        let t_f = Instant::now();
-        let per_signal = engine.float_nearest_per_signal(query, 5, FloatMetric::Cosine);
-        q(
-            &format!("recall.q{i}.float_all_signals_ms"),
-            format!("{:.1}", t_f.elapsed().as_secs_f64() * 1000.0),
-        );
-        for (model_id, outcome) in &per_signal {
-            let served = matches!(outcome, corpus_kit::FloatLaneOutcome::Hits(h) if !h.is_empty());
-            q(&format!("recall.q{i}.float.{model_id}.served"), served);
+        // Per-signal whole-record float lane (sidecar build only): every
+        // configured signal must serve.
+        #[cfg(feature = "whole-record-dense")]
+        {
+            let t_f = Instant::now();
+            let per_signal = engine.float_nearest_per_signal(query, 5, FloatMetric::Cosine);
+            q(
+                &format!("recall.q{i}.float_all_signals_ms"),
+                format!("{:.1}", t_f.elapsed().as_secs_f64() * 1000.0),
+            );
+            for (model_id, outcome) in &per_signal {
+                let served = matches!(outcome, corpus_kit::FloatLaneOutcome::Hits(h) if !h.is_empty());
+                q(&format!("recall.q{i}.float.{model_id}.served"), served);
+            }
         }
         let t_q = Instant::now();
         let hits = engine.bm25_top_k(query, 5).unwrap_or_default();
