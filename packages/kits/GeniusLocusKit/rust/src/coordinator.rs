@@ -11766,16 +11766,16 @@ impl EstateCoordinator {
         //   (7) Steps 9.5 and 10 — post-hydration shingle MMR with windowed tie
         //       resolution (`union_best_mmr_select`), λ from the step 8 weights.
         //
-        // All other mode+scoring combinations (Hybrid/CorpusOnly regardless of
-        // scoring, and UnionBest with Raw/Rrf/Discriminative):
-        //   Swift also falls back to RRF for Hybrid and CorpusOnly with MatrixAware;
-        //   for UnionBest + Raw/Rrf Swift uses buffer.final (same as RRF here).
-        //   For simplicity, all non-(UnionBest+MatrixAware) paths use the RRF/raw
-        //   formula below, matching Swift's documented fallback behaviour.
-        //   Every UnionBest scoring then runs the SAME step 10 MMR stage as the
-        //   matrixAware branch (Swift computes the union profile and the adaptive
-        //   weights for every scoring strategy and takes λ from them); Hybrid and
-        //   CorpusOnly keep the plain presentation sort, as in Swift.
+        // All other mode+scoring combinations:
+        //   UnionBest + Raw/Rrf/Discriminative score from the buffer's `final`
+        //   (the per-lane max) and run the SAME step 10 MMR stage as the
+        //   matrixAware branch (Swift computes the union profile and the
+        //   adaptive weights for every scoring strategy and takes λ from them).
+        //   Hybrid and CorpusOnly + Rrf take the weighted reciprocal-rank
+        //   fusion and the presentation sort; MatrixAware and Discriminative
+        //   fall back to that fusion in these modes, as Swift does.
+        //   Hybrid and CorpusOnly + Raw take Swift's ordered list merge: the
+        //   locus, BM25 and vector lists in that order, dedup by id, `limit`.
         //
         // UnionBest + Discriminative is handled in the else-branch below: the
         // dense_discrimination_factor is computed for ALL UnionBest calls (the
@@ -12053,12 +12053,27 @@ impl EstateCoordinator {
                 }
             }
 
-            // Initial final column = per-lane RRF before normalisation.
-            // normalizeFinals will overwrite with the weighted path, but the
-            // normaliser needs a populated `final` column to sort top-16 for
-            // the redundancy computation. We seed it with raw locus scores here;
-            // after normalisation of all other columns the weighted formula replaces it.
-            let mut col_final: Vec<f32> = col_locus.clone();
+            // The `final` column the step 7 profile reads. Swift's
+            // `RecallCandidateBuffer.merge` keeps the max of the per-lane hit
+            // finals for a candidate: the locus ramp and the graph lane's fixed
+            // 0.5 (both already folded into `col_locus`), the BM25 score, the
+            // Hamming similarity, and the dense cosine PLUS its consensus boost
+            // (the dense hit's `final = dense + boost`). The profile's
+            // redundancy and matrix coherence read the top 16 candidates by
+            // this column, so a locus-only seed ranks a BM25- or dense-led
+            // candidate below a recency-led one and the profile differs from
+            // Swift on any buffer wider than 16 candidates. The dense term
+            // reads the lane map, not `col_dense`: Swift step 5.8 raises
+            // `buffer.dense` only and never `buffer.final`. Step 9 writes the
+            // weighted score into its own `scores` vector, so this column is
+            // the profile input alone, as in Swift.
+            let mut col_final: Vec<f32> = ordered_ids.iter().enumerate().map(|(i, id)| {
+                let bm25 = bm25_score_map.get(id).map_or(0.0, |&(_, s)| s);
+                let vector = vector_score_map.get(id).map_or(0.0, |&(_, s)| s);
+                let dense = dense_score_map.get(id).map_or(0.0, |&(_, s)| s)
+                    + dense_consensus_boost.get(id).copied().unwrap_or(0.0);
+                col_locus[i].max(bm25).max(vector).max(dense)
+            }).collect();
 
             // Normalise all columns to [0, 1] (step 6).
             Self::normalize_column(&mut col_locus,     count);
@@ -12380,8 +12395,8 @@ impl EstateCoordinator {
                     // recorded fallback), so this tuple carries the buffer values
                     // and the UnionBest block below normalises them exactly as
                     // Swift step 6 does. The locus column carries the graph max,
-                    // as `buffer.locus` does. Hybrid and CorpusOnly keep the lane
-                    // sum and the weighted RRF fusion in the match below.
+                    // as `buffer.locus` does. Hybrid and CorpusOnly take the raw
+                    // list merge and the weighted RRF fusion in the match below.
                     if request.mode == GLKRecallMode::UnionBest {
                         let buffer_final = effective_locus_raw
                             .max(bm25_raw)
@@ -12392,10 +12407,29 @@ impl EstateCoordinator {
                     }
 
                     let final_score = match request.scoring {
-                        GLKRecallScoring::Raw =>
-                            // Use effective_locus_raw so graph-only candidates score as 0.5,
-                            // not 0.0 — parity with Swift's buffer.final for graph candidates.
-                            effective_locus_raw + bm25_raw + vec_raw + dense_raw + dense_boost,
+                        GLKRecallScoring::Raw => {
+                            // Hybrid and CorpusOnly `.raw` is Swift's ordered list
+                            // merge (recallHybrid / recallCorpusOnly): the locus
+                            // list, then the BM25 list, then the vector list,
+                            // dedup by id, `prefix(limit)`. No fusion and no lane
+                            // sum: a hit's `final` is the score of the first list
+                            // that holds it (the locus ramp, the BM25 score, or
+                            // the Hamming similarity), and the presentation branch
+                            // below orders by (list, rank in that list). The graph
+                            // lane is not one of Swift's hybrid lists, so a
+                            // graph-only candidate is dropped here; the dense lane
+                            // never runs for these modes. CorpusOnly has no locus
+                            // list, so its merge starts at BM25.
+                            if locus_rank < usize::MAX {
+                                locus_raw
+                            } else if bm25_rank < usize::MAX {
+                                bm25_raw
+                            } else if vec_rank < usize::MAX {
+                                vec_raw
+                            } else {
+                                return None;
+                            }
+                        }
                         GLKRecallScoring::Rrf
                         | GLKRecallScoring::MatrixAware
                         | GLKRecallScoring::Discriminative => {
@@ -12570,6 +12604,29 @@ impl EstateCoordinator {
                     (scored[i].0.clone(), scores[i], col_locus[i], col_bm25[i], col_vector[i], col_dense[i],
                      0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32)
                 }).collect();
+            } else if request.scoring == GLKRecallScoring::Raw {
+                // Hybrid and CorpusOnly `.raw`: the ordered list merge is the
+                // presentation order. Each candidate sorts by the first list
+                // that holds it (locus, then BM25, then vector) and by its rank
+                // in that list, which is the order Swift's merge appends them
+                // in; `limit` truncates that list. No score sort and no 4N tie
+                // window: list positions never tie. Every candidate on this
+                // path is in one of the three lists (the Raw arm above drops
+                // the rest), so the trailing key is never reached.
+                let merge_key = |id: &str| -> (u8, usize) {
+                    if let Some(&(rank, _)) = locus_score_map.get(id) {
+                        (0, rank)
+                    } else if let Some(&(rank, _)) = bm25_score_map.get(id) {
+                        (1, rank)
+                    } else if let Some(&(rank, _)) = vector_score_map.get(id) {
+                        (2, rank)
+                    } else {
+                        (3, usize::MAX)
+                    }
+                };
+                scored.sort_by_key(|t| merge_key(&t.0));
+                scored.truncate(request.limit);
+                fused_scored = scored;
             } else {
                 // Presentation sort: (score DESC, subject ASC). subject is content-derived
                 // and deterministic per seed; None subject sorts as "".
