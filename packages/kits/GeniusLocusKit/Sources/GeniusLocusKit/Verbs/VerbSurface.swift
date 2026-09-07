@@ -726,7 +726,7 @@ public extension GeniusLocusKit {
     /// model id)`, which also invalidates the standalone store's resident
     /// array; the corpus and the standalone store share backing storage but
     /// maintain separate in-memory indexes). Failure in any lane seals an
-    /// `"expungeOrphan"` audit event (honest record of partial completion)
+    /// `"expungeOrphan"` audit event (the record of partial completion)
     /// and then raises `VerbError.crossKitVectorDeleteFailed`.
     ///
     /// **Step 3 — Audit seal:** on success, seals the gate-produced `"tombstone"`
