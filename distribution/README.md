@@ -38,10 +38,10 @@ and runs `mootx01 install` as a post-install step for interactive client wiring.
 Uninstall calls `mootx01 uninstall --yes` before removing files and preserves
 the estate data directory.
 
-On the Community Edition release lane (the only lane that publishes Windows
+On the public release lane (the only lane that publishes Windows
 builds) the two executables and the setup EXE are Authenticode-signed with
 Azure Artifact Signing, and that lane refuses to ship an unsigned Windows
-build; `windows/SIGNING.md` is the runbook. The Enterprise repository is not
+build; `windows/SIGNING.md` is the runbook. The development repository is not
 tagged for public releases: its `release.yml` builds Windows assets for
 internal use without Authenticode signing, by design, and its download page
 carries the SmartScreen disclaimer. Every release also publishes
