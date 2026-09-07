@@ -1,0 +1,22 @@
+{
+ "version": 1,
+ "description": "Sub-span scoring switch cross-port pin (SUBSPAN-PARAM). Read by Swift SubSpanScoringSwitchTests.swift and Rust sub_span_scoring_switch.rs. A full-hydration unionBest matrixAware recall over six ingested bodies that carry the query terms in different phrasing plus one captured control body that is not in the corpus, all supplied by the locus lane at limit 7, with the CorpusKit deterministic model as the corpus float lane and no vector store registered (so the dense column starts at 0 for every candidate). With GLKRecallRequest.subSpanScoring off the step 5.8 refinement does not run: every hit reports dense 0 and no subSpan.budget stage. With the switch on the blend max(dense, subSpanMaxCosine) runs over the corpus records: every ingested body's hit reports dense above 0 and the control body's hit stays at 0 because it has no corpus record to score. Both ports assert the same three facts.",
+ "query": "quarterly budget review meeting notes finance team",
+ "scoring": "matrixAware",
+ "hydration": "full",
+ "limit": 7,
+ "ingested_bodies": [
+  "quarterly budget review meeting notes from the finance team",
+  "finance team notes: the quarterly budget review meeting covered headcount and travel",
+  "meeting notes for the budget review, quarterly, prepared by finance",
+  "the finance team's quarterly review of the budget: notes and follow-ups",
+  "notes from the quarterly finance meeting where the team reviewed the budget lines",
+  "budget review notes, quarterly cadence, finance team attendees and decisions"
+ ],
+ "control_body": "weekend hiking trail map with campsite list and water sources",
+ "expected": {
+  "off_dense_all_zero": true,
+  "on_dense_positive_bodies": "every ingested body",
+  "on_control_dense_zero": true
+ }
+}

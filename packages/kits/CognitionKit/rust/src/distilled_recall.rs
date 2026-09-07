@@ -149,7 +149,10 @@ pub fn run_distilled_recall(
         RecallFallbackPolicy::AllowDegraded,
         RecallOrigin::Internal,
     )
-    .with_query_text(input.query.clone());
+    .with_query_text(input.query.clone())
+    // Sub-span scoring is an additive-cost stage this recipe does not
+    // request; every caller names the switch (ruling 2026-09-07).
+    .with_sub_span_scoring(genius_locus_kit::recall::GLKSubSpanScoring::Off);
     let result = coord.recall_scored(handle, request, now)?;
 
     // Hydrate each hit through the hydration selector pinned to Distilled.
@@ -289,7 +292,9 @@ mod tests {
                 RecallFallbackPolicy::AllowDegraded,
                 RecallOrigin::Internal,
             )
-            .with_query_text(query.to_string());
+            .with_query_text(query.to_string())
+            // Sub-span scoring off, as on the primary recall above.
+            .with_sub_span_scoring(genius_locus_kit::recall::GLKSubSpanScoring::Off);
             let exact: Vec<String> = coord
                 .recall_scored(&h, request, NOW + 1)
                 .expect("exact search")

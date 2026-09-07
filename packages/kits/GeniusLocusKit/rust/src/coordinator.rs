@@ -104,7 +104,7 @@ use crate::grants::{
 };
 use crate::handle::{EstateHandle, EstateUuid};
 use crate::recall::{
-    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
+    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GLKSubSpanScoring,
     RecallEvidencePath, RecallHit, RecallOrigin, RecallPlan, RecallScoreVector,
     RecallShape, RecallUnionProfile, RecallWeights,
 };
@@ -12138,8 +12138,14 @@ impl EstateCoordinator {
 
             // Step 5.8 — sub-span dense refinement. Twin of Swift RecallDirector
             // step 5.8 (recallUnionBest, matrixAware only, which is exactly this
-            // branch). When a CorpusContentEngine is registered and the request
-            // carries query text, transient sentence-level sub-span vectors are
+            // branch). Runs only when the request turns it on
+            // (`request.sub_span_scoring == On`): sub-span scoring is an
+            // additive-cost stage, so no request gets it by absence (ruling
+            // 2026-09-07) and every internal caller names its choice at the
+            // call site. With the switch off the dense column keeps whatever
+            // the dense lane produced. With the switch on, when a
+            // CorpusContentEngine is registered and the request carries query
+            // text, transient sentence-level sub-span vectors are
             // computed for the candidates in the buffer and the dense column
             // takes max(col_dense[i], subSpanMaxCosine). Sub-span vectors are
             // discarded at once (zero persistence).
@@ -12168,7 +12174,7 @@ impl EstateCoordinator {
             //
             // Degradation: an empty outcome (provider has no float lane, source
             // unavailable) leaves the column unchanged. Non-throwing, non-fatal.
-            if !query_str.is_empty() {
+            if request.sub_span_scoring == GLKSubSpanScoring::On && !query_str.is_empty() {
                 if let Some(ref c) = corpus {
                     let mut priority: Vec<usize> = (0..count).collect();
                     priority.sort_by(|&a, &b| {
