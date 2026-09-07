@@ -4,26 +4,30 @@
 //
 // Post-recall, pre-presentation packager that determines the response
 // shape adjective (never/always/auto), computes the four gate signals,
-// applies the WEAK → CONFIDENT → INTERMEDIATE gate, applies the score-cliff
+// applies the WEAK -> CONFIDENT -> INTERMEDIATE gate, applies the score-cliff
 // row cutoff, and returns a `GLKPackagedResult` for the ARIA boundary to
 // render.
 //
 // ## Gate signals (all mirrored from the Swift reference)
-//   m1 — Top-margin: (score[0] - score[1]) / max(score[0], ε).  Measures
+//   m1 — Top-margin: (score[0] - score[1]) / max(score[0], epsilon).  Measures
 //         how decisively the top hit leads the second.
-//   m2 — Lane agreement: `union_profile.signal_agreement`. Fraction of
-//         lanes that confirmed each candidate; proxy for cross-lane
-//         consensus.
-//   m3 — Dense spread: population stddev of the dense-lane score over the
-//         top-10 hits. A flat dense column signals the dense lane is dark or
-//         uninformative; a high spread signals discriminative embedding recall.
-//   m4 — Word-boundary containment: ≥60% of the distinctive words in the
+//   m2 — Lane agreement: normalised Spearman footrule between the lexical head
+//         order (bm25_rank ascending) and the span rerank order (cosine
+//         descending, ties by bm25_rank ascending) over the span-scored top-10
+//         hits. 1.0 when they agree perfectly, 0.0 when fully reversed.
+//         Stays 0.0 when no span hits are available.
+//   m3 — Span cosine spread: population standard deviation of the span cosines
+//         over the span-scored top-10 hits. A non-zero spread signals that the
+//         encoder found discriminative evidence. 0.0 when fewer than 2 span
+//         hits exist (triggers WEAK for multi-hit results); 1.0 for the
+//         single-total-hit special case (WEAK must not fire on the only hit).
+//   m4 — Word-boundary containment: >=60% of the distinctive words in the
 //         composed answer appear in the top hit's drawer content. Guards against
 //         hallucinated answers that do not trace to the top citation.
 //
 // ## Gate decision (order is load-bearing — WEAK checked first)
-//   WEAK        — m1 < t1′  OR  m3 < t3′
-//   CONFIDENT   — m1 ≥ t1  AND  m2 ≥ t2  AND  m4 = true
+//   WEAK        — m1 < t1'  OR  m3 < t3'
+//   CONFIDENT   — m1 >= t1  AND  m2 >= t2  AND  m4 = true
 //   INTERMEDIATE — neither of the above
 //
 // ## Response levels
@@ -33,7 +37,7 @@
 //
 // ## Score-cliff row cutoff
 //   Start including rows at index 0. After the kMin-th row has been included,
-//   check each successive gap. Stop (exclusive) when a gap ≥ c × spread fires.
+//   check each successive gap. Stop (exclusive) when a gap >= c * spread fires.
 //   If no cliff fires, include up to kMax rows.
 //
 // Conformance is gated by the golden-pin tests in
@@ -115,11 +119,14 @@ pub enum GLKResponseLevel {
 /// Mirrors Swift `GLKConfidenceSignals`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GLKConfidenceSignals {
-    /// m1: top-margin = (score[0] - score[1]) / max(score[0], ε).
+    /// m1: top-margin = (score[0] - score[1]) / max(score[0], epsilon).
     pub m1: f64,
-    /// m2: lane agreement = union_profile.signal_agreement.
+    /// m2: lane agreement = normalised Spearman footrule between the lexical
+    /// order and the span rerank order of the span-scored top-10 hits.
     pub m2: f64,
-    /// m3: dense spread = population stddev of dense scores over top-10.
+    /// m3: span cosine spread = population stddev of span cosines over the
+    /// span-scored top-10 hits. 0.0 when fewer than 2 span hits exist
+    /// (multi-hit case); 1.0 for a single-total-hit result.
     pub m3: f64,
     /// m4: word-boundary containment — ≥60% of answer's distinctive words appear
     /// in the top citation's drawer content.
@@ -189,7 +196,7 @@ pub struct PackagerThresholds {
     pub t2: f64,
     /// WEAK gate: m1 ceiling below which WEAK fires (t1′). Default: 0.05.
     pub t1_prime: f64,
-    /// WEAK gate: dense-spread floor (t3′). Default: 0.10.
+    /// WEAK gate: span-cosine-spread floor below which WEAK fires (t3'). Default: 0.10.
     pub t3_prime: f64,
     /// Score-cliff ratio threshold (c). Default: 0.20.
     pub c: f64,
@@ -350,7 +357,8 @@ impl GLKResultsPackager {
         let hits = &result.hits;
         let eps: f64 = 1e-9;
 
-        // m1: top-margin = (score[0] - score[1]) / max(score[0], ε)
+        // m1: top-margin = (score[0] - score[1]) / max(score[0], epsilon).
+        // Unchanged from the pre-span packager.
         let m1 = if hits.len() >= 2 {
             let s0 = hits[0].score.final_score as f64;
             let s1 = hits[1].score.final_score as f64;
@@ -362,46 +370,49 @@ impl GLKResultsPackager {
             0.0
         };
 
-        // m2: lane agreement from union_profile.signal_agreement.
-        // 0.0 when no union profile is available (non-unionBest modes).
-        let m2 = result
-            .union_profile
-            .as_ref()
-            .map(|p| p.signal_agreement as f64)
-            .unwrap_or(0.0);
-
-        // m3: population stddev of dense-lane scores over top-10 hits.
-        // Single-hit case → spread = 1.0 (maximum confidence — one unambiguous
-        // result; WEAK gate must not fire on m3 for a single confident hit).
-        // Mirrors Swift: `guard top.count >= 2 else { return top.isEmpty ? 0.0 : 1.0 }`.
-        let top10: Vec<f64> = hits
+        // Collect the SpanRerankHit of every hit in hits.prefix(10) that carries
+        // one, in returned order. Used for both m2 and m3.
+        let scored: Vec<&crate::span_rerank::SpanRerankHit> = hits
             .iter()
             .take(10)
-            .map(|h| h.score.dense as f64)
+            .filter_map(|h| h.span_hit.as_ref())
             .collect();
-        let m3 = if top10.len() >= 2 {
-            let mean = top10.iter().sum::<f64>() / top10.len() as f64;
-            let variance = top10.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                / top10.len() as f64;
-            variance.sqrt()
-        } else if top10.is_empty() {
-            // No hits: spread is undefined → 0.0 (WEAK fires via m1=0.0 anyway).
+
+        // m2: lane agreement — normalised Spearman footrule between the lexical
+        // order (bm25_rank ascending) and the span order (cosine descending, ties
+        // by bm25_rank ascending) of the span-scored top-10 hits.
+        // 0.0 when no span hits are available. Twin of Swift
+        // `GLKResultsPackager.spanRerankAgreement(_:)`.
+        let m2 = span_rerank_agreement(&scored);
+
+        // m3: population stddev of span cosines over the span-scored top-10 hits.
+        // Special cases mirror the pre-span dense-spread rules (the single-hit
+        // WEAK guard is on total hits, not scored hits):
+        //   hits empty    -> 0.0
+        //   hits.len == 1 -> 1.0  (WEAK must not fire on the only hit)
+        //   else scored < 2 -> 0.0 (no useful encoder signal for a multi-hit result)
+        //   else stddev of cosines.
+        // Mirrors Swift: `guard top.count >= 2 else { return top.isEmpty ? 0.0 : 1.0 }`.
+        let m3 = if hits.is_empty() {
+            // No candidates: spread undefined -> 0.0.
             0.0
-        } else {
-            // Single hit: maximum margin, spread treated as 1.0. Mirrors Swift.
+        } else if hits.len() == 1 {
+            // Single candidate: maximum margin — WEAK must not fire on m3 for
+            // the only result regardless of whether it has a span hit.
             1.0
+        } else {
+            // Multi-hit: use span cosine spread. span_cosine_spread returns 0.0
+            // when fewer than 2 span hits exist, which fires WEAK on a result
+            // the encoder did not contribute to.
+            span_cosine_spread(&scored)
         };
 
-        // m4: word-boundary containment.
-        // ≥60% of the distinctive words in `composed_answer` must appear in the
+        // m4: word-boundary containment. Unchanged.
+        // >=60% of the distinctive words in `composed_answer` must appear in the
         // top citation's drawer content. With no answer text or no top content
         // the signal is undefined and reads false, exactly Swift's
-        // `if let text = composedAnswer, !text.isEmpty, let topContent = …,
-        // !topContent.isEmpty` guard: an empty answer must never count as
-        // contained (the containment helper's own empty-answer rule is only
-        // reached with a non-empty answer whose words are all short or
-        // stopwords). The Rust product path passes no answer, so without this
-        // guard it could reach CONFIDENT where Swift cannot.
+        // `if let text = composedAnswer, !text.isEmpty, let topContent = ...`
+        // guard: an empty answer must never count as contained.
         let top_content = hits
             .first()
             .and_then(|h| h.drawer.as_ref())
@@ -413,8 +424,8 @@ impl GLKResultsPackager {
             self.word_boundary_containment(composed_answer, top_content, 0.60)
         };
 
-        // Use t3_prime from thresholds — passed in but also available in the outer
-        // scope. We only need it for the return value's completeness.
+        // t3_prime is consumed by the gate comparison upstream; read here so the
+        // compiler does not warn about the unused parameter.
         let _ = thresholds;
 
         // Round m1/m2/m3 to 2 decimal places before gate comparisons, exactly
@@ -423,8 +434,7 @@ impl GLKResultsPackager {
         // zero, matching Swift's Double.rounded() (same IEEE 754 default mode).
         // Without this step, values like m1=0.245 compare as < t1=0.25 and
         // misclassify to INTERMEDIATE; after rounding they compare as == 0.25
-        // and reach CONFIDENT. The gate comparisons downstream use the rounded
-        // values so the classification is byte-identical to the Swift port.
+        // and reach CONFIDENT.
         fn round2(v: f64) -> f64 {
             (v * 100.0).round() / 100.0
         }
@@ -556,6 +566,77 @@ impl Default for GLKResultsPackager {
 }
 
 // ---------------------------------------------------------------------------
+// Lane-agreement and cosine-spread helpers
+// ---------------------------------------------------------------------------
+
+/// Lane-agreement margin (m2): 1 - footrule/maximum, where footrule is the
+/// Spearman footrule distance between the lexical order (bm25_rank ascending)
+/// and the span order (cosine descending, ties by bm25_rank ascending) of the
+/// scored span hits; maximum = (n * n) / 2 (integer division). Returns 1.0
+/// when n == 1, 0.0 when n == 0. f64 arithmetic from f32 cosines, same tie
+/// rules as the Swift twin. Twin of Swift `GLKResultsPackager.spanRerankAgreement(_:)`.
+fn span_rerank_agreement(scored: &[&crate::span_rerank::SpanRerankHit]) -> f64 {
+    let n = scored.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n == 1 {
+        return 1.0;
+    }
+
+    // Lexical order: sort by bm25_rank ascending.
+    let mut lexical: Vec<&crate::span_rerank::SpanRerankHit> = scored.to_vec();
+    lexical.sort_by_key(|h| h.bm25_rank);
+
+    // Span order: sort by cosine descending, ties by bm25_rank ascending.
+    let mut span: Vec<&crate::span_rerank::SpanRerankHit> = scored.to_vec();
+    span.sort_by(|a, b| {
+        b.cosine
+            .partial_cmp(&a.cosine)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.bm25_rank.cmp(&b.bm25_rank))
+    });
+
+    // posS[item_id] = index of that item in the span order.
+    let pos_s: std::collections::HashMap<&str, usize> = span
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.item_id.as_str(), i))
+        .collect();
+
+    // footrule = sum over lexical of |lexical_index - span_index|.
+    let footrule: usize = lexical
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let j = pos_s[h.item_id.as_str()];
+            if i > j { i - j } else { j - i }
+        })
+        .sum();
+
+    // maximum = (n * n) / 2 (integer division, the footrule upper bound);
+    // n >= 2 here, so it is never zero.
+    let maximum = (n * n) / 2;
+    1.0 - footrule as f64 / maximum as f64
+}
+
+/// Span-cosine spread (m3): population standard deviation of the cosine values
+/// of the scored span hits, computed from f64 casts of the f32 cosines.
+/// Returns 0.0 when fewer than 2 scored hits exist. The single-total-hit
+/// special case (m3 = 1.0) is handled by the caller. Formula: mean, then
+/// sqrt(sum((x - mean)^2) / n). Twin of Swift `GLKResultsPackager.spanCosineSpread(_:)`.
+fn span_cosine_spread(scored: &[&crate::span_rerank::SpanRerankHit]) -> f64 {
+    let n = scored.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let values: Vec<f64> = scored.iter().map(|h| h.cosine as f64).collect();
+    let mean = values.iter().sum::<f64>() / n as f64;
+    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+    variance.sqrt()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -565,23 +646,28 @@ mod tests {
     use crate::recall::{
         GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
         RecallFallbackPolicy, RecallHit, RecallOrigin, RecallPlan, RecallScoreVector,
-        RecallUnionProfile, RecallWeights,
+        RecallWeights,
     };
+    use crate::span_rerank::SpanRerankHit;
     use locus_kit::drawer::Drawer;
     use locus_kit::filter::RecallFrame;
 
     const NOW_MS: i64 = 1_700_000_000_000_i64;
 
-    // Helper: build a minimal GLKRecallResult from a list of (final_score, dense_score, content)
-    // tuples, with signal_agreement set on the union profile.
+    // Helper: build a minimal GLKRecallResult from hit specs.
+    //
+    // Each spec is (final_score, Option<(lexical_rank, span_cosine)>, content).
+    // When span evidence is provided a SpanRerankHit is attached with
+    // bestSpanIndex/Start/End zeroed (the packager reads only cosine and bm25_rank).
+    // union_profile is left None: m2 now reads the span order, not signal_agreement.
+    // score.dense stays 0: m3 now reads span cosines, not the dense-lane column.
     fn make_result(
-        hits_spec: &[(f32, f32, &str)], // (final_score, dense_score, content)
-        signal_agreement: f32,
+        hits_spec: &[(f32, Option<(usize, f32)>, &str)],
     ) -> GLKRecallResult {
         let hits: Vec<RecallHit> = hits_spec
             .iter()
             .enumerate()
-            .map(|(i, (final_score, dense, content))| {
+            .map(|(i, (final_score, span_ev, content))| {
                 let drawer = Drawer::new(
                     format!("drawer-{}", i),
                     *content,
@@ -590,25 +676,27 @@ mod tests {
                     NOW_MS,
                     "test-model",
                 );
+                let span_hit = span_ev.map(|(bm25_rank, cosine)| SpanRerankHit {
+                    item_id: format!("hit-{}", i),
+                    best_span_index: 0,
+                    best_span_start: 0,
+                    best_span_end: 0,
+                    cosine,
+                    bm25_rank,
+                });
                 RecallHit {
                     id: format!("hit-{}", i),
                     drawer: Some(drawer),
                     sources: vec![],
                     score: RecallScoreVector {
                         final_score: *final_score,
-                        dense: *dense,
                         ..RecallScoreVector::ZERO
                     },
                     explanation: vec![],
-                    span_hit: None,
+                    span_hit,
                 }
             })
             .collect();
-
-        let union_profile = Some(RecallUnionProfile {
-            signal_agreement,
-            ..RecallUnionProfile::ZERO
-        });
 
         let request = GLKRecallRequest::new(
             RecallFrame::new(vec![]),
@@ -629,7 +717,7 @@ mod tests {
         GLKRecallResult {
             request,
             plan,
-            union_profile,
+            union_profile: None,
             hits,
             dense_lane_status: None,
             degraded_stages: vec![],
@@ -645,13 +733,10 @@ mod tests {
     /// Golden pin A: answer:never returns all hits unchanged and no answer block.
     #[test]
     fn test_a_never_mode_fast_path() {
-        let result = make_result(
-            &[
-                (0.90, 0.80, "fruit banana information"),
-                (0.30, 0.20, "other content"),
-            ],
-            0.80,
-        );
+        let result = make_result(&[
+            (0.90, None, "fruit banana information"),
+            (0.30, None, "other content"),
+        ]);
         let packager = GLKResultsPackager::new();
         let packaged = packager.package(&result, PackagerAnswerMode::Never, None, PackagerThresholds::default());
 
@@ -665,21 +750,18 @@ mod tests {
     // B. CONFIDENT gate → L0AnswerOnly
     // -----------------------------------------------------------------------
 
-    /// Golden pin B: CONFIDENT gate fires → L0AnswerOnly (rows list empty).
+    /// Golden pin B: CONFIDENT gate fires -> L0AnswerOnly (rows list empty).
     ///
-    /// Fixture: scores [0.90, 0.30], signal_agreement=0.80,
-    ///   answer "fruit banana information" ⊂ content "fruit banana mango recall content test paragraph information"
-    /// Expected signals: m1≈0.667 ≥ t1=0.25, m2=0.80 ≥ t2=0.50, m4=true → CONFIDENT.
+    /// Span evidence: h-0(cos=0.90,rank=1), h-1(cos=0.50,rank=2). Lexical and span
+    /// orders agree (0.90>0.50 => span leads same as lexical), footrule=0, m2=1.0>=t2.
+    /// m3=stddev(0.90,0.50)=0.20>=t3_prime. m1=(0.90-0.30)/0.90=0.67>=t1. m4=true.
     #[test]
     fn test_b_confident_gate_l0_answer_only() {
         let top_content = "fruit banana mango recall content test paragraph information";
-        let result = make_result(
-            &[
-                (0.90, 0.80, top_content),
-                (0.30, 0.20, "other content unrelated"),
-            ],
-            0.80,
-        );
+        let result = make_result(&[
+            (0.90, Some((1, 0.90)), top_content),
+            (0.30, Some((2, 0.50)), "other content unrelated"),
+        ]);
         let packager = GLKResultsPackager::new();
         let packaged = packager.package(
             &result,
@@ -702,24 +784,23 @@ mod tests {
     // C. INTERMEDIATE gate → L1Full
     // -----------------------------------------------------------------------
 
-    /// Golden pin C: INTERMEDIATE gate fires → L1Full (answer block + rows).
+    /// Golden pin C: INTERMEDIATE gate fires -> L1Full (answer block + rows).
     ///
-    /// Fixture: scores [0.70, 0.40, 0.30], signal_agreement=0.30
-    /// m1=(0.70-0.40)/0.70≈0.429 ≥ t1=0.25; m2=0.30 < t2=0.50 → NOT CONFIDENT.
-    /// WEAK check: m1=0.429 ≥ t1'=0.05 → not WEAK from m1.
-    /// Dense spread with zeros: m3=0.0 < t3'=0.10 → WEAK from m3.
-    ///
-    /// To get INTERMEDIATE, we need m3 ≥ t3_prime. Use dense scores [0.90,0.50,0.10].
+    /// Span evidence: lexical ranks [3,2,1] with cosines [0.80,0.50,0.30].
+    /// Lexical order (rank asc): [hit-2(rank1), hit-1(rank2), hit-0(rank3)].
+    /// Span order (cos desc): [hit-0(0.80), hit-1(0.50), hit-2(0.30)].
+    /// posS: {hit-0:0, hit-1:1, hit-2:2}. footrule = |0-2|+|1-1|+|2-0| = 4.
+    /// maximum = (3*3)/2 = 4. m2 = 1-4/4 = 0.0 < t2=0.50 -> not CONFIDENT.
+    /// m1=(0.70-0.40)/0.70=0.43>=t1'=0.05 (not WEAK from m1).
+    /// m3=stddev(0.80,0.50,0.30)=0.205>=t3_prime=0.10 (not WEAK from m3).
+    /// Neither CONFIDENT nor WEAK -> INTERMEDIATE.
     #[test]
     fn test_c_intermediate_gate_l1_full() {
-        let result = make_result(
-            &[
-                (0.70, 0.90, "intermediate content first"),
-                (0.40, 0.50, "intermediate content second"),
-                (0.30, 0.10, "intermediate content third"),
-            ],
-            0.30, // m2=0.30 < t2=0.50 → not CONFIDENT
-        );
+        let result = make_result(&[
+            (0.70, Some((3, 0.80)), "intermediate content first"),
+            (0.40, Some((2, 0.50)), "intermediate content second"),
+            (0.30, Some((1, 0.30)), "intermediate content third"),
+        ]);
         let packager = GLKResultsPackager::new();
         let packaged = packager.package(
             &result,
@@ -739,20 +820,18 @@ mod tests {
     // D. WEAK gate → RowsOnly
     // -----------------------------------------------------------------------
 
-    /// Golden pin D: WEAK gate fires → RowsOnly (no answer block).
+    /// Golden pin D: WEAK gate fires -> RowsOnly (no answer block).
     ///
-    /// Fixture: scores [0.520, 0.500, 0.480]
-    ///   m1 = (0.520-0.500)/0.520 ≈ 0.038 < t1′=0.05 → WEAK.
+    /// Span evidence: cosines [0.80,0.50,0.20], ranks [1,2,3]. Lexical and span
+    /// orders agree, footrule=0, m2=1.0. m3=stddev(0.80,0.50,0.20)=0.245>=t3_prime.
+    /// m1=(0.520-0.500)/0.520=0.038<t1'=0.05 -> WEAK fires from m1 margin first.
     #[test]
     fn test_d_weak_gate_rows_only() {
-        let result = make_result(
-            &[
-                (0.520, 0.30, "weak content first"),
-                (0.500, 0.29, "weak content second"),
-                (0.480, 0.28, "weak content third"),
-            ],
-            0.80, // m2 would pass, but WEAK fires first
-        );
+        let result = make_result(&[
+            (0.520, Some((1, 0.80)), "weak content first"),
+            (0.500, Some((2, 0.50)), "weak content second"),
+            (0.480, Some((3, 0.20)), "weak content third"),
+        ]);
         let packager = GLKResultsPackager::new();
         let packaged = packager.package(
             &result,
@@ -774,34 +853,26 @@ mod tests {
     ///
     /// Fixture: 7 hits with scores [0.90,0.85,0.80,0.75,0.20,0.18,0.16].
     /// The large gap between hit[3]=0.75 and hit[4]=0.20 (gap=0.55) fires the cliff.
-    /// kMin=3 → the gap between hits[2] and hits[3] is inside kMin and NOT checked.
-    /// i=4 is the first index checked (i ≥ kMin=3 means i=3,4,... but wait, Swift
-    /// starts checking at i=kMin, meaning after INCLUDING kMin rows). Actually the
-    /// Swift cliff checks gap at index i (between hit[i-1] and hit[i]) starting
-    /// from i=kMin. So:
-    ///   i=3: gap = 0.80-0.75 = 0.05 (below threshold)
-    ///   i=4: gap = 0.75-0.20 = 0.55 ≥ threshold → cutoff=4.
+    /// Spread over 7 scores = 0.90-0.16=0.74; threshold = 0.20*0.74=0.148.
+    /// i=3: gap = 0.80-0.75 = 0.05 < 0.148 (no cliff).
+    /// i=4: gap = 0.75-0.20 = 0.55 >= 0.148 -> fires -> cutoff=4.
     ///
-    /// Spread over 7 scores ≈ 0.260; threshold = 0.20 × 0.260 ≈ 0.052.
-    /// Gap at i=3 = 0.05 < 0.052 (barely passes — does NOT fire).
-    /// Gap at i=4 = 0.55 >> threshold → fires → cutoff=4.
+    /// Span evidence: hits 0-3 carry cosines [0.80,0.60,0.40,0.20], ranks [1,2,3,4].
+    /// Lexical and span orders agree, footrule=0, m2=1.0. m3=stddev>=0.10 (not WEAK).
+    /// m1=(0.90-0.85)/0.90=0.056>=t1'=0.05 (not WEAK from m1, < t1=0.25 not CONFIDENT).
+    /// m4=false (answer not in "cliff content 0"). -> INTERMEDIATE -> L1Full.
     #[test]
     fn test_e_cliff_cutoff_fires_at_kmin() {
-        let result = make_result(
-            &[
-                (0.90, 0.30, "cliff content 0"),
-                (0.85, 0.29, "cliff content 1"),
-                (0.80, 0.28, "cliff content 2"),
-                (0.75, 0.27, "cliff content 3"),
-                (0.20, 0.06, "cliff content 4"),
-                (0.18, 0.05, "cliff content 5"),
-                (0.16, 0.04, "cliff content 6"),
-            ],
-            0.20,
-        );
+        let result = make_result(&[
+            (0.90, Some((1, 0.80)), "cliff content 0"),
+            (0.85, Some((2, 0.60)), "cliff content 1"),
+            (0.80, Some((3, 0.40)), "cliff content 2"),
+            (0.75, Some((4, 0.20)), "cliff content 3"),
+            (0.20, None, "cliff content 4"),
+            (0.18, None, "cliff content 5"),
+            (0.16, None, "cliff content 6"),
+        ]);
         let packager = GLKResultsPackager::new();
-        // Use never mode to directly test cliff through the rows without the gate.
-        // For cliff testing, use always mode with a composed answer so cliff runs.
         let packaged = packager.package(
             &result,
             PackagerAnswerMode::Always,
@@ -809,11 +880,9 @@ mod tests {
             PackagerThresholds::default(),
         );
 
-        // L1Full or L0AnswerOnly; either way the cliff must have fired at 4.
-        // For always mode: CONFIDENT → L0AnswerOnly (rows empty), INTERMEDIATE/WEAK → L1Full.
-        // With signal_agreement=0.20 and no m4 (answer "cliff test answer" not in "cliff content 0"),
-        // this should be INTERMEDIATE → L1Full.
-        assert_eq!(packaged.level, GLKResponseLevel::L1Full, "always mode with INTERMEDIATE → L1Full");
+        // INTERMEDIATE -> L1Full (always mode: CONFIDENT -> L1Full too, but m4=false
+        // and m1<t1 mean we cannot reach CONFIDENT here). The cliff fires at i=4.
+        assert_eq!(packaged.level, GLKResponseLevel::L1Full, "always mode with INTERMEDIATE -> L1Full");
         assert_eq!(packaged.rows.len(), 4, "cliff must fire at i=4, returning 4 rows; got {}", packaged.rows.len());
     }
 
