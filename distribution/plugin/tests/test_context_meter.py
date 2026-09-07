@@ -174,19 +174,24 @@ class TestRungsFireOnce(MeterCase):
             self.assertIn(expected, text)
 
     def test_every_rung_message_carries_sensitivity_reminder(self):
-        """a46c8160 — every checkpoint rung must warn the model not to include
-        credentials or restricted content in the filed note.
+        """a46c8160 — every checkpoint rung must keep credentials out of the
+        note and tell the model to file it at the highest sensitivity of any
+        material recalled under a grant, naming that sensitivity in the
+        moot_file_memory call.
 
-        Fails pre-fix because the MESSAGES templates contain no sensitivity
-        guidance, so a handoff can silently downgrade secret context to normal.
+        Fails against a template that only says "leave it out or pass
+        sensitivity": that wording let a handoff land below the material
+        it summarised.
         """
         # SECURITY: the reminder prevents the model from inadvertently filing
         # credentials or restricted-memory content into an estate note at the
         # default (normal) sensitivity tier.
         required_phrases = (
             "credentials, keys or tokens",
-            "restricted or secret memories",
-            "sensitivity set to the highest tier",
+            "restricted or secret memories under a grant",
+            "highest sensitivity of any material it recalled",
+            "name that sensitivity explicitly (restricted or secret) in the "
+            "moot_file_memory call",
         )
         for rung, template in moot_hooks.MESSAGES.items():
             text = template.format(pct=rung, session_id="S")
@@ -229,6 +234,10 @@ class TestPrecompactAndRecovery(MeterCase):
         self.assertEqual(len(printed), 1, printed)
         self.assertIn("session/%s/handoff" % self.session_id, printed[0])
         self.assertIn("derivesFrom", printed[0])
+        # The handoff is read back under the ceiling it was filed at: a
+        # restricted or secret handoff needs the matching grant live again.
+        self.assertIn("read back under the same ceiling", printed[0])
+        self.assertIn("mootx01 unlock secret", printed[0])
         state = moot_hooks.load_state(self.session_id)
         self.assertEqual(state.get("fired"), [])
         self.assertFalse(state.get("unknown_reported"))

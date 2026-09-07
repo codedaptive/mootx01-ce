@@ -20,11 +20,16 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
     private(set) var captureTunnelCount: Int = 0
     /// Number of frame-gated by-id reads (`getDrawers(ids:matchingFrame:)`).
     private(set) var frameGatedCalls: Int = 0
+    /// Every drawer capture frame in arrival order, so a test can assert on
+    /// the fields `store` stamps (sensitivity, kind, wing) without decoding
+    /// a drawer bitmap.
+    private(set) var capturedFrames: [CaptureFrame] = []
 
     // MARK: - WorkPacketEstateClient
 
     func capture(_ frame: CaptureFrame) async throws -> Drawer {
         captureDrawerCount += 1
+        capturedFrames.append(frame)
         let drawer = makeDrawer(from: frame)
         drawers[drawer.id] = drawer
         return drawer

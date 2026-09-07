@@ -135,4 +135,105 @@ struct MemoryToolAdapterSensitivityTests {
         #expect(result.contains("disabled"),
                 "a disabled memory tool must refuse a direct tools/call")
     }
+
+    // MARK: - Write side floors at the live grant ceiling
+
+    /// Read the drawer in the `memories` wing whose content contains
+    /// `marker` through an explicit sensitivity filter, which suppresses the
+    /// default `.elevated` ceiling that hides a restricted or secret row.
+    private func filedTier(
+        of marker: String, at tier: AdjectiveSensitivity, kit: GeniusLocusKit, handle: EstateHandle
+    ) async throws -> AdjectiveSensitivity? {
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.sensitivity(tier)], hydrationLevel: .full, limit: 50))
+        return drawers.first { $0.tombstonedAt == nil && $0.content.contains(marker) }?.adjectiveSensitivity
+    }
+
+    @Test("memory create under a restricted grant files restricted and names it")
+    func createUnderRestrictedGrantFilesRestricted() async throws {
+        let (kit, handle, dispatcher) = try await makeHarness()
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date())
+        let reply = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object([
+                "command": .string("create"),
+                "path": .string("/memories/ceiling-restricted.txt"),
+                "file_text": .string("ceiling-restricted body"),
+            ])
+        ))
+        #expect(reply.contains("File created successfully at: /memories/ceiling-restricted.txt"), "got: \(reply)")
+        #expect(reply.contains("sensitivity: restricted"), "the reply must name the tier applied; got: \(reply)")
+        #expect(try await filedTier(of: "ceiling-restricted body", at: .restricted, kit: kit, handle: handle) == .restricted)
+    }
+
+    @Test("memory create under a secret grant files secret and names it")
+    func createUnderSecretGrantFilesSecret() async throws {
+        let (kit, handle, dispatcher) = try await makeHarness()
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+        let reply = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object([
+                "command": .string("create"),
+                "path": .string("/memories/ceiling-secret.txt"),
+                "file_text": .string("ceiling-secret body"),
+            ])
+        ))
+        #expect(reply.contains("sensitivity: secret"), "got: \(reply)")
+        #expect(try await filedTier(of: "ceiling-secret body", at: .secret, kit: kit, handle: handle) == .secret)
+    }
+
+    @Test("memory create with no grant files normal and the reply is unchanged")
+    func createWithNoGrantFilesNormal() async throws {
+        let (kit, handle, dispatcher) = try await makeHarness()
+        let reply = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object([
+                "command": .string("create"),
+                "path": .string("/memories/ceiling-none.txt"),
+                "file_text": .string("ceiling-none body"),
+            ])
+        ))
+        #expect(reply == "File created successfully at: /memories/ceiling-none.txt")
+        #expect(try await filedTier(of: "ceiling-none body", at: .normal, kit: kit, handle: handle) == .normal)
+    }
+
+    @Test("memory str_replace under a restricted grant lifts the edit to restricted")
+    func strReplaceUnderRestrictedGrantLiftsToRestricted() async throws {
+        let (kit, handle, dispatcher) = try await makeHarness()
+        try await seed("old ceiling-edit body", path: "/memories/ceiling-edit.txt", sensitivity: .normal, kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date())
+        let reply = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object([
+                "command": .string("str_replace"),
+                "path": .string("/memories/ceiling-edit.txt"),
+                "old_str": .string("old"),
+                "new_str": .string("new"),
+            ])
+        ))
+        #expect(reply.contains("The memory file has been edited."), "got: \(reply)")
+        #expect(reply.contains("sensitivity: restricted"), "got: \(reply)")
+        #expect(try await filedTier(of: "new ceiling-edit body", at: .restricted, kit: kit, handle: handle) == .restricted)
+        // The superseded normal row is withdrawn, so the old body is gone at normal.
+        #expect(try await filedTier(of: "old ceiling-edit body", at: .normal, kit: kit, handle: handle) == nil)
+    }
+
+    @Test("memory insert under a secret grant lifts the edit to secret")
+    func insertUnderSecretGrantLiftsToSecret() async throws {
+        let (kit, handle, dispatcher) = try await makeHarness()
+        try await seed("line one\nline two", path: "/memories/ceiling-insert.txt", sensitivity: .elevated, kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
+        let reply = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object([
+                "command": .string("insert"),
+                "path": .string("/memories/ceiling-insert.txt"),
+                "insert_line": .integer(1),
+                "insert_text": .string("ceiling-insert middle"),
+            ])
+        ))
+        #expect(reply.contains("sensitivity: secret"), "got: \(reply)")
+        #expect(try await filedTier(of: "ceiling-insert middle", at: .secret, kit: kit, handle: handle) == .secret)
+    }
 }
