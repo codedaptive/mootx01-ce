@@ -775,3 +775,166 @@ fn view_range_array_slices_lines() {
         assert!(t.contains("     3\t"), "line numbers must start at 3; got: {t}");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Sensitivity grant ceiling on the write side
+// ---------------------------------------------------------------------------
+//
+// The `memory` tool has no sensitivity argument, so its content-bearing
+// writes (create, str_replace, insert) file at the live restricted or secret
+// grant ceiling from the dispatcher's SensitivityGrantLedger, the same rule
+// moot_file_memory applies, and the reply names the tier while a grant is
+// live. These dispatch through `interface_tools::dispatch` with the adapter
+// flag set explicitly, so no env var is touched. Swift twin:
+// `MemoryToolAdapterSensitivityTests` (the "grant ceiling" cases).
+
+/// Dispatch one `memory` call with an explicit grant ledger and the adapter
+/// enabled by flag.
+fn memory_with_ledger(
+    a: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    sensitivity_ledger: &aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger,
+) -> serde_json::Value {
+    aria_mcp::interface_tools::dispatch(
+        "memory",
+        a,
+        registry,
+        &SurfacedRecallLedger::new(),
+        sensitivity_ledger,
+        aria_mcp::estate_posture::EstatePosture::Live,
+        true,
+        "",
+        "",
+        None,
+        None,
+    )
+    .expect("memory dispatch must not throw")
+}
+
+/// The adjective sensitivity of the live drawer in the `memories` wing whose
+/// content contains `marker`, read through an explicit sensitivity filter so
+/// a restricted or secret row is visible to the assertion.
+fn filed_tier_of(
+    registry: &EstateRegistry,
+    marker: &str,
+    tier: AdjectiveSensitivity,
+) -> Option<AdjectiveSensitivity> {
+    use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::Sensitivity(tier)]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(50);
+    coord
+        .recall(&registry.default.handle, frame, wall_now())
+        .expect("recall must succeed")
+        .into_iter()
+        .find(|d| d.tombstoned_at.is_none() && d.content.contains(marker))
+        .map(|d| d.adjective_sensitivity())
+}
+
+#[test]
+fn memory_create_under_restricted_grant_files_restricted_and_names_it() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+    ledger.grant_restricted(wall_now());
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-restricted.txt",
+        "file_text" => "ceiling-restricted body"
+    ];
+    let result = memory_with_ledger(&a, &registry, &ledger);
+    let t = text(&result);
+    assert!(!is_error(&result), "create under a grant must succeed; got: {t}");
+    assert!(t.contains("File created successfully at: /memories/ceiling-restricted.txt"), "got: {t}");
+    assert!(t.contains("sensitivity: restricted"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of(&registry, "ceiling-restricted body", AdjectiveSensitivity::Restricted),
+        Some(AdjectiveSensitivity::Restricted)
+    );
+}
+
+#[test]
+fn memory_create_under_secret_grant_files_secret_and_names_it() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+    ledger.grant_secret(wall_now());
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-secret.txt",
+        "file_text" => "ceiling-secret body"
+    ];
+    let result = memory_with_ledger(&a, &registry, &ledger);
+    let t = text(&result);
+    assert!(!is_error(&result), "create under a grant must succeed; got: {t}");
+    assert!(t.contains("sensitivity: secret"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of(&registry, "ceiling-secret body", AdjectiveSensitivity::Secret),
+        Some(AdjectiveSensitivity::Secret)
+    );
+}
+
+#[test]
+fn memory_create_with_no_grant_files_normal_and_reply_is_unchanged() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let ledger = aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-none.txt",
+        "file_text" => "ceiling-none body"
+    ];
+    let result = memory_with_ledger(&a, &registry, &ledger);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert_eq!(t, "File created successfully at: /memories/ceiling-none.txt");
+    assert_eq!(
+        filed_tier_of(&registry, "ceiling-none body", AdjectiveSensitivity::Normal),
+        Some(AdjectiveSensitivity::Normal)
+    );
+}
+
+#[test]
+fn memory_str_replace_under_restricted_grant_lifts_the_edit_to_restricted() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_file(&registry, "ceiling-edit.txt", "old ceiling-edit body", AdjectiveSensitivity::Normal);
+    let ledger = aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+    ledger.grant_restricted(wall_now());
+    let a = args![
+        "command" => "str_replace",
+        "path" => "/memories/ceiling-edit.txt",
+        "old_str" => "old",
+        "new_str" => "new"
+    ];
+    let result = memory_with_ledger(&a, &registry, &ledger);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert!(t.contains("The memory file has been edited."), "got: {t}");
+    assert!(t.contains("sensitivity: restricted"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of(&registry, "new ceiling-edit body", AdjectiveSensitivity::Restricted),
+        Some(AdjectiveSensitivity::Restricted)
+    );
+    // The superseded normal row is withdrawn, so the old body is gone at Normal.
+    assert_eq!(filed_tier_of(&registry, "old ceiling-edit body", AdjectiveSensitivity::Normal), None);
+}
+
+#[test]
+fn memory_insert_under_secret_grant_lifts_the_edit_to_secret() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_file(&registry, "ceiling-insert.txt", "line one\nline two", AdjectiveSensitivity::Elevated);
+    let ledger = aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+    ledger.grant_secret(wall_now());
+    let a = args![
+        "command" => "insert",
+        "path" => "/memories/ceiling-insert.txt",
+        "insert_line" => 1,
+        "insert_text" => "ceiling-insert middle"
+    ];
+    let result = memory_with_ledger(&a, &registry, &ledger);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert!(t.contains("sensitivity: secret"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of(&registry, "ceiling-insert middle", AdjectiveSensitivity::Secret),
+        Some(AdjectiveSensitivity::Secret)
+    );
+}

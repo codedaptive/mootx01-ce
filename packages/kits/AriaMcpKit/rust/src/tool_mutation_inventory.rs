@@ -22,6 +22,14 @@
 /// committed is changed, moved, or removed. Same risk class as a read from
 /// the user's perspective — undoable by withdrawing/retiring the new row,
 /// never a mutation of prior state.
+///
+/// `moot_file_memory` stays in this tier because its sensitivity follows
+/// the live grant ceiling on the server: while a restricted or secret grant
+/// is live an omitted sensitivity files at the grant's tier and a lower
+/// explicit tier is refused (`interface_tools::run_file_memory`), so an
+/// allow-tier write cannot downgrade material recalled under a grant. The
+/// opt-in `memory` adapter's create, str_replace and insert file at the
+/// ceiling without an argument (`memory_adapter`).
 pub const ADDITIVE_WRITE_TOOLS: &[&str] =
     &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories"];
 

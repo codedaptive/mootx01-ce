@@ -76,7 +76,8 @@ enum PacketTools {
     /// `sensitivityUnlockLedger` is the dispatcher's daemon-RAM grant ledger; the
     /// by-id readers (get, lineage) ask it for the live sensitivity ceiling at `now`
     /// so a restricted/secret grant lifts the packet read gate exactly as it lifts
-    /// moot_memory_get's.
+    /// moot_memory_get's, and the writer (file) asks it for the same ceiling so a
+    /// packet filed under the grant lands at that tier, as moot_file_memory does.
     static func dispatch(
         name: String,
         args: [String: JSONValue],
@@ -87,7 +88,10 @@ enum PacketTools {
     ) async throws -> JSONValue {
         switch name {
         case "moot_file_packet":
-            return try await runFilePacket(args: args, kit: kit, handle: try resolveHandle(args), now: now)
+            return try await runFilePacket(
+                args: args, kit: kit, handle: try resolveHandle(args),
+                grantCeiling: await sensitivityUnlockLedger.ceilingSensitivity(now: now),
+                now: now)
         case "moot_packet_get":
             return try await runPacketGet(
                 args: args, kit: kit, handle: try resolveHandle(args),
@@ -118,7 +122,10 @@ enum PacketTools {
                 uncertainties, and next steps, with optional lineage links to prior packets. \
                 Returns the estate-assigned drawer ID — supply it as targetPacketID in \
                 lineageLinks of future packets, and as drawer_id for moot_packet_get / \
-                moot_packet_lineage.
+                moot_packet_lineage. While a restricted or secret grant is live \
+                (mootx01 unlock), an omitted sensitivity files at the grant's tier, a \
+                lower explicit tier is refused with an error naming the ceiling, and \
+                the reply names the tier applied.
                 """,
                 inputSchema: ToolProjection.withEstateID(ToolProjection.objectSchema(
                     properties: [
@@ -172,6 +179,8 @@ enum PacketTools {
                             "Identifier of the model that produced this packet (e.g. model name/version)."),
                         "agent": ToolProjection.stringSchema(
                             "Identifier of the agent process filing this packet."),
+                        "sensitivity": ToolProjection.stringSchema(
+                            "Optional sensitivity: normal (default), elevated, restricted, secret. While a restricted or secret grant is live (mootx01 unlock), an omitted sensitivity files at the grant's tier, a lower explicit tier is refused with an error naming the ceiling, and the reply names the tier applied. Omit to use the default; null is invalid."),
                         "lineage_links": .object([
                             "type": .string("array"),
                             "description": .string(
@@ -258,16 +267,41 @@ enum PacketTools {
 
     // MARK: - moot_file_packet
 
+    /// `grantCeiling` is the live sensitivity grant tier from the dispatcher's
+    /// ledger at `now` (`nil` = no restricted or secret grant live).
     private static func runFilePacket(
         args: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle,
+        grantCeiling: AdjectiveSensitivity?,
         now: Date
     ) async throws -> JSONValue {
         let objective = try requireString(args, "objective")
         let model = try requireString(args, "model")
         let agent = try requireString(args, "agent")
         let wing = args["wing"]?.stringValue
+
+        // SECURITY: a packet filed while a restricted or secret grant is live
+        // may summarise material recalled under that grant (sources, claims),
+        // so the write side shares the read side's ceiling from the same
+        // ledger, the rule `ToolDispatcher.runFileMemory` applies. An omitted
+        // sensitivity files at the grant's tier; an explicit tier below it is
+        // refused as an isError result naming the ceiling (byte-identical to
+        // the moot_file_memory refusal) and writes nothing; an explicit tier
+        // at or above it is kept. With no live grant the argument decodes as
+        // moot_file_memory's does, default `.normal`. The Rust port carries no
+        // packet tools, so this rule has no twin there.
+        let sensitivity: AdjectiveSensitivity
+        if args["sensitivity"] == nil {
+            sensitivity = grantCeiling ?? .normal
+        } else {
+            let requested = try decodeSensitivity(args["sensitivity"])
+            if let ceiling = grantCeiling, requested.rawValue < ceiling.rawValue {
+                return ToolDispatcher.errorResult(ToolDispatcher.sensitivityBelowCeilingMessage(
+                    requested: requested, ceiling: ceiling))
+            }
+            sensitivity = requested
+        }
 
         let sources = try parseSources(args["sources"])
         let claims = try parseClaims(args["claims"])
@@ -304,25 +338,55 @@ enum PacketTools {
 
         let drawerID: String
         do {
-            drawerID = try await store.store(packet, now: now)
+            drawerID = try await store.store(packet, now: now, sensitivity: sensitivity)
         } catch {
             return ToolDispatcher.errorResult(
                 "moot_file_packet: store failed: \(error.localizedDescription)")
         }
 
-        return ToolDispatcher.textResult("""
-        packet_filed:
-          drawer_id: \(drawerID)
-          packet_id: \(packet.id)
-          objective: \(objective)
-          sources: \(sources.count)
-          claims: \(claims.count)
-          uncertainties: \(uncertainties.count)
-          next_steps: \(nextSteps.count)
-          lineage_links: \(links.count)
-          model: \(model)
-          agent: \(agent)
-        """)
+        var lines = [
+            "packet_filed:",
+            "  drawer_id: \(drawerID)",
+            "  packet_id: \(packet.id)",
+            "  objective: \(objective)",
+            "  sources: \(sources.count)",
+            "  claims: \(claims.count)",
+            "  uncertainties: \(uncertainties.count)",
+            "  next_steps: \(nextSteps.count)",
+            "  lineage_links: \(links.count)",
+            "  model: \(model)",
+            "  agent: \(agent)",
+        ]
+        // Under a live grant the reply names the tier the packet was filed
+        // at, so a caller that omitted the argument learns the floor the
+        // server applied. With no grant the reply keeps its prior shape.
+        if grantCeiling != nil {
+            lines.append("  sensitivity: \(ToolDispatcher.sensitivityArgumentName(sensitivity))")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// Decode the optional `sensitivity` argument. A present value must be one
+    /// of the four tier names; `null` or any other value is `invalidParams`,
+    /// the same contract as `ToolDispatcher.decodeSensitivity` for
+    /// moot_file_memory. Callers handle the absent key themselves (it inherits
+    /// the live grant ceiling).
+    private static func decodeSensitivity(_ value: JSONValue?) throws -> AdjectiveSensitivity {
+        guard let name = value?.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "sensitivity must be a string; omit it to use the default")
+        }
+        switch name {
+        case "normal": return .normal
+        case "elevated": return .elevated
+        case "restricted": return .restricted
+        case "secret": return .secret
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown sensitivity: \(name)")
+        }
     }
 
     // MARK: - moot_packet_get
