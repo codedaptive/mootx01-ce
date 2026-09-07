@@ -74,7 +74,7 @@ use crate::engine::key::VectorRecordKey;
 use crate::engine::metric::{DenseMetric, FloatMetric};
 use crate::engine::mih::{MIHBandCount, MIHIndex};
 use crate::engine::payload::{VectorKind, VectorPayload};
-use crate::engine::resident_store::ResidentArrayStore;
+use crate::engine::resident_store::{GenerationStamp, ResidentArrayStore};
 use crate::engine::seam::{DenseIndex, MetadataFilter};
 use crate::error::SynapseKitError;
 use engram_lib::Engram;
@@ -2407,12 +2407,22 @@ impl VectorStore {
             .delete("hnsw_graph", &StoragePredicate::IsTrue)
             .map_err(|e| SynapseKitError::StoreUnavailable(format!("destroy_all_vectors failed: {e}")))?;
 
+        // The registry survives a destroy (it names generations, not rows), so
+        // the empty sidecar is stamped with it and the next open accepts the
+        // empty array instead of rebuilding it from the empty table.
+        let reg_rows = self
+            .storage
+            .row_store()
+            .query("vector_generations", Some(&StoragePredicate::IsTrue), &[], None, None)
+            .map_err(|e| SynapseKitError::StoreUnavailable(e.to_string()))?;
+        let current_stamp = Self::generation_stamp_from_rows(&reg_rows);
+
         // Reset both indexes and live count to empty. The table is now empty.
         let mut state = self.state.lock().map_err(|_| {
             SynapseKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
         })?;
         if let Some(ref mut store) = state.array_store {
-            store.rebuild_from(&[])?;
+            store.rebuild_from(&[], current_stamp)?;
             let snap = store.snapshot();
             let (payloads, keys) = Self::array_to_payloads_keys(&snap);
             state.brute_force_index.build(&payloads, &keys)?;
@@ -2723,7 +2733,7 @@ impl VectorStore {
         let records = self.fetch_all_binary_records(&gen_pred)?;
         state.live_binary_count = records.len() as u32;
         if let Some(ref mut store) = state.array_store {
-            store.rebuild_from(&records)?;
+            store.rebuild_from(&records, Self::generation_stamp_from_rows(&reg_rows))?;
             let rebuilt = store.snapshot();
             let (payloads, keys) = Self::array_to_payloads_keys(&rebuilt);
             state.brute_force_index.build(&payloads, &keys)?;
@@ -3081,6 +3091,7 @@ impl VectorStore {
             .query("vector_generations", Some(&StoragePredicate::IsTrue), &[], None, None)
             .map_err(|e| SynapseKitError::StoreUnavailable(e.to_string()))?;
         let gen_pred = Self::serving_gen_predicate_core(&reg_rows, state);
+        let current_stamp = Self::generation_stamp_from_rows(&reg_rows);
 
         if let Some(ref mut store) = state.array_store {
             // Attempt to load from the on-disk sidecar.
@@ -3089,7 +3100,13 @@ impl VectorStore {
             let snap = store.snapshot();
             let table_count = self.binary_row_count(&gen_pred)?;
 
-            // Compare live-vs-live: snap.live_count() is the number of
+            // Two checks, both required. (1) Generation: the header stamp
+            // must equal the registry read above; a sidecar left behind by
+            // a crash between the registry flip of publish_shadow_generation
+            // and its sidecar rebuild carries the previous stamp and is
+            // rejected even when the two generations hold the same number
+            // of rows (a full reindex commonly does). (2) Compare
+            // live-vs-live: snap.live_count() is the number of
             // non-tombstoned slots in the sidecar (written to the header
             // at flush time and recomputed here from the bitmap).
             // table_count is the number of serving-generation binary rows in
@@ -3098,19 +3115,20 @@ impl VectorStore {
             // not count. They agree iff the sidecar is up-to-date (C5 fix: using
             // snap.count here counts tombstoned slots and spuriously
             // triggers a full rebuild after every delete).
-            if snap.live_count() == table_count {
-                // Sidecar and table agree on live records — use the sidecar.
+            if store.generation_stamp() == &current_stamp && snap.live_count() == table_count {
+                // Sidecar and table agree on generation and live records — use the sidecar.
                 state.live_binary_count = snap.live_count() as u32;
                 let (payloads, keys) = Self::array_to_payloads_keys(&snap);
                 state.brute_force_index.build(&payloads, &keys)?;
                 state.mih_index.build(&payloads, &keys)?;
             } else {
-                // Stale sidecar: rebuild from the table (serving generation only).
+                // Stale sidecar: rebuild from the table (serving generation only)
+                // under the registry stamp the rows were fetched with.
                 state.sidecar_rebuild_count += 1;
                 let records = self.fetch_all_binary_records(&gen_pred)?;
                 state.live_binary_count = records.len() as u32;
                 let store_ref = state.array_store.as_mut().unwrap();
-                store_ref.rebuild_from(&records)?;
+                store_ref.rebuild_from(&records, current_stamp)?;
                 let rebuilt = store_ref.snapshot();
                 let (payloads, keys) = Self::array_to_payloads_keys(&rebuilt);
                 state.brute_force_index.build(&payloads, &keys)?;
@@ -4065,6 +4083,23 @@ impl VectorStore {
         let mut all_clauses = vec![unknown_clause];
         all_clauses.extend(per_model_clauses);
         StoragePredicate::any(all_clauses)
+    }
+
+    /// The serving-generation stamp of the sidecar: `model_id` to
+    /// `serving_generation` for every parseable `vector_generations` row, the
+    /// same rows `build_serving_gen_predicate` scopes the table reads with.
+    /// A sidecar is accepted at open only when its header stamp equals this
+    /// map (see `ensure_index_built_locked`).
+    fn generation_stamp_from_rows(reg_rows: &[StorageRow]) -> GenerationStamp {
+        let mut stamp = GenerationStamp::new();
+        for row in reg_rows {
+            if let (Some(TypedValue::Text(mid)), Some(TypedValue::Int(sg))) =
+                (row.get("model_id"), row.get("serving_generation"))
+            {
+                stamp.insert(mid.clone(), *sg);
+            }
+        }
+        stamp
     }
 
     /// Build a serving-generation predicate from already-fetched registry rows

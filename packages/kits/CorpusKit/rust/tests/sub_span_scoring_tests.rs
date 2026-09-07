@@ -22,9 +22,14 @@
 //!         Verifies the engine wires source + provider and returns scored results.
 //!   §6b `Corpus::score_sub_spans` — chunk-based path.
 //!         Verifies the corpus path produces non-empty results.
+//!   §7  `SubSpanBudget` — the work bound (2026-09-07 security scan, finding
+//!         49b0b7cd7). The aggregate window budget stops the walk in the
+//!         caller's order and names the unscored candidates; the per-record
+//!         byte cap cuts on a scalar boundary; the defaults are the
+//!         documented bound. Mirrors Swift `SubSpanBudgetTests`.
 
 use corpus_kit::{
-    content_digest, sub_span_scoring, CorpusContentChangeBatch, CorpusContentConfiguration,
+    content_digest, sub_span_scoring, SubSpanBudget, CorpusContentChangeBatch, CorpusContentConfiguration,
     CorpusContentEngine, CorpusContentId, CorpusContentRecord, CorpusContentSource,
     CorpusContentStore, CorpusDocumentStore, CorpusKitError, CorpusIndexUnitPolicy, CorpusOperatingMode,
     EmbeddingModelConfig, NamedInferenceFn,
@@ -361,16 +366,16 @@ fn cosine_mismatched_length_yields_zero() {
 fn score_empty_query_yields_empty_map() {
     let provider = ThrowingFloatProvider;
     let source = MapContentSource::new(vec![("a", "hello world")]);
-    let result = sub_span_scoring::score("", &["a"], &source, &provider, 4, 0);
-    assert!(result.is_empty(), "empty query must return empty map without calling provider");
+    let result = sub_span_scoring::score("", &["a"], &source, &provider, 4, 0, SubSpanBudget::DEFAULT);
+    assert!(result.scores.is_empty(), "empty query must return empty map without calling provider");
 }
 
 #[test]
 fn score_empty_candidate_ids_yields_empty_map() {
     let provider = ThrowingFloatProvider;
     let source = MapContentSource::new(vec![("a", "hello world")]);
-    let result = sub_span_scoring::score("hello", &[], &source, &provider, 4, 0);
-    assert!(result.is_empty(), "empty candidateIDs must return empty map without calling source");
+    let result = sub_span_scoring::score("hello", &[], &source, &provider, 4, 0, SubSpanBudget::DEFAULT);
+    assert!(result.scores.is_empty(), "empty candidateIDs must return empty map without calling source");
 }
 
 // ── §4: score() — provider without float lane ─────────────────────────────────
@@ -389,8 +394,9 @@ fn score_throwing_provider_yields_empty_map() {
         &provider,
         4,
         0,
+        SubSpanBudget::DEFAULT,
     );
-    assert!(result.is_empty(), "provider without float lane must return empty map; got {result:?}");
+    assert!(result.scores.is_empty(), "provider without float lane must return empty outcome; got {result:?}");
 }
 
 // ── §5: Sub-span rescue fixture ───────────────────────────────────────────────
@@ -433,12 +439,13 @@ fn score_sub_span_rescue_ranks_true_answer_first() {
         &provider,
         4, // window=4
         0, // overlap=0
+        SubSpanBudget::DEFAULT,
     );
 
     // All three must appear in the map.
-    let true_score = *results.get("true_answer").expect("true_answer must be scored");
-    let dist_score1 = *results.get("distractor1").expect("distractor1 must be scored");
-    let dist_score2 = *results.get("distractor2").expect("distractor2 must be scored");
+    let true_score = *results.scores.get("true_answer").expect("true_answer must be scored");
+    let dist_score1 = *results.scores.get("distractor1").expect("distractor1 must be scored");
+    let dist_score2 = *results.scores.get("distractor2").expect("distractor2 must be scored");
 
     // True answer must outscore distractors.
     assert!(
@@ -472,10 +479,11 @@ fn score_absent_candidate_is_omitted() {
         &provider,
         4,
         0,
+        SubSpanBudget::DEFAULT,
     );
-    assert!(results.contains_key("present"), "present candidate must be scored");
+    assert!(results.scores.contains_key("present"), "present candidate must be scored");
     assert!(
-        !results.contains_key("absent_id"),
+        !results.scores.contains_key("absent_id"),
         "absent candidate must be omitted (implicit 0.0)"
     );
 }
@@ -504,8 +512,9 @@ fn score_uses_effective_dense_text() {
         &provider,
         4,
         0,
+        SubSpanBudget::DEFAULT,
     );
-    let score = *results.get("dual_text").expect("dual_text must be scored");
+    let score = *results.scores.get("dual_text").expect("dual_text must be scored");
     assert!(
         (score - 1.0).abs() < 0.001,
         "effective_dense_text must be used; expected score 1.0, got {score}"
@@ -528,12 +537,12 @@ fn engine_score_sub_spans_returns_scored_results() {
 
     // score_sub_spans does NOT require index_content — it resolves records
     // directly via the source, mirroring the Swift test.
-    let results = engine.score_sub_spans("alpha alpha alpha", &["doc1", "doc2"]);
+    let results = engine.score_sub_spans("alpha alpha alpha", &["doc1", "doc2"], SubSpanBudget::DEFAULT);
 
-    assert!(!results.is_empty(), "score_sub_spans must return scored results for content in source");
+    assert!(!results.scores.is_empty(), "score_sub_spans must return scored results for content in source");
 
-    let score1 = *results.get("doc1").unwrap_or(&0.0);
-    let score2 = *results.get("doc2").unwrap_or(&0.0);
+    let score1 = *results.scores.get("doc1").unwrap_or(&0.0);
+    let score2 = *results.scores.get("doc2").unwrap_or(&0.0);
     assert!(
         score1 > score2,
         "doc1 (matching direction) must outscore doc2; doc1={score1}, doc2={score2}"
@@ -545,11 +554,11 @@ fn engine_score_sub_spans_absent_candidate_omitted() {
     let (engine, store) = make_engine(directional_inference());
     store.put("alpha alpha alpha", "present", NOW_MS).unwrap();
 
-    let results = engine.score_sub_spans("alpha alpha alpha", &["present", "nonexistent"]);
+    let results = engine.score_sub_spans("alpha alpha alpha", &["present", "nonexistent"], SubSpanBudget::DEFAULT);
 
-    assert!(results.contains_key("present"), "present candidate must be scored");
+    assert!(results.scores.contains_key("present"), "present candidate must be scored");
     assert!(
-        !results.contains_key("nonexistent"),
+        !results.scores.contains_key("nonexistent"),
         "absent candidate must be omitted"
     );
 }
@@ -579,14 +588,130 @@ fn corpus_score_sub_spans_chunk_path_returns_results() {
         .ingest("omega omega omega", "source2", NOW_MS)
         .unwrap();
 
-    let results = corpus.score_sub_spans("alpha alpha alpha", &["source1", "source2"]);
+    let results = corpus.score_sub_spans("alpha alpha alpha", &["source1", "source2"], SubSpanBudget::DEFAULT);
 
-    assert!(!results.is_empty(), "score_sub_spans must return results for ingested sources");
+    assert!(!results.scores.is_empty(), "score_sub_spans must return results for ingested sources");
 
-    let score1 = *results.get("source1").unwrap_or(&0.0);
-    let score2 = *results.get("source2").unwrap_or(&0.0);
+    let score1 = *results.scores.get("source1").unwrap_or(&0.0);
+    let score2 = *results.scores.get("source2").unwrap_or(&0.0);
     assert!(
         score1 > score2,
         "source1 (matching direction) must outscore source2; s1={score1}, s2={score2}"
     );
+}
+
+// ── §7: SubSpanBudget — the work bound ───────────────────────────────────────
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Routes like `FirstTokenRoutingProvider` and counts every `embed_float`
+/// call, the inference-call meter the budget bounds. Mirrors Swift
+/// `CountingRoutingProvider`.
+struct CountingRoutingProvider {
+    calls: AtomicUsize,
+}
+
+impl CountingRoutingProvider {
+    fn new() -> Self {
+        Self { calls: AtomicUsize::new(0) }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl EmbeddingProvider for CountingRoutingProvider {
+    fn model_id(&self) -> &str {
+        "test-counting-routing-v1"
+    }
+    fn model_version(&self) -> &str {
+        "1.0.0"
+    }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
+        Err(SynapseKitError::EmbeddingFailed("not used".into()))
+    }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if text.starts_with("target") {
+            Ok(vec![1.0, 0.0])
+        } else {
+            Ok(vec![0.0, 1.0])
+        }
+    }
+}
+
+/// Eight tokens: two windows at window 4 / overlap 0.
+const EIGHT_TOKENS: &str = "target a b c d e f g";
+
+#[test]
+fn budget_defaults_are_the_documented_bound() {
+    assert_eq!(SubSpanBudget::DEFAULT.max_record_bytes, 16_384);
+    assert_eq!(SubSpanBudget::DEFAULT.max_windows, 1_024);
+    assert_eq!(SubSpanBudget::default(), SubSpanBudget::DEFAULT);
+}
+
+#[test]
+fn window_budget_stops_the_walk_in_caller_order_and_names_the_unscored() {
+    let provider = CountingRoutingProvider::new();
+    let source = MapContentSource::new(vec![
+        ("c1", EIGHT_TOKENS),
+        ("c2", EIGHT_TOKENS),
+        ("c3", EIGHT_TOKENS),
+    ]);
+    let budget = SubSpanBudget { max_record_bytes: 16_384, max_windows: 3 };
+    let outcome = sub_span_scoring::score(
+        "target", &["c1", "c2", "c3"], &source, &provider, 4, 0, budget);
+    // c1 takes two windows, c2 one (partial, still scored), c3 none.
+    assert_eq!(outcome.windows_embedded, 3);
+    assert!(outcome.truncated, "the aggregate budget stopped the walk");
+    assert_eq!(outcome.unscored_ids, vec!["c3".to_string()]);
+    assert!(outcome.scores.contains_key("c1"));
+    assert!(outcome.scores.contains_key("c2"), "a partially embedded candidate is scored over its windows");
+    assert!(!outcome.scores.contains_key("c3"));
+    assert_eq!(provider.calls(), 1 + 3, "one query embedding plus exactly max_windows sub-span embeddings");
+
+    // The caller's order decides who the budget reaches: reversed, c3 wins.
+    let provider = CountingRoutingProvider::new();
+    let budget = SubSpanBudget { max_record_bytes: 16_384, max_windows: 1 };
+    let outcome = sub_span_scoring::score(
+        "target", &["c3", "c1"], &source, &provider, 4, 0, budget);
+    assert!(outcome.scores.contains_key("c3"));
+    assert_eq!(outcome.unscored_ids, vec!["c1".to_string()]);
+    assert!(outcome.truncated);
+}
+
+#[test]
+fn window_budget_that_covers_every_window_does_not_truncate() {
+    let provider = CountingRoutingProvider::new();
+    let source = MapContentSource::new(vec![("c1", EIGHT_TOKENS), ("c2", EIGHT_TOKENS)]);
+    let budget = SubSpanBudget { max_record_bytes: 16_384, max_windows: 4 };
+    let outcome = sub_span_scoring::score(
+        "target", &["c1", "c2"], &source, &provider, 4, 0, budget);
+    assert_eq!(outcome.windows_embedded, 4);
+    assert!(!outcome.truncated);
+    assert!(outcome.unscored_ids.is_empty());
+    assert_eq!(outcome.scores.len(), 2);
+}
+
+#[test]
+fn record_byte_cap_bounds_the_windows_one_record_produces() {
+    let provider = CountingRoutingProvider::new();
+    let source = MapContentSource::new(vec![("c1", EIGHT_TOKENS)]);
+    // "target a" is 8 bytes: one token window instead of two.
+    let budget = SubSpanBudget { max_record_bytes: 8, max_windows: 1_024 };
+    let outcome = sub_span_scoring::score("target", &["c1"], &source, &provider, 4, 0, budget);
+    assert_eq!(outcome.windows_embedded, 1, "the cap left one window");
+    assert!(!outcome.truncated, "the byte cap is a constant of the measure, not a truncation");
+    assert!(outcome.unscored_ids.is_empty());
+    assert!(outcome.scores.contains_key("c1"));
+}
+
+#[test]
+fn capped_text_cuts_on_a_scalar_boundary() {
+    // "target " is 7 bytes; "é" is 2 bytes (0xC3 0xA9). A cap of 8 lands
+    // inside the scalar and steps back to 7.
+    assert_eq!(sub_span_scoring::capped_text("target é", 8), "target ");
+    assert_eq!(sub_span_scoring::capped_text("target é", 9), "target é");
+    assert_eq!(sub_span_scoring::capped_text("target", 100), "target");
+    assert_eq!(sub_span_scoring::capped_text("é", 1), "");
 }

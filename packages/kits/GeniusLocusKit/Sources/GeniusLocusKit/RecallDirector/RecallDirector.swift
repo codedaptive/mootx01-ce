@@ -1535,6 +1535,71 @@ public extension GeniusLocusKit {
     /// 11. Build `RecallHit` array from `drawerIndex` in MMR-selected order,
     ///    applying `hydrationLevel` stripping via `applyHydration(_:level:)`.
     /// 12. Return `GLKRecallResult` with `unionProfile` populated.
+    /// Scalars of one body the step 9.5 shingler reads at most. A body longer
+    /// than the cap is shingled over its first 4,096 scalars: the
+    /// character-3-gram Jaccard the MMR penalises near-duplicates with is a
+    /// measure of the opening of the body, which is where a near-duplicate
+    /// declares itself, and a set of at most 4,094 3-grams bounds every
+    /// pairwise intersection in step 10. Rust
+    /// `UNION_BEST_MMR_BODY_CAP_SCALARS` twin.
+    internal static let unionBestMMRBodyCapScalars = 4_096
+
+    /// Aggregate scalars the step 9.5 shingler reads per query across the
+    /// whole candidate view. The budget is split evenly: every body is
+    /// shingled over the same prefix length, `min(cap, budget / bodies)`, so
+    /// the shingle memory and the step 10 work (picks × the shingled scalars)
+    /// are a constant of the build, not of the estate. An even split keeps
+    /// one similarity measure for the whole pool. A body without a set in a
+    /// pool of bodies with sets would fall to the sourceMask proxy, which
+    /// reads a same-lane neighbour as an exact duplicate and a cross-lane
+    /// neighbour as unrelated, and the MMR then drops the lane's real hits
+    /// for the unrelated-looking ones; a shorter prefix on every body keeps
+    /// the comparison symmetric. One million scalars is 244 full-cap bodies,
+    /// or about 600 scalars each across the widest fused pool the lanes can
+    /// supply (the lexical, locus and fingerprint lanes at the 256 frontier
+    /// ceiling plus the 4x over-fetched dense lanes). Rust
+    /// `UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS` twin. Internal: the file is a
+    /// public extension, so the access level is stated; tests reach it
+    /// through `@testable import`.
+    internal static let unionBestMMRShingleBudgetScalars = 1_000_000
+
+    /// The shingle sets of the MMR body view under the budget. `bodies[i]` is
+    /// the body of slot i (nil when the slot has none: a body-free tier or a
+    /// candidate outside the frame-admissible pool). Every non-empty body is
+    /// shingled over the same prefix, `min(unionBestMMRBodyCapScalars,
+    /// unionBestMMRShingleBudgetScalars / non-empty bodies)` scalars. Returns
+    /// one set per slot (nil where the slot has no body or an empty body) and
+    /// whether the aggregate budget shortened the prefix below the cap for at
+    /// least one body longer than the prefix (the cap alone shortening a body
+    /// is the measure, not a truncation). Rust
+    /// `recall::union_best_mmr_shingles` twin; the two ports build the same
+    /// sets for the same inputs.
+    internal static func unionBestMMRShingles(
+        bodies: [String?]
+    ) -> (sets: [Set<String>?], truncated: Bool) {
+        let nonEmpty = bodies.reduce(0) { $0 + (($1?.isEmpty == false) ? 1 : 0) }
+        let prefix = nonEmpty == 0
+            ? unionBestMMRBodyCapScalars
+            : min(unionBestMMRBodyCapScalars, unionBestMMRShingleBudgetScalars / nonEmpty)
+        var sets = [Set<String>?](repeating: nil, count: bodies.count)
+        var truncated = false
+        for (i, body) in bodies.enumerated() {
+            guard let body, !body.isEmpty else { continue }
+            let scalars = body.unicodeScalars
+            // `index(_:offsetBy:limitedBy:)` walks at most `prefix` scalars, so
+            // a long body is never scanned whole.
+            let longerThanPrefix = scalars.index(
+                scalars.startIndex, offsetBy: prefix, limitedBy: scalars.endIndex
+            ).map { $0 < scalars.endIndex } ?? false
+            if longerThanPrefix && prefix < unionBestMMRBodyCapScalars {
+                truncated = true
+            }
+            let capped = longerThanPrefix ? String(scalars.prefix(prefix)) : body
+            sets[i] = ShingleSimilarity.shingles(capped)
+        }
+        return (sets, truncated)
+    }
+
     private func recallUnionBest(
         estate: LocusKit.Estate,
         request: GLKRecallRequest,
@@ -1543,6 +1608,10 @@ public extension GeniusLocusKit {
     ) async throws -> GLKRecallResult {
         // Accumulates recoverable stage failures for GLKRecallResult.degradedStages.
         var degradedStages: [String] = []
+        // The candidates step 5.8's sub-span window budget left unscored: their
+        // dense column is the stored signal alone and the explainer says so.
+        // Empty unless the budget truncated. Rust `sub_span_unscored` twin.
+        var subSpanUnscoredIDs: Set<String> = []
 
         // W2.5 R(b): resolve lane weights ONCE for this recall with the
         // provision-aware precedence (shape-explicit > provisioned estate
@@ -2463,10 +2532,24 @@ public extension GeniusLocusKit {
         // Step 5.8 — sub-span dense refinement (MISSION_11X_RECALL_GAP_01 Item 1).
         //
         // Runs for .matrixAware scoring when a CorpusContentEngine is registered.
-        // Computes transient sentence-level sub-span vectors for each candidate
+        // Computes transient sentence-level sub-span vectors for the candidates
         // in the buffer and takes max(buffer.dense[i], subSpanMaxCosine[i]) as the
         // refined dense score. Sub-span vectors are immediately discarded — zero
-        // persistence; compute is bounded by the candidate pool (~40), not corpus size.
+        // persistence.
+        //
+        // BOUND: the work is the CorpusKit `SubSpanBudget` (a per-record byte
+        // cap and an aggregate window budget per query), not the candidate
+        // pool: a large record or a wide pool cannot turn one search into an
+        // unbounded run of embedding calls under the coordinator lock. The
+        // budget serves candidates in PRIORITY order: BM25 score descending,
+        // then Hamming similarity descending, then id ascending (a
+        // port-independent tie-break: this buffer is in lane merge order and
+        // the Rust buffer is in id order), so the lexical and fingerprint
+        // evidence the refinement exists to rescue is scored before
+        // recency-only supply and both ports reach the same candidates. When
+        // the budget truncates, the stage `subSpan.budget` is recorded and the
+        // unscored candidates keep their stored dense signal; the explainer
+        // marks their hits `subSpan:budget`.
         //
         // BLEND RULE: max-cosine — if the sub-span max-cosine of a candidate
         // exceeds its whole-doc dense cosine, the sub-span wins. This preserves the
@@ -2479,23 +2562,30 @@ public extension GeniusLocusKit {
         // only improve precision (they cannot lower the dense column). The gating
         // on matrixAware keeps it off the cheaper .raw/.rrf paths.
         //
-        // Degradation: if scoreSubSpans returns empty (provider no float lane,
-        // source unavailable), the buffer.dense column is left unchanged. The step
-        // is non-throwing and non-fatal.
+        // Degradation: if scoreSubSpans returns an empty outcome (provider no
+        // float lane, source unavailable), the buffer.dense column is left
+        // unchanged. The step is non-throwing and non-fatal.
         if request.scoring == .matrixAware,
            let corpus = corpusKits[handle],
            let text = sketch.queryText, !text.isEmpty,
            buffer.count > 0 {
-            let candidateIDs = Array(buffer.ids[0..<buffer.count])
-            let subSpanScores = await corpus.scoreSubSpans(
-                query: text, candidateIDs: candidateIDs)
-            if !subSpanScores.isEmpty {
-                for i in 0..<buffer.count {
-                    if let subSpan = subSpanScores[buffer.ids[i]] {
-                        // max-cosine blend: sub-span only improves the dense column.
-                        buffer.dense[i] = max(buffer.dense[i], subSpan)
-                    }
+            let priority = (0..<buffer.count).sorted { a, b in
+                if buffer.bm25[a] != buffer.bm25[b] { return buffer.bm25[a] > buffer.bm25[b] }
+                if buffer.vector[a] != buffer.vector[b] { return buffer.vector[a] > buffer.vector[b] }
+                return buffer.ids[a] < buffer.ids[b]
+            }
+            let candidateIDs = priority.map { buffer.ids[$0] }
+            let outcome = await corpus.scoreSubSpans(
+                query: text, candidateIDs: candidateIDs, budget: .default)
+            for i in 0..<buffer.count {
+                if let subSpan = outcome.scores[buffer.ids[i]] {
+                    // max-cosine blend: sub-span only improves the dense column.
+                    buffer.dense[i] = max(buffer.dense[i], subSpan)
                 }
+            }
+            if outcome.truncated {
+                degradedStages.append("subSpan.budget")
+                subSpanUnscoredIDs.formUnion(outcome.unscoredIDs)
             }
         }
 
@@ -2755,20 +2845,32 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Shingle each hydrated body ONCE. Step 10 compares every selected
-        // candidate against every remaining candidate (about 2N·|pool| pairs
-        // per query, more when Phase 2 widens); rebuilding both character-
-        // 3-gram sets per pair measured 35–40 s of a 36–46 s search over a
-        // 13,817-drawer wing. The sets are built here, after step 9.5 fills
-        // mmrContentByID, and reused across both MMR phases through the
-        // SubstrateML set overload — the same |∩|/|∪| the string overload
-        // computes, so the selection is byte-identical. An empty body builds
-        // no set; the MMR loop reads a missing set as "content unavailable →
-        // sourceMask Jaccard", the same rule the empty-content check applied.
+        // Shingle each hydrated body ONCE, under the step 9.5 budget. Step 10
+        // compares every selected candidate against every remaining candidate
+        // (about 2N·|pool| pairs per query, more when Phase 2 widens);
+        // rebuilding both character-3-gram sets per pair measured 35–40 s of
+        // a 36–46 s search over a 13,817-drawer wing. The sets are built here,
+        // after step 9.5 fills mmrContentByID, and reused across both MMR
+        // phases through the SubstrateML set overload — the same |∩|/|∪| the
+        // string overload computes, so the selection is byte-identical. Every
+        // body is shingled over the same prefix, `unionBestMMRBodyCapScalars`
+        // or the even share of `unionBestMMRShingleBudgetScalars`, whichever
+        // is shorter (`unionBestMMRShingles`); when the budget shortens the
+        // prefix below the cap the stage `unionBest.mmrBudget` is recorded.
+        // An empty body builds no set; the MMR loop reads a missing set as
+        // "content unavailable → sourceMask Jaccard", the same rule the
+        // empty-content check applied.
         var mmrShinglesByID: [String: Set<String>] = [:]
-        mmrShinglesByID.reserveCapacity(mmrContentByID.count)
-        for (id, content) in mmrContentByID where !content.isEmpty {
-            mmrShinglesByID[id] = ShingleSimilarity.shingles(content)
+        if !mmrContentByID.isEmpty {
+            let bodies: [String?] = (0..<buffer.count).map { mmrContentByID[buffer.ids[$0]] }
+            let view = Self.unionBestMMRShingles(bodies: bodies)
+            mmrShinglesByID.reserveCapacity(mmrContentByID.count)
+            for i in 0..<buffer.count {
+                if let set = view.sets[i] { mmrShinglesByID[buffer.ids[i]] = set }
+            }
+            if view.truncated {
+                degradedStages.append("unionBest.mmrBudget")
+            }
         }
 
         // Step 10 — greedy MMR with adaptive λ.
@@ -3092,7 +3194,8 @@ public extension GeniusLocusKit {
                 : 0
             var explanationLines = explainer.explain(hit: bareHit, sketch: sketch,
                                                      plan: plan, scoring: request.scoring,
-                                                     agreement: agreementEarned)
+                                                     agreement: agreementEarned,
+                                                     subSpanUnscored: subSpanUnscoredIDs.contains(id))
             // PER-SIGNAL DENSE PROVENANCE (6b-core): when this hit was surfaced by
             // the dense lane, append the modelIDs of the signals that voted, in
             // slot order. The line is honest — it names exactly the signals whose

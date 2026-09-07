@@ -88,6 +88,12 @@ required-features = ["migration-v1-5-to-v1-6"]
 name = "whole_record_float_vacuum_migration_tests"
 required-features = ["migration-v1-6-to-v1-7"]
 
+# The chain's entry gate (stamp read, floor and ceiling refusals, dispatch
+# from the detected version) needs a compiled chain to gate.
+[[test]]
+name = "migration_chain_tests"
+required-features = ["migration-v1-4-to-v1-5"]
+
 # Geometry normalization is format-agnostic: runs on ANY plaintext estate with
 # nonzero reserve, regardless of migration floor. No required-features gate.
 [[test]]
