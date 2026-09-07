@@ -146,7 +146,7 @@ struct StorageMaintenanceTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await storage.open(schema: schema)
 
-        try await storage.transaction(isolation: .serializable) { _ in
+        _ = try await storage.transaction(isolation: .serializable) { _ in
             // The estate connection holds an open transaction here; the
             // maintenance pass must refuse rather than deadlock or corrupt.
             await #expect(throws: StorageMaintenanceError.notQuiescent(
