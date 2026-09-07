@@ -176,7 +176,10 @@ public func hybridRecall(
             fallback: .allowDegraded,
             queryText: scoredLane.queryText,
             traceLimit: scoredLane.traceLimit,
-            origin: .internal)
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let scored = try await glk.recall(handle, request)
         var seen = Set<String>()
         var union: [Drawer] = []

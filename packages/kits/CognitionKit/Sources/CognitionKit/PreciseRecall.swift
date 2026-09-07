@@ -150,7 +150,10 @@ public enum PreciseRecall {
             fallback: .allowDegraded,
             queryText: query,
             traceLimit: limit,
-            origin: .internal)
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let result = try await kit.recall(handle, request)
 
         // b. REDUCTION COMPOSITION — project each body-free pooled hit (with its
