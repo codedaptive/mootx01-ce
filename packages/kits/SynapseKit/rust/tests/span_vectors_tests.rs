@@ -148,3 +148,47 @@ fn reclaim_removes_retired_and_non_serving_rows_only() {
         assert_eq!(row.get("generation"), Some(&TypedValue::Int(0)));
     }
 }
+
+#[test]
+fn whole_record_vacuum_removes_float_and_graph_rows_keeps_binary_and_span_rows() {
+    use engram_lib::Engram;
+    use synapsekit::engine::payload::VectorKind;
+    let (store, raw) = make_store();
+    // Binary rows (kind 0) at lane 0 and float rows (kind 1) at lane 1 for two
+    // models; span rows (kind 2) under the encoder model.
+    let binary = VectorPayload { kind: VectorKind::Binary, dim: 256, bytes: vec![0x0F; 32], scale: None };
+    for model in ["live-v1", "other-v1"] {
+        store.add_payload("i1", 0, &binary, model, "1", NOW).unwrap();
+        store.add_payload("i1", 1, &VectorPayload::from_f32(&[1.0, 0.0]), model, "1", NOW).unwrap();
+    }
+    store
+        .write_span_vectors("i1", "arctic-embed-s-w60", "1", &[span(0, vec![1, 2], 1.0, 0, 30)], NOW)
+        .unwrap();
+    store.flush().unwrap();
+    let mut graph = BTreeMap::new();
+    graph.insert("model_id".to_string(), TypedValue::Text("live-v1".into()));
+    graph.insert("node_idx".to_string(), TypedValue::Int(0));
+    graph.insert("node_id".to_string(), TypedValue::Text("i1".into()));
+    graph.insert("layer".to_string(), TypedValue::Int(0));
+    graph.insert("neighbours".to_string(), TypedValue::Blob(vec![0, 0, 0, 0]));
+    graph.insert("generation".to_string(), TypedValue::Int(0));
+    raw.row_store().insert("hnsw_graph", graph).unwrap();
+
+    let (float_rows, graph_rows) = store.reclaim_whole_record_float_rows().unwrap();
+    assert_eq!((float_rows, graph_rows), (2, 1));
+    let mut kinds: Vec<i64> = raw
+        .row_store()
+        .query_projected("vectors", &["kind"], Some(&StoragePredicate::IsTrue), &[], None, None)
+        .unwrap()
+        .iter()
+        .map(|row| match row.get("kind") { Some(TypedValue::Int(k)) => *k, _ => -1 })
+        .collect();
+    kinds.sort();
+    assert_eq!(kinds, vec![0, 0, 2]);
+    assert_eq!(raw.row_store().count("hnsw_graph", None).unwrap(), 0);
+    // A second pass finds nothing and the binary lane still serves.
+    assert_eq!(store.reclaim_whole_record_float_rows().unwrap(), (0, 0));
+    let probe = Engram::new(0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F);
+    let ids: Vec<String> = store.find_nearest(&probe, "live-v1", 5).unwrap().into_iter().map(|m| m.item_id).collect();
+    assert_eq!(ids, vec!["i1".to_string()]);
+}

@@ -19,8 +19,8 @@ use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
 use crate::corpus::{
-    discrimination_signal_from_outcome, Corpus, CorpusPathReason, EmbeddingModelConfig, EncodeSpeed,
-    FloatDiscriminationSignal, FloatLaneOutcome, ProviderSlot, TrainingPathDecision,
+    Corpus, CorpusPathReason, EmbeddingModelConfig, EncodeSpeed,
+    ProviderSlot, TrainingPathDecision,
 };
 use crate::corpus_provider_counts_store::{
     CorpusProviderCountsStore, PersistedCounts, PersistedCountsReference,
@@ -39,7 +39,6 @@ use crate::schema_profile::{
 };
 use crate::tokenizer::default_keyword_tokens;
 use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
-use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -54,10 +53,17 @@ pub type ContentOnEncoded = Box<dyn Fn(&[String], &str) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
 use synapsekit::{
-    engine::metric::FloatMetric,
     EmbeddingProvider, VectorExactKey, VectorPayload, VectorPayloadInput,
     VectorRepresentationClaims, VectorRepresentationKey, VectorStore,
 };
+
+/// The whole-record dense float surface of the engine: per-signal nearest and
+/// farthest recall, the discrimination signal, the float re-embed of one
+/// record and the forced store-error test seams. Compiled only with the
+/// `whole-record-dense` feature. Swift twin:
+/// Sources/CorpusKitWholeRecordDense/CorpusContentEngine+FloatLane.swift.
+#[cfg(feature = "whole-record-dense")]
+mod float_lane;
 
 /// Range evidence for a standalone passage hit. Never changes result
 /// identity.
@@ -222,24 +228,6 @@ fn evidence_from_item_key(key: &str) -> Option<CorpusEvidence> {
     }
 }
 
-/// Emit one CorpusKit-tagged counter (the same shape corpus.rs uses).
-fn emit_engine_metric(name: &str, value: f64) {
-    report!(StatSample::metric(
-        name.to_string(),
-        value,
-        [("kit".to_string(), "CorpusKit".to_string())]
-            .into_iter()
-            .collect(),
-        {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0)
-        },
-    ));
-}
-
 // ── Engine ───────────────────────────────────────────────────────────────
 
 /// The engine/index layout version stamped into `corpus_index_state`.
@@ -263,6 +251,17 @@ pub type ContentBackfillFaultHook = Box<dyn Fn(&str, usize) -> Result<(), String
 
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
+
+/// The vector lanes this engine writes, claims and deletes per slot: lane 0
+/// is the 256-bit engram row every build writes; lane 1 is the whole-record
+/// float row, which exists only with the `whole-record-dense` feature. The
+/// default build names lane 0 alone, so a populated estate whose float rows
+/// the 1.6 to 1.7 capsule vacuumed (and whose lane-1 claim it released) is
+/// never re-claimed by `reconcile_configured_providers`.
+#[cfg(feature = "whole-record-dense")]
+pub const CLAIMED_LANES: [u32; 2] = [0, 1];
+#[cfg(not(feature = "whole-record-dense"))]
+pub const CLAIMED_LANES: [u32; 1] = [0];
 
 /// Reserved checkpoint row recording the last APPLIED feed cursor.
 pub(crate) const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
@@ -400,9 +399,10 @@ pub struct CorpusContentEngine {
     /// Test-only drain failure-injection hook.
     ingest_failure_hook: Mutex<Option<ContentIngestFailureHook>>,
     /// Test-only single-use forced float store error (default slot).
+    #[cfg(feature = "whole-record-dense")]
     forced_float_error: Mutex<Option<String>>,
     /// Test-only single-use provider opt-out for the default float slot.
-    #[cfg(feature = "canonical-test-seams")]
+    #[cfg(all(feature = "canonical-test-seams", feature = "whole-record-dense"))]
     forced_float_provider_opt_out: AtomicBool,
     /// Test-only training fault seams (crash-boundary suites).
     train_fault_after_model: Mutex<Option<String>>,
@@ -526,8 +526,9 @@ impl CorpusContentEngine {
             on_encoded: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
+            #[cfg(feature = "whole-record-dense")]
             forced_float_error: Mutex::new(None),
-            #[cfg(feature = "canonical-test-seams")]
+            #[cfg(all(feature = "canonical-test-seams", feature = "whole-record-dense"))]
             forced_float_provider_opt_out: AtomicBool::new(false),
             train_fault_after_model: Mutex::new(None),
             train_fault_before_commit_model: Mutex::new(None),
@@ -648,21 +649,6 @@ impl CorpusContentEngine {
             }
         }
         Ok(())
-    }
-
-    /// Test seam: force the next per-signal float call to report a store
-    /// error for the DEFAULT slot (single-use).
-    pub fn test_force_float_store_error(&self, message: impl Into<String>) {
-        if let Ok(mut guard) = self.forced_float_error.lock() {
-            *guard = Some(message.into());
-        }
-    }
-
-    /// Test seam: force the next default float call to report provider opt-out.
-    #[cfg(feature = "canonical-test-seams")]
-    pub fn test_force_float_provider_opt_out(&self) {
-        self.forced_float_provider_opt_out
-            .store(true, Ordering::Release);
     }
 
     /// The declared encode speed (serial drain today; surface retained).
@@ -816,7 +802,7 @@ impl CorpusContentEngine {
         for id in &ids {
             for key in self.unit_keys(id)? {
                 for slot in &self.slots {
-                    for lane in [0u32, 1u32] {
+                    for lane in CLAIMED_LANES {
                         if shared.contains(&format!("{}|{lane}", slot.model_id)) {
                             continue;
                         }
@@ -845,191 +831,6 @@ impl CorpusContentEngine {
         Ok(())
     }
 
-    /// Per-signal dense float NEAREST recall — content-ID keyed.
-    /// Per-signal dense float NEAREST recall.
-    ///
-    /// - `metric`: the float distance function. Defaults to `FloatMetric::Cosine`
-    ///   so callers that do not pass a metric see byte-identical behaviour.
-    pub fn float_nearest_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-        metric: FloatMetric,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, true, metric)
-    }
-
-    /// Per-signal dense float FARTHEST (anti-similarity) recall.
-    ///
-    /// - `metric`: the float distance function. Defaults to `FloatMetric::Cosine`.
-    pub fn float_farthest_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-        metric: FloatMetric,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, false, metric)
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Mirrors Swift `CorpusContentEngine.floatNearestPerSignalWithDiscrimination`.
-    /// Same semantics and return shape as `float_nearest_per_signal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// Discrimination is `Some` exactly when the outcome is `Hits` with ≥1 result.
-    ///
-    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
-    /// The coordinator (GLK) consumes the signal to discount the dense contribution
-    /// when the lane self-reports degeneracy.
-    ///
-    /// See `FloatDiscriminationSignal` for the statistic definition.
-    ///
-    /// - `metric`: the float distance function; propagated to `float_nearest_per_signal`.
-    pub fn float_nearest_per_signal_with_discrimination(
-        &self,
-        query: &str,
-        limit: usize,
-        metric: FloatMetric,
-    ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
-        self.float_nearest_per_signal(query, limit, metric)
-            .into_iter()
-            .map(|(model_id, outcome)| {
-                let disc = discrimination_signal_from_outcome(&outcome);
-                (model_id, outcome, disc)
-            })
-            .collect()
-    }
-
-    /// Single-signal convenience: the DEFAULT slot's nearest outcome (cosine metric).
-    pub fn float_nearest(&self, query: &str, limit: usize) -> FloatLaneOutcome {
-        self.float_nearest_per_signal(query, limit, FloatMetric::Cosine)
-            .into_iter()
-            .next()
-            .map(|(_, o)| o)
-            .unwrap_or(FloatLaneOutcome::EmptyQuery)
-    }
-
-    fn float_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-        nearest: bool,
-        metric: FloatMetric,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        if limit == 0 || query.is_empty() {
-            return self
-                .slots
-                .iter()
-                .map(|s| (s.model_id.clone(), FloatLaneOutcome::EmptyQuery))
-                .collect();
-        }
-        // Consume the forced-error seam for the DEFAULT slot (nearest only).
-        let mut forced_default: Option<FloatLaneOutcome> = None;
-        if nearest {
-            #[cfg(feature = "canonical-test-seams")]
-            let forced_provider_opt_out = self
-                .forced_float_provider_opt_out
-                .swap(false, Ordering::AcqRel);
-            #[cfg(not(feature = "canonical-test-seams"))]
-            let forced_provider_opt_out = false;
-            if forced_provider_opt_out {
-                emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                forced_default = Some(FloatLaneOutcome::UnavailableProviderOptOut);
-            } else if let Ok(mut guard) = self.forced_float_error.lock() {
-                if let Some(message) = guard.take() {
-                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
-                    forced_default = Some(FloatLaneOutcome::StoreError(message));
-                }
-            }
-        }
-        let mut results = Vec::with_capacity(self.slots.len());
-        for (slot_index, slot) in self.slots.iter().enumerate() {
-            let model_id = slot.model_id.clone();
-            if slot_index == 0 {
-                if let Some(forced) = forced_default.take() {
-                    results.push((model_id, forced));
-                    continue;
-                }
-            }
-            let probe = {
-                let handle = slot.handle.lock().unwrap();
-                match handle.provider().embed_float(query) {
-                    Ok(v) if v.is_empty() => {
-                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
-                        continue;
-                    }
-                    Ok(v) => v,
-                    Err(synapsekit::SynapseKitError::EmbedFloatVocabMiss(_)) => {
-                        emit_engine_metric("corpus.float_lane.dark_vocab_miss", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableNoVocabHit));
-                        continue;
-                    }
-                    Err(_) => {
-                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
-                        continue;
-                    }
-                }
-            };
-            let matches = if nearest {
-                self.vector_store
-                    .find_nearest_float(&probe, &model_id, limit * 4, metric)
-            } else {
-                self.vector_store
-                    .find_farthest_float(&probe, &model_id, limit * 4, metric)
-            };
-            let matches = match matches {
-                Ok(m) => m,
-                Err(e) => {
-                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
-                    results.push((model_id, FloatLaneOutcome::StoreError(format!("{e:?}"))));
-                    continue;
-                }
-            };
-            if matches.is_empty() {
-                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
-                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
-                continue;
-            }
-            let mut by_content: BTreeMap<String, f32> = BTreeMap::new();
-            for m in &matches {
-                let id = content_id_from_item_key(&m.item_id).to_string();
-                let similarity = 1.0 - (m.distance as f32) / 10_000.0;
-                let entry =
-                    by_content
-                        .entry(id)
-                        .or_insert(if nearest { f32::MIN } else { f32::MAX });
-                if nearest {
-                    if similarity > *entry {
-                        *entry = similarity;
-                    }
-                } else if similarity < *entry {
-                    *entry = similarity;
-                }
-            }
-            if by_content.is_empty() {
-                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
-                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
-                continue;
-            }
-            let mut ranked: Vec<(String, f32)> = by_content.into_iter().collect();
-            ranked.sort_by(|a, b| {
-                let ord = if nearest {
-                    b.1.partial_cmp(&a.1)
-                } else {
-                    a.1.partial_cmp(&b.1)
-                };
-                ord.unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            ranked.truncate(limit);
-            emit_engine_metric("corpus.float_lane.hit", ranked.len() as f64);
-            results.push((model_id, FloatLaneOutcome::Hits(ranked)));
-        }
-        results
-    }
-
     /// Register this engine's representation claims (idempotent).
     pub fn register_claims(&self, now_millis: i64) -> CorpusKitResult<()> {
         for (slot_index, slot) in self.slots.iter().enumerate() {
@@ -1038,7 +839,7 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 // Attached mode writes binary (lane 0) rows for the DEFAULT
                 // slot only — GLK's Hamming readers all probe the default
                 // model — so non-default binary claims are not registered
@@ -1075,7 +876,7 @@ impl CorpusContentEngine {
         for (slot_index, slot) in self.slots.iter().enumerate() {
             let handle = slot.handle.lock().unwrap();
             let provider = handle.provider();
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 if lane == 0
                     && slot_index != 0
                     && self.configuration.mode() == CorpusOperatingMode::Attached
@@ -1154,6 +955,34 @@ impl CorpusContentEngine {
                     .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
             }
             retired.insert((key.model_id, key.model_version));
+        }
+
+        // A provider whose persisted basis or counts row names a (model_id,
+        // model_version) no slot carries any more is retired even when it held
+        // no representation claim: a non-default attached slot writes no
+        // vector row in the default build (the engram row is the default
+        // slot's, the whole-record float row is the sidecar's), so the claims
+        // diff alone cannot see it leave.
+        let desired_providers: BTreeSet<(String, String)> = desired
+            .iter()
+            .map(|key| (key.model_id.clone(), key.model_version.clone()))
+            .collect();
+        for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+            let persisted = self
+                .storage
+                .row_store()
+                .query_projected(table, &["model_id", "model_version"], None, &[], None, None)
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            for row in &persisted {
+                if let (Some(TypedValue::Text(model_id)), Some(TypedValue::Text(model_version))) =
+                    (row.get("model_id"), row.get("model_version"))
+                {
+                    let key = (model_id.clone(), model_version.clone());
+                    if !desired_providers.contains(&key) {
+                        retired.insert(key);
+                    }
+                }
+            }
         }
 
         let desired_model_ids: BTreeSet<String> =
@@ -1256,82 +1085,6 @@ impl CorpusContentEngine {
                 Ok(false)
             }
         }
-    }
-
-    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
-    ///
-    /// Resolves the current record from the source — picking up any newly-written
-    /// `dense_composition_text` (e.g. a distillate written by the GLK drain rider)
-    /// — and writes a fresh float-vector row (vector_index: 1) for each active slot.
-    /// Only the float lane is updated: BM25, binary (Hamming) vectors, coverage,
-    /// and the idempotence checkpoint are NOT touched.
-    ///
-    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
-    /// digest (unchanged by distillation). Calling `index_record(force: true)`
-    /// would bypass the gate but also re-run BM25 indexing, disturbing IDF state.
-    /// This method targets only the float lane, preserving §9 BM25 isolation
-    /// (SPEC_DISTILLATION_STORAGE): BM25 scores are byte-identical before/after.
-    ///
-    /// Routes through the CCE (not direct to `VectorStore`) to maintain
-    /// counts-admission serialization (FINDING_11X_MAINTENANCE_WALK_2026-07-28
-    /// constraint 3). Returns `false` only when the ID no longer resolves.
-    ///
-    /// Swift parity: `CorpusContentEngine.recomposeDenseVector(id:now:)`.
-    pub fn recompose_dense_vector(&self, id: &str, now_millis: i64) -> CorpusKitResult<bool> {
-        Self::validate(id)?;
-        match self.source.record(id)? {
-            Some(record) => {
-                self.recompose_dense_float(&record, now_millis)?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
-    /// Dense-float-only vector upsert for one content record. Writes the float
-    /// (vector_index: 1) row across all active slots using `effective_dense_text`.
-    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
-    /// Swift parity: `CorpusContentEngine.recomposeDenseFloat(record:now:)`.
-    fn recompose_dense_float(
-        &self,
-        record: &CorpusContentRecord,
-        now_millis: i64,
-    ) -> CorpusKitResult<()> {
-        // The whole-content key is the content ID itself. For passage mode,
-        // passages use lexical text only — no dense-text split — so only the
-        // whole-document float row is updated here, which is correct for all
-        // GLK-attached configurations.
-        let key = &record.id;
-        let embed_text = record
-            .dense_composition_text
-            .as_deref()
-            .unwrap_or(&record.text);
-
-        let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(self.slots.len());
-        for slot in &self.slots {
-            let handle = slot.handle.lock().unwrap();
-            let provider = handle.provider();
-            let (_engram, floats) = provider
-                .embed_pair(embed_text)
-                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
-            if floats.is_empty() {
-                continue;
-            }
-            rows.push(VectorPayloadInput {
-                item_id: key.clone(),
-                vector_index: 1,
-                payload: VectorPayload::from_f32(&floats),
-                model_id: provider.model_id().to_string(),
-                model_version: provider.model_version().to_string(),
-                filed_at_unix_secs: now_millis,
-            });
-        }
-        if !rows.is_empty() {
-            self.vector_store
-                .add_payloads(&rows)
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        }
-        Ok(())
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
@@ -1496,6 +1249,11 @@ impl CorpusContentEngine {
                                     provider.embed_pair(record.effective_dense_text()).map_err(|error| {
                                         CorpusKitError::EmbeddingFailed(format!("{error:?}"))
                                     })?;
+                                // The default build stores the engram only; the pooled float is
+                                // computed for the projection and dropped (whole-record dense rows
+                                // are a whole-record-dense feature write).
+                                #[cfg(not(feature = "whole-record-dense"))]
+                                let _ = floats;
                                 if meta.3 {
                                     rows.push(VectorPayloadInput {
                                         item_id: record.id.clone(),
@@ -1506,15 +1264,18 @@ impl CorpusContentEngine {
                                         filed_at_unix_secs: now_millis,
                                     });
                                 }
-                                if !floats.is_empty() {
-                                    rows.push(VectorPayloadInput {
-                                        item_id: record.id.clone(),
-                                        vector_index: 1,
-                                        payload: VectorPayload::from_f32(&floats),
-                                        model_id: meta.0.clone(),
-                                        model_version: meta.1.clone(),
-                                        filed_at_unix_secs: now_millis,
-                                    });
+                                #[cfg(feature = "whole-record-dense")]
+                                {
+                                    if !floats.is_empty() {
+                                        rows.push(VectorPayloadInput {
+                                            item_id: record.id.clone(),
+                                            vector_index: 1,
+                                            payload: VectorPayload::from_f32(&floats),
+                                            model_id: meta.0.clone(),
+                                            model_version: meta.1.clone(),
+                                            filed_at_unix_secs: now_millis,
+                                        });
+                                    }
                                 }
                                 covered.push((record.id.clone(), meta.0.clone(), meta.2.clone()));
                             }
@@ -2126,6 +1887,11 @@ impl CorpusContentEngine {
                 let (engram, floats) = provider
                     .embed_pair(embed_text)
                     .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
+                // The default build stores the engram only; the pooled float is
+                // computed for the projection and dropped (whole-record dense rows
+                // are a whole-record-dense feature write).
+                #[cfg(not(feature = "whole-record-dense"))]
+                let _ = floats;
                 if write_binary {
                     rows.push(VectorPayloadInput {
                         item_id: key.clone(),
@@ -2136,15 +1902,18 @@ impl CorpusContentEngine {
                         filed_at_unix_secs: now_millis,
                     });
                 }
-                if !floats.is_empty() {
-                    rows.push(VectorPayloadInput {
-                        item_id: key.clone(),
-                        vector_index: 1,
-                        payload: VectorPayload::from_f32(&floats),
-                        model_id: provider.model_id().to_string(),
-                        model_version: provider.model_version().to_string(),
-                        filed_at_unix_secs: now_millis,
-                    });
+                #[cfg(feature = "whole-record-dense")]
+                {
+                    if !floats.is_empty() {
+                        rows.push(VectorPayloadInput {
+                            item_id: key.clone(),
+                            vector_index: 1,
+                            payload: VectorPayload::from_f32(&floats),
+                            model_id: provider.model_id().to_string(),
+                            model_version: provider.model_version().to_string(),
+                            filed_at_unix_secs: now_millis,
+                        });
+                    }
                 }
             }
             covered.push((record.id.clone(), provider.model_id().to_string(), digest));
@@ -2323,7 +2092,7 @@ impl CorpusContentEngine {
                 .remove(key)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
             for model_id in &model_ids {
-                for lane in [0u32, 1u32] {
+                for lane in CLAIMED_LANES {
                     if shared.contains(&format!("{model_id}|{lane}")) {
                         continue;
                     }
@@ -2348,7 +2117,7 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 let claimants = self
                     .claims
                     .claimants(&VectorRepresentationKey::new(
@@ -3559,6 +3328,11 @@ impl CorpusContentEngine {
                                                     "{error:?}"
                                                 ))
                                             })?;
+                                        // The default build stores the engram only; the pooled float is
+                                        // computed for the projection and dropped (whole-record dense rows
+                                        // are a whole-record-dense feature write).
+                                        #[cfg(not(feature = "whole-record-dense"))]
+                                        let _ = floats;
                                         if meta.4 {
                                             rows.push(VectorPayloadInput {
                                                 item_id: record.id.clone(),
@@ -3569,15 +3343,18 @@ impl CorpusContentEngine {
                                                 filed_at_unix_secs: now_millis,
                                             });
                                         }
-                                        if !floats.is_empty() {
-                                            rows.push(VectorPayloadInput {
-                                                item_id: record.id.clone(),
-                                                vector_index: 1,
-                                                payload: VectorPayload::from_f32(&floats),
-                                                model_id: meta.1.clone(),
-                                                model_version: meta.2.clone(),
-                                                filed_at_unix_secs: now_millis,
-                                            });
+                                        #[cfg(feature = "whole-record-dense")]
+                                        {
+                                            if !floats.is_empty() {
+                                                rows.push(VectorPayloadInput {
+                                                    item_id: record.id.clone(),
+                                                    vector_index: 1,
+                                                    payload: VectorPayload::from_f32(&floats),
+                                                    model_id: meta.1.clone(),
+                                                    model_version: meta.2.clone(),
+                                                    filed_at_unix_secs: now_millis,
+                                                });
+                                            }
                                         }
                                         covered.push((
                                             record.id.clone(),

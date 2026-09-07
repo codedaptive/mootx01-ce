@@ -2,9 +2,10 @@
 //!
 //! Measurement (plan 70BC55F3, 2026-09-05): a retrieval-trained sentence encoder
 //! reranking BM25's head beat BM25 on two corpora; the four float families
-//! (LSA/NMF/PPMI/FDC) did not earn their cost. The default ensemble is now RI
-//! only; the dense families compile only when the `dense-families` Cargo feature
-//! is enabled. RI stays always-on: its binary fingerprint feeds dreaming,
+//! (NMF/PPMI/FDC) and LSA did not earn their cost. The default ensemble is now RI
+//! only; the dense families (NMF, PPMI, FDC) compile only when the `dense-families`
+//! Cargo feature is enabled; LSA compiles only when the `lsa` feature is enabled
+//! (ruling 2026-09-07). RI stays always-on: its binary fingerprint feeds dreaming,
 //! contradiction, and consolidation.
 //!
 //! ## Why this lives in corpus-kit-providers, not corpus-kit core
@@ -29,20 +30,25 @@ use corpus_kit::EmbeddingModelConfig;
 
 use crate::RandomIndexingProvider;
 #[cfg(feature = "dense-families")]
-use crate::{FDCProvider, LsaProvider, NmfProvider, PpmiProvider};
+use crate::{FDCProvider, NmfProvider, PpmiProvider};
+#[cfg(feature = "lsa")]
+use crate::LsaProvider;
 
 /// The default recall ensemble (untrained), gated by the `dense-families` feature.
 ///
 /// With `dense-families` OFF (default): one provider — `RandomIndexing`.
-/// With `dense-families` ON (`--features dense-families`): five providers —
+/// With `dense-families` ON (`--features dense-families`): four providers —
+/// RI, PPMI, NMF, FDC — in that fixed canonical order.
+/// With `lsa` ON (`--features lsa`, implies `dense-families`): five providers —
 /// RI, PPMI, LSA, NMF, FDC — in that fixed canonical order.
 ///
-/// `models[0]` (`RandomIndexing`) leads in both cases: it is the DEFAULT signal
+/// `models[0]` (`RandomIndexing`) leads in all cases: it is the DEFAULT signal
 /// that the Corpus's single-signal entry points delegate to.
 ///
 /// The dense families are OFF by default (plan 70BC55F3, 2026-09-05):
-/// LSA/NMF/PPMI/FDC did not beat BM25+RI on two measured corpora. RI stays
+/// NMF/PPMI/FDC did not beat BM25+RI on two measured corpora. RI stays
 /// because its binary fingerprint feeds dreaming, contradiction, and consolidation.
+/// LSA is additionally dark by ruling 2026-09-07 (unproven; own `lsa` switch).
 ///
 /// Constructed FRESH each call — `EmbeddingModelConfig` is not `Clone`.
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig> {
@@ -56,24 +62,27 @@ pub fn default_ensemble() -> Vec<EmbeddingModelConfig> {
     }
     #[cfg(feature = "dense-families")]
     {
-        // Dense families are ON: return all five signals.
-        // Activated via --features dense-families.
-        vec![
+        // Dense families are ON: RI, PPMI, NMF, FDC always; LSA when `lsa` feature is on.
+        // Build the vec conditionally to preserve the canonical RI/PPMI/LSA/NMF/FDC order.
+        let mut models = vec![
             EmbeddingModelConfig::RandomIndexing {
                 provider: Box::new(RandomIndexingProvider::new()),
             },
             EmbeddingModelConfig::Ppmi {
                 provider: Box::new(PpmiProvider::new()),
             },
-            EmbeddingModelConfig::Lsa {
-                provider: Box::new(LsaProvider::default_new()),
-            },
-            EmbeddingModelConfig::Nmf {
-                provider: Box::new(NmfProvider::default_new()),
-            },
-            EmbeddingModelConfig::Fdc {
-                provider: Box::new(FDCProvider::default_provider()),
-            },
-        ]
+        ];
+        // LSA is on its own `lsa` switch (ruling 2026-09-07): dark and unproven.
+        #[cfg(feature = "lsa")]
+        models.push(EmbeddingModelConfig::Lsa {
+            provider: Box::new(LsaProvider::default_new()),
+        });
+        models.push(EmbeddingModelConfig::Nmf {
+            provider: Box::new(NmfProvider::default_new()),
+        });
+        models.push(EmbeddingModelConfig::Fdc {
+            provider: Box::new(FDCProvider::default_provider()),
+        });
+        models
     }
 }
