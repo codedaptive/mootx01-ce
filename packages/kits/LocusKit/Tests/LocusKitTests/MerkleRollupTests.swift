@@ -400,7 +400,6 @@ struct MerkleRollupTests {
     @Test("captureBatch defers Merkle rollup — room root is nil until reindex")
     func batchCaptureDefersMerkleRootUntilReindex() async throws {
         let (estate, _) = try await makeEstate()
-        let now = Date(timeIntervalSince1970: 2_000_000)
         let frames = (1...5).map {
             captureFrame(content: "batch item \($0)")
         }

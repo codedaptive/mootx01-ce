@@ -270,7 +270,7 @@ struct TwentyRowEstateFixtureTests {
             let query: [CFString: Any] = [
                 kSecClass: kSecClassGenericPassword,
                 kSecAttrService: "com.mootx01.estate.identity",
-                kSecReturnAttributes: kCFBooleanTrue,
+                kSecReturnAttributes: kCFBooleanTrue!,
                 kSecMatchLimit: kSecMatchLimitAll,
             ]
             var result: AnyObject?
