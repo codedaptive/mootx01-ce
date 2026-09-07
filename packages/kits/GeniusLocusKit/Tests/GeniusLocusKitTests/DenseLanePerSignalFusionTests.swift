@@ -18,10 +18,13 @@
 // INTELLECTUS LOCK is not required here: these tests do not toggle Intellectus
 // and assert only on the returned GLKRecallResult, not telemetry counters.
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -220,3 +223,4 @@ struct DenseLaneConsensusTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

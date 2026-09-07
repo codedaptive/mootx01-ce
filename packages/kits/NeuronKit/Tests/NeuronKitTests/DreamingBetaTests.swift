@@ -76,7 +76,7 @@ struct BetaPruneTests {
     /// entries would remain and this test would fail.
     @Test("BETA prunes below-floor consolidated entries; retains above-floor")
     func prunesDecayedConsolidatedEntries() async throws {
-        let (daemon, _, _) = makeBetaDaemon()
+        let (_, _, _) = makeBetaDaemon()
 
         // Seed consolidated via bumpCoRecall (which populates coRecallCounts)
         // and then inject consolidated values directly by running a no-op THETA

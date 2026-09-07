@@ -272,9 +272,14 @@ enum EnrichmentStage {
                 }
                 if pairs.count < maxFacts,
                    let qid = anchor.wikidataQID, !qid.isEmpty {
-                    if let country = QIDFacts.countryLabel(for: qid).map(Self.grammarSafe),
-                       seenValues.insert("place:\(token)").inserted {
-                        pairs.append((label: "place", value: token))
+                    if let country = QIDFacts.countryLabel(for: qid).map(Self.grammarSafe) {
+                        if seenValues.insert("place:\(token)").inserted {
+                            pairs.append((label: "place", value: token))
+                        }
+                        if pairs.count < maxFacts,
+                           seenValues.insert("country:\(country)").inserted {
+                            pairs.append((label: "country", value: country))
+                        }
                     }
                 }
             }
