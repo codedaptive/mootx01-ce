@@ -8,7 +8,9 @@ automation does and what a maintainer does when it needs attention.
 
 ## What a release tag does
 
-`.github/workflows/release.yml` runs on a `vX.Y.Z` tag:
+The Community Edition repository's `.github/workflows/release.yml` (the lane
+that publishes to winget; the Enterprise lane ships no public Windows build
+and signs nothing) runs on a `vX.Y.Z` tag:
 
 1. Builds `mootx01.exe` and `moot-mgr.exe` for x86_64 and arm64, signs them
    (see [`SIGNING.md`](SIGNING.md)), builds the Inno Setup EXE for each
