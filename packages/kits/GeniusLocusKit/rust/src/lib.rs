@@ -203,7 +203,7 @@ pub use training::{
 pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
 pub use substrate_node_topology_provider::SubstrateNodeTopologyProvider;
 pub use recall::{
-    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
+    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GLKSubSpanScoring,
     GraphCache, PreferenceStore,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
     RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,

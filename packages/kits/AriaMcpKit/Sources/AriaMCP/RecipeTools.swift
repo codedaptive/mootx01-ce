@@ -803,7 +803,10 @@ enum RecipeTools {
             limit: userLimit,
             fallback: .allowDegraded,
             queryText: query,
-            origin: .internal
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this synthesis recall
+            // does not request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off
         )
         let synthRecallResult = try await kit.recall(handle, synthRequest)
         let tuning = try await kit.provisionedRecallTuning(for: handle)

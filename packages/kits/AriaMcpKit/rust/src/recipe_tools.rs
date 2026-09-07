@@ -789,7 +789,10 @@ fn run_grounded_synthesis_tool(
             RecallFallbackPolicy::AllowDegraded,
             RecallOrigin::Internal,
         )
-        .with_query_text(query.as_deref().unwrap_or(""));
+        .with_query_text(query.as_deref().unwrap_or(""))
+        // Sub-span scoring is an additive-cost stage this synthesis recall
+        // does not request; every caller names the switch (ruling 2026-09-07).
+        .with_sub_span_scoring(genius_locus_kit::recall::GLKSubSpanScoring::Off);
         coord.recall_scored(&estate.handle, synth_request, now)
     };
     let synthesis_text = {

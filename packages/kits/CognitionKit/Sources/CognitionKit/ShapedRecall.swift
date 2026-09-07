@@ -173,7 +173,10 @@ public struct ShapedRecall: Recipe {
             // the argument is absent. The engine clamps to [64, 256] so
             // out-of-range caller values are silently clamped rather than
             // rejected here.
-            frontierK: input.frontierK)
+            frontierK: input.frontierK,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let result = try await kit.recall(estate, request)
 
         // Project each hit into a PreciseMatch. The hits arrive in the shaped
