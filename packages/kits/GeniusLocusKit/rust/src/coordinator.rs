@@ -64,7 +64,7 @@ use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
 use corpus_kit::encoder::{EncoderModelSpec, SpanEncoder};
-use corpus_kit_providers::SpanEncoderFactory;
+use corpus_kit_providers::{EncoderModelSeed, SpanEncoderFactory};
 use crate::encoder_activation::{ModelDirectoryResolving, NilModelDirectoryResolver};
 use corpus_kit::{
     CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
@@ -2075,6 +2075,16 @@ impl EstateCoordinator {
         self.span_encoders.get(handle).cloned()
     }
 
+    /// Whether the span rerank stage is registered for `handle`: the encoder
+    /// loaded and the estate's VectorStore was registered, so unionBest recall
+    /// reranks the lexical head. False on an estate with no encoder, on a
+    /// CorpusOnly estate (duty-side encoder only) and for a stale handle.
+    /// The ARIA discrimination line reads it to decide whether a dark dense
+    /// lane leaves the ranking lexical-only. Twin of Swift `isSpanRerankRegistered(for:)`.
+    pub fn is_span_rerank_registered(&self, handle: &EstateHandle) -> bool {
+        self.span_rerank_sources.contains_key(handle)
+    }
+
     /// Install the model-directory resolver used by every later activation.
     /// The bundling unit calls this once at daemon start; tests inject a
     /// scratch-directory resolver. Mirrors Swift
@@ -3204,6 +3214,72 @@ impl EstateCoordinator {
         }
     }
 
+    /// The bundled encoder (`EncoderModelSeed`, arctic-embed-s-w60) as an
+    /// `encoder_models` row. The one construction site for the seed row in the
+    /// Rust port: activation seeds it at open and the upgrade backfill seeds it
+    /// over a closed estate's storage. Twin of Swift
+    /// `GeniusLocusKit.defaultEncoderModelRow(isActive:)`.
+    pub fn default_encoder_model_row(
+        is_active: bool,
+    ) -> locus_kit::encoder_model_store::EncoderModelRow {
+        use locus_kit::encoder_model_store::{EncoderModelRow, Pooling};
+        EncoderModelRow {
+            model_id: EncoderModelSeed::MODEL_ID.to_string(),
+            model_version: EncoderModelSeed::MODEL_VERSION.to_string(),
+            dim: EncoderModelSeed::DIM as i64,
+            query_prefix: EncoderModelSeed::QUERY_PREFIX.to_string(),
+            doc_prefix: EncoderModelSeed::DOC_PREFIX.to_string(),
+            pooling: if EncoderModelSeed::POOLING == "cls" { Pooling::Cls } else { Pooling::Mean },
+            tokenizer_hash: EncoderModelSeed::TOKENIZER_HASH.to_string(),
+            window_words: EncoderModelSeed::WINDOW_WORDS as i64,
+            overlap_divisor: EncoderModelSeed::OVERLAP_DIVISOR as i64,
+            max_spans: EncoderModelSeed::MAX_SPANS as i64,
+            max_sequence: EncoderModelSeed::MAX_SEQUENCE as i64,
+            is_active,
+        }
+    }
+
+    /// Seed the bundled encoder as the active `encoder_models` row when
+    /// `registry` holds no active row; returns `true` when a row was written.
+    /// An estate that already carries an active row keeps it: a later audition
+    /// winner is a row swap through `EncoderModelStore::activate(model_id:)`,
+    /// never a reseed. Twin of Swift
+    /// `GeniusLocusKit.seedDefaultEncoderModel(in:)`.
+    pub fn seed_default_encoder_model_in(
+        registry: &locus_kit::encoder_model_store::EncoderModelStore,
+    ) -> Result<bool, LocusKitError> {
+        if registry.active()?.is_some() {
+            return Ok(false);
+        }
+        registry.upsert(&Self::default_encoder_model_row(true))?;
+        Ok(true)
+    }
+
+    /// `seed_default_encoder_model_in` over the estate's own storage
+    /// (`storages[handle]`). A stale or quiesced handle answers the usual
+    /// `estate_for_verb` error (the Swift twin throws `estateNotOpen`); an
+    /// open handle whose store exposes no storage returns `Ok(false)`. Maps
+    /// the LocusKitError into a `VerbDispatchError` the way the neighbouring
+    /// manifest helpers do. Twin of Swift
+    /// `GeniusLocusKit.seedDefaultEncoderModelIfAbsent(for:)`.
+    pub fn seed_default_encoder_model_if_absent(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<bool, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        let Some(storage) = self.storages.get(handle) else {
+            // An open handle over a store without a Storage: nothing to seed.
+            return Ok(false);
+        };
+        let registry = locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage));
+        Self::seed_default_encoder_model_in(&registry).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "seedDefaultEncoderModelIfAbsent".to_string(),
+                reason: format!("{e:?}"),
+            })
+        })
+    }
+
     /// Build and register the span encoder for `handle` from the active
     /// registry row, applying the failure contract: a missing model directory,
     /// a vocabulary hash mismatch or a load failure leaves the estate with NO
@@ -3211,6 +3287,25 @@ impl EstateCoordinator {
     /// Recall then runs lexical-only. Mirrors Swift
     /// `GeniusLocusKit.activateSpanEncoder(for:)`.
     pub fn activate_span_encoder(&mut self, handle: &EstateHandle) {
+        // Seed before reading: an estate whose manifest names the encoder is
+        // encoder-active from its first open (ruling 2026-09-04: upgrade never
+        // creates content; seeding belongs to provision and serve). The span rows
+        // are the span-encode standing signal's work and drain in the background,
+        // so the open stays fast. A seed failure is logged once and activation
+        // reads the registry as it stands.
+        match self.seed_default_encoder_model_if_absent(handle) {
+            Ok(true) => eprintln!(
+                "mootx01 encoder: estate {} seeded {} as the active encoder_models row",
+                uuid_to_str(&handle.estate_uuid),
+                EncoderModelSeed::MODEL_ID,
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "mootx01 encoder: estate {} could not seed the default encoder_models row ({e:?}); \
+                 activation reads the registry as it stands",
+                uuid_to_str(&handle.estate_uuid),
+            ),
+        }
         let spec = self.active_encoder_model_spec(handle);
         let Some(dir) = self.model_directory_resolver.model_dir_for(&spec.model_id) else {
             eprintln!(

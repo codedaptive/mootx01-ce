@@ -97,6 +97,10 @@ pub struct SpanRerankHit {
     pub best_span_start: usize,
     pub best_span_end: usize,
     pub cosine: f32,
+    /// The item's 1-based rank in the lexical head the stage read
+    /// (`SpanRerankInput.bm25_rank`). The packager's lane-agreement margin
+    /// compares this order with the span order.
+    pub bm25_rank: usize,
 }
 
 /// The per-estate registration the coordinator reads: the encoder, the span
@@ -152,7 +156,7 @@ pub fn span_rerank(
     }
     let ids: Vec<String> = head.iter().map(|h| h.item_id.clone()).collect();
     let rows = store.span_vectors(&ids, encoder.model_id())?;
-    let mut hits: Vec<(SpanRerankHit, usize)> = Vec::new();
+    let mut hits: Vec<SpanRerankHit> = Vec::new();
     for input in head {
         let Some(spans) = rows.get(&input.item_id) else { continue };
         let mut best: Option<SpanRerankHit> = None;
@@ -172,20 +176,21 @@ pub fn span_rerank(
                     best_span_start: span.start_word,
                     best_span_end: span.end_word,
                     cosine,
+                    bm25_rank: input.bm25_rank,
                 });
             }
         }
         if let Some(best) = best {
-            hits.push((best, input.bm25_rank));
+            hits.push(best);
         }
     }
     hits.sort_by(|a, b| {
-        b.0.cosine
-            .partial_cmp(&a.0.cosine)
+        b.cosine
+            .partial_cmp(&a.cosine)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.bm25_rank.cmp(&b.bm25_rank))
     });
-    Ok(hits.into_iter().map(|(hit, _)| hit).collect())
+    Ok(hits)
 }
 
 /// Fuse the lexical order with the span hits (sheet §8): reciprocal-rank fusion
