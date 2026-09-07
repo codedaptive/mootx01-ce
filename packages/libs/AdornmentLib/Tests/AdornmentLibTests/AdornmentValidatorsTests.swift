@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // AdornmentValidatorsTests.swift
 //
 // Golden-pin conformance tests for AdornmentValidators (SPEC_ADORNMENT §3,
@@ -87,3 +88,4 @@ struct AdornmentValidatorsTests {
         #expect(AdornmentValidators.validateDate(claim: claim, in: source) == true)
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

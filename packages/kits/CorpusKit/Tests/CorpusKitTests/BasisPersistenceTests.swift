@@ -48,6 +48,9 @@
 import Testing
 import Foundation
 import CorpusKit
+#if MOOTX01_WHOLE_RECORD_DENSE
+import CorpusKitWholeRecordDense
+#endif
 import CorpusKitProviders
 import EngramLib
 import PersistenceKit
@@ -540,6 +543,7 @@ struct BasisPersistenceTests {
 
     // MARK: - §8 per-doc ingest non-degeneracy (REGRESSION — Kinsta-verified bug)
 
+#if MOOTX01_LSA
     /// 20 documents split evenly between two topics: cars and animals.
     /// Each doc uses distinct vocabulary so that a well-trained LSA basis
     /// can separate them into different semantic directions. A degenerate basis
@@ -556,6 +560,7 @@ struct BasisPersistenceTests {
         // Default LsaProvider: rank=3, svdSweeps=30, modelID="lsa-v1".
         try await Corpus(storage: storage, model: .lsa(provider: LsaProvider()))
     }
+#endif // MOOTX01_LSA
 
     /// REGRESSION TEST — fails on code with degenerate-basis bug, passes after fix.
     ///
@@ -573,6 +578,7 @@ struct BasisPersistenceTests {
     /// Degenerate-basis signal: "dog bark fetch animal" are all OOV in a 1-car-doc
     /// vocabulary → floatNearest returns .unavailableNoVocabHit. After the fix,
     /// those terms are in-vocabulary and the animal docs rank in the top results.
+#if MOOTX01_LSA
     @Test("per-doc ingest of 20 docs produces a non-degenerate LSA basis (REGRESSION)")
     func perDocIngestProducesNonDegenerateBasis() async throws {
         try await GlobalTestLock.shared.withLock {
@@ -615,6 +621,7 @@ struct BasisPersistenceTests {
 
         }
     }
+#endif // MOOTX01_LSA
 
     // MARK: - §9 reindex recovers a deliberately-degenerate basis
 
@@ -628,6 +635,7 @@ struct BasisPersistenceTests {
     ///   4. Confirm degenerate state: animal query is OOV (car-only vocabulary).
     ///   5. Call corpus.reindex(now:) — must retrain on all 20 docs.
     ///   6. Confirm recovery: trainedChunkCount == 20 and animal query returns hits.
+#if MOOTX01_LSA
     @Test("reindex recovers a deliberately-degenerate LSA basis")
     func reindexRecoversDegenerateBasis() async throws {
         try await GlobalTestLock.shared.withLock {
@@ -717,6 +725,7 @@ struct BasisPersistenceTests {
                     "animal doc must rank in top-5 after reindex on the full 20-doc corpus")
         }
     }
+#endif // MOOTX01_LSA
 }
 
 // MARK: - CountsRefactorDigestGates
@@ -1064,6 +1073,7 @@ struct CountsRefactorDigestGates {
     /// capture serializeBasis() before finalizeFromCounts(). Assert the method
     /// returns false and that serializeBasis() is unchanged (state must not be
     /// mutated by a false-returning finalizeFromCounts call).
+#if MOOTX01_LSA
     @Test("T9: LSA finalizeFromCounts returns false and leaves state unchanged")
     func lsaCountsOnlyUnsupported() throws {
         let lsaP = LsaProvider()
@@ -1081,6 +1091,7 @@ struct CountsRefactorDigestGates {
         #expect(lsaRestored.serializeBasis() == pre,
                 "T9: LSA state must be unchanged after finalizeFromCounts() == false")
     }
+#endif // MOOTX01_LSA
 
     // MARK: - T10: NMF counts-only unsupported
 

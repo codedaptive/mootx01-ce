@@ -890,7 +890,7 @@ fn recall_precise_tool() -> serde_json::Value {
                 "query": string_schema("The search query text — drives BM25 + vector recall and the precision re-rank."),
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "pool": integer_schema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
-                "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
+                "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
                 "filter": filter_schema(),
                 "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),

@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // MapReduceChunkingTests.swift — piece-bound pins for mintAdornmentMapReduce.
 //
 // A record line longer than the chunk threshold is hard-split at
@@ -70,3 +71,4 @@ struct MapReduceChunkingTests {
         #expect(Array(bodies.prefix(2)) == ["bbbbbb", "b\nzz"])
     }
 }
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

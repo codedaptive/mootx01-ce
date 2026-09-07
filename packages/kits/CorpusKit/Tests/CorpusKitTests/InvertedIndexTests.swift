@@ -560,13 +560,13 @@ struct InvertedIndexStoreTests {
             tokens: tok.keywordTokens("ephemeral content keyword"),
             now: now
         )
-        #expect(await try await store.documentCount() == 1)
+        #expect(try await store.documentCount() == 1)
 
         var hits = try await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
         #expect(!hits.isEmpty, "should find ephemeral doc before removal")
 
         try await store.remove(itemID: "ephemeral-doc")
-        #expect(await try await store.documentCount() == 0)
+        #expect(try await store.documentCount() == 0)
 
         hits = try await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
         #expect(hits.isEmpty, "should not find removed doc")
@@ -636,7 +636,7 @@ struct InvertedIndexStoreTests {
 
         hits = try await store.topK(queryTerms: tok.keywordTokens("different"), k: 5)
         #expect(!hits.isEmpty, "after re-index, new term must be findable")
-        #expect(await try await store.documentCount() == 1,
+        #expect(try await store.documentCount() == 1,
                 "doc count must stay 1 after re-index, not double-count")
     }
 }

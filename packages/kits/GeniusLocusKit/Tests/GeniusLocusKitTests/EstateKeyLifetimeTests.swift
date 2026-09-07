@@ -103,7 +103,7 @@ struct EstateKeyLifetimeTests {
         // in this environment the probe throws; that is a skip, not a failure.
         let probe = KeychainEstateIdentityKeyStore()
         if let residue = try? probe.loadPrivateKey(forEstateID: estateID) {
-            #expect(residue == nil, "ephemeral estate left an identity key in the Keychain")
+            #expect(residue.isEmpty, "ephemeral estate left an identity key in the Keychain")
         }
         #endif
     }
@@ -145,7 +145,7 @@ struct EstateKeyLifetimeTests {
         let probe = KeychainEstateIdentityKeyStore()
         for estateID in estateIDs {
             if let residue = try? probe.loadPrivateKey(forEstateID: estateID) {
-                #expect(residue == nil, "loop estate \(estateID) left an identity key in the Keychain")
+                #expect(residue.isEmpty, "loop estate \(estateID) left an identity key in the Keychain")
             }
         }
         #endif

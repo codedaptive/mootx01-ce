@@ -149,7 +149,19 @@ encoder = ["corpus-kit-providers/candle"]
 # LSA, NMF, FDC — Encoder Rerank contract sheet §13) into RecallShape. Off by
 # default; Random Indexing is the only live family. Twin of the Swift package
 # trait `DenseFamilies` (`MOOTX01_DENSE_FAMILIES`).
-dense-families = []
+dense-families = ["whole-record-dense", "corpus-kit/dense-families"]
+# lsa: the LSA lane key and presets (lsa_forward, anti_redundant_lsa) on a
+# switch of their own (ruling 2026-09-07). dense-families does not enable it
+# and the dark-variant gate does not build it: the family is dark and unproven.
+# Enables dense-families, which the key and presets need. Twin of the Swift
+# package trait `LSA` (MOOTX01_LSA).
+lsa = ["dense-families", "corpus-kit/lsa"]
+# whole-record-dense: compiles the whole-record dense float lane of union-best
+# (step 4.5), its lane keys, presets, anti-similar hook, float metric and
+# telemetry, and turns on corpus-kit's float query surface. Off by default
+# (ruling 2026-09-07): the span stage is the one dense provider. Twin of the
+# Swift package trait `WholeRecordDense` (MOOTX01_WHOLE_RECORD_DENSE).
+whole-record-dense = ["corpus-kit/whole-record-dense"]
 
 [dev-dependencies]
 # P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],

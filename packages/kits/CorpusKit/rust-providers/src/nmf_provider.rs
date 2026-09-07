@@ -968,9 +968,13 @@ mod tests {
 
     #[test]
     fn projection_seed_is_distinct() {
-        // NMF seed must differ from LSA, RI, and PPMI seeds for bucket isolation.
-        assert_ne!(NMF_PROJECTION_SEED, crate::lsa::LSA_PROJECTION_SEED,
-            "NMF and LSA projection seeds must differ");
+        // NMF seed must differ from RI and PPMI seeds for bucket isolation.
+        // LSA comparison is only available when the `lsa` feature is on.
+        #[cfg(feature = "lsa")]
+        {
+            assert_ne!(NMF_PROJECTION_SEED, crate::lsa::LSA_PROJECTION_SEED,
+                "NMF and LSA projection seeds must differ");
+        }
         assert_ne!(NMF_PROJECTION_SEED, crate::random_indexing::RI_PROJECTION_SEED,
             "NMF and RI projection seeds must differ");
         assert_ne!(NMF_PROJECTION_SEED, crate::ppmi::PPMI_PROJECTION_SEED,
