@@ -35,7 +35,11 @@ extension ToolProjection {
                 Anthropic memory_20250818 compatible. Manages a virtual /memories \
                 filesystem backed by the MOOTx01 estate with governance: audit \
                 trail, lineage, sensitivity, confirmation state. Commands: view, \
-                create, str_replace, insert, delete, rename.
+                create, str_replace, insert, delete, rename. While a restricted \
+                or secret grant is live (mootx01 unlock), create, str_replace and \
+                insert file at the grant's tier and the reply names it; a file \
+                filed restricted or secret is outside this tool's read posture \
+                until the grant lifts a grant-aware read such as moot_memory_get.
                 """,
             inputSchema: withEstateID(objectSchema(
                 properties: [
@@ -61,7 +65,11 @@ extension ToolProjection {
 
 extension ToolDispatcher {
 
-    func runMemoryTool(_ args: [String: JSONValue]) async throws -> JSONValue {
+    /// `now` is the dispatch-boundary instant (`InterfaceTools.dispatch`
+    /// threads the bench-clock value) and gates the sensitivity-grant floor
+    /// on the content-bearing writes; the `Date()` default covers direct
+    /// runner calls in tests, the same convention as `runFileMemory`.
+    func runMemoryTool(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL). The feature
         // flag gated only tool PROJECTION (tools/list), so a disabled tool was
         // merely hidden — a hard-coded tools/call to `memory` still dispatched
@@ -76,9 +84,9 @@ extension ToolDispatcher {
         }
         switch command {
         case "view":        return try await memoryView(args)
-        case "create":      return try await memoryCreate(args)
-        case "str_replace": return try await memoryStrReplace(args)
-        case "insert":      return try await memoryInsert(args)
+        case "create":      return try await memoryCreate(args, now: now)
+        case "str_replace": return try await memoryStrReplace(args, now: now)
+        case "insert":      return try await memoryInsert(args, now: now)
         case "delete":      return try await memoryDelete(args)
         case "rename":      return try await memoryRename(args)
         default:
@@ -166,6 +174,41 @@ extension ToolDispatcher {
         return "\(memoriesRoot)/\(room)"
     }
 
+    // SECURITY: the `memory` tool has no sensitivity argument (Anthropic's
+    // memory_20250818 contract fixes its schema), so a create or edit while
+    // a restricted or secret grant is live would file material recalled
+    // under that grant at `.normal`, readable with no grant. The
+    // content-bearing writes therefore share `runFileMemory`'s floor from
+    // the same ledger: the drawer files at the higher of the tier it would
+    // otherwise carry (`.normal` for create, the source drawer's tier for
+    // str_replace and insert) and the live grant ceiling, and the reply
+    // names the tier while a grant is live. Rename moves content without
+    // adding any and keeps the source tier. A drawer filed restricted or
+    // secret is then outside the adapter's no-grant read posture
+    // (`isMemoryAdapterVisible`) until read through a grant-aware tool such
+    // as moot_memory_get. Mirrors `floored_sensitivity` in the Rust
+    // memory_adapter.rs.
+
+    /// The tier a content-bearing write files at: `base` lifted to the live
+    /// grant ceiling when one is above it.
+    private static func flooredSensitivity(
+        _ base: AdjectiveSensitivity, ceiling: AdjectiveSensitivity?
+    ) -> AdjectiveSensitivity {
+        if let ceiling, ceiling.rawValue > base.rawValue { return ceiling }
+        return base
+    }
+
+    /// The reply for a content-bearing write: `body`, plus a
+    /// `sensitivity: <tier>` line while a grant is live so the caller learns
+    /// the floor the server applied. With no grant the reply keeps its prior
+    /// shape (Anthropic's contract text, unchanged).
+    private static func writeReply(
+        _ body: String, filed: AdjectiveSensitivity, ceiling: AdjectiveSensitivity?
+    ) -> JSONValue {
+        guard ceiling != nil else { return textResult(body) }
+        return textResult(body + "\nsensitivity: " + sensitivityArgumentName(filed))
+    }
+
     // MARK: - Commands
 
     private func memoryView(_ args: [String: JSONValue]) async throws -> JSONValue {
@@ -241,7 +284,7 @@ extension ToolDispatcher {
             "Here's the content of \(path) with line numbers:\n" + numbered.joined(separator: "\n"))
     }
 
-    private func memoryCreate(_ args: [String: JSONValue]) async throws -> JSONValue {
+    private func memoryCreate(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
         let path = try validateMemPath(args)
         guard case .string(let fileText) = args["file_text"] else {
             return Self.textResult("Error: missing 'file_text' parameter")
@@ -254,6 +297,8 @@ extension ToolDispatcher {
         }
 
         let room = memRoomForPath(path)
+        let ceiling = await sensitivityUnlockLedger.ceilingSensitivity(now: now)
+        let filed = Self.flooredSensitivity(.normal, ceiling: ceiling)
         let frame = CaptureFrame(
             content: fileText,
             channel: .actuator,
@@ -261,17 +306,17 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            sensitivity: filed,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
         )
         _ = try await kit.capture(handle, frame, mode: .regular)
         memLog.info("memory create: \(path, privacy: .public)")
-        return Self.textResult("File created successfully at: \(path)")
+        return Self.writeReply("File created successfully at: \(path)", filed: filed, ceiling: ceiling)
     }
 
-    private func memoryStrReplace(_ args: [String: JSONValue]) async throws -> JSONValue {
+    private func memoryStrReplace(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
         let path = try validateMemPath(args)
         guard case .string(let oldStr) = args["old_str"] else {
             return Self.textResult("Error: missing 'old_str' parameter")
@@ -300,6 +345,11 @@ extension ToolDispatcher {
 
         let newContent = content.replacingOccurrences(of: oldStr, with: newStr)
         let room = memRoomForPath(path)
+        let ceiling = await sensitivityUnlockLedger.ceilingSensitivity(now: now)
+        // Carry the source drawer's tier forward (a re-capture with a
+        // hardcoded .normal silently DOWNGRADED elevated drawers on edit),
+        // floored to the live grant ceiling.
+        let filed = Self.flooredSensitivity(drawer.adjectiveSensitivity, ceiling: ceiling)
         let frame = CaptureFrame(
             content: newContent,
             channel: .actuator,
@@ -307,9 +357,7 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            // Carry the source drawer's tier forward — a re-capture with a
-            // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
-            sensitivity: drawer.adjectiveSensitivity,
+            sensitivity: filed,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -317,10 +365,10 @@ extension ToolDispatcher {
         _ = try await kit.capture(handle, frame, mode: .regular)
         try await kit.withdraw(handle, WithdrawFrame(rowID: drawer.id, reason: "memory str_replace supersession"))
         memLog.info("memory str_replace: \(path, privacy: .public)")
-        return Self.textResult("The memory file has been edited.")
+        return Self.writeReply("The memory file has been edited.", filed: filed, ceiling: ceiling)
     }
 
-    private func memoryInsert(_ args: [String: JSONValue]) async throws -> JSONValue {
+    private func memoryInsert(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
         let path = try validateMemPath(args)
         guard case .integer(let insertLineNum) = args["insert_line"] else {
             return Self.textResult("Error: missing 'insert_line' parameter")
@@ -348,6 +396,11 @@ extension ToolDispatcher {
         let newContent = lines.joined(separator: "\n")
 
         let room = memRoomForPath(path)
+        let ceiling = await sensitivityUnlockLedger.ceilingSensitivity(now: now)
+        // Carry the source drawer's tier forward (a re-capture with a
+        // hardcoded .normal silently DOWNGRADED elevated drawers on edit),
+        // floored to the live grant ceiling.
+        let filed = Self.flooredSensitivity(drawer.adjectiveSensitivity, ceiling: ceiling)
         let frame = CaptureFrame(
             content: newContent,
             channel: .actuator,
@@ -355,9 +408,7 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            // Carry the source drawer's tier forward — a re-capture with a
-            // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
-            sensitivity: drawer.adjectiveSensitivity,
+            sensitivity: filed,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -365,7 +416,7 @@ extension ToolDispatcher {
         _ = try await kit.capture(handle, frame, mode: .regular)
         try await kit.withdraw(handle, WithdrawFrame(rowID: drawer.id, reason: "memory insert supersession"))
         memLog.info("memory insert: \(path, privacy: .public)")
-        return Self.textResult("The file \(path) has been edited.")
+        return Self.writeReply("The file \(path) has been edited.", filed: filed, ceiling: ceiling)
     }
 
     private func memoryDelete(_ args: [String: JSONValue]) async throws -> JSONValue {
@@ -419,6 +470,7 @@ extension ToolDispatcher {
             embeddingModelID: "fdc-simhash-v1",
             // Carry the source drawer's tier forward — a re-capture with a
             // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
+            // Rename adds no content, so the live grant ceiling does not apply.
             sensitivity: drawer.adjectiveSensitivity,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,

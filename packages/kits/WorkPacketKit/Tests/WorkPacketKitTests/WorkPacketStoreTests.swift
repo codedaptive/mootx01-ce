@@ -42,6 +42,24 @@ struct WorkPacketStoreTests {
         #expect(client.captureDrawerCount == 1)
     }
 
+    @Test("store stamps the normal tier when no sensitivity is given")
+    func storeDefaultsToNormalSensitivity() async throws {
+        let (store, client) = makeStore()
+        _ = try await store.store(makePacket(id: "pkt-normal"), now: fixedDate)
+        let frame = try #require(client.capturedFrames.last)
+        #expect(frame.sensitivity == .normal)
+    }
+
+    @Test("store stamps the sensitivity the caller passes",
+          arguments: [AdjectiveSensitivity.elevated, .restricted, .secret])
+    func storeStampsCallerSensitivity(tier: AdjectiveSensitivity) async throws {
+        let (store, client) = makeStore()
+        _ = try await store.store(makePacket(id: "pkt-\(tier.rawValue)"), now: fixedDate, sensitivity: tier)
+        let frame = try #require(client.capturedFrames.last)
+        #expect(frame.sensitivity == tier,
+                "the packet drawer must carry the tier ARIA floors it to")
+    }
+
     @Test("store files tunnels for lineage links")
     func storeFilesLineageTunnels() async throws {
         let (store, client) = makeStore()
