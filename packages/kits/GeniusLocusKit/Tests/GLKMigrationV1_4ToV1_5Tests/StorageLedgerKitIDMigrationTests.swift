@@ -22,7 +22,7 @@
 //   6. v1_0-stamped estate carrying the old rows: the full chain ends at
 //      the current format (the rewrite runs before the 1.0→1.1 capsule,
 //      which opens the vector store).
-//   7. The capsule's pairs are the frozen literals, and the new ids are what
+//   7. The capsule's pairs read the SynapseKit kitID/formerKitIDs constants, and the new ids are what
 //      the vector tier's stores declare, so a migrated ledger is the ledger
 //      those stores look their version up in.
 //   8. On a SQLite estate a pre-rename runtime left behind, the renamed
@@ -192,10 +192,10 @@ struct StorageLedgerKitIDMigrationTests {
     }
     #endif
 
-    // MARK: §7 The pairs are frozen literals and the new ids are the stores' ids
+    // MARK: §7 The pairs come from the SynapseKit constants and the new ids are the stores' ids
 
     @Test
-    func pairsAreFrozenLiteralsAndTargetTheDeclaredStoreIds() {
+    func pairsComeFromSynapseKitConstantsAndTargetTheDeclaredStoreIds() {
         #expect(pairs.vectorStore == StorageLedgerKitIDRename(from: "VectorKit", to: "SynapseKit"))
         #expect(pairs.representationClaims == StorageLedgerKitIDRename(from: "VectorKitClaims", to: "SynapseKitClaims"))
         // The ledger id a migrated estate carries is the id the store looks
