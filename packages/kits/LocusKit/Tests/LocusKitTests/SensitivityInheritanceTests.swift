@@ -166,7 +166,6 @@ struct SensitivityInheritanceTests {
         // (e.g. it absorbed a new elevated constituent at the GLK layer).
         let d4 = episodicDrawer(id: "d4", sensitivity: .elevated)
         try await store.addDrawer(d4)
-        let v2 = vagueDrawer(id: "v2", sensitivity: .elevated)
         // Share lineageID with v1 (required by foldIn precondition).
         let v2WithLineage = Drawer(
             id: TestStorage.tid("v2"),

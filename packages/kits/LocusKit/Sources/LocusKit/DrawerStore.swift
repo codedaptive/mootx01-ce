@@ -1025,15 +1025,14 @@ public actor DrawerStore {
         guard !drawers.isEmpty else { return }
         let estateID = estateUuid
         let vocab = vocabulary
-        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
 
         // Pre-compute HLC stamps and row UUIDs outside the @Sendable transaction
         // closure (both access actor-isolated state: hlc and UUID parsing).
         // Each drawer's stamp derives from its own filedAt (not a single batch
-        // nowMillis) so that per-record capture_date values (schema v1.2) produce
+        // timestamp) so that per-record capture_date values (schema v1.2) produce
         // distinct HLC physical times. For batches where all drawers share the
         // same filedAt (no capture_date on any record), every stamp derives from
-        // the same millisecond — byte-identical to the prior single-nowMillis path.
+        // the same millisecond.
         let stamps = drawers.map { d in
             hlc.send(now: Int64(d.filedAt.timeIntervalSince1970 * 1000))
         }
