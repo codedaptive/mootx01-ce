@@ -31,8 +31,15 @@ public protocol WorkPacketEstateClient: Sendable {
     /// recall pages. The `limit` field in the frame caps the result count.
     func listDrawers(_ frame: RecallFrame) async throws -> [Drawer]
 
-    /// Fetch specific drawers by their row IDs.
+    /// Fetch specific drawers by their row IDs, unfiltered. Used by lineage
+    /// traversal, which reports ids only and re-gates them before output.
     func getDrawers(ids: [String]) async throws -> [Drawer]
+
+    /// Fetch specific drawers by their row IDs, returning only those that
+    /// pass `frame`'s filter chain (the estate's recall filter pipeline —
+    /// state, wing/room, sensitivity ceiling, tombstone exclusion). The
+    /// packet read gate (SPEC § 5 B-4) is built on this call.
+    func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer]
 }
 
 // MARK: - EstateAdapter
@@ -73,5 +80,13 @@ public struct EstateAdapter: WorkPacketEstateClient {
 
     public func getDrawers(ids: [String]) async throws -> [Drawer] {
         try await estate.getDrawers(ids: ids)
+    }
+
+    /// Frame-gated by-id load: `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`
+    /// runs the exact recall filter pipeline over the loaded rows; only the
+    /// `admissible` subset is returned. Packets are read at `.full` hydration
+    /// because the caller decodes the JSON body.
+    public func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer] {
+        try await estate.getDrawers(ids: ids, matchingFrame: frame, hydrationLevel: .full).admissible
     }
 }
