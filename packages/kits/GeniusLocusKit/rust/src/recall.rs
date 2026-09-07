@@ -1385,6 +1385,32 @@ fn single_dense_forward(forward_key: &str) -> RecallShape {
     RecallShape::new(weights, None)
 }
 
+// ---------------------------------------------------------------------------
+// GLKSubSpanScoring
+// ---------------------------------------------------------------------------
+
+/// Whether the unionBest matrixAware pipeline runs the step 5.8 sub-span
+/// dense refinement (`CorpusContentEngine::score_sub_spans`) for a request.
+///
+/// Sub-span scoring is an additive-cost stage: transient sentence-window
+/// embeddings for every candidate the `SubSpanBudget` admits, under the
+/// coordinator lock. Ruling 2026-09-07: every non-minimum feature is a call
+/// parameter with an explicit default chosen by the caller, and
+/// additive-cost features default off. `GLKRecallRequest::new` sets `Off`;
+/// every internal caller names its choice at the call site, and the switch
+/// is not an ARIA argument. Mirrors Swift `GLKSubSpanScoring`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GLKSubSpanScoring {
+    /// Step 5.8 does not run: the dense column keeps the dense lane's
+    /// whole-record cosine (0 for candidates the dense lane never ranked).
+    Off,
+    /// Step 5.8 runs when the other conditions hold (matrixAware scoring, a
+    /// registered CorpusContentEngine, non-empty query text): the dense
+    /// column becomes `max(dense, sub_span_max_cosine)` for every candidate
+    /// scored inside the budget.
+    On,
+}
+
 /// Mirrors Swift `GLKRecallRequest` (GLKRecallRequest.swift).
 #[derive(Debug, Clone)]
 pub struct GLKRecallRequest {
@@ -1465,6 +1491,16 @@ pub struct GLKRecallRequest {
     ///
     /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
     pub anomalous_filter: Option<bool>,
+
+    /// Whether the step 5.8 sub-span dense refinement runs for this request.
+    ///
+    /// `Off` (what `new()` sets) leaves the dense column as the dense lane
+    /// produced it. `On` runs `score_sub_spans` on the unionBest matrixAware
+    /// pipeline when a corpus is registered and the request carries query
+    /// text, and blends `max(dense, sub_span_max_cosine)`. Every internal
+    /// caller sets this explicitly. Mirrors Swift
+    /// `GLKRecallRequest.subSpanScoring`.
+    pub sub_span_scoring: GLKSubSpanScoring,
 }
 
 impl GLKRecallRequest {
@@ -1496,6 +1532,7 @@ impl GLKRecallRequest {
             composition: None,
             frontier_k: None,
             anomalous_filter: None,
+            sub_span_scoring: GLKSubSpanScoring::Off,
         }
     }
 
@@ -1561,6 +1598,17 @@ impl GLKRecallRequest {
     /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
     pub fn with_anomalous_filter(mut self, filter: bool) -> Self {
         self.anomalous_filter = Some(filter);
+        self
+    }
+
+    /// Builder: set the step 5.8 sub-span scoring switch.
+    ///
+    /// `new()` sets `Off`. Every internal caller calls this builder (or sets
+    /// the field in a struct literal) so the choice is visible at the call
+    /// site; the ARIA surface does not expose the switch. Mirrors Swift's
+    /// defaulted `subSpanScoring:` init parameter.
+    pub fn with_sub_span_scoring(mut self, sub_span_scoring: GLKSubSpanScoring) -> Self {
+        self.sub_span_scoring = sub_span_scoring;
         self
     }
 }
