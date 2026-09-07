@@ -173,6 +173,29 @@ class TestRungsFireOnce(MeterCase):
             expected = "session/S/handoff" if rung == 85 else "session/S/checkpoint-%d" % rung
             self.assertIn(expected, text)
 
+    def test_every_rung_message_carries_sensitivity_reminder(self):
+        """a46c8160 — every checkpoint rung must warn the model not to include
+        credentials or restricted content in the filed note.
+
+        Fails pre-fix because the MESSAGES templates contain no sensitivity
+        guidance, so a handoff can silently downgrade secret context to normal.
+        """
+        # SECURITY: the reminder prevents the model from inadvertently filing
+        # credentials or restricted-memory content into an estate note at the
+        # default (normal) sensitivity tier.
+        required_phrases = (
+            "credentials, keys or tokens",
+            "restricted or secret memories",
+            "sensitivity set to the highest tier",
+        )
+        for rung, template in moot_hooks.MESSAGES.items():
+            text = template.format(pct=rung, session_id="S")
+            for phrase in required_phrases:
+                self.assertIn(
+                    phrase, text,
+                    "Rung %d MESSAGES template is missing sensitivity phrase %r" % (rung, phrase),
+                )
+
 
 class TestPrecompactAndRecovery(MeterCase):
 

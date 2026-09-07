@@ -55,11 +55,42 @@ public struct VectorRepresentationKey: Sendable, Hashable, Comparable {
 /// Durable consumer-claims ledger over vector representations.
 public actor VectorRepresentationClaims {
 
+    /// The kit id this ledger's schema-version row is keyed by. The single
+    /// source for `schemaDeclaration.kitID`; `formerKitIDs` lists the ids
+    /// that row carried under earlier names of the kit.
+    public static let kitID = "SynapseKitClaims"
+
+    /// Kit ids this ledger's schema-version row carried before `kitID`,
+    /// oldest first (the VectorKit → SynapseKit rename, see
+    /// `VectorStore.formerKitIDs`). `prepareSchemaLedger(storage:)` moves such
+    /// a row to `kitID`; the GeniusLocusKit 1.4 → 1.5 capsule reads its pair
+    /// from here.
+    public static let formerKitIDs: [String] = ["VectorKitClaims"]
+
+    /// Move this ledger's schema-version row from any id in `formerKitIDs`
+    /// to `kitID` before `storage.migrate(to: schemaDeclaration)`.
+    ///
+    /// SECURITY: without the rename a populated estate is treated as version
+    /// 0 under the new id and the ladder replays over its rows, leaving a
+    /// duplicate ledger row under the old id. Same outcomes as
+    /// `VectorStore.prepareSchemaLedger(storage:)`: `.renamed` and `.noRow`
+    /// pass; `.conflict` (rows under both ids) leaves both rows in place,
+    /// logs one warning, and returns normally so the estate stays openable
+    /// and `migrate(to:)` runs under the current id without replaying.
+    ///
+    /// - Parameter storage: The estate storage the ledger will open on.
+    /// - Throws: `SynapseKitError.storeUnavailable` when the rename call
+    ///   itself fails (storage error). A conflicted ledger does not throw.
+    public static func prepareSchemaLedger(storage: any Storage) async throws {
+        try await SchemaLedgerPreparation.moveFormerRows(
+            on: storage, from: formerKitIDs, to: kitID)
+    }
+
     /// Additive ledger schema. Applied via `storage.migrate(to:)` like the
     /// other sidecar declarations; not part of any composite schema until
     /// the attached-profile composition (P3) adopts it.
     public static let schemaDeclaration = SchemaDeclaration(
-        kitID: "SynapseKitClaims",
+        kitID: kitID,
         version: 1,
         tables: [
             TableDeclaration(

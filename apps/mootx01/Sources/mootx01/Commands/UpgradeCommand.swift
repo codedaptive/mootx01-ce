@@ -1172,12 +1172,18 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         // The migrator's daemon seam: launchd when this is the resident
         // estate, a no-op otherwise — a cloned estate is encrypted with the
-        // resident daemon left running over its own estate.
+        // resident daemon left running over its own estate. The resident
+        // directory comes from the daemon's launchd registration; an
+        // unreadable registration selects launchd (SAFETY: the copy+rename
+        // never runs under a daemon that may hold this estate open).
+        let residentDirectory = MootPaths.residentDataDirectory(homeDirectory: home)
         let resident = MootPaths.isResidentEstate(
             dataDirectory: dataDirectory,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home))
+            residentDataDirectory: residentDirectory)
         if !resident {
             print("  data directory \(dataDirectory.path) is not the resident estate; daemon left running")
+        } else if let warning = residentDirectory.registrationWarning(for: dataDirectory) {
+            print(warning)
         }
         print("Encrypting the estate\u{2026}")
         do {

@@ -25,6 +25,11 @@ public enum ResidentDaemonQuiesce {
     /// operator sees why nothing restarted, then run `work`. The daemon
     /// serves a different estate and has no stake in this one.
     ///
+    /// Unreadable registration (`MootPaths.ResidentDataDirectory
+    /// .unreadableRegistration`): print the registration warning, then
+    /// proceed exactly as for the resident estate. SAFETY: an estate the
+    /// daemon may hold open is never migrated under a running daemon.
+    ///
     /// - Parameters:
     ///   - dataDirectory: the data directory the step will open.
     ///   - residentDataDirectory: the daemon's data directory, from
@@ -38,7 +43,7 @@ public enum ResidentDaemonQuiesce {
     ///   and the next `mootx01 upgrade` retries.
     public static func run<T>(
         dataDirectory: URL,
-        residentDataDirectory: URL,
+        residentDataDirectory: MootPaths.ResidentDataDirectory,
         step: String,
         daemon: EstateEncryptionMigrator.DaemonControl,
         work: () async -> T
@@ -48,6 +53,9 @@ public enum ResidentDaemonQuiesce {
         else {
             print("  data directory \(dataDirectory.path) is not the resident estate; daemon left running")
             return await work()
+        }
+        if let warning = residentDataDirectory.registrationWarning(for: dataDirectory) {
+            print(warning)
         }
         let wasRunning = daemon.isRunning()
         if wasRunning && !daemon.stop() {

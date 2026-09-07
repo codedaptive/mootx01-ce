@@ -86,6 +86,22 @@ final class MockPacketsClient: WorkPacketEstateClient, @unchecked Sendable {
         ids.compactMap { drawers[$0] }
     }
 
+    /// Frame-gated by-id read (WorkPacketKit read gate). The mock applies the
+    /// same subset of the frame it applies in `listDrawers` — the exportable
+    /// filter — and returns every other planted drawer; MootManager's own
+    /// handlers read through the unfiltered `getDrawers(ids:)` above, so this
+    /// conformance exists for the protocol, not for a manager code path.
+    func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer] {
+        let wantExportable = frame.filterChain.contains {
+            if case .exportable = $0 { return true }
+            return false
+        }
+        return ids.compactMap { drawers[$0] }.filter { drawer in
+            guard wantExportable else { return true }
+            return (drawer.adjectiveBitmap >> 12) & 0x3F == 32
+        }
+    }
+
     // MARK: - Test helpers
 
     /// Plant a pre-encoded WorkPacket content string as a drawer.
