@@ -54,13 +54,26 @@ fn load_fixture_compositions() -> Vec<String> {
     fixture.composition_names
 }
 
+/// Compositions the benchmarker fixture lists that this build gates out.
+/// `dense-fused` reads the whole-record float column and compiles only with
+/// the `whole-record-dense` feature (ruling 2026-09-07).
+fn gated_compositions() -> Vec<String> {
+    if cfg!(feature = "whole-record-dense") { vec![] } else { vec!["dense-fused".to_string()] }
+}
+
+/// The fixture names this build is expected to resolve.
+fn expected_fixture_compositions() -> Vec<String> {
+    let gated = gated_compositions();
+    load_fixture_compositions().into_iter().filter(|n| !gated.contains(n)).collect()
+}
+
 /// Every name in the benchmarker fixture must exist in the Rust grid. If a name
 /// is present in the fixture but missing from the kit, the benchmarker would
 /// send a composition arg the kit cannot resolve — silent wrong results at run
 /// time. Fail here instead, loudly, at build time.
 #[test]
 fn fixture_names_exist_in_grid() {
-    let fixture_names = load_fixture_compositions();
+    let fixture_names = expected_fixture_compositions();
     let grid_names: Vec<String> = composition_grid::names();
     for name in &fixture_names {
         assert!(
@@ -86,7 +99,7 @@ fn grid_has_no_duplicate_names() {
 /// stability keeps the leaderboard columns stable across runs and across langs.
 #[test]
 fn fixture_order_matches_grid() {
-    let fixture_names = load_fixture_compositions();
+    let fixture_names = expected_fixture_compositions();
     let grid_names = composition_grid::names();
     let grid_subset: Vec<String> = grid_names
         .into_iter()

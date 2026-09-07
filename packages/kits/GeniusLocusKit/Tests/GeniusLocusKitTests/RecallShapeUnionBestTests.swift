@@ -21,10 +21,13 @@
 // tokens drive distinct embeddings so the per-signal cosine ordering is
 // deterministic and reproducible across the Swift/Rust ports.
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -327,3 +330,4 @@ struct RecallShapeUnionBestTests {
         }
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

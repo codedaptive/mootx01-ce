@@ -93,3 +93,15 @@ convergence-kit  = { path = "../../ConvergenceKit/rust" }
 # version match persistence-kit's entry exactly — Cargo deduplicates to one
 # compiled instance, adding zero build cost.
 rusqlite         = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[features]
+# whole-record-dense: compiles the resident adapter's float index duties
+# (THETA rebuild, BETA compaction) and turns on the same feature in
+# neuron-kit, genius-locus-kit and corpus-kit. Off by default (ruling
+# 2026-09-07): the span stage is the one dense provider. Twin of the Swift
+# package trait `WholeRecordDense`.
+whole-record-dense = [
+    "neuron-kit/whole-record-dense",
+    "genius-locus-kit/whole-record-dense",
+    "corpus-kit/whole-record-dense",
+]

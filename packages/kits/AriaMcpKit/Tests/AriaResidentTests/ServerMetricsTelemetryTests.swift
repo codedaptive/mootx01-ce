@@ -71,7 +71,7 @@ struct ServerMetricsTelemetryTests {
 
     @Test("reportServerMetrics: gate suppresses all emission when monitoring is off")
     func reportServerMetricsGateSuppressesWhenDisabled() async throws {
-        try await intellectusGlobalGate.withLock {
+        await intellectusGlobalGate.withLock {
             let spy = CaptureSink()
             Intellectus.install(sink: spy)
             Intellectus.setEnabled(false)

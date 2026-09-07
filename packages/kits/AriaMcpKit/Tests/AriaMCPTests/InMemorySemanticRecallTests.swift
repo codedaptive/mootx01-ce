@@ -94,7 +94,7 @@ private func openInMemoryEstateWithSemanticRecall()
 
 // MARK: - Test suite
 
-@Suite("In-memory estate — semantic recall wiring + Lane D proof", .serialized)
+@Suite("In-memory estate — semantic recall wiring", .serialized)
 struct InMemorySemanticRecallTests {
 
     // MARK: - A. Impatient capture → search (in-memory)
@@ -169,45 +169,6 @@ struct InMemorySemanticRecallTests {
     ///
     /// Dark-by-default (the float lane silently absent under the production default)
     /// is forbidden per the no-deferrals mandate.
-    @Test func laneDLiveUnderBetaDefaultDeterministicProvider() async throws {
-        // Build a Corpus directly against InMemoryStorage — bypasses the
-        // ToolDispatcher layer to assert on floatNearest directly.
-        let storage = InMemoryStorage(
-            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-
-        // .deterministic is the production default (AriaMCPMain.swift, kit.provision).
-        let corpus = try await Corpus(storage: storage, model: .deterministic)
-
-        // Ingest a document. The deterministic provider's embedFloat returns a
-        // 32-element float vector (FNV-1a + FloatSimHash), which ingest stores as
-        // vector_index=1 in the VectorStore (the Lane D row). Without embedFloat
-        // support the float row would not be written and floatNearest would
-        // return .unavailableNoFloatRows.
-        let content = "golden eagle alpine thermal soaring wingspan territory claim"
-        try await corpus.ingest(content, sourceID: "eagles/golden-eagle", now: Date())
-
-        // floatNearest must return .hits — proving Lane D is live.
-        // .unavailableProviderOptOut would mean embedFloat threw (structural opt-out, no float lane).
-        // .unavailableNoFloatRows would mean embedFloat returned [] or ingest skipped float.
-        // .unavailableNoVocabHit would mean the provider has a trained basis but the query
-        //   tokens are all OOV — unexpected here since the deterministic provider is not vocabulary-based.
-        let outcome = await corpus.floatNearest(query: "golden eagle thermal", limit: 5)
-        switch outcome {
-        case .hits(let results):
-            #expect(!results.isEmpty,
-                "floatNearest must return ≥1 hit for the ingested document; got empty")
-        case .unavailableProviderOptOut:
-            Issue.record("Lane D DARK — deterministic provider threw embedFloat (opt-out). The beta default must have a live float lane (no deferrals).")
-        case .unavailableNoFloatRows:
-            Issue.record("Lane D DARK — no float rows stored after ingest. The deterministic provider must write Lane D rows during ingest.")
-        case .unavailableNoVocabHit:
-            Issue.record("Lane D DARK — vocabMiss on a deterministic provider is unexpected; the deterministic provider does not use a vocabulary.")
-        case .emptyQuery:
-            Issue.record("floatNearest returned .emptyQuery — query was non-empty, this is a bug.")
-        case .storeError(let e):
-            Issue.record("Lane D store error (unexpected): \(e)")
-        }
-    }
 
     // MARK: - D. PostgreSQL shape-shared (env-gated)
 
