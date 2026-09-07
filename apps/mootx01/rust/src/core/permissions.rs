@@ -109,7 +109,7 @@ const READ_TOOLS: &[&str] = &[
 /// Only the read table is installer-local.
 ///
 /// The allow tier holds `moot_file_memory` without a confirmation prompt
-/// because the server, not the host, keeps its sensitivity honest: a memory
+/// because the server, not the host, enforces the sensitivity tier: a memory
 /// filed while a restricted or secret grant is live takes the grant's tier
 /// when the caller names none and refuses a lower one, so no prompt is
 /// needed to stop a handoff downgrading granted material.
