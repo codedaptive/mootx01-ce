@@ -1786,7 +1786,7 @@ public extension GeniusLocusKit {
     /// Keys are encoded sorted so the stored JSON is deterministic.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionLaneWeights(
+    func provisionLaneWeights(
         _ weights: [String: Float], for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
@@ -1807,7 +1807,7 @@ public extension GeniusLocusKit {
     /// fail-quiet contract the RecallDirector applies at recall).
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionedLaneWeights(for handle: EstateHandle) async throws -> [String: Float] {
+    func provisionedLaneWeights(for handle: EstateHandle) async throws -> [String: Float] {
         let estate = try estate(for: handle)
         guard let json = try? await estate.meta(key: GeniusLocusKit.laneWeightsMetaKey),
               let data = json.data(using: .utf8),
@@ -1829,7 +1829,7 @@ public extension GeniusLocusKit {
     ///   - tuning: the recall-tuning envelope to store.
     ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionRecallTuning(
+    func provisionRecallTuning(
         _ tuning: RecallTuningManifest, for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
@@ -1851,7 +1851,7 @@ public extension GeniusLocusKit {
     ///
     /// - Parameter handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionedRecallTuning(for handle: EstateHandle) async throws -> RecallTuningManifest {
+    func provisionedRecallTuning(for handle: EstateHandle) async throws -> RecallTuningManifest {
         let estate = try estate(for: handle)
         guard let json = try? await estate.meta(key: GeniusLocusKit.recallTuningMetaKey),
               let data = json.data(using: .utf8),
@@ -1874,7 +1874,8 @@ public extension GeniusLocusKit {
     /// selection.
     ///
     /// An absent key means "use the deterministic default ensemble
-    /// (RI/PPMI/LSA/NMF/FDC)." No estate migration is required.
+    /// (RI only by default; RI/PPMI/NMF/FDC under DenseFamilies; LSA on its own
+    /// switch, MOOTX01_LSA, and dark by default)." No estate migration is required.
     ///
     /// ## Provider model ID contract
     ///
@@ -1887,7 +1888,7 @@ public extension GeniusLocusKit {
     ///   - modelID: the `EmbeddingProvider.modelID` to store.
     ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionEmbeddingProvider(
+    func provisionEmbeddingProvider(
         _ modelID: String, for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
@@ -1915,7 +1916,10 @@ public extension GeniusLocusKit {
     ///
     /// - Parameter handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String? {
+    ///
+    /// `package` rather than internal so the 1.6 to 1.7 migration capsule (a
+    /// sibling module) can read the key under the WholeRecordDense trait.
+    package func provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String? {
         let estate = try estate(for: handle)
         // meta(key:) returns nil when the key is absent; an empty string
         // stored by a previous call is returned as "". Callers treat "" the
@@ -1945,7 +1949,7 @@ public extension GeniusLocusKit {
     ///   - config: the door config to store.
     ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionDoorConfig(
+    func provisionDoorConfig(
         _ config: DoorManifest, for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
@@ -1976,7 +1980,7 @@ public extension GeniusLocusKit {
     ///
     /// - Parameter handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionedDoorConfig(for handle: EstateHandle) async throws -> DoorManifest {
+    func provisionedDoorConfig(for handle: EstateHandle) async throws -> DoorManifest {
         let estate = try estate(for: handle)
         return await provisionedDoorConfig(estate: estate)
     }
@@ -1997,7 +2001,7 @@ public extension GeniusLocusKit {
     ///   - config: the modes config to store.
     ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionModesConfig(
+    func provisionModesConfig(
         _ config: ModesManifest, for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
@@ -2027,7 +2031,7 @@ public extension GeniusLocusKit {
     ///
     /// - Parameter handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    public func provisionedModesConfig(for handle: EstateHandle) async throws -> ModesManifest {
+    func provisionedModesConfig(for handle: EstateHandle) async throws -> ModesManifest {
         let estate = try estate(for: handle)
         return await provisionedModesConfig(estate: estate)
     }

@@ -133,7 +133,6 @@ private func makeResult(hits: [RecallHit]) -> GLKRecallResult {
         plan: RecallPlan(effectiveMode: .locusOnly, frontierK: 64, weights: .uniform),
         unionProfile: nil,
         hits: hits,
-        denseLaneStatus: nil,
         degradedStages: [],
         laneRanks: [:],
         queryLatticeAnchor: nil

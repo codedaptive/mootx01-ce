@@ -1,3 +1,4 @@
+#if MOOTX01_MINERS
 // CoreAIEngineTests.swift — asset-free checks on the Core AI engine.
 //
 // The engine itself needs a converted .aimodel to construct, so the
@@ -100,3 +101,4 @@ struct CoreAIEngineTokenizerBoundTests {
     }
 }
 #endif
+#endif // MOOTX01_MINERS: the library compiles to nothing with the switch off, so do its tests.

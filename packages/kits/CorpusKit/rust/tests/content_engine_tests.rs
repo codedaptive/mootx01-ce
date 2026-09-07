@@ -1368,11 +1368,14 @@ fn engine_claims_its_representations() {
         "1.0.0",
         0
     )));
-    assert!(claimed.contains(&synapsekit::VectorRepresentationKey::new(
-        "corpus-deterministic-v1",
-        "1.0.0",
-        1
-    )));
+    // The whole-record float lane (vector_index 1) is claimed only when the
+    // sidecar build writes it (CLAIMED_LANES).
+    let float_lane = synapsekit::VectorRepresentationKey::new("corpus-deterministic-v1", "1.0.0", 1);
+    assert_eq!(
+        claimed.contains(&float_lane),
+        cfg!(feature = "whole-record-dense"),
+        "lane 1 is claimed exactly in the whole-record-dense build"
+    );
 }
 
 #[test]
@@ -1412,6 +1415,9 @@ struct MutableSource {
     fetch_count: AtomicUsize,
 }
 
+// The counter and remove helpers serve the dense-families trainable-slot
+// tests; the default build compiles them without a caller.
+#[cfg_attr(not(feature = "dense-families"), allow(dead_code))]
 impl MutableSource {
     fn new() -> Arc<Self> {
         Arc::new(Self { records: Mutex::new(BTreeMap::new()), fetch_count: AtomicUsize::new(0) })
@@ -1472,6 +1478,8 @@ impl CorpusContentSource for MutableSource {
 }
 
 // A source that always returns None for record() — simulates a dead source.
+// Used by the dense-families trainable-slot tests only.
+#[cfg_attr(not(feature = "dense-families"), allow(dead_code))]
 struct NilSource {
     ids: Vec<String>,
 }

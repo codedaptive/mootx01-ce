@@ -39,14 +39,16 @@ pub fn run(
     }
 
     // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs the six data-directory migration steps (schema 10 → 19,
-    // kg_facts identity, shared-content reclaim, dense pooling convergence,
-    // span encode, vector reclaim) against the estate resolved via
-    // MOOTX01_DATA_DIR, then exits. No network, no prompts; each step
-    // quiesces the daemon only when the estate is the resident one. Ordering
-    // matches run_convergence: schema gate → correctness migration →
-    // VACUUM-backed reclaim → dense pooling convergence → span encode →
-    // vector reclaim. A refused schema version stops the sequence (every later
+    // estates. Runs the eight data-directory migration steps (schema 10 → 19,
+    // kg_facts identity, shared-content reclaim, whole-record vacuum, ssc
+    // facts, dense pooling convergence, span encode, vector reclaim) against
+    // the estate resolved via MOOTX01_DATA_DIR, then exits. No network, no
+    // prompts; each step quiesces the daemon only when the estate is the
+    // resident one. Ordering matches run_convergence: schema gate →
+    // correctness migration → VACUUM-backed reclaim → whole-record vacuum
+    // (the first estate open, so the 1.6 → 1.7 capsule runs and reports
+    // here) → ssc facts → dense pooling convergence → span encode → vector
+    // reclaim. A refused schema version stops the sequence (every later
     // step would open the schema and stamp it); otherwise all steps run even
     // when earlier steps fail (independent + retryable) and the exit is
     // non-zero when any step reported failure.
@@ -56,11 +58,12 @@ pub fn run(
         }
         let ok_kg    = run_kg_fact_identity_backfill();
         let ok_recl  = run_shared_content_reclaim_if_pending();
+        let ok_vacuum = run_whole_record_vacuum();
         let ok_facts = run_ssc_facts_backfill();
         let ok_dense = run_dense_pooling_convergence();
         let ok_span  = run_span_encode_backfill();
         let ok_vec   = run_vector_reclaim();
-        if ok_kg && ok_recl && ok_facts && ok_dense && ok_span && ok_vec {
+        if ok_kg && ok_recl && ok_vacuum && ok_facts && ok_dense && ok_span && ok_vec {
             return ExitCode::from(exit::OK);
         } else {
             return ExitCode::from(exit::FAILURE);
@@ -228,6 +231,7 @@ fn run_convergence() {
     if run_schema_upgrade() {
         let _ = run_kg_fact_identity_backfill();
         let _ = run_shared_content_reclaim_if_pending();
+        let _ = run_whole_record_vacuum();
         let _ = run_dense_pooling_convergence();
         let _ = run_span_encode_backfill();
         let _ = run_vector_reclaim();
@@ -448,7 +452,9 @@ fn run_kg_fact_identity_backfill() -> bool {
 /// `SqliteDrawerStore::from_path` → `SqliteStorage::new` adopts the sibling
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
 ///
-/// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)
+/// Bring the trainable provider bases a populated estate carries
+/// (random-indexing in every build; PPMI, NMF and FDC only in a
+/// dense-families build; LSA only under its own feature)
 /// onto the basis format this binary's codec writes. A basis row persisted
 /// under an earlier format version holds vectors pooled the old way; the
 /// corpus opens such a slot untrained and its open-time provider reconcile
@@ -689,6 +695,123 @@ fn run_span_encode_backfill() -> bool {
 /// Models whose vector rows `mootx01 upgrade` reclaims: the dense
 /// distributional families the Encoder Rerank Program took dark
 /// (`dense-families` feature off). Their rows serve nothing at 19.
+/// Vacuum the whole-record float rows (`vectors` kind 1) and the `hnsw_graph`
+/// rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26). The 1.6 → 1.7
+/// capsule does the work inside the registry's migration chain when the
+/// estate opens (it also rebuilds the binary sidecar and releases the float
+/// representation claim), so this step counts the rows before the open, opens
+/// the estate through the registry's maintenance path, counts again, and
+/// returns the freed pages to the filesystem with a VACUUM when anything was
+/// deleted. It runs after the shared-content reclaim and before the ssc facts
+/// backfill: the first estate open of the sequence, so the capsule's work is
+/// reported here and every later step finds the estate at 1.7. Idempotent: a
+/// vacuumed estate deletes nothing and skips the VACUUM. Twin of Swift
+/// `UpgradeCommand.runWholeRecordVacuum`.
+///
+/// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+/// Returns `true` on success or when there is nothing to vacuum.
+fn run_whole_record_vacuum() -> bool {
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+
+    let data = crate::core::paths::data_dir();
+    let name = crate::core::paths::active_estate(&data);
+    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    if !estate.exists() {
+        return true;
+    }
+    let Some(ok) = with_resident_daemon_quiesced(
+        &data,
+        &crate::core::paths::resident_data_dir(),
+        "whole-record vacuum",
+        &PlatformDaemon,
+        || {
+            let now = wall_now_millis();
+            let path = estate.display().to_string();
+            let result = (|| -> Result<(usize, usize, i64), String> {
+                let before = whole_record_row_counts(&path, now)?;
+                // The maintenance open runs the migration chain, which runs the
+                // 1.6 → 1.7 capsule on an estate that has not taken it yet.
+                // Dropping the registry stops and joins the drain worker.
+                let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+                    &path,
+                    "aria-mcp-default",
+                )?;
+                drop(reg);
+                let after = whole_record_row_counts(&path, now)?;
+                let float_rows = before.0.saturating_sub(after.0);
+                let graph_rows = before.1.saturating_sub(after.1);
+                let mut reclaimed_bytes = 0i64;
+                if float_rows + graph_rows > 0 {
+                    let store = SqliteDrawerStore::from_path(&path, now, None, 5.0)
+                        .map_err(|e| e.to_string())?;
+                    let storage = store.storage().ok_or("drawer store exposes no storage")?;
+                    reclaimed_bytes = storage
+                        .perform_maintenance(None, None)
+                        .map_err(|e| format!("{e:?}"))?
+                        .reclaimed_bytes;
+                }
+                Ok((float_rows, graph_rows, reclaimed_bytes))
+            })();
+            match result {
+                Ok((0, 0, _)) => {
+                    println!("  ✓ whole-record vacuum: nothing to reclaim");
+                    true
+                }
+                Ok((float_rows, graph_rows, bytes)) => {
+                    println!("  ✓ whole-record vacuum: {float_rows} float row(s), {graph_rows} graph row(s) deleted; {bytes} bytes returned to filesystem");
+                    true
+                }
+                Err(e) => {
+                    println!("  ✗ whole-record vacuum failed: {e}\n    Every serving row is untouched. Run `mootx01 upgrade` to retry.");
+                    false
+                }
+            }
+        },
+    ) else {
+        return false;
+    };
+    ok
+}
+
+/// The whole-record float (`vectors` kind 1) and `hnsw_graph` row counts of
+/// an estate, read through a connection of its own that is dropped before
+/// the caller opens the estate. Zero when the vector tier was never
+/// registered (a Locus-only estate has no `vectors` table). Twin of Swift
+/// `UpgradeCommand.wholeRecordRowCounts`.
+fn whole_record_row_counts(path: &str, now: i64) -> Result<(usize, usize), String> {
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+    use persistence_kit::{Column, StoragePredicate, TypedValue};
+    use synapsekit::engine::payload::VectorKind;
+    use synapsekit::VectorStore;
+
+    let store = SqliteDrawerStore::from_path(path, now, None, 5.0).map_err(|e| e.to_string())?;
+    let storage = store.storage().ok_or("drawer store exposes no storage")?;
+    if storage
+        .current_schema_version_for(VectorStore::KIT_ID)
+        .map_err(|e| format!("{e:?}"))?
+        == 0
+    {
+        return Ok((0, 0));
+    }
+    let float_rows = storage
+        .row_store()
+        .count(
+            "vectors",
+            Some(&StoragePredicate::Eq(
+                Column::new("vectors", "kind"),
+                TypedValue::Int(VectorKind::Float32.raw()),
+            )),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+    let graph_rows = storage
+        .row_store()
+        .count("hnsw_graph", None)
+        .map_err(|e| format!("{e:?}"))?;
+    Ok((float_rows, graph_rows))
+}
+
 const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 4] = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"];
 
 /// Reclaim the vector rows nothing serves at schema 19 (ENCODER_RERANK

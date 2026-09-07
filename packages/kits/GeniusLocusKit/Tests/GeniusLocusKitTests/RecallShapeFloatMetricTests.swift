@@ -23,6 +23,8 @@
 //   — RecallShape Codable round-trips (no estate required)
 //   — VectorStore float metric parameter (SQLite backend, proves downstream threading)
 
+// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
+#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import PersistenceKit
@@ -171,7 +173,7 @@ struct RecallShapeFloatMetricTests {
     ///       v_B = [0.9, 0.1] has cosine_dist ≈ 0.007 but l2_dist ≈ 0.14.
     ///   Cosine: v_A first (dist=0); l2: v_B first (dist=0.14 < 0.99).
     ///   This fixture works.
-    @Test("cosine and l2 produce different top-1 on a designed fixture", .serialized)
+    @Test("cosine and l2 produce different top-1 on a designed fixture")
     func cosineAndL2DifferOnFixture() async throws {
         let storage = try makeScratchStore()
         try await storage.open(schema: VectorStore.schemaDeclaration)
@@ -229,7 +231,7 @@ struct RecallShapeFloatMetricTests {
     ///   Dot: v_H (dot=10) > v_I (dot=1.0) → v_H first (−dot: v_H smallest)
     ///   Cosine: v_I first (dist=0)
     ///   This fixture produces different top-1 for dot vs cosine.
-    @Test("dot and cosine produce different top-1 on a designed fixture", .serialized)
+    @Test("dot and cosine produce different top-1 on a designed fixture")
     func dotAndCosineDifferOnFixture() async throws {
         let storage = try makeScratchStore()
         try await storage.open(schema: VectorStore.schemaDeclaration)
@@ -265,7 +267,7 @@ struct RecallShapeFloatMetricTests {
     }
 
     /// Verify that farthest queries also respect the metric parameter.
-    @Test("findFarthestFloat respects metric parameter", .serialized)
+    @Test("findFarthestFloat respects metric parameter")
     func farthestRespectsMetric() async throws {
         let storage = try makeScratchStore()
         try await storage.open(schema: VectorStore.schemaDeclaration)
@@ -299,3 +301,4 @@ struct RecallShapeFloatMetricTests {
         #expect(!l2Farthest.isEmpty, "l2 farthest must return hits")
     }
 }
+#endif // MOOTX01_WHOLE_RECORD_DENSE

@@ -20,6 +20,10 @@
 // The inference closures mirror recall_scored_parity.rs's minilm/mpnet configs so
 // the per-signal cosine ordering is deterministic across the Swift/Rust ports.
 
+// whole-record-dense feature only: the whole-record float lane is a sidecar
+// (ruling 2026-09-07).
+#![cfg(feature = "whole-record-dense")]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
