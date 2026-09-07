@@ -1236,7 +1236,7 @@ mod tests {
 
         // Deterministic corpus: use SplitMix64 directly for reproducibility.
         let mut rng: u64 = 0xDEADBEEF;
-        let mut next = |rng: &mut u64| -> u64 {
+        let next = |rng: &mut u64| -> u64 {
             *rng = rng.wrapping_add(0x9e3779b97f4a7c15);
             let mut z = *rng;
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -1318,7 +1318,7 @@ mod tests {
     fn bulk_rebuild_is_content_stable_across_arrival_orders() {
         // SplitMix64 (same algorithm as the index RNG) for deterministic vectors.
         let mut rng: u64 = 7;
-        let mut next = |state: &mut u64| -> u64 {
+        let next = |state: &mut u64| -> u64 {
             *state = state.wrapping_add(0x9e3779b97f4a7c15);
             let mut z = *state;
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
